@@ -7,9 +7,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+cpal.workspace = true
 crossbeam-channel.workspace = true
 ffmpeg-next.workspace = true
 openreel-core = { path = "../openreel-core" }
+rtrb.workspace = true
 
 [lints]
 workspace = true

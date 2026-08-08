@@ -17,10 +17,13 @@ repository = "https://github.com/rielstamand/OpenReel"
 # Every third-party version is pinned here. Member manifests only opt in with
 # `workspace = true`, keeping the dependency graph versioned in one place.
 [workspace.dependencies]
+cpal = "=0.18.1"
 crossbeam-channel = "=0.5.16"
 eframe = "=0.35.0"
-ffmpeg-next = { version = "=8.0.0", default-features = false, features = ["codec", "format", "software-scaling"] }
+ffmpeg-next = { version = "=8.0.0", default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"] }
 proptest = "=1.11.0"
+rfd = "=0.17.2"
+rtrb = "=0.3.4"
 schemars = "=1.2.2"
 serde = { version = "=1.0.229", features = ["derive", "rc"] }
 serde_json = "=1.0.151"

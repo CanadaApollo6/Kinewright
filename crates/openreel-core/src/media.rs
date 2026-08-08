@@ -37,9 +37,22 @@ pub struct ExportProgress {
 
 pub type ProgressSink = Sender<ExportProgress>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackState {
+    Paused,
+    Playing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaEvent {
+    Position(TimeCode),
+    PlaybackStateChanged(PlaybackState),
+    Error(MediaError),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MediaError {
-    #[error("media backend is not implemented in M0")]
+    #[error("media operation is not implemented")]
     NotImplemented,
     #[error("media backend error: {0}")]
     Backend(String),
@@ -50,8 +63,14 @@ pub trait MediaEngine: Send + Sync {
     fn set_document(&self, doc: Arc<Document>);
     fn request_frame(&self, t: TimeCode);
     fn frames(&self) -> Receiver<(TimeCode, FrameTexture)>;
+    /// Non-blocking playback status stream. Implementations may coalesce ticks.
+    fn events(&self) -> Receiver<MediaEvent>;
     fn play(&self, from: TimeCode);
     fn pause(&self);
+    /// Seek transport and audio to an exact project frame without blocking the caller.
+    fn seek(&self, to: TimeCode);
+    /// Read the atomically published audio-master position.
+    fn position(&self) -> TimeCode;
     fn thumbnail_at(&self, t: TimeCode, max_w: u32) -> Result<RgbaImage, MediaError>;
     fn export(
         &self,
