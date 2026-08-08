@@ -1,0 +1,16 @@
+[package]
+name = "openreel-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+crossbeam-channel.workspace = true
+ffmpeg-next.workspace = true
+openreel-core = { path = "../openreel-core" }
+
+[lints]
+workspace = true
+
