@@ -1,4 +1,10 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use crossbeam_channel::{Receiver, Sender};
 use thiserror::Error;
@@ -27,7 +33,30 @@ pub struct ExportSettings {
     pub audio_codec: String,
     pub video_bitrate: u64,
     pub audio_bitrate: u64,
+    pub cancellation: ExportCancellation,
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct ExportCancellation(Arc<AtomicBool>);
+
+impl ExportCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+impl PartialEq for ExportCancellation {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ExportCancellation {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportProgress {
@@ -54,6 +83,8 @@ pub enum MediaEvent {
 pub enum MediaError {
     #[error("media operation is not implemented")]
     NotImplemented,
+    #[error("export was cancelled")]
+    Cancelled,
     #[error("media backend error: {0}")]
     Backend(String),
 }

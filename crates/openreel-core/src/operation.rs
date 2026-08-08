@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AssetId, Clip, ClipId, Document, MediaAsset, TimeCode, TimeMappingError, Track, TrackId,
-    map_source_range_to_project,
+    AssetId, Clip, ClipId, Document, Effect, EffectId, MediaAsset, ParamValue, TimeCode,
+    TimeMappingError, Track, TrackId, Transition, map_source_range_to_project,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -41,6 +41,27 @@ pub enum Operation {
         to: TimeCode,
     },
     DeleteClip {
+        clip: ClipId,
+    },
+    AddEffect {
+        clip: ClipId,
+        effect: Effect,
+    },
+    RemoveEffect {
+        clip: ClipId,
+        effect: EffectId,
+    },
+    SetEffectParam {
+        clip: ClipId,
+        effect: EffectId,
+        name: String,
+        value: ParamValue,
+    },
+    AddTransition {
+        clip: ClipId,
+        transition: Transition,
+    },
+    RemoveTransition {
         clip: ClipId,
     },
 }
@@ -135,6 +156,40 @@ pub enum OpError {
     },
     #[error("clip id space is exhausted")]
     ClipIdExhausted,
+    #[error("effect {effect} already exists on clip {clip}")]
+    DuplicateEffect { clip: ClipId, effect: EffectId },
+    #[error("effect {effect} does not exist on clip {clip}")]
+    MissingEffect { clip: ClipId, effect: EffectId },
+    #[error("unknown effect name {0:?}")]
+    UnknownEffect(String),
+    #[error("effect {effect:?} has no parameter {name:?}")]
+    UnknownEffectParam { effect: String, name: String },
+    #[error("effect {effect:?} parameter {name:?} requires an integer")]
+    InvalidEffectParamType { effect: String, name: String },
+    #[error(
+        "effect {effect:?} parameter {name:?} is {actual}, outside the inclusive range {min}..={max}"
+    )]
+    EffectParamOutOfRange {
+        effect: String,
+        name: String,
+        min: i64,
+        max: i64,
+        actual: i64,
+    },
+    #[error("clip {0} already has a transition_in")]
+    DuplicateTransition(ClipId),
+    #[error("clip {0} has no transition_in")]
+    MissingTransition(ClipId),
+    #[error("unknown transition name {0:?}")]
+    UnknownTransition(String),
+    #[error("transition duration on clip {clip} must be positive, got {duration}")]
+    InvalidTransitionDuration { clip: ClipId, duration: TimeCode },
+    #[error("transition duration {duration} exceeds clip {clip} duration {clip_duration}")]
+    TransitionTooLong {
+        clip: ClipId,
+        duration: TimeCode,
+        clip_duration: TimeCode,
+    },
     #[error("time calculation overflowed")]
     TimeOverflow,
     #[error(transparent)]
@@ -160,6 +215,18 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
             to,
         } => move_clip(doc, *clip, *to_track, *to),
         Operation::DeleteClip { clip } => delete_clip(doc, *clip),
+        Operation::AddEffect { clip, effect } => add_effect(doc, *clip, effect.clone()),
+        Operation::RemoveEffect { clip, effect } => remove_effect(doc, *clip, *effect),
+        Operation::SetEffectParam {
+            clip,
+            effect,
+            name,
+            value,
+        } => set_effect_param(doc, *clip, *effect, name, value.clone()),
+        Operation::AddTransition { clip, transition } => {
+            add_transition(doc, *clip, transition.clone())
+        }
+        Operation::RemoveTransition { clip } => remove_transition(doc, *clip),
     }
 }
 
@@ -346,6 +413,82 @@ fn delete_clip(doc: &mut Document, clip_id: ClipId) -> Result<(), OpError> {
     Ok(())
 }
 
+fn add_effect(doc: &mut Document, clip_id: ClipId, effect: Effect) -> Result<(), OpError> {
+    validate_effect(&effect)?;
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let clip = &mut doc.tracks[track_index].clips[clip_index];
+    if clip.effects.iter().any(|existing| existing.id == effect.id) {
+        return Err(OpError::DuplicateEffect {
+            clip: clip_id,
+            effect: effect.id,
+        });
+    }
+    clip.effects.push(effect);
+    Ok(())
+}
+
+fn remove_effect(doc: &mut Document, clip_id: ClipId, effect_id: EffectId) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let clip = &mut doc.tracks[track_index].clips[clip_index];
+    let effect_index = clip
+        .effects
+        .iter()
+        .position(|effect| effect.id == effect_id)
+        .ok_or(OpError::MissingEffect {
+            clip: clip_id,
+            effect: effect_id,
+        })?;
+    clip.effects.remove(effect_index);
+    Ok(())
+}
+
+fn set_effect_param(
+    doc: &mut Document,
+    clip_id: ClipId,
+    effect_id: EffectId,
+    name: &str,
+    value: ParamValue,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let effect = doc.tracks[track_index].clips[clip_index]
+        .effects
+        .iter_mut()
+        .find(|effect| effect.id == effect_id)
+        .ok_or(OpError::MissingEffect {
+            clip: clip_id,
+            effect: effect_id,
+        })?;
+    validate_effect_parameter(&effect.name, name, &value)?;
+    effect.parameters.insert(name.to_owned(), value);
+    Ok(())
+}
+
+fn add_transition(
+    doc: &mut Document,
+    clip_id: ClipId,
+    transition: Transition,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let clip = &doc.tracks[track_index].clips[clip_index];
+    if clip.transition_in.is_some() {
+        return Err(OpError::DuplicateTransition(clip_id));
+    }
+    validate_transition(doc, clip, &transition)?;
+    doc.tracks[track_index].clips[clip_index].transition_in = Some(transition);
+    Ok(())
+}
+
+fn remove_transition(doc: &mut Document, clip_id: ClipId) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let transition = doc.tracks[track_index].clips[clip_index]
+        .transition_in
+        .take();
+    if transition.is_none() {
+        return Err(OpError::MissingTransition(clip_id));
+    }
+    Ok(())
+}
+
 fn find_clip(doc: &Document, id: ClipId) -> Result<(usize, usize), OpError> {
     doc.tracks
         .iter()
@@ -410,6 +553,78 @@ fn validate_asset(asset: &MediaAsset) -> Result<(), OpError> {
         .is_some_and(|(width, height)| width == 0 || height == 0)
     {
         return Err(OpError::InvalidResolution);
+    }
+    Ok(())
+}
+
+fn validate_effect(effect: &Effect) -> Result<(), OpError> {
+    match effect.name.as_str() {
+        "brightness" | "contrast" | "saturation" | "opacity" | "transform" => {}
+        _ => return Err(OpError::UnknownEffect(effect.name.clone())),
+    }
+    for (name, value) in &effect.parameters {
+        validate_effect_parameter(&effect.name, name, value)?;
+    }
+    Ok(())
+}
+
+fn validate_effect_parameter(
+    effect: &str,
+    name: &str,
+    value: &ParamValue,
+) -> Result<(), OpError> {
+    let (min, max) = match (effect, name) {
+        ("brightness" | "contrast" | "saturation", "percent") => (-100, 100),
+        ("opacity", "percent") => (0, 100),
+        ("transform", "scale_percent") => (1, 400),
+        ("transform", "x_percent" | "y_percent") => (-100, 100),
+        ("brightness" | "contrast" | "saturation" | "opacity" | "transform", _) => {
+            return Err(OpError::UnknownEffectParam {
+                effect: effect.to_owned(),
+                name: name.to_owned(),
+            });
+        }
+        _ => return Err(OpError::UnknownEffect(effect.to_owned())),
+    };
+    let ParamValue::Integer(actual) = value else {
+        return Err(OpError::InvalidEffectParamType {
+            effect: effect.to_owned(),
+            name: name.to_owned(),
+        });
+    };
+    if !(min..=max).contains(actual) {
+        return Err(OpError::EffectParamOutOfRange {
+            effect: effect.to_owned(),
+            name: name.to_owned(),
+            min,
+            max,
+            actual: *actual,
+        });
+    }
+    Ok(())
+}
+
+fn validate_transition(
+    doc: &Document,
+    clip: &Clip,
+    transition: &Transition,
+) -> Result<(), OpError> {
+    if transition.name != "crossfade" {
+        return Err(OpError::UnknownTransition(transition.name.clone()));
+    }
+    if transition.duration <= TimeCode::ZERO {
+        return Err(OpError::InvalidTransitionDuration {
+            clip: clip.id,
+            duration: transition.duration,
+        });
+    }
+    let clip_duration = doc.clip_duration(clip)?;
+    if transition.duration > clip_duration {
+        return Err(OpError::TransitionTooLong {
+            clip: clip.id,
+            duration: transition.duration,
+            clip_duration,
+        });
     }
     Ok(())
 }
@@ -496,6 +711,19 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                 .timeline_start
                 .checked_add(clip_duration)
                 .ok_or(OpError::TimeOverflow)?;
+            let mut effect_ids = HashSet::new();
+            for effect in &clip.effects {
+                if !effect_ids.insert(effect.id) {
+                    return Err(OpError::DuplicateEffect {
+                        clip: clip.id,
+                        effect: effect.id,
+                    });
+                }
+                validate_effect(effect)?;
+            }
+            if let Some(transition) = &clip.transition_in {
+                validate_transition(doc, clip, transition)?;
+            }
             if let Some((previous_clip, previous_end)) = previous {
                 if clip.timeline_start < previous_clip.timeline_start {
                     return Err(OpError::ClipsUnsorted {

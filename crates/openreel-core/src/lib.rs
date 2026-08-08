@@ -13,7 +13,7 @@ pub use agent::{
     HarnessInfo, SessionConfig,
 };
 pub use media::{
-    ExportProgress, ExportSettings, FrameTexture, MediaEngine, MediaError, MediaEvent,
+    ExportCancellation, ExportProgress, ExportSettings, FrameTexture, MediaEngine, MediaError, MediaEvent,
     PlaybackState, ProgressSink, RgbaImage,
 };
 pub use model::{

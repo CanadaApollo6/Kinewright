@@ -11,7 +11,12 @@ cpal.workspace = true
 crossbeam-channel.workspace = true
 ffmpeg-next.workspace = true
 openreel-core = { path = "../openreel-core" }
+pollster.workspace = true
 rtrb.workspace = true
+wgpu.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

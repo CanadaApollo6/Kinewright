@@ -1,5 +1,6 @@
 use openreel_core::{
-    AssetId, ClipId, Document, FrameRounding, MediaError, TimeCode, TrackId, TrackKind,
+    AssetId, Clip, ClipId, Document, Effect, FrameRounding, MediaError, TimeCode, Track, TrackId,
+    TrackKind,
     map_frames_with_rounding, map_source_range_to_project,
 };
 
@@ -12,6 +13,15 @@ pub struct TimelineSource {
     pub source_at: TimeCode,
     pub source_end: TimeCode,
     pub timeline_end: TimeCode,
+}
+
+/// One active video layer at a project frame. Layers are returned in document
+/// track order, which is the project's bottom-to-top z-order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineVideoLayer {
+    pub source: TimelineSource,
+    pub effects: Vec<Effect>,
+    pub transition_alpha: f32,
 }
 
 /// Map a project frame to its active clip and source frame.
@@ -33,6 +43,44 @@ pub fn timeline_source_at(
         return Ok(None);
     };
 
+    source_on_track(document, track, project_at)
+}
+
+/// Resolve every active video track at a project frame, bottom-to-top.
+pub fn video_layers_at(
+    document: &Document,
+    project_at: TimeCode,
+) -> Result<Vec<TimelineVideoLayer>, MediaError> {
+    if project_at < TimeCode::ZERO {
+        return Ok(Vec::new());
+    }
+    let mut layers = Vec::new();
+    for track in document
+        .tracks
+        .iter()
+        .filter(|track| track.kind == TrackKind::Video)
+    {
+        if let Some(source) = source_on_track(document, track, project_at)? {
+            let clip = track
+                .clips
+                .iter()
+                .find(|clip| clip.id == source.clip)
+                .ok_or_else(|| MediaError::Backend("active timeline clip disappeared".to_owned()))?;
+            layers.push(TimelineVideoLayer {
+                source,
+                effects: clip.effects.clone(),
+                transition_alpha: transition_alpha(clip, project_at),
+            });
+        }
+    }
+    Ok(layers)
+}
+
+fn source_on_track(
+    document: &Document,
+    track: &Track,
+    project_at: TimeCode,
+) -> Result<Option<TimelineSource>, MediaError> {
     for clip in &track.clips {
         if project_at < clip.timeline_start {
             break;
@@ -78,6 +126,17 @@ pub fn timeline_source_at(
         }));
     }
     Ok(None)
+}
+
+fn transition_alpha(clip: &Clip, project_at: TimeCode) -> f32 {
+    let Some(transition) = &clip.transition_in else {
+        return 1.0;
+    };
+    if transition.name != "crossfade" || transition.duration.0 <= 1 {
+        return 1.0;
+    }
+    let offset = project_at.0.saturating_sub(clip.timeline_start.0);
+    (offset as f32 / (transition.duration.0 - 1) as f32).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -179,6 +238,32 @@ mod tests {
                 .unwrap()
                 .source_at,
             TimeCode(14)
+        );
+    }
+
+    #[test]
+    fn overlapping_video_tracks_keep_document_bottom_to_top_order() {
+        let mut document = fixture();
+        document.tracks.push(Track {
+            id: TrackId(8),
+            kind: TrackKind::Video,
+            clips: vec![Clip {
+                id: ClipId(3),
+                asset: AssetId(2),
+                source_range: TimeCode(0)..TimeCode(10),
+                timeline_start: TimeCode::ZERO,
+                effects: Vec::new(),
+                transition_in: None,
+            }],
+        });
+
+        let layers = video_layers_at(&document, TimeCode::ZERO).unwrap();
+        assert_eq!(
+            layers
+                .iter()
+                .map(|layer| layer.source.track)
+                .collect::<Vec<_>>(),
+            [TrackId(7), TrackId(8)]
         );
     }
 }

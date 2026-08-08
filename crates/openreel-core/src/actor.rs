@@ -226,11 +226,11 @@ fn broadcast(subscribers: &mut Vec<Sender<Event>>, event: Event) {
 mod tests {
     use super::*;
     use crate::{
-        AssetId, Clip, ClipId, MediaAsset, MediaKind, Rational, TimeCode, Track, TrackId,
-        TrackKind,
+        AssetId, Clip, ClipId, Effect, EffectId, MediaAsset, MediaKind, ParamValue, Rational,
+        TimeCode, Track, TrackId, TrackKind, Transition,
     };
     use proptest::prelude::*;
-    use std::{path::PathBuf, time::Duration};
+    use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
     fn asset(id: u64) -> MediaAsset {
         MediaAsset {
@@ -363,7 +363,7 @@ mod tests {
         fn generated_documents_survive_arbitrary_do_undo_redo_sequences(
             lengths in prop::collection::vec(1_u16..80, 1..8),
             gaps in prop::collection::vec(0_u8..8, 1..8),
-            actions in prop::collection::vec(0_u8..5, 0..100),
+            actions in prop::collection::vec(0_u8..10, 0..100),
         ) {
             let initial = generated_document(&lengths, &gaps);
             prop_assert!(initial.validate().is_ok());
@@ -373,6 +373,7 @@ mod tests {
             let mut expected_redo = Vec::new();
             let mut next_asset_id = 2_u64;
             let mut next_track_id = 2_u64;
+            let mut next_effect_id = 1_u64;
             let mut successful_dos = 0_usize;
 
             for action in actions {
@@ -418,6 +419,86 @@ mod tests {
                         }
                     }
                     3 => {
+                        let operation = Operation::AddEffect {
+                            clip: ClipId(1),
+                            effect: Effect {
+                                id: EffectId(next_effect_id),
+                                name: "brightness".to_owned(),
+                                parameters: BTreeMap::new(),
+                            },
+                        };
+                        next_effect_id += 1;
+                        expected_undo.push(Arc::clone(&expected));
+                        expected_redo.clear();
+                        let mut after = (*expected).clone();
+                        operation.apply(&mut after).unwrap();
+                        expected = Arc::new(after);
+                        state.do_operation(operation).unwrap();
+                        successful_dos += 1;
+                    }
+                    4 => {
+                        if let Some(effect) = expected.clip(ClipId(1)).and_then(|clip| clip.effects.first()) {
+                            let operation = Operation::SetEffectParam {
+                                clip: ClipId(1),
+                                effect: effect.id,
+                                name: "percent".to_owned(),
+                                value: ParamValue::Integer(25),
+                            };
+                            expected_undo.push(Arc::clone(&expected));
+                            expected_redo.clear();
+                            let mut after = (*expected).clone();
+                            operation.apply(&mut after).unwrap();
+                            expected = Arc::new(after);
+                            state.do_operation(operation).unwrap();
+                            successful_dos += 1;
+                        }
+                    }
+                    5 => {
+                        if let Some(effect) = expected.clip(ClipId(1)).and_then(|clip| clip.effects.first()) {
+                            let operation = Operation::RemoveEffect {
+                                clip: ClipId(1),
+                                effect: effect.id,
+                            };
+                            expected_undo.push(Arc::clone(&expected));
+                            expected_redo.clear();
+                            let mut after = (*expected).clone();
+                            operation.apply(&mut after).unwrap();
+                            expected = Arc::new(after);
+                            state.do_operation(operation).unwrap();
+                            successful_dos += 1;
+                        }
+                    }
+                    6 => {
+                        if expected.clip(ClipId(1)).is_some_and(|clip| clip.transition_in.is_none()) {
+                            let operation = Operation::AddTransition {
+                                clip: ClipId(1),
+                                transition: Transition {
+                                    name: "crossfade".to_owned(),
+                                    duration: TimeCode(1),
+                                },
+                            };
+                            expected_undo.push(Arc::clone(&expected));
+                            expected_redo.clear();
+                            let mut after = (*expected).clone();
+                            operation.apply(&mut after).unwrap();
+                            expected = Arc::new(after);
+                            state.do_operation(operation).unwrap();
+                            successful_dos += 1;
+                        }
+                    }
+                    7 => {
+                        if expected.clip(ClipId(1)).is_some_and(|clip| clip.transition_in.is_some()) {
+                            let operation = Operation::RemoveTransition { clip: ClipId(1) };
+                            expected_undo.push(Arc::clone(&expected));
+                            expected_redo.clear();
+                            let mut after = (*expected).clone();
+                            operation.apply(&mut after).unwrap();
+                            expected = Arc::new(after);
+                            state.do_operation(operation).unwrap();
+                            successful_dos += 1;
+                        }
+                    }
+                    8 => {
                         if let Some(previous) = expected_undo.pop() {
                             expected_redo.push(Arc::clone(&expected));
                             expected = previous;

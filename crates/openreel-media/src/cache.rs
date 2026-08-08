@@ -17,11 +17,6 @@ impl FrameCache {
         }
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.frames.clear();
-        self.order.clear();
-    }
-
     pub(crate) fn insert(&mut self, at: TimeCode, frame: FrameTexture) {
         if self.frames.insert(at, frame).is_some() {
             self.order.retain(|entry| *entry != at);

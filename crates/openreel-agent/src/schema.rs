@@ -155,6 +155,11 @@ mod tests {
                 "trim_clip",
                 "move_clip",
                 "delete_clip",
+                "add_effect",
+                "remove_effect",
+                "set_effect_param",
+                "add_transition",
+                "remove_transition",
             ]
         );
         for definition in tools {
@@ -181,6 +186,11 @@ mod tests {
                 Operation::TrimClip { .. } => "TrimClip",
                 Operation::MoveClip { .. } => "MoveClip",
                 Operation::DeleteClip { .. } => "DeleteClip",
+                Operation::AddEffect { .. } => "AddEffect",
+                Operation::RemoveEffect { .. } => "RemoveEffect",
+                Operation::SetEffectParam { .. } => "SetEffectParam",
+                Operation::AddTransition { .. } => "AddTransition",
+                Operation::RemoveTransition { .. } => "RemoveTransition",
             }
         }
 

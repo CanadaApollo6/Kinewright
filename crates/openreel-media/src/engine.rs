@@ -1,7 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, OnceLock, RwLock,
         atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering},
     },
     thread,
@@ -16,14 +16,13 @@ use openreel_core::{
 
 use crate::{
     audio::AudioRuntime,
-    cache::FrameCache,
     clock::samples_to_frame,
-    decode::{VideoDecoder, probe_path, thumbnail},
+    compositor::GpuContext,
+    decode::{probe_path, thumbnail},
+    render::FrameRenderer,
     timeline_source_at,
 };
 
-const FRAME_CACHE_CAPACITY: usize = 36;
-const PREFETCH_FRAMES: i64 = 16;
 const WORKER_TICK: Duration = Duration::from_millis(5);
 
 struct SharedClock {
@@ -93,10 +92,22 @@ pub struct FfmpegMediaEngine {
     requested: Arc<RequestedPositions>,
     clock: Arc<SharedClock>,
     next_asset_id: AtomicU64,
+    gpu: GpuContext,
+    export_document: Arc<RwLock<Arc<Document>>>,
 }
 
 impl FfmpegMediaEngine {
     pub fn new() -> Result<Self, MediaError> {
+        static GPU: OnceLock<Result<GpuContext, MediaError>> = OnceLock::new();
+        let gpu = GPU
+            .get_or_init(|| {
+                GpuContext::headless(false).or_else(|_| GpuContext::headless(true))
+            })
+            .clone()?;
+        Self::new_with_gpu(gpu)
+    }
+
+    pub fn new_with_gpu(gpu: GpuContext) -> Result<Self, MediaError> {
         crate::initialize_ffmpeg()?;
         let (control_tx, control_rx) = unbounded();
         let (frames_tx, frames_rx) = bounded(2);
@@ -109,6 +120,7 @@ impl FfmpegMediaEngine {
         // without an unbounded command backlog.
         let requested = Arc::new(RequestedPositions::default());
         let worker_requested = Arc::clone(&requested);
+        let worker_gpu = gpu.clone();
         thread::Builder::new()
             .name("openreel-media".to_owned())
             .spawn(move || {
@@ -120,6 +132,7 @@ impl FfmpegMediaEngine {
                     events_drop_rx,
                     worker_clock,
                     worker_requested,
+                    worker_gpu,
                 )
                 .run();
             })
@@ -132,6 +145,8 @@ impl FfmpegMediaEngine {
             requested,
             clock,
             next_asset_id: AtomicU64::new(1),
+            gpu,
+            export_document: Arc::new(RwLock::new(Arc::new(Document::default()))),
         })
     }
 }
@@ -160,6 +175,9 @@ impl MediaEngine for FfmpegMediaEngine {
             .unwrap_or(0)
             .saturating_add(1);
         self.next_asset_id.fetch_max(next_id, Ordering::Relaxed);
+        if let Ok(mut export_document) = self.export_document.write() {
+            *export_document = Arc::clone(&doc);
+        }
         let _ = self.control_tx.send(Control::SetDocument(doc));
     }
 
@@ -216,18 +234,22 @@ impl MediaEngine for FfmpegMediaEngine {
 
     fn export(
         &self,
-        _out: &Path,
-        _settings: ExportSettings,
-        _progress: ProgressSink,
+        out: &Path,
+        settings: ExportSettings,
+        progress: ProgressSink,
     ) -> Result<(), MediaError> {
-        Err(MediaError::NotImplemented)
+        let document = self
+            .export_document
+            .read()
+            .map_err(|_| MediaError::Backend("export document lock was poisoned".to_owned()))?
+            .clone();
+        crate::export::export_document(&document, out, settings, progress, self.gpu.clone())
     }
 }
 
 #[derive(Clone)]
 struct ActiveMedia {
     clip: ClipId,
-    asset: AssetId,
     path: PathBuf,
     source_fps: Rational,
     project_fps: Rational,
@@ -247,10 +269,7 @@ struct Worker {
     handled_frame_sequence: u64,
     handled_seek_sequence: u64,
     document: Arc<Document>,
-    video: Option<VideoDecoder>,
-    video_asset: Option<AssetId>,
-    cache: FrameCache,
-    black_frame: FrameTexture,
+    renderer: FrameRenderer,
     audio: Option<AudioRuntime>,
     audio_clip: Option<ClipId>,
     playing: bool,
@@ -266,6 +285,7 @@ impl Worker {
         events_drop_rx: Receiver<MediaEvent>,
         clock: Arc<SharedClock>,
         requested: Arc<RequestedPositions>,
+        gpu: GpuContext,
     ) -> Self {
         Self {
             control_rx,
@@ -278,10 +298,7 @@ impl Worker {
             handled_frame_sequence: 0,
             handled_seek_sequence: 0,
             document: Arc::new(Document::default()),
-            video: None,
-            video_asset: None,
-            cache: FrameCache::new(FRAME_CACHE_CAPACITY),
-            black_frame: black_frame((1_920, 1_080)),
+            renderer: FrameRenderer::new(gpu),
             audio: None,
             audio_clip: None,
             playing: false,
@@ -329,10 +346,7 @@ impl Worker {
     fn set_document(&mut self, doc: &Document) {
         self.pause();
         self.document = Arc::new(doc.clone());
-        self.video = None;
-        self.video_asset = None;
-        self.cache.clear();
-        self.black_frame = black_frame(doc.resolution);
+        self.renderer.clear();
         self.audio_clip = None;
         self.clock.set_fps(doc.fps);
         self.clock.set_frame(TimeCode::ZERO);
@@ -457,65 +471,22 @@ impl Worker {
     }
 
     fn present(&mut self, project_at: TimeCode) {
-        let active = match active_media_at(&self.document, project_at) {
-            Ok(active) => active,
+        let document = Arc::clone(&self.document);
+        let frame = match self
+            .renderer
+            .render(&document, project_at, document.resolution)
+        {
+            Ok(frame) => frame,
             Err(error) => {
                 self.fail(error);
                 return;
             }
         };
-        let Some(active) = active else {
-            send_latest(
-                &self.frames_tx,
-                &self.frames_drop_rx,
-                (project_at, self.black_frame.clone()),
-            );
-            return;
-        };
-        if !matches!(active.kind, MediaKind::Video | MediaKind::AudioVideo) {
-            send_latest(
-                &self.frames_tx,
-                &self.frames_drop_rx,
-                (project_at, self.black_frame.clone()),
-            );
-            return;
-        }
-        if self.video_asset != Some(active.asset) {
-            self.video = None;
-            self.video_asset = Some(active.asset);
-            self.cache.clear();
-        }
-        if !self.cache.contains(active.source_at) {
-            if self.video.is_none() {
-                match VideoDecoder::open(&active.path, active.source_fps) {
-                    Ok(decoder) => self.video = Some(decoder),
-                    Err(error) => {
-                        self.fail(error);
-                        return;
-                    }
-                }
-            }
-            let end = TimeCode(
-                active
-                    .source_at
-                    .0
-                    .saturating_add(PREFETCH_FRAMES)
-                    .min(active.source_end.0.saturating_sub(1)),
-            );
-            if let Some(video) = &mut self.video {
-                if let Err(error) = video.decode_window(active.source_at, end, &mut self.cache) {
-                    self.fail(error);
-                    return;
-                }
-            }
-        }
-        if let Some(frame) = self.cache.frame_at_or_before(active.source_at) {
-            send_latest(
-                &self.frames_tx,
-                &self.frames_drop_rx,
-                (project_at, frame),
-            );
-        }
+        send_latest(
+            &self.frames_tx,
+            &self.frames_drop_rx,
+            (project_at, frame),
+        );
     }
 
     fn audio_for_position(&mut self, project_at: TimeCode) -> Result<AudioRuntime, MediaError> {
@@ -566,7 +537,6 @@ fn active_media_at(
     })?;
     Ok(Some(ActiveMedia {
         clip: source.clip,
-        asset: source.asset,
         path: asset.path.clone(),
         source_fps: asset.fps,
         project_fps: document.fps,
@@ -574,22 +544,6 @@ fn active_media_at(
         source_end: source.source_end,
         kind: asset.kind,
     }))
-}
-
-fn black_frame(resolution: (u32, u32)) -> FrameTexture {
-    let pixel_count = usize::try_from(resolution.0)
-        .unwrap_or_default()
-        .saturating_mul(usize::try_from(resolution.1).unwrap_or_default())
-        .saturating_mul(4);
-    let mut rgba = vec![0; pixel_count];
-    for alpha in rgba.iter_mut().skip(3).step_by(4) {
-        *alpha = 255;
-    }
-    FrameTexture {
-        width: resolution.0,
-        height: resolution.1,
-        rgba: Arc::new(rgba),
-    }
 }
 
 fn black_image(resolution: (u32, u32), max_width: u32) -> RgbaImage {

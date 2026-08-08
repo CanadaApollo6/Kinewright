@@ -3,8 +3,11 @@
 mod audio;
 mod cache;
 mod clock;
+mod compositor;
 mod decode;
 mod engine;
+mod export;
+mod render;
 mod timeline;
 
 use ffmpeg_next as ffmpeg;
@@ -13,7 +16,8 @@ use openreel_core::MediaError;
 pub use cache::select_frame_for_position;
 pub use clock::{frame_to_samples, samples_to_frame};
 pub use engine::FfmpegMediaEngine;
-pub use timeline::{TimelineSource, timeline_source_at};
+pub use compositor::{Compositor, CompositorLayer, GpuContext};
+pub use timeline::{TimelineSource, TimelineVideoLayer, timeline_source_at, video_layers_at};
 
 /// Initialize the linked FFmpeg libraries.
 pub fn initialize_ffmpeg() -> Result<(), MediaError> {

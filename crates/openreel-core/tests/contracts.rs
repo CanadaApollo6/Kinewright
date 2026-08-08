@@ -1,12 +1,14 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use openreel_core::{
-    AssetId, Clip, ClipId, Command, Core, Document, Event, MediaAsset, MediaKind, OpError,
-    Operation, Rational, TimeCode, Track, TrackId, TrackKind,
+    AssetId, Clip, ClipId, Command, Core, Document, Effect, EffectId, Event, MediaAsset,
+    MediaKind, OpError, Operation, ParamValue, Rational, TimeCode, Track, TrackId, TrackKind,
+    Transition,
 };
 
 fn asset(id: u64, fps: Rational, duration: i64) -> MediaAsset {
@@ -93,6 +95,32 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             to: TimeCode(60),
         },
         Operation::DeleteClip { clip: ClipId(1) },
+        Operation::AddEffect {
+            clip: ClipId(1),
+            effect: Effect {
+                id: EffectId(1),
+                name: "brightness".to_owned(),
+                parameters: BTreeMap::new(),
+            },
+        },
+        Operation::RemoveEffect {
+            clip: ClipId(1),
+            effect: EffectId(1),
+        },
+        Operation::SetEffectParam {
+            clip: ClipId(1),
+            effect: EffectId(1),
+            name: "percent".to_owned(),
+            value: ParamValue::Integer(25),
+        },
+        Operation::AddTransition {
+            clip: ClipId(1),
+            transition: Transition {
+                name: "crossfade".to_owned(),
+                duration: TimeCode(10),
+            },
+        },
+        Operation::RemoveTransition { clip: ClipId(1) },
     ];
 
     for operation in operations {
@@ -100,6 +128,149 @@ fn document_and_every_operation_variant_round_trip_through_json() {
         let decoded: Operation = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, operation);
     }
+}
+
+#[test]
+fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
+    let mut doc = document_with_one_clip();
+    let effect = Effect {
+        id: EffectId(7),
+        name: "brightness".to_owned(),
+        parameters: BTreeMap::new(),
+    };
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: effect.clone(),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(doc.clip(ClipId(1)).unwrap().effects, vec![effect]);
+
+    let before_duplicate = doc.clone();
+    assert_eq!(
+        Operation::AddEffect {
+            clip: ClipId(1),
+            effect: Effect {
+                id: EffectId(7),
+                name: "opacity".to_owned(),
+                parameters: BTreeMap::new(),
+            },
+        }
+        .apply(&mut doc),
+        Err(OpError::DuplicateEffect {
+            clip: ClipId(1),
+            effect: EffectId(7),
+        })
+    );
+    assert_eq!(doc, before_duplicate);
+
+    Operation::SetEffectParam {
+        clip: ClipId(1),
+        effect: EffectId(7),
+        name: "percent".to_owned(),
+        value: ParamValue::Integer(40),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        doc.clip(ClipId(1)).unwrap().effects[0]
+            .parameters
+            .get("percent"),
+        Some(&ParamValue::Integer(40))
+    );
+
+    let before_invalid = doc.clone();
+    assert_eq!(
+        Operation::SetEffectParam {
+            clip: ClipId(1),
+            effect: EffectId(7),
+            name: "percent".to_owned(),
+            value: ParamValue::Integer(101),
+        }
+        .apply(&mut doc),
+        Err(OpError::EffectParamOutOfRange {
+            effect: "brightness".to_owned(),
+            name: "percent".to_owned(),
+            min: -100,
+            max: 100,
+            actual: 101,
+        })
+    );
+    assert_eq!(doc, before_invalid);
+
+    Operation::RemoveEffect {
+        clip: ClipId(1),
+        effect: EffectId(7),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(doc.clip(ClipId(1)).unwrap().effects.is_empty());
+    assert_eq!(
+        Operation::AddEffect {
+            clip: ClipId(1),
+            effect: Effect {
+                id: EffectId(8),
+                name: "blur".to_owned(),
+                parameters: BTreeMap::new(),
+            },
+        }
+        .apply(&mut doc),
+        Err(OpError::UnknownEffect("blur".to_owned()))
+    );
+}
+
+#[test]
+fn transition_operations_validate_crossfade_duration_and_are_atomic() {
+    let mut doc = document_with_one_clip();
+    Operation::AddTransition {
+        clip: ClipId(1),
+        transition: Transition {
+            name: "crossfade".to_owned(),
+            duration: TimeCode(12),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        doc.clip(ClipId(1)).unwrap().transition_in,
+        Some(Transition {
+            name: "crossfade".to_owned(),
+            duration: TimeCode(12),
+        })
+    );
+
+    let before_duplicate = doc.clone();
+    assert_eq!(
+        Operation::AddTransition {
+            clip: ClipId(1),
+            transition: Transition {
+                name: "crossfade".to_owned(),
+                duration: TimeCode(4),
+            },
+        }
+        .apply(&mut doc),
+        Err(OpError::DuplicateTransition(ClipId(1)))
+    );
+    assert_eq!(doc, before_duplicate);
+
+    Operation::RemoveTransition { clip: ClipId(1) }
+        .apply(&mut doc)
+        .unwrap();
+    assert_eq!(
+        Operation::AddTransition {
+            clip: ClipId(1),
+            transition: Transition {
+                name: "crossfade".to_owned(),
+                duration: TimeCode(31),
+            },
+        }
+        .apply(&mut doc),
+        Err(OpError::TransitionTooLong {
+            clip: ClipId(1),
+            duration: TimeCode(31),
+            clip_duration: TimeCode(30),
+        })
+    );
 }
 
 #[test]

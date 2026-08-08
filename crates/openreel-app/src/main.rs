@@ -10,11 +10,12 @@ use eframe::egui;
 use openreel_agent::{ClaudeCodeDriver, McpServer};
 use openreel_core::{
     AgentDriver, AgentEvent, AgentSession, AssetId, AuthenticationStatus, ClipId, Command, Core,
-    Document, Event, FrameRounding, HarnessInfo, MediaAsset, MediaEngine, MediaError, MediaEvent,
-    Operation, PlaybackState, SessionConfig, TimeCode, Track, TrackId, TrackKind,
+    Document, Event, ExportCancellation, ExportProgress, ExportSettings, FrameRounding,
+    HarnessInfo, MediaAsset, MediaEngine, MediaError, MediaEvent, Operation, PlaybackState,
+    Rational, SessionConfig, TimeCode, Track, TrackId, TrackKind,
     map_frames_with_rounding, map_source_range_to_project,
 };
-use openreel_media::{FfmpegMediaEngine, timeline_source_at};
+use openreel_media::{FfmpegMediaEngine, GpuContext, timeline_source_at};
 
 const DEFAULT_TRACK_ID: TrackId = TrackId(1);
 const TIMELINE_HEIGHT: f32 = 112.0;
@@ -31,6 +32,22 @@ enum ChatEntry {
         output_tokens: u64,
         cost_usd: Option<f64>,
     },
+}
+
+struct ExportDialog {
+    open: bool,
+    output: String,
+    width: u32,
+    height: u32,
+    fps_numerator: u32,
+    fps_denominator: u32,
+}
+
+struct ExportJob {
+    cancellation: ExportCancellation,
+    progress_rx: crossbeam_channel::Receiver<ExportProgress>,
+    result_rx: mpsc::Receiver<(PathBuf, Result<(), MediaError>)>,
+    progress: ExportProgress,
 }
 
 struct OpenReelApp {
@@ -58,6 +75,8 @@ struct OpenReelApp {
     pixels_per_frame: f32,
     project_path: Option<PathBuf>,
     status: String,
+    export_dialog: ExportDialog,
+    export_job: Option<ExportJob>,
 }
 
 impl OpenReelApp {
@@ -80,6 +99,8 @@ impl OpenReelApp {
             }
         };
         let agent_info = ClaudeCodeDriver.detect();
+        let resolution = document.resolution;
+        let fps = document.fps;
         let app = Self {
             core,
             core_events,
@@ -105,6 +126,15 @@ impl OpenReelApp {
             pixels_per_frame: 6.0,
             project_path: None,
             status: "Creating default video track…".to_owned(),
+            export_dialog: ExportDialog {
+                open: false,
+                output: "export.mp4".to_owned(),
+                width: resolution.0,
+                height: resolution.1,
+                fps_numerator: fps.numerator(),
+                fps_denominator: fps.denominator(),
+            },
+            export_job: None,
         };
         if app
             .core
@@ -171,6 +201,204 @@ impl OpenReelApp {
                 self.status = format!("Saved {}", path.display());
             }
             Err(error) => self.status = format!("Could not save {}: {error}", path.display()),
+        }
+    }
+
+    fn open_export_dialog(&mut self) {
+        self.export_dialog.width = self.document.resolution.0;
+        self.export_dialog.height = self.document.resolution.1;
+        self.export_dialog.fps_numerator = self.document.fps.numerator();
+        self.export_dialog.fps_denominator = self.document.fps.denominator();
+        if let Some(project_path) = &self.project_path {
+            self.export_dialog.output = project_path.with_extension("mp4").display().to_string();
+        }
+        self.export_dialog.open = true;
+    }
+
+    fn choose_export_output(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("MPEG-4 video", &["mp4"])
+            .set_file_name("export.mp4")
+            .save_file()
+        else {
+            return;
+        };
+        self.export_dialog.output = path.display().to_string();
+    }
+
+    fn start_export(&mut self) {
+        if self.export_job.is_some() {
+            return;
+        }
+        if self.document.duration <= TimeCode::ZERO {
+            self.status = "Add a clip to the timeline before exporting".to_owned();
+            return;
+        }
+        if self.export_dialog.width % 2 != 0 || self.export_dialog.height % 2 != 0 {
+            self.status = "H.264 export width and height must be even".to_owned();
+            return;
+        }
+        let fps = match Rational::new(
+            self.export_dialog.fps_numerator,
+            self.export_dialog.fps_denominator,
+        ) {
+            Ok(fps) => fps,
+            Err(error) => {
+                self.status = format!("Invalid export frame rate: {error}");
+                return;
+            }
+        };
+        let mut output = PathBuf::from(self.export_dialog.output.trim());
+        if output.as_os_str().is_empty() {
+            self.status = "Choose an export output path".to_owned();
+            return;
+        }
+        if output.extension().is_none() {
+            output.set_extension("mp4");
+            self.export_dialog.output = output.display().to_string();
+        }
+        let cancellation = ExportCancellation::default();
+        let settings = ExportSettings {
+            fps,
+            resolution: (self.export_dialog.width, self.export_dialog.height),
+            video_codec: "libx264".to_owned(),
+            audio_codec: "aac".to_owned(),
+            video_bitrate: 8_000_000,
+            audio_bitrate: 192_000,
+            cancellation: cancellation.clone(),
+        };
+        let (progress_tx, progress_rx) = crossbeam_channel::unbounded();
+        let (result_tx, result_rx) = mpsc::channel();
+        let media = Arc::clone(&self.media);
+        let worker_output = output.clone();
+        let spawn = thread::Builder::new()
+            .name("openreel-export".to_owned())
+            .spawn(move || {
+                let result = media.export(&worker_output, settings, progress_tx);
+                let _ = result_tx.send((worker_output, result));
+            });
+        if let Err(error) = spawn {
+            self.status = format!("Could not start export: {error}");
+            return;
+        }
+        self.status = format!("Exporting {}…", output.display());
+        self.export_job = Some(ExportJob {
+            cancellation,
+            progress_rx,
+            result_rx,
+            progress: ExportProgress {
+                completed_frames: 0,
+                total_frames: 0,
+            },
+        });
+    }
+
+    fn poll_export(&mut self, ctx: &egui::Context) {
+        let mut completed = None;
+        if let Some(job) = &mut self.export_job {
+            while let Ok(progress) = job.progress_rx.try_recv() {
+                job.progress = progress;
+            }
+            match job.result_rx.try_recv() {
+                Ok(result) => completed = Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    completed = Some((
+                        PathBuf::from(&self.export_dialog.output),
+                        Err(MediaError::Backend("export worker stopped".to_owned())),
+                    ));
+                }
+                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(50)),
+            }
+        }
+        if let Some((path, result)) = completed {
+            self.export_job = None;
+            self.status = match result {
+                Ok(()) => format!("Exported {}", path.display()),
+                Err(MediaError::Cancelled) => "Export cancelled".to_owned(),
+                Err(error) => format!("Export failed: {error}"),
+            };
+        }
+    }
+
+    fn show_export_dialog(&mut self, ctx: &egui::Context) {
+        if !self.export_dialog.open {
+            return;
+        }
+        let mut open = self.export_dialog.open;
+        let mut browse = false;
+        let mut start = false;
+        let mut cancel = false;
+        egui::Window::new("Export MP4")
+            .open(&mut open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                egui::Grid::new("export-settings").show(ui, |ui| {
+                    ui.label("Output");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.export_dialog.output)
+                                .desired_width(320.0),
+                        );
+                        if ui.button("Browse…").clicked() {
+                            browse = true;
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Resolution");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut self.export_dialog.width).range(2..=16_384));
+                        ui.label("×");
+                        ui.add(egui::DragValue::new(&mut self.export_dialog.height).range(2..=16_384));
+                    });
+                    ui.end_row();
+                    ui.label("FPS");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut self.export_dialog.fps_numerator)
+                                .range(1..=120_000),
+                        );
+                        ui.label("/");
+                        ui.add(
+                            egui::DragValue::new(&mut self.export_dialog.fps_denominator)
+                                .range(1..=10_000),
+                        );
+                    });
+                    ui.end_row();
+                });
+                ui.separator();
+                if let Some(job) = &self.export_job {
+                    let fraction = if job.progress.total_frames == 0 {
+                        0.0
+                    } else {
+                        job.progress.completed_frames as f32 / job.progress.total_frames as f32
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(fraction)
+                            .show_percentage()
+                            .text(format!(
+                                "{} / {} frames",
+                                job.progress.completed_frames, job.progress.total_frames
+                            )),
+                    );
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                } else if ui.button("Export").clicked() {
+                    start = true;
+                }
+            });
+        self.export_dialog.open = open || self.export_job.is_some();
+        if browse {
+            self.choose_export_output();
+        }
+        if start {
+            self.start_export();
+        }
+        if cancel {
+            if let Some(job) = &self.export_job {
+                job.cancellation.cancel();
+                self.status = "Cancelling export…".to_owned();
+            }
         }
     }
 
@@ -524,6 +752,7 @@ impl OpenReelApp {
 
     fn poll_background(&mut self, ctx: &egui::Context) {
         self.poll_agent(ctx);
+        self.poll_export(ctx);
         while let Ok((path, result)) = self.probe_rx.try_recv() {
             match result {
                 Ok(asset) => {
@@ -650,6 +879,14 @@ impl OpenReelApp {
             if ui.button("Save As…").clicked() {
                 ui.close();
                 self.save_project(true);
+            }
+            ui.separator();
+            if ui
+                .add_enabled(self.export_job.is_none(), egui::Button::new("Export MP4…"))
+                .clicked()
+            {
+                ui.close();
+                self.open_export_dialog();
             }
         });
     }
@@ -1063,6 +1300,7 @@ impl eframe::App for OpenReelApp {
             ui.separator();
             self.timeline(ui);
         });
+        self.show_export_dialog(ui.ctx());
     }
 }
 
@@ -1084,6 +1322,24 @@ fn operation_status(operation: &Operation) -> String {
         Operation::TrimClip { clip, .. } => format!("Trimmed clip {clip}"),
         Operation::MoveClip { clip, to, .. } => format!("Moved clip {clip} to frame {to}"),
         Operation::DeleteClip { clip } => format!("Deleted clip {clip}"),
+        Operation::AddEffect { clip, effect } => {
+            format!("Added {} effect {} to clip {clip}", effect.name, effect.id)
+        }
+        Operation::RemoveEffect { clip, effect } => {
+            format!("Removed effect {effect} from clip {clip}")
+        }
+        Operation::SetEffectParam {
+            clip,
+            effect,
+            name,
+            ..
+        } => format!("Set {name} on effect {effect} for clip {clip}"),
+        Operation::AddTransition { clip, transition } => {
+            format!("Added {} transition to clip {clip}", transition.name)
+        }
+        Operation::RemoveTransition { clip } => {
+            format!("Removed transition from clip {clip}")
+        }
     }
 }
 
@@ -1111,10 +1367,23 @@ fn clip_color(asset: AssetId, selected: bool) -> egui::Color32 {
 }
 
 fn main() -> eframe::Result {
-    let media = Arc::new(FfmpegMediaEngine::new().expect("FFmpeg media engine must initialize"));
     eframe::run_native(
         "OpenReel",
-        eframe::NativeOptions::default(),
-        Box::new(move |_creation_context| Ok(Box::new(OpenReelApp::new(media)))),
+        eframe::NativeOptions {
+            renderer: eframe::Renderer::Wgpu,
+            ..Default::default()
+        },
+        Box::new(move |creation_context| {
+            let render_state = creation_context
+                .wgpu_render_state
+                .as_ref()
+                .expect("the OpenReel app requires eframe's wgpu renderer");
+            let gpu = GpuContext::new(render_state.device.clone(), render_state.queue.clone());
+            let media = Arc::new(
+                FfmpegMediaEngine::new_with_gpu(gpu)
+                    .expect("FFmpeg media engine must initialize"),
+            );
+            Ok(Box::new(OpenReelApp::new(media)))
+        }),
     )
 }

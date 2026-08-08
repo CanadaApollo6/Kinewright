@@ -9,13 +9,49 @@ use std::{
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ffmpeg_next as ffmpeg;
-use openreel_core::{MediaError, Rational, TimeCode};
+use openreel_core::{ExportCancellation, MediaError, Rational, TimeCode};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::{clock::frame_to_samples, decode::backend};
 
 const AV_TIME_BASE: i64 = 1_000_000;
 const BUFFER_SECONDS: usize = 2;
+
+pub(crate) fn decode_audio_range(
+    path: &Path,
+    source_fps: Rational,
+    source_from: TimeCode,
+    source_end: TimeCode,
+    output_rate: u32,
+    output_channels: u16,
+    cancellation: &ExportCancellation,
+) -> Result<Vec<f32>, MediaError> {
+    if cancellation.is_cancelled() {
+        return Err(MediaError::Cancelled);
+    }
+    let start_sample = frame_to_samples(source_from, output_rate, source_fps);
+    let end_sample = frame_to_samples(source_end, output_rate, source_fps);
+    let expected = usize::try_from(end_sample.saturating_sub(start_sample))
+        .unwrap_or(usize::MAX)
+        .saturating_mul(usize::from(output_channels));
+    let mut decoder = AudioDecoder::open(
+        path,
+        output_rate,
+        output_channels,
+        start_sample,
+        end_sample,
+    )?;
+    let mut samples = Vec::with_capacity(expected);
+    while let Some(chunk) = decoder.next_chunk()? {
+        if cancellation.is_cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        samples.extend_from_slice(&chunk);
+    }
+    samples.resize(expected, 0.0);
+    samples.truncate(expected);
+    Ok(samples)
+}
 
 pub(crate) struct AudioRuntime {
     stream: cpal::Stream,

@@ -1,7 +1,8 @@
 use std::fmt::Write as _;
 
 use openreel_core::{
-    ClipId, Document, Rational, TimeCode, TrackKind, map_source_range_to_project,
+    ClipId, Document, Effect, ParamValue, Rational, TimeCode, TrackKind,
+    map_source_range_to_project,
 };
 
 #[must_use]
@@ -59,7 +60,7 @@ pub fn render_timeline_state(document: &Document) -> String {
             let asset_name = asset.map_or("<missing>", |asset| asset.name.as_str());
             let _ = writeln!(
                 output,
-                "  clip {} asset={} {:?} timeline={}..{} duration={} source={}..{}",
+                "  clip {} asset={} {:?} timeline={}..{} duration={} source={}..{} effects={} transition_in={}",
                 clip.id,
                 clip.asset,
                 asset_name,
@@ -68,6 +69,8 @@ pub fn render_timeline_state(document: &Document) -> String {
                 frame_and_seconds(duration, document.fps),
                 source_frame_and_seconds(clip.source_range.start, asset.map(|asset| asset.fps)),
                 source_frame_and_seconds(clip.source_range.end, asset.map(|asset| asset.fps)),
+                render_effects(&clip.effects),
+                render_transition(clip.transition_in.as_ref()),
             );
         }
     }
@@ -126,7 +129,7 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
         .checked_add(duration)
         .ok_or_else(|| "time calculation overflowed".to_owned())?;
     Ok(format!(
-        "clip {}\ntrack={} kind={:?}\nasset={} {:?}\ntimeline={}..{} duration={}\nsource={}..{} duration={}\neffects={} transition_in={}",
+        "clip {}\ntrack={} kind={:?}\nasset={} {:?}\ntimeline={}..{} duration={}\nsource={}..{} duration={}\neffects={}\ntransition_in={}",
         clip.id,
         track.id,
         track.kind,
@@ -144,11 +147,46 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
                 .unwrap_or(TimeCode::ZERO),
             asset.fps,
         ),
-        clip.effects.len(),
-        clip.transition_in
-            .as_ref()
-            .map_or("none".to_owned(), |transition| transition.name.clone()),
+        render_effects(&clip.effects),
+        render_transition(clip.transition_in.as_ref()),
     ))
+}
+
+fn render_effects(effects: &[Effect]) -> String {
+    if effects.is_empty() {
+        return "none".to_owned();
+    }
+    let mut rendered = String::from("[");
+    for (index, effect) in effects.iter().enumerate() {
+        if index != 0 {
+            rendered.push_str(", ");
+        }
+        let _ = write!(rendered, "{}:{}(", effect.id, effect.name);
+        for (parameter_index, (name, value)) in effect.parameters.iter().enumerate() {
+            if parameter_index != 0 {
+                rendered.push(',');
+            }
+            let _ = write!(rendered, "{name}={}", render_param(value));
+        }
+        rendered.push(')');
+    }
+    rendered.push(']');
+    rendered
+}
+
+fn render_param(value: &ParamValue) -> String {
+    match value {
+        ParamValue::Integer(value) => value.to_string(),
+        ParamValue::Boolean(value) => value.to_string(),
+        ParamValue::Text(value) => format!("{value:?}"),
+    }
+}
+
+fn render_transition(transition: Option<&openreel_core::Transition>) -> String {
+    transition.map_or_else(
+        || "none".to_owned(),
+        |transition| format!("{}:{}f", transition.name, transition.duration.0),
+    )
 }
 
 fn frame_and_seconds(frame: TimeCode, fps: Rational) -> String {
@@ -163,10 +201,11 @@ fn source_frame_and_seconds(frame: TimeCode, fps: Option<Rational>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{collections::BTreeMap, path::PathBuf};
 
     use openreel_core::{
-        AssetId, Clip, MediaAsset, MediaKind, Track, TrackId,
+        AssetId, Clip, Effect, EffectId, MediaAsset, MediaKind, ParamValue, Track, TrackId,
+        Transition,
     };
 
     use super::*;
@@ -182,8 +221,18 @@ mod tests {
                         asset: AssetId(4),
                         source_range: TimeCode(30)..TimeCode(120),
                         timeline_start: TimeCode(0),
-                        effects: Vec::new(),
-                        transition_in: None,
+                        effects: vec![Effect {
+                            id: EffectId(3),
+                            name: "brightness".to_owned(),
+                            parameters: BTreeMap::from([(
+                                "percent".to_owned(),
+                                ParamValue::Integer(25),
+                            )]),
+                        }],
+                        transition_in: Some(Transition {
+                            name: "crossfade".to_owned(),
+                            duration: TimeCode(15),
+                        }),
                     },
                     Clip {
                         id: ClipId(11),
@@ -215,8 +264,8 @@ mod tests {
         let expected = r#"project fps=30/1 size=1920x1080 duration=180f/6.000s
 tracks=1 clips=2 assets=1
 track 7 video clips=2
-  clip 10 asset=4 "interview.mp4" timeline=0f/0.000s..90f/3.000s duration=90f/3.000s source=30f/1.000s..120f/4.000s
-  clip 11 asset=4 "interview.mp4" timeline=120f/4.000s..180f/6.000s duration=60f/2.000s source=150f/5.000s..210f/7.000s
+  clip 10 asset=4 "interview.mp4" timeline=0f/0.000s..90f/3.000s duration=90f/3.000s source=30f/1.000s..120f/4.000s effects=[3:brightness(percent=25)] transition_in=crossfade:15f
+  clip 11 asset=4 "interview.mp4" timeline=120f/4.000s..180f/6.000s duration=60f/2.000s source=150f/5.000s..210f/7.000s effects=none transition_in=none
 assets:
   asset 4 "interview.mp4" kind=AudioVideo duration=300f/10.000s fps=30/1 size=1920x1080 path="fixtures/interview.mp4""#;
         assert_eq!(render_timeline_state(&fixture()), expected);
@@ -227,5 +276,7 @@ assets:
         let rendered = render_clip_info(&fixture(), ClipId(10)).unwrap();
         assert!(rendered.contains("timeline=0f/0.000s..90f/3.000s"));
         assert!(rendered.contains("source=30f/1.000s..120f/4.000s"));
+        assert!(rendered.contains("effects=[3:brightness(percent=25)]"));
+        assert!(rendered.contains("transition_in=crossfade:15f"));
     }
 }

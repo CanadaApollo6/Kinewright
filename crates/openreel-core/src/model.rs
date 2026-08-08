@@ -85,12 +85,22 @@ pub enum ParamValue {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Effect {
     pub id: EffectId,
+    /// One of `brightness`, `contrast`, `saturation`, `opacity`, or `transform`.
     pub name: String,
+    /// Integer-only fixed-point parameters. Missing parameters use their neutral defaults:
+    ///
+    /// - brightness/contrast/saturation: `percent` in -100..=100, default 0
+    /// - opacity: `percent` in 0..=100, default 100
+    /// - transform: `scale_percent` in 1..=400 (default 100), plus
+    ///   `x_percent` and `y_percent` in -100..=100 (default 0). Offsets are
+    ///   percentages of the project width/height, positive right/down.
     pub parameters: BTreeMap<String, ParamValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Transition {
+    /// Currently `crossfade`. It fades the clip from the already-composited
+    /// lower layers during the first `duration` project frames.
     pub name: String,
     /// Transition length in project frames.
     pub duration: TimeCode,
