@@ -20,7 +20,7 @@ const BUFFER_SECONDS: usize = 2;
 pub(crate) struct AudioRuntime {
     stream: cpal::Stream,
     producer: Producer<f32>,
-    decoder: AudioDecoder,
+    decoder: Option<AudioDecoder>,
     pending: Vec<f32>,
     pending_index: usize,
     pub(crate) error_flag: Arc<AtomicBool>,
@@ -30,8 +30,42 @@ pub(crate) struct AudioRuntime {
 impl AudioRuntime {
     pub(crate) fn open(
         path: &Path,
+        source_fps: Rational,
         project_fps: Rational,
-        from: TimeCode,
+        source_from: TimeCode,
+        source_end: TimeCode,
+        project_from: TimeCode,
+        position_samples: Arc<AtomicU64>,
+        sample_rate_atomic: Arc<AtomicU32>,
+    ) -> Result<Self, MediaError> {
+        Self::open_output(
+            Some((path, source_fps, source_from, source_end)),
+            project_fps,
+            project_from,
+            position_samples,
+            sample_rate_atomic,
+        )
+    }
+
+    pub(crate) fn open_silence(
+        project_fps: Rational,
+        project_from: TimeCode,
+        position_samples: Arc<AtomicU64>,
+        sample_rate_atomic: Arc<AtomicU32>,
+    ) -> Result<Self, MediaError> {
+        Self::open_output(
+            None,
+            project_fps,
+            project_from,
+            position_samples,
+            sample_rate_atomic,
+        )
+    }
+
+    fn open_output(
+        source: Option<(&Path, Rational, TimeCode, TimeCode)>,
+        project_fps: Rational,
+        project_from: TimeCode,
         position_samples: Arc<AtomicU64>,
         sample_rate_atomic: Arc<AtomicU32>,
     ) -> Result<Self, MediaError> {
@@ -49,7 +83,7 @@ impl AudioRuntime {
             .saturating_mul(usize::from(channels))
             .saturating_mul(BUFFER_SECONDS);
         let (producer, consumer) = RingBuffer::new(capacity.max(1));
-        let start_sample = frame_to_samples(from, sample_rate, project_fps);
+        let start_sample = frame_to_samples(project_from, sample_rate, project_fps);
         position_samples.store(start_sample, Ordering::Release);
         sample_rate_atomic.store(sample_rate, Ordering::Release);
         let error_flag = Arc::new(AtomicBool::new(false));
@@ -62,7 +96,13 @@ impl AudioRuntime {
             Arc::clone(&position_samples),
             Arc::clone(&error_flag),
         )?;
-        let decoder = AudioDecoder::open(path, sample_rate, channels, start_sample)?;
+        let decoder = source
+            .map(|(path, source_fps, source_from, source_end)| {
+                let source_start = frame_to_samples(source_from, sample_rate, source_fps);
+                let source_end = frame_to_samples(source_end, sample_rate, source_fps);
+                AudioDecoder::open(path, sample_rate, channels, source_start, source_end)
+            })
+            .transpose()?;
         let mut runtime = Self {
             stream,
             producer,
@@ -95,7 +135,11 @@ impl AudioRuntime {
             }
             self.pending.clear();
             self.pending_index = 0;
-            match self.decoder.next_chunk()? {
+            let Some(decoder) = &mut self.decoder else {
+                self.exhausted = true;
+                return Ok(());
+            };
+            match decoder.next_chunk()? {
                 Some(chunk) => self.pending = chunk,
                 None => {
                     self.exhausted = true;
@@ -186,7 +230,9 @@ struct AudioDecoder {
     output_rate: u32,
     output_channels: usize,
     target_sample: u64,
+    end_sample: u64,
     started: bool,
+    finished: bool,
     eof_sent: bool,
     queued: VecDeque<Vec<f32>>,
 }
@@ -197,6 +243,7 @@ impl AudioDecoder {
         output_rate: u32,
         output_channels: u16,
         target_sample: u64,
+        end_sample: u64,
     ) -> Result<Self, MediaError> {
         let mut input = ffmpeg::format::input(path).map_err(backend)?;
         let stream = input
@@ -240,7 +287,9 @@ impl AudioDecoder {
             output_rate,
             output_channels: usize::from(output_channels),
             target_sample,
+            end_sample,
             started: false,
+            finished: false,
             eof_sent: false,
             queued: VecDeque::new(),
         })
@@ -252,6 +301,9 @@ impl AudioDecoder {
                 if !chunk.is_empty() {
                     return Ok(Some(chunk));
                 }
+            }
+            if self.finished {
+                return Ok(None);
             }
             if self.eof_sent {
                 return Ok(None);
@@ -295,16 +347,22 @@ impl AudioDecoder {
                 )
             });
             let chunk_end = chunk_start.saturating_add(u64::try_from(samples).unwrap_or(u64::MAX));
+            if chunk_start >= self.end_sample {
+                self.finished = true;
+                return Ok(());
+            }
             if !self.started && chunk_end <= self.target_sample {
                 continue;
             }
-            let skip = if self.started {
-                0
-            } else {
-                usize::try_from(self.target_sample.saturating_sub(chunk_start))
-                    .unwrap_or(samples)
-                    .min(samples)
-            };
+            let wanted_start = chunk_start.max(self.target_sample);
+            let wanted_end = chunk_end.min(self.end_sample);
+            if wanted_end <= wanted_start {
+                self.finished = chunk_end >= self.end_sample;
+                continue;
+            }
+            let skip = usize::try_from(wanted_start.saturating_sub(chunk_start))
+                .unwrap_or(samples)
+                .min(samples);
             let gap = if self.started {
                 0
             } else {
@@ -313,19 +371,24 @@ impl AudioDecoder {
             let gap = usize::try_from(gap)
                 .unwrap_or_default()
                 .min(usize::try_from(self.output_rate).unwrap_or_default());
-            let remaining = samples.saturating_sub(skip);
+            let remaining = usize::try_from(wanted_end.saturating_sub(wanted_start))
+                .unwrap_or(samples.saturating_sub(skip))
+                .min(samples.saturating_sub(skip));
             let mut interleaved = Vec::with_capacity(
                 gap.saturating_add(remaining)
                     .saturating_mul(self.output_channels),
             );
             interleaved.resize(gap.saturating_mul(self.output_channels), 0.0);
-            for sample_index in skip..samples {
+            for sample_index in skip..skip.saturating_add(remaining) {
                 for channel in 0..self.output_channels {
                     interleaved.push(converted.plane::<f32>(channel)[sample_index]);
                 }
             }
             self.started = true;
             self.queued.push_back(interleaved);
+            if wanted_end >= self.end_sample {
+                self.finished = true;
+            }
         }
         Ok(())
     }

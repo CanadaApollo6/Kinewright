@@ -5,7 +5,8 @@ use std::{
 };
 
 use openreel_core::{
-    Document, MediaEngine, MediaEvent, MediaKind, PlaybackState, Rational, TimeCode,
+    Clip, ClipId, Document, MediaAsset, MediaEngine, MediaEvent, MediaKind, PlaybackState,
+    Rational, TimeCode, Track, TrackId, TrackKind,
 };
 use openreel_media::FfmpegMediaEngine;
 
@@ -84,12 +85,7 @@ fn frame_requests_decode_exact_requested_frames_without_an_audio_device() {
     let clip = TestClip::generate();
     let engine = FfmpegMediaEngine::new().unwrap();
     let asset = engine.probe(&clip.0).unwrap();
-    let mut document = Document {
-        fps: asset.fps,
-        resolution: asset.resolution.unwrap(),
-        ..Document::default()
-    };
-    document.media_pool.push(asset);
+    let document = full_timeline(asset);
     let frames = engine.frames();
     engine.set_document(std::sync::Arc::new(document));
 
@@ -104,6 +100,63 @@ fn frame_requests_decode_exact_requested_frames_without_an_audio_device() {
 }
 
 #[test]
+fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
+    let clip = TestClip::generate();
+    let engine = FfmpegMediaEngine::new().unwrap();
+    let asset = engine.probe(&clip.0).unwrap();
+    let document = Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            clips: vec![
+                Clip {
+                    id: ClipId(1),
+                    asset: asset.id,
+                    source_range: TimeCode(5)..TimeCode(15),
+                    timeline_start: TimeCode(0),
+                    effects: Vec::new(),
+                    transition_in: None,
+                },
+                Clip {
+                    id: ClipId(2),
+                    asset: asset.id,
+                    source_range: TimeCode(30)..TimeCode(40),
+                    timeline_start: TimeCode(15),
+                    effects: Vec::new(),
+                    transition_in: None,
+                },
+            ],
+        }],
+        media_pool: vec![asset.clone()],
+        fps: asset.fps,
+        resolution: asset.resolution.unwrap(),
+        duration: TimeCode(25),
+    };
+    document.validate().unwrap();
+    let frames = engine.frames();
+    engine.set_document(std::sync::Arc::new(document));
+
+    engine.request_frame(TimeCode(0));
+    let first_clip = receive_frame(&frames, TimeCode(0));
+    engine.request_frame(TimeCode(10));
+    let gap_start = receive_frame(&frames, TimeCode(10));
+    engine.request_frame(TimeCode(14));
+    let gap_end = receive_frame(&frames, TimeCode(14));
+    engine.request_frame(TimeCode(15));
+    let second_clip = receive_frame(&frames, TimeCode(15));
+
+    assert!(first_clip.rgba.chunks_exact(4).any(|pixel| pixel[..3] != [0, 0, 0]));
+    assert!(second_clip.rgba.chunks_exact(4).any(|pixel| pixel[..3] != [0, 0, 0]));
+    assert_ne!(first_clip.rgba, second_clip.rgba);
+    for gap in [gap_start, gap_end] {
+        assert!(gap
+            .rgba
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0, 0, 0, 255]));
+    }
+}
+
+#[test]
 fn audio_device_play_pause_and_seek_smoke_test() {
     if std::env::var_os("OPENREEL_AUDIO_TEST").as_deref() != Some(std::ffi::OsStr::new("1")) {
         eprintln!("skipped: set OPENREEL_AUDIO_TEST=1 on a machine with an audio device");
@@ -113,12 +166,7 @@ fn audio_device_play_pause_and_seek_smoke_test() {
     let clip = TestClip::generate();
     let engine = FfmpegMediaEngine::new().unwrap();
     let asset = engine.probe(&clip.0).unwrap();
-    let mut document = Document {
-        fps: asset.fps,
-        resolution: asset.resolution.unwrap(),
-        ..Document::default()
-    };
-    document.media_pool.push(asset);
+    let document = full_timeline(asset);
     let events = engine.events();
     engine.set_document(std::sync::Arc::new(document));
 
@@ -134,6 +182,83 @@ fn audio_device_play_pause_and_seek_smoke_test() {
     let paused = engine.position();
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(engine.position(), paused, "audio clock advanced while paused");
+}
+
+#[test]
+fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
+    if std::env::var_os("OPENREEL_AUDIO_TEST").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        eprintln!("skipped: set OPENREEL_AUDIO_TEST=1 on a machine with an audio device");
+        return;
+    }
+
+    let clip = TestClip::generate();
+    let engine = FfmpegMediaEngine::new().unwrap();
+    let asset = engine.probe(&clip.0).unwrap();
+    let document = Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            clips: vec![
+                Clip {
+                    id: ClipId(1),
+                    asset: asset.id,
+                    source_range: TimeCode(0)..TimeCode(10),
+                    timeline_start: TimeCode(0),
+                    effects: Vec::new(),
+                    transition_in: None,
+                },
+                Clip {
+                    id: ClipId(2),
+                    asset: asset.id,
+                    source_range: TimeCode(20)..TimeCode(40),
+                    timeline_start: TimeCode(15),
+                    effects: Vec::new(),
+                    transition_in: None,
+                },
+            ],
+        }],
+        media_pool: vec![asset.clone()],
+        fps: asset.fps,
+        resolution: asset.resolution.unwrap(),
+        duration: TimeCode(35),
+    };
+    document.validate().unwrap();
+    let events = engine.events();
+    engine.set_document(std::sync::Arc::new(document));
+
+    engine.play(TimeCode(8));
+    wait_for_state(&events, PlaybackState::Playing);
+    wait_for_position(&engine, TimeCode(20));
+    while let Ok(event) = events.try_recv() {
+        if let MediaEvent::Error(error) = event {
+            panic!("timeline boundary playback failed: {error}");
+        }
+    }
+    engine.pause();
+    wait_for_state(&events, PlaybackState::Paused);
+}
+
+fn full_timeline(asset: MediaAsset) -> Document {
+    let document = Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            clips: vec![Clip {
+                id: ClipId(1),
+                asset: asset.id,
+                source_range: TimeCode::ZERO..asset.duration,
+                timeline_start: TimeCode::ZERO,
+                effects: Vec::new(),
+                transition_in: None,
+            }],
+        }],
+        media_pool: vec![asset.clone()],
+        fps: asset.fps,
+        resolution: asset.resolution.unwrap(),
+        duration: asset.duration,
+    };
+    document.validate().unwrap();
+    document
 }
 
 fn receive_frame(

@@ -1,0 +1,184 @@
+use openreel_core::{
+    AssetId, ClipId, Document, FrameRounding, MediaError, TimeCode, TrackId, TrackKind,
+    map_frames_with_rounding, map_source_range_to_project,
+};
+
+/// The source frame selected by a project-frame position on the first video track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineSource {
+    pub track: TrackId,
+    pub clip: ClipId,
+    pub asset: AssetId,
+    pub source_at: TimeCode,
+    pub source_end: TimeCode,
+    pub timeline_end: TimeCode,
+}
+
+/// Map a project frame to its active clip and source frame.
+///
+/// Clip intervals are half-open. A position in a gap, before the first clip, or
+/// at/after the document duration maps to `None`.
+pub fn timeline_source_at(
+    document: &Document,
+    project_at: TimeCode,
+) -> Result<Option<TimelineSource>, MediaError> {
+    if project_at < TimeCode::ZERO {
+        return Ok(None);
+    }
+    let Some(track) = document
+        .tracks
+        .iter()
+        .find(|track| track.kind == TrackKind::Video)
+    else {
+        return Ok(None);
+    };
+
+    for clip in &track.clips {
+        if project_at < clip.timeline_start {
+            break;
+        }
+        let asset = document.asset(clip.asset).ok_or_else(|| {
+            MediaError::Backend(format!("timeline clip {} references missing asset {}", clip.id, clip.asset))
+        })?;
+        let duration = map_source_range_to_project(
+            clip.source_range.clone(),
+            asset.fps,
+            document.fps,
+        )
+        .map_err(|error| MediaError::Backend(error.to_string()))?;
+        let timeline_end = clip
+            .timeline_start
+            .checked_add(duration)
+            .ok_or_else(|| MediaError::Backend("timeline position overflowed".to_owned()))?;
+        if project_at >= timeline_end {
+            continue;
+        }
+        let project_offset = project_at
+            .checked_sub(clip.timeline_start)
+            .ok_or_else(|| MediaError::Backend("timeline position underflowed".to_owned()))?;
+        let source_offset = map_frames_with_rounding(
+            project_offset,
+            document.fps,
+            asset.fps,
+            FrameRounding::Floor,
+        )
+        .map_err(|error| MediaError::Backend(error.to_string()))?;
+        let source_at = clip
+            .source_range
+            .start
+            .checked_add(source_offset)
+            .ok_or_else(|| MediaError::Backend("source position overflowed".to_owned()))?;
+        return Ok(Some(TimelineSource {
+            track: track.id,
+            clip: clip.id,
+            asset: clip.asset,
+            source_at: TimeCode(source_at.0.min(clip.source_range.end.0.saturating_sub(1))),
+            source_end: clip.source_range.end,
+            timeline_end,
+        }));
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use openreel_core::{
+        AssetId, Clip, ClipId, Document, MediaAsset, MediaKind, Rational, TimeCode, Track,
+        TrackId, TrackKind,
+    };
+
+    use super::*;
+
+    fn fixture() -> Document {
+        Document {
+            tracks: vec![Track {
+                id: TrackId(7),
+                kind: TrackKind::Video,
+                clips: vec![
+                    Clip {
+                        id: ClipId(1),
+                        asset: AssetId(1),
+                        source_range: TimeCode(10)..TimeCode(20),
+                        timeline_start: TimeCode(0),
+                        effects: Vec::new(),
+                        transition_in: None,
+                    },
+                    Clip {
+                        id: ClipId(2),
+                        asset: AssetId(2),
+                        source_range: TimeCode(30)..TimeCode(40),
+                        timeline_start: TimeCode(15),
+                        effects: Vec::new(),
+                        transition_in: None,
+                    },
+                ],
+            }],
+            media_pool: vec![
+                MediaAsset {
+                    id: AssetId(1),
+                    path: PathBuf::from("one.mp4"),
+                    name: "one".to_owned(),
+                    duration: TimeCode(60),
+                    fps: Rational::new(30, 1).unwrap(),
+                    kind: MediaKind::AudioVideo,
+                    resolution: Some((320, 180)),
+                },
+                MediaAsset {
+                    id: AssetId(2),
+                    path: PathBuf::from("two.mp4"),
+                    name: "two".to_owned(),
+                    duration: TimeCode(60),
+                    fps: Rational::new(30, 1).unwrap(),
+                    kind: MediaKind::AudioVideo,
+                    resolution: Some((320, 180)),
+                },
+            ],
+            fps: Rational::new(30, 1).unwrap(),
+            resolution: (320, 180),
+            duration: TimeCode(25),
+        }
+    }
+
+    #[test]
+    fn selects_sources_across_clip_boundaries_and_gap() {
+        let document = fixture();
+        let cases = [
+            (TimeCode(0), Some((ClipId(1), AssetId(1), TimeCode(10)))),
+            (TimeCode(9), Some((ClipId(1), AssetId(1), TimeCode(19)))),
+            (TimeCode(10), None),
+            (TimeCode(14), None),
+            (TimeCode(15), Some((ClipId(2), AssetId(2), TimeCode(30)))),
+            (TimeCode(24), Some((ClipId(2), AssetId(2), TimeCode(39)))),
+            (TimeCode(25), None),
+        ];
+
+        for (position, expected) in cases {
+            let actual = timeline_source_at(&document, position).unwrap();
+            assert_eq!(
+                actual.map(|source| (source.clip, source.asset, source.source_at)),
+                expected,
+                "wrong mapping at project frame {position}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_rates_use_integer_floor_mapping_inside_the_clip() {
+        let mut document = fixture();
+        document.fps = Rational::new(30, 1).unwrap();
+        document.media_pool[0].fps = Rational::new(24, 1).unwrap();
+        document.tracks[0].clips[0].source_range = TimeCode(10)..TimeCode(34);
+        document.tracks[0].clips[1].timeline_start = TimeCode(35);
+        document.duration = TimeCode(45);
+
+        assert_eq!(
+            timeline_source_at(&document, TimeCode(5))
+                .unwrap()
+                .unwrap()
+                .source_at,
+            TimeCode(14)
+        );
+    }
+}

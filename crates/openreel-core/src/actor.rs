@@ -333,7 +333,7 @@ mod tests {
         fn generated_documents_survive_arbitrary_do_undo_redo_sequences(
             lengths in prop::collection::vec(1_u16..80, 1..8),
             gaps in prop::collection::vec(0_u8..8, 1..8),
-            actions in prop::collection::vec(0_u8..3, 0..100),
+            actions in prop::collection::vec(0_u8..5, 0..100),
         ) {
             let initial = generated_document(&lengths, &gaps);
             prop_assert!(initial.validate().is_ok());
@@ -342,6 +342,7 @@ mod tests {
             let mut expected_undo = Vec::new();
             let mut expected_redo = Vec::new();
             let mut next_asset_id = 2_u64;
+            let mut next_track_id = 2_u64;
             let mut successful_dos = 0_usize;
 
             for action in actions {
@@ -358,6 +359,35 @@ mod tests {
                         successful_dos += 1;
                     }
                     1 => {
+                        let operation = Operation::AddTrack {
+                            track: Track {
+                                id: TrackId(next_track_id),
+                                kind: TrackKind::Video,
+                                clips: Vec::new(),
+                            },
+                        };
+                        next_track_id += 1;
+                        expected_undo.push(Arc::clone(&expected));
+                        expected_redo.clear();
+                        let mut after = (*expected).clone();
+                        operation.apply(&mut after).unwrap();
+                        expected = Arc::new(after);
+                        state.do_operation(operation).unwrap();
+                        successful_dos += 1;
+                    }
+                    2 => {
+                        if let Some(track) = expected.tracks.iter().rev().find(|track| track.clips.is_empty()) {
+                            let operation = Operation::RemoveTrack { track: track.id };
+                            expected_undo.push(Arc::clone(&expected));
+                            expected_redo.clear();
+                            let mut after = (*expected).clone();
+                            operation.apply(&mut after).unwrap();
+                            expected = Arc::new(after);
+                            state.do_operation(operation).unwrap();
+                            successful_dos += 1;
+                        }
+                    }
+                    3 => {
                         if let Some(previous) = expected_undo.pop() {
                             expected_redo.push(Arc::clone(&expected));
                             expected = previous;

@@ -10,9 +10,8 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use openreel_core::{
-    AssetId, Document, ExportSettings, FrameRounding, FrameTexture, MediaAsset, MediaEngine,
-    MediaError, MediaEvent, MediaKind, PlaybackState, ProgressSink, Rational, RgbaImage, TimeCode,
-    map_frames_with_rounding,
+    AssetId, ClipId, Document, ExportSettings, FrameTexture, MediaAsset, MediaEngine, MediaError,
+    MediaEvent, MediaKind, PlaybackState, ProgressSink, Rational, RgbaImage, TimeCode,
 };
 
 use crate::{
@@ -20,6 +19,7 @@ use crate::{
     cache::FrameCache,
     clock::samples_to_frame,
     decode::{VideoDecoder, probe_path, thumbnail},
+    timeline_source_at,
 };
 
 const FRAME_CACHE_CAPACITY: usize = 36;
@@ -152,6 +152,14 @@ impl MediaEngine for FfmpegMediaEngine {
 
     fn set_document(&self, doc: Arc<Document>) {
         self.clock.set_fps(doc.fps);
+        let next_id = doc
+            .media_pool
+            .iter()
+            .map(|asset| asset.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.next_asset_id.fetch_max(next_id, Ordering::Relaxed);
         let _ = self.control_tx.send(Control::SetDocument(doc));
     }
 
@@ -218,11 +226,13 @@ impl MediaEngine for FfmpegMediaEngine {
 
 #[derive(Clone)]
 struct ActiveMedia {
+    clip: ClipId,
+    asset: AssetId,
     path: PathBuf,
     source_fps: Rational,
     project_fps: Rational,
-    source_duration: TimeCode,
-    project_duration: TimeCode,
+    source_at: TimeCode,
+    source_end: TimeCode,
     kind: MediaKind,
 }
 
@@ -236,10 +246,13 @@ struct Worker {
     requested: Arc<RequestedPositions>,
     handled_frame_sequence: u64,
     handled_seek_sequence: u64,
-    active: Option<ActiveMedia>,
+    document: Arc<Document>,
     video: Option<VideoDecoder>,
+    video_asset: Option<AssetId>,
     cache: FrameCache,
+    black_frame: FrameTexture,
     audio: Option<AudioRuntime>,
+    audio_clip: Option<ClipId>,
     playing: bool,
     last_position: Option<TimeCode>,
 }
@@ -264,10 +277,13 @@ impl Worker {
             requested,
             handled_frame_sequence: 0,
             handled_seek_sequence: 0,
-            active: None,
+            document: Arc::new(Document::default()),
             video: None,
+            video_asset: None,
             cache: FrameCache::new(FRAME_CACHE_CAPACITY),
+            black_frame: black_frame((1_920, 1_080)),
             audio: None,
+            audio_clip: None,
             playing: false,
             last_position: None,
         }
@@ -298,11 +314,12 @@ impl Worker {
                 max_width,
                 reply,
             } => {
-                let result = self.active.as_ref().ok_or_else(|| {
-                    MediaError::Backend("no media asset is loaded".to_owned())
-                }).and_then(|active| {
-                    let source = project_to_source(at, active).unwrap_or(TimeCode::ZERO);
-                    thumbnail(&active.path, active.source_fps, source, max_width)
+                let result = active_media_at(&self.document, at).and_then(|active| {
+                    if let Some(active) = active {
+                        thumbnail(&active.path, active.source_fps, active.source_at, max_width)
+                    } else {
+                        Ok(black_image(self.document.resolution, max_width))
+                    }
                 });
                 let _ = reply.send(result);
             }
@@ -311,31 +328,16 @@ impl Worker {
 
     fn set_document(&mut self, doc: &Document) {
         self.pause();
+        self.document = Arc::new(doc.clone());
         self.video = None;
+        self.video_asset = None;
         self.cache.clear();
-        self.active = doc.media_pool.last().map(|asset| {
-            let project_duration = map_frames_with_rounding(
-                asset.duration,
-                asset.fps,
-                doc.fps,
-                FrameRounding::Ceil,
-            )
-            .unwrap_or(asset.duration);
-            ActiveMedia {
-                path: asset.path.clone(),
-                source_fps: asset.fps,
-                project_fps: doc.fps,
-                source_duration: asset.duration,
-                project_duration,
-                kind: asset.kind,
-            }
-        });
+        self.black_frame = black_frame(doc.resolution);
+        self.audio_clip = None;
         self.clock.set_fps(doc.fps);
         self.clock.set_frame(TimeCode::ZERO);
         self.last_position = None;
-        if self.active.is_some() {
-            self.present(TimeCode::ZERO);
-        }
+        self.present(TimeCode::ZERO);
     }
 
     fn handle_coalesced_requests(&mut self) {
@@ -360,25 +362,17 @@ impl Worker {
 
     fn start_playback(&mut self, from: TimeCode) {
         self.audio = None;
-        let Some(active) = self.active.clone() else {
-            self.fail(MediaError::Backend("no media asset is loaded".to_owned()));
-            return;
-        };
-        if !matches!(active.kind, MediaKind::Audio | MediaKind::AudioVideo) {
-            self.fail(MediaError::Backend(
-                "the loaded media has no audio master stream".to_owned(),
-            ));
+        if self.document.duration <= TimeCode::ZERO {
+            self.fail(MediaError::Backend("the timeline is empty".to_owned()));
             return;
         }
-        let from = TimeCode(from.0.clamp(0, active.project_duration.0.saturating_sub(1)));
+        let from = TimeCode(
+            from.0
+                .clamp(0, self.document.duration.0.saturating_sub(1)),
+        );
         self.clock.set_frame(from);
-        match AudioRuntime::open(
-            &active.path,
-            active.project_fps,
-            from,
-            Arc::clone(&self.clock.position_samples),
-            Arc::clone(&self.clock.sample_rate),
-        )
+        match self
+            .audio_for_position(from)
         .and_then(|runtime| {
             runtime.play()?;
             Ok(runtime)
@@ -428,19 +422,32 @@ impl Worker {
             }
         }
         let position = self.clock.position();
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|active| position >= active.project_duration)
-        {
-            let end = self
-                .active
-                .as_ref()
-                .map_or(TimeCode::ZERO, |active| active.project_duration);
+        if position >= self.document.duration {
+            let end = self.document.duration;
             self.clock.fallback_frame.store(end.0, Ordering::Release);
             self.pause();
             self.emit(MediaEvent::Position(end));
             return;
+        }
+        let clip = match active_media_at(&self.document, position) {
+            Ok(active) => active.map(|active| active.clip),
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        if clip != self.audio_clip {
+            self.audio = None;
+            match self.audio_for_position(position).and_then(|runtime| {
+                runtime.play()?;
+                Ok(runtime)
+            }) {
+                Ok(runtime) => self.audio = Some(runtime),
+                Err(error) => {
+                    self.fail(error);
+                    return;
+                }
+            }
         }
         if self.last_position != Some(position) {
             self.last_position = Some(position);
@@ -450,21 +457,35 @@ impl Worker {
     }
 
     fn present(&mut self, project_at: TimeCode) {
-        let Some(active) = self.active.clone() else {
+        let active = match active_media_at(&self.document, project_at) {
+            Ok(active) => active,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        let Some(active) = active else {
+            send_latest(
+                &self.frames_tx,
+                &self.frames_drop_rx,
+                (project_at, self.black_frame.clone()),
+            );
             return;
         };
         if !matches!(active.kind, MediaKind::Video | MediaKind::AudioVideo) {
+            send_latest(
+                &self.frames_tx,
+                &self.frames_drop_rx,
+                (project_at, self.black_frame.clone()),
+            );
             return;
         }
-        let project_at = TimeCode(
-            project_at
-                .0
-                .clamp(0, active.project_duration.0.saturating_sub(1)),
-        );
-        let Ok(source_at) = project_to_source(project_at, &active) else {
-            return;
-        };
-        if !self.cache.contains(source_at) {
+        if self.video_asset != Some(active.asset) {
+            self.video = None;
+            self.video_asset = Some(active.asset);
+            self.cache.clear();
+        }
+        if !self.cache.contains(active.source_at) {
             if self.video.is_none() {
                 match VideoDecoder::open(&active.path, active.source_fps) {
                     Ok(decoder) => self.video = Some(decoder),
@@ -475,24 +496,51 @@ impl Worker {
                 }
             }
             let end = TimeCode(
-                source_at
+                active
+                    .source_at
                     .0
                     .saturating_add(PREFETCH_FRAMES)
-                    .min(active.source_duration.0.saturating_sub(1)),
+                    .min(active.source_end.0.saturating_sub(1)),
             );
             if let Some(video) = &mut self.video {
-                if let Err(error) = video.decode_window(source_at, end, &mut self.cache) {
+                if let Err(error) = video.decode_window(active.source_at, end, &mut self.cache) {
                     self.fail(error);
                     return;
                 }
             }
         }
-        if let Some(frame) = self.cache.frame_at_or_before(source_at) {
+        if let Some(frame) = self.cache.frame_at_or_before(active.source_at) {
             send_latest(
                 &self.frames_tx,
                 &self.frames_drop_rx,
                 (project_at, frame),
             );
+        }
+    }
+
+    fn audio_for_position(&mut self, project_at: TimeCode) -> Result<AudioRuntime, MediaError> {
+        let active = active_media_at(&self.document, project_at)?;
+        self.audio_clip = active.as_ref().map(|active| active.clip);
+        if let Some(active) = active.filter(|active| {
+            matches!(active.kind, MediaKind::Audio | MediaKind::AudioVideo)
+        }) {
+            AudioRuntime::open(
+                &active.path,
+                active.source_fps,
+                active.project_fps,
+                active.source_at,
+                active.source_end,
+                project_at,
+                Arc::clone(&self.clock.position_samples),
+                Arc::clone(&self.clock.sample_rate),
+            )
+        } else {
+            AudioRuntime::open_silence(
+                self.document.fps,
+                project_at,
+                Arc::clone(&self.clock.position_samples),
+                Arc::clone(&self.clock.sample_rate),
+            )
         }
     }
 
@@ -506,14 +554,66 @@ impl Worker {
     }
 }
 
-fn project_to_source(at: TimeCode, active: &ActiveMedia) -> Result<TimeCode, MediaError> {
-    map_frames_with_rounding(
-        at,
-        active.project_fps,
-        active.source_fps,
-        FrameRounding::Floor,
+fn active_media_at(
+    document: &Document,
+    project_at: TimeCode,
+) -> Result<Option<ActiveMedia>, MediaError> {
+    let Some(source) = timeline_source_at(document, project_at)? else {
+        return Ok(None);
+    };
+    let asset = document.asset(source.asset).ok_or_else(|| {
+        MediaError::Backend(format!("timeline asset {} disappeared", source.asset))
+    })?;
+    Ok(Some(ActiveMedia {
+        clip: source.clip,
+        asset: source.asset,
+        path: asset.path.clone(),
+        source_fps: asset.fps,
+        project_fps: document.fps,
+        source_at: source.source_at,
+        source_end: source.source_end,
+        kind: asset.kind,
+    }))
+}
+
+fn black_frame(resolution: (u32, u32)) -> FrameTexture {
+    let pixel_count = usize::try_from(resolution.0)
+        .unwrap_or_default()
+        .saturating_mul(usize::try_from(resolution.1).unwrap_or_default())
+        .saturating_mul(4);
+    let mut rgba = vec![0; pixel_count];
+    for alpha in rgba.iter_mut().skip(3).step_by(4) {
+        *alpha = 255;
+    }
+    FrameTexture {
+        width: resolution.0,
+        height: resolution.1,
+        rgba: Arc::new(rgba),
+    }
+}
+
+fn black_image(resolution: (u32, u32), max_width: u32) -> RgbaImage {
+    let width = resolution.0.min(max_width.max(1)).max(1);
+    let height = u32::try_from(
+        u64::from(resolution.1)
+            .saturating_mul(u64::from(width))
+            / u64::from(resolution.0.max(1)),
     )
-    .map_err(|error| MediaError::Backend(error.to_string()))
+    .unwrap_or(resolution.1)
+    .max(1);
+    let pixel_count = usize::try_from(width)
+        .unwrap_or_default()
+        .saturating_mul(usize::try_from(height).unwrap_or_default())
+        .saturating_mul(4);
+    let mut pixels = vec![0; pixel_count];
+    for alpha in pixels.iter_mut().skip(3).step_by(4) {
+        *alpha = 255;
+    }
+    RgbaImage {
+        width,
+        height,
+        pixels,
+    }
 }
 
 fn send_latest<T: Send>(sender: &Sender<T>, drop_receiver: &Receiver<T>, value: T) {

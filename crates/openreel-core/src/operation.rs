@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AssetId, Clip, ClipId, Document, MediaAsset, TimeCode, TimeMappingError, TrackId,
+    AssetId, Clip, ClipId, Document, MediaAsset, TimeCode, TimeMappingError, Track, TrackId,
     map_source_range_to_project,
 };
 
@@ -13,6 +13,12 @@ use crate::{
 pub enum Operation {
     AddAsset {
         asset: MediaAsset,
+    },
+    AddTrack {
+        track: Track,
+    },
+    RemoveTrack {
+        track: TrackId,
     },
     AddClip {
         track: TrackId,
@@ -70,6 +76,8 @@ pub enum OpError {
     DuplicateAsset(AssetId),
     #[error("track {0} occurs more than once")]
     DuplicateTrack(TrackId),
+    #[error("new track {0} must be empty")]
+    NewTrackNotEmpty(TrackId),
     #[error("clip {0} occurs more than once")]
     DuplicateClip(ClipId),
     #[error("asset {0} does not exist")]
@@ -136,6 +144,8 @@ pub enum OpError {
 fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpError> {
     match operation {
         Operation::AddAsset { asset } => add_asset(doc, asset.clone()),
+        Operation::AddTrack { track } => add_track(doc, track.clone()),
+        Operation::RemoveTrack { track } => remove_track(doc, *track),
         Operation::AddClip {
             track,
             asset,
@@ -151,6 +161,27 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
         } => move_clip(doc, *clip, *to_track, *to),
         Operation::DeleteClip { clip } => delete_clip(doc, *clip),
     }
+}
+
+fn add_track(doc: &mut Document, track: Track) -> Result<(), OpError> {
+    if doc.tracks.iter().any(|existing| existing.id == track.id) {
+        return Err(OpError::DuplicateTrack(track.id));
+    }
+    if !track.clips.is_empty() {
+        return Err(OpError::NewTrackNotEmpty(track.id));
+    }
+    doc.tracks.push(track);
+    Ok(())
+}
+
+fn remove_track(doc: &mut Document, track_id: TrackId) -> Result<(), OpError> {
+    let index = doc
+        .tracks
+        .iter()
+        .position(|track| track.id == track_id)
+        .ok_or(OpError::MissingTrack(track_id))?;
+    doc.tracks.remove(index);
+    Ok(())
 }
 
 fn add_asset(doc: &mut Document, asset: MediaAsset) -> Result<(), OpError> {
@@ -240,11 +271,41 @@ fn trim_clip(
     new_source: std::ops::Range<TimeCode>,
 ) -> Result<(), OpError> {
     let (track_index, clip_index) = find_clip(doc, clip_id)?;
-    let asset_id = doc.tracks[track_index].clips[clip_index].asset;
+    let original = doc.tracks[track_index].clips[clip_index].clone();
+    let asset_id = original.asset;
     let asset = doc
         .asset(asset_id)
         .ok_or(OpError::MissingAsset(asset_id))?;
     validate_source_range(asset, &new_source)?;
+    let shifted_start = match new_source.start.cmp(&original.source_range.start) {
+        std::cmp::Ordering::Greater => {
+            let offset = map_source_range_to_project(
+                original.source_range.start..new_source.start,
+                asset.fps,
+                doc.fps,
+            )?;
+            original
+                .timeline_start
+                .checked_add(offset)
+                .ok_or(OpError::TimeOverflow)?
+        }
+        std::cmp::Ordering::Less => {
+            let offset = map_source_range_to_project(
+                new_source.start..original.source_range.start,
+                asset.fps,
+                doc.fps,
+            )?;
+            original
+                .timeline_start
+                .checked_sub(offset)
+                .ok_or(OpError::TimeOverflow)?
+        }
+        std::cmp::Ordering::Equal => original.timeline_start,
+    };
+    if shifted_start < TimeCode::ZERO {
+        return Err(OpError::NegativeTimelinePosition(shifted_start));
+    }
+    doc.tracks[track_index].clips[clip_index].timeline_start = shifted_start;
     doc.tracks[track_index].clips[clip_index].source_range = new_source;
     Ok(())
 }

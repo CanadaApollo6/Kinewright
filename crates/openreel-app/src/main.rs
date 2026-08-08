@@ -1,5 +1,6 @@
 use std::{
-    path::PathBuf,
+    fs,
+    path::{Path, PathBuf},
     sync::{Arc, mpsc},
     thread,
     time::Duration,
@@ -7,10 +8,16 @@ use std::{
 
 use eframe::egui;
 use openreel_core::{
-    Command, Core, Document, Event, FrameRounding, MediaAsset, MediaEngine, MediaError, MediaEvent,
-    Operation, PlaybackState, TimeCode, map_frames_with_rounding,
+    AssetId, ClipId, Command, Core, Document, Event, FrameRounding, MediaAsset, MediaEngine,
+    MediaError, MediaEvent, Operation, PlaybackState, TimeCode, Track, TrackId, TrackKind,
+    map_frames_with_rounding, map_source_range_to_project,
 };
-use openreel_media::FfmpegMediaEngine;
+use openreel_media::{FfmpegMediaEngine, timeline_source_at};
+
+const DEFAULT_TRACK_ID: TrackId = TrackId(1);
+const TIMELINE_HEIGHT: f32 = 112.0;
+const CLIP_HEIGHT: f32 = 56.0;
+const EDGE_HANDLE_WIDTH: f32 = 7.0;
 
 struct OpenReelApp {
     core: Core,
@@ -23,9 +30,11 @@ struct OpenReelApp {
     document: Arc<Document>,
     texture: Option<egui::TextureHandle>,
     position: TimeCode,
-    duration: TimeCode,
     playing: bool,
     resume_after_scrub: bool,
+    selected_clip: Option<ClipId>,
+    pixels_per_frame: f32,
+    project_path: Option<PathBuf>,
     status: String,
 }
 
@@ -37,7 +46,7 @@ impl OpenReelApp {
         let frames = media.frames();
         let media_events = media.events();
         let (probe_tx, probe_rx) = mpsc::channel();
-        Self {
+        let app = Self {
             core,
             core_events,
             media,
@@ -48,11 +57,30 @@ impl OpenReelApp {
             document: Arc::new(document),
             texture: None,
             position: TimeCode::ZERO,
-            duration: TimeCode::ZERO,
             playing: false,
             resume_after_scrub: false,
-            status: "Open an MP4 to begin".to_owned(),
+            selected_clip: None,
+            pixels_per_frame: 6.0,
+            project_path: None,
+            status: "Creating default video track…".to_owned(),
+        };
+        if app
+            .core
+            .send(Command::Do(Operation::AddTrack {
+                track: Track {
+                    id: DEFAULT_TRACK_ID,
+                    kind: TrackKind::Video,
+                    clips: Vec::new(),
+                },
+            }))
+            .is_err()
+        {
+            return Self {
+                status: "Core actor stopped while creating the default track".to_owned(),
+                ..app
+            };
         }
+        app
     }
 
     fn choose_media(&mut self) {
@@ -74,52 +102,213 @@ impl OpenReelApp {
             .expect("failed to spawn media probe worker");
     }
 
+    fn save_project(&mut self, save_as: bool) {
+        let path = if !save_as {
+            self.project_path.clone()
+        } else {
+            None
+        };
+        let path = path.or_else(|| {
+            rfd::FileDialog::new()
+                .add_filter("OpenReel project", &["openreel"])
+                .set_file_name("project.openreel")
+                .save_file()
+        });
+        let Some(mut path) = path else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension("openreel");
+        }
+        let result = serde_json::to_string_pretty(&*self.document)
+            .map_err(|error| error.to_string())
+            .and_then(|json| fs::write(&path, json).map_err(|error| error.to_string()));
+        match result {
+            Ok(()) => {
+                self.project_path = Some(path.clone());
+                self.status = format!("Saved {}", path.display());
+            }
+            Err(error) => self.status = format!("Could not save {}: {error}", path.display()),
+        }
+    }
+
+    fn choose_project(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("OpenReel project", &["openreel", "json"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.open_project(&path);
+    }
+
+    fn open_project(&mut self, path: &Path) {
+        let loaded = fs::read_to_string(path)
+            .map_err(|error| error.to_string())
+            .and_then(|json| {
+                serde_json::from_str::<Document>(&json).map_err(|error| error.to_string())
+            })
+            .and_then(|document| {
+                document
+                    .validate()
+                    .map_err(|error| error.to_string())
+                    .map(|()| document)
+            });
+        let document = match loaded {
+            Ok(document) => document,
+            Err(error) => {
+                self.status = format!("Could not open {}: {error}", path.display());
+                return;
+            }
+        };
+        let missing: Vec<String> = document
+            .media_pool
+            .iter()
+            .filter(|asset| !asset.path.is_file())
+            .map(|asset| format!("{} ({})", asset.name, asset.path.display()))
+            .collect();
+        if let Err(error) = self.replace_core(document) {
+            self.status = format!("Could not open {}: {error}", path.display());
+            return;
+        }
+        self.project_path = Some(path.to_path_buf());
+        self.status = if missing.is_empty() {
+            format!("Opened {}", path.display())
+        } else {
+            format!(
+                "Opened {} — missing media: {}",
+                path.display(),
+                missing.join(", ")
+            )
+        };
+    }
+
+    fn replace_core(&mut self, document: Document) -> Result<(), String> {
+        let core = Core::spawn(document.clone()).map_err(|error| error.to_string())?;
+        let events = core.subscribe().map_err(|error| error.to_string())?;
+        self.media.pause();
+        self.core = core;
+        self.core_events = events;
+        self.document = Arc::new(document);
+        self.position = TimeCode::ZERO;
+        self.playing = false;
+        self.resume_after_scrub = false;
+        self.selected_clip = None;
+        self.texture = None;
+        self.media.set_document(Arc::clone(&self.document));
+        self.media.request_frame(TimeCode::ZERO);
+        Ok(())
+    }
+
+    fn send_operation(&mut self, operation: Operation) {
+        if self.core.send(Command::Do(operation)).is_err() {
+            self.status = "Core actor stopped while applying the edit".to_owned();
+        } else {
+            self.status = "Applying edit…".to_owned();
+        }
+    }
+
+    fn undo(&mut self) {
+        if self.core.send(Command::Undo).is_err() {
+            self.status = "Core actor stopped while undoing".to_owned();
+        } else {
+            self.status = "Undo".to_owned();
+        }
+    }
+
+    fn redo(&mut self) {
+        if self.core.send(Command::Redo).is_err() {
+            self.status = "Core actor stopped while redoing".to_owned();
+        } else {
+            self.status = "Redo".to_owned();
+        }
+    }
+
+    fn add_asset_to_timeline(&mut self, asset_id: AssetId) {
+        let Some(track) = self
+            .document
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+        else {
+            self.status = "No video track exists".to_owned();
+            return;
+        };
+        let Some(asset) = self.document.asset(asset_id) else {
+            self.status = format!("Asset {asset_id} no longer exists");
+            return;
+        };
+        self.send_operation(Operation::AddClip {
+            track: track.id,
+            asset: asset.id,
+            at: self.document.duration,
+            source: TimeCode::ZERO..asset.duration,
+        });
+    }
+
+    fn split_at_playhead(&mut self) {
+        let clip = self.selected_clip.or_else(|| {
+            timeline_source_at(&self.document, self.position)
+                .ok()
+                .flatten()
+                .map(|source| source.clip)
+        });
+        let Some(clip) = clip else {
+            self.status = "No clip is selected or active at the playhead".to_owned();
+            return;
+        };
+        self.send_operation(Operation::SplitClip {
+            clip,
+            at: self.position,
+        });
+    }
+
+    fn delete_selected(&mut self) {
+        let Some(clip) = self.selected_clip else {
+            self.status = "Select a clip to delete".to_owned();
+            return;
+        };
+        self.send_operation(Operation::DeleteClip { clip });
+    }
+
     fn poll_background(&mut self, ctx: &egui::Context) {
         while let Ok((path, result)) = self.probe_rx.try_recv() {
             match result {
                 Ok(asset) => {
-                    self.status = format!("Opening {}…", path.display());
-                    if self
-                        .core
-                        .send(Command::Do(Operation::AddAsset { asset }))
-                        .is_err()
-                    {
-                        self.status = "Core actor stopped while importing media".to_owned();
-                    }
+                    self.status = format!("Importing {}…", path.display());
+                    self.send_operation(Operation::AddAsset { asset });
                 }
-                Err(error) => self.status = format!("Could not open {}: {error}", path.display()),
+                Err(error) => self.status = format!("Could not import {}: {error}", path.display()),
             }
         }
 
         while let Ok(event) = self.core_events.try_recv() {
             match event {
-                Event::DocumentChanged { doc, .. } => {
+                Event::DocumentChanged { doc, last_op } => {
                     self.document = Arc::clone(&doc);
-                    self.media.set_document(Arc::clone(&doc));
-                    if let Some(asset) = doc.media_pool.last() {
-                        self.duration = map_frames_with_rounding(
-                            asset.duration,
-                            asset.fps,
-                            doc.fps,
-                            FrameRounding::Ceil,
-                        )
-                        .unwrap_or(asset.duration);
+                    if self
+                        .selected_clip
+                        .is_some_and(|clip| doc.clip(clip).is_none())
+                    {
+                        self.selected_clip = None;
+                    }
+                    if doc.duration <= TimeCode::ZERO {
                         self.position = TimeCode::ZERO;
-                        self.playing = false;
-                        self.status = format!(
-                            "{} — {}×{}, {}/{} fps, {} frames",
-                            asset.name,
-                            asset.resolution.map_or(0, |size| size.0),
-                            asset.resolution.map_or(0, |size| size.1),
-                            asset.fps.numerator(),
-                            asset.fps.denominator(),
-                            asset.duration.0
+                    } else {
+                        self.position = TimeCode(
+                            self.position.0.clamp(0, doc.duration.0.saturating_sub(1)),
                         );
-                        self.media.request_frame(TimeCode::ZERO);
+                    }
+                    self.playing = false;
+                    self.media.set_document(Arc::clone(&doc));
+                    self.media.seek(self.position);
+                    self.media.request_frame(self.position);
+                    if let Some(operation) = last_op {
+                        self.status = operation_status(&operation);
                     }
                 }
                 Event::OpRejected { error, .. } => {
-                    self.status = format!("Import rejected: {error}");
+                    self.status = format!("Edit rejected: {error}");
                 }
                 Event::QueryResult(_) => {}
             }
@@ -175,22 +364,76 @@ impl OpenReelApp {
     }
 
     fn toggle_playback(&mut self) {
-        if self.duration <= TimeCode::ZERO {
+        if self.document.duration <= TimeCode::ZERO {
+            self.status = "Add a clip to the timeline before playing".to_owned();
             return;
         }
         if self.playing {
             self.media.pause();
         } else {
-            if self.position >= self.duration {
+            if self.position >= self.document.duration {
                 self.position = TimeCode::ZERO;
             }
             self.media.play(self.position);
         }
     }
 
+    fn seek_to(&mut self, position: TimeCode) {
+        let maximum = self.document.duration.0.saturating_sub(1).max(0);
+        self.position = TimeCode(position.0.clamp(0, maximum));
+        self.media.seek(self.position);
+        self.media.request_frame(self.position);
+    }
+
+    fn file_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("File", |ui| {
+            if ui.button("Open…").clicked() {
+                ui.close();
+                self.choose_project();
+            }
+            if ui.button("Save").clicked() {
+                ui.close();
+                self.save_project(false);
+            }
+            if ui.button("Save As…").clicked() {
+                ui.close();
+                self.save_project(true);
+            }
+        });
+    }
+
+    fn media_bin(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Media bin");
+        if ui.button("Import media…").clicked() {
+            self.choose_media();
+        }
+        ui.separator();
+        if self.document.media_pool.is_empty() {
+            ui.label("No imported assets");
+            return;
+        }
+        let assets = self.document.media_pool.clone();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for asset in assets {
+                ui.group(|ui| {
+                    ui.strong(&asset.name);
+                    ui.small(format!(
+                        "{} frames · {}/{} fps",
+                        asset.duration.0,
+                        asset.fps.numerator(),
+                        asset.fps.denominator()
+                    ));
+                    if ui.button("Add to timeline").clicked() {
+                        self.add_asset_to_timeline(asset.id);
+                    }
+                });
+            }
+        });
+    }
+
     fn preview(&self, ui: &mut egui::Ui) {
         let available = ui.available_size();
-        let preview_height = (available.y - 72.0).max(120.0);
+        let preview_height = (available.y - 220.0).max(120.0);
         if let Some(texture) = &self.texture {
             let source = texture.size_vec2();
             let scale = (available.x / source.x)
@@ -213,7 +456,7 @@ impl OpenReelApp {
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "No media loaded",
+                "No timeline frame",
                 egui::FontId::proportional(18.0),
                 egui::Color32::GRAY,
             );
@@ -228,7 +471,7 @@ impl OpenReelApp {
             {
                 self.toggle_playback();
             }
-            let maximum = self.duration.0.saturating_sub(1).max(0);
+            let maximum = self.document.duration.0.saturating_sub(1).max(0);
             let mut slider_position = self.position.0.clamp(0, maximum);
             let response = ui.add_enabled(
                 maximum > 0,
@@ -256,28 +499,351 @@ impl OpenReelApp {
             ui.monospace(format!("{} / {}", self.position.0, maximum));
         });
     }
+
+    fn timeline(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Timeline");
+            if ui.button("Split (S)").clicked() {
+                self.split_at_playhead();
+            }
+            if ui.button("Delete").clicked() {
+                self.delete_selected();
+            }
+            if ui.button("Undo").clicked() {
+                self.undo();
+            }
+            if ui.button("Redo").clicked() {
+                self.redo();
+            }
+            ui.label("Zoom");
+            ui.add(egui::Slider::new(&mut self.pixels_per_frame, 1.0..=20.0));
+        });
+
+        let document = Arc::clone(&self.document);
+        let Some(track) = document
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+        else {
+            ui.label("No video track");
+            return;
+        };
+        let content_frames = document
+            .duration
+            .0
+            .max(self.position.0.saturating_add(1))
+            .max(60);
+        let width = ((content_frames as f32) * self.pixels_per_frame + 180.0)
+            .max(ui.available_width());
+        let mut pending_operation = None;
+        let mut seek = None;
+
+        egui::ScrollArea::horizontal()
+            .id_salt("timeline-scroll")
+            .show(ui, |ui| {
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(width, TIMELINE_HEIGHT),
+                    egui::Sense::click(),
+                );
+                let painter = ui.painter_at(rect);
+                painter.rect_filled(rect, 4.0, egui::Color32::from_gray(26));
+                let strip = egui::Rect::from_min_max(
+                    egui::pos2(rect.left(), rect.top() + 30.0),
+                    egui::pos2(rect.right(), rect.top() + 30.0 + CLIP_HEIGHT),
+                );
+                painter.rect_filled(strip, 2.0, egui::Color32::from_gray(42));
+
+                let tick = i64::from(
+                    (document.fps.numerator() / document.fps.denominator()).max(1),
+                );
+                let mut frame = 0_i64;
+                while frame <= content_frames {
+                    let x = rect.left() + (frame as f32) * self.pixels_per_frame;
+                    painter.line_segment(
+                        [egui::pos2(x, rect.top()), egui::pos2(x, rect.top() + 12.0)],
+                        egui::Stroke::new(1.0, egui::Color32::DARK_GRAY),
+                    );
+                    painter.text(
+                        egui::pos2(x + 3.0, rect.top() + 2.0),
+                        egui::Align2::LEFT_TOP,
+                        frame,
+                        egui::FontId::monospace(10.0),
+                        egui::Color32::LIGHT_GRAY,
+                    );
+                    frame = frame.saturating_add(tick);
+                }
+
+                for clip in &track.clips {
+                    let Some(asset) = document.asset(clip.asset) else {
+                        continue;
+                    };
+                    let Ok(duration) = map_source_range_to_project(
+                        clip.source_range.clone(),
+                        asset.fps,
+                        document.fps,
+                    ) else {
+                        continue;
+                    };
+                    let x = rect.left()
+                        + (clip.timeline_start.0 as f32) * self.pixels_per_frame;
+                    let clip_width = ((duration.0 as f32) * self.pixels_per_frame).max(30.0);
+                    let clip_rect = egui::Rect::from_min_size(
+                        egui::pos2(x, strip.top()),
+                        egui::vec2(clip_width, CLIP_HEIGHT),
+                    );
+                    let body_rect = egui::Rect::from_min_max(
+                        egui::pos2(clip_rect.left() + EDGE_HANDLE_WIDTH, clip_rect.top()),
+                        egui::pos2(clip_rect.right() - EDGE_HANDLE_WIDTH, clip_rect.bottom()),
+                    );
+                    let body = ui
+                        .interact(
+                            body_rect,
+                            ui.make_persistent_id(("clip-body", clip.id.0)),
+                            egui::Sense::click_and_drag(),
+                        )
+                        .on_hover_text("Drag to move; click to select");
+                    let left_rect = egui::Rect::from_min_max(
+                        clip_rect.min,
+                        egui::pos2(clip_rect.left() + EDGE_HANDLE_WIDTH, clip_rect.bottom()),
+                    );
+                    let right_rect = egui::Rect::from_min_max(
+                        egui::pos2(clip_rect.right() - EDGE_HANDLE_WIDTH, clip_rect.top()),
+                        clip_rect.max,
+                    );
+                    let left = ui
+                        .interact(
+                            left_rect,
+                            ui.make_persistent_id(("clip-left", clip.id.0)),
+                            egui::Sense::drag(),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+                    let right = ui
+                        .interact(
+                            right_rect,
+                            ui.make_persistent_id(("clip-right", clip.id.0)),
+                            egui::Sense::drag(),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+
+                    if body.clicked() {
+                        self.selected_clip = Some(clip.id);
+                    }
+                    if body.drag_stopped() {
+                        let delta = (body.drag_delta().x / self.pixels_per_frame).round() as i64;
+                        if delta != 0 {
+                            pending_operation = Some(Operation::MoveClip {
+                                clip: clip.id,
+                                to_track: track.id,
+                                to: TimeCode(clip.timeline_start.0.saturating_add(delta).max(0)),
+                            });
+                        }
+                    }
+                    if left.drag_stopped() {
+                        let project_delta =
+                            (left.drag_delta().x / self.pixels_per_frame).round() as i64;
+                        let source_delta = project_delta_to_source(
+                            project_delta,
+                            document.fps,
+                            asset.fps,
+                        );
+                        let new_start = TimeCode(
+                            clip.source_range
+                                .start
+                                .0
+                                .saturating_add(source_delta)
+                                .clamp(0, clip.source_range.end.0.saturating_sub(1)),
+                        );
+                        if new_start != clip.source_range.start {
+                            pending_operation = Some(Operation::TrimClip {
+                                clip: clip.id,
+                                new_source: new_start..clip.source_range.end,
+                            });
+                        }
+                    }
+                    if right.drag_stopped() {
+                        let project_delta =
+                            (right.drag_delta().x / self.pixels_per_frame).round() as i64;
+                        let source_delta = project_delta_to_source(
+                            project_delta,
+                            document.fps,
+                            asset.fps,
+                        );
+                        let new_end = TimeCode(
+                            clip.source_range
+                                .end
+                                .0
+                                .saturating_add(source_delta)
+                                .clamp(clip.source_range.start.0.saturating_add(1), asset.duration.0),
+                        );
+                        if new_end != clip.source_range.end {
+                            pending_operation = Some(Operation::TrimClip {
+                                clip: clip.id,
+                                new_source: clip.source_range.start..new_end,
+                            });
+                        }
+                    }
+
+                    let drag = if body.dragged() {
+                        body.drag_delta()
+                    } else {
+                        egui::Vec2::ZERO
+                    };
+                    let draw_rect = clip_rect.translate(drag);
+                    let selected = self.selected_clip == Some(clip.id);
+                    let color = clip_color(clip.asset, selected);
+                    painter.rect_filled(draw_rect, 4.0, color);
+                    painter.rect_stroke(
+                        draw_rect,
+                        4.0,
+                        egui::Stroke::new(
+                            if selected { 2.0 } else { 1.0 },
+                            if selected {
+                                egui::Color32::WHITE
+                            } else {
+                                egui::Color32::from_gray(150)
+                            },
+                        ),
+                        egui::StrokeKind::Inside,
+                    );
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            draw_rect.min,
+                            egui::pos2(draw_rect.left() + EDGE_HANDLE_WIDTH, draw_rect.bottom()),
+                        ),
+                        2.0,
+                        egui::Color32::from_white_alpha(70),
+                    );
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(draw_rect.right() - EDGE_HANDLE_WIDTH, draw_rect.top()),
+                            draw_rect.max,
+                        ),
+                        2.0,
+                        egui::Color32::from_white_alpha(70),
+                    );
+                    painter.text(
+                        draw_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        &asset.name,
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::WHITE,
+                    );
+                }
+
+                let playhead_x =
+                    rect.left() + (self.position.0 as f32) * self.pixels_per_frame;
+                painter.line_segment(
+                    [
+                        egui::pos2(playhead_x, rect.top()),
+                        egui::pos2(playhead_x, rect.bottom()),
+                    ],
+                    egui::Stroke::new(2.0, egui::Color32::RED),
+                );
+
+                if response.clicked() {
+                    if let Some(pointer) = response.interact_pointer_pos() {
+                        let frame = ((pointer.x - rect.left()) / self.pixels_per_frame)
+                            .round() as i64;
+                        seek = Some(TimeCode(frame));
+                    }
+                }
+            });
+
+        if let Some(operation) = pending_operation {
+            self.send_operation(operation);
+        }
+        if let Some(position) = seek {
+            self.seek_to(position);
+        }
+    }
+
+    fn keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let (space, undo, redo, split, delete) = ctx.input(|input| {
+            (
+                input.key_pressed(egui::Key::Space),
+                input.modifiers.ctrl && input.key_pressed(egui::Key::Z),
+                input.modifiers.ctrl && input.key_pressed(egui::Key::Y),
+                !input.modifiers.ctrl && input.key_pressed(egui::Key::S),
+                input.key_pressed(egui::Key::Delete),
+            )
+        });
+        if undo {
+            self.undo();
+        } else if redo {
+            self.redo();
+        } else if split {
+            self.split_at_playhead();
+        } else if delete {
+            self.delete_selected();
+        } else if space {
+            self.toggle_playback();
+        }
+    }
 }
 
 impl eframe::App for OpenReelApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_background(ui.ctx());
-        if ui.input(|input| input.key_pressed(egui::Key::Space))
-            && !ui.ctx().egui_wants_keyboard_input()
-        {
-            self.toggle_playback();
-        }
+        self.keyboard_shortcuts(ui.ctx());
 
         ui.horizontal(|ui| {
-            if ui.button("Open media…").clicked() {
-                self.choose_media();
-            }
+            self.file_menu(ui);
+            ui.separator();
             ui.label(&self.status);
         });
         ui.separator();
-        self.preview(ui);
-        ui.separator();
-        self.transport(ui);
+
+        egui::Panel::left("media-bin-panel")
+            .default_size(240.0)
+            .resizable(true)
+            .show(ui, |ui| self.media_bin(ui));
+        egui::CentralPanel::default().show(ui, |ui| {
+            self.preview(ui);
+            ui.separator();
+            self.transport(ui);
+            ui.separator();
+            self.timeline(ui);
+        });
     }
+}
+
+fn operation_status(operation: &Operation) -> String {
+    match operation {
+        Operation::AddAsset { asset } => format!("Imported {}", asset.name),
+        Operation::AddTrack { track } => format!("Added {:?} track {}", track.kind, track.id),
+        Operation::RemoveTrack { track } => format!("Removed track {track}"),
+        Operation::AddClip { asset, .. } => format!("Added asset {asset} to timeline"),
+        Operation::SplitClip { clip, at } => format!("Split clip {clip} at frame {at}"),
+        Operation::TrimClip { clip, .. } => format!("Trimmed clip {clip}"),
+        Operation::MoveClip { clip, to, .. } => format!("Moved clip {clip} to frame {to}"),
+        Operation::DeleteClip { clip } => format!("Deleted clip {clip}"),
+    }
+}
+
+fn project_delta_to_source(
+    project_delta: i64,
+    project_fps: openreel_core::Rational,
+    source_fps: openreel_core::Rational,
+) -> i64 {
+    let sign = project_delta.signum();
+    let magnitude = TimeCode(project_delta.saturating_abs());
+    map_frames_with_rounding(magnitude, project_fps, source_fps, FrameRounding::Nearest)
+        .map_or(0, |frames| frames.0.saturating_mul(sign))
+}
+
+fn clip_color(asset: AssetId, selected: bool) -> egui::Color32 {
+    if selected {
+        return egui::Color32::from_rgb(55, 125, 210);
+    }
+    let seed = u8::try_from(asset.0 % 80).unwrap_or_default();
+    egui::Color32::from_rgb(
+        45_u8.saturating_add(seed),
+        80_u8.saturating_add(seed / 2),
+        135_u8.saturating_add(seed / 3),
+    )
 }
 
 fn main() -> eframe::Result {

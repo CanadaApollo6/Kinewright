@@ -1,8 +1,12 @@
-use std::path::PathBuf;
+use std::{
+    fs,
+    path::PathBuf,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use openreel_core::{
-    AssetId, Clip, ClipId, Document, MediaAsset, MediaKind, OpError, Operation, Rational,
-    TimeCode, Track, TrackId, TrackKind,
+    AssetId, Clip, ClipId, Command, Core, Document, Event, MediaAsset, MediaKind, OpError,
+    Operation, Rational, TimeCode, Track, TrackId, TrackKind,
 };
 
 fn asset(id: u64, fps: Rational, duration: i64) -> MediaAsset {
@@ -61,6 +65,14 @@ fn document_and_every_operation_variant_round_trip_through_json() {
         Operation::AddAsset {
             asset: asset(2, Rational::new(24_000, 1_001).unwrap(), 240),
         },
+        Operation::AddTrack {
+            track: Track {
+                id: TrackId(2),
+                kind: TrackKind::Audio,
+                clips: Vec::new(),
+            },
+        },
+        Operation::RemoveTrack { track: TrackId(2) },
         Operation::AddClip {
             track: TrackId(1),
             asset: AssetId(1),
@@ -88,6 +100,179 @@ fn document_and_every_operation_variant_round_trip_through_json() {
         let decoded: Operation = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, operation);
     }
+}
+
+#[test]
+fn add_and_remove_track_are_validated_and_atomic() {
+    let mut doc = Document::default();
+    let video = Track {
+        id: TrackId(1),
+        kind: TrackKind::Video,
+        clips: Vec::new(),
+    };
+    Operation::AddTrack {
+        track: video.clone(),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(doc.tracks, vec![video.clone()]);
+
+    let before_duplicate = doc.clone();
+    assert_eq!(
+        Operation::AddTrack {
+            track: video.clone(),
+        }
+        .apply(&mut doc),
+        Err(OpError::DuplicateTrack(TrackId(1)))
+    );
+    assert_eq!(doc, before_duplicate);
+
+    let non_empty = Track {
+        id: TrackId(2),
+        kind: TrackKind::Video,
+        clips: vec![Clip {
+            id: ClipId(99),
+            asset: AssetId(99),
+            source_range: TimeCode(0)..TimeCode(1),
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+        }],
+    };
+    assert_eq!(
+        Operation::AddTrack { track: non_empty }.apply(&mut doc),
+        Err(OpError::NewTrackNotEmpty(TrackId(2)))
+    );
+
+    Operation::RemoveTrack { track: TrackId(1) }
+        .apply(&mut doc)
+        .unwrap();
+    assert!(doc.tracks.is_empty());
+    assert_eq!(
+        Operation::RemoveTrack { track: TrackId(404) }.apply(&mut doc),
+        Err(OpError::MissingTrack(TrackId(404)))
+    );
+}
+
+#[test]
+fn remove_track_cascades_clips_and_recomputes_duration() {
+    let mut doc = document_with_one_clip();
+    Operation::RemoveTrack { track: TrackId(1) }
+        .apply(&mut doc)
+        .unwrap();
+    assert!(doc.tracks.is_empty());
+    assert_eq!(doc.duration, TimeCode::ZERO);
+    assert_eq!(doc.media_pool.len(), 1);
+}
+
+#[test]
+fn left_edge_trim_moves_the_timeline_start_as_one_atomic_edit() {
+    let mut doc = document_with_one_clip();
+    Operation::TrimClip {
+        clip: ClipId(1),
+        new_source: TimeCode(5)..TimeCode(30),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    assert_eq!(doc.tracks[0].clips[0].timeline_start, TimeCode(15));
+    assert_eq!(doc.tracks[0].clips[0].source_range, TimeCode(5)..TimeCode(30));
+    assert_eq!(doc.duration, TimeCode(40));
+}
+
+#[test]
+fn project_json_round_trip_preserves_exact_document_equality() {
+    let doc = document_with_one_clip();
+    let json = serde_json::to_string_pretty(&doc).unwrap();
+    let loaded: Document = serde_json::from_str(&json).unwrap();
+    loaded.validate().unwrap();
+    assert_eq!(loaded, doc);
+}
+
+#[test]
+fn public_actor_builds_undoes_redoes_saves_and_reopens_a_rough_cut() {
+    let core = Core::spawn(Document::default()).unwrap();
+    let events = core.subscribe().unwrap();
+    let _initial = events.recv_timeout(Duration::from_secs(1)).unwrap();
+    let fps = Rational::new(30, 1).unwrap();
+    let operations = [
+        Operation::AddTrack {
+            track: Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                clips: Vec::new(),
+            },
+        },
+        Operation::AddAsset {
+            asset: asset(1, fps, 120),
+        },
+        Operation::AddAsset {
+            asset: asset(2, fps, 120),
+        },
+        Operation::AddClip {
+            track: TrackId(1),
+            asset: AssetId(1),
+            at: TimeCode(0),
+            source: TimeCode(0)..TimeCode(120),
+        },
+        Operation::AddClip {
+            track: TrackId(1),
+            asset: AssetId(2),
+            at: TimeCode(120),
+            source: TimeCode(0)..TimeCode(120),
+        },
+        Operation::SplitClip {
+            clip: ClipId(1),
+            at: TimeCode(30),
+        },
+        Operation::TrimClip {
+            clip: ClipId(1),
+            new_source: TimeCode(5)..TimeCode(30),
+        },
+        Operation::MoveClip {
+            clip: ClipId(2),
+            to_track: TrackId(1),
+            to: TimeCode(130),
+        },
+        Operation::DeleteClip { clip: ClipId(3) },
+    ];
+
+    let mut latest = None;
+    for operation in operations {
+        core.send(Command::Do(operation)).unwrap();
+        let Event::DocumentChanged { doc, .. } =
+            events.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("expected accepted edit");
+        };
+        latest = Some(doc);
+    }
+    core.send(Command::Undo).unwrap();
+    let Event::DocumentChanged { doc: restored, .. } =
+        events.recv_timeout(Duration::from_secs(1)).unwrap()
+    else {
+        panic!("expected undo snapshot");
+    };
+    assert!(restored.clip(ClipId(3)).is_some());
+    core.send(Command::Redo).unwrap();
+    let Event::DocumentChanged { doc: redone, .. } =
+        events.recv_timeout(Duration::from_secs(1)).unwrap()
+    else {
+        panic!("expected redo snapshot");
+    };
+    assert_eq!(redone, latest.unwrap());
+    redone.validate().unwrap();
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("openreel-m2-{nonce}.openreel"));
+    fs::write(&path, serde_json::to_string_pretty(&*redone).unwrap()).unwrap();
+    let reopened: Document = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let _ = fs::remove_file(path);
+    reopened.validate().unwrap();
+    assert_eq!(reopened, *redone);
 }
 
 #[test]

@@ -5,6 +5,7 @@ mod cache;
 mod clock;
 mod decode;
 mod engine;
+mod timeline;
 
 use ffmpeg_next as ffmpeg;
 use openreel_core::MediaError;
@@ -12,6 +13,7 @@ use openreel_core::MediaError;
 pub use cache::select_frame_for_position;
 pub use clock::{frame_to_samples, samples_to_frame};
 pub use engine::FfmpegMediaEngine;
+pub use timeline::{TimelineSource, timeline_source_at};
 
 /// Initialize the linked FFmpeg libraries.
 pub fn initialize_ffmpeg() -> Result<(), MediaError> {
