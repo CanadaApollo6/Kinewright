@@ -1,9 +1,14 @@
 use std::{
+    collections::HashMap,
     future::Future,
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
+    time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -34,6 +39,134 @@ use crate::{
 };
 
 const THUMBNAIL_MAX_WIDTH: u32 = 512;
+const DEFAULT_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmationRequest {
+    pub id: u64,
+    pub tool_name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConfirmationDecision {
+    Approved,
+    Rejected(String),
+}
+
+#[derive(Clone)]
+pub struct ConfirmationBroker {
+    requests_tx: crossbeam_channel::Sender<ConfirmationRequest>,
+    requests_rx: crossbeam_channel::Receiver<ConfirmationRequest>,
+    pending: Arc<Mutex<HashMap<u64, crossbeam_channel::Sender<ConfirmationDecision>>>>,
+    next_id: Arc<AtomicU64>,
+    timeout: Duration,
+}
+
+impl Default for ConfirmationBroker {
+    fn default() -> Self {
+        Self::with_timeout(DEFAULT_CONFIRMATION_TIMEOUT)
+    }
+}
+
+impl ConfirmationBroker {
+    #[must_use]
+    pub fn with_timeout(timeout: Duration) -> Self {
+        let (requests_tx, requests_rx) = crossbeam_channel::unbounded();
+        Self {
+            requests_tx,
+            requests_rx,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Arc::new(AtomicU64::new(1)),
+            timeout,
+        }
+    }
+
+    #[must_use]
+    pub fn pending_requests(&self) -> Vec<ConfirmationRequest> {
+        self.requests_rx
+            .try_iter()
+            .filter(|request| self.is_pending(request.id))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn is_pending(&self, id: u64) -> bool {
+        self.pending
+            .lock()
+            .is_ok_and(|pending| pending.contains_key(&id))
+    }
+
+    pub fn approve(&self, id: u64) -> bool {
+        self.resolve(id, ConfirmationDecision::Approved)
+    }
+
+    pub fn reject(&self, id: u64, reason: impl Into<String>) -> bool {
+        self.resolve(id, ConfirmationDecision::Rejected(reason.into()))
+    }
+
+    pub fn reject_all(&self, reason: impl Into<String>) {
+        let reason = reason.into();
+        let pending = self
+            .pending
+            .lock()
+            .map(|mut pending| pending.drain().map(|(_, sender)| sender).collect::<Vec<_>>())
+            .unwrap_or_default();
+        for sender in pending {
+            let _ = sender.send(ConfirmationDecision::Rejected(reason.clone()));
+        }
+    }
+
+    fn resolve(&self, id: u64, decision: ConfirmationDecision) -> bool {
+        let sender = self
+            .pending
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(&id));
+        sender.is_some_and(|sender| sender.send(decision).is_ok())
+    }
+
+    fn confirm(
+        &self,
+        tool_name: &str,
+        description: String,
+    ) -> Result<(), String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (decision_tx, decision_rx) = crossbeam_channel::bounded(1);
+        self.pending
+            .lock()
+            .map_err(|_| "confirmation broker stopped".to_owned())?
+            .insert(id, decision_tx);
+        if self
+            .requests_tx
+            .send(ConfirmationRequest {
+                id,
+                tool_name: tool_name.to_owned(),
+                description,
+            })
+            .is_err()
+        {
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.remove(&id);
+            }
+            return Err("confirmation broker stopped".to_owned());
+        }
+        let decision = decision_rx.recv_timeout(self.timeout);
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&id);
+        }
+        match decision {
+            Ok(ConfirmationDecision::Approved) => Ok(()),
+            Ok(ConfirmationDecision::Rejected(reason)) => Err(reason),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                Err("confirmation timed out".to_owned())
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                Err("confirmation was interrupted".to_owned())
+            }
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum McpServerError {
@@ -47,12 +180,21 @@ pub enum McpServerError {
 
 pub struct McpServer {
     endpoint: String,
+    confirmations: ConfirmationBroker,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl McpServer {
     pub fn start(core: Core, media: Arc<dyn MediaEngine>) -> Result<Self, McpServerError> {
+        Self::start_with_broker(core, media, ConfirmationBroker::default())
+    }
+
+    fn start_with_broker(
+        core: Core,
+        media: Arc<dyn MediaEngine>,
+        confirmations: ConfirmationBroker,
+    ) -> Result<Self, McpServerError> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .map_err(McpServerError::Bind)?;
         let address = listener.local_addr().map_err(McpServerError::Listener)?;
@@ -61,13 +203,14 @@ impl McpServer {
             .map_err(McpServerError::Listener)?;
         let endpoint = format!("http://{address}/mcp");
         let (shutdown, shutdown_rx) = oneshot::channel();
-        let handler = OpenReelMcp::new(core, media);
+        let handler = OpenReelMcp::new(core, media, confirmations.clone());
         let server_thread = thread::Builder::new()
             .name("openreel-mcp".to_owned())
             .spawn(move || run_server(listener, handler, shutdown_rx))
             .map_err(McpServerError::Thread)?;
         Ok(Self {
             endpoint,
+            confirmations,
             shutdown: Some(shutdown),
             thread: Some(server_thread),
         })
@@ -78,6 +221,11 @@ impl McpServer {
         &self.endpoint
     }
 
+    #[must_use]
+    pub fn confirmations(&self) -> ConfirmationBroker {
+        self.confirmations.clone()
+    }
+
     pub fn shutdown(mut self) {
         self.signal_shutdown();
         if let Some(thread) = self.thread.take() {
@@ -86,6 +234,8 @@ impl McpServer {
     }
 
     fn signal_shutdown(&mut self) {
+        self.confirmations
+            .reject_all("the OpenReel agent session was interrupted");
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
@@ -126,11 +276,20 @@ fn run_server(listener: TcpListener, handler: OpenReelMcp, shutdown: oneshot::Re
 struct OpenReelMcp {
     core: Core,
     media: Arc<dyn MediaEngine>,
+    confirmations: ConfirmationBroker,
 }
 
 impl OpenReelMcp {
-    fn new(core: Core, media: Arc<dyn MediaEngine>) -> Self {
-        Self { core, media }
+    fn new(
+        core: Core,
+        media: Arc<dyn MediaEngine>,
+        confirmations: ConfirmationBroker,
+    ) -> Self {
+        Self {
+            core,
+            media,
+            confirmations,
+        }
     }
 
     fn tools(&self) -> Result<Vec<Tool>, SchemaError> {
@@ -168,8 +327,43 @@ impl OpenReelMcp {
             tool_name => {
                 let operation = decode_operation(tool_name, arguments)
                     .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+                if let Some(description) = self.confirmation_description(&operation)?
+                    && let Err(reason) = self.confirmations.confirm(tool_name, description)
+                {
+                    return Ok(error_text(format!(
+                        "refused destructive tool {tool_name}: {reason}"
+                    )));
+                }
                 Ok(self.apply_operation(tool_name, operation))
             }
+        }
+    }
+
+    fn confirmation_description(
+        &self,
+        operation: &Operation,
+    ) -> Result<Option<String>, McpError> {
+        match operation {
+            Operation::DeleteClip { clip } => Ok(Some(format!(
+                "The agent wants to delete clip {clip}. This edit can be undone."
+            ))),
+            Operation::RemoveTrack { track } => {
+                let document = self.document()?;
+                let Some(track) = document.tracks.iter().find(|candidate| candidate.id == *track)
+                else {
+                    return Ok(None);
+                };
+                if track.clips.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(format!(
+                        "The agent wants to remove track {} and its {} clip(s). This edit can be undone.",
+                        track.id,
+                        track.clips.len()
+                    )))
+                }
+            }
+            _ => Ok(None),
         }
     }
 
@@ -386,5 +580,208 @@ fn state_delta(tool_name: &str, before: Option<&Document>, after: &Document) -> 
             "applied {tool_name}; tracks={after_tracks}, clips={after_clips}, assets={after_assets}, duration={}f",
             after.duration.0
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openreel_core::{
+        AssetId, Clip, ExportSettings, FrameTexture, MediaAsset, MediaError,
+        MediaEvent, MediaKind, ProgressSink, Rational, RgbaImage, Track, TrackId, TrackKind,
+    };
+    use serde_json::json;
+    use std::{path::Path, time::Instant};
+
+    struct NoopMedia;
+
+    impl MediaEngine for NoopMedia {
+        fn probe(&self, _path: &Path) -> Result<MediaAsset, MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+
+        fn set_document(&self, _doc: Arc<Document>) {}
+
+        fn request_frame(&self, _t: TimeCode) {}
+
+        fn frames(&self) -> crossbeam_channel::Receiver<(TimeCode, FrameTexture)> {
+            crossbeam_channel::never()
+        }
+
+        fn events(&self) -> crossbeam_channel::Receiver<MediaEvent> {
+            crossbeam_channel::never()
+        }
+
+        fn play(&self, _from: TimeCode) {}
+
+        fn pause(&self) {}
+
+        fn seek(&self, _to: TimeCode) {}
+
+        fn position(&self) -> TimeCode {
+            TimeCode::ZERO
+        }
+
+        fn thumbnail_at(&self, _t: TimeCode, _max_w: u32) -> Result<RgbaImage, MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+
+        fn export(
+            &self,
+            _out: &Path,
+            _settings: ExportSettings,
+            _progress: ProgressSink,
+        ) -> Result<(), MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+    }
+
+    fn fixture() -> (Core, Arc<dyn MediaEngine>) {
+        let asset = MediaAsset {
+            id: AssetId(1),
+            path: PathBuf::from("fixture.mp4"),
+            name: "fixture".to_owned(),
+            duration: TimeCode(60),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Video,
+            resolution: Some((320, 180)),
+        };
+        let document = Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                clips: vec![Clip {
+                    id: ClipId(1),
+                    asset: asset.id,
+                    source_range: TimeCode::ZERO..TimeCode(60),
+                    timeline_start: TimeCode::ZERO,
+                    effects: Vec::new(),
+                    transition_in: None,
+                }],
+            }],
+            media_pool: vec![asset],
+            fps: Rational::new(30, 1).unwrap(),
+            resolution: (320, 180),
+            duration: TimeCode(60),
+        };
+        (Core::spawn(document).unwrap(), Arc::new(NoopMedia))
+    }
+
+    fn delete_request() -> CallToolRequestParams {
+        CallToolRequestParams::new("delete_clip").with_arguments(
+            json!({"clip": 1}).as_object().unwrap().clone(),
+        )
+    }
+
+    fn wait_for_request(broker: &ConfirmationBroker) -> ConfirmationRequest {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if let Some(request) = broker.pending_requests().into_iter().next() {
+                return request;
+            }
+            assert!(Instant::now() < deadline, "confirmation request was not published");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn invoke_in_background(
+        service: OpenReelMcp,
+        request: CallToolRequestParams,
+    ) -> crossbeam_channel::Receiver<Result<CallToolResult, McpError>> {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        thread::spawn(move || {
+            let _ = sender.send(service.call_blocking(request));
+        });
+        receiver
+    }
+
+    #[test]
+    fn approved_confirmation_applies_the_operation() {
+        let (core, media) = fixture();
+        let broker = ConfirmationBroker::with_timeout(Duration::from_secs(1));
+        let result = invoke_in_background(
+            OpenReelMcp::new(core.clone(), media, broker.clone()),
+            delete_request(),
+        );
+        let request = wait_for_request(&broker);
+        assert!(broker.approve(request.id));
+        let result = result.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
+        assert_eq!(result.is_error, Some(false));
+        let Event::QueryResult(QueryResult::Document(document)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected document query result");
+        };
+        assert!(document.clip(ClipId(1)).is_none());
+    }
+
+    #[test]
+    fn rejected_confirmation_returns_a_refusal_tool_result() {
+        let (core, media) = fixture();
+        let broker = ConfirmationBroker::with_timeout(Duration::from_secs(1));
+        let result = invoke_in_background(
+            OpenReelMcp::new(core, media, broker.clone()),
+            delete_request(),
+        );
+        let request = wait_for_request(&broker);
+        assert!(broker.reject(request.id, "rejected by user"));
+        let result = result.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(result.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("rejected by user"));
+    }
+
+    #[test]
+    fn confirmation_timeout_rejects_the_operation() {
+        let (core, media) = fixture();
+        let broker = ConfirmationBroker::with_timeout(Duration::from_millis(10));
+        let service = OpenReelMcp::new(core, media, broker);
+        let result = service.call_blocking(delete_request()).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(result.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("timed out"));
+    }
+
+    #[test]
+    fn interrupting_a_pending_confirmation_does_not_deadlock() {
+        let (core, media) = fixture();
+        let broker = ConfirmationBroker::with_timeout(Duration::from_secs(30));
+        let result = invoke_in_background(
+            OpenReelMcp::new(core, media, broker.clone()),
+            delete_request(),
+        );
+        let _request = wait_for_request(&broker);
+        broker.reject_all("session interrupted");
+        let result = result.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(result.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("session interrupted"));
+    }
+
+    #[test]
+    fn removing_a_nonempty_track_requires_confirmation() {
+        let (core, media) = fixture();
+        let broker = ConfirmationBroker::with_timeout(Duration::from_secs(1));
+        let request = CallToolRequestParams::new("remove_track").with_arguments(
+            json!({"track": 1}).as_object().unwrap().clone(),
+        );
+        let result = invoke_in_background(
+            OpenReelMcp::new(core, media, broker.clone()),
+            request,
+        );
+        let request = wait_for_request(&broker);
+        assert!(request.description.contains("1 clip(s)"));
+        assert!(broker.reject(request.id, "keep the track"));
+        let result = result.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
+        assert_eq!(result.is_error, Some(true));
     }
 }

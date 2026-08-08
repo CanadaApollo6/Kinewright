@@ -42,6 +42,7 @@ pub struct SessionConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
     Text(String),
+    Error(String),
     ToolCall { name: String, arguments: String },
     ToolResult { name: String, result: String },
     Cost {

@@ -24,6 +24,8 @@ use crate::{
 
 const CLAUDE_SYSTEM_PROMPT: &str = "You are OpenReel's video editing agent. Inspect the live timeline before editing. Resolve ordinal references such as first, second, and last against that initial timeline state, and decide all target clip ids before the first mutation unless the user explicitly says otherwise. Use only the OpenReel MCP tools. All edit time values are exact integer project frames; use the reported fps to convert seconds. Make the requested edits, verify the resulting timeline, then answer briefly.";
 
+pub const CODEX_FAIL_CLOSED_REASON: &str = "Codex exec 0.142.5 cannot disable its built-in shell/file tools while retaining MCP tools, and non-interactive MCP approval remains unsafe. OpenReel will not launch an unrestricted video-editing session.";
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodexDriver;
 
@@ -40,10 +42,7 @@ impl AgentDriver for CodexDriver {
     }
 
     fn start_session(&self, _cfg: SessionConfig) -> Result<Box<dyn AgentSession>, AgentError> {
-        Err(AgentError::Unavailable(
-            "Codex exec 0.142.5 cannot disable its built-in shell/file tools while retaining MCP tools, and non-interactive MCP approval remains unsafe. OpenReel will not launch an unrestricted video-editing session."
-                .to_owned(),
-        ))
+        Err(AgentError::Unavailable(CODEX_FAIL_CLOSED_REASON.to_owned()))
     }
 }
 
@@ -250,7 +249,7 @@ fn spawn_claude_reader(
                 let line = match line {
                     Ok(line) => line,
                     Err(error) => {
-                        let _ = events.send(AgentEvent::Text(format!(
+                        let _ = events.send(AgentEvent::Error(format!(
                             "Claude stream error: {error}"
                         )));
                         break;
@@ -262,7 +261,7 @@ fn spawn_claude_reader(
                     if let Ok(mut child) = child.lock() {
                         let _ = child.kill();
                     }
-                    let _ = events.send(AgentEvent::Text(format!(
+                    let _ = events.send(AgentEvent::Error(format!(
                         "Turn cap reached ({max_turns}); Claude was stopped."
                     )));
                     send_done(&events, &done);
@@ -279,14 +278,14 @@ fn spawn_claude_reader(
                         }
                     }
                     Err(error) => {
-                        let _ = events.send(AgentEvent::Text(error.to_string()));
+                        let _ = events.send(AgentEvent::Error(error.to_string()));
                     }
                 }
             }
             if !done.load(Ordering::Acquire) {
                 let status = child.lock().ok().and_then(|mut child| child.wait().ok());
                 if status.is_some_and(|status| !status.success()) {
-                    let _ = events.send(AgentEvent::Text(format!(
+                    let _ = events.send(AgentEvent::Error(format!(
                         "Claude Code exited with {}",
                         status.unwrap()
                     )));

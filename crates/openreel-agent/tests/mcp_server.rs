@@ -133,8 +133,7 @@ struct TestClip(PathBuf);
 
 impl TestClip {
     fn generate() -> Self {
-        let ffmpeg = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../third_party/ffmpeg/bin/ffmpeg.exe");
+        let ffmpeg = ffmpeg_executable();
         assert!(ffmpeg.is_file(), "provisioned ffmpeg.exe is missing");
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -178,6 +177,16 @@ impl TestClip {
         assert!(status.success(), "test media generation failed");
         Self(output)
     }
+}
+
+fn ffmpeg_executable() -> PathBuf {
+    std::env::var_os("FFMPEG_DIR").map_or_else(
+        || {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../third_party/ffmpeg/bin/ffmpeg.exe")
+        },
+        |directory| PathBuf::from(directory).join("bin/ffmpeg.exe"),
+    )
 }
 
 impl Drop for TestClip {
