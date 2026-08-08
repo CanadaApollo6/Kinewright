@@ -1,14 +1,14 @@
 use std::{
-    path::{Path, PathBuf},
-    process::Command as ProcessCommand,
+    path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use openreel_agent::{ClaudeCodeDriver, McpServer};
 use openreel_core::{
-    AgentDriver, AgentEvent, Clip, ClipId, Command, Core, Document, Event, MediaAsset, MediaEngine,
-    Query, QueryResult, Rational, SessionConfig, TimeCode, Track, TrackId, TrackKind,
+    AgentDriver, AgentEvent, AssetId, Clip, ClipId, Command, Core, Document, Event, MediaAsset,
+    MediaEngine, MediaKind, Query, QueryResult, Rational, SessionConfig, TimeCode, Track, TrackId,
+    TrackKind,
 };
 use openreel_media::FfmpegMediaEngine;
 
@@ -19,13 +19,12 @@ fn claude_splits_then_deletes_via_the_live_mcp_server() {
         return;
     }
 
-    let generated = TestClip::generate();
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
-    let asset = media.probe(&generated.0).unwrap();
-    let original = fixture_document(asset);
+    let original = fixture_document();
     let core = Core::spawn(original.clone()).unwrap();
     let agent_media: Arc<dyn MediaEngine> = media;
     let server = McpServer::start(core.clone(), agent_media).unwrap();
+    let confirmations = server.confirmations();
     let mut session = ClaudeCodeDriver
         .start_session(SessionConfig {
             working_directory: std::env::current_dir().ok(),
@@ -41,17 +40,28 @@ fn claude_splits_then_deletes_via_the_live_mcp_server() {
     session.send_user_message(prompt.to_owned()).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(180);
+    let mut approved = 0;
     loop {
+        for request in confirmations.pending_requests() {
+            println!("CONFIRM: {} — {}", request.tool_name, request.description);
+            assert!(confirmations.approve(request.id));
+            approved += 1;
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(!remaining.is_zero(), "Claude Code turn timed out");
-        let event = events
-            .recv_timeout(remaining.min(Duration::from_secs(10)))
-            .expect("Claude Code event stream ended or stalled");
+        let event = match events.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(event) => event,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                panic!("Claude Code event stream ended")
+            }
+        };
         println!("AGENT: {event:?}");
         if event == AgentEvent::Done {
             break;
         }
     }
+    assert_eq!(approved, 1, "the delete must require one approval");
 
     let edited = query_document(&core);
     let clips = &edited.tracks[0].clips;
@@ -81,7 +91,16 @@ fn query_document(core: &Core) -> Arc<Document> {
     document
 }
 
-fn fixture_document(asset: MediaAsset) -> Document {
+fn fixture_document() -> Document {
+    let asset = MediaAsset {
+        id: AssetId(1),
+        path: PathBuf::from("headless-agent-fixture.mp4"),
+        name: "headless fixture".to_owned(),
+        duration: TimeCode(180),
+        fps: Rational::new(30, 1).unwrap(),
+        kind: MediaKind::Video,
+        resolution: Some((320, 180)),
+    };
     Document {
         tracks: vec![Track {
             id: TrackId(1),
@@ -109,54 +128,5 @@ fn fixture_document(asset: MediaAsset) -> Document {
         fps: Rational::new(30, 1).unwrap(),
         resolution: (320, 180),
         duration: TimeCode(150),
-    }
-}
-
-struct TestClip(PathBuf);
-
-impl TestClip {
-    fn generate() -> Self {
-        let ffmpeg = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../third_party/ffmpeg/bin/ffmpeg.exe");
-        assert!(ffmpeg.is_file(), "provisioned ffmpeg.exe is missing");
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let output = std::env::temp_dir().join(format!(
-            "openreel-m3-agent-{}-{nonce}.mp4",
-            std::process::id()
-        ));
-        let status = ProcessCommand::new(ffmpeg)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=size=320x180:rate=30",
-                "-frames:v",
-                "180",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-g",
-                "60",
-                "-an",
-            ])
-            .arg(&output)
-            .status()
-            .expect("failed to run provisioned ffmpeg.exe");
-        assert!(status.success(), "test media generation failed");
-        Self(output)
-    }
-}
-
-impl Drop for TestClip {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
     }
 }

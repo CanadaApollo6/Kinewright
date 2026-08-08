@@ -2,6 +2,7 @@
 
 mod actor;
 mod agent;
+mod journal;
 mod media;
 mod model;
 mod operation;
@@ -12,6 +13,7 @@ pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,
 };
+pub use journal::JournalCommand;
 pub use media::{
     ExportCancellation, ExportProgress, ExportSettings, FrameTexture, MediaEngine, MediaError, MediaEvent,
     PlaybackState, ProgressSink, RgbaImage,
