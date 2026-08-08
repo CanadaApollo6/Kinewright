@@ -32,7 +32,7 @@ $programFilesX86 = ${env:ProgramFiles(x86)}
 $vswhere = Join-Path $programFilesX86 'Microsoft Visual Studio\Installer\vswhere.exe'
 $vcvars = $null
 if (Test-Path -LiteralPath $vswhere) {
-    $visualStudioRoot = & $vswhere -latest -products '*' -property installationPath
+    $visualStudioRoot = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     if ($visualStudioRoot) {
         $candidate = Join-Path $visualStudioRoot 'VC\Auxiliary\Build\vcvars64.bat'
         if (Test-Path -LiteralPath $candidate) {
@@ -41,7 +41,11 @@ if (Test-Path -LiteralPath $vswhere) {
     }
 }
 if (-not $vcvars) {
-    $vcvars = Get-ChildItem -Path (Join-Path $programFilesX86 'Microsoft Visual Studio') -Filter 'vcvars64.bat' -Recurse -ErrorAction SilentlyContinue |
+    $visualStudioSearchRoots = @(
+        (Join-Path $env:ProgramFiles 'Microsoft Visual Studio'),
+        (Join-Path $programFilesX86 'Microsoft Visual Studio')
+    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Container }
+    $vcvars = Get-ChildItem -Path $visualStudioSearchRoots -Filter 'vcvars64.bat' -Recurse -ErrorAction SilentlyContinue |
         Select-Object -First 1 -ExpandProperty FullName
 }
 if (-not $vcvars) {
@@ -49,14 +53,21 @@ if (-not $vcvars) {
 }
 
 # Import the environment emitted by vcvars64.bat into this PowerShell process.
-$vcvarsCommand = "`"$vcvars`" >nul 2>nul && set"
-foreach ($line in (& $env:ComSpec /d /s /c $vcvarsCommand)) {
+$vcvarsCommand = "call `"$vcvars`" >nul 2>nul && set"
+$vcvarsPath = $null
+foreach ($line in (& $env:ComSpec /d /c $vcvarsCommand)) {
     if ($line -match '^([^=]+)=(.*)$') {
-        [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process')
+        if ($Matches[1] -ieq 'PATH') {
+            if (-not $vcvarsPath -or $Matches[2] -match '\\VC\\Tools\\MSVC\\') {
+                $vcvarsPath = $Matches[2]
+            }
+        } else {
+            [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process')
+        }
     }
 }
-$env:Path = "$env:Path;$originalPath"
-if (-not $env:INCLUDE -or -not $env:LIB) {
+$env:Path = "$vcvarsPath;$originalPath"
+if (-not $vcvarsPath -or -not $env:INCLUDE -or -not $env:LIB) {
     throw "Failed to import the MSVC build environment from $vcvars"
 }
 

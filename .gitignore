@@ -3,6 +3,8 @@
 debug
 target
 .cargo-home/
+dist/
+.tools/
 
 # Provisioned by scripts/setup-ffmpeg.ps1. The binaries are intentionally not
 # committed; the script pins and verifies the exact archive.
