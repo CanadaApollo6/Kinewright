@@ -2802,7 +2802,9 @@ dependencies = [
  "openreel-agent",
  "openreel-core",
  "openreel-media",
+ "proptest",
  "rfd",
+ "serde",
  "serde_json",
 ]
 

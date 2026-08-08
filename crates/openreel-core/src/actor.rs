@@ -3,7 +3,7 @@ use std::{sync::Arc, thread};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use thiserror::Error;
 
-use crate::{Clip, ClipId, Document, OpError, Operation};
+use crate::{Clip, ClipId, Document, JournalCommand, OpError, Operation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -32,6 +32,9 @@ pub enum Event {
     DocumentChanged {
         doc: Arc<Document>,
         last_op: Option<Operation>,
+        /// Exact accepted history command. `None` is reserved for the initial
+        /// snapshot sent to a new subscriber.
+        journal_command: Option<JournalCommand>,
     },
     OpRejected {
         op: Operation,
@@ -175,6 +178,7 @@ fn run_actor(receiver: Receiver<CoreMessage>, mut state: CoreState) {
                     .send(Event::DocumentChanged {
                         doc: Arc::clone(&state.document),
                         last_op: None,
+                        journal_command: None,
                     })
                     .is_ok()
                 {
@@ -199,7 +203,8 @@ fn execute_command(state: &mut CoreState, command: Command) -> Event {
         Command::Do(operation) => match state.do_operation(operation.clone()) {
             Ok(doc) => Event::DocumentChanged {
                 doc,
-                last_op: Some(operation),
+                last_op: Some(operation.clone()),
+                journal_command: Some(JournalCommand::Do(operation)),
             },
             Err(error) => Event::OpRejected {
                 op: operation,
@@ -209,10 +214,12 @@ fn execute_command(state: &mut CoreState, command: Command) -> Event {
         Command::Undo => Event::DocumentChanged {
             doc: state.undo(),
             last_op: None,
+            journal_command: Some(JournalCommand::Undo),
         },
         Command::Redo => Event::DocumentChanged {
             doc: state.redo(),
             last_op: None,
+            journal_command: Some(JournalCommand::Redo),
         },
         Command::Query(query) => Event::QueryResult(state.query(query)),
     }
@@ -312,7 +319,7 @@ mod tests {
         assert_eq!(reply, broadcast);
         assert!(matches!(
             reply,
-            Event::DocumentChanged { doc, last_op: Some(op) }
+            Event::DocumentChanged { doc, last_op: Some(op), .. }
                 if op == operation && doc.asset(AssetId(1)).is_some()
         ));
     }

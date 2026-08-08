@@ -1,3 +1,5 @@
+mod recovery;
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -51,6 +53,7 @@ struct ExportJob {
 }
 
 struct OpenReelApp {
+    recovery: recovery::Recovery,
     core: Core,
     core_events: crossbeam_channel::Receiver<Event>,
     media: Arc<FfmpegMediaEngine>,
@@ -102,6 +105,7 @@ impl OpenReelApp {
         let resolution = document.resolution;
         let fps = document.fps;
         let app = Self {
+            recovery: recovery::Recovery::start(&core),
             core,
             core_events,
             media,
@@ -198,6 +202,7 @@ impl OpenReelApp {
         match result {
             Ok(()) => {
                 self.project_path = Some(path.clone());
+                self.recovery.checkpoint(&self.core);
                 self.status = format!("Saved {}", path.display());
             }
             Err(error) => self.status = format!("Could not save {}: {error}", path.display()),
@@ -463,6 +468,7 @@ impl OpenReelApp {
             session.interrupt();
         }
         self.media.pause();
+        self.recovery.attach(&core);
         self.core = core;
         self.core_events = events;
         self.mcp_server = Some(mcp_server);
@@ -765,7 +771,7 @@ impl OpenReelApp {
 
         while let Ok(event) = self.core_events.try_recv() {
             match event {
-                Event::DocumentChanged { doc, last_op } => {
+                Event::DocumentChanged { doc, last_op, .. } => {
                     self.document = Arc::clone(&doc);
                     if self
                         .selected_clip
@@ -1301,6 +1307,9 @@ impl eframe::App for OpenReelApp {
             self.timeline(ui);
         });
         self.show_export_dialog(ui.ctx());
+        if let Some(document) = self.recovery.show_dialog(ui.ctx(), &self.core) {
+            self.status = recovery::restore_status(self.replace_core(document));
+        }
     }
 }
 
