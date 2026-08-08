@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"fixture"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"openreel","tool":"split_clip","arguments":{"at":30,"clip":1},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"openreel","tool":"split_clip","arguments":{"at":30,"clip":1},"status":"completed","result":"applied split_clip"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Done."}}
+{"type":"turn.completed","usage":{"input_tokens":80,"output_tokens":12}}

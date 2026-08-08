@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 crossbeam-channel.workspace = true
 eframe.workspace = true
+openreel-agent = { path = "../openreel-agent" }
 openreel-core = { path = "../openreel-core" }
 openreel-media = { path = "../openreel-media" }
 rfd.workspace = true

@@ -46,6 +46,7 @@ pub struct CoreDisconnected;
 
 enum CoreMessage {
     Command(Command),
+    Request(Command, Sender<Event>),
     Subscribe(Sender<Event>),
 }
 
@@ -70,6 +71,20 @@ impl Core {
         self.sender
             .send(CoreMessage::Command(command))
             .map_err(|_| CoreDisconnected)
+    }
+
+    /// Execute a command through the actor and wait for its authoritative event.
+    ///
+    /// This is intended for background integrations such as MCP tool calls that
+    /// must return the exact outcome of their own command. The command is still
+    /// broadcast to every subscriber and uses the same operation and history
+    /// path as [`Self::send`].
+    pub fn request(&self, command: Command) -> Result<Event, CoreDisconnected> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::Request(command, reply))
+            .map_err(|_| CoreDisconnected)?;
+        receiver.recv().map_err(|_| CoreDisconnected)
     }
 
     /// Subscribe to a true broadcast stream. Each subscriber gets every event.
@@ -166,43 +181,40 @@ fn run_actor(receiver: Receiver<CoreMessage>, mut state: CoreState) {
                     subscribers.push(subscriber);
                 }
             }
-            CoreMessage::Command(command) => match command {
-                Command::Do(operation) => match state.do_operation(operation.clone()) {
-                    Ok(doc) => broadcast(
-                        &mut subscribers,
-                        Event::DocumentChanged {
-                            doc,
-                            last_op: Some(operation),
-                        },
-                    ),
-                    Err(error) => broadcast(
-                        &mut subscribers,
-                        Event::OpRejected {
-                            op: operation,
-                            error,
-                        },
-                    ),
-                },
-                Command::Undo => {
-                    let doc = state.undo();
-                    broadcast(
-                        &mut subscribers,
-                        Event::DocumentChanged { doc, last_op: None },
-                    );
-                }
-                Command::Redo => {
-                    let doc = state.redo();
-                    broadcast(
-                        &mut subscribers,
-                        Event::DocumentChanged { doc, last_op: None },
-                    );
-                }
-                Command::Query(query) => {
-                    let result = state.query(query);
-                    broadcast(&mut subscribers, Event::QueryResult(result));
-                }
-            },
+            CoreMessage::Command(command) => {
+                let event = execute_command(&mut state, command);
+                broadcast(&mut subscribers, event);
+            }
+            CoreMessage::Request(command, reply) => {
+                let event = execute_command(&mut state, command);
+                broadcast(&mut subscribers, event.clone());
+                let _ = reply.send(event);
+            }
         }
+    }
+}
+
+fn execute_command(state: &mut CoreState, command: Command) -> Event {
+    match command {
+        Command::Do(operation) => match state.do_operation(operation.clone()) {
+            Ok(doc) => Event::DocumentChanged {
+                doc,
+                last_op: Some(operation),
+            },
+            Err(error) => Event::OpRejected {
+                op: operation,
+                error,
+            },
+        },
+        Command::Undo => Event::DocumentChanged {
+            doc: state.undo(),
+            last_op: None,
+        },
+        Command::Redo => Event::DocumentChanged {
+            doc: state.redo(),
+            last_op: None,
+        },
+        Command::Query(query) => Event::QueryResult(state.query(query)),
     }
 }
 
@@ -285,6 +297,24 @@ mod tests {
             panic!("expected op log");
         };
         assert_eq!(log.len(), 1);
+    }
+
+    #[test]
+    fn request_returns_the_same_authoritative_event_that_subscribers_receive() {
+        let core = Core::spawn(Document::default()).unwrap();
+        let events = core.subscribe().unwrap();
+        let _initial = events.recv_timeout(Duration::from_secs(1)).unwrap();
+        let operation = Operation::AddAsset { asset: asset(1) };
+
+        let reply = core.request(Command::Do(operation.clone())).unwrap();
+        let broadcast = events.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        assert_eq!(reply, broadcast);
+        assert!(matches!(
+            reply,
+            Event::DocumentChanged { doc, last_op: Some(op) }
+                if op == operation && doc.asset(AssetId(1)).is_some()
+        ));
     }
 
     fn generated_document(lengths: &[u16], gaps: &[u8]) -> Document {

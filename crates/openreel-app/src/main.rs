@@ -7,9 +7,11 @@ use std::{
 };
 
 use eframe::egui;
+use openreel_agent::{ClaudeCodeDriver, McpServer};
 use openreel_core::{
-    AssetId, ClipId, Command, Core, Document, Event, FrameRounding, MediaAsset, MediaEngine,
-    MediaError, MediaEvent, Operation, PlaybackState, TimeCode, Track, TrackId, TrackKind,
+    AgentDriver, AgentEvent, AgentSession, AssetId, AuthenticationStatus, ClipId, Command, Core,
+    Document, Event, FrameRounding, HarnessInfo, MediaAsset, MediaEngine, MediaError, MediaEvent,
+    Operation, PlaybackState, SessionConfig, TimeCode, Track, TrackId, TrackKind,
     map_frames_with_rounding, map_source_range_to_project,
 };
 use openreel_media::{FfmpegMediaEngine, timeline_source_at};
@@ -19,12 +21,32 @@ const TIMELINE_HEIGHT: f32 = 112.0;
 const CLIP_HEIGHT: f32 = 56.0;
 const EDGE_HANDLE_WIDTH: f32 = 7.0;
 
+enum ChatEntry {
+    User(String),
+    Text(String),
+    ToolCall { name: String, arguments: String },
+    ToolResult { name: String, result: String },
+    Cost {
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: Option<f64>,
+    },
+}
+
 struct OpenReelApp {
     core: Core,
     core_events: crossbeam_channel::Receiver<Event>,
     media: Arc<FfmpegMediaEngine>,
     frames: crossbeam_channel::Receiver<(TimeCode, openreel_core::FrameTexture)>,
     media_events: crossbeam_channel::Receiver<MediaEvent>,
+    mcp_server: Option<McpServer>,
+    agent_info: Option<HarnessInfo>,
+    agent_session: Option<Box<dyn AgentSession>>,
+    agent_events: Option<crossbeam_channel::Receiver<AgentEvent>>,
+    agent_running: bool,
+    agent_input: String,
+    agent_turn_cap: u32,
+    chat: Vec<ChatEntry>,
     probe_tx: mpsc::Sender<(PathBuf, Result<MediaAsset, MediaError>)>,
     probe_rx: mpsc::Receiver<(PathBuf, Result<MediaAsset, MediaError>)>,
     document: Arc<Document>,
@@ -46,12 +68,32 @@ impl OpenReelApp {
         let frames = media.frames();
         let media_events = media.events();
         let (probe_tx, probe_rx) = mpsc::channel();
+        let agent_media: Arc<dyn MediaEngine> = media.clone();
+        let mut chat = Vec::new();
+        let mcp_server = match McpServer::start(core.clone(), agent_media) {
+            Ok(server) => Some(server),
+            Err(error) => {
+                chat.push(ChatEntry::Text(format!(
+                    "Could not start the OpenReel agent server: {error}"
+                )));
+                None
+            }
+        };
+        let agent_info = ClaudeCodeDriver.detect();
         let app = Self {
             core,
             core_events,
             media,
             frames,
             media_events,
+            mcp_server,
+            agent_info,
+            agent_session: None,
+            agent_events: None,
+            agent_running: false,
+            agent_input: String::new(),
+            agent_turn_cap: 8,
+            chat,
             probe_tx,
             probe_rx,
             document: Arc::new(document),
@@ -186,9 +228,19 @@ impl OpenReelApp {
     fn replace_core(&mut self, document: Document) -> Result<(), String> {
         let core = Core::spawn(document.clone()).map_err(|error| error.to_string())?;
         let events = core.subscribe().map_err(|error| error.to_string())?;
+        let agent_media: Arc<dyn MediaEngine> = self.media.clone();
+        let mcp_server = McpServer::start(core.clone(), agent_media)
+            .map_err(|error| format!("agent server: {error}"))?;
+        if let Some(session) = &mut self.agent_session {
+            session.interrupt();
+        }
         self.media.pause();
         self.core = core;
         self.core_events = events;
+        self.mcp_server = Some(mcp_server);
+        self.agent_session = None;
+        self.agent_events = None;
+        self.agent_running = false;
         self.document = Arc::new(document);
         self.position = TimeCode::ZERO;
         self.playing = false;
@@ -271,7 +323,207 @@ impl OpenReelApp {
         self.send_operation(Operation::DeleteClip { clip });
     }
 
+    fn start_agent_turn(&mut self) {
+        let message = self.agent_input.trim().to_owned();
+        if message.is_empty() || self.agent_running {
+            return;
+        }
+        let Some(endpoint) = self
+            .mcp_server
+            .as_ref()
+            .map(|server| server.endpoint().to_owned())
+        else {
+            self.status = "The OpenReel agent server is unavailable".to_owned();
+            return;
+        };
+        if self.agent_info.is_none() {
+            self.status = "Claude Code is not installed on PATH".to_owned();
+            return;
+        }
+
+        if self.agent_session.is_none() {
+            let working_directory = self
+                .project_path
+                .as_deref()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+                .or_else(|| std::env::current_dir().ok());
+            let config = SessionConfig {
+                working_directory,
+                model: None,
+                max_turns: Some(self.agent_turn_cap),
+                mcp_url: Some(endpoint),
+            };
+            match ClaudeCodeDriver.start_session(config) {
+                Ok(session) => {
+                    self.agent_events = Some(session.events());
+                    self.agent_session = Some(session);
+                }
+                Err(error) => {
+                    self.status = format!("Could not start Claude Code: {error}");
+                    return;
+                }
+            }
+        }
+
+        let result = self
+            .agent_session
+            .as_mut()
+            .expect("agent session was initialized")
+            .send_user_message(message.clone());
+        match result {
+            Ok(()) => {
+                self.chat.push(ChatEntry::User(message));
+                self.agent_input.clear();
+                self.agent_running = true;
+                self.status = "Claude Code is editing the timeline".to_owned();
+            }
+            Err(error) => self.status = format!("Could not send agent message: {error}"),
+        }
+    }
+
+    fn stop_agent(&mut self) {
+        if let Some(session) = &mut self.agent_session {
+            session.interrupt();
+        }
+        self.agent_session = None;
+        self.agent_events = None;
+        self.agent_running = false;
+        self.status = "Agent stopped".to_owned();
+    }
+
+    fn poll_agent(&mut self, ctx: &egui::Context) {
+        let events = self
+            .agent_events
+            .as_ref()
+            .map(|receiver| receiver.try_iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for event in events {
+            match event {
+                AgentEvent::Text(text) => self.chat.push(ChatEntry::Text(text)),
+                AgentEvent::ToolCall { name, arguments } => {
+                    self.chat.push(ChatEntry::ToolCall { name, arguments });
+                }
+                AgentEvent::ToolResult { name, result } => {
+                    self.chat.push(ChatEntry::ToolResult { name, result });
+                }
+                AgentEvent::Cost {
+                    input_tokens,
+                    output_tokens,
+                    cost_usd,
+                } => self.chat.push(ChatEntry::Cost {
+                    input_tokens,
+                    output_tokens,
+                    cost_usd,
+                }),
+                AgentEvent::Done => {
+                    self.agent_running = false;
+                    self.status = "Agent turn finished".to_owned();
+                }
+            }
+        }
+        if self.agent_running {
+            ctx.request_repaint_after(Duration::from_millis(30));
+        }
+    }
+
+    fn agent_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Agent");
+        match &self.agent_info {
+            Some(info) => {
+                let authentication = match info.authentication {
+                    AuthenticationStatus::Authenticated => "authenticated",
+                    AuthenticationStatus::Unauthenticated => "not authenticated",
+                    AuthenticationStatus::Unknown => "authentication unknown",
+                };
+                ui.label(format!(
+                    "Claude Code {} ({authentication})",
+                    info.version.as_deref().unwrap_or("version unknown")
+                ));
+            }
+            None => {
+                ui.colored_label(egui::Color32::LIGHT_RED, "Claude Code not found on PATH");
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label("Turn cap");
+            ui.add_enabled(
+                !self.agent_running && self.agent_session.is_none(),
+                egui::DragValue::new(&mut self.agent_turn_cap).range(1..=20),
+            );
+        });
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for (index, entry) in self.chat.iter().enumerate() {
+                    match entry {
+                        ChatEntry::User(text) => {
+                            ui.strong("You");
+                            ui.label(text);
+                        }
+                        ChatEntry::Text(text) => {
+                            ui.strong("Claude");
+                            ui.label(text);
+                        }
+                        ChatEntry::ToolCall { name, arguments } => {
+                            ui.label(format!("Tool: {name}"));
+                            ui.small(summarize(arguments, 180));
+                        }
+                        ChatEntry::ToolResult { name, result } => {
+                            egui::CollapsingHeader::new(format!("Result: {name}"))
+                                .id_salt(("agent-result", index))
+                                .show(ui, |ui| {
+                                    ui.small(summarize(result, 500));
+                                });
+                        }
+                        ChatEntry::Cost {
+                            input_tokens,
+                            output_tokens,
+                            cost_usd,
+                        } => {
+                            let cost = cost_usd
+                                .map(|cost| format!(", ${cost:.4}"))
+                                .unwrap_or_default();
+                            ui.small(format!(
+                                "{input_tokens} input / {output_tokens} output tokens{cost}"
+                            ));
+                        }
+                    }
+                    ui.add_space(6.0);
+                }
+            });
+        ui.separator();
+        ui.add_enabled(
+            !self.agent_running,
+            egui::TextEdit::multiline(&mut self.agent_input)
+                .desired_rows(3)
+                .hint_text("Describe an edit…"),
+        );
+        ui.horizontal(|ui| {
+            let can_send = !self.agent_running
+                && !self.agent_input.trim().is_empty()
+                && self.agent_info.is_some()
+                && self.mcp_server.is_some();
+            if ui
+                .add_enabled(can_send, egui::Button::new("Send"))
+                .clicked()
+            {
+                self.start_agent_turn();
+            }
+            if ui
+                .add_enabled(self.agent_running, egui::Button::new("Stop"))
+                .clicked()
+            {
+                self.stop_agent();
+            }
+        });
+    }
+
     fn poll_background(&mut self, ctx: &egui::Context) {
+        self.poll_agent(ctx);
         while let Ok((path, result)) = self.probe_rx.try_recv() {
             match result {
                 Ok(asset) => {
@@ -800,6 +1052,10 @@ impl eframe::App for OpenReelApp {
             .default_size(240.0)
             .resizable(true)
             .show(ui, |ui| self.media_bin(ui));
+        egui::Panel::right("agent-panel")
+            .default_size(340.0)
+            .resizable(true)
+            .show(ui, |ui| self.agent_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| {
             self.preview(ui);
             ui.separator();
@@ -808,6 +1064,14 @@ impl eframe::App for OpenReelApp {
             self.timeline(ui);
         });
     }
+}
+
+fn summarize(value: &str, maximum_chars: usize) -> String {
+    let mut summary = value.chars().take(maximum_chars).collect::<String>();
+    if value.chars().count() > maximum_chars {
+        summary.push('…');
+    }
+    summary
 }
 
 fn operation_status(operation: &Operation) -> String {

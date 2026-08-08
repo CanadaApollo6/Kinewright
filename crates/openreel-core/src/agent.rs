@@ -35,25 +35,35 @@ pub struct SessionConfig {
     pub working_directory: Option<PathBuf>,
     pub model: Option<String>,
     pub max_turns: Option<u32>,
+    /// Streamable HTTP endpoint for the live OpenReel MCP server.
+    pub mcp_url: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
     Text(String),
     ToolCall { name: String, arguments: String },
     ToolResult { name: String, result: String },
-    Cost { input_tokens: u64, output_tokens: u64 },
+    Cost {
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: Option<f64>,
+    },
     Done,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AgentError {
-    #[error("agent session protocol is not implemented in M0")]
-    NotImplemented,
     #[error("agent harness is not installed")]
     NotInstalled,
+    #[error("agent session requires the OpenReel MCP endpoint")]
+    MissingMcpEndpoint,
+    #[error("agent driver is unavailable: {0}")]
+    Unavailable(String),
     #[error("agent harness error: {0}")]
     Harness(String),
+    #[error("agent protocol error: {0}")]
+    Protocol(String),
 }
 
 pub trait AgentDriver: Send + Sync {
