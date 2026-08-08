@@ -24,8 +24,7 @@ impl Drop for TemporaryFile {
 
 impl TestClip {
     fn generate() -> Self {
-        let ffmpeg = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../third_party/ffmpeg/bin/ffmpeg.exe");
+        let ffmpeg = ffmpeg_executable();
         assert!(ffmpeg.is_file(), "provisioned ffmpeg.exe is missing");
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -78,8 +77,7 @@ impl Drop for TestClip {
 }
 
 fn generate_solid(name: &str, color: &str, frequency: &str) -> TemporaryFile {
-    let ffmpeg = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../third_party/ffmpeg/bin/ffmpeg.exe");
+    let ffmpeg = ffmpeg_executable();
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -254,8 +252,7 @@ fn two_track_effect_export_matches_preview_after_h264_redecode() {
 }
 
 fn decode_stereo_audio(path: &Path) -> Vec<f32> {
-    let ffmpeg = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../third_party/ffmpeg/bin/ffmpeg.exe");
+    let ffmpeg = ffmpeg_executable();
     let output = Command::new(ffmpeg)
         .args([
             "-hide_banner",
@@ -293,6 +290,16 @@ fn decode_stereo_audio(path: &Path) -> Vec<f32> {
             (left + right) * 0.5
         })
         .collect()
+}
+
+fn ffmpeg_executable() -> PathBuf {
+    std::env::var_os("FFMPEG_DIR").map_or_else(
+        || {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../third_party/ffmpeg/bin/ffmpeg.exe")
+        },
+        |directory| PathBuf::from(directory).join("bin/ffmpeg.exe"),
+    )
 }
 
 fn tone_amplitude(samples: &[f32], sample_rate: u32, frequency: f64) -> f64 {
