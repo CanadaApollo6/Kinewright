@@ -7,11 +7,14 @@ use std::{
 
 use eframe::egui;
 use openreel_core::{
-    ExportCancellation, ExportProgress, ExportSettings, MediaEngine, MediaError, Rational,
-    TimeCode,
+    ExportCancellation, ExportProgress, ExportSettings, MediaEngine, MediaError, Rational, TimeCode,
 };
 
-use crate::app::OpenReelApp;
+use crate::{
+    app::OpenReelApp,
+    icons::Icon,
+    theme::{color, size, space, type_size},
+};
 
 pub(crate) struct ExportDialog {
     pub(crate) open: bool,
@@ -133,7 +136,9 @@ impl OpenReelApp {
                         Err(MediaError::Backend("export worker stopped".to_owned())),
                     ));
                 }
-                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(50)),
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(50))
+                }
             }
         }
         if let Some((path, result)) = completed {
@@ -154,43 +159,72 @@ impl OpenReelApp {
         let mut browse = false;
         let mut start = false;
         let mut cancel = false;
-        egui::Window::new("Export MP4")
+        egui::Window::new("Export")
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
-                egui::Grid::new("export-settings").show(ui, |ui| {
-                    ui.label("Output");
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.export_dialog.output)
-                                .desired_width(320.0),
-                        );
-                        if ui.button("Browse…").clicked() {
-                            browse = true;
-                        }
+                ui.label(
+                    egui::RichText::new("DELIVERABLE")
+                        .strong()
+                        .size(type_size::MICRO)
+                        .color(color::TEXT_MUTED),
+                );
+                ui.label(
+                    egui::RichText::new("H.264 video · AAC audio · MP4 container")
+                        .color(color::TEXT_SECONDARY),
+                );
+                ui.add_space(space::TWO);
+                egui::Grid::new("export-settings")
+                    .num_columns(2)
+                    .spacing(egui::vec2(space::THREE, space::TWO))
+                    .show(ui, |ui| {
+                        ui.label("Output");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.export_dialog.output)
+                                    .desired_width(320.0),
+                            );
+                            if ui
+                                .add(
+                                    egui::Button::image_and_text(
+                                        Icon::Folder.image(size::ICON_MD),
+                                        "Browse…",
+                                    )
+                                    .fill(color::SURFACE_RAISED),
+                                )
+                                .clicked()
+                            {
+                                browse = true;
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Frame size");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut self.export_dialog.width)
+                                    .range(2..=16_384),
+                            );
+                            ui.label("×");
+                            ui.add(
+                                egui::DragValue::new(&mut self.export_dialog.height)
+                                    .range(2..=16_384),
+                            );
+                        });
+                        ui.end_row();
+                        ui.label("FPS");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut self.export_dialog.fps_numerator)
+                                    .range(1..=120_000),
+                            );
+                            ui.label("/");
+                            ui.add(
+                                egui::DragValue::new(&mut self.export_dialog.fps_denominator)
+                                    .range(1..=10_000),
+                            );
+                        });
+                        ui.end_row();
                     });
-                    ui.end_row();
-                    ui.label("Resolution");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut self.export_dialog.width).range(2..=16_384));
-                        ui.label("×");
-                        ui.add(egui::DragValue::new(&mut self.export_dialog.height).range(2..=16_384));
-                    });
-                    ui.end_row();
-                    ui.label("FPS");
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut self.export_dialog.fps_numerator)
-                                .range(1..=120_000),
-                        );
-                        ui.label("/");
-                        ui.add(
-                            egui::DragValue::new(&mut self.export_dialog.fps_denominator)
-                                .range(1..=10_000),
-                        );
-                    });
-                    ui.end_row();
-                });
                 ui.separator();
                 if let Some(job) = &self.export_job {
                     let fraction = if job.progress.total_frames == 0 {
@@ -206,11 +240,32 @@ impl OpenReelApp {
                                 job.progress.completed_frames, job.progress.total_frames
                             )),
                     );
-                    if ui.button("Cancel").clicked() {
+                    ui.colored_label(color::TEXT_SECONDARY, "Encoding on background worker");
+                    if ui
+                        .add(egui::Button::image_and_text(
+                            Icon::Stop.image(size::ICON_MD),
+                            "Cancel export",
+                        ))
+                        .clicked()
+                    {
                         cancel = true;
                     }
-                } else if ui.button("Export").clicked() {
-                    start = true;
+                } else {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::image_and_text(
+                                    Icon::Export.image(size::ICON_MD),
+                                    "Export MP4",
+                                )
+                                .fill(color::ACCENT_28)
+                                .stroke(egui::Stroke::new(1.0, color::ACCENT_72)),
+                            )
+                            .clicked()
+                        {
+                            start = true;
+                        }
+                    });
                 }
             });
         self.export_dialog.open = open || self.export_job.is_some();

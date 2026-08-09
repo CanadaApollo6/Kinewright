@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::{mpsc, Arc},
     time::Duration,
 };
 
@@ -20,6 +20,8 @@ use crate::{
     chat_ui::{AgentHarnessChoice, ChatEntry, CostAccumulator},
     error_ui::ErrorLog,
     export_ui::{ExportDialog, ExportJob},
+    icons::Icon,
+    theme::{self, color, size, space, type_size},
     transcript_ui::TranscriptScope,
 };
 
@@ -38,6 +40,7 @@ pub(crate) struct OpenReelApp {
     pub(crate) media: Arc<FfmpegMediaEngine>,
     pub(crate) frames: crossbeam_channel::Receiver<(TimeCode, openreel_core::FrameTexture)>,
     pub(crate) media_events: crossbeam_channel::Receiver<MediaEvent>,
+    pub(crate) visual_cache: crate::visual_cache::VisualCache,
     pub(crate) mcp_server: Option<McpServer>,
     pub(crate) claude_info: Option<HarnessInfo>,
     pub(crate) codex_info: Option<HarnessInfo>,
@@ -62,6 +65,8 @@ pub(crate) struct OpenReelApp {
     pub(crate) selected_asset: Option<AssetId>,
     pub(crate) transcript_scope: TranscriptScope,
     pub(crate) pixels_per_frame: f32,
+    pub(crate) timeline_zoom_target: f32,
+    pub(crate) timeline_scroll_target: f32,
     pub(crate) project_path: Option<PathBuf>,
     saved_document: Option<Arc<Document>>,
     pending_project_action: Option<ProjectAction>,
@@ -74,15 +79,19 @@ pub(crate) struct OpenReelApp {
     pub(crate) error_log: ErrorLog,
     pub(crate) error_log_open: bool,
     recovery: crate::recovery::Recovery,
+    screenshot: crate::screenshot::ScreenshotCapture,
 }
 
 impl OpenReelApp {
     fn new(media: Arc<FfmpegMediaEngine>) -> Self {
         let document = Document::default();
         let core = Core::spawn(document.clone()).expect("default document must be valid");
-        let core_events = core.subscribe().expect("Core actor must accept subscribers");
+        let core_events = core
+            .subscribe()
+            .expect("Core actor must accept subscribers");
         let frames = media.frames();
         let media_events = media.events();
+        let visual_cache = crate::visual_cache::VisualCache::new(media.visual_asset_results());
         let (probe_tx, probe_rx) = mpsc::channel();
         let agent_media: Arc<dyn MediaEngine> = media.clone();
         let mut chat = Vec::new();
@@ -114,6 +123,7 @@ impl OpenReelApp {
             media,
             frames,
             media_events,
+            visual_cache,
             mcp_server,
             claude_info,
             codex_info,
@@ -138,6 +148,8 @@ impl OpenReelApp {
             selected_asset: None,
             transcript_scope: TranscriptScope::default(),
             pixels_per_frame: 6.0,
+            timeline_zoom_target: 6.0,
+            timeline_scroll_target: 0.0,
             project_path: None,
             saved_document: None,
             pending_project_action: None,
@@ -157,6 +169,7 @@ impl OpenReelApp {
             error_log,
             error_log_open,
             recovery,
+            screenshot: crate::screenshot::ScreenshotCapture::from_environment(),
         };
         if app
             .core
@@ -216,7 +229,6 @@ impl OpenReelApp {
         }
     }
 
-
     fn choose_project(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("OpenReel project", &["openreel", "json"])
@@ -229,7 +241,10 @@ impl OpenReelApp {
 
     fn new_project(&mut self) {
         if let Err(error) = self.replace_core(Document::default()) {
-            self.record_error("Project", format!("Could not create a new project: {error}"));
+            self.record_error(
+                "Project",
+                format!("Could not create a new project: {error}"),
+            );
             return;
         }
         self.project_path = None;
@@ -359,15 +374,32 @@ impl OpenReelApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
+                ui.colored_label(
+                    color::STATUS_WARNING,
+                    egui::RichText::new("PROJECT HAS UNSAVED CHANGES")
+                        .strong()
+                        .size(type_size::MICRO),
+                );
                 ui.label(format!(
                     "Save changes to {} before continuing?",
                     self.project_name()
                 ));
+                ui.add_space(space::TWO);
                 ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
+                    if ui
+                        .add(
+                            egui::Button::new("Save")
+                                .fill(color::ACCENT_28)
+                                .stroke(egui::Stroke::new(1.0, color::ACCENT_72)),
+                        )
+                        .clicked()
+                    {
                         save = true;
                     }
-                    if ui.button("Discard").clicked() {
+                    if ui
+                        .add(egui::Button::new("Discard").fill(color::SURFACE_ACTIVE))
+                        .clicked()
+                    {
                         discard = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -411,11 +443,13 @@ impl OpenReelApp {
         self.agent_running = false;
         self.document = Arc::new(document);
         self.position = TimeCode::ZERO;
+        self.timeline_scroll_target = 0.0;
         self.playing = false;
         self.resume_after_scrub = false;
         self.selected_clip = None;
         self.selected_asset = None;
         self.texture = None;
+        self.visual_cache.clear();
         self.media.set_document(Arc::clone(&self.document));
         for asset in &self.document.media_pool {
             self.media.request_transcription(asset.clone());
@@ -448,10 +482,18 @@ impl OpenReelApp {
         }
     }
 
-
     fn poll_background(&mut self, ctx: &egui::Context) {
         self.poll_agent(ctx);
         self.poll_export(ctx);
+        for (asset, error) in self.visual_cache.poll(ctx) {
+            self.error_log.push(
+                "Media",
+                format!("Could not build timeline visuals for asset {asset}: {error}"),
+            );
+        }
+        if self.visual_cache.has_pending() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
         while let Ok((path, result)) = self.probe_rx.try_recv() {
             match result {
                 Ok(asset) => {
@@ -484,9 +526,8 @@ impl OpenReelApp {
                     if doc.duration <= TimeCode::ZERO {
                         self.position = TimeCode::ZERO;
                     } else {
-                        self.position = TimeCode(
-                            self.position.0.clamp(0, doc.duration.0.saturating_sub(1)),
-                        );
+                        self.position =
+                            TimeCode(self.position.0.clamp(0, doc.duration.0.saturating_sub(1)));
                     }
                     self.playing = false;
                     self.media.set_document(Arc::clone(&doc));
@@ -539,11 +580,8 @@ impl OpenReelApp {
             if let Some(texture) = &mut self.texture {
                 texture.set(image, egui::TextureOptions::LINEAR);
             } else {
-                self.texture = Some(ctx.load_texture(
-                    "openreel-preview",
-                    image,
-                    egui::TextureOptions::LINEAR,
-                ));
+                self.texture =
+                    Some(ctx.load_texture("openreel-preview", image, egui::TextureOptions::LINEAR));
             }
             if !self.resume_after_scrub {
                 self.position = at;
@@ -584,8 +622,6 @@ impl OpenReelApp {
             }
         });
     }
-
-
 }
 
 impl eframe::App for OpenReelApp {
@@ -598,43 +634,94 @@ impl eframe::App for OpenReelApp {
             self.status = crate::recovery::restore_status(self.replace_core(document));
         }
 
-        ui.horizontal(|ui| {
-            self.file_menu(ui);
-            ui.separator();
-            ui.label(&self.status);
-            if ui
-                .button(format!("Errors ({})", self.error_log.len()))
-                .clicked()
-            {
-                self.error_log_open = true;
-            }
-        });
-        ui.separator();
+        egui::Panel::top("app-top-bar")
+            .exact_size(size::TOP_BAR_HEIGHT)
+            .frame(
+                egui::Frame::new()
+                    .fill(color::SURFACE)
+                    .stroke(egui::Stroke::new(1.0, color::BORDER_SUBTLE))
+                    .inner_margin(egui::Margin::symmetric(
+                        space::THREE as i8,
+                        space::ONE as i8,
+                    )),
+            )
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    // The wordmark stays quiet: accent color is reserved for the
+                    // playhead, selection, and live agent state.
+                    ui.colored_label(
+                        color::TEXT_SECONDARY,
+                        egui::RichText::new("OPENREEL")
+                            .strong()
+                            .font(theme::title_font()),
+                    );
+                    ui.separator();
+                    self.file_menu(ui);
+                    if ui
+                        .add_enabled(
+                            self.export_job.is_none(),
+                            egui::Button::image_and_text(
+                                Icon::Export.image(size::ICON_MD),
+                                "Export",
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.open_export_dialog();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // A zero-count alert chip is permanent noise; show it
+                        // only when there is something to look at.
+                        if self.error_log.len() > 0
+                            && ui
+                                .add(egui::Button::image_and_text(
+                                    Icon::Alert.image(size::ICON_SM),
+                                    format!("{}", self.error_log.len()),
+                                ))
+                                .on_hover_text("Open error log")
+                                .clicked()
+                        {
+                            self.error_log_open = true;
+                        }
+                        ui.colored_label(color::TEXT_MUTED, &self.status);
+                    });
+                });
+            });
 
         egui::Panel::left("media-bin-panel")
             .default_size(240.0)
+            .min_size(208.0)
             .resizable(true)
+            .frame(theme::panel_frame())
             .show(ui, |ui| self.media_bin(ui));
         egui::Panel::right("agent-panel")
             .default_size(340.0)
+            .min_size(280.0)
             .resizable(true)
+            .frame(theme::panel_frame())
             .show(ui, |ui| self.agent_panel(ui));
-        egui::CentralPanel::default().show(ui, |ui| {
-            self.preview(ui);
-            ui.separator();
-            self.transport(ui);
-            ui.separator();
-            self.timeline(ui);
-            ui.separator();
-            self.transcript_panel(ui);
-        });
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(color::CANVAS)
+                    .inner_margin(egui::Margin::same(space::TWO as i8)),
+            )
+            .show(ui, |ui| {
+                self.preview(ui);
+                ui.separator();
+                self.transport(ui);
+                ui.separator();
+                self.timeline(ui);
+                ui.separator();
+                self.transcript_panel(ui);
+            });
         self.show_export_dialog(ui.ctx());
         self.show_help(ui.ctx());
         self.show_error_log(ui.ctx());
         self.show_unsaved_confirmation(ui.ctx());
+        self.screenshot.update(ui.ctx());
     }
 }
-
 
 fn operation_status(operation: &Operation) -> String {
     match operation {
@@ -653,10 +740,7 @@ fn operation_status(operation: &Operation) -> String {
             format!("Removed effect {effect} from clip {clip}")
         }
         Operation::SetEffectParam {
-            clip,
-            effect,
-            name,
-            ..
+            clip, effect, name, ..
         } => format!("Set {name} on effect {effect} for clip {clip}"),
         Operation::AddTransition { clip, transition } => {
             format!("Added {} transition to clip {clip}", transition.name)
@@ -672,19 +756,37 @@ pub(crate) fn run() -> eframe::Result {
         "OpenReel",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([size::WINDOW_WIDTH, size::WINDOW_HEIGHT])
+                .with_min_inner_size([size::WINDOW_MIN_WIDTH, size::WINDOW_MIN_HEIGHT]),
             ..Default::default()
         },
         Box::new(move |creation_context| {
+            crate::theme::install(&creation_context.egui_ctx);
+            egui_extras::install_image_loaders(&creation_context.egui_ctx);
             let render_state = creation_context
                 .wgpu_render_state
                 .as_ref()
                 .expect("the OpenReel app requires eframe's wgpu renderer");
             let gpu = GpuContext::new(render_state.device.clone(), render_state.queue.clone());
             let media = Arc::new(
-                FfmpegMediaEngine::new_with_gpu(gpu)
-                    .expect("FFmpeg media engine must initialize"),
+                FfmpegMediaEngine::new_with_gpu(gpu).expect("FFmpeg media engine must initialize"),
             );
-            Ok(Box::new(OpenReelApp::new(media)))
+            let mut app = OpenReelApp::new(media);
+            // `OpenReel.exe project.openreel` opens the project directly; this
+            // is also the hook Windows file association needs.
+            if let Some(argument) = std::env::args().nth(1) {
+                let path = PathBuf::from(&argument);
+                if path.is_file() {
+                    app.open_project(&path);
+                } else {
+                    app.record_error(
+                        "Project",
+                        format!("Startup project not found: {argument}"),
+                    );
+                }
+            }
+            Ok(Box::new(app))
         }),
     )
 }

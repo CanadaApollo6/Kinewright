@@ -84,6 +84,8 @@ foreach ($dll in $dlls) {
 
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $licensesDir 'OpenReel-GPL-3.0.txt')
 Copy-Item -LiteralPath $ffmpegLicense -Destination (Join-Path $licensesDir 'FFmpeg-GPL.txt')
+Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\openreel-app\assets\licenses\Inter-OFL.txt') -Destination $licensesDir
+Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\openreel-app\assets\licenses\JetBrains-Mono-OFL.txt') -Destination $licensesDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging\windows\LICENSES\README.txt') -Destination $licensesDir
 
 $ffmpegBuildInfo = Join-Path $FfmpegDir 'BUILD_INFO'

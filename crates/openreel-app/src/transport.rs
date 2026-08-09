@@ -1,7 +1,12 @@
 use eframe::egui;
 use openreel_core::{MediaEngine, TimeCode};
 
-use crate::app::OpenReelApp;
+use crate::{
+    app::OpenReelApp,
+    icons::{self, Icon},
+    theme::{self, color, size, space},
+    timeline_ui::format_timecode,
+};
 
 impl OpenReelApp {
     pub(crate) fn toggle_playback(&mut self) {
@@ -27,39 +32,71 @@ impl OpenReelApp {
     }
 
     pub(crate) fn transport(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui
-                .button(if self.playing { "⏸ Pause" } else { "▶ Play" })
-                .clicked()
-            {
-                self.toggle_playback();
-            }
-            let maximum = self.document.duration.0.saturating_sub(1).max(0);
-            let mut slider_position = self.position.0.clamp(0, maximum);
-            let response = ui.add_enabled(
-                maximum > 0,
-                egui::Slider::new(&mut slider_position, 0..=maximum)
-                    .show_value(false)
-                    .text("Position"),
-            );
-            if response.drag_started() {
-                self.resume_after_scrub = self.playing;
-                if self.playing {
-                    self.media.pause();
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), size::TRANSPORT_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let leading_space = ((ui.available_width() - 430.0) / 2.0).max(0.0);
+                ui.add_space(leading_space);
+                if icons::transport_button(ui, Icon::StepBack, "Previous frame", false).clicked() {
+                    self.seek_to(TimeCode(self.position.0.saturating_sub(1)));
                 }
-            }
-            if response.changed() {
-                self.position = TimeCode(slider_position);
-                self.media.request_frame(self.position);
-            }
-            if response.drag_stopped() || (response.changed() && !response.dragged()) {
-                self.media.seek(self.position);
-                if self.resume_after_scrub {
-                    self.media.play(self.position);
+                let playback_icon = if self.playing {
+                    Icon::Pause
+                } else {
+                    Icon::Play
+                };
+                let playback_label = if self.playing { "Pause" } else { "Play" };
+                if icons::transport_button(ui, playback_icon, playback_label, self.playing)
+                    .clicked()
+                {
+                    self.toggle_playback();
                 }
-                self.resume_after_scrub = false;
-            }
-            ui.monospace(format!("{} / {}", self.position.0, maximum));
-        });
+                if icons::transport_button(ui, Icon::StepForward, "Next frame", false).clicked() {
+                    self.seek_to(TimeCode(self.position.0.saturating_add(1)));
+                }
+                ui.add_space(space::TWO);
+                let maximum = self.document.duration.0.saturating_sub(1).max(0);
+                let mut slider_position = self.position.0.clamp(0, maximum);
+                let response = ui.add_sized(
+                    [150.0, size::CONTROL_HEIGHT],
+                    egui::Slider::new(&mut slider_position, 0..=maximum)
+                        .show_value(false)
+                        .trailing_fill(true)
+                        .text("Position"),
+                );
+                if response.drag_started() {
+                    self.resume_after_scrub = self.playing;
+                    if self.playing {
+                        self.media.pause();
+                    }
+                }
+                if response.changed() {
+                    self.position = TimeCode(slider_position);
+                    self.media.request_frame(self.position);
+                }
+                if response.drag_stopped() || (response.changed() && !response.dragged()) {
+                    self.media.seek(self.position);
+                    if self.resume_after_scrub {
+                        self.media.play(self.position);
+                    }
+                    self.resume_after_scrub = false;
+                }
+                ui.add_space(space::TWO);
+                ui.label(
+                    egui::RichText::new(format_timecode(self.position, self.document.fps))
+                        .font(theme::timecode_font())
+                        .color(color::TEXT_PRIMARY),
+                );
+                ui.colored_label(
+                    color::TEXT_MUTED,
+                    egui::RichText::new(format!(
+                        "/ {}",
+                        format_timecode(TimeCode(maximum), self.document.fps)
+                    ))
+                    .font(theme::code_font()),
+                );
+            },
+        );
     }
 }

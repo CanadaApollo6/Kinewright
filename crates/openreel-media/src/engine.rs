@@ -16,6 +16,7 @@ use openreel_core::{
 };
 
 use crate::{
+    analysis::{VisualAssetResult, VisualAssetService},
     audio::AudioRuntime,
     clock::samples_to_frame,
     compositor::GpuContext,
@@ -97,6 +98,7 @@ pub struct FfmpegMediaEngine {
     gpu: GpuContext,
     export_document: Arc<RwLock<Arc<Document>>>,
     transcripts: TranscriptService,
+    visual_assets: VisualAssetService,
 }
 
 impl FfmpegMediaEngine {
@@ -107,9 +109,7 @@ impl FfmpegMediaEngine {
     pub fn new_with_data_dir(data_dir: PathBuf) -> Result<Self, MediaError> {
         static GPU: OnceLock<Result<GpuContext, MediaError>> = OnceLock::new();
         let gpu = GPU
-            .get_or_init(|| {
-                GpuContext::headless(false).or_else(|_| GpuContext::headless(true))
-            })
+            .get_or_init(|| GpuContext::headless(false).or_else(|_| GpuContext::headless(true)))
             .clone()?;
         Self::new_with_gpu_and_data_dir(gpu, data_dir)
     }
@@ -152,6 +152,7 @@ impl FfmpegMediaEngine {
             })
             .map_err(|error| MediaError::Backend(error.to_string()))?;
 
+        let visual_assets = VisualAssetService::new(data_dir.clone())?;
         Ok(Self {
             control_tx,
             frames_rx,
@@ -162,7 +163,29 @@ impl FfmpegMediaEngine {
             gpu,
             export_document: Arc::new(RwLock::new(Arc::new(Document::default()))),
             transcripts: TranscriptService::new(data_dir)?,
+            visual_assets,
         })
+    }
+
+    /// Queue a content-addressed waveform extraction without blocking the caller.
+    pub fn request_waveform(&self, asset: MediaAsset) -> bool {
+        self.visual_assets.request_waveform(asset)
+    }
+
+    /// Queue one source-frame thumbnail without blocking the caller.
+    pub fn request_thumbnail(
+        &self,
+        asset: MediaAsset,
+        source_at: TimeCode,
+        max_width: u32,
+    ) -> bool {
+        self.visual_assets
+            .request_thumbnail(asset, source_at, max_width)
+    }
+
+    /// Bounded stream of ready waveform and thumbnail data.
+    pub fn visual_asset_results(&self) -> Receiver<VisualAssetResult> {
+        self.visual_assets.results()
     }
 }
 
@@ -223,9 +246,7 @@ impl MediaEngine for FfmpegMediaEngine {
     fn seek(&self, to: TimeCode) {
         self.clock.set_frame(to);
         self.requested.seek.store(to.0.max(0), Ordering::Relaxed);
-        self.requested
-            .seek_sequence
-            .fetch_add(1, Ordering::Release);
+        self.requested.seek_sequence.fetch_add(1, Ordering::Release);
         self.request_frame(to);
     }
 
@@ -411,14 +432,9 @@ impl Worker {
             self.fail(MediaError::Backend("the timeline is empty".to_owned()));
             return;
         }
-        let from = TimeCode(
-            from.0
-                .clamp(0, self.document.duration.0.saturating_sub(1)),
-        );
+        let from = TimeCode(from.0.clamp(0, self.document.duration.0.saturating_sub(1)));
         self.clock.set_frame(from);
-        match self
-            .audio_for_position(from)
-        .and_then(|runtime| {
+        match self.audio_for_position(from).and_then(|runtime| {
             runtime.play()?;
             Ok(runtime)
         }) {
@@ -439,7 +455,9 @@ impl Worker {
             }
         }
         let position = self.clock.position();
-        self.clock.fallback_frame.store(position.0, Ordering::Release);
+        self.clock
+            .fallback_frame
+            .store(position.0, Ordering::Release);
         self.audio = None;
         self.clock.sample_rate.store(0, Ordering::Release);
         if self.playing {
@@ -513,19 +531,15 @@ impl Worker {
                 return;
             }
         };
-        send_latest(
-            &self.frames_tx,
-            &self.frames_drop_rx,
-            (project_at, frame),
-        );
+        send_latest(&self.frames_tx, &self.frames_drop_rx, (project_at, frame));
     }
 
     fn audio_for_position(&mut self, project_at: TimeCode) -> Result<AudioRuntime, MediaError> {
         let active = active_media_at(&self.document, project_at)?;
         self.audio_clip = active.as_ref().map(|active| active.clip);
-        if let Some(active) = active.filter(|active| {
-            matches!(active.kind, MediaKind::Audio | MediaKind::AudioVideo)
-        }) {
+        if let Some(active) =
+            active.filter(|active| matches!(active.kind, MediaKind::Audio | MediaKind::AudioVideo))
+        {
             AudioRuntime::open(
                 &active.path,
                 active.source_fps,
@@ -580,9 +594,7 @@ fn active_media_at(
 fn black_image(resolution: (u32, u32), max_width: u32) -> RgbaImage {
     let width = resolution.0.min(max_width.max(1)).max(1);
     let height = u32::try_from(
-        u64::from(resolution.1)
-            .saturating_mul(u64::from(width))
-            / u64::from(resolution.0.max(1)),
+        u64::from(resolution.1).saturating_mul(u64::from(width)) / u64::from(resolution.0.max(1)),
     )
     .unwrap_or(resolution.1)
     .max(1);

@@ -34,13 +34,8 @@ pub(crate) fn decode_audio_range(
     let expected = usize::try_from(end_sample.saturating_sub(start_sample))
         .unwrap_or(usize::MAX)
         .saturating_mul(usize::from(output_channels));
-    let mut decoder = AudioDecoder::open(
-        path,
-        output_rate,
-        output_channels,
-        start_sample,
-        end_sample,
-    )?;
+    let mut decoder =
+        AudioDecoder::open(path, output_rate, output_channels, start_sample, end_sample)?;
     let mut samples = Vec::with_capacity(expected);
     while let Some(chunk) = decoder.next_chunk()? {
         if cancellation.is_cancelled() {
@@ -51,6 +46,83 @@ pub(crate) fn decode_audio_range(
     samples.resize(expected, 0.0);
     samples.truncate(expected);
     Ok(samples)
+}
+
+/// Decode a mono peak envelope without retaining the source samples. The
+/// decoder is opened once and each sample is reduced directly into a bounded
+/// min/max bucket.
+pub(crate) fn decode_audio_peaks(
+    path: &Path,
+    source_fps: Rational,
+    source_end: TimeCode,
+    output_rate: u32,
+    maximum_peaks: usize,
+) -> Result<Vec<(i16, i16)>, MediaError> {
+    let end_sample = frame_to_samples(source_end, output_rate, source_fps);
+    let bucket_count = usize::try_from(end_sample)
+        .unwrap_or(usize::MAX)
+        .min(maximum_peaks)
+        .max(1);
+    let mut accumulator = PeakAccumulator::new(end_sample, bucket_count);
+    let mut decoder = AudioDecoder::open(path, output_rate, 1, 0, end_sample)?;
+    while let Some(chunk) = decoder.next_chunk()? {
+        accumulator.extend(&chunk);
+    }
+    Ok(accumulator.finish())
+}
+
+struct PeakAccumulator {
+    total_samples: u64,
+    next_sample: u64,
+    minimums: Vec<f32>,
+    maximums: Vec<f32>,
+}
+
+impl PeakAccumulator {
+    fn new(total_samples: u64, bucket_count: usize) -> Self {
+        Self {
+            total_samples: total_samples.max(1),
+            next_sample: 0,
+            minimums: vec![1.0; bucket_count.max(1)],
+            maximums: vec![-1.0; bucket_count.max(1)],
+        }
+    }
+
+    fn extend(&mut self, samples: &[f32]) {
+        let bucket_count = self.minimums.len() as u128;
+        let total = u128::from(self.total_samples);
+        for sample in samples {
+            if self.next_sample >= self.total_samples {
+                break;
+            }
+            let bucket =
+                usize::try_from(u128::from(self.next_sample).saturating_mul(bucket_count) / total)
+                    .unwrap_or(self.minimums.len().saturating_sub(1))
+                    .min(self.minimums.len().saturating_sub(1));
+            let sample = sample.clamp(-1.0, 1.0);
+            self.minimums[bucket] = self.minimums[bucket].min(sample);
+            self.maximums[bucket] = self.maximums[bucket].max(sample);
+            self.next_sample = self.next_sample.saturating_add(1);
+        }
+    }
+
+    fn finish(self) -> Vec<(i16, i16)> {
+        self.minimums
+            .into_iter()
+            .zip(self.maximums)
+            .map(|(minimum, maximum)| {
+                if minimum > maximum {
+                    (0, 0)
+                } else {
+                    (quantize_peak(minimum), quantize_peak(maximum))
+                }
+            })
+            .collect()
+    }
+}
+
+fn quantize_peak(sample: f32) -> i16 {
+    (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16
 }
 
 pub(crate) struct AudioRuntime {
@@ -430,11 +502,7 @@ impl AudioDecoder {
     }
 }
 
-fn timestamp_to_samples(
-    timestamp: i64,
-    time_base: ffmpeg::Rational,
-    output_rate: u32,
-) -> u64 {
+fn timestamp_to_samples(timestamp: i64, time_base: ffmpeg::Rational, output_rate: u32) -> u64 {
     if timestamp <= 0 {
         return 0;
     }
@@ -446,11 +514,7 @@ fn timestamp_to_samples(
 }
 
 fn normalized_start(start: i64) -> i64 {
-    if start < -1_000_000_000_000 {
-        0
-    } else {
-        start
-    }
+    if start < -1_000_000_000_000 { 0 } else { start }
 }
 
 #[cfg(test)]
@@ -476,9 +540,32 @@ mod tests {
         let (mut producer, mut consumer) = RingBuffer::new(2);
         assert!(producer.push(1.0_f32).is_ok());
         assert!(producer.push(2.0_f32).is_ok());
-        assert!(matches!(producer.push(3.0_f32), Err(rtrb::PushError::Full(3.0))));
+        assert!(matches!(
+            producer.push(3.0_f32),
+            Err(rtrb::PushError::Full(3.0))
+        ));
         assert_eq!(consumer.pop(), Ok(1.0));
         assert_eq!(consumer.pop(), Ok(2.0));
         assert!(matches!(consumer.pop(), Err(rtrb::PopError::Empty)));
+    }
+
+    #[test]
+    fn peak_accumulator_reduces_samples_into_bounded_min_max_pairs() {
+        let mut accumulator = PeakAccumulator::new(8, 2);
+        accumulator.extend(&[-1.0, -0.5, 0.25]);
+        accumulator.extend(&[0.5, -0.25, 0.0, 0.75, 1.0]);
+
+        assert_eq!(
+            accumulator.finish(),
+            vec![(i16::MIN + 1, 16_384), (-8_192, i16::MAX)]
+        );
+    }
+
+    #[test]
+    fn peak_accumulator_zero_fills_missing_buckets() {
+        let mut accumulator = PeakAccumulator::new(8, 4);
+        accumulator.extend(&[0.5, -0.5]);
+
+        assert_eq!(accumulator.finish()[1..], [(0, 0), (0, 0), (0, 0)]);
     }
 }

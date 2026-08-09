@@ -2,9 +2,13 @@ use std::{path::Path, time::Duration};
 
 use eframe::egui;
 use openreel_agent::{CODEX_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver};
-use openreel_core::{AgentDriver, AgentEvent, AuthenticationStatus, SessionConfig};
+use openreel_core::{AgentDriver, AgentEvent, AuthenticationStatus, HarnessInfo, SessionConfig};
 
-use crate::app::OpenReelApp;
+use crate::{
+    app::OpenReelApp,
+    icons::Icon,
+    theme::{self, color, radius, size, space, type_size},
+};
 
 const AGENT_HARNESS_MEMORY_ID: &str = "openreel-agent-harness";
 
@@ -41,8 +45,14 @@ impl AgentHarnessChoice {
 pub(crate) enum ChatEntry {
     User(String),
     Text(String),
-    ToolCall { name: String, arguments: String },
-    ToolResult { name: String, result: String },
+    ToolCall {
+        name: String,
+        arguments: String,
+    },
+    ToolResult {
+        name: String,
+        result: String,
+    },
     Cost {
         input_tokens: u64,
         output_tokens: u64,
@@ -241,8 +251,6 @@ impl OpenReelApp {
     }
 
     pub(crate) fn agent_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Agent");
-
         if !self.agent_running && self.agent_session.is_none() {
             if self.claude_info.is_some() && self.codex_info.is_none() {
                 self.agent_harness = AgentHarnessChoice::ClaudeCode;
@@ -259,53 +267,50 @@ impl OpenReelApp {
                 }
             }
         }
+        let any_harness = self.claude_info.is_some() || self.codex_info.is_some();
+
+        ui.horizontal(|ui| {
+            ui.add(Icon::Chat.image(size::ICON_MD).tint(color::TEXT_SECONDARY));
+            ui.label(
+                egui::RichText::new("AGENT")
+                    .strong()
+                    .size(type_size::HEADING),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // The pill tells the truth: no detected harness is not "ready".
+                let (state, state_color) = if self.agent_running {
+                    ("RUNNING", color::ACCENT)
+                } else if any_harness {
+                    ("READY", color::STATUS_SUCCESS)
+                } else {
+                    ("NO HARNESS", color::STATUS_WARNING)
+                };
+                ui.colored_label(
+                    state_color,
+                    egui::RichText::new(state).size(type_size::MICRO),
+                );
+            });
+        });
+        ui.add_space(space::ONE);
 
         egui::CollapsingHeader::new("Harness detection")
-            .default_open(self.claude_info.is_none() && self.codex_info.is_none())
+            .default_open(!any_harness)
             .show(ui, |ui| {
-                match &self.claude_info {
-                    Some(info) => {
-                        ui.label(format!(
-                            "Claude Code: detected {}",
-                            info.version.as_deref().unwrap_or("(version unknown)")
-                        ));
-                        ui.small(format!(
-                            "{} · {}",
-                            info.executable.display(),
-                            authentication_label(info.authentication)
-                        ));
-                    }
-                    None => {
-                        ui.colored_label(
-                            egui::Color32::LIGHT_RED,
-                            "Claude Code: probed `claude`; not found on PATH",
-                        );
-                    }
-                }
-                match &self.codex_info {
-                    Some(info) => {
-                        ui.label(format!(
-                            "Codex: detected {}",
-                            info.version.as_deref().unwrap_or("(version unknown)")
-                        ));
-                        ui.small(format!(
-                            "{} · {}",
-                            info.executable.display(),
-                            authentication_label(info.authentication)
-                        ));
-                    }
-                    None => {
-                        ui.label("Codex: probed `codex`; not found on PATH");
-                    }
-                }
-                if self.claude_info.is_none() && self.codex_info.is_none() {
+                // Absence is normal, not an emergency: a muted dot, not red.
+                // Red is reserved for the selected harness being unusable.
+                harness_row(ui, "Claude Code", self.claude_info.as_ref());
+                harness_row(ui, "Codex", self.codex_info.as_ref());
+                if !any_harness {
                     ui.separator();
-                    ui.strong("Install and authenticate a supported agent CLI to use chat.");
+                    ui.label("Install and authenticate a supported agent CLI to use chat.");
                     ui.hyperlink_to(
                         "Install Claude Code",
                         "https://docs.anthropic.com/en/docs/claude-code/getting-started",
                     );
-                    ui.hyperlink_to("Install Codex CLI", "https://developers.openai.com/codex/cli");
+                    ui.hyperlink_to(
+                        "Install Codex CLI",
+                        "https://developers.openai.com/codex/cli",
+                    );
                 }
             });
 
@@ -343,14 +348,23 @@ impl OpenReelApp {
             AgentHarnessChoice::Codex => self.codex_info.as_ref(),
         };
         match selected_info {
-            Some(info) => ui.label(format!(
-                "Using {} {} ({})",
-                self.agent_harness.label(),
-                info.version.as_deref().unwrap_or("version unknown"),
-                authentication_label(info.authentication)
-            )),
+            Some(info) => {
+                // CLI version strings often repeat the product name; keep the
+                // number only.
+                let version = info
+                    .version
+                    .as_deref()
+                    .map(|value| value.split_whitespace().next().unwrap_or(value))
+                    .unwrap_or("version unknown");
+                ui.label(format!(
+                    "Using {} {} · {}",
+                    self.agent_harness.label(),
+                    version,
+                    authentication_label(info.authentication)
+                ))
+            }
             None => ui.colored_label(
-                egui::Color32::LIGHT_RED,
+                color::STATUS_DANGER,
                 format!("{} not found on PATH", self.agent_harness.label()),
             ),
         };
@@ -382,7 +396,7 @@ impl OpenReelApp {
         });
         if self.agent_cost.cap_reached() {
             ui.colored_label(
-                egui::Color32::YELLOW,
+                color::STATUS_WARNING,
                 "Cost cap reached. Raise the soft cap to send another message.",
             );
         }
@@ -390,19 +404,30 @@ impl OpenReelApp {
 
         let mut confirmation_decision = None;
         for request in &self.pending_confirmations {
-            ui.group(|ui| {
-                ui.colored_label(egui::Color32::YELLOW, "Agent confirmation required");
-                ui.strong(&request.tool_name);
-                ui.label(&request.description);
-                ui.horizontal(|ui| {
-                    if ui.button("Approve").clicked() {
-                        confirmation_decision = Some((request.id, true));
-                    }
-                    if ui.button("Reject").clicked() {
-                        confirmation_decision = Some((request.id, false));
-                    }
+            egui::Frame::new()
+                .fill(color::SURFACE_RAISED)
+                .stroke(egui::Stroke::new(1.0, color::STATUS_WARNING))
+                .corner_radius(radius::MD)
+                .inner_margin(egui::Margin::same(space::TWO as i8))
+                .show(ui, |ui| {
+                    ui.colored_label(color::STATUS_WARNING, "AGENT CONFIRMATION REQUIRED");
+                    ui.strong(&request.tool_name);
+                    ui.label(&request.description);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::Button::new("Approve").fill(color::ACCENT_28))
+                            .clicked()
+                        {
+                            confirmation_decision = Some((request.id, true));
+                        }
+                        if ui
+                            .add(egui::Button::new("Reject").fill(color::SURFACE_ACTIVE))
+                            .clicked()
+                        {
+                            confirmation_decision = Some((request.id, false));
+                        }
+                    });
                 });
-            });
         }
         if let Some((id, approve)) = confirmation_decision
             && let Some(confirmations) = &self.confirmations
@@ -413,7 +438,8 @@ impl OpenReelApp {
                 confirmations.reject(id, "rejected by user")
             };
             if resolved {
-                self.pending_confirmations.retain(|request| request.id != id);
+                self.pending_confirmations
+                    .retain(|request| request.id != id);
                 self.chat.push(ChatEntry::Text(if approve {
                     "Approved destructive edit.".to_owned()
                 } else {
@@ -429,23 +455,60 @@ impl OpenReelApp {
                 for (index, entry) in self.chat.iter().enumerate() {
                     match entry {
                         ChatEntry::User(text) => {
-                            ui.strong("You");
-                            ui.label(text);
+                            chat_frame(color::ACCENT_16, color::ACCENT_72).show(ui, |ui| {
+                                ui.colored_label(
+                                    color::ACCENT,
+                                    egui::RichText::new("YOU").strong().size(type_size::MICRO),
+                                );
+                                ui.label(text);
+                            });
                         }
                         ChatEntry::Text(text) => {
-                            ui.strong("Agent");
-                            ui.label(text);
+                            chat_frame(color::SURFACE, color::BORDER_SUBTLE).show(ui, |ui| {
+                                ui.colored_label(
+                                    color::TEXT_SECONDARY,
+                                    egui::RichText::new("AGENT").strong().size(type_size::MICRO),
+                                );
+                                ui.label(text);
+                            });
                         }
                         ChatEntry::ToolCall { name, arguments } => {
-                            ui.label(format!("Tool: {name}"));
-                            ui.small(summarize(arguments, 180));
+                            chat_frame(color::SURFACE_RAISED, color::BORDER_STRONG).show(
+                                ui,
+                                |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            Icon::Waveform
+                                                .image(size::ICON_SM)
+                                                .tint(color::TEXT_MUTED),
+                                        );
+                                        ui.colored_label(
+                                            color::TEXT_SECONDARY,
+                                            egui::RichText::new(format!("TOOL · {name}"))
+                                                .strong()
+                                                .size(type_size::MICRO),
+                                        );
+                                    });
+                                    ui.label(
+                                        egui::RichText::new(summarize(arguments, 180))
+                                            .font(theme::code_font())
+                                            .color(color::TEXT_SECONDARY),
+                                    );
+                                },
+                            );
                         }
                         ChatEntry::ToolResult { name, result } => {
-                            egui::CollapsingHeader::new(format!("Result: {name}"))
-                                .id_salt(("agent-result", index))
-                                .show(ui, |ui| {
-                                    ui.small(summarize(result, 500));
-                                });
+                            chat_frame(color::SURFACE, color::BORDER_SUBTLE).show(ui, |ui| {
+                                egui::CollapsingHeader::new(format!("RESULT · {name}"))
+                                    .id_salt(("agent-result", index))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(summarize(result, 500))
+                                                .font(theme::code_font())
+                                                .color(color::TEXT_SECONDARY),
+                                        );
+                                    });
+                            });
                         }
                         ChatEntry::Cost {
                             input_tokens,
@@ -455,21 +518,33 @@ impl OpenReelApp {
                             let cost = cost_usd
                                 .map(|cost| format!(", ${cost:.4}"))
                                 .unwrap_or_default();
-                            ui.small(format!(
-                                "{input_tokens} input / {output_tokens} output tokens{cost}"
-                            ));
+                            ui.colored_label(
+                                color::TEXT_MUTED,
+                                egui::RichText::new(format!(
+                                    "{input_tokens} input / {output_tokens} output tokens{cost}"
+                                ))
+                                .size(type_size::MICRO),
+                            );
                         }
                     }
-                    ui.add_space(6.0);
+                    ui.add_space(space::ONE_HALF);
                 }
             });
-        ui.separator();
-        ui.add_enabled(
-            !self.agent_running,
-            egui::TextEdit::multiline(&mut self.agent_input)
-                .desired_rows(3)
-                .hint_text("Describe an edit…"),
-        );
+        ui.add_space(space::ONE);
+        egui::Frame::new()
+            .fill(color::CANVAS)
+            .stroke(egui::Stroke::new(1.0, color::BORDER_STRONG))
+            .corner_radius(radius::MD)
+            .inner_margin(egui::Margin::same(space::ONE as i8))
+            .show(ui, |ui| {
+                ui.add_enabled(
+                    !self.agent_running,
+                    egui::TextEdit::multiline(&mut self.agent_input)
+                        .desired_rows(3)
+                        .frame(egui::Frame::NONE)
+                        .hint_text("Describe an edit…"),
+                );
+            });
         ui.horizontal(|ui| {
             let can_send = !self.agent_running
                 && !self.agent_input.trim().is_empty()
@@ -477,18 +552,60 @@ impl OpenReelApp {
                 && !self.agent_cost.cap_reached()
                 && self.mcp_server.is_some();
             if ui
-                .add_enabled(can_send, egui::Button::new("Send"))
+                .add_enabled(
+                    can_send,
+                    egui::Button::image_and_text(Icon::Send.image(size::ICON_MD), "Send")
+                        .fill(color::ACCENT_28)
+                        .stroke(egui::Stroke::new(1.0, color::ACCENT_72)),
+                )
                 .clicked()
             {
                 self.start_agent_turn();
             }
             if ui
-                .add_enabled(self.agent_running, egui::Button::new("Stop"))
+                .add_enabled(
+                    self.agent_running,
+                    egui::Button::image_and_text(Icon::Stop.image(size::ICON_MD), "Stop")
+                        .fill(color::SURFACE_RAISED),
+                )
                 .clicked()
             {
                 self.stop_agent();
             }
         });
+    }
+}
+
+fn chat_frame(fill: egui::Color32, stroke: egui::Color32) -> egui::Frame {
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, stroke))
+        .corner_radius(radius::MD)
+        .inner_margin(egui::Margin::same(space::TWO as i8))
+}
+
+fn harness_row(ui: &mut egui::Ui, name: &str, info: Option<&HarnessInfo>) {
+    ui.horizontal(|ui| {
+        match info {
+            Some(info) => {
+                ui.colored_label(color::STATUS_SUCCESS, "●");
+                ui.label(format!(
+                    "{name} {}",
+                    info.version.as_deref().unwrap_or("(version unknown)")
+                ));
+            }
+            None => {
+                ui.colored_label(color::TEXT_MUTED, "○");
+                ui.colored_label(color::TEXT_MUTED, format!("{name} not detected"));
+            }
+        }
+    });
+    if let Some(info) = info {
+        ui.small(format!(
+            "{} · {}",
+            info.executable.display(),
+            authentication_label(info.authentication)
+        ));
     }
 }
 

@@ -3,7 +3,7 @@ use std::time::Duration;
 use eframe::egui;
 use openreel_core::{MediaAsset, MediaEngine, TimelineTranscriptWord, TranscriptStatus};
 
-use crate::app::OpenReelApp;
+use crate::{app::OpenReelApp, theme::color};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TranscriptScope {
@@ -66,7 +66,12 @@ impl OpenReelApp {
                     .filter(|total| *total > 0)
                     .map(|total| downloaded_bytes as f32 / total as f32);
                 let label = total_bytes.map_or_else(
-                    || format!("Downloading Whisper model… {} MiB", downloaded_bytes / 1_048_576),
+                    || {
+                        format!(
+                            "Downloading Whisper model… {} MiB",
+                            downloaded_bytes / 1_048_576
+                        )
+                    },
                     |total| {
                         format!(
                             "Downloading Whisper model… {} / {} MiB",
@@ -88,7 +93,10 @@ impl OpenReelApp {
                 ui.label("No speech found.");
             }
             TranscriptStatus::Failed(error) => {
-                ui.colored_label(egui::Color32::LIGHT_RED, format!("Transcription failed: {error}"));
+                ui.colored_label(
+                    color::STATUS_DANGER,
+                    format!("Transcription failed: {error}"),
+                );
                 if ui.button("Retry").clicked() {
                     self.media.request_transcription(asset);
                 }
@@ -117,7 +125,11 @@ impl OpenReelApp {
                                                 && mapped_word.source_start == word.source_start
                                         })
                                         .min_by_key(|mapped_word| {
-                                            (mapped_word.clip != selected_clip.unwrap_or(mapped_word.clip), mapped_word.project_start)
+                                            (
+                                                mapped_word.clip
+                                                    != selected_clip.unwrap_or(mapped_word.clip),
+                                                mapped_word.project_start,
+                                            )
                                         })
                                         .map(|mapped_word| mapped_word.project_start);
                                 }
@@ -194,12 +206,7 @@ impl OpenReelApp {
             .or_else(|| self.document.media_pool.first())
     }
 
-    fn running_transcript_label(
-        &self,
-        ui: &mut egui::Ui,
-        label: &str,
-        progress: Option<f32>,
-    ) {
+    fn running_transcript_label(&self, ui: &mut egui::Ui, label: &str, progress: Option<f32>) {
         if let Some(progress) = progress {
             ui.add(egui::ProgressBar::new(progress.clamp(0.0, 1.0)).text(label));
         } else {
@@ -212,10 +219,6 @@ impl OpenReelApp {
 fn transcript_word_button(ui: &mut egui::Ui, word: &TimelineTranscriptWord) -> egui::Response {
     ui.small_button(&word.text).on_hover_text(format!(
         "project {}..{} frames · source {}..{} frames · clip {}",
-        word.project_start.0,
-        word.project_end.0,
-        word.source_start.0,
-        word.source_end.0,
-        word.clip
+        word.project_start.0, word.project_end.0, word.source_start.0, word.source_end.0, word.clip
     ))
 }
