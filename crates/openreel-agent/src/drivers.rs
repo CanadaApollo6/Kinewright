@@ -1,13 +1,15 @@
 use std::{
     env,
-    io::{BufRead as _, BufReader, Write as _},
+    fs,
+    io::{BufRead as _, BufReader, Read as _, Write as _},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command as ProcessCommand, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     thread,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -18,13 +20,47 @@ use openreel_core::{
 use serde_json::{Value, json};
 
 use crate::{
-    protocol::ClaudeProtocol,
+    protocol::{ClaudeProtocol, CodexProtocol},
     schema::all_tool_names,
 };
 
-const CLAUDE_SYSTEM_PROMPT: &str = "You are OpenReel's video editing agent. Inspect the live timeline before editing. Resolve ordinal references such as first, second, and last against that initial timeline state, and decide all target clip ids before the first mutation unless the user explicitly says otherwise. Use only the OpenReel MCP tools. All edit time values are exact integer project frames; use the reported fps to convert seconds. Make the requested edits, verify the resulting timeline, then answer briefly.";
+const OPENREEL_SYSTEM_PROMPT: &str = "You are OpenReel's video editing agent. Inspect the live timeline before editing. Resolve ordinal references such as first, second, and last against that initial timeline state, and decide all target clip ids before the first mutation unless the user explicitly says otherwise. Use only the OpenReel MCP tools. All edit time values are exact integer project frames; use the reported fps to convert seconds. Make the requested edits, verify the resulting timeline, then answer briefly.";
+const MINIMUM_CODEX_VERSION: (u64, u64, u64) = (0, 147, 0);
+const CODEX_DISABLED_FEATURES: &[&str] = &[
+    "shell_tool",
+    "unified_exec",
+    "view_image",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "in_app_browser",
+    "computer_use",
+    "image_generation",
+    "apps",
+    "enable_mcp_apps",
+    "plugins",
+    "recommended_plugins",
+    "multi_agent",
+    "goals",
+    "memories",
+    "skill_search",
+    "skill_mcp_dependency_install",
+    "hooks",
+    "tool_suggest",
+    "remote_plugin",
+    "plugin_sharing",
+    "code_mode_host",
+    "shell_snapshot",
+    "workspace_dependencies",
+    "auth_elicitation",
+    "tool_call_mcp_elicitation",
+    "default_mode_request_user_input",
+    "request_permissions_tool",
+];
+static CODEX_SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub const CODEX_FAIL_CLOSED_REASON: &str = "Codex exec 0.142.5 cannot disable its built-in shell/file tools while retaining MCP tools, and non-interactive MCP approval remains unsafe. OpenReel will not launch an unrestricted video-editing session.";
+pub const CODEX_SANDBOX_NOTICE: &str =
+    "Codex sessions use a read-only empty scratch sandbox; shell, file-write, and web tools are disabled.";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodexDriver;
@@ -41,8 +77,25 @@ impl AgentDriver for CodexDriver {
         detect_cli("codex", self.id(), codex_authentication)
     }
 
-    fn start_session(&self, _cfg: SessionConfig) -> Result<Box<dyn AgentSession>, AgentError> {
-        Err(AgentError::Unavailable(CODEX_FAIL_CLOSED_REASON.to_owned()))
+    fn start_session(&self, cfg: SessionConfig) -> Result<Box<dyn AgentSession>, AgentError> {
+        let executable = find_on_path("codex").ok_or(AgentError::NotInstalled)?;
+        let version = process_output(&executable, &["--version"]).ok_or_else(|| {
+            AgentError::Unavailable(
+                "OpenReel could not verify the installed Codex CLI version; refusing to launch it"
+                    .to_owned(),
+            )
+        })?;
+        if !codex_version_is_supported(&version) {
+            return Err(AgentError::Unavailable(format!(
+                "Codex CLI 0.147.0 or newer is required for OpenReel's restricted driver (found {})",
+                version.trim()
+            )));
+        }
+        let endpoint = cfg
+            .mcp_url
+            .clone()
+            .ok_or(AgentError::MissingMcpEndpoint)?;
+        CodexSession::new(executable, endpoint, cfg).map(|session| Box::new(session) as _)
     }
 }
 
@@ -115,7 +168,7 @@ impl ClaudeSession {
             "dontAsk",
             "--no-session-persistence",
             "--system-prompt",
-            CLAUDE_SYSTEM_PROMPT,
+            OPENREEL_SYSTEM_PROMPT,
         ]);
         if let Some(model) = &cfg.model {
             command.args(["--model", model]);
@@ -178,6 +231,327 @@ impl ClaudeSession {
             let _ = child.kill();
         }
     }
+}
+
+struct CodexSession {
+    executable: PathBuf,
+    endpoint: String,
+    model: Option<String>,
+    max_turns: u32,
+    turns: u32,
+    prior_requests: Vec<String>,
+    tool_names: Vec<String>,
+    scratch_directory: PathBuf,
+    child: Arc<Mutex<Option<Child>>>,
+    events_rx: Receiver<AgentEvent>,
+    events_tx: Sender<AgentEvent>,
+    done: Arc<AtomicBool>,
+}
+
+impl CodexSession {
+    fn new(
+        executable: PathBuf,
+        endpoint: String,
+        cfg: SessionConfig,
+    ) -> Result<Self, AgentError> {
+        let tool_names = all_tool_names()
+            .map_err(|error| AgentError::Harness(error.to_string()))?;
+        let scratch_directory = create_codex_scratch_directory()?;
+        let (events_tx, events_rx) = unbounded();
+        Ok(Self {
+            executable,
+            endpoint,
+            model: cfg.model,
+            max_turns: cfg.max_turns.unwrap_or(8).max(1),
+            turns: 0,
+            prior_requests: Vec::new(),
+            tool_names,
+            scratch_directory,
+            child: Arc::new(Mutex::new(None)),
+            events_rx,
+            events_tx,
+            done: Arc::new(AtomicBool::new(true)),
+        })
+    }
+
+    fn kill_current(&self) {
+        if let Ok(mut child) = self.child.lock()
+            && let Some(child) = child.as_mut()
+        {
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+    }
+}
+
+impl AgentSession for CodexSession {
+    fn send_user_message(&mut self, text: String) -> Result<(), AgentError> {
+        if text.trim().is_empty() {
+            return Err(AgentError::Protocol("user message is empty".to_owned()));
+        }
+        if self.turns >= self.max_turns {
+            return Err(AgentError::Harness(format!(
+                "Turn cap reached ({}); start a new Codex session to continue.",
+                self.max_turns
+            )));
+        }
+        {
+            let mut child = self
+                .child
+                .lock()
+                .map_err(|_| AgentError::Harness("Codex child lock was poisoned".to_owned()))?;
+            if let Some(process) = child.as_mut()
+                && process
+                    .try_wait()
+                    .map_err(|error| AgentError::Harness(error.to_string()))?
+                    .is_none()
+            {
+                return Err(AgentError::Harness(
+                    "Codex is still processing the previous turn".to_owned(),
+                ));
+            }
+        }
+
+        let prompt = codex_prompt(&self.prior_requests, &text);
+        let mut command = build_codex_command(
+            &self.executable,
+            &self.endpoint,
+            self.model.as_deref(),
+            &self.scratch_directory,
+            &self.tool_names,
+            &prompt,
+        );
+        let mut process = command
+            .spawn()
+            .map_err(|error| AgentError::Harness(format!("could not start Codex: {error}")))?;
+        let stdout = process
+            .stdout
+            .take()
+            .ok_or_else(|| AgentError::Harness("Codex stdout was not available".to_owned()))?;
+        let stderr = process
+            .stderr
+            .take()
+            .ok_or_else(|| AgentError::Harness("Codex stderr was not available".to_owned()))?;
+        *self
+            .child
+            .lock()
+            .map_err(|_| AgentError::Harness("Codex child lock was poisoned".to_owned()))? =
+            Some(process);
+        self.done.store(false, Ordering::Release);
+        if let Err(error) = spawn_codex_reader(
+            stdout,
+            stderr,
+            Arc::clone(&self.child),
+            self.events_tx.clone(),
+            Arc::clone(&self.done),
+        ) {
+            self.kill_current();
+            return Err(error);
+        }
+        self.prior_requests.push(text);
+        self.turns += 1;
+        Ok(())
+    }
+
+    fn events(&self) -> Receiver<AgentEvent> {
+        self.events_rx.clone()
+    }
+
+    fn interrupt(&mut self) {
+        let was_running = !self.done.load(Ordering::Acquire);
+        self.kill_current();
+        if was_running {
+            let _ = self.events_tx.send(AgentEvent::Text("Stopped.".to_owned()));
+        }
+        send_done(&self.events_tx, &self.done);
+    }
+}
+
+fn codex_prompt(prior_requests: &[String], current: &str) -> String {
+    if prior_requests.is_empty() {
+        return format!("{OPENREEL_SYSTEM_PROMPT}\n\nUser request:\n{current}");
+    }
+    let context = prior_requests
+        .iter()
+        .enumerate()
+        .map(|(index, request)| format!("{}. {request}", index + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "{OPENREEL_SYSTEM_PROMPT}\n\nEarlier user requests in this chat are below. The live timeline is authoritative; inspect it again before acting.\n{context}\n\nCurrent user request:\n{current}"
+    )
+}
+
+impl Drop for CodexSession {
+    fn drop(&mut self) {
+        self.kill_current();
+        let _ = fs::remove_dir_all(&self.scratch_directory);
+    }
+}
+
+fn build_codex_command(
+    executable: &Path,
+    endpoint: &str,
+    model: Option<&str>,
+    scratch_directory: &Path,
+    tool_names: &[String],
+    prompt: &str,
+) -> ProcessCommand {
+    let mut command = ProcessCommand::new(executable);
+    command
+        .arg("exec")
+        .arg("--ignore-user-config")
+        .arg("--ignore-rules")
+        .arg("--strict-config")
+        .arg("--ephemeral")
+        .arg("--skip-git-repo-check")
+        .arg("--json")
+        .arg("--color")
+        .arg("never")
+        .arg("--sandbox")
+        .arg("read-only");
+    for feature in CODEX_DISABLED_FEATURES {
+        command.arg("--disable").arg(feature);
+    }
+    if let Some(model) = model {
+        command.arg("--model").arg(model);
+    }
+    let endpoint = serde_json::to_string(endpoint).expect("serializing a string cannot fail");
+    let tool_names =
+        serde_json::to_string(tool_names).expect("serializing tool names cannot fail");
+    command
+        .arg("-C")
+        .arg(scratch_directory)
+        .arg("-c")
+        .arg("approval_policy='never'")
+        .arg("-c")
+        .arg("web_search='disabled'")
+        .arg("-c")
+        .arg("tools.update_plan.enabled=false")
+        .arg("-c")
+        .arg("agents.enabled=false")
+        .arg("-c")
+        .arg("analytics.enabled=false")
+        .arg("-c")
+        .arg("feedback.enabled=false")
+        .arg("-c")
+        .arg("history.persistence='none'")
+        .arg("-c")
+        .arg("shell_environment_policy.inherit='none'")
+        .arg("-c")
+        .arg("project_doc_max_bytes=0")
+        .arg("-c")
+        .arg(format!("mcp_servers.openreel.url={endpoint}"))
+        .arg("-c")
+        .arg(format!(
+            "mcp_servers.openreel.enabled_tools={tool_names}"
+        ))
+        .arg("-c")
+        .arg("mcp_servers.openreel.required=true")
+        .arg("-c")
+        .arg("mcp_servers.openreel.default_tools_approval_mode='approve'")
+        .arg(prompt)
+        .current_dir(scratch_directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_console_window(&mut command);
+    command
+}
+
+fn spawn_codex_reader(
+    stdout: impl std::io::Read + Send + 'static,
+    stderr: impl std::io::Read + Send + 'static,
+    child: Arc<Mutex<Option<Child>>>,
+    events: Sender<AgentEvent>,
+    done: Arc<AtomicBool>,
+) -> Result<(), AgentError> {
+    let stderr_reader = thread::Builder::new()
+        .name("openreel-codex-stderr".to_owned())
+        .spawn(move || {
+            let mut stderr_text = String::new();
+            let _ = BufReader::new(stderr).read_to_string(&mut stderr_text);
+            stderr_text
+        })
+        .map_err(|error| AgentError::Harness(error.to_string()))?;
+    thread::Builder::new()
+        .name("openreel-codex-events".to_owned())
+        .spawn(move || {
+            let mut protocol = CodexProtocol::default();
+            for line in BufReader::new(stdout).lines() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(error) => {
+                        let _ = events.send(AgentEvent::Error(format!(
+                            "Codex stream error: {error}"
+                        )));
+                        break;
+                    }
+                };
+                match protocol.parse_line(&line) {
+                    Ok(parsed) => {
+                        for event in parsed {
+                            if event == AgentEvent::Done {
+                                send_done(&events, &done);
+                            } else {
+                                let _ = events.send(event);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = events.send(AgentEvent::Error(error.to_string()));
+                    }
+                }
+            }
+            let status = child
+                .lock()
+                .ok()
+                .and_then(|mut child| child.as_mut().and_then(|child| child.wait().ok()));
+            let stderr_text = stderr_reader.join().unwrap_or_default();
+            if !done.load(Ordering::Acquire)
+                && let Some(status) = status
+                && !status.success()
+            {
+                let detail = stderr_text.trim();
+                let message = if detail.is_empty() {
+                    format!("Codex exited with {status}")
+                } else {
+                    format!("Codex exited with {status}: {detail}")
+                };
+                let _ = events.send(AgentEvent::Error(message));
+            }
+            send_done(&events, &done);
+        })
+        .map(|_| ())
+        .map_err(|error| AgentError::Harness(error.to_string()))
+}
+
+fn create_codex_scratch_directory() -> Result<PathBuf, AgentError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for _ in 0..16 {
+        let counter = CODEX_SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = env::temp_dir().join(format!(
+            "openreel-codex-{}-{now}-{counter}",
+            std::process::id()
+        ));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(AgentError::Harness(format!(
+                    "could not create the Codex scratch directory: {error}"
+                )));
+            }
+        }
+    }
+    Err(AgentError::Harness(
+        "could not allocate a unique Codex scratch directory".to_owned(),
+    ))
 }
 
 impl AgentSession for ClaudeSession {
@@ -348,11 +722,32 @@ fn codex_authentication(executable: &Path) -> AuthenticationStatus {
     let Some(output) = process_output(executable, &["login", "status"]) else {
         return AuthenticationStatus::Unknown;
     };
-    if output.to_ascii_lowercase().contains("logged in") {
+    codex_authentication_status(&output)
+}
+
+fn codex_authentication_status(output: &str) -> AuthenticationStatus {
+    let output = output.to_ascii_lowercase();
+    if output.contains("not logged in") {
+        AuthenticationStatus::Unauthenticated
+    } else if output.contains("logged in") {
         AuthenticationStatus::Authenticated
     } else {
-        AuthenticationStatus::Unauthenticated
+        AuthenticationStatus::Unknown
     }
+}
+
+fn codex_version_is_supported(output: &str) -> bool {
+    output
+        .split_whitespace()
+        .find_map(|part| {
+            let mut components = part.trim_start_matches('v').split(['.', '-']);
+            Some((
+                components.next()?.parse::<u64>().ok()?,
+                components.next()?.parse::<u64>().ok()?,
+                components.next()?.parse::<u64>().ok()?,
+            ))
+        })
+        .is_some_and(|version| version >= MINIMUM_CODEX_VERSION)
 }
 
 fn process_output(executable: &Path, arguments: &[&str]) -> Option<String> {
@@ -416,10 +811,82 @@ mod tests {
     }
 
     #[test]
-    fn codex_fails_closed_while_mcp_only_tool_restriction_is_unavailable() {
-        let Err(error) = CodexDriver.start_session(SessionConfig::default()) else {
-            panic!("Codex must not start an unrestricted session");
-        };
-        assert!(error.to_string().contains("cannot disable its built-in"));
+    fn codex_requires_the_policy_controls_added_by_0_147() {
+        assert!(codex_version_is_supported("codex-cli 0.147.0"));
+        assert!(codex_version_is_supported("codex-cli 0.148.1-beta.2"));
+        assert!(!codex_version_is_supported("codex-cli 0.146.0"));
+        assert!(!codex_version_is_supported("unexpected output"));
+    }
+
+    #[test]
+    fn codex_authentication_status_does_not_misread_not_logged_in() {
+        assert_eq!(
+            codex_authentication_status("Logged in using ChatGPT"),
+            AuthenticationStatus::Authenticated
+        );
+        assert_eq!(
+            codex_authentication_status("Not logged in"),
+            AuthenticationStatus::Unauthenticated
+        );
+        assert_eq!(
+            codex_authentication_status("Status unavailable"),
+            AuthenticationStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn codex_command_is_read_only_and_has_an_exact_mcp_allowlist() {
+        let scratch = Path::new("empty-codex-scratch");
+        let tools = vec!["get_timeline_state".to_owned(), "split_clip".to_owned()];
+        let command = build_codex_command(
+            Path::new("codex"),
+            "http://127.0.0.1:43123/mcp",
+            Some("gpt-test"),
+            scratch,
+            &tools,
+            "test prompt",
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let joined = args.join(" ");
+
+        assert!(joined.contains("exec --ignore-user-config --ignore-rules --strict-config"));
+        assert!(joined.contains("--sandbox read-only"));
+        assert!(joined.contains("--disable shell_tool"));
+        assert!(joined.contains("--disable unified_exec"));
+        assert!(joined.contains("approval_policy='never'"));
+        assert!(joined.contains("web_search='disabled'"));
+        assert!(joined.contains("tools.update_plan.enabled=false"));
+        assert!(joined.contains("project_doc_max_bytes=0"));
+        assert!(joined.contains("mcp_servers.openreel.required=true"));
+        assert!(joined.contains(
+            "mcp_servers.openreel.enabled_tools=[\"get_timeline_state\",\"split_clip\"]"
+        ));
+        assert_eq!(command.get_current_dir(), Some(scratch));
+    }
+
+    #[test]
+    fn codex_scratch_directories_are_unique_and_empty() {
+        let first = create_codex_scratch_directory().unwrap();
+        let second = create_codex_scratch_directory().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(fs::read_dir(&first).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&second).unwrap().count(), 0);
+        fs::remove_dir_all(first).unwrap();
+        fs::remove_dir_all(second).unwrap();
+    }
+
+    #[test]
+    fn codex_replays_prior_user_requests_without_reusing_filesystem_state() {
+        let prompt = codex_prompt(
+            &["split the first clip".to_owned(), "delete the second clip".to_owned()],
+            "undo that deletion",
+        );
+        assert!(prompt.contains("1. split the first clip"));
+        assert!(prompt.contains("2. delete the second clip"));
+        assert!(prompt.contains("Current user request:\nundo that deletion"));
+        assert!(prompt.contains("The live timeline is authoritative"));
     }
 }

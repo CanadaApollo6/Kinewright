@@ -82,6 +82,79 @@ fn claude_splits_then_deletes_via_the_live_mcp_server() {
     server.shutdown();
 }
 
+#[test]
+fn codex_splits_then_deletes_via_the_live_mcp_server() {
+    if std::env::var("OPENREEL_AGENT_TEST").as_deref() != Ok("1") {
+        eprintln!("skipped: set OPENREEL_AGENT_TEST=1 to use the installed Codex CLI");
+        return;
+    }
+
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let original = fixture_document();
+    let core = Core::spawn(original.clone()).unwrap();
+    let agent_media: Arc<dyn MediaEngine> = media;
+    let server = McpServer::start(core.clone(), agent_media).unwrap();
+    let confirmations = server.confirmations();
+    let mut session = openreel_agent::CodexDriver
+        .start_session(SessionConfig {
+            working_directory: std::env::current_dir().ok(),
+            model: None,
+            max_turns: Some(2),
+            mcp_url: Some(server.endpoint().to_owned()),
+        })
+        .expect("the gated test requires Codex CLI 0.147.0+ with a subscription login");
+    let events = session.events();
+
+    let prompt = "split the first clip at frame 30 then delete the second clip";
+    println!("USER: {prompt}");
+    session.send_user_message(prompt.to_owned()).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut approved = 0;
+    loop {
+        for request in confirmations.pending_requests() {
+            println!("CONFIRM: {} — {}", request.tool_name, request.description);
+            assert!(confirmations.approve(request.id));
+            approved += 1;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "Codex turn timed out");
+        let event = match events.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(event) => event,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                panic!("Codex event stream ended")
+            }
+        };
+        println!("AGENT: {event:?}");
+        if let AgentEvent::Error(error) = &event {
+            panic!("Codex driver error: {error}");
+        }
+        if event == AgentEvent::Done {
+            break;
+        }
+    }
+    assert_eq!(approved, 1, "the delete must require one approval");
+
+    let edited = query_document(&core);
+    let clips = &edited.tracks[0].clips;
+    assert_eq!(clips.len(), 2);
+    assert_eq!(clips[0].id, ClipId(1));
+    assert_eq!(clips[0].source_range, TimeCode(0)..TimeCode(30));
+    assert_eq!(clips[1].id, ClipId(3));
+    assert_eq!(clips[1].source_range, TimeCode(30)..TimeCode(90));
+    assert!(edited.clip(ClipId(2)).is_none());
+    println!("ASSERT: clips are [1:0..30, 3:30..90]; clip 2 is deleted");
+
+    let _ = core.request(Command::Undo).unwrap();
+    let _ = core.request(Command::Undo).unwrap();
+    assert_eq!(&*query_document(&core), &original);
+    println!("ASSERT: two undo commands restore the original two-clip document");
+
+    session.interrupt();
+    server.shutdown();
+}
+
 fn query_document(core: &Core) -> Arc<Document> {
     let Event::QueryResult(QueryResult::Document(document)) =
         core.request(Command::Query(Query::Document)).unwrap()

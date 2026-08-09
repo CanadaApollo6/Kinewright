@@ -1,10 +1,42 @@
 use std::{path::Path, time::Duration};
 
 use eframe::egui;
-use openreel_agent::{CODEX_FAIL_CLOSED_REASON, ClaudeCodeDriver};
+use openreel_agent::{CODEX_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver};
 use openreel_core::{AgentDriver, AgentEvent, AuthenticationStatus, SessionConfig};
 
 use crate::app::OpenReelApp;
+
+const AGENT_HARNESS_MEMORY_ID: &str = "openreel-agent-harness";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentHarnessChoice {
+    ClaudeCode,
+    Codex,
+}
+
+impl AgentHarnessChoice {
+    fn key(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "claude-code" => Some(Self::ClaudeCode),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+}
 
 pub(crate) enum ChatEntry {
     User(String),
@@ -86,8 +118,15 @@ impl OpenReelApp {
             self.record_error("Agent", "The OpenReel agent server is unavailable");
             return;
         };
-        if self.claude_info.is_none() {
-            self.record_error("Agent", "Claude Code is not installed on PATH");
+        let harness_info = match self.agent_harness {
+            AgentHarnessChoice::ClaudeCode => self.claude_info.as_ref(),
+            AgentHarnessChoice::Codex => self.codex_info.as_ref(),
+        };
+        if harness_info.is_none() {
+            self.record_error(
+                "Agent",
+                format!("{} is not installed on PATH", self.agent_harness.label()),
+            );
             return;
         }
 
@@ -105,13 +144,20 @@ impl OpenReelApp {
                 max_turns: Some(self.agent_turn_cap),
                 mcp_url: Some(endpoint),
             };
-            match ClaudeCodeDriver.start_session(config) {
+            let session = match self.agent_harness {
+                AgentHarnessChoice::ClaudeCode => ClaudeCodeDriver.start_session(config),
+                AgentHarnessChoice::Codex => CodexDriver.start_session(config),
+            };
+            match session {
                 Ok(session) => {
                     self.agent_events = Some(session.events());
                     self.agent_session = Some(session);
                 }
                 Err(error) => {
-                    self.record_error("Agent", format!("Could not start Claude Code: {error}"));
+                    self.record_error(
+                        "Agent",
+                        format!("Could not start {}: {error}", self.agent_harness.label()),
+                    );
                     return;
                 }
             }
@@ -127,7 +173,7 @@ impl OpenReelApp {
                 self.chat.push(ChatEntry::User(message));
                 self.agent_input.clear();
                 self.agent_running = true;
-                self.status = "Claude Code is editing the timeline".to_owned();
+                self.status = format!("{} is editing the timeline", self.agent_harness.label());
             }
             Err(error) => {
                 self.record_error("Agent", format!("Could not send agent message: {error}"));
@@ -196,6 +242,24 @@ impl OpenReelApp {
 
     pub(crate) fn agent_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Agent");
+
+        if !self.agent_running && self.agent_session.is_none() {
+            if self.claude_info.is_some() && self.codex_info.is_none() {
+                self.agent_harness = AgentHarnessChoice::ClaudeCode;
+            } else if self.codex_info.is_some() && self.claude_info.is_none() {
+                self.agent_harness = AgentHarnessChoice::Codex;
+            } else if self.claude_info.is_some() && self.codex_info.is_some() {
+                let remembered = ui.ctx().data_mut(|data| {
+                    data.get_persisted::<String>(egui::Id::new(AGENT_HARNESS_MEMORY_ID))
+                });
+                if let Some(remembered) =
+                    remembered.and_then(|key| AgentHarnessChoice::from_key(&key))
+                {
+                    self.agent_harness = remembered;
+                }
+            }
+        }
+
         egui::CollapsingHeader::new("Harness detection")
             .default_open(self.claude_info.is_none() && self.codex_info.is_none())
             .show(ui, |ui| {
@@ -221,8 +285,12 @@ impl OpenReelApp {
                 match &self.codex_info {
                     Some(info) => {
                         ui.label(format!(
-                            "Codex: detected {} ({})",
-                            info.version.as_deref().unwrap_or("version unknown"),
+                            "Codex: detected {}",
+                            info.version.as_deref().unwrap_or("(version unknown)")
+                        ));
+                        ui.small(format!(
+                            "{} · {}",
+                            info.executable.display(),
                             authentication_label(info.authentication)
                         ));
                     }
@@ -230,9 +298,6 @@ impl OpenReelApp {
                         ui.label("Codex: probed `codex`; not found on PATH");
                     }
                 }
-                ui.small(format!(
-                    "Codex unavailable (fail-closed): {CODEX_FAIL_CLOSED_REASON}"
-                ));
                 if self.claude_info.is_none() && self.codex_info.is_none() {
                     ui.separator();
                     ui.strong("Install and authenticate a supported agent CLI to use chat.");
@@ -243,17 +308,55 @@ impl OpenReelApp {
                     ui.hyperlink_to("Install Codex CLI", "https://developers.openai.com/codex/cli");
                 }
             });
-        match &self.claude_info {
-            Some(info) => {
-                ui.label(format!(
-                    "Using Claude Code {} ({})",
-                    info.version.as_deref().unwrap_or("version unknown"),
-                    authentication_label(info.authentication)
-                ));
+
+        if self.claude_info.is_some() && self.codex_info.is_some() {
+            let before = self.agent_harness;
+            ui.add_enabled_ui(!self.agent_running, |ui| {
+                egui::ComboBox::from_label("Harness")
+                    .selected_text(self.agent_harness.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.agent_harness,
+                            AgentHarnessChoice::ClaudeCode,
+                            "Claude Code",
+                        );
+                        ui.selectable_value(
+                            &mut self.agent_harness,
+                            AgentHarnessChoice::Codex,
+                            "Codex",
+                        );
+                    });
+            });
+            if before != self.agent_harness {
+                self.stop_agent();
+                ui.ctx().data_mut(|data| {
+                    data.insert_persisted(
+                        egui::Id::new(AGENT_HARNESS_MEMORY_ID),
+                        self.agent_harness.key().to_owned(),
+                    );
+                });
             }
-            None => {
-                ui.colored_label(egui::Color32::LIGHT_RED, "Claude Code not found on PATH");
-            }
+        }
+
+        let selected_info = match self.agent_harness {
+            AgentHarnessChoice::ClaudeCode => self.claude_info.as_ref(),
+            AgentHarnessChoice::Codex => self.codex_info.as_ref(),
+        };
+        match selected_info {
+            Some(info) => ui.label(format!(
+                "Using {} {} ({})",
+                self.agent_harness.label(),
+                info.version.as_deref().unwrap_or("version unknown"),
+                authentication_label(info.authentication)
+            )),
+            None => ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                format!("{} not found on PATH", self.agent_harness.label()),
+            ),
+        };
+        let selected_available = selected_info.is_some();
+        if self.agent_harness == AgentHarnessChoice::Codex {
+            ui.small(CODEX_SANDBOX_NOTICE);
         }
         ui.horizontal(|ui| {
             ui.label("Turn cap");
@@ -330,7 +433,7 @@ impl OpenReelApp {
                             ui.label(text);
                         }
                         ChatEntry::Text(text) => {
-                            ui.strong("Claude");
+                            ui.strong("Agent");
                             ui.label(text);
                         }
                         ChatEntry::ToolCall { name, arguments } => {
@@ -370,7 +473,7 @@ impl OpenReelApp {
         ui.horizontal(|ui| {
             let can_send = !self.agent_running
                 && !self.agent_input.trim().is_empty()
-                && self.claude_info.is_some()
+                && selected_available
                 && !self.agent_cost.cap_reached()
                 && self.mcp_server.is_some();
             if ui
