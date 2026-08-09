@@ -8,7 +8,9 @@ mod decode;
 mod engine;
 mod export;
 mod render;
+mod sha256;
 mod timeline;
+mod transcript;
 
 use ffmpeg_next as ffmpeg;
 use openreel_core::MediaError;
@@ -18,6 +20,10 @@ pub use clock::{frame_to_samples, samples_to_frame};
 pub use engine::FfmpegMediaEngine;
 pub use compositor::{Compositor, CompositorLayer, GpuContext};
 pub use timeline::{TimelineSource, TimelineVideoLayer, timeline_source_at, video_layers_at};
+pub use transcript::{
+    WHISPER_MODEL_LICENSE, WHISPER_MODEL_NAME, WHISPER_MODEL_SHA256, WHISPER_MODEL_URL,
+    default_data_dir,
+};
 
 /// Initialize the linked FFmpeg libraries.
 pub fn initialize_ffmpeg() -> Result<(), MediaError> {

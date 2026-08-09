@@ -7,6 +7,7 @@ mod media_bin;
 mod preview_ui;
 mod recovery;
 mod timeline_ui;
+mod transcript_ui;
 mod transport;
 
 fn main() -> eframe::Result {

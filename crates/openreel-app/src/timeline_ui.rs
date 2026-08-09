@@ -169,6 +169,7 @@ impl OpenReelApp {
 
                     if body.clicked() {
                         self.selected_clip = Some(clip.id);
+                        self.selected_asset = Some(clip.asset);
                     }
                     if body.drag_stopped() {
                         let delta = (body.drag_delta().x / self.pixels_per_frame).round() as i64;

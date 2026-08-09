@@ -14,7 +14,8 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use openreel_core::{
-    ClipId, Command, Core, Document, Event, MediaEngine, Operation, Query, QueryResult, TimeCode,
+    AssetId, ClipId, Command, Core, Document, Event, MediaEngine, Operation, Query, QueryResult,
+    TimeCode, TimelineTranscriptWord, TranscriptStatus,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -34,7 +35,10 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
-    render::{render_clip_info, render_timeline_state},
+    render::{
+        render_asset_transcript, render_clip_info, render_timeline_state,
+        render_timeline_transcript,
+    },
     schema::{SchemaError, decode_operation, operation_tools, schema_object},
 };
 
@@ -320,6 +324,15 @@ impl OpenReelMcp {
                 let args: FrameAtArgs = decode_args("get_frame_at", arguments)?;
                 self.frame_at(args.timecode)
             }
+            "get_transcript" => {
+                let args: TranscriptArgs = decode_args("get_transcript", arguments)?;
+                self.asset_transcript(args.asset_id)
+            }
+            "get_timeline_transcript" => {
+                let args: TimelineTranscriptArgs =
+                    decode_args("get_timeline_transcript", arguments)?;
+                self.timeline_transcript(args.range)
+            }
             "import_media" => {
                 let args: ImportMediaArgs = decode_args("import_media", arguments)?;
                 self.import_media(args.path)
@@ -382,10 +395,17 @@ impl OpenReelMcp {
     }
 
     fn apply_operation(&self, tool_name: &str, operation: Operation) -> CallToolResult {
+        let imported_asset = match &operation {
+            Operation::AddAsset { asset } => Some(asset.clone()),
+            _ => None,
+        };
         let before = self.document().ok();
         match self.core.request(Command::Do(operation)) {
             Ok(Event::DocumentChanged { doc, .. }) => {
                 self.media.set_document(Arc::clone(&doc));
+                if let Some(asset) = imported_asset {
+                    self.media.request_transcription(asset);
+                }
                 success_text(state_delta(tool_name, before.as_deref(), &doc))
             }
             Ok(Event::OpRejected { error, .. }) => error_text(error.to_string()),
@@ -432,6 +452,59 @@ impl OpenReelMcp {
             ContentBlock::image(BASE64.encode(png), "image/png"),
         ]))
     }
+
+    fn asset_transcript(&self, asset_id: AssetId) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let Some(asset) = document.asset(asset_id) else {
+            return Ok(error_text(format!("asset {asset_id} does not exist")));
+        };
+        let mut status = self.media.transcript_status(asset_id);
+        if status == TranscriptStatus::NotRequested {
+            self.media.request_transcription(asset.clone());
+            status = self.media.transcript_status(asset_id);
+        }
+        Ok(success_text(render_asset_transcript(asset_id, &status)))
+    }
+
+    fn timeline_transcript(
+        &self,
+        requested: Option<TranscriptRangeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let range = requested.map_or(TimeCode::ZERO..document.duration, |range| {
+            range.start..range.end
+        });
+        if range.start < TimeCode::ZERO
+            || range.end <= range.start
+            || range.end > document.duration
+        {
+            return Ok(error_text(format!(
+                "timeline transcript range {}..{} is outside project range 0..{}",
+                range.start.0, range.end.0, document.duration.0
+            )));
+        }
+        for asset in &document.media_pool {
+            if self.media.transcript_status(asset.id) == TranscriptStatus::NotRequested {
+                self.media.request_transcription(asset.clone());
+            }
+        }
+        let words: Vec<TimelineTranscriptWord> = match self
+            .media
+            .timeline_transcript(&document, Some(range.clone()))
+        {
+            Ok(words) => words,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let mut rendered = render_timeline_transcript(&document, range, &words);
+        for asset in &document.media_pool {
+            let status = self.media.transcript_status(asset.id);
+            if !matches!(status, TranscriptStatus::Ready(_) | TranscriptStatus::NoSpeech) {
+                rendered.push('\n');
+                rendered.push_str(&render_asset_transcript(asset.id, &status));
+            }
+        }
+        Ok(success_text(rendered))
+    }
 }
 
 impl ServerHandler for OpenReelMcp {
@@ -439,7 +512,7 @@ impl ServerHandler for OpenReelMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openreel", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Inspect the timeline before editing. Frame values are exact project frames. Use import_media for filesystem paths.",
+                "Inspect the timeline before editing. Frame values are exact project frames. Transcript inspectors expose source and project word boundaries. For filler-word removal, compute precise boundaries from get_timeline_transcript and edit only through TrimClip, SplitClip, and DeleteClip operations. Use import_media for filesystem paths.",
             )
     }
 
@@ -495,6 +568,25 @@ struct ImportMediaArgs {
     path: PathBuf,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TranscriptArgs {
+    /// Stable asset id shown by get_timeline_state.
+    asset_id: AssetId,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TimelineTranscriptArgs {
+    /// Optional half-open range in exact project frames. Omit for the full timeline.
+    #[serde(default)]
+    range: Option<TranscriptRangeArgs>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TranscriptRangeArgs {
+    start: TimeCode,
+    end: TimeCode,
+}
+
 fn inspector_tools() -> Vec<Tool> {
     let read_only = || {
         ToolAnnotations::new()
@@ -520,6 +612,18 @@ fn inspector_tools() -> Vec<Tool> {
             "get_frame_at",
             "Render an actual PNG image at an exact project frame, downscaled to at most 512 pixels wide.",
             schema_object::<FrameAtArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_transcript",
+            "Return one asset's word-timestamped transcript in exact source frames and seconds, or its background transcription status.",
+            schema_object::<TranscriptArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_timeline_transcript",
+            "Return audible words mapped through clips to exact project frames and seconds. Use these boundaries for precise TrimClip, SplitClip, and DeleteClip edits.",
+            schema_object::<TimelineTranscriptArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -620,6 +724,20 @@ mod tests {
 
         fn position(&self) -> TimeCode {
             TimeCode::ZERO
+        }
+
+        fn request_transcription(&self, _asset: MediaAsset) {}
+
+        fn transcript_status(&self, _asset: AssetId) -> TranscriptStatus {
+            TranscriptStatus::NotRequested
+        }
+
+        fn timeline_transcript(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+        ) -> Result<Vec<TimelineTranscriptWord>, MediaError> {
+            Ok(Vec::new())
         }
 
         fn thumbnail_at(&self, _t: TimeCode, _max_w: u32) -> Result<RgbaImage, MediaError> {

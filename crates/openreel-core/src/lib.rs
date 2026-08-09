@@ -15,8 +15,9 @@ pub use agent::{
 };
 pub use journal::JournalCommand;
 pub use media::{
-    ExportCancellation, ExportProgress, ExportSettings, FrameTexture, MediaEngine, MediaError, MediaEvent,
-    PlaybackState, ProgressSink, RgbaImage,
+    AssetTranscript, ExportCancellation, ExportProgress, ExportSettings, FrameTexture, MediaEngine,
+    MediaError, MediaEvent, PlaybackState, ProgressSink, RgbaImage, TimelineTranscriptWord,
+    TranscriptStatus, TranscriptWord,
 };
 pub use model::{
     AssetId, Clip, ClipId, Document, Effect, EffectId, MediaAsset, MediaKind, ParamValue, Track,

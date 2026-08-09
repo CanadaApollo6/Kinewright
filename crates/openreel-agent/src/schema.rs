@@ -5,10 +5,12 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 4] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 6] = [
     "get_timeline_state",
     "get_clip_info",
     "get_frame_at",
+    "get_transcript",
+    "get_timeline_transcript",
     "import_media",
 ];
 

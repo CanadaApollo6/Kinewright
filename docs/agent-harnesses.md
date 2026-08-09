@@ -26,22 +26,59 @@ is applied. The driver enforces the configured internal turn cap and `interrupt`
 
 ## Codex
 
-Status: detected and protocol-fixture-tested, but intentionally unavailable as a runnable driver
-with Codex CLI 0.142.5.
+Status: supported with Codex CLI 0.147.0 or newer and shown in the app when `codex` is found on
+`PATH`. A detected older version fails closed at session start.
 
-Transport, once safe: native Streamable HTTP configured through `codex exec --json -c` overrides.
-Its JSONL parser already maps agent messages, MCP calls/results, usage, failures, and completion to
-`AgentEvent`.
+Capability assessment (2026-08-08): Codex still does not have one switch for an MCP-only tool
+surface. [openai/codex#6049](https://github.com/openai/codex/issues/6049) remains open. The 0.147.0
+configuration surface does, however, support the policy-neutralized option:
 
-Blocker: `codex exec` currently has no supported switch that disables its built-in shell and file
-tools while retaining configured MCP tools. Non-interactive MCP approval behavior also cannot give
-OpenReel the same fail-closed guarantee as the Claude invocation. Launching it would give a video
-editing prompt unrelated machine capabilities, so `start_session` returns a precise unavailable
-error instead. Enable the driver only after the installed CLI can enforce an MCP-only allowlist.
+- `--sandbox read-only`, `approval_policy='never'`, `web_search='disabled'`, `--ephemeral`,
+  `--ignore-user-config`, and `--ignore-rules`;
+- stable feature switches for `shell_tool`, `unified_exec`, `view_image`, browser/computer use,
+  image generation, apps, plugins, multi-agent features, skills, and related optional tools;
+- `tools.update_plan.enabled=false`, added before 0.147.0; and
+- per-server `enabled_tools`, `required`, and `default_tools_approval_mode` MCP settings.
+
+See the official [Codex configuration reference](https://developers.openai.com/codex/config-reference),
+[CLI reference](https://developers.openai.com/codex/cli/reference), and
+[MCP guide](https://developers.openai.com/codex/mcp). `codex app-server` uses the same policy and
+tool configuration rather than offering a stronger MCP-only boundary. Codex's MCP-server mode is
+the opposite direction: it exposes Codex as a tool to another client.
+
+The empirical probe used the exact 0.147.0 executable, strict config, an empty scratch working
+directory, a read-only sandbox, and one allowlisted scratch MCP tool. The captured model request
+contained the scratch MCP tool plus only resource-discovery, plan, and user-input helpers. It did
+not contain shell, file mutation, web, browser, computer, image, app, plugin, or agent tools. The
+model called the scratch MCP tool successfully, could not create the requested marker file, and the
+working directory remained empty. The shipped command additionally disables the plan helper.
+Resource discovery and user-input helpers remain, which is why this is the policy-neutralized path
+rather than a claim that all built-ins are gone.
+
+Safety: every invocation ignores user config and rules, runs in a newly created empty directory,
+sets project-instruction loading to zero bytes, uses the read-only sandbox and no inherited shell
+environment, disables shell/file/web and other unrelated feature tools, and registers only the
+exact OpenReel MCP tool names. The MCP server still routes every mutation through Core, and its
+`ConfirmationBroker` still gates destructive edits. The chat panel states: "Codex sessions use a
+read-only empty scratch sandbox; shell, file-write, and web tools are disabled."
+
+Transport: native Streamable HTTP. `codex exec` receives the process-local `/mcp` URL and exact
+tool allowlist through command-line config overrides, so no stdio proxy and no persistent change to
+the user's Codex configuration are needed.
+
+Protocol: each user turn starts one ephemeral `codex exec --json` process. The session wrapper
+replays earlier user requests as bounded chat context while requiring a fresh live-timeline read,
+enforces the configured number of user turns, and `interrupt` kills the active child. Recorded
+0.147.0 JSONL includes `thread.started`, `turn.started`, `item.started` and `item.completed` for
+`mcp_tool_call`, `item.completed` for `agent_message` or `error`, and `turn.completed` with token
+usage. These map to `ToolCall`, `ToolResult`, `Text`/`Error`, `Cost`, and `Done`. Codex subscription
+JSONL reports tokens but not a dollar price, so `cost_usd` is normally absent.
 
 ## Test gate
 
-The live subscription test is ignored by behavior unless `OPENREEL_AGENT_TEST=1` is set. It creates
-generated media and a two-clip project, launches the real installed Claude CLI once, asks it to split
-clip 1 at frame 30 and delete clip 2, verifies the live document, then sends two undo commands and
-asserts that the original document is restored.
+The live subscription tests are ignored by behavior unless `OPENREEL_AGENT_TEST=1` is set. There is
+one Claude variant and one Codex variant; a complete gated run therefore makes at most two short
+harness calls. Each creates a two-clip project, launches the real installed CLI once, asks it to
+split clip 1 at frame 30 and delete clip 2, verifies the live document, then sends two undo commands
+and asserts that the original document is restored. CLI-independent workspace tests never launch a
+subscription harness.

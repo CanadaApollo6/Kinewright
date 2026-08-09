@@ -132,15 +132,12 @@ fn model_usage_total(value: &Value, key: &str) -> Option<u64> {
     )
 }
 
-// Kept and fixture-tested for the moment Codex can safely restrict built-in tools.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Default)]
 pub(crate) struct CodexProtocol {
     tool_names: HashMap<String, String>,
     announced: HashSet<String>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl CodexProtocol {
     pub(crate) fn parse_line(&mut self, line: &str) -> Result<Vec<AgentEvent>, AgentError> {
         let value: Value = serde_json::from_str(line)
@@ -156,7 +153,10 @@ impl CodexProtocol {
                     input_tokens: token_value(usage, "input_tokens", "inputTokens").unwrap_or(0),
                     output_tokens: token_value(usage, "output_tokens", "outputTokens")
                         .unwrap_or(0),
-                    cost_usd: value.get("cost_usd").and_then(Value::as_f64),
+                    cost_usd: value
+                        .get("cost_usd")
+                        .or_else(|| usage.get("cost_usd"))
+                        .and_then(Value::as_f64),
                 });
                 events.push(AgentEvent::Done);
             }
@@ -165,7 +165,7 @@ impl CodexProtocol {
                     .pointer("/error/message")
                     .or_else(|| value.get("message"))
                     .map_or_else(|| compact_json(&value), content_text);
-                events.push(AgentEvent::Text(format!("Codex error: {message}")));
+                events.push(AgentEvent::Error(format!("Codex error: {message}")));
                 events.push(AgentEvent::Done);
             }
             _ => {}
@@ -208,22 +208,48 @@ impl CodexProtocol {
                     });
                 }
                 if value.get("type").and_then(Value::as_str) == Some("item.completed") {
-                    let result = item
-                        .get("result")
-                        .or_else(|| item.get("error"))
-                        .or_else(|| item.get("output"))
-                        .unwrap_or(&Value::Null);
                     events.push(AgentEvent::ToolResult {
                         name,
-                        result: content_text(result),
+                        result: codex_tool_result(item),
                     });
                     self.tool_names.remove(&id);
                     self.announced.remove(&id);
                 }
             }
+            Some("error")
+                if value.get("type").and_then(Value::as_str) == Some("item.completed") =>
+            {
+                let message = item
+                    .get("message")
+                    .map_or_else(|| compact_json(item), content_text);
+                events.push(AgentEvent::Error(format!("Codex error: {message}")));
+            }
             _ => {}
         }
     }
+}
+
+fn codex_tool_result(item: &Value) -> String {
+    if let Some(error) = item.get("error").filter(|error| !error.is_null()) {
+        return content_text(error);
+    }
+    let result = item
+        .get("result")
+        .or_else(|| item.get("output"))
+        .unwrap_or(&Value::Null);
+    if let Some(content) = result.get("content") {
+        let text = content_text(content);
+        if text != "null" && text != "[]" {
+            return text;
+        }
+    }
+    if let Some(structured) = result
+        .get("structured_content")
+        .filter(|structured| !structured.is_null())
+    {
+        return compact_json(structured);
+    }
+    content_text(result)
 }
 
 fn token_value(value: &Value, snake: &str, camel: &str) -> Option<u64> {
@@ -298,14 +324,21 @@ mod tests {
             .flat_map(|line| protocol.parse_line(line).unwrap())
             .collect::<Vec<_>>();
         assert!(events.contains(&AgentEvent::ToolCall {
-            name: "split_clip".to_owned(),
-            arguments: "{\"at\":30,\"clip\":1}".to_owned(),
+            name: "probe_echo".to_owned(),
+            arguments: "{\"text\":\"mcp-ok\"}".to_owned(),
         }));
         assert!(events.contains(&AgentEvent::ToolResult {
-            name: "split_clip".to_owned(),
-            result: "applied split_clip".to_owned(),
+            name: "probe_echo".to_owned(),
+            result: "OPENREEL_PROBE:mcp-ok".to_owned(),
         }));
-        assert!(events.contains(&AgentEvent::Text("Done.".to_owned())));
+        assert!(events.contains(&AgentEvent::Text(
+            "MCP succeeded; no built-in write tool was available.".to_owned()
+        )));
+        assert!(events.contains(&AgentEvent::Cost {
+            input_tokens: 3,
+            output_tokens: 3,
+            cost_usd: None,
+        }));
         assert_eq!(events.last(), Some(&AgentEvent::Done));
     }
 
