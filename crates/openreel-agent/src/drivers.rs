@@ -1,5 +1,6 @@
 use std::{
     env,
+    ffi::OsString,
     fs,
     io::{BufRead as _, BufReader, Read as _, Write as _},
     path::{Path, PathBuf},
@@ -49,6 +50,8 @@ const CODEX_DISABLED_FEATURES: &[&str] = &[
     "tool_suggest",
     "remote_plugin",
     "plugin_sharing",
+    "code_mode",
+    "code_mode_only",
     "code_mode_host",
     "shell_snapshot",
     "workspace_dependencies",
@@ -68,18 +71,48 @@ pub struct CodexDriver;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ClaudeCodeDriver;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexSpawnTarget {
+    executable: PathBuf,
+    prefix_arguments: Vec<OsString>,
+}
+
+impl CodexSpawnTarget {
+    fn native(executable: PathBuf) -> Self {
+        Self {
+            executable,
+            prefix_arguments: Vec::new(),
+        }
+    }
+
+    fn command(&self) -> ProcessCommand {
+        let mut command = ProcessCommand::new(&self.executable);
+        command.args(&self.prefix_arguments);
+        command
+    }
+}
+
 impl AgentDriver for CodexDriver {
     fn id(&self) -> HarnessId {
         HarnessId::new("codex")
     }
 
     fn detect(&self) -> Option<HarnessInfo> {
-        detect_cli("codex", self.id(), codex_authentication)
+        let target = find_codex_spawn_target()?;
+        let version = codex_process_output(&target, &["--version"])
+            .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned));
+        let authentication = codex_authentication(&target);
+        Some(HarnessInfo {
+            id: self.id(),
+            executable: target.executable,
+            version,
+            authentication,
+        })
     }
 
     fn start_session(&self, cfg: SessionConfig) -> Result<Box<dyn AgentSession>, AgentError> {
-        let executable = find_on_path("codex").ok_or(AgentError::NotInstalled)?;
-        let version = process_output(&executable, &["--version"]).ok_or_else(|| {
+        let target = find_codex_spawn_target().ok_or(AgentError::NotInstalled)?;
+        let version = codex_process_output(&target, &["--version"]).ok_or_else(|| {
             AgentError::Unavailable(
                 "OpenReel could not verify the installed Codex CLI version; refusing to launch it"
                     .to_owned(),
@@ -95,7 +128,7 @@ impl AgentDriver for CodexDriver {
             .mcp_url
             .clone()
             .ok_or(AgentError::MissingMcpEndpoint)?;
-        CodexSession::new(executable, endpoint, cfg).map(|session| Box::new(session) as _)
+        CodexSession::new(target, endpoint, cfg).map(|session| Box::new(session) as _)
     }
 }
 
@@ -234,7 +267,7 @@ impl ClaudeSession {
 }
 
 struct CodexSession {
-    executable: PathBuf,
+    target: CodexSpawnTarget,
     endpoint: String,
     model: Option<String>,
     max_turns: u32,
@@ -242,6 +275,8 @@ struct CodexSession {
     prior_requests: Vec<String>,
     tool_names: Vec<String>,
     scratch_directory: PathBuf,
+    model_catalog_directory: PathBuf,
+    model_catalog_path: PathBuf,
     child: Arc<Mutex<Option<Child>>>,
     events_rx: Receiver<AgentEvent>,
     events_tx: Sender<AgentEvent>,
@@ -250,16 +285,24 @@ struct CodexSession {
 
 impl CodexSession {
     fn new(
-        executable: PathBuf,
+        target: CodexSpawnTarget,
         endpoint: String,
         cfg: SessionConfig,
     ) -> Result<Self, AgentError> {
         let tool_names = all_tool_names()
             .map_err(|error| AgentError::Harness(error.to_string()))?;
         let scratch_directory = create_codex_scratch_directory()?;
+        let (model_catalog_directory, model_catalog_path) =
+            match create_codex_direct_model_catalog(&target) {
+                Ok(catalog) => catalog,
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&scratch_directory);
+                    return Err(error);
+                }
+            };
         let (events_tx, events_rx) = unbounded();
         Ok(Self {
-            executable,
+            target,
             endpoint,
             model: cfg.model,
             max_turns: cfg.max_turns.unwrap_or(8).max(1),
@@ -267,6 +310,8 @@ impl CodexSession {
             prior_requests: Vec::new(),
             tool_names,
             scratch_directory,
+            model_catalog_directory,
+            model_catalog_path,
             child: Arc::new(Mutex::new(None)),
             events_rx,
             events_tx,
@@ -316,10 +361,11 @@ impl AgentSession for CodexSession {
 
         let prompt = codex_prompt(&self.prior_requests, &text);
         let mut command = build_codex_command(
-            &self.executable,
+            &self.target,
             &self.endpoint,
             self.model.as_deref(),
             &self.scratch_directory,
+            &self.model_catalog_path,
             &self.tool_names,
             &prompt,
         );
@@ -388,18 +434,20 @@ impl Drop for CodexSession {
     fn drop(&mut self) {
         self.kill_current();
         let _ = fs::remove_dir_all(&self.scratch_directory);
+        let _ = fs::remove_dir_all(&self.model_catalog_directory);
     }
 }
 
 fn build_codex_command(
-    executable: &Path,
+    target: &CodexSpawnTarget,
     endpoint: &str,
     model: Option<&str>,
     scratch_directory: &Path,
+    model_catalog_path: &Path,
     tool_names: &[String],
     prompt: &str,
 ) -> ProcessCommand {
-    let mut command = ProcessCommand::new(executable);
+    let mut command = target.command();
     command
         .arg("exec")
         .arg("--ignore-user-config")
@@ -419,6 +467,8 @@ fn build_codex_command(
         command.arg("--model").arg(model);
     }
     let endpoint = serde_json::to_string(endpoint).expect("serializing a string cannot fail");
+    let model_catalog_path = serde_json::to_string(model_catalog_path)
+        .expect("serializing a model catalog path cannot fail");
     let tool_names =
         serde_json::to_string(tool_names).expect("serializing tool names cannot fail");
     command
@@ -442,6 +492,8 @@ fn build_codex_command(
         .arg("shell_environment_policy.inherit='none'")
         .arg("-c")
         .arg("project_doc_max_bytes=0")
+        .arg("-c")
+        .arg(format!("model_catalog_json={model_catalog_path}"))
         .arg("-c")
         .arg(format!("mcp_servers.openreel.url={endpoint}"))
         .arg("-c")
@@ -552,6 +604,71 @@ fn create_codex_scratch_directory() -> Result<PathBuf, AgentError> {
     Err(AgentError::Harness(
         "could not allocate a unique Codex scratch directory".to_owned(),
     ))
+}
+
+fn create_codex_direct_model_catalog(
+    target: &CodexSpawnTarget,
+) -> Result<(PathBuf, PathBuf), AgentError> {
+    let cached = codex_model_cache_path()
+        .filter(|path| path.is_file())
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|source| serde_json::from_str::<Value>(&source).ok());
+    let bundled = || {
+        codex_process_output(target, &["debug", "models", "--bundled"])
+            .and_then(|source| serde_json::from_str::<Value>(&source).ok())
+    };
+    let mut catalog = cached.or_else(bundled).ok_or_else(|| {
+        AgentError::Unavailable(
+            "OpenReel could not load Codex model metadata to force direct MCP tool calling"
+                .to_owned(),
+        )
+    })?;
+    force_direct_tool_mode(&mut catalog)?;
+
+    let directory = create_codex_scratch_directory()?;
+    let path = directory.join("models-direct.json");
+    let serialized = serde_json::to_vec(&catalog).map_err(|error| {
+        AgentError::Harness(format!("could not serialize the Codex model catalog: {error}"))
+    })?;
+    if let Err(error) = fs::write(&path, serialized) {
+        let _ = fs::remove_dir_all(&directory);
+        return Err(AgentError::Harness(format!(
+            "could not write the Codex direct-tool model catalog: {error}"
+        )));
+    }
+    Ok((directory, path))
+}
+
+fn codex_model_cache_path() -> Option<PathBuf> {
+    env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".codex")))
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+        .map(|home| home.join("models_cache.json"))
+}
+
+fn force_direct_tool_mode(catalog: &mut Value) -> Result<(), AgentError> {
+    let models = if catalog.is_array() {
+        catalog.as_array_mut()
+    } else {
+        catalog.get_mut("models").and_then(Value::as_array_mut)
+    }
+    .ok_or_else(|| {
+        AgentError::Harness("Codex model catalog does not contain a models array".to_owned())
+    })?;
+    if models.is_empty() {
+        return Err(AgentError::Harness(
+            "Codex model catalog contains no models".to_owned(),
+        ));
+    }
+    for model in models {
+        let model = model.as_object_mut().ok_or_else(|| {
+            AgentError::Harness("Codex model catalog contains a non-object model".to_owned())
+        })?;
+        model.insert("tool_mode".to_owned(), Value::String("direct".to_owned()));
+        model.insert("supports_search_tool".to_owned(), Value::Bool(false));
+    }
+    Ok(())
 }
 
 impl AgentSession for ClaudeSession {
@@ -718,8 +835,8 @@ fn claude_authentication(executable: &Path) -> AuthenticationStatus {
         })
 }
 
-fn codex_authentication(executable: &Path) -> AuthenticationStatus {
-    let Some(output) = process_output(executable, &["login", "status"]) else {
+fn codex_authentication(target: &CodexSpawnTarget) -> AuthenticationStatus {
+    let Some(output) = codex_process_output(target, &["login", "status"]) else {
         return AuthenticationStatus::Unknown;
     };
     codex_authentication_status(&output)
@@ -750,10 +867,91 @@ fn codex_version_is_supported(output: &str) -> bool {
         .is_some_and(|version| version >= MINIMUM_CODEX_VERSION)
 }
 
+fn find_codex_spawn_target() -> Option<CodexSpawnTarget> {
+    let launcher = find_on_path("codex")?;
+    resolve_codex_spawn_target(&launcher, || find_on_path("node"))
+}
+
+fn codex_windows_platform() -> (&'static str, &'static str) {
+    match env::consts::ARCH {
+        "aarch64" => ("codex-win32-arm64", "aarch64-pc-windows-msvc"),
+        _ => ("codex-win32-x64", "x86_64-pc-windows-msvc"),
+    }
+}
+
+fn resolve_codex_spawn_target(
+    launcher: &Path,
+    find_node: impl FnOnce() -> Option<PathBuf>,
+) -> Option<CodexSpawnTarget> {
+    let is_script_shim = launcher.extension().is_some_and(|extension| {
+        let extension = extension.to_string_lossy();
+        extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("ps1")
+    });
+    if !is_script_shim {
+        return Some(CodexSpawnTarget::native(launcher.to_owned()));
+    }
+
+    let npm_bin = launcher.parent()?;
+    let codex_package = npm_bin.join("node_modules").join("@openai").join("codex");
+    let (platform_package, target_triple) = codex_windows_platform();
+    let platform_package_roots = [
+        codex_package
+            .join("node_modules")
+            .join("@openai")
+            .join(platform_package),
+        npm_bin
+            .join("node_modules")
+            .join("@openai")
+            .join(platform_package),
+    ];
+    for package_root in platform_package_roots {
+        for binary_directory in ["bin", "codex"] {
+            let native = package_root
+                .join("vendor")
+                .join(target_triple)
+                .join(binary_directory)
+                .join("codex.exe");
+            if native.is_file() {
+                return Some(CodexSpawnTarget::native(native));
+            }
+        }
+    }
+    for binary_directory in ["bin", "codex"] {
+        let native = codex_package
+            .join("vendor")
+            .join(target_triple)
+            .join(binary_directory)
+            .join("codex.exe");
+        if native.is_file() {
+            return Some(CodexSpawnTarget::native(native));
+        }
+    }
+
+    let javascript_entrypoint = codex_package.join("bin").join("codex.js");
+    if !javascript_entrypoint.is_file() {
+        return None;
+    }
+    Some(CodexSpawnTarget {
+        executable: find_node()?,
+        prefix_arguments: vec![javascript_entrypoint.into_os_string()],
+    })
+}
+
+fn codex_process_output(target: &CodexSpawnTarget, arguments: &[&str]) -> Option<String> {
+    let mut command = target.command();
+    command.args(arguments).stdin(Stdio::null());
+    hide_console_window(&mut command);
+    process_command_output(command)
+}
+
 fn process_output(executable: &Path, arguments: &[&str]) -> Option<String> {
     let mut command = ProcessCommand::new(executable);
     command.args(arguments).stdin(Stdio::null());
     hide_console_window(&mut command);
+    process_command_output(command)
+}
+
+fn process_command_output(mut command: ProcessCommand) -> Option<String> {
     let output = command.output().ok()?;
     if !output.status.success() {
         return None;
@@ -837,12 +1035,15 @@ mod tests {
     #[test]
     fn codex_command_is_read_only_and_has_an_exact_mcp_allowlist() {
         let scratch = Path::new("empty-codex-scratch");
+        let model_catalog = Path::new("models-direct.json");
         let tools = vec!["get_timeline_state".to_owned(), "split_clip".to_owned()];
+        let target = CodexSpawnTarget::native(PathBuf::from("codex"));
         let command = build_codex_command(
-            Path::new("codex"),
+            &target,
             "http://127.0.0.1:43123/mcp",
             Some("gpt-test"),
             scratch,
+            model_catalog,
             &tools,
             "test prompt",
         );
@@ -856,15 +1057,102 @@ mod tests {
         assert!(joined.contains("--sandbox read-only"));
         assert!(joined.contains("--disable shell_tool"));
         assert!(joined.contains("--disable unified_exec"));
+        assert!(joined.contains("--disable code_mode"));
+        assert!(joined.contains("--disable code_mode_only"));
+        assert!(joined.contains("--disable code_mode_host"));
         assert!(joined.contains("approval_policy='never'"));
         assert!(joined.contains("web_search='disabled'"));
         assert!(joined.contains("tools.update_plan.enabled=false"));
         assert!(joined.contains("project_doc_max_bytes=0"));
+        assert!(joined.contains("model_catalog_json=\"models-direct.json\""));
         assert!(joined.contains("mcp_servers.openreel.required=true"));
         assert!(joined.contains(
             "mcp_servers.openreel.enabled_tools=[\"get_timeline_state\",\"split_clip\"]"
         ));
         assert_eq!(command.get_current_dir(), Some(scratch));
+    }
+
+    #[test]
+    fn codex_model_catalog_forces_direct_non_deferred_tools() {
+        let mut catalog = json!({
+            "client_version": "0.147.0",
+            "models": [
+                {
+                    "slug": "gpt-code-mode",
+                    "tool_mode": "code_mode_only",
+                    "supports_search_tool": true,
+                    "use_responses_lite": true
+                },
+                {
+                    "slug": "gpt-default",
+                    "tool_mode": null,
+                    "supports_search_tool": false
+                }
+            ]
+        });
+
+        force_direct_tool_mode(&mut catalog).unwrap();
+
+        for model in catalog["models"].as_array().unwrap() {
+            assert_eq!(model["tool_mode"], "direct");
+            assert_eq!(model["supports_search_tool"], false);
+        }
+        assert_eq!(catalog["models"][0]["use_responses_lite"], true);
+        assert_eq!(catalog["client_version"], "0.147.0");
+    }
+
+    #[test]
+    fn codex_npm_shim_resolves_to_the_vendored_native_binary() {
+        let npm_bin = create_codex_scratch_directory().unwrap();
+        let shim = npm_bin.join("codex.cmd");
+        fs::write(&shim, "@echo off\r\n").unwrap();
+        let (platform_package, target_triple) = codex_windows_platform();
+        let native = npm_bin
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("node_modules")
+            .join("@openai")
+            .join(platform_package)
+            .join("vendor")
+            .join(target_triple)
+            .join("bin")
+            .join("codex.exe");
+        fs::create_dir_all(native.parent().unwrap()).unwrap();
+        fs::write(&native, b"mock native codex").unwrap();
+
+        let resolved = resolve_codex_spawn_target(&shim, || {
+            panic!("node fallback must not be used when the native binary exists")
+        })
+        .unwrap();
+
+        assert_eq!(resolved, CodexSpawnTarget::native(native));
+        fs::remove_dir_all(npm_bin).unwrap();
+    }
+
+    #[test]
+    fn codex_npm_shim_falls_back_to_node_and_the_javascript_entrypoint() {
+        let npm_bin = create_codex_scratch_directory().unwrap();
+        let shim = npm_bin.join("codex.ps1");
+        fs::write(&shim, "#!/usr/bin/env pwsh\n").unwrap();
+        let javascript_entrypoint = npm_bin
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("bin")
+            .join("codex.js");
+        fs::create_dir_all(javascript_entrypoint.parent().unwrap()).unwrap();
+        fs::write(&javascript_entrypoint, "#!/usr/bin/env node\n").unwrap();
+        let node = npm_bin.join("node.exe");
+
+        let resolved =
+            resolve_codex_spawn_target(&shim, || Some(node.clone())).expect("node fallback");
+        assert_eq!(resolved.executable, node);
+        assert_eq!(
+            resolved.prefix_arguments,
+            vec![javascript_entrypoint.into_os_string()]
+        );
+        fs::remove_dir_all(npm_bin).unwrap();
     }
 
     #[test]
