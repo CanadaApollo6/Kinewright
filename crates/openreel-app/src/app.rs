@@ -10,9 +10,9 @@ use openreel_agent::{
     ClaudeCodeDriver, CodexDriver, ConfirmationBroker, ConfirmationRequest, McpServer,
 };
 use openreel_core::{
-    AgentDriver, AgentEvent, AgentSession, ClipId, Command, Core, Document, Event, HarnessInfo,
-    MediaAsset, MediaEngine, MediaError, MediaEvent, Operation, PlaybackState, TimeCode, Track,
-    TrackId, TrackKind,
+    AgentDriver, AgentEvent, AgentSession, AssetId, ClipId, Command, Core, Document, Event,
+    HarnessInfo, MediaAsset, MediaEngine, MediaError, MediaEvent, Operation, PlaybackState,
+    TimeCode, Track, TrackId, TrackKind,
 };
 use openreel_media::{FfmpegMediaEngine, GpuContext};
 
@@ -20,6 +20,7 @@ use crate::{
     chat_ui::{ChatEntry, CostAccumulator},
     error_ui::ErrorLog,
     export_ui::{ExportDialog, ExportJob},
+    transcript_ui::TranscriptScope,
 };
 
 const DEFAULT_TRACK_ID: TrackId = TrackId(1);
@@ -57,6 +58,8 @@ pub(crate) struct OpenReelApp {
     pub(crate) playing: bool,
     pub(crate) resume_after_scrub: bool,
     pub(crate) selected_clip: Option<ClipId>,
+    pub(crate) selected_asset: Option<AssetId>,
+    pub(crate) transcript_scope: TranscriptScope,
     pub(crate) pixels_per_frame: f32,
     pub(crate) project_path: Option<PathBuf>,
     saved_document: Option<Arc<Document>>,
@@ -125,6 +128,8 @@ impl OpenReelApp {
             playing: false,
             resume_after_scrub: false,
             selected_clip: None,
+            selected_asset: None,
+            transcript_scope: TranscriptScope::default(),
             pixels_per_frame: 6.0,
             project_path: None,
             saved_document: None,
@@ -402,8 +407,12 @@ impl OpenReelApp {
         self.playing = false;
         self.resume_after_scrub = false;
         self.selected_clip = None;
+        self.selected_asset = None;
         self.texture = None;
         self.media.set_document(Arc::clone(&self.document));
+        for asset in &self.document.media_pool {
+            self.media.request_transcription(asset.clone());
+        }
         self.media.request_frame(TimeCode::ZERO);
         Ok(())
     }
@@ -459,6 +468,12 @@ impl OpenReelApp {
                     {
                         self.selected_clip = None;
                     }
+                    if self
+                        .selected_asset
+                        .is_some_and(|asset| doc.asset(asset).is_none())
+                    {
+                        self.selected_asset = None;
+                    }
                     if doc.duration <= TimeCode::ZERO {
                         self.position = TimeCode::ZERO;
                     } else {
@@ -470,6 +485,10 @@ impl OpenReelApp {
                     self.media.set_document(Arc::clone(&doc));
                     self.media.seek(self.position);
                     self.media.request_frame(self.position);
+                    if let Some(Operation::AddAsset { asset }) = &last_op {
+                        self.selected_asset = Some(asset.id);
+                        self.media.request_transcription(asset.clone());
+                    }
                     if let Some(operation) = last_op {
                         self.status = operation_status(&operation);
                     }
@@ -599,6 +618,8 @@ impl eframe::App for OpenReelApp {
             self.transport(ui);
             ui.separator();
             self.timeline(ui);
+            ui.separator();
+            self.transcript_panel(ui);
         });
         self.show_export_dialog(ui.ctx());
         self.show_help(ui.ctx());

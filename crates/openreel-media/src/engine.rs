@@ -12,6 +12,7 @@ use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use openreel_core::{
     AssetId, ClipId, Document, ExportSettings, FrameTexture, MediaAsset, MediaEngine, MediaError,
     MediaEvent, MediaKind, PlaybackState, ProgressSink, Rational, RgbaImage, TimeCode,
+    TimelineTranscriptWord, TranscriptStatus,
 };
 
 use crate::{
@@ -21,6 +22,7 @@ use crate::{
     decode::{probe_path, thumbnail},
     render::FrameRenderer,
     timeline_source_at,
+    transcript::{TranscriptService, default_data_dir},
 };
 
 const WORKER_TICK: Duration = Duration::from_millis(5);
@@ -94,20 +96,32 @@ pub struct FfmpegMediaEngine {
     next_asset_id: AtomicU64,
     gpu: GpuContext,
     export_document: Arc<RwLock<Arc<Document>>>,
+    transcripts: TranscriptService,
 }
 
 impl FfmpegMediaEngine {
     pub fn new() -> Result<Self, MediaError> {
+        Self::new_with_data_dir(default_data_dir())
+    }
+
+    pub fn new_with_data_dir(data_dir: PathBuf) -> Result<Self, MediaError> {
         static GPU: OnceLock<Result<GpuContext, MediaError>> = OnceLock::new();
         let gpu = GPU
             .get_or_init(|| {
                 GpuContext::headless(false).or_else(|_| GpuContext::headless(true))
             })
             .clone()?;
-        Self::new_with_gpu(gpu)
+        Self::new_with_gpu_and_data_dir(gpu, data_dir)
     }
 
     pub fn new_with_gpu(gpu: GpuContext) -> Result<Self, MediaError> {
+        Self::new_with_gpu_and_data_dir(gpu, default_data_dir())
+    }
+
+    pub fn new_with_gpu_and_data_dir(
+        gpu: GpuContext,
+        data_dir: PathBuf,
+    ) -> Result<Self, MediaError> {
         crate::initialize_ffmpeg()?;
         let (control_tx, control_rx) = unbounded();
         let (frames_tx, frames_rx) = bounded(2);
@@ -147,6 +161,7 @@ impl FfmpegMediaEngine {
             next_asset_id: AtomicU64::new(1),
             gpu,
             export_document: Arc::new(RwLock::new(Arc::new(Document::default()))),
+            transcripts: TranscriptService::new(data_dir)?,
         })
     }
 }
@@ -216,6 +231,22 @@ impl MediaEngine for FfmpegMediaEngine {
 
     fn position(&self) -> TimeCode {
         self.clock.position()
+    }
+
+    fn request_transcription(&self, asset: MediaAsset) {
+        self.transcripts.request(asset);
+    }
+
+    fn transcript_status(&self, asset: AssetId) -> TranscriptStatus {
+        self.transcripts.status(asset)
+    }
+
+    fn timeline_transcript(
+        &self,
+        document: &Document,
+        range: Option<std::ops::Range<TimeCode>>,
+    ) -> Result<Vec<TimelineTranscriptWord>, MediaError> {
+        self.transcripts.timeline_words(document, range)
     }
 
     fn thumbnail_at(&self, at: TimeCode, max_width: u32) -> Result<RgbaImage, MediaError> {

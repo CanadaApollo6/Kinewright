@@ -1,0 +1,25 @@
+{
+  "asset": 4,
+  "content_sha256": "fixture-content",
+  "source_fps": {
+    "numerator": 30,
+    "denominator": 1
+  },
+  "words": [
+    {
+      "text": "Hello",
+      "source_start": 30,
+      "source_end": 36
+    },
+    {
+      "text": "um",
+      "source_start": 39,
+      "source_end": 45
+    },
+    {
+      "text": "world.",
+      "source_start": 48,
+      "source_end": 60
+    }
+  ]
+}

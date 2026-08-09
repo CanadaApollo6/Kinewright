@@ -45,6 +45,7 @@ impl OpenReelApp {
             at: self.document.duration,
             source: TimeCode::ZERO..asset.duration,
         });
+        self.selected_asset = Some(asset_id);
     }
 
     pub(crate) fn media_bin(&mut self, ui: &mut egui::Ui) {
@@ -61,7 +62,12 @@ impl OpenReelApp {
         egui::ScrollArea::vertical().show(ui, |ui| {
             for asset in assets {
                 ui.group(|ui| {
-                    ui.strong(&asset.name);
+                    if ui
+                        .selectable_label(self.selected_asset == Some(asset.id), &asset.name)
+                        .clicked()
+                    {
+                        self.selected_asset = Some(asset.id);
+                    }
                     ui.small(format!(
                         "{} frames · {}/{} fps",
                         asset.duration.0,

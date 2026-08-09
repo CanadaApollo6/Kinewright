@@ -9,7 +9,7 @@ use std::{
 use crossbeam_channel::{Receiver, Sender};
 use thiserror::Error;
 
-use crate::{Document, MediaAsset, Rational, TimeCode};
+use crate::{AssetId, ClipId, Document, MediaAsset, Rational, TimeCode, TrackId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameTexture {
@@ -79,6 +79,65 @@ pub enum MediaEvent {
     Error(MediaError),
 }
 
+/// One recognized word. Both boundaries are half-open source-frame positions
+/// in the owning asset's exact frame rate.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TranscriptWord {
+    pub text: String,
+    pub source_start: TimeCode,
+    pub source_end: TimeCode,
+}
+
+/// Derived, reproducible speech data for one media asset. This deliberately
+/// does not live in `Document` or the operation journal.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AssetTranscript {
+    pub asset: AssetId,
+    pub content_sha256: String,
+    pub source_fps: Rational,
+    pub words: Vec<TranscriptWord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptStatus {
+    NotRequested,
+    Queued,
+    Hashing,
+    DownloadingModel {
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+    },
+    Transcribing {
+        progress_percent: u8,
+    },
+    Ready(Arc<AssetTranscript>),
+    NoSpeech,
+    Failed(String),
+}
+
+impl TranscriptStatus {
+    #[must_use]
+    pub const fn is_running(&self) -> bool {
+        matches!(
+            self,
+            Self::Queued | Self::Hashing | Self::DownloadingModel { .. } | Self::Transcribing { .. }
+        )
+    }
+}
+
+/// A source word mapped through a clip onto the project timeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineTranscriptWord {
+    pub text: String,
+    pub asset: AssetId,
+    pub track: TrackId,
+    pub clip: ClipId,
+    pub source_start: TimeCode,
+    pub source_end: TimeCode,
+    pub project_start: TimeCode,
+    pub project_end: TimeCode,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MediaError {
     #[error("media operation is not implemented")]
@@ -102,6 +161,18 @@ pub trait MediaEngine: Send + Sync {
     fn seek(&self, to: TimeCode);
     /// Read the atomically published audio-master position.
     fn position(&self) -> TimeCode;
+    /// Queue derived speech recognition without blocking the caller. Repeated
+    /// requests for the same asset are coalesced by the implementation.
+    fn request_transcription(&self, asset: MediaAsset);
+    /// Return the latest state for an asset's derived transcript.
+    fn transcript_status(&self, asset: AssetId) -> TranscriptStatus;
+    /// Return words currently audible on the timeline, optionally restricted
+    /// to a half-open range of project frames.
+    fn timeline_transcript(
+        &self,
+        document: &Document,
+        range: Option<std::ops::Range<TimeCode>>,
+    ) -> Result<Vec<TimelineTranscriptWord>, MediaError>;
     fn thumbnail_at(&self, t: TimeCode, max_w: u32) -> Result<RgbaImage, MediaError>;
     fn export(
         &self,

@@ -1,8 +1,8 @@
 use std::fmt::Write as _;
 
 use openreel_core::{
-    ClipId, Document, Effect, ParamValue, Rational, TimeCode, TrackKind,
-    map_source_range_to_project,
+    AssetId, ClipId, Document, Effect, ParamValue, Rational, TimeCode,
+    TimelineTranscriptWord, TrackKind, TranscriptStatus, map_source_range_to_project,
 };
 
 #[must_use]
@@ -152,6 +152,94 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
     ))
 }
 
+#[must_use]
+pub fn render_asset_transcript(asset: AssetId, status: &TranscriptStatus) -> String {
+    match status {
+        TranscriptStatus::NotRequested => {
+            format!("asset {asset} transcript status=not-requested")
+        }
+        TranscriptStatus::Queued => format!("asset {asset} transcript status=queued"),
+        TranscriptStatus::Hashing => format!("asset {asset} transcript status=hashing"),
+        TranscriptStatus::DownloadingModel {
+            downloaded_bytes,
+            total_bytes,
+        } => total_bytes.map_or_else(
+            || {
+                format!(
+                    "asset {asset} transcript status=downloading-model bytes={downloaded_bytes}"
+                )
+            },
+            |total| {
+                format!(
+                    "asset {asset} transcript status=downloading-model bytes={downloaded_bytes}/{total}"
+                )
+            },
+        ),
+        TranscriptStatus::Transcribing { progress_percent } => {
+            format!("asset {asset} transcript status=transcribing progress={progress_percent}%")
+        }
+        TranscriptStatus::NoSpeech => format!("asset {asset} transcript: no speech found"),
+        TranscriptStatus::Failed(error) => {
+            format!("asset {asset} transcript status=failed error={error:?}")
+        }
+        TranscriptStatus::Ready(transcript) => {
+            let mut output = format!(
+                "asset {asset} transcript fps={}/{} words={}\n",
+                transcript.source_fps.numerator(),
+                transcript.source_fps.denominator(),
+                transcript.words.len()
+            );
+            for word in &transcript.words {
+                let _ = writeln!(
+                    output,
+                    "{}..{} {:?}",
+                    frame_and_seconds(word.source_start, transcript.source_fps),
+                    frame_and_seconds(word.source_end, transcript.source_fps),
+                    word.text
+                );
+            }
+            output.pop();
+            output
+        }
+    }
+}
+
+#[must_use]
+pub fn render_timeline_transcript(
+    document: &Document,
+    range: std::ops::Range<TimeCode>,
+    words: &[TimelineTranscriptWord],
+) -> String {
+    let mut output = format!(
+        "timeline transcript range={}..{} words={}\n",
+        frame_and_seconds(range.start, document.fps),
+        frame_and_seconds(range.end, document.fps),
+        words.len()
+    );
+    for word in words {
+        let source_fps = document
+            .asset(word.asset)
+            .map_or(word_project_fallback_fps(document), |asset| asset.fps);
+        let _ = writeln!(
+            output,
+            "clip={} asset={} project={}..{} source={}..{} {:?}",
+            word.clip,
+            word.asset,
+            frame_and_seconds(word.project_start, document.fps),
+            frame_and_seconds(word.project_end, document.fps),
+            frame_and_seconds(word.source_start, source_fps),
+            frame_and_seconds(word.source_end, source_fps),
+            word.text
+        );
+    }
+    output.pop();
+    output
+}
+
+fn word_project_fallback_fps(document: &Document) -> Rational {
+    document.fps
+}
+
 fn render_effects(effects: &[Effect]) -> String {
     if effects.is_empty() {
         return "none".to_owned();
@@ -204,8 +292,8 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
     use openreel_core::{
-        AssetId, Clip, Effect, EffectId, MediaAsset, MediaKind, ParamValue, Track, TrackId,
-        Transition,
+        AssetId, AssetTranscript, Clip, Effect, EffectId, MediaAsset, MediaKind, ParamValue,
+        TimelineTranscriptWord, Track, TrackId, Transition, TranscriptStatus,
     };
 
     use super::*;
@@ -278,5 +366,52 @@ assets:
         assert!(rendered.contains("source=30f/1.000s..120f/4.000s"));
         assert!(rendered.contains("effects=[3:brightness(percent=25)]"));
         assert!(rendered.contains("transition_in=crossfade:15f"));
+    }
+
+    #[test]
+    fn asset_transcript_matches_the_fixture_golden_rendering() {
+        let transcript: AssetTranscript =
+            serde_json::from_str(include_str!("../tests/fixtures/transcript.json")).unwrap();
+        let rendered = render_asset_transcript(
+            transcript.asset,
+            &TranscriptStatus::Ready(std::sync::Arc::new(transcript)),
+        );
+        let expected = r#"asset 4 transcript fps=30/1 words=3
+30f/1.000s..36f/1.200s "Hello"
+39f/1.300s..45f/1.500s "um"
+48f/1.600s..60f/2.000s "world.""#;
+        assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn timeline_transcript_matches_the_fixture_golden_rendering() {
+        let words = vec![
+            TimelineTranscriptWord {
+                text: "Hello".to_owned(),
+                asset: AssetId(4),
+                track: TrackId(7),
+                clip: ClipId(10),
+                source_start: TimeCode(30),
+                source_end: TimeCode(36),
+                project_start: TimeCode(0),
+                project_end: TimeCode(6),
+            },
+            TimelineTranscriptWord {
+                text: "um".to_owned(),
+                asset: AssetId(4),
+                track: TrackId(7),
+                clip: ClipId(10),
+                source_start: TimeCode(39),
+                source_end: TimeCode(45),
+                project_start: TimeCode(9),
+                project_end: TimeCode(15),
+            },
+        ];
+        let rendered =
+            render_timeline_transcript(&fixture(), TimeCode(0)..TimeCode(30), &words);
+        let expected = r#"timeline transcript range=0f/0.000s..30f/1.000s words=2
+clip=10 asset=4 project=0f/0.000s..6f/0.200s source=30f/1.000s..36f/1.200s "Hello"
+clip=10 asset=4 project=9f/0.300s..15f/0.500s source=39f/1.300s..45f/1.500s "um""#;
+        assert_eq!(rendered, expected);
     }
 }
