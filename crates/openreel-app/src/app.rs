@@ -17,7 +17,7 @@ use openreel_core::{
 use openreel_media::{FfmpegMediaEngine, GpuContext};
 
 use crate::{
-    chat_ui::{ChatEntry, CostAccumulator},
+    chat_ui::{AgentHarnessChoice, ChatEntry, CostAccumulator},
     error_ui::ErrorLog,
     export_ui::{ExportDialog, ExportJob},
     transcript_ui::TranscriptScope,
@@ -41,6 +41,7 @@ pub(crate) struct OpenReelApp {
     pub(crate) mcp_server: Option<McpServer>,
     pub(crate) claude_info: Option<HarnessInfo>,
     pub(crate) codex_info: Option<HarnessInfo>,
+    pub(crate) agent_harness: AgentHarnessChoice,
     pub(crate) agent_session: Option<Box<dyn AgentSession>>,
     pub(crate) agent_events: Option<crossbeam_channel::Receiver<AgentEvent>>,
     pub(crate) agent_running: bool,
@@ -98,6 +99,11 @@ impl OpenReelApp {
         let confirmations = mcp_server.as_ref().map(McpServer::confirmations);
         let claude_info = ClaudeCodeDriver.detect();
         let codex_info = CodexDriver.detect();
+        let agent_harness = if claude_info.is_some() {
+            AgentHarnessChoice::ClaudeCode
+        } else {
+            AgentHarnessChoice::Codex
+        };
         let resolution = document.resolution;
         let fps = document.fps;
         let error_log_open = error_log.len() > 0;
@@ -111,6 +117,7 @@ impl OpenReelApp {
             mcp_server,
             claude_info,
             codex_info,
+            agent_harness,
             agent_session: None,
             agent_events: None,
             agent_running: false,

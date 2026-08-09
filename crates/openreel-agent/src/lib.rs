@@ -6,7 +6,7 @@ mod render;
 mod schema;
 mod server;
 
-pub use drivers::{CODEX_FAIL_CLOSED_REASON, ClaudeCodeDriver, CodexDriver};
+pub use drivers::{CODEX_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver};
 pub use render::{
     render_asset_transcript, render_clip_info, render_timeline_state, render_timeline_transcript,
 };
