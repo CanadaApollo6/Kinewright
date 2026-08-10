@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" role="img" aria-labelledby="title desc">
+  <title id="title">OpenReel icon</title>
+  <desc id="desc">An open film reel with an integrated cyan play button.</desc>
+
+  <defs>
+    <mask id="reel-cutouts" maskUnits="userSpaceOnUse" x="0" y="0" width="1254" height="1254">
+      <rect width="1254" height="1254" fill="#000" />
+
+      <!-- The approved open reel silhouette. -->
+      <path
+        fill="#fff"
+        d="M 819 227
+           A 415 415 0 1 1 987 384
+           L 875 451
+           A 285 285 0 1 0 760 343
+           Z" />
+
+      <!-- Fourteen rounded film-frame cutouts. -->
+      <g fill="#000">
+        <rect x="533" y="225" width="90" height="62" rx="13" transform="rotate(-8.6 578 256)" />
+        <rect x="667" y="227" width="90" height="62" rx="13" transform="rotate(13.6 712 258)" />
+        <rect x="407" y="271" width="90" height="62" rx="13" transform="rotate(-31 452 302)" />
+        <rect x="299" y="373" width="90" height="62" rx="13" transform="rotate(-55.9 344 404)" />
+        <rect x="913" y="461" width="90" height="62" rx="13" transform="rotate(72.1 958 492)" />
+        <rect x="247" y="505" width="90" height="62" rx="13" transform="rotate(-79.6 292 536)" />
+        <rect x="925" y="607" width="90" height="62" rx="13" transform="rotate(96.7 970 638)" />
+        <rect x="249" y="645" width="90" height="62" rx="13" transform="rotate(256.9 294 676)" />
+        <rect x="881" y="743" width="90" height="62" rx="13" transform="rotate(120.7 926 774)" />
+        <rect x="305" y="769" width="90" height="62" rx="13" transform="rotate(234.2 350 800)" />
+        <rect x="791" y="847" width="90" height="62" rx="13" transform="rotate(143.7 836 878)" />
+        <rect x="411" y="867" width="90" height="62" rx="13" transform="rotate(210.1 456 898)" />
+        <rect x="675" y="905" width="90" height="62" rx="13" transform="rotate(165.1 720 936)" />
+        <rect x="541" y="911" width="90" height="62" rx="13" transform="rotate(187.3 586 942)" />
+      </g>
+    </mask>
+  </defs>
+
+  <rect width="1254" height="1254" fill="#E6ECF2" mask="url(#reel-cutouts)" />
+
+  <!-- Integrated play button from the approved mark. -->
+  <path
+    fill="#42C7C9"
+    d="M 574 484
+       C 563 478 555 486 555 500
+       L 555 694
+       C 555 708 565 716 577 709
+       L 740 613
+       C 751 607 751 590 740 583
+       Z" />
+</svg>
