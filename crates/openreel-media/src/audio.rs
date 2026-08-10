@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -12,7 +12,10 @@ use ffmpeg_next as ffmpeg;
 use openreel_core::{ExportCancellation, MediaError, Rational, TimeCode};
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::{clock::frame_to_samples, decode::backend};
+use crate::{
+    clock::frame_to_samples,
+    decode::{backend, ensure_decoder, media_error, media_input, stream_timestamp_to_global},
+};
 
 const AV_TIME_BASE: i64 = 1_000_000;
 const BUFFER_SECONDS: usize = 2;
@@ -329,6 +332,7 @@ fn render_output<T>(
 }
 
 struct AudioDecoder {
+    path: PathBuf,
     input: ffmpeg::format::context::Input,
     decoder: ffmpeg::decoder::Audio,
     resampler: ffmpeg::software::resampling::Context,
@@ -353,17 +357,23 @@ impl AudioDecoder {
         target_sample: u64,
         end_sample: u64,
     ) -> Result<Self, MediaError> {
-        let mut input = ffmpeg::format::input(path).map_err(backend)?;
+        let mut input = media_input(path)?;
         let stream = input
             .streams()
             .best(ffmpeg::media::Type::Audio)
-            .ok_or_else(|| MediaError::Backend("media has no audio stream".to_owned()))?;
+            .ok_or_else(|| {
+                MediaError::Backend(format!("media {} has no audio stream", path.display()))
+            })?;
         let stream_index = stream.index();
         let stream_time_base = stream.time_base();
         let stream_start = normalized_start(stream.start_time());
+        ensure_decoder(&stream, "audio", path)?;
         let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-            .map_err(backend)?;
-        let decoder = context.decoder().audio().map_err(backend)?;
+            .map_err(|error| media_error(path, "could not read audio codec parameters", error))?;
+        let decoder = context
+            .decoder()
+            .audio()
+            .map_err(|error| media_error(path, "could not open the audio decoder", error))?;
         let input_layout = if decoder.channel_layout().is_empty() {
             ffmpeg::ChannelLayout::default(i32::from(decoder.channels()))
         } else {
@@ -378,14 +388,18 @@ impl AudioDecoder {
             output_layout,
             output_rate,
         )
-        .map_err(backend)?;
+        .map_err(|error| media_error(path, "could not create audio resampler", error))?;
         let target_us = i64::try_from(
             u128::from(target_sample).saturating_mul(u128::from(AV_TIME_BASE as u64))
                 / u128::from(output_rate),
         )
-        .unwrap_or(i64::MAX);
-        input.seek(target_us, ..target_us).map_err(backend)?;
+        .unwrap_or(i64::MAX)
+        .saturating_add(stream_timestamp_to_global(stream_start, stream_time_base));
+        input
+            .seek(target_us, ..target_us)
+            .map_err(|error| media_error(path, "audio seek failed", error))?;
         Ok(Self {
+            path: path.to_path_buf(),
             input,
             decoder,
             resampler,
@@ -425,10 +439,14 @@ impl AudioDecoder {
                 if stream_index != self.stream_index {
                     continue;
                 }
-                self.decoder.send_packet(&packet).map_err(backend)?;
+                self.decoder
+                    .send_packet(&packet)
+                    .map_err(|error| media_error(&self.path, "audio decode failed", error))?;
                 self.receive_frames()?;
             } else {
-                self.decoder.send_eof().map_err(backend)?;
+                self.decoder.send_eof().map_err(|error| {
+                    media_error(&self.path, "audio decoder flush failed", error)
+                })?;
                 self.eof_sent = true;
                 self.receive_frames()?;
             }
@@ -442,7 +460,7 @@ impl AudioDecoder {
             let mut converted = ffmpeg::frame::Audio::empty();
             self.resampler
                 .run(&decoded, &mut converted)
-                .map_err(backend)?;
+                .map_err(|error| media_error(&self.path, "audio resampling failed", error))?;
             let samples = converted.samples();
             if samples == 0 {
                 continue;

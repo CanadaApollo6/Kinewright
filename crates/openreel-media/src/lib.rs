@@ -13,6 +13,9 @@ mod sha256;
 mod timeline;
 mod transcript;
 
+#[cfg(test)]
+mod media_matrix_tests;
+
 use ffmpeg_next as ffmpeg;
 use openreel_core::MediaError;
 
