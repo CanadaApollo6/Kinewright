@@ -751,14 +751,29 @@ fn operation_status(operation: &Operation) -> String {
     }
 }
 
+fn window_icon() -> Option<egui::IconData> {
+    let image = image::load_from_memory(include_bytes!("../assets/openreel-icon.png")).ok()?;
+    let image = image.thumbnail(256, 256).to_rgba8();
+    let (width, height) = image.dimensions();
+    Some(egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
+}
+
 pub(crate) fn run() -> eframe::Result {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([size::WINDOW_WIDTH, size::WINDOW_HEIGHT])
+        .with_min_inner_size([size::WINDOW_MIN_WIDTH, size::WINDOW_MIN_HEIGHT]);
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     eframe::run_native(
         "OpenReel",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([size::WINDOW_WIDTH, size::WINDOW_HEIGHT])
-                .with_min_inner_size([size::WINDOW_MIN_WIDTH, size::WINDOW_MIN_HEIGHT]),
+            viewport,
             ..Default::default()
         },
         Box::new(move |creation_context| {

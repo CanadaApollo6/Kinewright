@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/openreel-logo-cyan-play-wordmark.png" width="200" alt="OpenReel — an open film reel with a play button">
+</p>
+
 # OpenReel
 
 **An open-source agentic video editor.** Your footage, your subscriptions, your timeline.
