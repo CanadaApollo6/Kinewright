@@ -5,12 +5,17 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 6] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 11] = [
     "get_timeline_state",
     "get_clip_info",
     "get_frame_at",
     "get_transcript",
     "get_timeline_transcript",
+    "get_silences",
+    "get_timeline_silences",
+    "get_scene_changes",
+    "get_timeline_scene_changes",
+    "apply_edit_plan",
     "import_media",
 ];
 
@@ -71,6 +76,25 @@ pub fn all_tool_names() -> Result<Vec<String>, SchemaError> {
         .collect::<Vec<_>>();
     names.extend(INSPECTOR_TOOL_NAMES.into_iter().map(str::to_owned));
     Ok(names)
+}
+
+#[must_use]
+pub fn operation_tool_name(operation: &Operation) -> &'static str {
+    match operation {
+        Operation::AddAsset { .. } => "add_asset",
+        Operation::AddTrack { .. } => "add_track",
+        Operation::RemoveTrack { .. } => "remove_track",
+        Operation::AddClip { .. } => "add_clip",
+        Operation::SplitClip { .. } => "split_clip",
+        Operation::TrimClip { .. } => "trim_clip",
+        Operation::MoveClip { .. } => "move_clip",
+        Operation::DeleteClip { .. } => "delete_clip",
+        Operation::AddEffect { .. } => "add_effect",
+        Operation::RemoveEffect { .. } => "remove_effect",
+        Operation::SetEffectParam { .. } => "set_effect_param",
+        Operation::AddTransition { .. } => "add_transition",
+        Operation::RemoveTransition { .. } => "remove_transition",
+    }
 }
 
 pub fn schema_object<T: schemars::JsonSchema>() -> Arc<JsonObject> {
@@ -178,30 +202,12 @@ mod tests {
 
     #[test]
     fn operation_exhaustiveness_guard_requires_new_variants_to_be_acknowledged() {
-        fn marker(operation: &Operation) -> &'static str {
-            match operation {
-                Operation::AddAsset { .. } => "AddAsset",
-                Operation::AddTrack { .. } => "AddTrack",
-                Operation::RemoveTrack { .. } => "RemoveTrack",
-                Operation::AddClip { .. } => "AddClip",
-                Operation::SplitClip { .. } => "SplitClip",
-                Operation::TrimClip { .. } => "TrimClip",
-                Operation::MoveClip { .. } => "MoveClip",
-                Operation::DeleteClip { .. } => "DeleteClip",
-                Operation::AddEffect { .. } => "AddEffect",
-                Operation::RemoveEffect { .. } => "RemoveEffect",
-                Operation::SetEffectParam { .. } => "SetEffectParam",
-                Operation::AddTransition { .. } => "AddTransition",
-                Operation::RemoveTransition { .. } => "RemoveTransition",
-            }
-        }
-
         assert_eq!(
-            marker(&Operation::SplitClip {
+            operation_tool_name(&Operation::SplitClip {
                 clip: ClipId(4),
                 at: TimeCode(30),
             }),
-            "SplitClip"
+            "split_clip"
         );
         let _ = (AssetId(1), TrackId(1));
     }

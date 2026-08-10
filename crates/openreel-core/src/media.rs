@@ -138,6 +138,104 @@ pub struct TimelineTranscriptWord {
     pub project_end: TimeCode,
 }
 
+/// A half-open silent range in one asset's exact source-frame time base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SilenceSpan {
+    pub source_start: TimeCode,
+    pub source_end: TimeCode,
+}
+
+/// Derived, reproducible audio-energy analysis for one media asset.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AssetSilences {
+    pub asset: AssetId,
+    pub content_sha256: String,
+    pub source_fps: Rational,
+    pub source_frames: TimeCode,
+    /// Detection threshold in hundredths of a dBFS (for example, -4000 is -40 dBFS).
+    pub threshold_dbfs_hundredths: i32,
+    pub window_milliseconds: u32,
+    pub spans: Vec<SilenceSpan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SilenceStatus {
+    NotRequested,
+    Queued,
+    Hashing,
+    Analyzing,
+    Ready(Arc<AssetSilences>),
+    NoAudio,
+    Failed(String),
+}
+
+impl SilenceStatus {
+    #[must_use]
+    pub const fn is_running(&self) -> bool {
+        matches!(self, Self::Queued | Self::Hashing | Self::Analyzing)
+    }
+}
+
+/// One candidate scene boundary. Confidence is stored as basis points from
+/// 0.00% through 100.00% so the derived contract remains deterministic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SceneChange {
+    pub source_frame: TimeCode,
+    pub confidence_basis_points: u16,
+}
+
+/// Derived, reproducible scene-difference analysis for one media asset.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AssetSceneChanges {
+    pub asset: AssetId,
+    pub content_sha256: String,
+    pub source_fps: Rational,
+    pub source_frames: TimeCode,
+    pub proxy_width: u32,
+    pub changes: Vec<SceneChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SceneStatus {
+    NotRequested,
+    Queued,
+    Hashing,
+    Analyzing,
+    Ready(Arc<AssetSceneChanges>),
+    NoVideo,
+    Failed(String),
+}
+
+impl SceneStatus {
+    #[must_use]
+    pub const fn is_running(&self) -> bool {
+        matches!(self, Self::Queued | Self::Hashing | Self::Analyzing)
+    }
+}
+
+/// A source silence span mapped through one clip onto project frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineSilenceSpan {
+    pub asset: AssetId,
+    pub track: TrackId,
+    pub clip: ClipId,
+    pub source_start: TimeCode,
+    pub source_end: TimeCode,
+    pub project_start: TimeCode,
+    pub project_end: TimeCode,
+}
+
+/// A source scene boundary mapped through one clip onto a project frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineSceneChange {
+    pub asset: AssetId,
+    pub track: TrackId,
+    pub clip: ClipId,
+    pub source_frame: TimeCode,
+    pub project_frame: TimeCode,
+    pub confidence_basis_points: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MediaError {
     #[error("media operation is not implemented")]
@@ -173,6 +271,24 @@ pub trait MediaEngine: Send + Sync {
         document: &Document,
         range: Option<std::ops::Range<TimeCode>>,
     ) -> Result<Vec<TimelineTranscriptWord>, MediaError>;
+    /// Queue windowed-RMS silence analysis without blocking the caller.
+    fn request_silence_detection(&self, asset: MediaAsset);
+    fn silence_status(&self, asset: AssetId) -> SilenceStatus;
+    fn timeline_silences(
+        &self,
+        document: &Document,
+        range: Option<std::ops::Range<TimeCode>>,
+        minimum_source_frames: TimeCode,
+    ) -> Result<Vec<TimelineSilenceSpan>, MediaError>;
+    /// Queue proxy-resolution scene analysis without blocking the caller.
+    fn request_scene_detection(&self, asset: MediaAsset);
+    fn scene_status(&self, asset: AssetId) -> SceneStatus;
+    fn timeline_scene_changes(
+        &self,
+        document: &Document,
+        range: Option<std::ops::Range<TimeCode>>,
+        minimum_confidence_basis_points: u16,
+    ) -> Result<Vec<TimelineSceneChange>, MediaError>;
     fn thumbnail_at(&self, t: TimeCode, max_w: u32) -> Result<RgbaImage, MediaError>;
     fn export(
         &self,

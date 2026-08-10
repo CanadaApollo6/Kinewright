@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use eframe::egui;
 use openreel_core::{
-    ClipId, FrameRounding, MediaAsset, MediaEngine, MediaKind, Operation, Rational, TimeCode,
-    TrackKind, map_frames_with_rounding, map_source_range_to_project,
+    ClipId, FrameRounding, MediaAsset, MediaEngine, MediaKind, Operation, Rational, SceneStatus,
+    SilenceStatus, TimeCode, TrackKind, map_frames_with_rounding, map_source_range_to_project,
 };
 use openreel_media::{WaveformData, timeline_source_at};
 
@@ -710,6 +710,14 @@ fn paint_clip(
     if dragging {
         painter.rect_filled(rect, radius::SM, color::SURFACE_ACTIVE);
     }
+    paint_derived_markers(
+        painter,
+        clip_bounds,
+        media,
+        asset,
+        source_range.clone(),
+        rect,
+    );
     painter.rect_stroke(
         rect,
         radius::SM,
@@ -744,6 +752,69 @@ fn paint_clip(
             radius::XS,
             color::ACCENT_72,
         );
+    }
+}
+
+fn paint_derived_markers(
+    painter: &egui::Painter,
+    clip_bounds: egui::Rect,
+    media: &openreel_media::FfmpegMediaEngine,
+    asset: &MediaAsset,
+    source_range: std::ops::Range<TimeCode>,
+    rect: egui::Rect,
+) {
+    let visible = rect.intersect(clip_bounds);
+    if !visible.is_positive() {
+        return;
+    }
+    let source_span = source_range
+        .end
+        .0
+        .saturating_sub(source_range.start.0)
+        .max(1);
+    let source_x = |frame: TimeCode| {
+        rect.left()
+            + frame.0.saturating_sub(source_range.start.0) as f32 / source_span as f32
+                * rect.width()
+    };
+
+    if let SilenceStatus::Ready(silences) = media.silence_status(asset.id) {
+        for span in &silences.spans {
+            let start = span.source_start.max(source_range.start);
+            let end = span.source_end.min(source_range.end);
+            if end.0.saturating_sub(start.0) < 6 {
+                continue;
+            }
+            let underline = egui::Rect::from_min_max(
+                egui::pos2(source_x(start).max(visible.left()), rect.bottom() - 3.0),
+                egui::pos2(source_x(end).min(visible.right()), rect.bottom() - 1.0),
+            );
+            if underline.is_positive() {
+                painter.rect_filled(underline, radius::NONE, color::TEXT_MUTED);
+            }
+        }
+    }
+
+    if let SceneStatus::Ready(scenes) = media.scene_status(asset.id) {
+        for change in &scenes.changes {
+            if change.confidence_basis_points < 1_000
+                || change.source_frame < source_range.start
+                || change.source_frame >= source_range.end
+            {
+                continue;
+            }
+            let x = source_x(change.source_frame);
+            if x < visible.left() || x > visible.right() {
+                continue;
+            }
+            painter.line_segment(
+                [
+                    egui::pos2(x, rect.top() + 19.0),
+                    egui::pos2(x, rect.bottom() - 3.0),
+                ],
+                egui::Stroke::new(1.0, color::TEXT_SECONDARY),
+            );
+        }
     }
 }
 

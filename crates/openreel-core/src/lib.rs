@@ -15,15 +15,16 @@ pub use agent::{
 };
 pub use journal::JournalCommand;
 pub use media::{
-    AssetTranscript, ExportCancellation, ExportProgress, ExportSettings, FrameTexture, MediaEngine,
-    MediaError, MediaEvent, PlaybackState, ProgressSink, RgbaImage, TimelineTranscriptWord,
-    TranscriptStatus, TranscriptWord,
+    AssetSceneChanges, AssetSilences, AssetTranscript, ExportCancellation, ExportProgress,
+    ExportSettings, FrameTexture, MediaEngine, MediaError, MediaEvent, PlaybackState, ProgressSink,
+    RgbaImage, SceneChange, SceneStatus, SilenceSpan, SilenceStatus, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, TranscriptWord,
 };
 pub use model::{
     AssetId, Clip, ClipId, Document, Effect, EffectId, MediaAsset, MediaKind, ParamValue, Track,
     TrackId, TrackKind, Transition,
 };
-pub use operation::{ApplyOp, OpError, Operation};
+pub use operation::{ApplyOp, BatchError, OpError, Operation, apply_batch};
 pub use time::{
     FrameRounding, Rational, TimeCode, TimeMappingError, map_frames,
     map_frames_with_rounding, map_source_range_to_project,

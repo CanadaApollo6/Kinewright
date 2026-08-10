@@ -3,11 +3,12 @@ use std::{sync::Arc, thread};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use thiserror::Error;
 
-use crate::{Clip, ClipId, Document, JournalCommand, OpError, Operation};
+use crate::{BatchError, Clip, ClipId, Document, JournalCommand, OpError, Operation, apply_batch};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Do(Operation),
+    DoBatch(Vec<Operation>),
     Undo,
     Redo,
     Query(Query),
@@ -39,6 +40,10 @@ pub enum Event {
     OpRejected {
         op: Operation,
         error: OpError,
+    },
+    BatchRejected {
+        operations: Vec<Operation>,
+        error: BatchError,
     },
     QueryResult(QueryResult),
 }
@@ -104,7 +109,7 @@ impl Core {
 #[derive(Clone)]
 struct HistoryEntry {
     document: Arc<Document>,
-    operation: Operation,
+    operations: Vec<Operation>,
 }
 
 struct CoreState {
@@ -130,10 +135,24 @@ impl CoreState {
         operation.apply(&mut after)?;
         self.undo.push(HistoryEntry {
             document: before,
-            operation: operation.clone(),
+            operations: vec![operation.clone()],
         });
         self.redo.clear();
         self.op_log.push(operation);
+        self.document = Arc::new(after);
+        Ok(Arc::clone(&self.document))
+    }
+
+    fn do_batch(&mut self, operations: Vec<Operation>) -> Result<Arc<Document>, BatchError> {
+        let before = Arc::clone(&self.document);
+        let mut after = (*before).clone();
+        apply_batch(&mut after, &operations)?;
+        self.undo.push(HistoryEntry {
+            document: before,
+            operations: operations.clone(),
+        });
+        self.redo.clear();
+        self.op_log.extend(operations);
         self.document = Arc::new(after);
         Ok(Arc::clone(&self.document))
     }
@@ -142,7 +161,7 @@ impl CoreState {
         if let Some(entry) = self.undo.pop() {
             self.redo.push(HistoryEntry {
                 document: Arc::clone(&self.document),
-                operation: entry.operation,
+                operations: entry.operations,
             });
             self.document = entry.document;
         }
@@ -153,7 +172,7 @@ impl CoreState {
         if let Some(entry) = self.redo.pop() {
             self.undo.push(HistoryEntry {
                 document: Arc::clone(&self.document),
-                operation: entry.operation,
+                operations: entry.operations,
             });
             self.document = entry.document;
         }
@@ -210,6 +229,14 @@ fn execute_command(state: &mut CoreState, command: Command) -> Event {
                 op: operation,
                 error,
             },
+        },
+        Command::DoBatch(operations) => match state.do_batch(operations.clone()) {
+            Ok(doc) => Event::DocumentChanged {
+                doc,
+                last_op: None,
+                journal_command: Some(JournalCommand::DoBatch(operations)),
+            },
+            Err(error) => Event::BatchRejected { operations, error },
         },
         Command::Undo => Event::DocumentChanged {
             doc: state.undo(),
@@ -324,6 +351,76 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn batch_broadcasts_once_appends_each_op_and_undoes_as_one_snapshot() {
+        let core = Core::spawn(Document::default()).unwrap();
+        let events = core.subscribe().unwrap();
+        let _initial = events.recv_timeout(Duration::from_secs(1)).unwrap();
+        let operations = vec![
+            Operation::AddAsset { asset: asset(1) },
+            Operation::AddTrack {
+                track: Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    clips: Vec::new(),
+                },
+            },
+        ];
+
+        core.send(Command::DoBatch(operations.clone())).unwrap();
+        let Event::DocumentChanged {
+            doc,
+            last_op: None,
+            journal_command: Some(JournalCommand::DoBatch(journaled)),
+        } = events.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("expected one batch document change");
+        };
+        assert_eq!(journaled, operations);
+        assert!(doc.asset(AssetId(1)).is_some());
+        assert_eq!(doc.tracks.len(), 1);
+        assert!(events.try_recv().is_err(), "batch emitted more than one broadcast");
+
+        core.send(Command::Query(Query::OpLog)).unwrap();
+        let Event::QueryResult(QueryResult::OpLog(log)) =
+            events.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("expected op log");
+        };
+        assert_eq!(&*log, &operations);
+
+        core.send(Command::Undo).unwrap();
+        let Event::DocumentChanged { doc, .. } =
+            events.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("expected undo document change");
+        };
+        assert_eq!(&*doc, &Document::default());
+    }
+
+    #[test]
+    fn rejected_batch_is_atomic_and_reports_the_failed_operation() {
+        let mut state = CoreState::new(Document::default());
+        let before = Arc::clone(&state.document);
+        let operations = vec![
+            Operation::AddAsset { asset: asset(1) },
+            Operation::AddAsset { asset: asset(1) },
+            Operation::AddAsset { asset: asset(2) },
+        ];
+
+        assert_eq!(
+            state.do_batch(operations),
+            Err(BatchError::OperationFailed {
+                op_number: 2,
+                error: OpError::DuplicateAsset(AssetId(1)),
+            })
+        );
+        assert_eq!(&*state.document, &*before);
+        assert!(state.undo.is_empty());
+        assert!(state.redo.is_empty());
+        assert!(state.op_log.is_empty());
+    }
+
     fn generated_document(lengths: &[u16], gaps: &[u8]) -> Document {
         let mut timeline_start = 0_i64;
         let clips = lengths
@@ -366,6 +463,63 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn batch_matches_sequential_application(
+            kinds in prop::collection::vec(any::<bool>(), 1..24),
+        ) {
+            let mut next_asset = 1_u64;
+            let mut next_track = 1_u64;
+            let operations = kinds
+                .into_iter()
+                .map(|is_asset| {
+                    if is_asset {
+                        let operation = Operation::AddAsset { asset: asset(next_asset) };
+                        next_asset += 1;
+                        operation
+                    } else {
+                        let operation = Operation::AddTrack {
+                            track: Track {
+                                id: TrackId(next_track),
+                                kind: TrackKind::Video,
+                                clips: Vec::new(),
+                            },
+                        };
+                        next_track += 1;
+                        operation
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut sequential = Document::default();
+            for operation in &operations {
+                operation.apply(&mut sequential).unwrap();
+            }
+            let mut batched = Document::default();
+            apply_batch(&mut batched, &operations).unwrap();
+            prop_assert_eq!(batched, sequential);
+        }
+
+        #[test]
+        fn batch_rejection_never_exposes_a_valid_prefix(
+            prefix_length in 1_usize..24,
+        ) {
+            let mut operations = (1..=prefix_length)
+                .map(|id| Operation::AddAsset { asset: asset(id as u64) })
+                .collect::<Vec<_>>();
+            operations.push(Operation::AddAsset { asset: asset(1) });
+            operations.push(Operation::AddAsset { asset: asset(999) });
+            let mut document = Document::default();
+            let before = document.clone();
+            let error = apply_batch(&mut document, &operations).unwrap_err();
+            prop_assert_eq!(
+                error,
+                BatchError::OperationFailed {
+                    op_number: prefix_length + 1,
+                    error: OpError::DuplicateAsset(AssetId(1)),
+                }
+            );
+            prop_assert_eq!(document, before);
+        }
+
         #[test]
         fn generated_documents_survive_arbitrary_do_undo_redo_sequences(
             lengths in prop::collection::vec(1_u16..80, 1..8),

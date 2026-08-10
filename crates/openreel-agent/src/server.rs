@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fmt::Write as _,
     future::Future,
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
     path::PathBuf,
@@ -15,7 +16,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use openreel_core::{
     AssetId, ClipId, Command, Core, Document, Event, MediaEngine, Operation, Query, QueryResult,
-    TimeCode, TimelineTranscriptWord, TranscriptStatus,
+    SceneStatus, SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
+    TimelineTranscriptWord, TranscriptStatus,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -36,14 +38,19 @@ use tokio::sync::oneshot;
 
 use crate::{
     render::{
-        render_asset_transcript, render_clip_info, render_timeline_state,
-        render_timeline_transcript,
+        render_asset_scene_changes, render_asset_silences, render_asset_transcript,
+        render_clip_info, render_timeline_scene_changes, render_timeline_silences,
+        render_timeline_state, render_timeline_transcript,
     },
-    schema::{SchemaError, decode_operation, operation_tools, schema_object},
+    schema::{
+        SchemaError, decode_operation, operation_tool_name, operation_tools, schema_object,
+    },
 };
 
 const THUMBNAIL_MAX_WIDTH: u32 = 512;
 const DEFAULT_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_MINIMUM_SILENCE_FRAMES: i64 = 6;
+const DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS: u16 = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmationRequest {
@@ -333,6 +340,28 @@ impl OpenReelMcp {
                     decode_args("get_timeline_transcript", arguments)?;
                 self.timeline_transcript(args.range)
             }
+            "get_silences" => {
+                let args: SilencesArgs = decode_args("get_silences", arguments)?;
+                self.asset_silences(args.asset_id, args.min_duration_frames)
+            }
+            "get_timeline_silences" => {
+                let args: TimelineDerivedArgs =
+                    decode_args("get_timeline_silences", arguments)?;
+                self.timeline_silences(args.range)
+            }
+            "get_scene_changes" => {
+                let args: SceneChangesArgs = decode_args("get_scene_changes", arguments)?;
+                self.asset_scene_changes(args.asset_id, args.min_confidence)
+            }
+            "get_timeline_scene_changes" => {
+                let args: TimelineDerivedArgs =
+                    decode_args("get_timeline_scene_changes", arguments)?;
+                self.timeline_scene_changes(args.range)
+            }
+            "apply_edit_plan" => {
+                let args: EditPlanArgs = decode_args("apply_edit_plan", arguments)?;
+                self.apply_edit_plan(args.operations)
+            }
             "import_media" => {
                 let args: ImportMediaArgs = decode_args("import_media", arguments)?;
                 self.import_media(args.path)
@@ -404,11 +433,12 @@ impl OpenReelMcp {
             Ok(Event::DocumentChanged { doc, .. }) => {
                 self.media.set_document(Arc::clone(&doc));
                 if let Some(asset) = imported_asset {
-                    self.media.request_transcription(asset);
+                    self.request_asset_analysis(asset);
                 }
                 success_text(state_delta(tool_name, before.as_deref(), &doc))
             }
             Ok(Event::OpRejected { error, .. }) => error_text(error.to_string()),
+            Ok(Event::BatchRejected { error, .. }) => error_text(error.to_string()),
             Ok(_) => error_text("Core returned the wrong operation result"),
             Err(error) => error_text(error.to_string()),
         }
@@ -420,6 +450,51 @@ impl OpenReelMcp {
             Err(error) => return Ok(error_text(error.to_string())),
         };
         Ok(self.apply_operation("import_media", Operation::AddAsset { asset }))
+    }
+
+    fn apply_edit_plan(&self, operations: Vec<Operation>) -> Result<CallToolResult, McpError> {
+        let before = self.document()?;
+        if let Some(description) = plan_confirmation_description(&before, &operations)
+            && let Err(reason) = self.confirmations.confirm("apply_edit_plan", description)
+        {
+            return Ok(error_text(format!(
+                "refused destructive tool apply_edit_plan: {reason}"
+            )));
+        }
+        let added_assets = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                Operation::AddAsset { asset } => Some(asset.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let event = self
+            .core
+            .request(Command::DoBatch(operations.clone()))
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        Ok(match event {
+            Event::DocumentChanged { doc, .. } => {
+                self.media.set_document(Arc::clone(&doc));
+                for asset in added_assets {
+                    self.request_asset_analysis(asset);
+                }
+                success_text(render_plan_outcomes(
+                    &operations,
+                    None,
+                    Some(state_delta("apply_edit_plan", Some(&before), &doc)),
+                ))
+            }
+            Event::BatchRejected { error, .. } => {
+                error_text(render_plan_outcomes(&operations, Some(&error), None))
+            }
+            _ => error_text("Core returned the wrong edit-plan result"),
+        })
+    }
+
+    fn request_asset_analysis(&self, asset: openreel_core::MediaAsset) {
+        self.media.request_transcription(asset.clone());
+        self.media.request_silence_detection(asset.clone());
+        self.media.request_scene_detection(asset);
     }
 
     fn frame_at(&self, timecode: TimeCode) -> Result<CallToolResult, McpError> {
@@ -466,6 +541,53 @@ impl OpenReelMcp {
         Ok(success_text(render_asset_transcript(asset_id, &status)))
     }
 
+    fn asset_silences(
+        &self,
+        asset_id: AssetId,
+        requested_minimum: Option<TimeCode>,
+    ) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let Some(asset) = document.asset(asset_id) else {
+            return Ok(error_text(format!("asset {asset_id} does not exist")));
+        };
+        let minimum = requested_minimum.unwrap_or(TimeCode(DEFAULT_MINIMUM_SILENCE_FRAMES));
+        if minimum <= TimeCode::ZERO {
+            return Ok(error_text("min_duration_frames must be positive"));
+        }
+        let mut status = self.media.silence_status(asset_id);
+        if status == SilenceStatus::NotRequested {
+            self.media.request_silence_detection(asset.clone());
+            status = self.media.silence_status(asset_id);
+        }
+        Ok(success_text(render_asset_silences(asset_id, &status, minimum)))
+    }
+
+    fn asset_scene_changes(
+        &self,
+        asset_id: AssetId,
+        requested_minimum: Option<f64>,
+    ) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let Some(asset) = document.asset(asset_id) else {
+            return Ok(error_text(format!("asset {asset_id} does not exist")));
+        };
+        let minimum = match requested_minimum {
+            Some(value) => match confidence_to_basis_points(value) {
+                Ok(value) => value,
+                Err(error) => return Ok(error_text(error)),
+            },
+            None => DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS,
+        };
+        let mut status = self.media.scene_status(asset_id);
+        if status == SceneStatus::NotRequested {
+            self.media.request_scene_detection(asset.clone());
+            status = self.media.scene_status(asset_id);
+        }
+        Ok(success_text(render_asset_scene_changes(
+            asset_id, &status, minimum,
+        )))
+    }
+
     fn timeline_transcript(
         &self,
         requested: Option<TranscriptRangeArgs>,
@@ -505,6 +627,74 @@ impl OpenReelMcp {
         }
         Ok(success_text(rendered))
     }
+
+    fn timeline_silences(
+        &self,
+        requested: Option<TranscriptRangeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let range = validated_timeline_range(&document, requested, "timeline silence")?;
+        for asset in &document.media_pool {
+            if self.media.silence_status(asset.id) == SilenceStatus::NotRequested {
+                self.media.request_silence_detection(asset.clone());
+            }
+        }
+        let spans: Vec<TimelineSilenceSpan> = match self.media.timeline_silences(
+            &document,
+            Some(range.clone()),
+            TimeCode(DEFAULT_MINIMUM_SILENCE_FRAMES),
+        ) {
+            Ok(spans) => spans,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let mut rendered = render_timeline_silences(&document, range, &spans);
+        for asset in &document.media_pool {
+            let status = self.media.silence_status(asset.id);
+            if !matches!(status, SilenceStatus::Ready(_) | SilenceStatus::NoAudio) {
+                rendered.push('\n');
+                rendered.push_str(&render_asset_silences(
+                    asset.id,
+                    &status,
+                    TimeCode(DEFAULT_MINIMUM_SILENCE_FRAMES),
+                ));
+            }
+        }
+        Ok(success_text(rendered))
+    }
+
+    fn timeline_scene_changes(
+        &self,
+        requested: Option<TranscriptRangeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let range = validated_timeline_range(&document, requested, "timeline scene")?;
+        for asset in &document.media_pool {
+            if self.media.scene_status(asset.id) == SceneStatus::NotRequested {
+                self.media.request_scene_detection(asset.clone());
+            }
+        }
+        let changes: Vec<TimelineSceneChange> = match self.media.timeline_scene_changes(
+            &document,
+            Some(range.clone()),
+            DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS,
+        ) {
+            Ok(changes) => changes,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let mut rendered = render_timeline_scene_changes(&document, range, &changes);
+        for asset in &document.media_pool {
+            let status = self.media.scene_status(asset.id);
+            if !matches!(status, SceneStatus::Ready(_) | SceneStatus::NoVideo) {
+                rendered.push('\n');
+                rendered.push_str(&render_asset_scene_changes(
+                    asset.id,
+                    &status,
+                    DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS,
+                ));
+            }
+        }
+        Ok(success_text(rendered))
+    }
 }
 
 impl ServerHandler for OpenReelMcp {
@@ -512,7 +702,7 @@ impl ServerHandler for OpenReelMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openreel", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Inspect the timeline before editing. Frame values are exact project frames. Transcript inspectors expose source and project word boundaries. For filler-word removal, compute precise boundaries from get_timeline_transcript and edit only through TrimClip, SplitClip, and DeleteClip operations. Use import_media for filesystem paths.",
+                "Inspect the timeline, transcript, silences, and scene changes before editing. Resolve ordinal targets against the initial timeline state. Frame values are exact project frames. Prefer one atomic apply_edit_plan after inspection instead of separate operation tools. Use import_media for filesystem paths.",
             )
     }
 
@@ -575,6 +765,37 @@ struct TranscriptArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct SilencesArgs {
+    /// Stable asset id shown by get_timeline_state.
+    asset_id: AssetId,
+    /// Optional minimum silence duration in exact source frames. Defaults to 6.
+    #[serde(default)]
+    min_duration_frames: Option<TimeCode>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SceneChangesArgs {
+    /// Stable asset id shown by get_timeline_state.
+    asset_id: AssetId,
+    /// Optional confidence threshold from 0 through 100 percent. Defaults to 10.
+    #[serde(default)]
+    min_confidence: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TimelineDerivedArgs {
+    /// Optional half-open range in exact project frames. Omit for the full timeline.
+    #[serde(default)]
+    range: Option<TranscriptRangeArgs>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EditPlanArgs {
+    /// Ordered operations. Each item uses the generated Operation schema and sees prior effects.
+    operations: Vec<Operation>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct TimelineTranscriptArgs {
     /// Optional half-open range in exact project frames. Omit for the full timeline.
     #[serde(default)]
@@ -602,6 +823,42 @@ fn inspector_tools() -> Vec<Tool> {
             schema_object::<EmptyArgs>(),
         )
         .with_annotations(read_only()),
+        Tool::new(
+            "get_silences",
+            "Return cached windowed-RMS silence spans for one asset in exact source frames and seconds, or background analysis status.",
+            schema_object::<SilencesArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_timeline_silences",
+            "Return cached silence spans mapped through clips to exact project frames and seconds.",
+            schema_object::<TimelineDerivedArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_scene_changes",
+            "Return cached proxy-resolution scene boundaries and confidence scores for one asset.",
+            schema_object::<SceneChangesArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_timeline_scene_changes",
+            "Return cached scene boundaries mapped through clips to exact project frames and seconds.",
+            schema_object::<TimelineDerivedArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "apply_edit_plan",
+            "Atomically validate and apply an ordered array of generated OpenReel Operations as one undo entry.",
+            schema_object::<EditPlanArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(false)
+                .open_world(false),
+        ),
         Tool::new(
             "get_clip_info",
             "Return detailed live information for one clip id.",
@@ -687,12 +944,111 @@ fn state_delta(tool_name: &str, before: Option<&Document>, after: &Document) -> 
     }
 }
 
+fn validated_timeline_range(
+    document: &Document,
+    requested: Option<TranscriptRangeArgs>,
+    label: &str,
+) -> Result<std::ops::Range<TimeCode>, McpError> {
+    let range = requested.map_or(TimeCode::ZERO..document.duration, |range| {
+        range.start..range.end
+    });
+    if range.start < TimeCode::ZERO || range.end <= range.start || range.end > document.duration {
+        return Err(McpError::invalid_params(
+            format!(
+                "{label} range {}..{} is outside project range 0..{}",
+                range.start.0, range.end.0, document.duration.0
+            ),
+            None,
+        ));
+    }
+    Ok(range)
+}
+
+fn confidence_to_basis_points(confidence: f64) -> Result<u16, String> {
+    if !confidence.is_finite() || !(0.0..=100.0).contains(&confidence) {
+        return Err("min_confidence must be between 0 and 100 percent".to_owned());
+    }
+    Ok((confidence * 100.0).round() as u16)
+}
+
+fn plan_confirmation_description(document: &Document, operations: &[Operation]) -> Option<String> {
+    let mut candidate = document.clone();
+    let mut removed_clips = 0_usize;
+    let mut removed_tracks = 0_usize;
+    for operation in operations {
+        match operation {
+            Operation::DeleteClip { clip } if candidate.clip(*clip).is_some() => {
+                removed_clips = removed_clips.saturating_add(1);
+            }
+            Operation::RemoveTrack { track } => {
+                let existing = candidate.tracks.iter().find(|candidate| candidate.id == *track)?;
+                if !existing.clips.is_empty() {
+                    removed_tracks = removed_tracks.saturating_add(1);
+                    removed_clips = removed_clips.saturating_add(existing.clips.len());
+                }
+            }
+            _ => {}
+        }
+        if operation.apply(&mut candidate).is_err() {
+            return None;
+        }
+    }
+    if removed_clips == 0 && removed_tracks == 0 {
+        return None;
+    }
+    Some(format!(
+        "Plan removes {removed_clips} {} and {removed_tracks} {} - approve?",
+        if removed_clips == 1 { "clip" } else { "clips" },
+        if removed_tracks == 1 { "track" } else { "tracks" },
+    ))
+}
+
+fn render_plan_outcomes(
+    operations: &[Operation],
+    error: Option<&openreel_core::BatchError>,
+    summary: Option<String>,
+) -> String {
+    let failed = match error {
+        Some(openreel_core::BatchError::OperationFailed { op_number, .. }) => Some(*op_number),
+        _ => None,
+    };
+    let mut output = String::new();
+    for (index, operation) in operations.iter().enumerate() {
+        let number = index + 1;
+        let outcome = match (error, failed) {
+            (None, _) => "applied".to_owned(),
+            (Some(openreel_core::BatchError::Empty), _) => "not run: empty plan".to_owned(),
+            (Some(openreel_core::BatchError::OperationFailed { error, .. }), Some(failed))
+                if number == failed => format!("rejected: {error}"),
+            (Some(_), Some(failed)) if number < failed => "rolled back".to_owned(),
+            (Some(_), Some(_)) => "not run".to_owned(),
+            _ => "not run".to_owned(),
+        };
+        let _ = writeln!(
+            output,
+            "op {number} {}: {outcome}",
+            operation_tool_name(operation)
+        );
+    }
+    if let Some(error) = error {
+        let _ = writeln!(output, "plan rejected atomically: {error}");
+    }
+    if let Some(summary) = summary {
+        let _ = writeln!(output, "{summary}");
+    }
+    if output.ends_with('\n') {
+        output.pop();
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use openreel_core::{
         AssetId, Clip, ExportSettings, FrameTexture, MediaAsset, MediaError,
-        MediaEvent, MediaKind, ProgressSink, Rational, RgbaImage, Track, TrackId, TrackKind,
+        MediaEvent, MediaKind, ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus,
+        TimelineSceneChange, TimelineSilenceSpan, Track, TrackId, TrackKind,
     };
     use serde_json::json;
     use std::{path::Path, time::Instant};
@@ -737,6 +1093,36 @@ mod tests {
             _document: &Document,
             _range: Option<std::ops::Range<TimeCode>>,
         ) -> Result<Vec<TimelineTranscriptWord>, MediaError> {
+            Ok(Vec::new())
+        }
+
+        fn request_silence_detection(&self, _asset: MediaAsset) {}
+
+        fn silence_status(&self, _asset: AssetId) -> SilenceStatus {
+            SilenceStatus::NotRequested
+        }
+
+        fn timeline_silences(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+            _minimum_source_frames: TimeCode,
+        ) -> Result<Vec<TimelineSilenceSpan>, MediaError> {
+            Ok(Vec::new())
+        }
+
+        fn request_scene_detection(&self, _asset: MediaAsset) {}
+
+        fn scene_status(&self, _asset: AssetId) -> SceneStatus {
+            SceneStatus::NotRequested
+        }
+
+        fn timeline_scene_changes(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+            _minimum_confidence_basis_points: u16,
+        ) -> Result<Vec<TimelineSceneChange>, MediaError> {
             Ok(Vec::new())
         }
 
@@ -788,6 +1174,15 @@ mod tests {
     fn delete_request() -> CallToolRequestParams {
         CallToolRequestParams::new("delete_clip").with_arguments(
             json!({"clip": 1}).as_object().unwrap().clone(),
+        )
+    }
+
+    fn plan_request(operations: serde_json::Value) -> CallToolRequestParams {
+        CallToolRequestParams::new("apply_edit_plan").with_arguments(
+            json!({"operations": operations})
+                .as_object()
+                .unwrap()
+                .clone(),
         )
     }
 
@@ -901,5 +1296,101 @@ mod tests {
         assert!(broker.reject(request.id, "keep the track"));
         let result = result.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
         assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn generated_plan_schema_composes_the_operation_schema() {
+        let (core, media) = fixture();
+        let service = OpenReelMcp::new(core, media, ConfirmationBroker::default());
+        let tool = service
+            .tools()
+            .unwrap()
+            .into_iter()
+            .find(|tool| tool.name == "apply_edit_plan")
+            .unwrap();
+        let schema = serde_json::to_string(&tool.input_schema).unwrap();
+        assert!(schema.contains("AddTrack"));
+        assert!(schema.contains("DeleteClip"));
+        assert!(schema.contains("operations"));
+    }
+
+    #[test]
+    fn edit_plan_applies_atomically_and_undoes_once() {
+        let (core, media) = fixture();
+        let original = match core.request(Command::Query(Query::Document)).unwrap() {
+            Event::QueryResult(QueryResult::Document(document)) => document,
+            _ => panic!("expected document"),
+        };
+        let service = OpenReelMcp::new(core.clone(), media, ConfirmationBroker::default());
+        let result = service
+            .call_blocking(plan_request(json!([
+                {"AddTrack": {"track": {"id": 2, "kind": "Video", "clips": []}}},
+                {"MoveClip": {"clip": 1, "to_track": 2, "to": 0}}
+            ])))
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        let text = &result.content[0].as_text().unwrap().text;
+        assert!(text.contains("op 1 add_track: applied"));
+        assert!(text.contains("op 2 move_clip: applied"));
+
+        let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
+            panic!("expected undo result");
+        };
+        assert_eq!(&*doc, &*original);
+    }
+
+    #[test]
+    fn mixed_validity_edit_plan_rejects_without_partial_state() {
+        let (core, media) = fixture();
+        let service = OpenReelMcp::new(core.clone(), media, ConfirmationBroker::default());
+        let result = service
+            .call_blocking(plan_request(json!([
+                {"AddTrack": {"track": {"id": 2, "kind": "Video", "clips": []}}},
+                {"AddTrack": {"track": {"id": 2, "kind": "Video", "clips": []}}}
+            ])))
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let text = &result.content[0].as_text().unwrap().text;
+        assert!(text.contains("op 1 add_track: rolled back"));
+        assert!(text.contains("op 2 add_track: rejected"));
+        let Event::QueryResult(QueryResult::Document(document)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected document");
+        };
+        assert!(document.tracks.iter().all(|track| track.id != TrackId(2)));
+    }
+
+    #[test]
+    fn destructive_edit_plan_uses_one_summary_confirmation_for_approve_and_reject() {
+        for approve in [true, false] {
+            let (core, media) = fixture();
+            let broker = ConfirmationBroker::with_timeout(Duration::from_secs(1));
+            let result = invoke_in_background(
+                OpenReelMcp::new(core.clone(), media, broker.clone()),
+                plan_request(json!([
+                    {"RemoveTrack": {"track": 1}}
+                ])),
+            );
+            let request = wait_for_request(&broker);
+            assert_eq!(request.tool_name, "apply_edit_plan");
+            assert_eq!(
+                request.description,
+                "Plan removes 1 clip and 1 track - approve?"
+            );
+            if approve {
+                assert!(broker.approve(request.id));
+            } else {
+                assert!(broker.reject(request.id, "keep the plan unchanged"));
+            }
+            let result = result.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
+            assert_eq!(result.is_error, Some(!approve));
+            let Event::QueryResult(QueryResult::Document(document)) =
+                core.request(Command::Query(Query::Document)).unwrap()
+            else {
+                panic!("expected document");
+            };
+            assert_eq!(document.tracks.is_empty(), approve);
+        }
     }
 }

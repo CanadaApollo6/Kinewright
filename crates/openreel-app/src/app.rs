@@ -452,7 +452,7 @@ impl OpenReelApp {
         self.visual_cache.clear();
         self.media.set_document(Arc::clone(&self.document));
         for asset in &self.document.media_pool {
-            self.media.request_transcription(asset.clone());
+            self.request_asset_analysis(asset.clone());
         }
         self.media.request_frame(TimeCode::ZERO);
         Ok(())
@@ -464,6 +464,12 @@ impl OpenReelApp {
         } else {
             self.status = "Applying edit…".to_owned();
         }
+    }
+
+    fn request_asset_analysis(&self, asset: MediaAsset) {
+        self.media.request_transcription(asset.clone());
+        self.media.request_silence_detection(asset.clone());
+        self.media.request_scene_detection(asset);
     }
 
     pub(crate) fn undo(&mut self) {
@@ -510,6 +516,12 @@ impl OpenReelApp {
         while let Ok(event) = self.core_events.try_recv() {
             match event {
                 Event::DocumentChanged { doc, last_op, .. } => {
+                    let new_assets = doc
+                        .media_pool
+                        .iter()
+                        .filter(|asset| self.document.asset(asset.id).is_none())
+                        .cloned()
+                        .collect::<Vec<_>>();
                     self.document = Arc::clone(&doc);
                     if self
                         .selected_clip
@@ -535,7 +547,9 @@ impl OpenReelApp {
                     self.media.request_frame(self.position);
                     if let Some(Operation::AddAsset { asset }) = &last_op {
                         self.selected_asset = Some(asset.id);
-                        self.media.request_transcription(asset.clone());
+                    }
+                    for asset in new_assets {
+                        self.request_asset_analysis(asset);
                     }
                     if let Some(operation) = last_op {
                         self.status = operation_status(&operation);
@@ -544,8 +558,18 @@ impl OpenReelApp {
                 Event::OpRejected { error, .. } => {
                     self.record_error("Operations", format!("Edit rejected: {error}"));
                 }
+                Event::BatchRejected { error, .. } => {
+                    self.record_error("Operations", format!("Edit plan rejected: {error}"));
+                }
                 Event::QueryResult(_) => {}
             }
+        }
+
+        if self.document.media_pool.iter().any(|asset| {
+            self.media.silence_status(asset.id).is_running()
+                || self.media.scene_status(asset.id).is_running()
+        }) {
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
 
         while let Ok(event) = self.media_events.try_recv() {

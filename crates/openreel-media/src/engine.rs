@@ -11,8 +11,9 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use openreel_core::{
     AssetId, ClipId, Document, ExportSettings, FrameTexture, MediaAsset, MediaEngine, MediaError,
-    MediaEvent, MediaKind, PlaybackState, ProgressSink, Rational, RgbaImage, TimeCode,
-    TimelineTranscriptWord, TranscriptStatus,
+    MediaEvent, MediaKind, PlaybackState, ProgressSink, Rational, RgbaImage, SceneStatus,
+    SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TranscriptStatus,
 };
 
 use crate::{
@@ -21,6 +22,7 @@ use crate::{
     clock::samples_to_frame,
     compositor::GpuContext,
     decode::{probe_path, thumbnail},
+    derived::{DerivedAnalysisConfig, DerivedAnalysisService},
     render::{DecodeStrategy, FrameRenderer, PREVIEW_MAX_WIDTH, RenderScale},
     timeline_source_at,
     transcript::{TranscriptService, default_data_dir},
@@ -99,6 +101,7 @@ pub struct FfmpegMediaEngine {
     export_document: Arc<RwLock<Arc<Document>>>,
     transcripts: TranscriptService,
     visual_assets: VisualAssetService,
+    derived_analysis: DerivedAnalysisService,
 }
 
 impl FfmpegMediaEngine {
@@ -121,6 +124,18 @@ impl FfmpegMediaEngine {
     pub fn new_with_gpu_and_data_dir(
         gpu: GpuContext,
         data_dir: PathBuf,
+    ) -> Result<Self, MediaError> {
+        Self::new_with_gpu_data_dir_and_analysis_config(
+            gpu,
+            data_dir,
+            DerivedAnalysisConfig::default(),
+        )
+    }
+
+    pub fn new_with_gpu_data_dir_and_analysis_config(
+        gpu: GpuContext,
+        data_dir: PathBuf,
+        analysis_config: DerivedAnalysisConfig,
     ) -> Result<Self, MediaError> {
         crate::initialize_ffmpeg()?;
         let (control_tx, control_rx) = unbounded();
@@ -153,6 +168,7 @@ impl FfmpegMediaEngine {
             .map_err(|error| MediaError::Backend(error.to_string()))?;
 
         let visual_assets = VisualAssetService::new(data_dir.clone())?;
+        let derived_analysis = DerivedAnalysisService::new(data_dir.clone(), analysis_config)?;
         Ok(Self {
             control_tx,
             frames_rx,
@@ -164,6 +180,7 @@ impl FfmpegMediaEngine {
             export_document: Arc::new(RwLock::new(Arc::new(Document::default()))),
             transcripts: TranscriptService::new(data_dir)?,
             visual_assets,
+            derived_analysis,
         })
     }
 
@@ -268,6 +285,45 @@ impl MediaEngine for FfmpegMediaEngine {
         range: Option<std::ops::Range<TimeCode>>,
     ) -> Result<Vec<TimelineTranscriptWord>, MediaError> {
         self.transcripts.timeline_words(document, range)
+    }
+
+    fn request_silence_detection(&self, asset: MediaAsset) {
+        self.derived_analysis.request_silences(asset);
+    }
+
+    fn silence_status(&self, asset: AssetId) -> SilenceStatus {
+        self.derived_analysis.silence_status(asset)
+    }
+
+    fn timeline_silences(
+        &self,
+        document: &Document,
+        range: Option<std::ops::Range<TimeCode>>,
+        minimum_source_frames: TimeCode,
+    ) -> Result<Vec<TimelineSilenceSpan>, MediaError> {
+        self.derived_analysis
+            .timeline_silences(document, range, minimum_source_frames)
+    }
+
+    fn request_scene_detection(&self, asset: MediaAsset) {
+        self.derived_analysis.request_scenes(asset);
+    }
+
+    fn scene_status(&self, asset: AssetId) -> SceneStatus {
+        self.derived_analysis.scene_status(asset)
+    }
+
+    fn timeline_scene_changes(
+        &self,
+        document: &Document,
+        range: Option<std::ops::Range<TimeCode>>,
+        minimum_confidence_basis_points: u16,
+    ) -> Result<Vec<TimelineSceneChange>, MediaError> {
+        self.derived_analysis.timeline_scenes(
+            document,
+            range,
+            minimum_confidence_basis_points,
+        )
     }
 
     fn thumbnail_at(&self, at: TimeCode, max_width: u32) -> Result<RgbaImage, MediaError> {

@@ -86,6 +86,27 @@ frame because the next coalesced request may supersede it. The remaining
 headroom below 256 MiB is for the current decoder lookahead, compositor output,
 and channel-owned frame.
 
+## Derived audio and scene analysis
+
+Silence and scene data are reproducible derived assets. They never enter the
+project `Document` or operation journal. Import only queues background work;
+hashing, cache access, audio decode, and proxy video decode stay off the UI
+thread. Cache files are keyed by the source SHA-256 plus the relevant analysis
+configuration, written atomically, and treated as misses when corrupt or when
+their source metadata or algorithm version does not match.
+
+Silence analysis decodes 48 kHz mono audio and measures non-overlapping 10 ms
+RMS windows. The default threshold is -40.00 dBFS. Window boundaries map back
+to the asset's rational frame rate using floor starts and ceil ends, and callers
+apply an integer source-frame minimum duration (six frames by default).
+
+Scene analysis decodes sequentially at a maximum 320-pixel proxy width. It
+combines normalized luma SAD with a 64-bin luma histogram distance, then uses a
+temporal-difference score to suppress persistent motion in the same manner as
+`scdet`. Confidence is stored as integer basis points. The UI and timeline
+tools default to a 10.00% threshold; lower-level cached candidates remain
+available for callers that request another threshold.
+
 ## Unsupported or damaged media
 
 Probe verifies that the linked FFmpeg build has decoders for every selected

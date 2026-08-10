@@ -6,6 +6,7 @@ mod cache;
 mod clock;
 mod compositor;
 mod decode;
+mod derived;
 mod engine;
 mod export;
 mod render;
@@ -26,6 +27,12 @@ pub use analysis::{
 pub use cache::select_frame_for_position;
 pub use clock::{frame_to_samples, samples_to_frame};
 pub use compositor::{Compositor, CompositorLayer, GpuContext};
+pub use derived::{
+    DEFAULT_MINIMUM_SILENCE_FRAMES, DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS,
+    DEFAULT_SCENE_PROXY_WIDTH, DEFAULT_SILENCE_THRESHOLD_DBFS_HUNDREDTHS,
+    DEFAULT_SILENCE_WINDOW_MILLISECONDS, DerivedAnalysisConfig, SceneDetectionConfig,
+    SilenceDetectionConfig,
+};
 pub use engine::FfmpegMediaEngine;
 pub use timeline::{TimelineSource, TimelineVideoLayer, timeline_source_at, video_layers_at};
 pub use transcript::{

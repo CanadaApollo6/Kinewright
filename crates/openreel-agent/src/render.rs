@@ -1,8 +1,9 @@
 use std::fmt::Write as _;
 
 use openreel_core::{
-    AssetId, ClipId, Document, Effect, ParamValue, Rational, TimeCode,
-    TimelineTranscriptWord, TrackKind, TranscriptStatus, map_source_range_to_project,
+    AssetId, ClipId, Document, Effect, ParamValue, Rational, SceneStatus, SilenceStatus,
+    TimeCode, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TrackKind,
+    TranscriptStatus, map_source_range_to_project,
 };
 
 #[must_use]
@@ -230,6 +231,155 @@ pub fn render_timeline_transcript(
             frame_and_seconds(word.source_start, source_fps),
             frame_and_seconds(word.source_end, source_fps),
             word.text
+        );
+    }
+    output.pop();
+    output
+}
+
+#[must_use]
+pub fn render_asset_silences(
+    asset: AssetId,
+    status: &SilenceStatus,
+    minimum_duration: TimeCode,
+) -> String {
+    match status {
+        SilenceStatus::NotRequested => format!("asset {asset} silences status=not-requested"),
+        SilenceStatus::Queued => format!("asset {asset} silences status=queued"),
+        SilenceStatus::Hashing => format!("asset {asset} silences status=hashing"),
+        SilenceStatus::Analyzing => format!("asset {asset} silences status=analyzing"),
+        SilenceStatus::NoAudio => format!("asset {asset} silences: no audio stream"),
+        SilenceStatus::Failed(error) => {
+            format!("asset {asset} silences status=failed error={error:?}")
+        }
+        SilenceStatus::Ready(silences) => {
+            let spans = silences
+                .spans
+                .iter()
+                .filter(|span| {
+                    span.source_end.0.saturating_sub(span.source_start.0)
+                        >= minimum_duration.0
+                })
+                .collect::<Vec<_>>();
+            let mut output = format!(
+                "asset {asset} silences fps={}/{} threshold={:.2}dBFS min_duration={} spans={}\n",
+                silences.source_fps.numerator(),
+                silences.source_fps.denominator(),
+                f64::from(silences.threshold_dbfs_hundredths) / 100.0,
+                frame_and_seconds(minimum_duration, silences.source_fps),
+                spans.len()
+            );
+            for span in spans {
+                let duration = TimeCode(span.source_end.0.saturating_sub(span.source_start.0));
+                let _ = writeln!(
+                    output,
+                    "{}..{} duration={}",
+                    frame_and_seconds(span.source_start, silences.source_fps),
+                    frame_and_seconds(span.source_end, silences.source_fps),
+                    frame_and_seconds(duration, silences.source_fps),
+                );
+            }
+            output.pop();
+            output
+        }
+    }
+}
+
+#[must_use]
+pub fn render_timeline_silences(
+    document: &Document,
+    range: std::ops::Range<TimeCode>,
+    spans: &[TimelineSilenceSpan],
+) -> String {
+    let mut output = format!(
+        "timeline silences range={}..{} spans={}\n",
+        frame_and_seconds(range.start, document.fps),
+        frame_and_seconds(range.end, document.fps),
+        spans.len()
+    );
+    for span in spans {
+        let source_fps = document.asset(span.asset).map_or(document.fps, |asset| asset.fps);
+        let _ = writeln!(
+            output,
+            "clip={} asset={} project={}..{} source={}..{}",
+            span.clip,
+            span.asset,
+            frame_and_seconds(span.project_start, document.fps),
+            frame_and_seconds(span.project_end, document.fps),
+            frame_and_seconds(span.source_start, source_fps),
+            frame_and_seconds(span.source_end, source_fps),
+        );
+    }
+    output.pop();
+    output
+}
+
+#[must_use]
+pub fn render_asset_scene_changes(
+    asset: AssetId,
+    status: &SceneStatus,
+    minimum_confidence_basis_points: u16,
+) -> String {
+    match status {
+        SceneStatus::NotRequested => format!("asset {asset} scene changes status=not-requested"),
+        SceneStatus::Queued => format!("asset {asset} scene changes status=queued"),
+        SceneStatus::Hashing => format!("asset {asset} scene changes status=hashing"),
+        SceneStatus::Analyzing => format!("asset {asset} scene changes status=analyzing"),
+        SceneStatus::NoVideo => format!("asset {asset} scene changes: no video stream"),
+        SceneStatus::Failed(error) => {
+            format!("asset {asset} scene changes status=failed error={error:?}")
+        }
+        SceneStatus::Ready(scenes) => {
+            let changes = scenes
+                .changes
+                .iter()
+                .filter(|change| {
+                    change.confidence_basis_points >= minimum_confidence_basis_points
+                })
+                .collect::<Vec<_>>();
+            let mut output = format!(
+                "asset {asset} scene changes fps={}/{} min_confidence={:.2}% boundaries={}\n",
+                scenes.source_fps.numerator(),
+                scenes.source_fps.denominator(),
+                f64::from(minimum_confidence_basis_points) / 100.0,
+                changes.len()
+            );
+            for change in changes {
+                let _ = writeln!(
+                    output,
+                    "{} confidence={:.2}%",
+                    frame_and_seconds(change.source_frame, scenes.source_fps),
+                    f64::from(change.confidence_basis_points) / 100.0,
+                );
+            }
+            output.pop();
+            output
+        }
+    }
+}
+
+#[must_use]
+pub fn render_timeline_scene_changes(
+    document: &Document,
+    range: std::ops::Range<TimeCode>,
+    changes: &[TimelineSceneChange],
+) -> String {
+    let mut output = format!(
+        "timeline scene changes range={}..{} boundaries={}\n",
+        frame_and_seconds(range.start, document.fps),
+        frame_and_seconds(range.end, document.fps),
+        changes.len()
+    );
+    for change in changes {
+        let source_fps = document.asset(change.asset).map_or(document.fps, |asset| asset.fps);
+        let _ = writeln!(
+            output,
+            "clip={} asset={} project={} source={} confidence={:.2}%",
+            change.clip,
+            change.asset,
+            frame_and_seconds(change.project_frame, document.fps),
+            frame_and_seconds(change.source_frame, source_fps),
+            f64::from(change.confidence_basis_points) / 100.0,
         );
     }
     output.pop();

@@ -335,7 +335,7 @@ struct AudioDecoder {
     path: PathBuf,
     input: ffmpeg::format::context::Input,
     decoder: ffmpeg::decoder::Audio,
-    resampler: ffmpeg::software::resampling::Context,
+    resampler: Option<ffmpeg::software::resampling::Context>,
     stream_index: usize,
     stream_time_base: ffmpeg::Rational,
     stream_start: i64,
@@ -374,21 +374,6 @@ impl AudioDecoder {
             .decoder()
             .audio()
             .map_err(|error| media_error(path, "could not open the audio decoder", error))?;
-        let input_layout = if decoder.channel_layout().is_empty() {
-            ffmpeg::ChannelLayout::default(i32::from(decoder.channels()))
-        } else {
-            decoder.channel_layout()
-        };
-        let output_layout = ffmpeg::ChannelLayout::default(i32::from(output_channels));
-        let resampler = ffmpeg::software::resampling::Context::get(
-            decoder.format(),
-            input_layout,
-            decoder.rate(),
-            ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Planar),
-            output_layout,
-            output_rate,
-        )
-        .map_err(|error| media_error(path, "could not create audio resampler", error))?;
         let target_us = i64::try_from(
             u128::from(target_sample).saturating_mul(u128::from(AV_TIME_BASE as u64))
                 / u128::from(output_rate),
@@ -402,7 +387,7 @@ impl AudioDecoder {
             path: path.to_path_buf(),
             input,
             decoder,
-            resampler,
+            resampler: None,
             stream_index,
             stream_time_base,
             stream_start,
@@ -457,10 +442,55 @@ impl AudioDecoder {
         let mut decoded = ffmpeg::frame::Audio::empty();
         while self.decoder.receive_frame(&mut decoded).is_ok() {
             let pts = decoded.timestamp();
-            let mut converted = ffmpeg::frame::Audio::empty();
+            let decoded_format = decoded.format();
+            let mut decoded_layout = decoded.channel_layout();
+            if decoded_layout.is_empty() {
+                decoded_layout = ffmpeg::ChannelLayout::default(i32::from(decoded.channels()));
+                decoded.set_channel_layout(decoded_layout);
+            }
+            let decoded_rate = decoded.rate();
+            if self.resampler.is_none() {
+                let output_layout =
+                    ffmpeg::ChannelLayout::default(i32::try_from(self.output_channels).unwrap_or(1));
+                self.resampler = Some(
+                    ffmpeg::software::resampling::Context::get(
+                        decoded_format,
+                        decoded_layout,
+                        decoded_rate,
+                        ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Planar),
+                        output_layout,
+                        self.output_rate,
+                    )
+                    .map_err(|error| {
+                        media_error(&self.path, "could not create audio resampler", error)
+                    })?,
+                );
+            }
+            let output = *self
+                .resampler
+                .as_ref()
+                .expect("resampler is initialized from the first decoded frame")
+                .output();
+            let output_samples = u64::try_from(decoded.samples())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(u64::from(output.rate))
+                .saturating_add(u64::from(decoded_rate).saturating_sub(1))
+                / u64::from(decoded_rate.max(1));
+            let output_samples = usize::try_from(output_samples.saturating_add(64))
+                .unwrap_or(usize::MAX);
+            let mut converted =
+                ffmpeg::frame::Audio::new(output.format, output_samples, output.channel_layout);
+            converted.set_rate(output.rate);
             self.resampler
+                .as_mut()
+                .expect("resampler is initialized from the first decoded frame")
                 .run(&decoded, &mut converted)
-                .map_err(|error| media_error(&self.path, "audio resampling failed", error))?;
+                .map_err(|error| {
+                    MediaError::Backend(format!(
+                        "audio resampling failed for {} ({decoded_format:?}, {decoded_layout:?}, {decoded_rate} Hz): {error}",
+                        self.path.display()
+                    ))
+                })?;
             let samples = converted.samples();
             if samples == 0 {
                 continue;

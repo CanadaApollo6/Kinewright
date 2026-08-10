@@ -301,6 +301,14 @@ fn replay(parsed: ParsedJournal) -> Inspection {
                 });
                 break;
             }
+            Event::BatchRejected { error, .. } => {
+                damage = Some(Damage {
+                    offset: record.start,
+                    ignored_bytes: parsed.byte_len - record.start,
+                    reason: format!("a journaled edit plan was rejected during replay: {error}"),
+                });
+                break;
+            }
             _ => {
                 damage = Some(Damage {
                     offset: record.start,
@@ -782,6 +790,9 @@ mod tests {
             match core.request(command.clone().into()).unwrap() {
                 Event::DocumentChanged { doc, .. } => document = (*doc).clone(),
                 Event::OpRejected { error, .. } => panic!("fixture command was rejected: {error}"),
+                Event::BatchRejected { error, .. } => {
+                    panic!("fixture edit plan was rejected: {error}")
+                }
                 Event::QueryResult(_) => panic!("unexpected query result"),
             }
         }
@@ -822,6 +833,32 @@ mod tests {
         assert_eq!(report.recovered_commands, commands.len());
         assert!(report.damage.is_none());
         assert_eq!(report.document, execute(&initial, &commands));
+    }
+
+    #[test]
+    fn replayed_batch_is_one_history_entry() {
+        let initial = Document::default();
+        let batch = JournalCommand::DoBatch(vec![
+            Operation::AddAsset { asset: asset(1) },
+            Operation::AddTrack {
+                track: Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    clips: Vec::new(),
+                },
+            },
+        ]);
+        let commands = vec![batch, JournalCommand::Undo];
+        let Inspection::Recoverable(report) = inspect_bytes(&encoded_journal(&initial, &commands))
+        else {
+            panic!("complete batch journal must be recoverable");
+        };
+        assert_eq!(report.recovered_commands, 2);
+        assert_eq!(report.document, initial);
+
+        let once = execute(&Document::default(), &[commands[0].clone()]);
+        assert!(once.asset(AssetId(1)).is_some());
+        assert_eq!(once.tracks.len(), 1);
     }
 
     #[test]

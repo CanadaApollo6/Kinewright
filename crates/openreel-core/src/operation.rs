@@ -77,6 +77,29 @@ impl Operation {
     }
 }
 
+/// Validate and apply an ordered edit plan without exposing partial state.
+///
+/// The caller's document is replaced only after every operation succeeds. Each
+/// operation is applied to the result of the previous one, so generated ids and
+/// later validations have the same semantics as sequential `Operation::apply`
+/// calls.
+pub fn apply_batch(doc: &mut Document, operations: &[Operation]) -> Result<(), BatchError> {
+    if operations.is_empty() {
+        return Err(BatchError::Empty);
+    }
+    let mut candidate = doc.clone();
+    for (index, operation) in operations.iter().enumerate() {
+        operation
+            .apply(&mut candidate)
+            .map_err(|error| BatchError::OperationFailed {
+                op_number: index + 1,
+                error,
+            })?;
+    }
+    *doc = candidate;
+    Ok(())
+}
+
 impl ApplyOp for Operation {
     fn apply(&self, doc: &mut Document) -> Result<(), OpError> {
         // Applying to a clone makes rejection atomic: the caller's document is
@@ -194,6 +217,19 @@ pub enum OpError {
     TimeOverflow,
     #[error(transparent)]
     TimeMapping(#[from] TimeMappingError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum BatchError {
+    #[error("edit plan must contain at least one operation")]
+    Empty,
+    #[error("edit plan operation {op_number} failed: {error}")]
+    OperationFailed {
+        /// One-based operation number as presented to users and agents.
+        op_number: usize,
+        #[source]
+        error: OpError,
+    },
 }
 
 fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpError> {
