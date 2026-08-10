@@ -386,7 +386,8 @@ fn rotation_from_degrees(degrees: i32) -> Result<VideoRotation, MediaError> {
 
 struct PendingVideoFrame {
     first_grid_frame: i64,
-    texture: FrameTexture,
+    decoded: Option<ffmpeg::frame::Video>,
+    texture: Option<FrameTexture>,
 }
 
 pub(crate) struct VideoDecoder {
@@ -403,6 +404,10 @@ pub(crate) struct VideoDecoder {
     scaled_height: u32,
     fallback_index: i64,
     pending: Option<PendingVideoFrame>,
+    lookahead: Option<PendingVideoFrame>,
+    continuation_at: Option<TimeCode>,
+    eof_sent: bool,
+    seek_count: u64,
 }
 
 impl VideoDecoder {
@@ -410,7 +415,11 @@ impl VideoDecoder {
         Self::open_scaled(path, fps, None)
     }
 
-    fn open_scaled(path: &Path, fps: Rational, max_width: Option<u32>) -> Result<Self, MediaError> {
+    pub(crate) fn open_scaled(
+        path: &Path,
+        fps: Rational,
+        max_width: Option<u32>,
+    ) -> Result<Self, MediaError> {
         let input = media_input(path)?;
         let stream = input
             .streams()
@@ -428,8 +437,14 @@ impl VideoDecoder {
                 path.display()
             ))
         })?;
-        let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+        let mut context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
             .map_err(|error| media_error(path, "could not read video codec parameters", error))?;
+        context.set_threading(ffmpeg::codec::threading::Config {
+            kind: ffmpeg::codec::threading::Type::Frame,
+            count: std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(16),
+        });
         let decoder = context
             .decoder()
             .video()
@@ -481,6 +496,10 @@ impl VideoDecoder {
             scaled_height,
             fallback_index: 0,
             pending: None,
+            lookahead: None,
+            continuation_at: None,
+            eof_sent: false,
+            seek_count: 0,
         })
     }
 
@@ -499,9 +518,60 @@ impl VideoDecoder {
         self.decoder.flush();
         self.fallback_index = start.0;
         self.pending = None;
+        self.lookahead = None;
+        self.continuation_at = None;
+        self.eof_sent = false;
+        self.seek_count = self.seek_count.saturating_add(1);
 
-        let mut reached_end = false;
-        while !reached_end {
+        self.decode_from_cursor(start, end, cache)
+    }
+
+    /// Continue directly from the prior window when it ended immediately
+    /// before `start`. A discontinuity falls back to the deterministic seek
+    /// path used by scrubbing.
+    pub(crate) fn decode_window_sequential(
+        &mut self,
+        start: TimeCode,
+        end: TimeCode,
+        cache: &mut FrameCache,
+    ) -> Result<(), MediaError> {
+        if self.continuation_at != Some(start) {
+            return self.decode_window(start, end, cache);
+        }
+        self.decode_from_cursor(start, end, cache)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seek_count(&self) -> u64 {
+        self.seek_count
+    }
+
+    fn decode_from_cursor(
+        &mut self,
+        start: TimeCode,
+        end: TimeCode,
+        cache: &mut FrameCache,
+    ) -> Result<(), MediaError> {
+        if end < start {
+            self.continuation_at = Some(start);
+            return Ok(());
+        }
+
+        if self.apply_lookahead(start, end, cache)? {
+            self.continuation_at = Some(TimeCode(end.0.saturating_add(1)));
+            return Ok(());
+        }
+
+        loop {
+            if self.receive_frames(start, end, cache)? {
+                self.continuation_at = Some(TimeCode(end.0.saturating_add(1)));
+                return Ok(());
+            }
+            if self.eof_sent {
+                self.cache_pending_until(end.0.saturating_add(1), start, end, cache)?;
+                self.continuation_at = Some(TimeCode(end.0.saturating_add(1)));
+                return Ok(());
+            }
             let next = self
                 .input
                 .packets()
@@ -511,9 +581,8 @@ impl VideoDecoder {
                 self.decoder
                     .send_eof()
                     .map_err(|error| media_error(&self.path, "video decoder flush failed", error))?;
-                self.receive_frames(start, end, cache)?;
-                self.cache_pending_until(end.0.saturating_add(1), start, end, cache);
-                break;
+                self.eof_sent = true;
+                continue;
             };
             if stream_index != self.stream_index {
                 continue;
@@ -521,9 +590,19 @@ impl VideoDecoder {
             self.decoder
                 .send_packet(&packet)
                 .map_err(|error| media_error(&self.path, "video decode failed", error))?;
-            reached_end = self.receive_frames(start, end, cache)?;
         }
-        Ok(())
+    }
+
+    fn apply_lookahead(
+        &mut self,
+        start: TimeCode,
+        end: TimeCode,
+        cache: &mut FrameCache,
+    ) -> Result<bool, MediaError> {
+        let Some(next) = self.lookahead.take() else {
+            return Ok(false);
+        };
+        self.accept_frame(next, start, end, cache)
     }
 
     fn receive_frames(
@@ -532,8 +611,11 @@ impl VideoDecoder {
         end: TimeCode,
         cache: &mut FrameCache,
     ) -> Result<bool, MediaError> {
-        let mut decoded = ffmpeg::frame::Video::empty();
-        while self.decoder.receive_frame(&mut decoded).is_ok() {
+        loop {
+            let mut decoded = ffmpeg::frame::Video::empty();
+            if self.decoder.receive_frame(&mut decoded).is_err() {
+                break;
+            }
             let first_grid_frame = decoded.timestamp().map_or_else(
                 || {
                     let index = self.fallback_index;
@@ -548,17 +630,34 @@ impl VideoDecoder {
                     )
                 },
             );
-            let frame = self.convert(&decoded)?;
-            self.cache_pending_until(first_grid_frame, start, end, cache);
-            self.pending = Some(PendingVideoFrame {
+            let next = PendingVideoFrame {
                 first_grid_frame,
-                texture: frame,
-            });
+                decoded: Some(decoded),
+                texture: None,
+            };
             self.fallback_index = first_grid_frame.saturating_add(1);
-            if first_grid_frame > end.0 {
+            if self.accept_frame(next, start, end, cache)? {
                 return Ok(true);
             }
         }
+        Ok(false)
+    }
+
+    fn accept_frame(
+        &mut self,
+        next: PendingVideoFrame,
+        start: TimeCode,
+        end: TimeCode,
+        cache: &mut FrameCache,
+    ) -> Result<bool, MediaError> {
+        if self.pending.is_some() {
+            self.cache_pending_until(next.first_grid_frame, start, end, cache)?;
+        }
+        if next.first_grid_frame > end.0 && self.pending.is_some() {
+            self.lookahead = Some(next);
+            return Ok(true);
+        }
+        self.pending = Some(next);
         Ok(false)
     }
 
@@ -568,15 +667,29 @@ impl VideoDecoder {
         start: TimeCode,
         end: TimeCode,
         cache: &mut FrameCache,
-    ) {
-        let Some(pending) = self.pending.take() else {
-            return;
+    ) -> Result<(), MediaError> {
+        let Some(mut pending) = self.pending.take() else {
+            return Ok(());
         };
         let first = pending.first_grid_frame.max(start.0);
         let last = next_grid_frame.saturating_sub(1).min(end.0);
-        for index in first..=last {
-            cache.insert(TimeCode(index), pending.texture.clone());
+        if first <= last {
+            let texture = if let Some(texture) = &pending.texture {
+                texture.clone()
+            } else {
+                let decoded = pending.decoded.as_ref().ok_or_else(|| {
+                    MediaError::Backend("pending video frame has no pixels".to_owned())
+                })?;
+                self.convert(decoded)?
+            };
+            pending.decoded = None;
+            pending.texture = Some(texture.clone());
+            for index in first..=last {
+                cache.insert(TimeCode(index), texture.clone());
+            }
         }
+        self.pending = Some(pending);
+        Ok(())
     }
 
     fn convert(&mut self, decoded: &ffmpeg::frame::Video) -> Result<FrameTexture, MediaError> {

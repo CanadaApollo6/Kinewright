@@ -21,7 +21,7 @@ use crate::{
     clock::samples_to_frame,
     compositor::GpuContext,
     decode::{probe_path, thumbnail},
-    render::FrameRenderer,
+    render::{DecodeStrategy, FrameRenderer, PREVIEW_MAX_WIDTH, RenderScale},
     timeline_source_at,
     transcript::{TranscriptService, default_data_dir},
 };
@@ -521,9 +521,18 @@ impl Worker {
 
     fn present(&mut self, project_at: TimeCode) {
         let document = Arc::clone(&self.document);
+        let scale = RenderScale::Proxy {
+            max_width: PREVIEW_MAX_WIDTH,
+        };
+        let resolution = scale.output_resolution(document.resolution);
+        let strategy = if self.playing {
+            DecodeStrategy::Sequential
+        } else {
+            DecodeStrategy::Seek
+        };
         let frame = match self
             .renderer
-            .render(&document, project_at, document.resolution)
+            .render(&document, project_at, resolution, scale, strategy)
         {
             Ok(frame) => frame,
             Err(error) => {

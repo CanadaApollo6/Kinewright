@@ -54,6 +54,38 @@ compositing, and export all consume those same rotated RGBA frames.
 Reflected matrices and non-right-angle rotations are rejected with an explicit
 error instead of being rendered incorrectly.
 
+## Preview proxies and decode strategy
+
+Interactive preview uses an in-memory decode proxy capped at 1280 display
+pixels wide. Height is calculated from the source display aspect ratio, and
+sources narrower than 1280 pixels are never enlarged. A 3840x2160 source is
+therefore decoded and composited as 1280x720. This is the same bilinear
+swscale conversion used by thumbnails, but `thumbnail_at` continues to honor
+the caller's independent `max_width`. Export continues to open full-resolution
+decoders and renders at the requested export resolution.
+
+Decoder/cache identity includes the asset ID and proxy-width limit. A future
+preview resize or zoom that selects another width therefore opens a matching
+scaler and cannot reuse pixels from a differently sized proxy. `FrameTexture`
+dimensions are authoritative throughout the compositor and UI; the preview
+panel scales each delivered texture to fit its available rectangle.
+
+Paused scrubbing uses deterministic keyframe seeks and the existing coalesced
+latest-position request. Playback and export use sequential windows. The first
+window seeks to the requested source time; directly adjacent windows retain
+the demux/decoder cursor and M8 PTS-hold lookahead instead of flushing and
+seeking again. A discontinuity still falls back to the seek path. This keeps
+the audio master clock and the greatest-PTS-not-after selection rule unchanged.
+
+Sequential rendering prefetches up to 15 frames and retains at most 32 entries per
+source/scale. It also enforces a conservative 224 MiB aggregate RGBA cache
+budget across sources, counting every grid entry even when held VFR frames
+share one allocation. Prefetch shrinks for large full-resolution frames so a
+single decode window fits that budget. Scrubbing decodes only its requested
+frame because the next coalesced request may supersede it. The remaining
+headroom below 256 MiB is for the current decoder lookahead, compositor output,
+and channel-owned frame.
+
 ## Unsupported or damaged media
 
 Probe verifies that the linked FFmpeg build has decoders for every selected
@@ -94,3 +126,28 @@ cargo test -p openreel-media --lib full_media_matrix -- --nocapture
 The provisioned FFmpeg build contains `libx265`. The generator detects it; if a
 different supported build lacks it, the test uses `libx264` as the documented
 fallback and prints that substitution in the matrix output.
+
+## Preview performance gate
+
+The gated preview performance test generates only the 4K H.264 long-GOP and
+1080p HEVC cases. It reports 20 deterministic random cold-cache seeks, a
+sequential decode in 15-frame windows, and 20 forward scrub steps, all at the
+1280-pixel proxy limit:
+
+```powershell
+$env:OPENREEL_PERF_TEST = '1'
+cargo test -p openreel-media --lib proxy_preview_performance -- --nocapture
+```
+
+The local machine-class budgets are cold-seek p95 below 250 ms, scrub-step p95
+below 250 ms, sequential decode at or above 60 fps, and exactly one FFmpeg
+seek for the sequential run. The gate is opt-in and is not run in CI.
+
+M9 baseline measured on Windows 10.0.26200, an Intel Core i5-13600K (20
+logical processors), and software FFmpeg decode capped at 16 frame threads.
+The installed RTX 3080 was not used for video decode:
+
+| file | proxy | cold seek p50/p95 | sequential | scrub step p50/p95 |
+|---|---:|---:|---:|---:|
+| 4k-h264-g250 | 1280x720 | 89.4/140.7 ms | 125.9 fps | 94.7/120.9 ms |
+| hevc-1080p | 1280x720 | 27.0/35.6 ms | 251.0 fps | 24.7/31.0 ms |

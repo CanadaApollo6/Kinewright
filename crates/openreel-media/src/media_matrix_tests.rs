@@ -4,7 +4,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use openreel_core::{
@@ -19,6 +19,7 @@ use crate::{
     decode::{VideoDecoder, probe_path},
     export::export_document,
     initialize_ffmpeg,
+    render::PREVIEW_MAX_WIDTH,
 };
 
 struct MatrixDirectory(PathBuf);
@@ -503,6 +504,23 @@ fn vfr_grid_holds_the_previous_pts_frame_and_is_deterministic() {
         second_cache.frame_at_or_before(TimeCode(1)).unwrap().rgba,
         "repeated seeks must select the same source PTS"
     );
+
+    let mut proxy_decoder = VideoDecoder::open_scaled(&path, asset.fps, Some(80)).unwrap();
+    let mut proxy_cache = FrameCache::new(4);
+    proxy_decoder
+        .decode_window(TimeCode(0), TimeCode(0), &mut proxy_cache)
+        .unwrap();
+    proxy_decoder
+        .decode_window_sequential(TimeCode(1), TimeCode(2), &mut proxy_cache)
+        .unwrap();
+    assert_eq!(proxy_decoder.seek_count(), 1);
+    let proxy_first = proxy_cache.frame_at_or_before(TimeCode(0)).unwrap();
+    let proxy_held = proxy_cache.frame_at_or_before(TimeCode(1)).unwrap();
+    assert_eq!((proxy_first.width, proxy_first.height), (80, 45));
+    assert_eq!(
+        proxy_first.rgba, proxy_held.rgba,
+        "sequential proxy decode must preserve the PTS hold across windows"
+    );
 }
 
 #[test]
@@ -822,4 +840,185 @@ fn full_media_matrix_covers_4k_hevc_and_long_gop_sources() {
     let (mut cases, mut note) = generate_fast_matrix(&directory);
     add_full_matrix_cases(&directory, &mut cases, &mut note);
     validate_matrix(&directory, &cases, note.as_deref());
+}
+
+const PERF_SEEKS: usize = 20;
+const COLD_SEEK_P95_BUDGET: Duration = Duration::from_millis(250);
+const SCRUB_STEP_P95_BUDGET: Duration = Duration::from_millis(250);
+const SEQUENTIAL_MIN_FPS: f64 = 60.0;
+
+struct PerfResult {
+    name: String,
+    proxy: (u32, u32),
+    cold_p50: Duration,
+    cold_p95: Duration,
+    sequential_fps: f64,
+    sequential_seeks: u64,
+    scrub_p50: Duration,
+    scrub_p95: Duration,
+}
+
+fn percentile(samples: &mut [Duration], percent: usize) -> Duration {
+    samples.sort_unstable();
+    let rank = samples
+        .len()
+        .saturating_mul(percent)
+        .div_ceil(100)
+        .saturating_sub(1);
+    samples[rank.min(samples.len().saturating_sub(1))]
+}
+
+fn assert_proxy_frame(cache: &mut FrameCache, at: TimeCode) -> (u32, u32) {
+    assert!(
+        cache.contains(at),
+        "proxy decode did not cache exact frame {at}"
+    );
+    let frame = cache.frame_at_or_before(at).unwrap();
+    assert!(frame.width <= PREVIEW_MAX_WIDTH);
+    (frame.width, frame.height)
+}
+
+fn measure_proxy_performance(case: &MatrixCase) -> PerfResult {
+    let asset = probe_path(&case.path, AssetId(1)).unwrap();
+    let last = asset.duration.0.saturating_sub(1).max(1);
+    let random_positions = (0..PERF_SEEKS)
+        .map(|index| TimeCode(1 + (i64::try_from(index).unwrap() * 47 + 13) % last))
+        .collect::<Vec<_>>();
+
+    let mut seek_decoder =
+        VideoDecoder::open_scaled(&case.path, asset.fps, Some(PREVIEW_MAX_WIDTH)).unwrap();
+    let mut cold_samples = Vec::with_capacity(PERF_SEEKS);
+    let mut proxy = (0, 0);
+    for at in random_positions {
+        let mut cache = FrameCache::new(2);
+        let started = Instant::now();
+        seek_decoder.decode_window(at, at, &mut cache).unwrap();
+        cold_samples.push(started.elapsed());
+        proxy = assert_proxy_frame(&mut cache, at);
+    }
+
+    let mut sequential_decoder =
+        VideoDecoder::open_scaled(&case.path, asset.fps, Some(PREVIEW_MAX_WIDTH)).unwrap();
+    let mut sequential_cache = FrameCache::new(4);
+    let sequential_started = Instant::now();
+    let mut start = TimeCode::ZERO;
+    while start < asset.duration {
+        let end = TimeCode(
+            start
+                .0
+                .saturating_add(14)
+                .min(asset.duration.0.saturating_sub(1)),
+        );
+        if start == TimeCode::ZERO {
+            sequential_decoder
+                .decode_window(start, end, &mut sequential_cache)
+                .unwrap();
+        } else {
+            sequential_decoder
+                .decode_window_sequential(start, end, &mut sequential_cache)
+                .unwrap();
+        }
+        start = TimeCode(end.0.saturating_add(1));
+    }
+    let sequential_elapsed = sequential_started.elapsed();
+    let sequential_fps = asset.duration.0 as f64 / sequential_elapsed.as_secs_f64();
+    let sequential_seeks = sequential_decoder.seek_count();
+
+    let scrub_step = (last / i64::try_from(PERF_SEEKS).unwrap()).max(1);
+    let mut scrub_decoder =
+        VideoDecoder::open_scaled(&case.path, asset.fps, Some(PREVIEW_MAX_WIDTH)).unwrap();
+    let mut scrub_samples = Vec::with_capacity(PERF_SEEKS);
+    for index in 0..PERF_SEEKS {
+        let at = TimeCode(
+            (1 + i64::try_from(index).unwrap().saturating_mul(scrub_step)).min(last),
+        );
+        let mut cache = FrameCache::new(2);
+        let started = Instant::now();
+        scrub_decoder.decode_window(at, at, &mut cache).unwrap();
+        scrub_samples.push(started.elapsed());
+        assert_proxy_frame(&mut cache, at);
+    }
+
+    PerfResult {
+        name: case.name.clone(),
+        proxy,
+        cold_p50: percentile(&mut cold_samples.clone(), 50),
+        cold_p95: percentile(&mut cold_samples, 95),
+        sequential_fps,
+        sequential_seeks,
+        scrub_p50: percentile(&mut scrub_samples.clone(), 50),
+        scrub_p95: percentile(&mut scrub_samples, 95),
+    }
+}
+
+fn milliseconds(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
+}
+
+#[test]
+fn proxy_preview_performance_on_heavy_matrix_media() {
+    if std::env::var_os("OPENREEL_PERF_TEST").as_deref() != Some(OsStr::new("1")) {
+        eprintln!("skipped: set OPENREEL_PERF_TEST=1 for proxy preview measurements");
+        return;
+    }
+    initialize_ffmpeg().unwrap();
+    let directory = MatrixDirectory::new();
+    let mut cases = Vec::new();
+    let mut note = None;
+    add_full_matrix_cases(&directory, &mut cases, &mut note);
+    let results = cases
+        .iter()
+        .map(measure_proxy_performance)
+        .collect::<Vec<_>>();
+
+    println!(
+        "| file | proxy | cold seek p50 | cold seek p95 | sequential decode | decoder seeks | scrub step p50 | scrub step p95 |"
+    );
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|");
+    for result in &results {
+        println!(
+            "| {} | {}x{} | {:.1} ms | {:.1} ms | {:.1} fps | {} | {:.1} ms | {:.1} ms |",
+            result.name,
+            result.proxy.0,
+            result.proxy.1,
+            milliseconds(result.cold_p50),
+            milliseconds(result.cold_p95),
+            result.sequential_fps,
+            result.sequential_seeks,
+            milliseconds(result.scrub_p50),
+            milliseconds(result.scrub_p95),
+        );
+    }
+    if let Some(note) = note {
+        println!("performance note: {note}");
+    }
+
+    for result in &results {
+        assert!(
+            result.cold_p95 < COLD_SEEK_P95_BUDGET,
+            "{} proxy cold-seek p95 {:.1} ms exceeded {:.1} ms",
+            result.name,
+            milliseconds(result.cold_p95),
+            milliseconds(COLD_SEEK_P95_BUDGET),
+        );
+        assert!(
+            result.sequential_fps >= SEQUENTIAL_MIN_FPS,
+            "{} sequential proxy decode {:.1} fps was below {:.1} fps",
+            result.name,
+            result.sequential_fps,
+            SEQUENTIAL_MIN_FPS,
+        );
+        assert_eq!(
+            result.sequential_seeks, 1,
+            "{} sequential proxy decode re-sought between windows",
+            result.name,
+        );
+        assert!(
+            result.scrub_p95 < SCRUB_STEP_P95_BUDGET,
+            "{} proxy scrub-step p95 {:.1} ms exceeded {:.1} ms",
+            result.name,
+            milliseconds(result.scrub_p95),
+            milliseconds(SCRUB_STEP_P95_BUDGET),
+        );
+    }
 }

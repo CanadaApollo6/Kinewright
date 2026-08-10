@@ -182,7 +182,13 @@ fn export_to_temporary(
         )
         .map_err(|error| MediaError::Backend(error.to_string()))?;
         let project_at = TimeCode(project_at.0.min(document.duration.0.saturating_sub(1)));
-        let composed = renderer.render(document, project_at, settings.resolution)?;
+        let composed = renderer.render(
+            document,
+            project_at,
+            settings.resolution,
+            crate::render::RenderScale::FullResolution,
+            crate::render::DecodeStrategy::Sequential,
+        )?;
         let mut rgba = ffmpeg::frame::Video::new(
             ffmpeg::format::Pixel::RGBA,
             settings.resolution.0,
