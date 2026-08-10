@@ -7,6 +7,8 @@ use crate::{
 };
 
 impl OpenReelApp {
+    // Project pixel dimensions are intentionally projected into egui's f32 coordinate space.
+    #[allow(clippy::cast_precision_loss)]
     pub(crate) fn preview(&self, ui: &mut egui::Ui) {
         // The timeline is the editing surface; the monitor takes what is left
         // after the timeline's reservation, never the other way around.

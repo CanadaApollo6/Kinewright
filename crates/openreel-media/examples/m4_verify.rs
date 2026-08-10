@@ -14,11 +14,12 @@ use openreel_core::{
 };
 use openreel_media::FfmpegMediaEngine;
 
+// This manual verifier deliberately keeps its complete preview/export scenario together.
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn Error>> {
     let output_dir = std::env::args_os()
         .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target/m4-manual"));
+        .map_or_else(|| PathBuf::from("target/m4-manual"), PathBuf::from);
     fs::create_dir_all(&output_dir)?;
     let ffmpeg =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffmpeg.exe");

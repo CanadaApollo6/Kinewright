@@ -124,8 +124,17 @@ impl PeakAccumulator {
     }
 }
 
+// The clamped, rounded sample is intentionally quantized to the i16 waveform format.
+#[allow(clippy::cast_possible_truncation)]
 fn quantize_peak(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16
+}
+
+pub(crate) struct AudioSourceSpec<'a> {
+    pub(crate) path: &'a Path,
+    pub(crate) fps: Rational,
+    pub(crate) from: TimeCode,
+    pub(crate) end: TimeCode,
 }
 
 pub(crate) struct AudioRuntime {
@@ -140,17 +149,14 @@ pub(crate) struct AudioRuntime {
 
 impl AudioRuntime {
     pub(crate) fn open(
-        path: &Path,
-        source_fps: Rational,
+        source: AudioSourceSpec<'_>,
         project_fps: Rational,
-        source_from: TimeCode,
-        source_end: TimeCode,
         project_from: TimeCode,
-        position_samples: Arc<AtomicU64>,
-        sample_rate_atomic: Arc<AtomicU32>,
+        position_samples: &Arc<AtomicU64>,
+        sample_rate_atomic: &Arc<AtomicU32>,
     ) -> Result<Self, MediaError> {
         Self::open_output(
-            Some((path, source_fps, source_from, source_end)),
+            Some(source),
             project_fps,
             project_from,
             position_samples,
@@ -161,8 +167,8 @@ impl AudioRuntime {
     pub(crate) fn open_silence(
         project_fps: Rational,
         project_from: TimeCode,
-        position_samples: Arc<AtomicU64>,
-        sample_rate_atomic: Arc<AtomicU32>,
+        position_samples: &Arc<AtomicU64>,
+        sample_rate_atomic: &Arc<AtomicU32>,
     ) -> Result<Self, MediaError> {
         Self::open_output(
             None,
@@ -174,11 +180,11 @@ impl AudioRuntime {
     }
 
     fn open_output(
-        source: Option<(&Path, Rational, TimeCode, TimeCode)>,
+        source: Option<AudioSourceSpec<'_>>,
         project_fps: Rational,
         project_from: TimeCode,
-        position_samples: Arc<AtomicU64>,
-        sample_rate_atomic: Arc<AtomicU32>,
+        position_samples: &Arc<AtomicU64>,
+        sample_rate_atomic: &Arc<AtomicU32>,
     ) -> Result<Self, MediaError> {
         let host = cpal::default_host();
         let device = host
@@ -204,14 +210,14 @@ impl AudioRuntime {
             sample_format,
             consumer,
             channels,
-            Arc::clone(&position_samples),
+            Arc::clone(position_samples),
             Arc::clone(&error_flag),
         )?;
         let decoder = source
-            .map(|(path, source_fps, source_from, source_end)| {
-                let source_start = frame_to_samples(source_from, sample_rate, source_fps);
-                let source_end = frame_to_samples(source_end, sample_rate, source_fps);
-                AudioDecoder::open(path, sample_rate, channels, source_start, source_end)
+            .map(|source| {
+                let source_start = frame_to_samples(source.from, sample_rate, source.fps);
+                let source_end = frame_to_samples(source.end, sample_rate, source.fps);
+                AudioDecoder::open(source.path, sample_rate, channels, source_start, source_end)
             })
             .transpose()?;
         let mut runtime = Self {
@@ -251,7 +257,7 @@ impl AudioRuntime {
                 return Ok(());
             };
             if let Some(chunk) = decoder.next_chunk()? {
-                self.pending = chunk
+                self.pending = chunk;
             } else {
                 self.exhausted = true;
                 return Ok(());
@@ -437,6 +443,8 @@ impl AudioDecoder {
         }
     }
 
+    // FFmpeg frame receipt, resampling, clipping, and queueing form one ordered state transition.
+    #[allow(clippy::too_many_lines)]
     fn receive_frames(&mut self) -> Result<(), MediaError> {
         let mut decoded = ffmpeg::frame::Audio::empty();
         while self.decoder.receive_frame(&mut decoded).is_ok() {
@@ -570,6 +578,8 @@ mod tests {
     use super::*;
 
     #[test]
+    // These values are exact binary fractions and zeros, so exact equality is the contract.
+    #[allow(clippy::float_cmp)]
     fn callback_consumes_ring_then_writes_silence_and_accounts_frames() {
         let (mut producer, mut consumer) = RingBuffer::new(4);
         producer.push(0.25).unwrap();

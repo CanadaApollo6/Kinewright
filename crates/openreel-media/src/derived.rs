@@ -1,15 +1,11 @@
 use std::{
-    collections::{BTreeMap, HashMap},
-    fmt::Write as _,
-    fs::{self, File},
-    io::Read as _,
+    collections::BTreeMap,
     ops::Range,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
-    thread,
+    sync::Arc,
 };
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Sender, unbounded};
 use openreel_core::{
     AssetId, AssetSceneChanges, AssetSilences, Document, ExportCancellation, FrameRounding,
     MediaAsset, MediaError, MediaKind, Rational, SceneChange, SceneStatus, SilenceSpan,
@@ -18,7 +14,12 @@ use openreel_core::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{audio::decode_audio_range, cache::FrameCache, decode::VideoDecoder, sha256::Sha256};
+use crate::{
+    audio::decode_audio_range,
+    cache::FrameCache,
+    decode::VideoDecoder,
+    derived_cache::{ContentHashes, JsonCache, StatusReporter, cache_root, spawn_worker},
+};
 
 const CACHE_VERSION: u32 = 1;
 const ANALYSIS_SAMPLE_RATE: u32 = 48_000;
@@ -65,35 +66,27 @@ pub struct DerivedAnalysisConfig {
 
 pub(crate) struct DerivedAnalysisService {
     jobs: Sender<Job>,
-    silence_states: Arc<RwLock<HashMap<AssetId, SilenceStatus>>>,
-    scene_states: Arc<RwLock<HashMap<AssetId, SceneStatus>>>,
+    silence_states: StatusReporter<SilenceStatus>,
+    scene_states: StatusReporter<SceneStatus>,
     config: DerivedAnalysisConfig,
 }
 
 impl DerivedAnalysisService {
-    pub(crate) fn new(
-        data_dir: PathBuf,
-        config: DerivedAnalysisConfig,
-    ) -> Result<Self, MediaError> {
+    pub(crate) fn new(data_dir: &Path, config: DerivedAnalysisConfig) -> Result<Self, MediaError> {
         let (jobs, jobs_rx) = unbounded();
-        let silence_states = Arc::new(RwLock::new(HashMap::new()));
-        let scene_states = Arc::new(RwLock::new(HashMap::new()));
-        let worker_silences = Arc::clone(&silence_states);
-        let worker_scenes = Arc::clone(&scene_states);
-        thread::Builder::new()
-            .name("openreel-derived-analysis".to_owned())
-            .spawn(move || {
-                DerivedAnalysisWorker::new(
-                    data_dir.join("derived-analysis").join("v1"),
-                    jobs_rx,
-                    worker_silences,
-                    worker_scenes,
-                )
-                .run();
-            })
-            .map_err(|error| {
-                MediaError::Backend(format!("could not start derived analysis worker: {error}"))
-            })?;
+        let silence_states = StatusReporter::new();
+        let scene_states = StatusReporter::new();
+        let mut worker = DerivedAnalysisWorker::new(
+            cache_root(data_dir, "derived-analysis", CACHE_VERSION),
+            silence_states.clone(),
+            scene_states.clone(),
+        );
+        spawn_worker(
+            "openreel-derived-analysis",
+            "derived analysis",
+            jobs_rx,
+            move |job| worker.handle(job),
+        )?;
         Ok(Self {
             jobs,
             silence_states,
@@ -103,68 +96,64 @@ impl DerivedAnalysisService {
     }
 
     pub(crate) fn request_silences(&self, asset: MediaAsset) {
+        let asset_id = asset.id;
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
-            update_silence(&self.silence_states, asset.id, SilenceStatus::NoAudio);
+            self.silence_states.update(asset.id, SilenceStatus::NoAudio);
             return;
         }
-        let should_queue = self.silence_states.read().map_or(true, |states| {
-            !matches!(
-                states.get(&asset.id),
-                Some(
-                    SilenceStatus::Queued
-                        | SilenceStatus::Hashing
-                        | SilenceStatus::Analyzing
-                        | SilenceStatus::Ready(_)
-                        | SilenceStatus::NoAudio
-                )
+        let should_queue = self.silence_states.should_queue(asset.id, |status| {
+            matches!(
+                status,
+                SilenceStatus::Queued
+                    | SilenceStatus::Hashing
+                    | SilenceStatus::Analyzing
+                    | SilenceStatus::Ready(_)
+                    | SilenceStatus::NoAudio
             )
         });
         if !should_queue {
             return;
         }
-        update_silence(&self.silence_states, asset.id, SilenceStatus::Queued);
+        self.silence_states.update(asset.id, SilenceStatus::Queued);
         if self
             .jobs
-            .send(Job::Silences(asset.clone(), self.config.silence))
+            .send(Job::Silences(asset, self.config.silence))
             .is_err()
         {
-            update_silence(
-                &self.silence_states,
-                asset.id,
+            self.silence_states.update(
+                asset_id,
                 SilenceStatus::Failed("derived analysis worker stopped".to_owned()),
             );
         }
     }
 
     pub(crate) fn request_scenes(&self, asset: MediaAsset) {
+        let asset_id = asset.id;
         if !matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo) {
-            update_scene(&self.scene_states, asset.id, SceneStatus::NoVideo);
+            self.scene_states.update(asset.id, SceneStatus::NoVideo);
             return;
         }
-        let should_queue = self.scene_states.read().map_or(true, |states| {
-            !matches!(
-                states.get(&asset.id),
-                Some(
-                    SceneStatus::Queued
-                        | SceneStatus::Hashing
-                        | SceneStatus::Analyzing
-                        | SceneStatus::Ready(_)
-                        | SceneStatus::NoVideo
-                )
+        let should_queue = self.scene_states.should_queue(asset.id, |status| {
+            matches!(
+                status,
+                SceneStatus::Queued
+                    | SceneStatus::Hashing
+                    | SceneStatus::Analyzing
+                    | SceneStatus::Ready(_)
+                    | SceneStatus::NoVideo
             )
         });
         if !should_queue {
             return;
         }
-        update_scene(&self.scene_states, asset.id, SceneStatus::Queued);
+        self.scene_states.update(asset.id, SceneStatus::Queued);
         if self
             .jobs
-            .send(Job::Scenes(asset.clone(), self.config.scenes))
+            .send(Job::Scenes(asset, self.config.scenes))
             .is_err()
         {
-            update_scene(
-                &self.scene_states,
-                asset.id,
+            self.scene_states.update(
+                asset_id,
                 SceneStatus::Failed("derived analysis worker stopped".to_owned()),
             );
         }
@@ -172,18 +161,11 @@ impl DerivedAnalysisService {
 
     pub(crate) fn silence_status(&self, asset: AssetId) -> SilenceStatus {
         self.silence_states
-            .read()
-            .ok()
-            .and_then(|states| states.get(&asset).cloned())
-            .unwrap_or(SilenceStatus::NotRequested)
+            .get_or(asset, SilenceStatus::NotRequested)
     }
 
     pub(crate) fn scene_status(&self, asset: AssetId) -> SceneStatus {
-        self.scene_states
-            .read()
-            .ok()
-            .and_then(|states| states.get(&asset).cloned())
-            .unwrap_or(SceneStatus::NotRequested)
+        self.scene_states.get_or(asset, SceneStatus::NotRequested)
     }
 
     pub(crate) fn timeline_silences(
@@ -222,51 +204,41 @@ enum Job {
 
 struct DerivedAnalysisWorker {
     root: PathBuf,
-    jobs: Receiver<Job>,
-    silence_states: Arc<RwLock<HashMap<AssetId, SilenceStatus>>>,
-    scene_states: Arc<RwLock<HashMap<AssetId, SceneStatus>>>,
-    hashes: HashMap<PathBuf, String>,
+    silence_states: StatusReporter<SilenceStatus>,
+    scene_states: StatusReporter<SceneStatus>,
+    hashes: ContentHashes,
 }
 
 impl DerivedAnalysisWorker {
     fn new(
         root: PathBuf,
-        jobs: Receiver<Job>,
-        silence_states: Arc<RwLock<HashMap<AssetId, SilenceStatus>>>,
-        scene_states: Arc<RwLock<HashMap<AssetId, SceneStatus>>>,
+        silence_states: StatusReporter<SilenceStatus>,
+        scene_states: StatusReporter<SceneStatus>,
     ) -> Self {
         Self {
             root,
-            jobs,
             silence_states,
             scene_states,
-            hashes: HashMap::new(),
+            hashes: ContentHashes::default(),
         }
     }
 
-    fn run(mut self) {
-        while let Ok(job) = self.jobs.recv() {
-            match job {
-                Job::Silences(asset, config) => {
-                    if let Err(error) = self.analyze_silences(&asset, config) {
-                        update_silence(
-                            &self.silence_states,
-                            asset.id,
-                            SilenceStatus::Failed(error.to_string()),
-                        );
-                    }
+    fn handle(&mut self, job: Job) -> bool {
+        match job {
+            Job::Silences(asset, config) => {
+                if let Err(error) = self.analyze_silences(&asset, config) {
+                    self.silence_states
+                        .update(asset.id, SilenceStatus::Failed(error.to_string()));
                 }
-                Job::Scenes(asset, config) => {
-                    if let Err(error) = self.analyze_scenes(&asset, config) {
-                        update_scene(
-                            &self.scene_states,
-                            asset.id,
-                            SceneStatus::Failed(error.to_string()),
-                        );
-                    }
+            }
+            Job::Scenes(asset, config) => {
+                if let Err(error) = self.analyze_scenes(&asset, config) {
+                    self.scene_states
+                        .update(asset.id, SceneStatus::Failed(error.to_string()));
                 }
             }
         }
+        true
     }
 
     fn analyze_silences(
@@ -274,19 +246,17 @@ impl DerivedAnalysisWorker {
         asset: &MediaAsset,
         config: SilenceDetectionConfig,
     ) -> Result<(), MediaError> {
-        update_silence(&self.silence_states, asset.id, SilenceStatus::Hashing);
+        self.silence_states.update(asset.id, SilenceStatus::Hashing);
         let hash = self.content_hash(&asset.path)?;
         let store = SilenceStore::new(self.root.join("silences"), config);
         if let Some(mut cached) = store.load(&hash, asset.fps, asset.duration)? {
             cached.asset = asset.id;
-            update_silence(
-                &self.silence_states,
-                asset.id,
-                SilenceStatus::Ready(Arc::new(cached)),
-            );
+            self.silence_states
+                .update(asset.id, SilenceStatus::Ready(Arc::new(cached)));
             return Ok(());
         }
-        update_silence(&self.silence_states, asset.id, SilenceStatus::Analyzing);
+        self.silence_states
+            .update(asset.id, SilenceStatus::Analyzing);
         let samples = decode_audio_range(
             &asset.path,
             asset.fps,
@@ -314,11 +284,8 @@ impl DerivedAnalysisWorker {
             spans,
         };
         store.save(&result)?;
-        update_silence(
-            &self.silence_states,
-            asset.id,
-            SilenceStatus::Ready(Arc::new(result)),
-        );
+        self.silence_states
+            .update(asset.id, SilenceStatus::Ready(Arc::new(result)));
         Ok(())
     }
 
@@ -327,19 +294,16 @@ impl DerivedAnalysisWorker {
         asset: &MediaAsset,
         config: SceneDetectionConfig,
     ) -> Result<(), MediaError> {
-        update_scene(&self.scene_states, asset.id, SceneStatus::Hashing);
+        self.scene_states.update(asset.id, SceneStatus::Hashing);
         let hash = self.content_hash(&asset.path)?;
         let store = SceneStore::new(self.root.join("scenes"), config);
         if let Some(mut cached) = store.load(&hash, asset.fps, asset.duration)? {
             cached.asset = asset.id;
-            update_scene(
-                &self.scene_states,
-                asset.id,
-                SceneStatus::Ready(Arc::new(cached)),
-            );
+            self.scene_states
+                .update(asset.id, SceneStatus::Ready(Arc::new(cached)));
             return Ok(());
         }
-        update_scene(&self.scene_states, asset.id, SceneStatus::Analyzing);
+        self.scene_states.update(asset.id, SceneStatus::Analyzing);
         let changes = detect_scene_changes(&asset.path, asset.fps, asset.duration, config)?;
         let result = AssetSceneChanges {
             asset: asset.id,
@@ -350,24 +314,18 @@ impl DerivedAnalysisWorker {
             changes,
         };
         store.save(&result)?;
-        update_scene(
-            &self.scene_states,
-            asset.id,
-            SceneStatus::Ready(Arc::new(result)),
-        );
+        self.scene_states
+            .update(asset.id, SceneStatus::Ready(Arc::new(result)));
         Ok(())
     }
 
     fn content_hash(&mut self, path: &Path) -> Result<String, MediaError> {
-        if let Some(hash) = self.hashes.get(path) {
-            return Ok(hash.clone());
-        }
-        let hash = sha256_file(path)?;
-        self.hashes.insert(path.to_path_buf(), hash.clone());
-        Ok(hash)
+        self.hashes.get(path)
     }
 }
 
+// Window lengths are memory-bounded; f64 normalization is stable for every realizable buffer.
+#[allow(clippy::cast_precision_loss)]
 fn detect_silences(
     samples: &[f32],
     sample_rate: u32,
@@ -496,7 +454,7 @@ fn detect_scene_changes(
                     let confidence = difference
                         .min((difference - previous_difference).abs())
                         .clamp(0.0, 1.0);
-                    let basis_points = (confidence * 10_000.0).round() as u16;
+                    let basis_points = confidence_basis_points(confidence);
                     if basis_points > 0 {
                         changes.push(SceneChange {
                             source_frame: TimeCode(frame_index),
@@ -513,6 +471,8 @@ fn detect_scene_changes(
     Ok(changes)
 }
 
+// Aggregate pixel counts are intentionally normalized in f64 for scene scoring.
+#[allow(clippy::cast_precision_loss)]
 fn frame_difference(previous: &[u8], current: &[u8]) -> f64 {
     let pixel_count = previous.len().min(current.len()) / 4;
     if pixel_count == 0 {
@@ -545,6 +505,12 @@ fn frame_difference(previous: &[u8], current: &[u8]) -> f64 {
     histogram_l1.max(normalized_sad * 1.5).clamp(0.0, 1.0)
 }
 
+// Confidence is clamped to 0..=1 before this rounded conversion to basis points.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn confidence_basis_points(confidence: f64) -> u16 {
+    (confidence * 10_000.0).round() as u16
+}
+
 pub(crate) fn map_timeline_silences<F>(
     document: &Document,
     range: Option<Range<TimeCode>>,
@@ -563,10 +529,10 @@ where
             let Some(asset) = document.asset(clip.asset) else {
                 continue;
             };
-            let analysis = analyses
+            let cached_silences = analyses
                 .entry(asset.id)
                 .or_insert_with(|| silences_for(asset.id));
-            let Some(analysis) = analysis else {
+            let Some(silences) = cached_silences else {
                 continue;
             };
             let clip_duration =
@@ -576,7 +542,7 @@ where
                 .timeline_start
                 .checked_add(clip_duration)
                 .ok_or_else(|| MediaError::Backend("timeline position overflowed".to_owned()))?;
-            for span in &analysis.spans {
+            for span in &silences.spans {
                 let source_start = span.source_start.max(clip.source_range.start);
                 let source_end = span.source_end.min(clip.source_range.end);
                 if source_end.0.saturating_sub(source_start.0) < minimum {
@@ -654,13 +620,13 @@ where
             let Some(asset) = document.asset(clip.asset) else {
                 continue;
             };
-            let analysis = analyses
+            let cached_scenes = analyses
                 .entry(asset.id)
                 .or_insert_with(|| scenes_for(asset.id));
-            let Some(analysis) = analysis else {
+            let Some(scenes) = cached_scenes else {
                 continue;
             };
-            for change in &analysis.changes {
+            for change in &scenes.changes {
                 if change.confidence_basis_points < minimum_confidence_basis_points
                     || change.source_frame < clip.source_range.start
                     || change.source_frame >= clip.source_range.end
@@ -726,20 +692,26 @@ fn validated_range(
 }
 
 struct SilenceStore {
-    root: PathBuf,
+    cache: JsonCache,
     config: SilenceDetectionConfig,
 }
 
 impl SilenceStore {
     fn new(root: PathBuf, config: SilenceDetectionConfig) -> Self {
-        Self { root, config }
+        Self {
+            cache: JsonCache::new(root, CACHE_VERSION, "silence"),
+            config,
+        }
     }
 
     fn path_for(&self, hash: &str) -> PathBuf {
-        self.root.join(format!(
-            "{hash}-t{}-w{}.json",
-            self.config.threshold_dbfs_hundredths, self.config.window_milliseconds
-        ))
+        self.cache.path_for(
+            hash,
+            &format!(
+                "-t{}-w{}",
+                self.config.threshold_dbfs_hundredths, self.config.window_milliseconds
+            ),
+        )
     }
 
     fn load(
@@ -748,61 +720,54 @@ impl SilenceStore {
         fps: Rational,
         frames: TimeCode,
     ) -> Result<Option<AssetSilences>, MediaError> {
-        let bytes = match fs::read(self.path_for(hash)) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(cache_error("read silence", error)),
-        };
-        let Ok(entry) = serde_json::from_slice::<SilenceCacheEntry>(&bytes) else {
-            return Ok(None);
-        };
-        if entry.version != CACHE_VERSION
-            || entry.silences.content_sha256 != hash
-            || entry.silences.source_fps != fps
-            || entry.silences.source_frames != frames
-            || entry.silences.threshold_dbfs_hundredths != self.config.threshold_dbfs_hundredths
-            || entry.silences.window_milliseconds != self.config.window_milliseconds
-            || entry.silences.spans.iter().any(|span| {
-                span.source_start < TimeCode::ZERO
-                    || span.source_end <= span.source_start
-                    || span.source_end > frames
+        self.cache
+            .load(&self.path_for(hash), |stored: StoredSilences| {
+                let silences = stored.silences;
+                (silences.content_sha256 == hash
+                    && silences.source_fps == fps
+                    && silences.source_frames == frames
+                    && silences.threshold_dbfs_hundredths == self.config.threshold_dbfs_hundredths
+                    && silences.window_milliseconds == self.config.window_milliseconds
+                    && !silences.spans.iter().any(|span| {
+                        span.source_start < TimeCode::ZERO
+                            || span.source_end <= span.source_start
+                            || span.source_end > frames
+                    }))
+                .then_some(silences)
             })
-        {
-            return Ok(None);
-        }
-        Ok(Some(entry.silences))
     }
 
     fn save(&self, silences: &AssetSilences) -> Result<(), MediaError> {
-        fs::create_dir_all(&self.root).map_err(|error| cache_error("create silence", error))?;
-        let bytes = serde_json::to_vec(&SilenceCacheEntry {
-            version: CACHE_VERSION,
-            silences: silences.clone(),
-        })
-        .map_err(|error| MediaError::Backend(format!("could not encode silence cache: {error}")))?;
-        atomic_write(&self.path_for(&silences.content_sha256), &bytes, "silence")
+        self.cache.save(
+            &self.path_for(&silences.content_sha256),
+            &StoredSilences {
+                silences: silences.clone(),
+            },
+        )
     }
 }
 
 #[derive(Serialize, Deserialize)]
-struct SilenceCacheEntry {
-    version: u32,
+struct StoredSilences {
     silences: AssetSilences,
 }
 
 struct SceneStore {
-    root: PathBuf,
+    cache: JsonCache,
     config: SceneDetectionConfig,
 }
 
 impl SceneStore {
     fn new(root: PathBuf, config: SceneDetectionConfig) -> Self {
-        Self { root, config }
+        Self {
+            cache: JsonCache::new(root, CACHE_VERSION, "scene"),
+            config,
+        }
     }
 
     fn path_for(&self, hash: &str) -> PathBuf {
-        self.root
-            .join(format!("{hash}-w{}.json", self.config.proxy_width))
+        self.cache
+            .path_for(hash, &format!("-w{}", self.config.proxy_width))
     }
 
     fn load(
@@ -811,133 +776,46 @@ impl SceneStore {
         fps: Rational,
         frames: TimeCode,
     ) -> Result<Option<AssetSceneChanges>, MediaError> {
-        let bytes = match fs::read(self.path_for(hash)) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(cache_error("read scene", error)),
-        };
-        let Ok(entry) = serde_json::from_slice::<SceneCacheEntry>(&bytes) else {
-            return Ok(None);
-        };
-        if entry.version != CACHE_VERSION
-            || entry.scenes.content_sha256 != hash
-            || entry.scenes.source_fps != fps
-            || entry.scenes.source_frames != frames
-            || entry.scenes.proxy_width != self.config.proxy_width
-            || entry.scenes.changes.iter().any(|change| {
-                change.source_frame <= TimeCode::ZERO || change.source_frame >= frames
+        self.cache
+            .load(&self.path_for(hash), |stored: StoredScenes| {
+                let scenes = stored.scenes;
+                (scenes.content_sha256 == hash
+                    && scenes.source_fps == fps
+                    && scenes.source_frames == frames
+                    && scenes.proxy_width == self.config.proxy_width
+                    && !scenes.changes.iter().any(|change| {
+                        change.source_frame <= TimeCode::ZERO || change.source_frame >= frames
+                    }))
+                .then_some(scenes)
             })
-        {
-            return Ok(None);
-        }
-        Ok(Some(entry.scenes))
     }
 
     fn save(&self, scenes: &AssetSceneChanges) -> Result<(), MediaError> {
-        fs::create_dir_all(&self.root).map_err(|error| cache_error("create scene", error))?;
-        let bytes = serde_json::to_vec(&SceneCacheEntry {
-            version: CACHE_VERSION,
-            scenes: scenes.clone(),
-        })
-        .map_err(|error| MediaError::Backend(format!("could not encode scene cache: {error}")))?;
-        atomic_write(&self.path_for(&scenes.content_sha256), &bytes, "scene")
+        self.cache.save(
+            &self.path_for(&scenes.content_sha256),
+            &StoredScenes {
+                scenes: scenes.clone(),
+            },
+        )
     }
 }
 
 #[derive(Serialize, Deserialize)]
-struct SceneCacheEntry {
-    version: u32,
+struct StoredScenes {
     scenes: AssetSceneChanges,
-}
-
-fn atomic_write(path: &Path, bytes: &[u8], label: &str) -> Result<(), MediaError> {
-    let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    fs::write(&temporary, bytes).map_err(|error| cache_error(&format!("write {label}"), error))?;
-    if path.exists() {
-        fs::remove_file(path).map_err(|error| cache_error(&format!("replace {label}"), error))?;
-    }
-    fs::rename(&temporary, path).map_err(|error| cache_error(&format!("commit {label}"), error))
-}
-
-fn cache_error(action: &str, error: std::io::Error) -> MediaError {
-    MediaError::Backend(format!("could not {action} cache: {error}"))
-}
-
-fn sha256_file(path: &Path) -> Result<String, MediaError> {
-    let mut file = File::open(path).map_err(|error| {
-        MediaError::Backend(format!("could not hash {}: {error}", path.display()))
-    })?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let count = file.read(&mut buffer).map_err(|error| {
-            MediaError::Backend(format!("could not hash {}: {error}", path.display()))
-        })?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    let mut encoded = String::with_capacity(64);
-    for byte in hasher.finalize() {
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    Ok(encoded)
-}
-
-fn update_silence(
-    states: &Arc<RwLock<HashMap<AssetId, SilenceStatus>>>,
-    asset: AssetId,
-    status: SilenceStatus,
-) {
-    if let Ok(mut states) = states.write() {
-        states.insert(asset, status);
-    }
-}
-
-fn update_scene(
-    states: &Arc<RwLock<HashMap<AssetId, SceneStatus>>>,
-    asset: AssetId,
-    status: SceneStatus,
-) {
-    if let Ok(mut states) = states.write() {
-        states.insert(asset, status);
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        path::PathBuf,
-        process::Command,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::{fs, path::PathBuf, process::Command};
 
     use openreel_core::{Clip, ClipId, MediaAsset, Track, TrackId, TrackKind};
 
     use super::*;
+    use crate::test_support::{TempDirectory, ffmpeg_executable};
 
-    struct TempDirectory(PathBuf);
-
-    impl TempDirectory {
-        fn new(label: &str) -> Self {
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = std::env::temp_dir()
-                .join(format!("openreel-{label}-{}-{nonce}", std::process::id()));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
+    // The generated fixture intentionally narrows its analytic f64 sine wave to PCM f32.
+    #[allow(clippy::cast_possible_truncation)]
     fn tone_silence_tone(sample_rate: u32) -> Vec<f32> {
         let seconds = 3_u32;
         (0..sample_rate * seconds)
@@ -984,7 +862,7 @@ mod tests {
         let directory = TempDirectory::new("decoded-silence");
         let fps = Rational::new(30, 1).unwrap();
         for sample_rate in [22_050, 48_000] {
-            let path = directory.0.join(format!("tone-gap-{sample_rate}.wav"));
+            let path = directory.path(&format!("tone-gap-{sample_rate}.wav"));
             write_pcm16_mono(&path, sample_rate, &tone_silence_tone(sample_rate));
             let decoded = decode_audio_range(
                 &path,
@@ -1058,7 +936,8 @@ mod tests {
     #[test]
     fn silence_and_scene_caches_round_trip_and_ignore_corruption() {
         let directory = TempDirectory::new("derived-cache");
-        let silence_store = SilenceStore::new(directory.0.join("silence"), Default::default());
+        let silence_store =
+            SilenceStore::new(directory.path("silence"), SilenceDetectionConfig::default());
         let silence = AssetSilences {
             asset: AssetId(1),
             content_sha256: "a".repeat(64),
@@ -1094,7 +973,7 @@ mod tests {
                 .is_none()
         );
 
-        let scene_store = SceneStore::new(directory.0.join("scene"), Default::default());
+        let scene_store = SceneStore::new(directory.path("scene"), SceneDetectionConfig::default());
         let scenes = AssetSceneChanges {
             asset: AssetId(2),
             content_sha256: "b".repeat(64),
@@ -1136,8 +1015,8 @@ mod tests {
     fn generated_hard_cuts_are_detected_without_continuous_false_positives() {
         crate::initialize_ffmpeg().unwrap();
         let directory = TempDirectory::new("scene-detection");
-        let hard_cuts = directory.0.join("hard-cuts.mp4");
-        let continuous = directory.0.join("continuous.mp4");
+        let hard_cuts = directory.path("hard-cuts.mp4");
+        let continuous = directory.path("continuous.mp4");
         let ffmpeg = ffmpeg_executable();
         let hard_status = Command::new(&ffmpeg)
             .args([
@@ -1299,16 +1178,8 @@ mod tests {
         }
     }
 
-    fn ffmpeg_executable() -> PathBuf {
-        std::env::var_os("FFMPEG_DIR").map_or_else(
-            || {
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../third_party/ffmpeg/bin/ffmpeg.exe")
-            },
-            |directory| PathBuf::from(directory).join("bin/ffmpeg.exe"),
-        )
-    }
-
+    // The clamped, rounded fixture samples are intentionally quantized to PCM i16.
+    #[allow(clippy::cast_possible_truncation)]
     fn write_pcm16_mono(path: &Path, sample_rate: u32, samples: &[f32]) {
         let data_bytes = u32::try_from(samples.len().saturating_mul(2)).unwrap();
         let mut bytes = Vec::with_capacity(44 + data_bytes as usize);

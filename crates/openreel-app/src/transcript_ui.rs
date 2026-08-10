@@ -36,6 +36,8 @@ impl OpenReelApp {
             });
     }
 
+    // Download byte counts become an approximate f32 progress bar in this immediate-mode panel.
+    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     fn asset_transcript_ui(&mut self, ui: &mut egui::Ui) {
         let Some(asset) = self.selected_transcript_asset().cloned() else {
             ui.label("Select or import an asset to see its transcript.");
@@ -54,9 +56,9 @@ impl OpenReelApp {
                 ui.label("Transcription queued…");
                 ui.ctx().request_repaint_after(Duration::from_millis(100));
             }
-            TranscriptStatus::Queued => self.running_transcript_label(ui, "Queued…", None),
+            TranscriptStatus::Queued => Self::running_transcript_label(ui, "Queued…", None),
             TranscriptStatus::Hashing => {
-                self.running_transcript_label(ui, "Hashing media…", None);
+                Self::running_transcript_label(ui, "Hashing media…", None);
             }
             TranscriptStatus::DownloadingModel {
                 downloaded_bytes,
@@ -80,10 +82,10 @@ impl OpenReelApp {
                         )
                     },
                 );
-                self.running_transcript_label(ui, &label, progress);
+                Self::running_transcript_label(ui, &label, progress);
             }
             TranscriptStatus::Transcribing { progress_percent } => {
-                self.running_transcript_label(
+                Self::running_transcript_label(
                     ui,
                     &format!("Transcribing… {progress_percent}%"),
                     Some(f32::from(progress_percent) / 100.0),
@@ -206,7 +208,7 @@ impl OpenReelApp {
             .or_else(|| self.document.media_pool.first())
     }
 
-    fn running_transcript_label(&self, ui: &mut egui::Ui, label: &str, progress: Option<f32>) {
+    fn running_transcript_label(ui: &mut egui::Ui, label: &str, progress: Option<f32>) {
         if let Some(progress) = progress {
             ui.add(egui::ProgressBar::new(progress.clamp(0.0, 1.0)).text(label));
         } else {

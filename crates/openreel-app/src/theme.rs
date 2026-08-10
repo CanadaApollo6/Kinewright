@@ -112,10 +112,16 @@ pub(crate) fn code_font() -> FontId {
     FontId::new(type_size::CODE, FontFamily::Monospace)
 }
 
+// Design-system spacing tokens are small whole-point values accepted by egui as i8 margins.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn margin(points: f32) -> i8 {
+    points as i8
+}
+
 pub(crate) fn panel_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(color::PANEL)
-        .inner_margin(egui::Margin::same(space::THREE as i8))
+        .inner_margin(egui::Margin::same(margin(space::THREE)))
 }
 
 pub(crate) fn card_frame(selected: bool) -> egui::Frame {
@@ -134,7 +140,7 @@ pub(crate) fn card_frame(selected: bool) -> egui::Frame {
             },
         ))
         .corner_radius(radius::MD)
-        .inner_margin(egui::Margin::same(space::TWO as i8))
+        .inner_margin(egui::Margin::same(margin(space::TWO)))
 }
 
 pub(crate) fn install(ctx: &egui::Context) {
@@ -164,8 +170,8 @@ pub(crate) fn install(ctx: &egui::Context) {
         ),
     ]);
     style.spacing.item_spacing = egui::vec2(space::TWO, space::ONE_HALF);
-    style.spacing.window_margin = egui::Margin::same(space::THREE as i8);
-    style.spacing.menu_margin = egui::Margin::same(space::TWO as i8);
+    style.spacing.window_margin = egui::Margin::same(margin(space::THREE));
+    style.spacing.menu_margin = egui::Margin::same(margin(space::TWO));
     style.spacing.button_padding = egui::vec2(space::ONE_HALF, space::ONE);
     style.spacing.indent = space::FOUR;
     style.spacing.interact_size = egui::vec2(size::CONTROL_HEIGHT, size::CONTROL_HEIGHT);

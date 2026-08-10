@@ -65,16 +65,30 @@ pub struct Core {
 }
 
 impl Core {
+    /// Start the core actor with a validated project document.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operation error when the initial document is invalid.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operating system cannot create the actor thread.
     pub fn spawn(initial_document: Document) -> Result<Self, OpError> {
         initial_document.validate()?;
         let (sender, receiver) = unbounded();
         thread::Builder::new()
             .name("openreel-core".to_owned())
-            .spawn(move || run_actor(receiver, CoreState::new(initial_document)))
+            .spawn(move || run_actor(&receiver, CoreState::new(initial_document)))
             .expect("failed to spawn Core actor");
         Ok(Self { sender })
     }
 
+    /// Queue a command for the core actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreDisconnected`] if the actor has stopped.
     pub fn send(&self, command: Command) -> Result<(), CoreDisconnected> {
         self.sender
             .send(CoreMessage::Command(command))
@@ -87,6 +101,10 @@ impl Core {
     /// must return the exact outcome of their own command. The command is still
     /// broadcast to every subscriber and uses the same operation and history
     /// path as [`Self::send`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreDisconnected`] if the actor stops before replying.
     pub fn request(&self, command: Command) -> Result<Event, CoreDisconnected> {
         let (reply, receiver) = unbounded();
         self.sender
@@ -97,6 +115,10 @@ impl Core {
 
     /// Subscribe to a true broadcast stream. Each subscriber gets every event.
     /// The first event is the current document snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreDisconnected`] if the actor has stopped.
     pub fn subscribe(&self) -> Result<Receiver<Event>, CoreDisconnected> {
         let (sender, receiver) = unbounded();
         self.sender
@@ -179,16 +201,16 @@ impl CoreState {
         Arc::clone(&self.document)
     }
 
-    fn query(&self, query: Query) -> QueryResult {
+    fn query(&self, query: &Query) -> QueryResult {
         match query {
             Query::Document => QueryResult::Document(Arc::clone(&self.document)),
-            Query::Clip(id) => QueryResult::Clip(self.document.clip(id).cloned()),
+            Query::Clip(id) => QueryResult::Clip(self.document.clip(*id).cloned()),
             Query::OpLog => QueryResult::OpLog(Arc::new(self.op_log.clone())),
         }
     }
 }
 
-fn run_actor(receiver: Receiver<CoreMessage>, mut state: CoreState) {
+fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
     while let Ok(message) = receiver.recv() {
         match message {
@@ -206,11 +228,11 @@ fn run_actor(receiver: Receiver<CoreMessage>, mut state: CoreState) {
             }
             CoreMessage::Command(command) => {
                 let event = execute_command(&mut state, command);
-                broadcast(&mut subscribers, event);
+                broadcast(&mut subscribers, &event);
             }
             CoreMessage::Request(command, reply) => {
                 let event = execute_command(&mut state, command);
-                broadcast(&mut subscribers, event.clone());
+                broadcast(&mut subscribers, &event);
                 let _ = reply.send(event);
             }
         }
@@ -248,11 +270,11 @@ fn execute_command(state: &mut CoreState, command: Command) -> Event {
             last_op: None,
             journal_command: Some(JournalCommand::Redo),
         },
-        Command::Query(query) => Event::QueryResult(state.query(query)),
+        Command::Query(query) => Event::QueryResult(state.query(&query)),
     }
 }
 
-fn broadcast(subscribers: &mut Vec<Sender<Event>>, event: Event) {
+fn broadcast(subscribers: &mut Vec<Sender<Event>>, event: &Event) {
     subscribers.retain(|subscriber| subscriber.send(event.clone()).is_ok());
 }
 

@@ -20,16 +20,16 @@ const AUDIO_CHANNELS: u16 = 2;
 pub(crate) fn export_document(
     document: &Document,
     out: &Path,
-    settings: ExportSettings,
-    progress: ProgressSink,
+    settings: &ExportSettings,
+    progress: &ProgressSink,
     gpu: GpuContext,
 ) -> Result<(), MediaError> {
-    validate_settings(document, out, &settings)?;
+    validate_settings(document, out, settings)?;
     let temporary = temporary_output(out);
     if temporary.exists() {
         fs::remove_file(&temporary).map_err(backend)?;
     }
-    let result = export_to_temporary(document, &temporary, &settings, &progress, gpu);
+    let result = export_to_temporary(document, &temporary, settings, progress, gpu);
     if let Err(error) = result {
         let _ = fs::remove_file(&temporary);
         return Err(error);
@@ -37,6 +37,8 @@ pub(crate) fn export_document(
     replace_output(&temporary, out)
 }
 
+// Encoder and muxer setup must stay in one ownership scope through trailer finalization.
+#[allow(clippy::too_many_lines)]
 fn export_to_temporary(
     document: &Document,
     out: &Path,

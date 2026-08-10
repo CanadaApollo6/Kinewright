@@ -147,12 +147,16 @@ impl OpenReelApp {
             self.export_job = None;
             match result {
                 Ok(()) => self.status = format!("Exported {}", path.display()),
-                Err(MediaError::Cancelled) => self.status = "Export cancelled".to_owned(),
+                Err(MediaError::Cancelled) => {
+                    "Export cancelled".clone_into(&mut self.status);
+                }
                 Err(error) => self.record_error("Export", format!("Export failed: {error}")),
             }
         }
     }
 
+    // Export settings, validation, progress, and cancellation share one immediate-mode dialog.
+    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     pub(crate) fn show_export_dialog(&mut self, ctx: &egui::Context) {
         if !self.export_dialog.open {
             return;
@@ -279,7 +283,7 @@ impl OpenReelApp {
         }
         if cancel && let Some(job) = &self.export_job {
             job.cancellation.cancel();
-            self.status = "Cancelling export…".to_owned();
+            "Cancelling export…".clone_into(&mut self.status);
         }
     }
 }

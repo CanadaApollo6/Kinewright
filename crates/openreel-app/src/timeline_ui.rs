@@ -56,6 +56,12 @@ impl OpenReelApp {
         self.send_operation(Operation::DeleteClip { clip });
     }
 
+    // Timeline interaction intentionally maps exact frames to egui's f32 pixel coordinate space.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation
+    )]
     pub(crate) fn timeline(&mut self, ui: &mut egui::Ui) {
         let old_zoom_target = self.timeline_zoom_target;
         ui.allocate_ui_with_layout(
@@ -515,6 +521,8 @@ impl OpenReelApp {
     }
 }
 
+// Track indices are small and intentionally projected into egui's f32 coordinate space.
+#[allow(clippy::cast_precision_loss)]
 fn paint_track_labels(
     ui: &mut egui::Ui,
     document: &openreel_core::Document,
@@ -573,7 +581,12 @@ fn paint_track_labels(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+// Ruler bounds intentionally convert between exact frames and f32 viewport pixels.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation
+)]
 fn paint_ruler(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -625,7 +638,8 @@ fn paint_ruler(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+// One clip paint pass keeps its layered drawing order explicit and reviewable.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn paint_clip(
     painter: &egui::Painter,
     clip_bounds: egui::Rect,
@@ -754,6 +768,8 @@ fn paint_clip(
     }
 }
 
+// Derived source-frame positions are intentionally projected into f32 clip pixels.
+#[allow(clippy::cast_precision_loss)]
 fn paint_derived_markers(
     painter: &egui::Painter,
     clip_bounds: egui::Rect,
@@ -817,7 +833,13 @@ fn paint_derived_markers(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+// Filmstrip sampling intentionally converts between bounded pixel columns and source frames.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn paint_filmstrip(
     painter: &egui::Painter,
     clip_bounds: egui::Rect,
@@ -865,6 +887,12 @@ fn paint_filmstrip(
     }
 }
 
+// Waveform rasterization intentionally converts bounded pixels and peak indices across domains.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn paint_waveform(
     painter: &egui::Painter,
     clip_bounds: egui::Rect,
@@ -966,6 +994,8 @@ fn snap_move(
     }
 }
 
+// Snapping rounds between f32 pixel tolerance, f64 ratios, and exact integer frames.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn nearest_snap(
     raw: i64,
     candidates: &[i64],
@@ -989,6 +1019,8 @@ fn nearest_snap(
     }
 }
 
+// Tick selection compares exact frame intervals in egui's f32 pixel coordinate space.
+#[allow(clippy::cast_precision_loss)]
 fn tick_density(pixels_per_frame: f32, fps: Rational) -> (i64, i64) {
     let nominal = i64::from(nominal_fps(fps));
     let candidates = [
@@ -1048,6 +1080,8 @@ mod tests {
     use super::*;
 
     #[test]
+    // This test checks the same intentional frame-to-pixel projection as tick_density.
+    #[allow(clippy::cast_precision_loss)]
     fn ruler_density_keeps_labels_and_minor_ticks_readable() {
         let fps = Rational::new(30, 1).unwrap();
         for zoom in [0.25, 1.0, 6.0, 20.0] {

@@ -7,6 +7,8 @@ use openreel_core::{
 };
 
 #[must_use]
+// Debug formatting keeps asset paths quoted and escaped in the stable text protocol.
+#[allow(clippy::unnecessary_debug_formatting)]
 pub fn render_timeline_state(document: &Document) -> String {
     let mut output = String::new();
     let _ = writeln!(
@@ -99,6 +101,11 @@ pub fn render_timeline_state(document: &Document) -> String {
     output
 }
 
+/// Render detailed state for one clip.
+///
+/// # Errors
+///
+/// Returns an error string when the clip or its referenced asset is missing.
 pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, String> {
     let (track, clip) = document
         .tracks
@@ -419,6 +426,8 @@ fn render_transition(transition: Option<&openreel_core::Transition>) -> String {
     )
 }
 
+// Human-readable seconds are intentionally approximate while frame counts remain exact.
+#[allow(clippy::cast_precision_loss)]
 fn frame_and_seconds(frame: TimeCode, fps: Rational) -> String {
     let seconds = (frame.0 as f64) * f64::from(fps.denominator()) / f64::from(fps.numerator());
     format!("{}f/{seconds:.3}s", frame.0)

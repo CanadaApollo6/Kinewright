@@ -56,6 +56,8 @@ impl OpenReelApp {
         self.selected_asset = Some(asset_id);
     }
 
+    // The media-bin immediate-mode pass keeps filtering, selection, and actions together.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn media_bin(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Media");

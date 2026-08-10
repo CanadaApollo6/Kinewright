@@ -18,7 +18,7 @@ use openreel_core::{
 
 use crate::{
     analysis::{VisualAssetResult, VisualAssetService},
-    audio::AudioRuntime,
+    audio::{AudioRuntime, AudioSourceSpec},
     clock::samples_to_frame,
     compositor::GpuContext,
     decode::{probe_path, thumbnail},
@@ -105,10 +105,20 @@ pub struct FfmpegMediaEngine {
 }
 
 impl FfmpegMediaEngine {
+    /// Start the media engine with the default cache directory and GPU selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when `FFmpeg`, GPU, audio, or worker initialization fails.
     pub fn new() -> Result<Self, MediaError> {
         Self::new_with_data_dir(default_data_dir())
     }
 
+    /// Start the media engine with an explicit cache directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when `FFmpeg`, GPU, audio, or worker initialization fails.
     pub fn new_with_data_dir(data_dir: PathBuf) -> Result<Self, MediaError> {
         static GPU: OnceLock<Result<GpuContext, MediaError>> = OnceLock::new();
         let gpu = GPU
@@ -117,10 +127,20 @@ impl FfmpegMediaEngine {
         Self::new_with_gpu_and_data_dir(gpu, data_dir)
     }
 
+    /// Start the media engine with an existing GPU context and default cache directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when `FFmpeg`, audio, or worker initialization fails.
     pub fn new_with_gpu(gpu: GpuContext) -> Result<Self, MediaError> {
         Self::new_with_gpu_and_data_dir(gpu, default_data_dir())
     }
 
+    /// Start the media engine with an existing GPU context and explicit cache directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when `FFmpeg`, audio, or worker initialization fails.
     pub fn new_with_gpu_and_data_dir(
         gpu: GpuContext,
         data_dir: PathBuf,
@@ -132,6 +152,11 @@ impl FfmpegMediaEngine {
         )
     }
 
+    /// Start the media engine with explicit GPU, cache, and derived-analysis configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when `FFmpeg`, audio, or worker initialization fails.
     pub fn new_with_gpu_data_dir_and_analysis_config(
         gpu: GpuContext,
         data_dir: PathBuf,
@@ -154,11 +179,13 @@ impl FfmpegMediaEngine {
             .name("openreel-media".to_owned())
             .spawn(move || {
                 Worker::new(
-                    control_rx,
-                    frames_tx,
-                    frames_drop_rx,
-                    events_tx,
-                    events_drop_rx,
+                    WorkerChannels {
+                        control_rx,
+                        frames_tx,
+                        frames_drop_rx,
+                        events_tx,
+                        events_drop_rx,
+                    },
                     worker_clock,
                     worker_requested,
                     worker_gpu,
@@ -167,8 +194,8 @@ impl FfmpegMediaEngine {
             })
             .map_err(|error| MediaError::Backend(error.to_string()))?;
 
-        let visual_assets = VisualAssetService::new(data_dir.clone())?;
-        let derived_analysis = DerivedAnalysisService::new(data_dir.clone(), analysis_config)?;
+        let visual_assets = VisualAssetService::new(&data_dir)?;
+        let derived_analysis = DerivedAnalysisService::new(&data_dir, analysis_config)?;
         Ok(Self {
             control_tx,
             frames_rx,
@@ -348,7 +375,7 @@ impl MediaEngine for FfmpegMediaEngine {
             .read()
             .map_err(|_| MediaError::Backend("export document lock was poisoned".to_owned()))?
             .clone();
-        crate::export::export_document(&document, out, settings, progress, self.gpu.clone())
+        crate::export::export_document(&document, out, &settings, &progress, self.gpu.clone())
     }
 }
 
@@ -381,23 +408,27 @@ struct Worker {
     last_position: Option<TimeCode>,
 }
 
+struct WorkerChannels {
+    control_rx: Receiver<Control>,
+    frames_tx: Sender<(TimeCode, FrameTexture)>,
+    frames_drop_rx: Receiver<(TimeCode, FrameTexture)>,
+    events_tx: Sender<MediaEvent>,
+    events_drop_rx: Receiver<MediaEvent>,
+}
+
 impl Worker {
     fn new(
-        control_rx: Receiver<Control>,
-        frames_tx: Sender<(TimeCode, FrameTexture)>,
-        frames_drop_rx: Receiver<(TimeCode, FrameTexture)>,
-        events_tx: Sender<MediaEvent>,
-        events_drop_rx: Receiver<MediaEvent>,
+        channels: WorkerChannels,
         clock: Arc<SharedClock>,
         requested: Arc<RequestedPositions>,
         gpu: GpuContext,
     ) -> Self {
         Self {
-            control_rx,
-            frames_tx,
-            frames_drop_rx,
-            events_tx,
-            events_drop_rx,
+            control_rx: channels.control_rx,
+            frames_tx: channels.frames_tx,
+            frames_drop_rx: channels.frames_drop_rx,
+            events_tx: channels.events_tx,
+            events_drop_rx: channels.events_drop_rx,
             clock,
             requested,
             handled_frame_sequence: 0,
@@ -603,21 +634,23 @@ impl Worker {
             active.filter(|active| matches!(active.kind, MediaKind::Audio | MediaKind::AudioVideo))
         {
             AudioRuntime::open(
-                &active.path,
-                active.source_fps,
+                AudioSourceSpec {
+                    path: &active.path,
+                    fps: active.source_fps,
+                    from: active.source_at,
+                    end: active.source_end,
+                },
                 active.project_fps,
-                active.source_at,
-                active.source_end,
                 project_at,
-                Arc::clone(&self.clock.position_samples),
-                Arc::clone(&self.clock.sample_rate),
+                &self.clock.position_samples,
+                &self.clock.sample_rate,
             )
         } else {
             AudioRuntime::open_silence(
                 self.document.fps,
                 project_at,
-                Arc::clone(&self.clock.position_samples),
-                Arc::clone(&self.clock.sample_rate),
+                &self.clock.position_samples,
+                &self.clock.sample_rate,
             )
         }
     }
@@ -677,11 +710,10 @@ fn black_image(resolution: (u32, u32), max_width: u32) -> RgbaImage {
 
 fn send_latest<T: Send>(sender: &Sender<T>, drop_receiver: &Receiver<T>, value: T) {
     match sender.try_send(value) {
-        Ok(()) => {}
+        Ok(()) | Err(crossbeam_channel::TrySendError::Disconnected(_)) => {}
         Err(crossbeam_channel::TrySendError::Full(value)) => {
             let _ = drop_receiver.try_recv();
             let _ = sender.try_send(value);
         }
-        Err(crossbeam_channel::TrySendError::Disconnected(_)) => {}
     }
 }

@@ -39,7 +39,7 @@ fn claude_splits_then_deletes_via_the_live_mcp_server() {
     println!("USER: {prompt}");
     session.send_user_message(prompt.to_owned()).unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_mins(3);
     let mut approved = 0;
     loop {
         for request in confirmations.pending_requests() {
@@ -109,7 +109,7 @@ fn codex_splits_then_deletes_via_the_live_mcp_server() {
     println!("USER: {prompt}");
     session.send_user_message(prompt.to_owned()).unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_mins(3);
     let mut approved = 0;
     loop {
         for request in confirmations.pending_requests() {

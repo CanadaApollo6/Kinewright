@@ -140,7 +140,7 @@ impl AgentDriver for ClaudeCodeDriver {
     fn start_session(&self, cfg: SessionConfig) -> Result<Box<dyn AgentSession>, AgentError> {
         let executable = find_on_path("claude").ok_or(AgentError::NotInstalled)?;
         let endpoint = cfg.mcp_url.clone().ok_or(AgentError::MissingMcpEndpoint)?;
-        ClaudeSession::spawn(executable, endpoint, cfg).map(|session| Box::new(session) as _)
+        ClaudeSession::spawn(executable, &endpoint, &cfg).map(|session| Box::new(session) as _)
     }
 }
 
@@ -154,11 +154,7 @@ struct ClaudeSession {
 }
 
 impl ClaudeSession {
-    fn spawn(
-        executable: PathBuf,
-        endpoint: String,
-        cfg: SessionConfig,
-    ) -> Result<Self, AgentError> {
+    fn spawn(executable: PathBuf, endpoint: &str, cfg: &SessionConfig) -> Result<Self, AgentError> {
         let tool_allowlist = all_tool_names()
             .map_err(|error| AgentError::Harness(error.to_string()))?
             .into_iter()

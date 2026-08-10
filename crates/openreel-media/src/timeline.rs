@@ -27,6 +27,10 @@ pub struct TimelineVideoLayer {
 ///
 /// Clip intervals are half-open. A position in a gap, before the first clip, or
 /// at/after the document duration maps to `None`.
+///
+/// # Errors
+///
+/// Returns a media error when exact source/project frame mapping fails.
 pub fn timeline_source_at(
     document: &Document,
     project_at: TimeCode,
@@ -46,6 +50,10 @@ pub fn timeline_source_at(
 }
 
 /// Resolve every active video track at a project frame, bottom-to-top.
+///
+/// # Errors
+///
+/// Returns a media error when exact source/project frame mapping fails.
 pub fn video_layers_at(
     document: &Document,
     project_at: TimeCode,
@@ -129,6 +137,8 @@ fn source_on_track(
     Ok(None)
 }
 
+// GPU alpha is f32; projecting integer frame offsets is the intended final conversion.
+#[allow(clippy::cast_precision_loss)]
 fn transition_alpha(clip: &Clip, project_at: TimeCode) -> f32 {
     let Some(transition) = &clip.transition_in else {
         return 1.0;

@@ -76,10 +76,20 @@ pub enum AgentError {
 pub trait AgentDriver: Send + Sync {
     fn id(&self) -> HarnessId;
     fn detect(&self) -> Option<HarnessInfo>;
+    /// Start a harness session using the supplied project context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an agent error when the harness is unavailable or rejects setup.
     fn start_session(&self, cfg: SessionConfig) -> Result<Box<dyn AgentSession>, AgentError>;
 }
 
 pub trait AgentSession: Send {
+    /// Send one user turn to the running harness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an agent error when the harness cannot accept the message.
     fn send_user_message(&mut self, text: String) -> Result<(), AgentError>;
     fn events(&self) -> Receiver<AgentEvent>;
     fn interrupt(&mut self);

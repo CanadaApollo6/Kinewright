@@ -1,6 +1,6 @@
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, fmt::Write, sync::Arc};
 
-use openreel_core::Operation;
+use openreel_core::{EFFECT_DESCRIPTORS, Operation};
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -39,6 +39,15 @@ pub enum SchemaError {
     UnknownTool(String),
 }
 
+/// Build one MCP tool definition for every operation variant.
+///
+/// # Errors
+///
+/// Returns a schema error when the generated operation schema has an unexpected shape.
+///
+/// # Panics
+///
+/// Panics if the statically generated operation schema cannot be serialized.
 pub fn operation_tools() -> Result<Vec<OperationToolDefinition>, SchemaError> {
     let root = serde_json::to_value(schemars::schema_for!(Operation))
         .expect("schemars Operation output must serialize");
@@ -69,6 +78,11 @@ pub fn decode_operation(tool_name: &str, arguments: JsonObject) -> Result<Operat
     })
 }
 
+/// Return every mutating and inspecting MCP tool name.
+///
+/// # Errors
+///
+/// Returns a schema error when operation tool generation fails.
 pub fn all_tool_names() -> Result<Vec<String>, SchemaError> {
     let mut names = operation_tools()?
         .into_iter()
@@ -136,18 +150,44 @@ fn operation_tool(
         .destructive(matches!(name.as_str(), "delete_clip" | "remove_track"))
         .idempotent(false)
         .open_world(false);
-    let tool = Tool::new(
-        name,
-        Cow::Owned(format!(
-            "Apply Operation::{variant} to the live timeline. All frame values are exact integers."
-        )),
-        Arc::new(input),
-    )
-    .with_annotations(annotations);
+    let mut description = format!(
+        "Apply Operation::{variant} to the live timeline. All frame values are exact integers."
+    );
+    if matches!(variant.as_str(), "AddEffect" | "SetEffectParam") {
+        write!(description, " {}", effect_documentation())
+            .expect("writing effect documentation to a String cannot fail");
+    }
+    let tool =
+        Tool::new(name, Cow::Owned(description), Arc::new(input)).with_annotations(annotations);
     Ok(OperationToolDefinition {
         variant: variant.clone(),
         tool,
     })
+}
+
+fn effect_documentation() -> String {
+    let mut documentation = String::from("Supported effects: ");
+    for (effect_index, effect) in EFFECT_DESCRIPTORS.iter().enumerate() {
+        if effect_index != 0 {
+            documentation.push_str("; ");
+        }
+        write!(documentation, "{}(", effect.name)
+            .expect("writing effect documentation to a String cannot fail");
+        for (parameter_index, parameter) in effect.parameters.iter().enumerate() {
+            if parameter_index != 0 {
+                documentation.push_str(", ");
+            }
+            write!(
+                documentation,
+                "{}={}..={}, neutral {}",
+                parameter.name, parameter.min, parameter.max, parameter.neutral
+            )
+            .expect("writing effect documentation to a String cannot fail");
+        }
+        documentation.push(')');
+    }
+    documentation.push('.');
+    documentation
 }
 
 fn camel_to_snake(value: &str) -> String {

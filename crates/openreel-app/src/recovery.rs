@@ -366,7 +366,7 @@ impl Recorder {
         let (control, controls) = unbounded();
         let worker = thread::Builder::new()
             .name("openreel-recovery".to_owned())
-            .spawn(move || recorder_loop(writer, events, controls, runtime_error))
+            .spawn(move || recorder_loop(writer, &events, &controls, &runtime_error))
             .map_err(|error| format!("could not start recovery recorder: {error}"))?;
         Ok(Self {
             control,
@@ -409,23 +409,23 @@ impl Drop for Recorder {
 
 fn recorder_loop(
     mut writer: JournalWriter,
-    events: Receiver<Event>,
-    controls: Receiver<RecorderControl>,
-    runtime_error: Arc<Mutex<Option<String>>>,
+    events: &Receiver<Event>,
+    controls: &Receiver<RecorderControl>,
+    runtime_error: &Arc<Mutex<Option<String>>>,
 ) {
     loop {
         select! {
             recv(controls) -> message => match message {
                 #[cfg(test)]
                 Ok(RecorderControl::Flush(acknowledge)) => {
-                    if !drain_events(&events, &mut writer, &runtime_error) {
+                    if !drain_events(events, &mut writer, runtime_error) {
                         let _ = acknowledge.send(());
                         break;
                     }
                     let _ = acknowledge.send(());
                 }
                 Ok(RecorderControl::Stop(acknowledge)) => {
-                    let _ = drain_events(&events, &mut writer, &runtime_error);
+                    let _ = drain_events(events, &mut writer, runtime_error);
                     let _ = acknowledge.send(());
                     break;
                 }
@@ -433,7 +433,7 @@ fn recorder_loop(
             },
             recv(events) -> event => match event {
                 Ok(event) => {
-                    if !record_event(&mut writer, event, &runtime_error) {
+                    if !record_event(&mut writer, event, runtime_error) {
                         break;
                     }
                 }
@@ -773,7 +773,7 @@ mod tests {
                 effect: Effect {
                     id: EffectId(1),
                     name: "brightness".to_owned(),
-                    parameters: Default::default(),
+                    parameters: std::collections::BTreeMap::default(),
                 },
             }),
             JournalCommand::Undo,

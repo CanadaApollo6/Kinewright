@@ -1,9 +1,13 @@
 use std::{num::NonZeroU64, sync::Arc};
 
-use openreel_core::{Effect, FrameTexture, MediaError, ParamValue};
+use openreel_core::{
+    Effect, EffectParameterDescriptor, EffectUniform, FrameTexture, MediaError, ParamValue,
+    effect_descriptor,
+};
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const UNIFORM_SIZE: u64 = 8 * 4;
+const UNIFORM_BYTES: usize = 8 * 4;
 
 #[derive(Clone)]
 pub struct GpuContext {
@@ -17,6 +21,11 @@ impl GpuContext {
         Self { device, queue }
     }
 
+    /// Acquire a headless adapter and device for rendering.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when no compatible adapter or device is available.
     pub fn headless(force_fallback_adapter: bool) -> Result<Self, MediaError> {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -183,6 +192,11 @@ impl Compositor {
         }
     }
 
+    /// Composite the supplied bottom-to-top layers into one RGBA frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error for invalid dimensions or a GPU mapping failure.
     pub fn render(
         &self,
         resolution: (u32, u32),
@@ -399,7 +413,7 @@ impl Compositor {
 }
 
 impl LayerParams {
-    fn as_bytes(self) -> [u8; UNIFORM_SIZE as usize] {
+    fn as_bytes(self) -> [u8; UNIFORM_BYTES] {
         let values = [
             self.brightness,
             self.contrast,
@@ -410,7 +424,7 @@ impl LayerParams {
             self.offset_y,
             0.0,
         ];
-        let mut bytes = [0_u8; UNIFORM_SIZE as usize];
+        let mut bytes = [0_u8; UNIFORM_BYTES];
         for (index, value) in values.into_iter().enumerate() {
             let start = index * 4;
             bytes[start..start + 4].copy_from_slice(&value.to_ne_bytes());
@@ -425,26 +439,31 @@ fn params_for(effects: &[Effect], transition_alpha: f32) -> LayerParams {
         ..Default::default()
     };
     for effect in effects {
-        match effect.name.as_str() {
-            "brightness" => params.brightness += percent(effect, "percent", 0) / 100.0,
-            "contrast" => params.contrast *= 1.0 + percent(effect, "percent", 0) / 100.0,
-            "saturation" => params.saturation *= 1.0 + percent(effect, "percent", 0) / 100.0,
-            "opacity" => params.opacity *= percent(effect, "percent", 100) / 100.0,
-            "transform" => {
-                params.scale *= percent(effect, "scale_percent", 100) / 100.0;
-                params.offset_x += percent(effect, "x_percent", 0) / 50.0;
-                params.offset_y += percent(effect, "y_percent", 0) / 50.0;
+        let Some(descriptor) = effect_descriptor(&effect.name) else {
+            continue;
+        };
+        for parameter in descriptor.parameters {
+            let value = parameter_value(effect, parameter);
+            match parameter.uniform {
+                EffectUniform::Brightness => params.brightness += value / 100.0,
+                EffectUniform::Contrast => params.contrast *= 1.0 + value / 100.0,
+                EffectUniform::Saturation => params.saturation *= 1.0 + value / 100.0,
+                EffectUniform::Opacity => params.opacity *= value / 100.0,
+                EffectUniform::Scale => params.scale *= value / 100.0,
+                EffectUniform::OffsetX => params.offset_x += value / 50.0,
+                EffectUniform::OffsetY => params.offset_y += value / 50.0,
             }
-            _ => {}
         }
     }
     params
 }
 
-fn percent(effect: &Effect, name: &str, default: i64) -> f32 {
-    match effect.parameters.get(name) {
+// Registered values are bounded to small integers that are exactly representable as f32.
+#[allow(clippy::cast_precision_loss)]
+fn parameter_value(effect: &Effect, descriptor: &EffectParameterDescriptor) -> f32 {
+    match effect.parameters.get(descriptor.name) {
         Some(ParamValue::Integer(value)) => *value as f32,
-        _ => default as f32,
+        _ => descriptor.neutral as f32,
     }
 }
 

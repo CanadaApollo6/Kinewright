@@ -1,19 +1,21 @@
 use std::{
-    collections::{HashMap, HashSet},
-    fmt::Write as _,
-    fs::{self, File},
-    io::Read as _,
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    thread,
-    time::SystemTime,
 };
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 use openreel_core::{AssetId, MediaAsset, MediaError, MediaKind, Rational, RgbaImage, TimeCode};
 use serde::{Deserialize, Serialize};
 
-use crate::{audio::decode_audio_peaks, decode::thumbnail, sha256::Sha256};
+use crate::{
+    audio::decode_audio_peaks,
+    decode::thumbnail,
+    derived_cache::{
+        ContentHashes, JsonCache, TempFileStyle, atomic_write, cache_path, cache_root,
+        create_cache_dir, read_cache, spawn_worker, trim_cache,
+    },
+};
 
 const CACHE_VERSION: u32 = 1;
 const JOB_CAPACITY: usize = 64;
@@ -78,25 +80,22 @@ pub(crate) struct VisualAssetService {
 }
 
 impl VisualAssetService {
-    pub(crate) fn new(data_dir: PathBuf) -> Result<Self, MediaError> {
+    pub(crate) fn new(data_dir: &Path) -> Result<Self, MediaError> {
         let (jobs, jobs_rx) = bounded(JOB_CAPACITY);
         let (results_tx, results) = bounded(RESULT_CAPACITY);
         let in_flight = Arc::new(Mutex::new(HashSet::new()));
         let worker_in_flight = Arc::clone(&in_flight);
-        thread::Builder::new()
-            .name("openreel-visual-assets".to_owned())
-            .spawn(move || {
-                VisualAssetWorker::new(
-                    data_dir.join("visual-assets").join("v1"),
-                    jobs_rx,
-                    results_tx,
-                    worker_in_flight,
-                )
-                .run();
-            })
-            .map_err(|error| {
-                MediaError::Backend(format!("could not start visual asset worker: {error}"))
-            })?;
+        let mut worker = VisualAssetWorker::new(
+            cache_root(data_dir, "visual-assets", CACHE_VERSION),
+            results_tx,
+            worker_in_flight,
+        );
+        spawn_worker(
+            "openreel-visual-assets",
+            "visual asset",
+            jobs_rx,
+            move |job| worker.handle(job),
+        )?;
         Ok(Self {
             jobs,
             results,
@@ -190,39 +189,32 @@ enum JobKey {
 
 struct VisualAssetWorker {
     root: PathBuf,
-    jobs: Receiver<Job>,
     results: Sender<VisualAssetResult>,
     in_flight: Arc<Mutex<HashSet<JobKey>>>,
-    hashes: HashMap<PathBuf, String>,
+    hashes: ContentHashes,
 }
 
 impl VisualAssetWorker {
     fn new(
         root: PathBuf,
-        jobs: Receiver<Job>,
         results: Sender<VisualAssetResult>,
         in_flight: Arc<Mutex<HashSet<JobKey>>>,
     ) -> Self {
         Self {
             root,
-            jobs,
             results,
             in_flight,
-            hashes: HashMap::new(),
+            hashes: ContentHashes::default(),
         }
     }
 
-    fn run(mut self) {
-        while let Ok(job) = self.jobs.recv() {
-            let key = job.key();
-            let result = self.process(job);
-            if let Ok(mut in_flight) = self.in_flight.lock() {
-                in_flight.remove(&key);
-            }
-            if self.results.send(result).is_err() {
-                break;
-            }
+    fn handle(&mut self, job: Job) -> bool {
+        let key = job.key();
+        let result = self.process(job);
+        if let Ok(mut in_flight) = self.in_flight.lock() {
+            in_flight.remove(&key);
         }
+        self.results.send(result).is_ok()
     }
 
     fn process(&mut self, job: Job) -> VisualAssetResult {
@@ -304,22 +296,20 @@ impl VisualAssetWorker {
     }
 
     fn content_hash(&mut self, path: &Path) -> Result<String, MediaError> {
-        if let Some(hash) = self.hashes.get(path) {
-            return Ok(hash.clone());
-        }
-        let hash = sha256_file(path)?;
-        self.hashes.insert(path.to_path_buf(), hash.clone());
-        Ok(hash)
+        self.hashes.get(path)
     }
 }
 
 struct WaveformStore {
-    root: PathBuf,
+    cache: JsonCache,
 }
 
 impl WaveformStore {
     fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            cache: JsonCache::new(root, CACHE_VERSION, "waveform")
+                .with_write_options("visual asset", TempFileStyle::ReplaceExtension),
+        }
     }
 
     fn load(
@@ -328,49 +318,31 @@ impl WaveformStore {
         source_fps: Rational,
         source_frames: TimeCode,
     ) -> Result<Option<WaveformData>, MediaError> {
-        let path = self.path_for(hash);
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(cache_error("read waveform", error)),
-        };
-        let cached = match serde_json::from_slice::<WaveformCacheFile>(&bytes) {
-            Ok(cached) => cached,
-            Err(_) => return Ok(None),
-        };
-        if cached.version != CACHE_VERSION
-            || cached.waveform.content_sha256 != hash
-            || cached.waveform.source_fps != source_fps
-            || cached.waveform.source_frames != source_frames
-            || cached.waveform.peaks.len() > MAX_WAVEFORM_PEAKS
-        {
-            return Ok(None);
-        }
-        Ok(Some(cached.waveform))
+        self.cache
+            .load(&self.cache.path_for(hash, ""), |stored: StoredWaveform| {
+                let waveform = stored.waveform;
+                (waveform.content_sha256 == hash
+                    && waveform.source_fps == source_fps
+                    && waveform.source_frames == source_frames
+                    && waveform.peaks.len() <= MAX_WAVEFORM_PEAKS)
+                    .then_some(waveform)
+            })
     }
 
     fn save(&self, waveform: &WaveformData) -> Result<(), MediaError> {
-        fs::create_dir_all(&self.root).map_err(|error| cache_error("create waveform", error))?;
-        let bytes = serde_json::to_vec(&WaveformCacheFile {
-            version: CACHE_VERSION,
-            waveform: waveform.clone(),
-        })
-        .map_err(|error| {
-            MediaError::Backend(format!("could not encode waveform cache: {error}"))
-        })?;
-        atomic_write(&self.path_for(&waveform.content_sha256), &bytes)?;
-        trim_cache(&self.root, MAX_WAVEFORM_FILES, MAX_WAVEFORM_BYTES)?;
+        self.cache.save(
+            &self.cache.path_for(&waveform.content_sha256, ""),
+            &StoredWaveform {
+                waveform: waveform.clone(),
+            },
+        )?;
+        trim_cache(self.cache.root(), MAX_WAVEFORM_FILES, MAX_WAVEFORM_BYTES)?;
         Ok(())
-    }
-
-    fn path_for(&self, hash: &str) -> PathBuf {
-        self.root.join(format!("{hash}.json"))
     }
 }
 
 #[derive(Serialize, Deserialize)]
-struct WaveformCacheFile {
-    version: u32,
+struct StoredWaveform {
     waveform: WaveformData,
 }
 
@@ -389,10 +361,9 @@ impl ThumbnailStore {
         source_at: TimeCode,
         max_width: u32,
     ) -> Result<Option<RgbaImage>, MediaError> {
-        let bytes = match fs::read(self.path_for(hash, source_at, max_width)) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(cache_error("read thumbnail", error)),
+        let Some(bytes) = read_cache(&self.path_for(hash, source_at, max_width), "thumbnail")?
+        else {
+            return Ok(None);
         };
         decode_thumbnail_cache(&bytes).map_or(Ok(None), |image| Ok(Some(image)))
     }
@@ -404,16 +375,25 @@ impl ThumbnailStore {
         max_width: u32,
         image: &RgbaImage,
     ) -> Result<(), MediaError> {
-        fs::create_dir_all(&self.root).map_err(|error| cache_error("create thumbnail", error))?;
+        create_cache_dir(&self.root, "thumbnail")?;
         let bytes = encode_thumbnail_cache(image)?;
-        atomic_write(&self.path_for(hash, source_at, max_width), &bytes)?;
+        atomic_write(
+            &self.path_for(hash, source_at, max_width),
+            &bytes,
+            "visual asset",
+            TempFileStyle::ReplaceExtension,
+        )?;
         trim_cache(&self.root, MAX_THUMBNAIL_FILES, MAX_THUMBNAIL_BYTES)?;
         Ok(())
     }
 
     fn path_for(&self, hash: &str, source_at: TimeCode, max_width: u32) -> PathBuf {
-        self.root
-            .join(format!("{hash}-{}-{max_width}.rgba", source_at.0))
+        cache_path(
+            &self.root,
+            hash,
+            &format!("-{}-{max_width}", source_at.0),
+            "rgba",
+        )
     }
 }
 
@@ -456,101 +436,12 @@ fn decode_thumbnail_cache(bytes: &[u8]) -> Option<RgbaImage> {
     })
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), MediaError> {
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    fs::write(&temporary, bytes).map_err(|error| cache_error("write visual asset", error))?;
-    if path.exists() {
-        fs::remove_file(path).map_err(|error| cache_error("replace visual asset", error))?;
-    }
-    fs::rename(&temporary, path).map_err(|error| cache_error("commit visual asset", error))
-}
-
-fn trim_cache(root: &Path, maximum_files: usize, maximum_bytes: u64) -> Result<(), MediaError> {
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(cache_error("scan visual asset", error)),
-    };
-    let mut files = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
-            metadata.is_file().then(|| {
-                (
-                    entry.path(),
-                    metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                    metadata.len(),
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-    files.sort_by_key(|(_, modified, _)| *modified);
-    let mut total_bytes = files.iter().map(|(_, _, bytes)| *bytes).sum::<u64>();
-    let mut file_count = files.len();
-    for (path, _, bytes) in files {
-        if file_count <= maximum_files && total_bytes <= maximum_bytes {
-            break;
-        }
-        if fs::remove_file(path).is_ok() {
-            file_count = file_count.saturating_sub(1);
-            total_bytes = total_bytes.saturating_sub(bytes);
-        }
-    }
-    Ok(())
-}
-
-fn sha256_file(path: &Path) -> Result<String, MediaError> {
-    let mut file = File::open(path).map_err(|error| {
-        MediaError::Backend(format!("could not hash {}: {error}", path.display()))
-    })?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let count = file.read(&mut buffer).map_err(|error| {
-            MediaError::Backend(format!("could not hash {}: {error}", path.display()))
-        })?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    let mut encoded = String::with_capacity(64);
-    for byte in hasher.finalize() {
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    Ok(encoded)
-}
-
-fn cache_error(action: &str, error: std::io::Error) -> MediaError {
-    MediaError::Backend(format!("could not {action} cache: {error}"))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::fs;
 
     use super::*;
-
-    struct TempDirectory(PathBuf);
-
-    impl TempDirectory {
-        fn new(label: &str) -> Self {
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = std::env::temp_dir()
-                .join(format!("openreel-{label}-{}-{nonce}", std::process::id()));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::TempDirectory;
 
     fn waveform(hash: &str) -> WaveformData {
         WaveformData {
@@ -608,7 +499,7 @@ mod tests {
     #[test]
     fn waveform_cache_round_trips_and_rebinds_asset() {
         let directory = TempDirectory::new("waveform-cache");
-        let store = WaveformStore::new(directory.0.clone());
+        let store = WaveformStore::new(directory.root().to_path_buf());
         let source = waveform("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         store.save(&source).unwrap();
 
@@ -630,7 +521,7 @@ mod tests {
     #[test]
     fn waveform_cache_rejects_metadata_mismatch() {
         let directory = TempDirectory::new("waveform-mismatch");
-        let store = WaveformStore::new(directory.0.clone());
+        let store = WaveformStore::new(directory.root().to_path_buf());
         let source = waveform("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         store.save(&source).unwrap();
 
@@ -662,13 +553,13 @@ mod tests {
     fn disk_cache_trimming_enforces_file_and_byte_bounds() {
         let directory = TempDirectory::new("visual-cache-trim");
         for index in 0..5 {
-            fs::write(directory.0.join(format!("{index}.cache")), vec![0_u8; 16]).unwrap();
+            fs::write(directory.path(&format!("{index}.cache")), vec![0_u8; 16]).unwrap();
         }
 
-        trim_cache(&directory.0, 3, 40).unwrap();
+        trim_cache(directory.root(), 3, 40).unwrap();
 
-        let files = fs::read_dir(&directory.0).unwrap().count();
-        let bytes = fs::read_dir(&directory.0)
+        let files = fs::read_dir(directory.root()).unwrap().count();
+        let bytes = fs::read_dir(directory.root())
             .unwrap()
             .map(|entry| entry.unwrap().metadata().unwrap().len())
             .sum::<u64>();

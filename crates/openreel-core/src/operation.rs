@@ -68,10 +68,19 @@ pub enum Operation {
 
 pub trait ApplyOp {
     /// Validate and apply to `doc`. This method performs no I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operation error without mutating `doc` when validation fails.
     fn apply(&self, doc: &mut Document) -> Result<(), OpError>;
 }
 
 impl Operation {
+    /// Validate and atomically apply this operation to a document.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operation error without mutating `doc` when validation fails.
     pub fn apply(&self, doc: &mut Document) -> Result<(), OpError> {
         <Self as ApplyOp>::apply(self, doc)
     }
@@ -83,6 +92,10 @@ impl Operation {
 /// operation is applied to the result of the previous one, so generated ids and
 /// later validations have the same semantics as sequential `Operation::apply`
 /// calls.
+///
+/// # Errors
+///
+/// Returns the failing operation index and error, leaving `doc` unchanged.
 pub fn apply_batch(doc: &mut Document, operations: &[Operation]) -> Result<(), BatchError> {
     if operations.is_empty() {
         return Err(BatchError::Empty);
@@ -576,42 +589,45 @@ fn validate_asset(asset: &MediaAsset) -> Result<(), OpError> {
 }
 
 fn validate_effect(effect: &Effect) -> Result<(), OpError> {
-    match effect.name.as_str() {
-        "brightness" | "contrast" | "saturation" | "opacity" | "transform" => {}
-        _ => return Err(OpError::UnknownEffect(effect.name.clone())),
-    }
+    let Some(descriptor) = crate::effect_descriptor(&effect.name) else {
+        return Err(OpError::UnknownEffect(effect.name.clone()));
+    };
     for (name, value) in &effect.parameters {
-        validate_effect_parameter(&effect.name, name, value)?;
+        validate_described_effect_parameter(descriptor, name, value)?;
     }
     Ok(())
 }
 
 fn validate_effect_parameter(effect: &str, name: &str, value: &ParamValue) -> Result<(), OpError> {
-    let (min, max) = match (effect, name) {
-        ("brightness" | "contrast" | "saturation", "percent") => (-100, 100),
-        ("opacity", "percent") => (0, 100),
-        ("transform", "scale_percent") => (1, 400),
-        ("transform", "x_percent" | "y_percent") => (-100, 100),
-        ("brightness" | "contrast" | "saturation" | "opacity" | "transform", _) => {
-            return Err(OpError::UnknownEffectParam {
-                effect: effect.to_owned(),
-                name: name.to_owned(),
-            });
-        }
-        _ => return Err(OpError::UnknownEffect(effect.to_owned())),
+    let Some(descriptor) = crate::effect_descriptor(effect) else {
+        return Err(OpError::UnknownEffect(effect.to_owned()));
     };
-    let ParamValue::Integer(actual) = value else {
-        return Err(OpError::InvalidEffectParamType {
-            effect: effect.to_owned(),
+    validate_described_effect_parameter(descriptor, name, value)
+}
+
+fn validate_described_effect_parameter(
+    effect: crate::EffectDescriptor,
+    name: &str,
+    value: &ParamValue,
+) -> Result<(), OpError> {
+    let Some(parameter) = effect.parameter(name) else {
+        return Err(OpError::UnknownEffectParam {
+            effect: effect.name.to_owned(),
             name: name.to_owned(),
         });
     };
-    if !(min..=max).contains(actual) {
-        return Err(OpError::EffectParamOutOfRange {
-            effect: effect.to_owned(),
+    let ParamValue::Integer(actual) = value else {
+        return Err(OpError::InvalidEffectParamType {
+            effect: effect.name.to_owned(),
             name: name.to_owned(),
-            min,
-            max,
+        });
+    };
+    if !(parameter.min..=parameter.max).contains(actual) {
+        return Err(OpError::EffectParamOutOfRange {
+            effect: effect.name.to_owned(),
+            name: name.to_owned(),
+            min: parameter.min,
+            max: parameter.max,
             actual: *actual,
         });
     }

@@ -3,7 +3,7 @@ use std::{
     fmt::Write as _,
     future::Future,
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -46,7 +46,7 @@ use crate::{
 };
 
 const THUMBNAIL_MAX_WIDTH: u32 = 512;
-const DEFAULT_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_CONFIRMATION_TIMEOUT: Duration = Duration::from_mins(1);
 const DEFAULT_MINIMUM_SILENCE_FRAMES: i64 = 6;
 const DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS: u16 = 1_000;
 
@@ -106,6 +106,7 @@ impl ConfirmationBroker {
             .is_ok_and(|pending| pending.contains_key(&id))
     }
 
+    #[must_use]
     pub fn approve(&self, id: u64) -> bool {
         self.resolve(id, ConfirmationDecision::Approved)
     }
@@ -196,6 +197,11 @@ pub struct McpServer {
 }
 
 impl McpServer {
+    /// Start the loopback MCP server for the live core and media engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns an MCP server error when the listener or server thread cannot start.
     pub fn start(core: Core, media: Arc<dyn MediaEngine>) -> Result<Self, McpServerError> {
         Self::start_with_broker(core, media, ConfirmationBroker::default())
     }
@@ -270,7 +276,7 @@ fn run_server(listener: TcpListener, handler: OpenReelMcp, shutdown: oneshot::Re
         let service: StreamableHttpService<OpenReelMcp, LocalSessionManager> =
             StreamableHttpService::new(
                 move || Ok(handler.clone()),
-                Default::default(),
+                Arc::default(),
                 StreamableHttpServerConfig::default(),
             );
         let router = axum::Router::new().nest_service("/mcp", service);
@@ -298,7 +304,7 @@ impl OpenReelMcp {
         }
     }
 
-    fn tools(&self) -> Result<Vec<Tool>, SchemaError> {
+    fn tools() -> Result<Vec<Tool>, SchemaError> {
         let mut tools = operation_tools()?
             .into_iter()
             .map(|definition| definition.tool)
@@ -354,11 +360,11 @@ impl OpenReelMcp {
             }
             "apply_edit_plan" => {
                 let args: EditPlanArgs = decode_args("apply_edit_plan", arguments)?;
-                self.apply_edit_plan(args.operations)
+                self.apply_edit_plan(&args.operations)
             }
             "import_media" => {
                 let args: ImportMediaArgs = decode_args("import_media", arguments)?;
-                self.import_media(args.path)
+                Ok(self.import_media(&args.path))
             }
             tool_name => {
                 let operation = decode_operation(tool_name, arguments)
@@ -438,17 +444,17 @@ impl OpenReelMcp {
         }
     }
 
-    fn import_media(&self, path: PathBuf) -> Result<CallToolResult, McpError> {
-        let asset = match self.media.probe(&path) {
+    fn import_media(&self, path: &Path) -> CallToolResult {
+        let asset = match self.media.probe(path) {
             Ok(asset) => asset,
-            Err(error) => return Ok(error_text(error.to_string())),
+            Err(error) => return error_text(error.to_string()),
         };
-        Ok(self.apply_operation("import_media", Operation::AddAsset { asset }))
+        self.apply_operation("import_media", Operation::AddAsset { asset })
     }
 
-    fn apply_edit_plan(&self, operations: Vec<Operation>) -> Result<CallToolResult, McpError> {
+    fn apply_edit_plan(&self, operations: &[Operation]) -> Result<CallToolResult, McpError> {
         let before = self.document()?;
-        if let Some(description) = plan_confirmation_description(&before, &operations)
+        if let Some(description) = plan_confirmation_description(&before, operations)
             && let Err(reason) = self.confirmations.confirm("apply_edit_plan", description)
         {
             return Ok(error_text(format!(
@@ -464,7 +470,7 @@ impl OpenReelMcp {
             .collect::<Vec<_>>();
         let event = self
             .core
-            .request(Command::DoBatch(operations.clone()))
+            .request(Command::DoBatch(operations.to_vec()))
             .map_err(|error| McpError::internal_error(error.to_string(), None))?;
         Ok(match event {
             Event::DocumentChanged { doc, .. } => {
@@ -473,13 +479,13 @@ impl OpenReelMcp {
                     self.request_asset_analysis(asset);
                 }
                 success_text(render_plan_outcomes(
-                    &operations,
+                    operations,
                     None,
                     Some(state_delta("apply_edit_plan", Some(&before), &doc)),
                 ))
             }
             Event::BatchRejected { error, .. } => {
-                error_text(render_plan_outcomes(&operations, Some(&error), None))
+                error_text(render_plan_outcomes(operations, Some(&error), None))
             }
             _ => error_text("Core returned the wrong edit-plan result"),
         })
@@ -708,15 +714,14 @@ impl ServerHandler for OpenReelMcp {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        let result = self
-            .tools()
+        let result = Self::tools()
             .map(ListToolsResult::with_all_items)
             .map_err(|error| McpError::internal_error(error.to_string(), None));
         std::future::ready(result)
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.tools()
+        Self::tools()
             .ok()?
             .into_iter()
             .find(|tool| tool.name == name)
@@ -739,7 +744,7 @@ impl ServerHandler for OpenReelMcp {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ClipInfoArgs {
-    /// Stable clip id shown by get_timeline_state.
+    /// Stable clip id shown by `get_timeline_state`.
     clip_id: ClipId,
 }
 
@@ -757,13 +762,13 @@ struct ImportMediaArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct TranscriptArgs {
-    /// Stable asset id shown by get_timeline_state.
+    /// Stable asset id shown by `get_timeline_state`.
     asset_id: AssetId,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SilencesArgs {
-    /// Stable asset id shown by get_timeline_state.
+    /// Stable asset id shown by `get_timeline_state`.
     asset_id: AssetId,
     /// Optional minimum silence duration in exact source frames. Defaults to 6.
     #[serde(default)]
@@ -772,7 +777,7 @@ struct SilencesArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SceneChangesArgs {
-    /// Stable asset id shown by get_timeline_state.
+    /// Stable asset id shown by `get_timeline_state`.
     asset_id: AssetId,
     /// Optional confidence threshold from 0 through 100 percent. Defaults to 10.
     #[serde(default)]
@@ -961,6 +966,8 @@ fn validated_timeline_range(
     Ok(range)
 }
 
+// The validated 0..=100 percentage is intentionally rounded to integer basis points.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn confidence_to_basis_points(confidence: f64) -> Result<u16, String> {
     if !confidence.is_finite() || !(0.0..=100.0).contains(&confidence) {
         return Err("min_confidence must be between 0 and 100 percent".to_owned());
@@ -1028,7 +1035,6 @@ fn render_plan_outcomes(
                 format!("rejected: {error}")
             }
             (Some(_), Some(failed)) if number < failed => "rolled back".to_owned(),
-            (Some(_), Some(_)) => "not run".to_owned(),
             _ => "not run".to_owned(),
         };
         let _ = writeln!(
@@ -1184,12 +1190,9 @@ mod tests {
     }
 
     fn plan_request(operations: serde_json::Value) -> CallToolRequestParams {
-        CallToolRequestParams::new("apply_edit_plan").with_arguments(
-            json!({"operations": operations})
-                .as_object()
-                .unwrap()
-                .clone(),
-        )
+        CallToolRequestParams::new("apply_edit_plan").with_arguments(serde_json::Map::from_iter([
+            ("operations".to_owned(), operations),
+        ]))
     }
 
     fn wait_for_request(broker: &ConfirmationBroker) -> ConfirmationRequest {
@@ -1323,10 +1326,7 @@ mod tests {
 
     #[test]
     fn generated_plan_schema_composes_the_operation_schema() {
-        let (core, media) = fixture();
-        let service = OpenReelMcp::new(core, media, ConfirmationBroker::default());
-        let tool = service
-            .tools()
+        let tool = OpenReelMcp::tools()
             .unwrap()
             .into_iter()
             .find(|tool| tool.name == "apply_edit_plan")
@@ -1340,9 +1340,10 @@ mod tests {
     #[test]
     fn edit_plan_applies_atomically_and_undoes_once() {
         let (core, media) = fixture();
-        let original = match core.request(Command::Query(Query::Document)).unwrap() {
-            Event::QueryResult(QueryResult::Document(document)) => document,
-            _ => panic!("expected document"),
+        let Event::QueryResult(QueryResult::Document(original)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected document");
         };
         let service = OpenReelMcp::new(core.clone(), media, ConfirmationBroker::default());
         let result = service

@@ -1,4 +1,4 @@
-//! MCP tools and installed-agent CLI drivers for the live OpenReel process.
+//! `MCP` tools and installed-agent CLI drivers for the live `OpenReel` process.
 
 mod drivers;
 mod protocol;

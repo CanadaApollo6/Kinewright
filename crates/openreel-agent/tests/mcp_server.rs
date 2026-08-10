@@ -1,9 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    process::Command as ProcessCommand,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use openreel_agent::McpServer;
@@ -11,7 +6,10 @@ use openreel_core::{
     AssetId, Clip, ClipId, Command, Core, Document, Event, MediaAsset, MediaEngine, MediaKind,
     Query, QueryResult, Rational, TimeCode, Track, TrackId, TrackKind,
 };
-use openreel_media::FfmpegMediaEngine;
+use openreel_media::{
+    FfmpegMediaEngine,
+    test_support::{GeneratedMedia, single_clip_document},
+};
 use rmcp::{
     ServiceExt as _, model::CallToolRequestParams, transport::StreamableHttpClientTransport,
 };
@@ -140,10 +138,36 @@ async fn edit_plans_cross_the_real_mcp_server_atomically_with_one_confirmation()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn get_frame_at_returns_a_downscaled_png_for_generated_media() {
-    let generated = TestClip::generate();
+    let generated = GeneratedMedia::ffmpeg(
+        "m3",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=30000/1001",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-frames:v",
+            "60",
+            "-t",
+            "2.002",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            "60",
+            "-c:a",
+            "aac",
+            "-shortest",
+        ],
+        "mp4",
+    );
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
-    let asset = media.probe(&generated.0).unwrap();
-    let document = fixture_document(asset);
+    let asset = media.probe(generated.path()).unwrap();
+    let document = single_clip_document(asset);
     let core = Core::spawn(document).unwrap();
     let agent_media: Arc<dyn MediaEngine> = media;
     let server = McpServer::start(core, agent_media).unwrap();
@@ -177,27 +201,6 @@ async fn get_frame_at_returns_a_downscaled_png_for_generated_media() {
     server.shutdown();
 }
 
-fn fixture_document(asset: openreel_core::MediaAsset) -> Document {
-    Document {
-        tracks: vec![Track {
-            id: TrackId(1),
-            kind: TrackKind::Video,
-            clips: vec![Clip {
-                id: ClipId(1),
-                asset: asset.id,
-                source_range: TimeCode(0)..TimeCode(60),
-                timeline_start: TimeCode::ZERO,
-                effects: Vec::new(),
-                transition_in: None,
-            }],
-        }],
-        media_pool: vec![asset],
-        fps: Rational::new(30_000, 1_001).unwrap(),
-        resolution: (320, 180),
-        duration: TimeCode(60),
-    }
-}
-
 fn edit_plan_document() -> Document {
     let asset = MediaAsset {
         id: AssetId(1),
@@ -229,12 +232,10 @@ fn edit_plan_document() -> Document {
 }
 
 fn plan_request(operations: serde_json::Value) -> CallToolRequestParams {
-    CallToolRequestParams::new("apply_edit_plan").with_arguments(
-        json!({"operations": operations})
-            .as_object()
-            .unwrap()
-            .clone(),
-    )
+    CallToolRequestParams::new("apply_edit_plan").with_arguments(serde_json::Map::from_iter([(
+        "operations".to_owned(),
+        operations,
+    )]))
 }
 
 fn query_document(core: &Core) -> Document {
@@ -267,66 +268,5 @@ async fn resolve_plan_confirmation(broker: openreel_agent::ConfirmationBroker, a
             "plan confirmation was not published"
         );
         tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-}
-
-struct TestClip(PathBuf);
-
-impl TestClip {
-    fn generate() -> Self {
-        let ffmpeg = ffmpeg_executable();
-        assert!(ffmpeg.is_file(), "provisioned ffmpeg.exe is missing");
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let output =
-            std::env::temp_dir().join(format!("openreel-m3-{}-{nonce}.mp4", std::process::id()));
-        let status = ProcessCommand::new(ffmpeg)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=size=320x180:rate=30000/1001",
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:sample_rate=48000",
-                "-frames:v",
-                "60",
-                "-t",
-                "2.002",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-g",
-                "60",
-                "-c:a",
-                "aac",
-                "-shortest",
-            ])
-            .arg(&output)
-            .status()
-            .expect("failed to run provisioned ffmpeg.exe");
-        assert!(status.success(), "test media generation failed");
-        Self(output)
-    }
-}
-
-fn ffmpeg_executable() -> PathBuf {
-    std::env::var_os("FFMPEG_DIR").map_or_else(
-        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffmpeg.exe"),
-        |directory| PathBuf::from(directory).join("bin/ffmpeg.exe"),
-    )
-}
-
-impl Drop for TestClip {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
     }
 }

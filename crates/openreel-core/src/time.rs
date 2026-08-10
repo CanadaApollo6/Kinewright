@@ -56,6 +56,11 @@ pub struct Rational {
 }
 
 impl Rational {
+    /// Construct a reduced, positive rational value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimeMappingError::InvalidRate`] if either component is zero.
     pub fn new(numerator: u32, denominator: u32) -> Result<Self, TimeMappingError> {
         if numerator == 0 || denominator == 0 {
             return Err(TimeMappingError::InvalidRate {
@@ -127,6 +132,10 @@ pub enum TimeMappingError {
 }
 
 /// Map a frame boundary between time bases using integer, round-to-nearest math.
+///
+/// # Errors
+///
+/// Returns an error for invalid rates, negative frames, or arithmetic overflow.
 pub fn map_frames(
     frames: TimeCode,
     source_fps: Rational,
@@ -136,6 +145,10 @@ pub fn map_frames(
 }
 
 /// Map a frame boundary between time bases without passing through seconds or floats.
+///
+/// # Errors
+///
+/// Returns an error for invalid rates, negative frames, or arithmetic overflow.
 pub fn map_frames_with_rounding(
     frames: TimeCode,
     source_fps: Rational,
@@ -182,6 +195,10 @@ pub fn map_frames_with_rounding(
 ///
 /// Mapping absolute boundaries is important: adjacent ranges share the exact
 /// same mapped boundary, so mixed-rate splits cannot create cumulative drift.
+///
+/// # Errors
+///
+/// Returns an error for an invalid range or any frame-mapping failure.
 pub fn map_source_range_to_project(
     source: Range<TimeCode>,
     source_fps: Rational,

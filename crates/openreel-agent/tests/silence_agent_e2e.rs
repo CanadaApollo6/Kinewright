@@ -1,35 +1,40 @@
 use std::{
-    path::{Path, PathBuf},
-    process::Command,
     sync::Arc,
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use openreel_agent::{ClaudeCodeDriver, McpServer};
 use openreel_core::{
-    AgentDriver, AgentEvent, AssetId, AssetTranscript, Clip, ClipId, Command as CoreCommand, Core,
-    Document, Event, MediaEngine, Query, QueryResult, SessionConfig, SilenceStatus, TimeCode,
-    Track, TrackId, TrackKind, TranscriptStatus, map_source_range_to_project,
+    AgentDriver, AgentEvent, AssetId, Command as CoreCommand, Core, Document, Event, MediaEngine,
+    Query, QueryResult, SessionConfig, SilenceStatus, TimeCode, map_source_range_to_project,
 };
-use openreel_media::FfmpegMediaEngine;
+use openreel_media::{
+    FfmpegMediaEngine,
+    test_support::{
+        SpeechClip, joined_words, normalized_words, single_clip_document, test_engine,
+        wait_for_transcript,
+    },
+};
 
 const TTS_SSML: &str = "<speak version='1.0' xml:lang='en-US'>Alpha.<break time='1400ms'/>Bravo.<break time='1400ms'/>Charlie.</speak>";
 
 #[test]
+// This gated E2E keeps generation, transcription, agent editing, and verification together.
+#[allow(clippy::too_many_lines)]
 fn claude_removes_long_silences_with_one_atomic_plan() {
     if std::env::var("OPENREEL_AGENT_TEST").as_deref() != Ok("1") {
         eprintln!("skipped: set OPENREEL_AGENT_TEST=1 to run SAPI, Whisper, and Claude");
         return;
     }
 
-    let clip = SpeechClip::generate();
-    let media = Arc::new(test_engine());
+    let clip = SpeechClip::ssml("agent-silence", TTS_SSML, "OPENREEL_AGENT_TEST_TTS_WAV");
+    let media = Arc::new(test_engine("OPENREEL_AGENT_TEST_DATA_DIR"));
     let asset = media.probe(&clip.mp4).expect("generated clip should probe");
     media.request_transcription(asset.clone());
     media.request_silence_detection(asset.clone());
     media.request_scene_detection(asset.clone());
-    let transcript = wait_for_transcript(&media, asset.id);
+    let transcript = wait_for_transcript(&media, asset.id, false);
     let silences = wait_for_silences(&media, asset.id);
     let transcript_text = joined_words(&transcript);
     let long_silences = silences
@@ -62,7 +67,7 @@ fn claude_removes_long_silences_with_one_atomic_plan() {
     println!("USER: {prompt}");
     session.send_user_message(prompt.to_owned()).unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let deadline = Instant::now() + Duration::from_mins(5);
     let mut tool_names = Vec::new();
     let mut approved = 0_u32;
     loop {
@@ -170,35 +175,11 @@ fn claude_removes_long_silences_with_one_atomic_plan() {
     server.shutdown();
 }
 
-fn test_engine() -> FfmpegMediaEngine {
-    std::env::var_os("OPENREEL_AGENT_TEST_DATA_DIR").map_or_else(
-        || FfmpegMediaEngine::new().expect("media engine should start"),
-        |path| {
-            FfmpegMediaEngine::new_with_data_dir(PathBuf::from(path))
-                .expect("media engine should start")
-        },
-    )
-}
-
-fn wait_for_transcript(engine: &FfmpegMediaEngine, asset: AssetId) -> Arc<AssetTranscript> {
-    let deadline = Instant::now() + Duration::from_secs(1_200);
-    loop {
-        match engine.transcript_status(asset) {
-            TranscriptStatus::Ready(transcript) => return transcript,
-            TranscriptStatus::NoSpeech => panic!("Whisper reported no speech for SAPI audio"),
-            TranscriptStatus::Failed(error) => panic!("transcription failed: {error}"),
-            _ => {}
-        }
-        assert!(Instant::now() < deadline, "transcription timed out");
-        thread::sleep(Duration::from_millis(100));
-    }
-}
-
 fn wait_for_silences(
     engine: &FfmpegMediaEngine,
     asset: AssetId,
 ) -> Arc<openreel_core::AssetSilences> {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         match engine.silence_status(asset) {
             SilenceStatus::Ready(silences) => return silences,
@@ -211,51 +192,6 @@ fn wait_for_silences(
     }
 }
 
-fn joined_words(transcript: &AssetTranscript) -> String {
-    transcript
-        .words
-        .iter()
-        .map(|word| word.text.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn normalized_words(text: &str) -> Vec<String> {
-    text.split_whitespace()
-        .map(|word| {
-            word.chars()
-                .filter(|character| character.is_alphabetic())
-                .flat_map(char::to_lowercase)
-                .collect::<String>()
-        })
-        .filter(|word| !word.is_empty())
-        .collect()
-}
-
-fn single_clip_document(asset: openreel_core::MediaAsset) -> Document {
-    let duration = asset.duration;
-    let fps = asset.fps;
-    let resolution = asset.resolution.unwrap_or((320, 180));
-    Document {
-        tracks: vec![Track {
-            id: TrackId(1),
-            kind: TrackKind::Video,
-            clips: vec![Clip {
-                id: ClipId(1),
-                asset: asset.id,
-                source_range: TimeCode::ZERO..duration,
-                timeline_start: TimeCode::ZERO,
-                effects: Vec::new(),
-                transition_in: None,
-            }],
-        }],
-        media_pool: vec![asset],
-        fps,
-        resolution,
-        duration,
-    }
-}
-
 fn query_document(core: &Core) -> Arc<Document> {
     let Event::QueryResult(QueryResult::Document(document)) = core
         .request(CoreCommand::Query(Query::Document))
@@ -264,95 +200,4 @@ fn query_document(core: &Core) -> Arc<Document> {
         panic!("expected document query result");
     };
     document
-}
-
-struct SpeechClip {
-    wav: PathBuf,
-    mp4: PathBuf,
-}
-
-impl SpeechClip {
-    fn generate() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let stem = format!("openreel-agent-silence-{}-{nonce}", std::process::id());
-        let wav = std::env::temp_dir().join(format!("{stem}.wav"));
-        let mp4 = std::env::temp_dir().join(format!("{stem}.mp4"));
-        if let Some(fixture) = std::env::var_os("OPENREEL_AGENT_TEST_TTS_WAV") {
-            std::fs::copy(&fixture, &wav).unwrap_or_else(|error| {
-                panic!(
-                    "could not copy OPENREEL_AGENT_TEST_TTS_WAV {}: {error}",
-                    PathBuf::from(fixture).display()
-                )
-            });
-        } else {
-            synthesize_speech(&wav);
-        }
-        mux_speech(&wav, &mp4);
-        Self { wav, mp4 }
-    }
-}
-
-impl Drop for SpeechClip {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.wav);
-        let _ = std::fs::remove_file(&self.mp4);
-    }
-}
-
-fn synthesize_speech(output: &Path) {
-    let script = concat!(
-        "$ErrorActionPreference = 'Stop'; ",
-        "Add-Type -AssemblyName System.Speech; ",
-        "$voice = New-Object System.Speech.Synthesis.SpeechSynthesizer; ",
-        "$voice.SetOutputToWaveFile($env:OPENREEL_SAPI_OUTPUT); ",
-        "$voice.SpeakSsml($env:OPENREEL_SAPI_SSML); ",
-        "$voice.Dispose()"
-    );
-    let status = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .env("OPENREEL_SAPI_OUTPUT", output)
-        .env("OPENREEL_SAPI_SSML", TTS_SSML)
-        .status()
-        .expect("Windows PowerShell with System.Speech is required");
-    assert!(status.success(), "SAPI speech synthesis failed");
-}
-
-fn mux_speech(wav: &Path, output: &Path) {
-    let status = Command::new(ffmpeg_executable())
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=navy:size=320x180:rate=30",
-            "-i",
-        ])
-        .arg(wav)
-        .args([
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-shortest",
-        ])
-        .arg(output)
-        .status()
-        .expect("failed to run provisioned ffmpeg.exe");
-    assert!(status.success(), "speech/video mux failed");
-}
-
-fn ffmpeg_executable() -> PathBuf {
-    std::env::var_os("FFMPEG_DIR")
-        .map(PathBuf::from)
-        .expect("FFMPEG_DIR must point at the provisioned FFmpeg directory")
-        .join("bin")
-        .join("ffmpeg.exe")
 }

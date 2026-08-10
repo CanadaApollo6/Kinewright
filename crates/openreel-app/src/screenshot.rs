@@ -46,7 +46,7 @@ impl ScreenshotCapture {
             self.output = None;
             let _ = thread::Builder::new()
                 .name("openreel-screenshot".to_owned())
-                .spawn(move || save_screenshot(output, image));
+                .spawn(move || save_screenshot(&output, &image));
             return;
         }
 
@@ -59,7 +59,7 @@ impl ScreenshotCapture {
     }
 }
 
-fn save_screenshot(output: PathBuf, image: Arc<egui::ColorImage>) {
+fn save_screenshot(output: &PathBuf, image: &egui::ColorImage) {
     let width = u32::try_from(image.size[0]).unwrap_or_default();
     let height = u32::try_from(image.size[1]).unwrap_or_default();
     if width == 0 || height == 0 {

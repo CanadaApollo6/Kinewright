@@ -2,6 +2,7 @@
 
 mod actor;
 mod agent;
+mod effect;
 mod journal;
 mod media;
 mod model;
@@ -12,6 +13,10 @@ pub use actor::{Command, Core, CoreDisconnected, Event, Query, QueryResult};
 pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,
+};
+pub use effect::{
+    EFFECT_DESCRIPTORS, EffectDescriptor, EffectParameterDescriptor, EffectUniform,
+    effect_descriptor,
 };
 pub use journal::JournalCommand;
 pub use media::{

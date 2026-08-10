@@ -250,6 +250,11 @@ pub enum MediaError {
 }
 
 pub trait MediaEngine: Send + Sync {
+    /// Inspect a media file and return its project metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the file cannot be probed.
     fn probe(&self, path: &Path) -> Result<MediaAsset, MediaError>;
     fn set_document(&self, doc: Arc<Document>);
     fn request_frame(&self, t: TimeCode);
@@ -269,6 +274,10 @@ pub trait MediaEngine: Send + Sync {
     fn transcript_status(&self, asset: AssetId) -> TranscriptStatus;
     /// Return words currently audible on the timeline, optionally restricted
     /// to a half-open range of project frames.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when timeline/source frame mapping fails.
     fn timeline_transcript(
         &self,
         document: &Document,
@@ -277,6 +286,11 @@ pub trait MediaEngine: Send + Sync {
     /// Queue windowed-RMS silence analysis without blocking the caller.
     fn request_silence_detection(&self, asset: MediaAsset);
     fn silence_status(&self, asset: AssetId) -> SilenceStatus;
+    /// Return detected silence spans mapped into project time.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when timeline/source frame mapping fails.
     fn timeline_silences(
         &self,
         document: &Document,
@@ -286,13 +300,28 @@ pub trait MediaEngine: Send + Sync {
     /// Queue proxy-resolution scene analysis without blocking the caller.
     fn request_scene_detection(&self, asset: MediaAsset);
     fn scene_status(&self, asset: AssetId) -> SceneStatus;
+    /// Return scene changes mapped into project time.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when timeline/source frame mapping fails.
     fn timeline_scene_changes(
         &self,
         document: &Document,
         range: Option<std::ops::Range<TimeCode>>,
         minimum_confidence_basis_points: u16,
     ) -> Result<Vec<TimelineSceneChange>, MediaError>;
+    /// Decode a thumbnail at an exact project frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when decoding or compositing fails.
     fn thumbnail_at(&self, t: TimeCode, max_w: u32) -> Result<RgbaImage, MediaError>;
+    /// Export the current document to a media file.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when export fails or is cancelled.
     fn export(
         &self,
         out: &Path,

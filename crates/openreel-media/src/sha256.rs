@@ -1,3 +1,7 @@
+use std::{fmt::Write as _, fs::File, io::Read as _, path::Path};
+
+use openreel_core::MediaError;
+
 const INITIAL_STATE: [u32; 8] = [
     0x6a09_e667,
     0xbb67_ae85,
@@ -143,6 +147,8 @@ impl Sha256 {
         digest
     }
 
+    // SHA-256 notation conventionally names its eight working words a through h.
+    #[allow(clippy::many_single_char_names)]
     fn compress(&mut self, block: &[u8]) {
         let mut schedule = [0_u32; 64];
         for (word, bytes) in schedule[..16].iter_mut().zip(block.chunks_exact(4)) {
@@ -188,12 +194,38 @@ impl Sha256 {
     }
 }
 
+pub(crate) fn sha256_file(path: &Path) -> Result<String, MediaError> {
+    let mut file = File::open(path).map_err(|error| {
+        MediaError::Backend(format!("could not hash {}: {error}", path.display()))
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(|error| {
+            MediaError::Backend(format!("could not hash {}: {error}", path.display()))
+        })?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let mut encoded = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    Ok(encoded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn encode(bytes: [u8; 32]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        let mut encoded = String::with_capacity(64);
+        for byte in bytes {
+            let _ = write!(encoded, "{byte:02x}");
+        }
+        encoded
     }
 
     #[test]

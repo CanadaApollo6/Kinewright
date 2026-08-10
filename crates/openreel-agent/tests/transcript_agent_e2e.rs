@@ -1,18 +1,17 @@
 use std::{
-    path::{Path, PathBuf},
-    process::Command,
     sync::Arc,
-    thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use openreel_agent::{ClaudeCodeDriver, McpServer};
 use openreel_core::{
-    AgentDriver, AgentEvent, AssetId, AssetTranscript, Clip, ClipId, Command as CoreCommand, Core,
-    Document, Event, MediaEngine, Query, QueryResult, SessionConfig, TimeCode, Track, TrackId,
-    TrackKind, TranscriptStatus,
+    AgentDriver, AgentEvent, Command as CoreCommand, Core, Document, Event, MediaEngine, Query,
+    QueryResult, SessionConfig,
 };
-use openreel_media::FfmpegMediaEngine;
+use openreel_media::test_support::{
+    SpeechClip, joined_words, normalized_words, single_clip_document, test_engine,
+    wait_for_transcript,
+};
 
 const TTS_TEXT: &str = "Hello, um, this is an Open Reel transcript test.";
 
@@ -23,12 +22,12 @@ fn one_agent_message_removes_the_transcribed_filler_word() {
         return;
     }
 
-    let clip = SpeechClip::generate();
-    let media = Arc::new(test_engine());
+    let clip = SpeechClip::plain("agent-transcript", TTS_TEXT, "OPENREEL_TRANSCRIPT_AUDIO");
+    let media = Arc::new(test_engine("OPENREEL_TRANSCRIPT_TEST_DATA_DIR"));
     let asset = media.probe(&clip.mp4).expect("generated clip should probe");
     media.request_transcription(asset.clone());
-    let transcript = wait_for_transcript(&media, asset.id);
-    let whisper_output = joined_asset_words(&transcript);
+    let transcript = wait_for_transcript(&media, asset.id, false);
+    let whisper_output = joined_words(&transcript);
     let whisper_words = normalized_words(&whisper_output);
     assert!(
         whisper_words.iter().any(|word| word == "um"),
@@ -59,7 +58,7 @@ fn one_agent_message_removes_the_transcribed_filler_word() {
         .send_user_message(prompt.to_owned())
         .expect("agent message should send");
 
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let deadline = Instant::now() + Duration::from_mins(5);
     let mut approved = 0_u32;
     loop {
         for request in confirmations.pending_requests() {
@@ -111,40 +110,6 @@ fn one_agent_message_removes_the_transcribed_filler_word() {
     server.shutdown();
 }
 
-fn test_engine() -> FfmpegMediaEngine {
-    std::env::var_os("OPENREEL_TRANSCRIPT_TEST_DATA_DIR").map_or_else(
-        || FfmpegMediaEngine::new().expect("media engine should start"),
-        |path| {
-            FfmpegMediaEngine::new_with_data_dir(PathBuf::from(path))
-                .expect("media engine should start")
-        },
-    )
-}
-
-fn single_clip_document(asset: openreel_core::MediaAsset) -> Document {
-    let duration = asset.duration;
-    let fps = asset.fps;
-    let resolution = asset.resolution.unwrap_or((320, 180));
-    Document {
-        tracks: vec![Track {
-            id: TrackId(1),
-            kind: TrackKind::Video,
-            clips: vec![Clip {
-                id: ClipId(1),
-                asset: asset.id,
-                source_range: TimeCode::ZERO..duration,
-                timeline_start: TimeCode::ZERO,
-                effects: Vec::new(),
-                transition_in: None,
-            }],
-        }],
-        media_pool: vec![asset],
-        fps,
-        resolution,
-        duration,
-    }
-}
-
 fn query_document(core: &Core) -> Arc<Document> {
     let Event::QueryResult(QueryResult::Document(document)) = core
         .request(CoreCommand::Query(Query::Document))
@@ -153,128 +118,4 @@ fn query_document(core: &Core) -> Arc<Document> {
         panic!("expected document query result");
     };
     document
-}
-
-fn wait_for_transcript(engine: &FfmpegMediaEngine, asset: AssetId) -> Arc<AssetTranscript> {
-    let deadline = Instant::now() + Duration::from_secs(1_200);
-    loop {
-        match engine.transcript_status(asset) {
-            TranscriptStatus::Ready(transcript) => return transcript,
-            TranscriptStatus::NoSpeech => panic!("Whisper reported no speech for SAPI audio"),
-            TranscriptStatus::Failed(error) => panic!("transcription failed: {error}"),
-            _ => {}
-        }
-        assert!(Instant::now() < deadline, "transcription timed out");
-        thread::sleep(Duration::from_millis(100));
-    }
-}
-
-fn joined_asset_words(transcript: &AssetTranscript) -> String {
-    transcript
-        .words
-        .iter()
-        .map(|word| word.text.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn normalized_words(text: &str) -> Vec<String> {
-    text.split_whitespace()
-        .map(|word| {
-            word.chars()
-                .filter(|character| character.is_alphabetic())
-                .flat_map(char::to_lowercase)
-                .collect::<String>()
-        })
-        .filter(|word| !word.is_empty())
-        .collect()
-}
-
-struct SpeechClip {
-    owned_audio: Option<PathBuf>,
-    mp4: PathBuf,
-}
-
-impl SpeechClip {
-    fn generate() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should follow the Unix epoch")
-            .as_nanos();
-        let stem = format!("openreel-agent-transcript-{}-{nonce}", std::process::id());
-        let wav = std::env::temp_dir().join(format!("{stem}.wav"));
-        let mp4 = std::env::temp_dir().join(format!("{stem}.mp4"));
-        let (audio, owned_audio) = std::env::var_os("OPENREEL_TRANSCRIPT_AUDIO").map_or_else(
-            || {
-                synthesize_speech(&wav);
-                (wav.clone(), Some(wav))
-            },
-            |path| (PathBuf::from(path), None),
-        );
-        mux_speech(&audio, &mp4);
-        Self { owned_audio, mp4 }
-    }
-}
-
-impl Drop for SpeechClip {
-    fn drop(&mut self) {
-        if let Some(audio) = &self.owned_audio {
-            let _ = std::fs::remove_file(audio);
-        }
-        let _ = std::fs::remove_file(&self.mp4);
-    }
-}
-
-fn synthesize_speech(output: &Path) {
-    let script = concat!(
-        "$ErrorActionPreference = 'Stop'; ",
-        "Add-Type -AssemblyName System.Speech; ",
-        "$voice = New-Object System.Speech.Synthesis.SpeechSynthesizer; ",
-        "$voice.SetOutputToWaveFile($env:OPENREEL_SAPI_OUTPUT); ",
-        "$voice.Speak('Hello, um, this is an Open Reel transcript test.'); ",
-        "$voice.Dispose()"
-    );
-    let status = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .env("OPENREEL_SAPI_OUTPUT", output)
-        .status()
-        .expect("Windows PowerShell with System.Speech is required by this gated test");
-    assert!(status.success(), "SAPI speech synthesis failed");
-}
-
-fn mux_speech(wav: &Path, output: &Path) {
-    let status = Command::new(ffmpeg_executable())
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=navy:size=320x180:rate=30",
-            "-i",
-        ])
-        .arg(wav)
-        .args([
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-shortest",
-        ])
-        .arg(output)
-        .status()
-        .expect("failed to run provisioned ffmpeg.exe");
-    assert!(status.success(), "speech/video mux failed");
-}
-
-fn ffmpeg_executable() -> PathBuf {
-    std::env::var_os("FFMPEG_DIR")
-        .map(PathBuf::from)
-        .expect("FFMPEG_DIR must point at the provisioned FFmpeg directory")
-        .join("bin")
-        .join("ffmpeg.exe")
 }

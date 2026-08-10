@@ -34,6 +34,8 @@ enum ProjectAction {
     Close,
 }
 
+// Independent transport, agent, dialog, and window flags model separate UI state machines.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct OpenReelApp {
     pub(crate) core: Core,
     pub(crate) core_events: crossbeam_channel::Receiver<Event>,
@@ -83,6 +85,8 @@ pub(crate) struct OpenReelApp {
 }
 
 impl OpenReelApp {
+    // Construction keeps all channel subscriptions and coupled UI state initialization together.
+    #[allow(clippy::too_many_lines)]
     fn new(media: Arc<FfmpegMediaEngine>) -> Self {
         let document = Document::default();
         let core = Core::spawn(document.clone()).expect("default document must be valid");
@@ -249,7 +253,7 @@ impl OpenReelApp {
         }
         self.project_path = None;
         self.saved_document = None;
-        self.status = "Creating default video track…".to_owned();
+        "Creating default video track…".clone_into(&mut self.status);
         self.send_operation(Operation::AddTrack {
             track: Track {
                 id: DEFAULT_TRACK_ID,
@@ -407,10 +411,7 @@ impl OpenReelApp {
                     }
                 });
             });
-        if save && self.save_project(false) {
-            self.pending_project_action = None;
-            self.perform_project_action(action, ctx);
-        } else if discard {
+        if (save && self.save_project(false)) || discard {
             self.pending_project_action = None;
             self.perform_project_action(action, ctx);
         } else if cancel {
@@ -462,7 +463,7 @@ impl OpenReelApp {
         if self.core.send(Command::Do(operation)).is_err() {
             self.record_error("Operations", "Core actor stopped while applying the edit");
         } else {
-            self.status = "Applying edit…".to_owned();
+            "Applying edit…".clone_into(&mut self.status);
         }
     }
 
@@ -476,7 +477,7 @@ impl OpenReelApp {
         if self.core.send(Command::Undo).is_err() {
             self.record_error("Operations", "Core actor stopped while undoing");
         } else {
-            self.status = "Undo".to_owned();
+            "Undo".clone_into(&mut self.status);
         }
     }
 
@@ -484,10 +485,12 @@ impl OpenReelApp {
         if self.core.send(Command::Redo).is_err() {
             self.record_error("Operations", "Core actor stopped while redoing");
         } else {
-            self.status = "Redo".to_owned();
+            "Redo".clone_into(&mut self.status);
         }
     }
 
+    // Polling coordinates six independent channels and preserves their visible event ordering.
+    #[allow(clippy::too_many_lines)]
     fn poll_background(&mut self, ctx: &egui::Context) {
         self.poll_agent(ctx);
         self.poll_export(ctx);
@@ -665,8 +668,8 @@ impl eframe::App for OpenReelApp {
                     .fill(color::SURFACE)
                     .stroke(egui::Stroke::new(1.0, color::BORDER_SUBTLE))
                     .inner_margin(egui::Margin::symmetric(
-                        space::THREE as i8,
-                        space::ONE as i8,
+                        theme::margin(space::THREE),
+                        theme::margin(space::ONE),
                     )),
             )
             .show(ui, |ui| {
@@ -728,7 +731,7 @@ impl eframe::App for OpenReelApp {
             .frame(
                 egui::Frame::new()
                     .fill(color::CANVAS)
-                    .inner_margin(egui::Margin::same(space::TWO as i8)),
+                    .inner_margin(egui::Margin::same(theme::margin(space::TWO))),
             )
             .show(ui, |ui| {
                 self.preview(ui);

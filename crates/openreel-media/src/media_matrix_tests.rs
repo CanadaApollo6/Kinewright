@@ -4,7 +4,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use openreel_core::{
@@ -20,41 +20,10 @@ use crate::{
     export::export_document,
     initialize_ffmpeg,
     render::PREVIEW_MAX_WIDTH,
+    test_support::{TempDirectory, ffmpeg_executable, run_ffmpeg},
 };
 
-struct MatrixDirectory(PathBuf);
-
-impl MatrixDirectory {
-    fn new() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after the Unix epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "openreel-m8-focused-{}-{nonce}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).expect("media matrix temp directory should be created");
-        Self(path)
-    }
-
-    fn path(&self, name: &str) -> PathBuf {
-        self.0.join(name)
-    }
-}
-
-impl Drop for MatrixDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn ffmpeg() -> PathBuf {
-    std::env::var_os("FFMPEG_DIR").map_or_else(
-        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffmpeg.exe"),
-        |directory| PathBuf::from(directory).join("bin/ffmpeg.exe"),
-    )
-}
+type MatrixDirectory = TempDirectory;
 
 fn ffprobe() -> PathBuf {
     std::env::var_os("FFMPEG_DIR").map_or_else(
@@ -91,21 +60,6 @@ fn keyframe_count(path: &Path) -> u64 {
         .trim()
         .parse()
         .expect("ffprobe should report an integer keyframe count")
-}
-
-fn run_ffmpeg<S: AsRef<OsStr>>(arguments: &[S], output: &Path) {
-    let result = Command::new(ffmpeg())
-        .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(arguments)
-        .arg(output)
-        .output()
-        .expect("provisioned ffmpeg.exe should run");
-    assert!(
-        result.status.success(),
-        "media generation failed for {}: {}",
-        output.display(),
-        String::from_utf8_lossy(&result.stderr)
-    );
 }
 
 #[derive(Clone)]
@@ -232,7 +186,7 @@ fn generate_audio(output: &Path, rate: u32, channels: u16) {
 }
 
 fn encoder_available(name: &str) -> bool {
-    Command::new(ffmpeg())
+    Command::new(ffmpeg_executable())
         .args(["-hide_banner", "-encoders"])
         .output()
         .is_ok_and(|output| {
@@ -243,6 +197,8 @@ fn encoder_available(name: &str) -> bool {
         })
 }
 
+// Keeping the hostile-media recipe together makes the exact matrix contents reviewable.
+#[allow(clippy::too_many_lines)]
 fn generate_fast_matrix(directory: &MatrixDirectory) -> (Vec<MatrixCase>, Option<String>) {
     let mut cases = Vec::new();
     let vfr = directory.path("phone-vfr.mp4");
@@ -464,7 +420,7 @@ fn generate_rotated(output: &Path, directory: &MatrixDirectory) {
 #[test]
 fn vfr_grid_holds_the_previous_pts_frame_and_is_deterministic() {
     initialize_ffmpeg().unwrap();
-    let directory = MatrixDirectory::new();
+    let directory = MatrixDirectory::new("m8-focused");
     let path = directory.path("phone-vfr.mp4");
     generate_vfr(&path);
     let asset = probe_path(&path, AssetId(1)).unwrap();
@@ -516,7 +472,7 @@ fn vfr_grid_holds_the_previous_pts_frame_and_is_deterministic() {
 #[test]
 fn display_matrix_rotation_changes_probe_and_decode_dimensions() {
     initialize_ffmpeg().unwrap();
-    let directory = MatrixDirectory::new();
+    let directory = MatrixDirectory::new("m8-focused");
     let path = directory.path("rotated.mp4");
     generate_rotated(&path, &directory);
     let asset = probe_path(&path, AssetId(1)).unwrap();
@@ -597,6 +553,8 @@ fn validate_video_case(case: &MatrixCase, asset: &MediaAsset) {
     );
 }
 
+// Generated fixture lengths are small and exactly adequate for f32 energy normalization.
+#[allow(clippy::cast_precision_loss)]
 fn validate_audio_case(case: &MatrixCase, asset: &MediaAsset) {
     let samples = decode_audio_range(
         &case.path,
@@ -709,22 +667,16 @@ fn validate_mixed_export(directory: &MatrixDirectory, assets: &[MediaAsset]) -> 
         .or_else(|_| GpuContext::headless(true))
         .unwrap();
     let (progress, updates) = crossbeam_channel::unbounded();
-    export_document(
-        &document,
-        &output,
-        ExportSettings {
-            fps: document.fps,
-            resolution: document.resolution,
-            video_codec: "libx264".to_owned(),
-            audio_codec: "aac".to_owned(),
-            video_bitrate: 750_000,
-            audio_bitrate: 128_000,
-            cancellation: ExportCancellation::default(),
-        },
-        progress,
-        gpu,
-    )
-    .unwrap();
+    let settings = ExportSettings {
+        fps: document.fps,
+        resolution: document.resolution,
+        video_codec: "libx264".to_owned(),
+        audio_codec: "aac".to_owned(),
+        video_bitrate: 750_000,
+        audio_bitrate: 128_000,
+        cancellation: ExportCancellation::default(),
+    };
+    export_document(&document, &output, &settings, &progress, gpu).unwrap();
     let final_progress = updates.try_iter().last().unwrap();
     assert_eq!(
         final_progress.completed_frames, final_progress.total_frames,
@@ -811,7 +763,7 @@ fn validate_matrix(directory: &MatrixDirectory, cases: &[MatrixCase], note: Opti
 #[test]
 fn fast_media_matrix_covers_hostile_probe_decode_audio_seek_and_export() {
     initialize_ffmpeg().unwrap();
-    let directory = MatrixDirectory::new();
+    let directory = MatrixDirectory::new("m8-focused");
     let (cases, note) = generate_fast_matrix(&directory);
     validate_matrix(&directory, &cases, note.as_deref());
 
@@ -829,7 +781,7 @@ fn full_media_matrix_covers_4k_hevc_and_long_gop_sources() {
         return;
     }
     initialize_ffmpeg().unwrap();
-    let directory = MatrixDirectory::new();
+    let directory = MatrixDirectory::new("m8-focused");
     let (mut cases, mut note) = generate_fast_matrix(&directory);
     add_full_matrix_cases(&directory, &mut cases, &mut note);
     validate_matrix(&directory, &cases, note.as_deref());
@@ -871,6 +823,8 @@ fn assert_proxy_frame(cache: &mut FrameCache, at: TimeCode) -> (u32, u32) {
     (frame.width, frame.height)
 }
 
+// Performance throughput is intentionally reported as an approximate f64 rate.
+#[allow(clippy::cast_precision_loss)]
 fn measure_proxy_performance(case: &MatrixCase) -> PerfResult {
     let asset = probe_path(&case.path, AssetId(1)).unwrap();
     let last = asset.duration.0.saturating_sub(1).max(1);
@@ -953,7 +907,7 @@ fn proxy_preview_performance_on_heavy_matrix_media() {
         return;
     }
     initialize_ffmpeg().unwrap();
-    let directory = MatrixDirectory::new();
+    let directory = MatrixDirectory::new("m8-focused");
     let mut cases = Vec::new();
     let mut note = None;
     add_full_matrix_cases(&directory, &mut cases, &mut note);

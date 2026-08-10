@@ -18,16 +18,13 @@ impl ClaudeProtocol {
             Some("assistant") => self.parse_assistant(&value, &mut events),
             Some("user") => self.parse_tool_results(&value, &mut events),
             Some("result") => parse_claude_result(&value, &mut events),
-            Some("system") | Some("stream_event") | Some("rate_limit_event") => {}
-            Some(other) => {
-                if value.get("error").is_some() {
-                    events.push(AgentEvent::Text(format!(
-                        "Claude {other}: {}",
-                        compact_json(value.get("error").unwrap_or(&Value::Null))
-                    )));
-                }
+            Some(other) if value.get("error").is_some() => {
+                events.push(AgentEvent::Text(format!(
+                    "Claude {other}: {}",
+                    compact_json(value.get("error").unwrap_or(&Value::Null))
+                )));
             }
-            None => {}
+            Some(_) | None => {}
         }
         Ok(events)
     }
@@ -136,7 +133,7 @@ impl CodexProtocol {
             .map_err(|error| AgentError::Protocol(format!("invalid Codex JSONL: {error}")))?;
         let mut events = Vec::new();
         match value.get("type").and_then(Value::as_str) {
-            Some("item.started") | Some("item.completed") => self.parse_item(&value, &mut events),
+            Some("item.started" | "item.completed") => self.parse_item(&value, &mut events),
             Some("turn.completed") => {
                 let usage = value.get("usage").unwrap_or(&Value::Null);
                 events.push(AgentEvent::Cost {
@@ -149,7 +146,7 @@ impl CodexProtocol {
                 });
                 events.push(AgentEvent::Done);
             }
-            Some("turn.failed") | Some("error") => {
+            Some("turn.failed" | "error") => {
                 let message = value
                     .pointer("/error/message")
                     .or_else(|| value.get("message"))
@@ -183,8 +180,7 @@ impl CodexProtocol {
                 let name = item
                     .get("tool")
                     .and_then(Value::as_str)
-                    .map(display_tool_name)
-                    .unwrap_or_else(|| "tool".to_owned());
+                    .map_or_else(|| "tool".to_owned(), display_tool_name);
                 self.tool_names.insert(id.clone(), name.clone());
                 if self.announced.insert(id.clone()) {
                     events.push(AgentEvent::ToolCall {

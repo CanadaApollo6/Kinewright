@@ -201,7 +201,7 @@ impl OpenReelApp {
         self.agent_session = None;
         self.agent_events = None;
         self.agent_running = false;
-        self.status = "Agent stopped".to_owned();
+        "Agent stopped".clone_into(&mut self.status);
     }
 
     pub(crate) fn poll_agent(&mut self, ctx: &egui::Context) {
@@ -241,7 +241,7 @@ impl OpenReelApp {
                 }),
                 AgentEvent::Done => {
                     self.agent_running = false;
-                    self.status = "Agent turn finished".to_owned();
+                    "Agent turn finished".clone_into(&mut self.status);
                 }
             }
         }
@@ -250,6 +250,8 @@ impl OpenReelApp {
         }
     }
 
+    // The agent panel is one ordered immediate-mode UI pass over session and confirmation state.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn agent_panel(&mut self, ui: &mut egui::Ui) {
         if !self.agent_running && self.agent_session.is_none() {
             if self.claude_info.is_some() && self.codex_info.is_none() {
@@ -406,7 +408,7 @@ impl OpenReelApp {
                 .fill(color::SURFACE_RAISED)
                 .stroke(egui::Stroke::new(1.0, color::STATUS_WARNING))
                 .corner_radius(radius::MD)
-                .inner_margin(egui::Margin::same(space::TWO as i8))
+                .inner_margin(egui::Margin::same(theme::margin(space::TWO)))
                 .show(ui, |ui| {
                     ui.colored_label(color::STATUS_WARNING, "AGENT CONFIRMATION REQUIRED");
                     ui.strong(&request.tool_name);
@@ -533,7 +535,7 @@ impl OpenReelApp {
             .fill(color::CANVAS)
             .stroke(egui::Stroke::new(1.0, color::BORDER_STRONG))
             .corner_radius(radius::MD)
-            .inner_margin(egui::Margin::same(space::ONE as i8))
+            .inner_margin(egui::Margin::same(theme::margin(space::ONE)))
             .show(ui, |ui| {
                 ui.add_enabled(
                     !self.agent_running,
@@ -579,7 +581,7 @@ fn chat_frame(fill: egui::Color32, stroke: egui::Color32) -> egui::Frame {
         .fill(fill)
         .stroke(egui::Stroke::new(1.0, stroke))
         .corner_radius(radius::MD)
-        .inner_margin(egui::Margin::same(space::TWO as i8))
+        .inner_margin(egui::Margin::same(theme::margin(space::TWO)))
 }
 
 fn harness_row(ui: &mut egui::Ui, name: &str, info: Option<&HarnessInfo>) {

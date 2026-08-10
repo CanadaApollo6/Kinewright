@@ -1,15 +1,14 @@
 use std::{
-    collections::{BTreeMap, HashMap},
-    fmt::Write as _,
+    collections::BTreeMap,
     fs::{self, File},
     io::{Read, Write},
     ops::Range,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
     thread,
 };
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Sender, unbounded};
 use openreel_core::{
     AssetId, AssetTranscript, Document, ExportCancellation, FrameRounding, MediaAsset, MediaError,
     MediaKind, Rational, TimeCode, TimelineTranscriptWord, TranscriptStatus, TranscriptWord,
@@ -20,7 +19,11 @@ use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperSegment,
 };
 
-use crate::{audio::decode_audio_range, sha256::Sha256};
+use crate::{
+    audio::decode_audio_range,
+    derived_cache::{JsonCache, StatusReporter, cache_root, spawn_worker},
+    sha256::sha256_file,
+};
 
 const CACHE_VERSION: u32 = 2;
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
@@ -36,59 +39,51 @@ pub const WHISPER_MODEL_LICENSE: &str = "MIT";
 
 pub(crate) struct TranscriptService {
     jobs: Sender<MediaAsset>,
-    states: Arc<RwLock<HashMap<AssetId, TranscriptStatus>>>,
+    states: StatusReporter<TranscriptStatus>,
 }
 
 impl TranscriptService {
     pub(crate) fn new(data_dir: PathBuf) -> Result<Self, MediaError> {
         let (jobs, jobs_rx) = unbounded();
-        let states = Arc::new(RwLock::new(HashMap::new()));
-        let worker_states = Arc::clone(&states);
-        thread::Builder::new()
-            .name("openreel-transcript".to_owned())
-            .spawn(move || TranscriptWorker::new(data_dir, jobs_rx, worker_states).run())
-            .map_err(|error| {
-                MediaError::Backend(format!("could not start transcript worker: {error}"))
-            })?;
+        let states = StatusReporter::new();
+        let mut worker = TranscriptWorker::new(data_dir, states.clone());
+        spawn_worker("openreel-transcript", "transcript", jobs_rx, move |asset| {
+            worker.handle(&asset)
+        })?;
         Ok(Self { jobs, states })
     }
 
     pub(crate) fn request(&self, asset: MediaAsset) {
+        let asset_id = asset.id;
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
             self.update(asset.id, TranscriptStatus::NoSpeech);
             return;
         }
-        let should_queue = self.states.read().map_or(true, |states| {
-            !matches!(
-                states.get(&asset.id),
-                Some(
-                    TranscriptStatus::Queued
-                        | TranscriptStatus::Hashing
-                        | TranscriptStatus::DownloadingModel { .. }
-                        | TranscriptStatus::Transcribing { .. }
-                        | TranscriptStatus::Ready(_)
-                        | TranscriptStatus::NoSpeech
-                )
+        let should_queue = self.states.should_queue(asset.id, |status| {
+            matches!(
+                status,
+                TranscriptStatus::Queued
+                    | TranscriptStatus::Hashing
+                    | TranscriptStatus::DownloadingModel { .. }
+                    | TranscriptStatus::Transcribing { .. }
+                    | TranscriptStatus::Ready(_)
+                    | TranscriptStatus::NoSpeech
             )
         });
         if !should_queue {
             return;
         }
         self.update(asset.id, TranscriptStatus::Queued);
-        if self.jobs.send(asset.clone()).is_err() {
+        if self.jobs.send(asset).is_err() {
             self.update(
-                asset.id,
+                asset_id,
                 TranscriptStatus::Failed("transcript worker stopped".to_owned()),
             );
         }
     }
 
     pub(crate) fn status(&self, asset: AssetId) -> TranscriptStatus {
-        self.states
-            .read()
-            .ok()
-            .and_then(|states| states.get(&asset).cloned())
-            .unwrap_or(TranscriptStatus::NotRequested)
+        self.states.get_or(asset, TranscriptStatus::NotRequested)
     }
 
     pub(crate) fn timeline_words(
@@ -103,39 +98,32 @@ impl TranscriptService {
     }
 
     fn update(&self, asset: AssetId, status: TranscriptStatus) {
-        update_status(&self.states, asset, status);
+        self.states.update(asset, status);
     }
 }
 
 struct TranscriptWorker {
     data_dir: PathBuf,
-    jobs: Receiver<MediaAsset>,
-    states: Arc<RwLock<HashMap<AssetId, TranscriptStatus>>>,
+    states: StatusReporter<TranscriptStatus>,
     store: TranscriptStore,
     model: Option<WhisperContext>,
 }
 
 impl TranscriptWorker {
-    fn new(
-        data_dir: PathBuf,
-        jobs: Receiver<MediaAsset>,
-        states: Arc<RwLock<HashMap<AssetId, TranscriptStatus>>>,
-    ) -> Self {
+    fn new(data_dir: PathBuf, states: StatusReporter<TranscriptStatus>) -> Self {
         Self {
-            store: TranscriptStore::new(data_dir.join("transcripts").join("v2")),
+            store: TranscriptStore::new(cache_root(&data_dir, "transcripts", CACHE_VERSION)),
             data_dir,
-            jobs,
             states,
             model: None,
         }
     }
 
-    fn run(mut self) {
-        while let Ok(asset) = self.jobs.recv() {
-            if let Err(error) = self.transcribe_asset(&asset) {
-                self.update(asset.id, TranscriptStatus::Failed(error.to_string()));
-            }
+    fn handle(&mut self, asset: &MediaAsset) -> bool {
+        if let Err(error) = self.transcribe_asset(asset) {
+            self.update(asset.id, TranscriptStatus::Failed(error.to_string()));
         }
+        true
     }
 
     fn transcribe_asset(&mut self, asset: &MediaAsset) -> Result<(), MediaError> {
@@ -181,10 +169,10 @@ impl TranscriptWorker {
             .ok_or_else(|| MediaError::Backend("Whisper model was not loaded".to_owned()))?;
         let transcript = run_whisper(
             context,
-            samples,
+            &samples,
             asset,
             content_sha256,
-            Arc::clone(&self.states),
+            self.states.clone(),
         )?;
         self.store.save(&transcript)?;
         self.finish(asset.id, transcript);
@@ -200,16 +188,16 @@ impl TranscriptWorker {
     }
 
     fn update(&self, asset: AssetId, status: TranscriptStatus) {
-        update_status(&self.states, asset, status);
+        self.states.update(asset, status);
     }
 }
 
 fn run_whisper(
     context: &WhisperContext,
-    samples: Vec<f32>,
+    samples: &[f32],
     asset: &MediaAsset,
     content_sha256: String,
-    states: Arc<RwLock<HashMap<AssetId, TranscriptStatus>>>,
+    states: StatusReporter<TranscriptStatus>,
 ) -> Result<AssetTranscript, MediaError> {
     let mut state = context
         .create_state()
@@ -234,8 +222,7 @@ fn run_whisper(
     let progress_asset = asset.id;
     params.set_progress_callback_safe(move |progress: i32| {
         let clamped = progress.clamp(0, 100);
-        update_status(
-            &states,
+        states.update(
             progress_asset,
             TranscriptStatus::Transcribing {
                 progress_percent: u8::try_from(clamped).unwrap_or(100),
@@ -243,7 +230,7 @@ fn run_whisper(
         );
     });
     state
-        .full(params, &samples)
+        .full(params, samples)
         .map_err(|error| MediaError::Backend(format!("Whisper inference failed: {error}")))?;
 
     let words = extract_words(
@@ -535,8 +522,7 @@ where
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct CacheEntry {
-    version: u32,
+struct StoredTranscript {
     content_sha256: String,
     model_sha256: String,
     source_fps: Rational,
@@ -544,16 +530,19 @@ struct CacheEntry {
 }
 
 struct TranscriptStore {
-    root: PathBuf,
+    cache: JsonCache,
 }
 
 impl TranscriptStore {
     fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            cache: JsonCache::new(root, CACHE_VERSION, "transcript"),
+        }
     }
 
+    #[cfg(test)]
     fn path_for(&self, content_sha256: &str) -> PathBuf {
-        self.root.join(format!("{content_sha256}.json"))
+        self.cache.path_for(content_sha256, "")
     }
 
     fn load(
@@ -561,68 +550,38 @@ impl TranscriptStore {
         content_sha256: &str,
         asset: AssetId,
     ) -> Result<Option<AssetTranscript>, MediaError> {
-        let path = self.path_for(content_sha256);
-        let json = match fs::read_to_string(&path) {
-            Ok(json) => json,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(MediaError::Backend(format!(
-                    "could not read transcript cache: {error}"
-                )));
-            }
-        };
-        let Ok(entry) = serde_json::from_str::<CacheEntry>(&json) else {
-            return Ok(None);
-        };
-        if entry.version != CACHE_VERSION
-            || entry.content_sha256 != content_sha256
-            || entry.model_sha256 != WHISPER_MODEL_SHA256
-        {
-            return Ok(None);
-        }
-        Ok(Some(AssetTranscript {
-            asset,
-            content_sha256: entry.content_sha256,
-            source_fps: entry.source_fps,
-            words: entry.words,
-        }))
+        self.cache.load(
+            &self.cache.path_for(content_sha256, ""),
+            |stored: StoredTranscript| {
+                (stored.content_sha256 == content_sha256
+                    && stored.model_sha256 == WHISPER_MODEL_SHA256)
+                    .then_some(AssetTranscript {
+                        asset,
+                        content_sha256: stored.content_sha256,
+                        source_fps: stored.source_fps,
+                        words: stored.words,
+                    })
+            },
+        )
     }
 
     fn save(&self, transcript: &AssetTranscript) -> Result<(), MediaError> {
-        fs::create_dir_all(&self.root).map_err(|error| {
-            MediaError::Backend(format!("could not create transcript cache: {error}"))
-        })?;
-        let entry = CacheEntry {
-            version: CACHE_VERSION,
-            content_sha256: transcript.content_sha256.clone(),
-            model_sha256: WHISPER_MODEL_SHA256.to_owned(),
-            source_fps: transcript.source_fps,
-            words: transcript.words.clone(),
-        };
-        let bytes = serde_json::to_vec(&entry).map_err(|error| {
-            MediaError::Backend(format!("could not encode transcript cache: {error}"))
-        })?;
-        let path = self.path_for(&transcript.content_sha256);
-        let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
-        fs::write(&temporary, bytes).map_err(|error| {
-            MediaError::Backend(format!("could not write transcript cache: {error}"))
-        })?;
-        if path.exists() {
-            fs::remove_file(&path).map_err(|error| {
-                MediaError::Backend(format!("could not replace transcript cache: {error}"))
-            })?;
-        }
-        fs::rename(&temporary, &path).map_err(|error| {
-            MediaError::Backend(format!("could not commit transcript cache: {error}"))
-        })?;
-        Ok(())
+        self.cache.save(
+            &self.cache.path_for(&transcript.content_sha256, ""),
+            &StoredTranscript {
+                content_sha256: transcript.content_sha256.clone(),
+                model_sha256: WHISPER_MODEL_SHA256.to_owned(),
+                source_fps: transcript.source_fps,
+                words: transcript.words.clone(),
+            },
+        )
     }
 }
 
 fn ensure_model(
     data_dir: &Path,
     asset: AssetId,
-    states: &Arc<RwLock<HashMap<AssetId, TranscriptStatus>>>,
+    states: &StatusReporter<TranscriptStatus>,
 ) -> Result<PathBuf, MediaError> {
     let model_dir = data_dir.join("models").join("whisper");
     let model_path = model_dir.join(WHISPER_MODEL_NAME);
@@ -646,8 +605,7 @@ fn ensure_model(
         )));
     }
     let total = response.content_length();
-    update_status(
-        states,
+    states.update(
         asset,
         TranscriptStatus::DownloadingModel {
             downloaded_bytes: 0,
@@ -670,8 +628,7 @@ fn ensure_model(
             MediaError::Backend(format!("could not write model download: {error}"))
         })?;
         downloaded = downloaded.saturating_add(u64::try_from(count).unwrap_or_default());
-        update_status(
-            states,
+        states.update(
             asset,
             TranscriptStatus::DownloadingModel {
                 downloaded_bytes: downloaded,
@@ -699,39 +656,6 @@ fn ensure_model(
     Ok(model_path)
 }
 
-fn sha256_file(path: &Path) -> Result<String, MediaError> {
-    let mut file = File::open(path).map_err(|error| {
-        MediaError::Backend(format!("could not hash {}: {error}", path.display()))
-    })?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let count = file.read(&mut buffer).map_err(|error| {
-            MediaError::Backend(format!("could not hash {}: {error}", path.display()))
-        })?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    let digest = hasher.finalize();
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    Ok(encoded)
-}
-
-fn update_status(
-    states: &Arc<RwLock<HashMap<AssetId, TranscriptStatus>>>,
-    asset: AssetId,
-    status: TranscriptStatus,
-) {
-    if let Ok(mut states) = states.write() {
-        states.insert(asset, status);
-    }
-}
-
 #[must_use]
 pub fn default_data_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA").map_or_else(
@@ -742,32 +666,10 @@ pub fn default_data_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use openreel_core::{Clip, ClipId, Track, TrackId, TrackKind};
 
     use super::*;
-
-    struct TempDirectory(PathBuf);
-
-    impl TempDirectory {
-        fn new(label: &str) -> Self {
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = std::env::temp_dir()
-                .join(format!("openreel-{label}-{}-{nonce}", std::process::id()));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::TempDirectory;
 
     fn fixture_transcript(asset: AssetId, hash: &str, fps: Rational) -> AssetTranscript {
         AssetTranscript {
@@ -785,7 +687,7 @@ mod tests {
     #[test]
     fn transcript_cache_round_trips_and_rebinds_asset_id() {
         let directory = TempDirectory::new("transcript-cache-roundtrip");
-        let store = TranscriptStore::new(directory.0.clone());
+        let store = TranscriptStore::new(directory.root().to_path_buf());
         let transcript = fixture_transcript(
             AssetId(1),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -805,7 +707,7 @@ mod tests {
     #[test]
     fn content_hash_is_the_cache_key() {
         let directory = TempDirectory::new("transcript-cache-key");
-        let store = TranscriptStore::new(directory.0.clone());
+        let store = TranscriptStore::new(directory.root().to_path_buf());
         let first_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let second_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         store
@@ -824,9 +726,9 @@ mod tests {
     #[test]
     fn corrupt_cache_entry_is_ignored_as_a_miss() {
         let directory = TempDirectory::new("transcript-cache-corrupt");
-        let store = TranscriptStore::new(directory.0.clone());
+        let store = TranscriptStore::new(directory.root().to_path_buf());
         let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-        fs::create_dir_all(&directory.0).unwrap();
+        fs::create_dir_all(directory.root()).unwrap();
         fs::write(store.path_for(hash), b"not json").unwrap();
 
         assert!(store.load(hash, AssetId(1)).unwrap().is_none());

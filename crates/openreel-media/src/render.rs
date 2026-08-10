@@ -254,9 +254,7 @@ fn prefetch_frames(frame_bytes: usize) -> i64 {
     if frame_bytes == 0 {
         return 0;
     }
-    let budget_frames = (FRAME_CACHE_BYTE_BUDGET / frame_bytes)
-        .min(FRAME_CACHE_CAPACITY)
-        .max(1);
+    let budget_frames = (FRAME_CACHE_BYTE_BUDGET / frame_bytes).clamp(1, FRAME_CACHE_CAPACITY);
     i64::try_from(budget_frames.saturating_sub(1))
         .unwrap_or(i64::MAX)
         .min(PREFETCH_FRAMES)

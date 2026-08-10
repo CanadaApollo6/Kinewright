@@ -20,7 +20,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-openreel-media = { path = "../openreel-media" }
+openreel-media = { path = "../openreel-media", features = ["test-util"] }
 
 [lints]
 workspace = true

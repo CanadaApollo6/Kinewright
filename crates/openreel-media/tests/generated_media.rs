@@ -12,6 +12,10 @@ use openreel_core::{
 };
 use openreel_media::FfmpegMediaEngine;
 
+#[path = "../src/test_support.rs"]
+pub mod test_support;
+use test_support::ffmpeg_executable;
+
 struct TestClip(PathBuf);
 
 struct TemporaryFile(PathBuf);
@@ -124,8 +128,8 @@ fn export_fixture(engine: &FfmpegMediaEngine) -> Document {
     let mut blue_asset = engine.probe(&blue.0).unwrap();
     // Keep the generated files alive for the duration of the test by taking
     // ownership of their paths. The caller removes them with the document assets.
-    red_asset.path = red.0.clone();
-    blue_asset.path = blue.0.clone();
+    red_asset.path.clone_from(&red.0);
+    blue_asset.path.clone_from(&blue.0);
     std::mem::forget(red);
     std::mem::forget(blue);
     let document = Document {
@@ -285,13 +289,8 @@ fn decode_stereo_audio(path: &Path) -> Vec<f32> {
         .collect()
 }
 
-fn ffmpeg_executable() -> PathBuf {
-    std::env::var_os("FFMPEG_DIR").map_or_else(
-        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffmpeg.exe"),
-        |directory| PathBuf::from(directory).join("bin/ffmpeg.exe"),
-    )
-}
-
+// The generated sample buffer is small; f64 indices preserve the intended spectral estimate.
+#[allow(clippy::cast_precision_loss)]
 fn tone_amplitude(samples: &[f32], sample_rate: u32, frequency: f64) -> f64 {
     let angular_step = std::f64::consts::TAU * frequency / f64::from(sample_rate);
     let (real, imaginary) =
@@ -562,23 +561,27 @@ fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
 }
 
 fn full_timeline(asset: MediaAsset) -> Document {
+    let asset_id = asset.id;
+    let asset_duration = asset.duration;
+    let fps = asset.fps;
+    let resolution = asset.resolution.unwrap();
     let document = Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
             clips: vec![Clip {
                 id: ClipId(1),
-                asset: asset.id,
-                source_range: TimeCode::ZERO..asset.duration,
+                asset: asset_id,
+                source_range: TimeCode::ZERO..asset_duration,
                 timeline_start: TimeCode::ZERO,
                 effects: Vec::new(),
                 transition_in: None,
             }],
         }],
-        media_pool: vec![asset.clone()],
-        fps: asset.fps,
-        resolution: asset.resolution.unwrap(),
-        duration: asset.duration,
+        media_pool: vec![asset],
+        fps,
+        resolution,
+        duration: asset_duration,
     };
     document.validate().unwrap();
     document

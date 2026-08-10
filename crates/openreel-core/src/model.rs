@@ -85,15 +85,10 @@ pub enum ParamValue {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Effect {
     pub id: EffectId,
-    /// One of `brightness`, `contrast`, `saturation`, `opacity`, or `transform`.
+    /// A registered effect name from `EFFECT_DESCRIPTORS`.
     pub name: String,
-    /// Integer-only fixed-point parameters. Missing parameters use their neutral defaults:
-    ///
-    /// - brightness/contrast/saturation: `percent` in -100..=100, default 0
-    /// - opacity: `percent` in 0..=100, default 100
-    /// - transform: `scale_percent` in 1..=400 (default 100), plus
-    ///   `x_percent` and `y_percent` in -100..=100 (default 0). Offsets are
-    ///   percentages of the project width/height, positive right/down.
+    /// Integer-only fixed-point parameters. Their ranges and neutral defaults
+    /// are defined by `EFFECT_DESCRIPTORS`.
     pub parameters: BTreeMap<String, ParamValue>,
 }
 
@@ -161,6 +156,11 @@ impl Document {
             .find(|clip| clip.id == id)
     }
 
+    /// Validate every cross-reference and timeline invariant in the document.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first violated document invariant.
     pub fn validate(&self) -> Result<(), OpError> {
         crate::operation::validate_document(self)
     }
