@@ -434,8 +434,8 @@ impl OpenReelApp {
                     if playhead_response.drag_started() {
                         scrub_started = true;
                     }
-                    if playhead_response.dragged() || playhead_response.drag_stopped() {
-                        if let Some(pointer) = playhead_response.interact_pointer_pos() {
+                    if (playhead_response.dragged() || playhead_response.drag_stopped())
+                        && let Some(pointer) = playhead_response.interact_pointer_pos() {
                             let raw =
                                 ((pointer.x - rect.left()) / self.pixels_per_frame).round() as i64;
                             let candidates = clip_bounds
@@ -451,7 +451,6 @@ impl OpenReelApp {
                             seek = Some(TimeCode(snapped));
                             snap_guide = guide.or(snap_guide);
                         }
-                    }
                     if playhead_response.drag_stopped() {
                         scrub_stopped = true;
                     }

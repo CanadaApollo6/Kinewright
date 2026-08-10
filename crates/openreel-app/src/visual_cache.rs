@@ -62,11 +62,10 @@ impl VisualCache {
         if let Some(waveform) = self.waveforms.get(&asset.id) {
             return Some(Arc::clone(waveform));
         }
-        if !self.failed_waveforms.contains(&asset.id) && self.requested_waveforms.insert(asset.id) {
-            if !media.request_waveform(asset.clone()) {
+        if !self.failed_waveforms.contains(&asset.id) && self.requested_waveforms.insert(asset.id)
+            && !media.request_waveform(asset.clone()) {
                 self.requested_waveforms.remove(&asset.id);
             }
-        }
         None
     }
 
@@ -91,11 +90,10 @@ impl VisualCache {
             self.touch_thumbnail(key);
             return Some(texture);
         }
-        if !self.failed_thumbnails.contains(&key) && self.requested_thumbnails.insert(key) {
-            if !media.request_thumbnail(asset.clone(), key.source_at, key.max_width) {
+        if !self.failed_thumbnails.contains(&key) && self.requested_thumbnails.insert(key)
+            && !media.request_thumbnail(asset.clone(), key.source_at, key.max_width) {
                 self.requested_thumbnails.remove(&key);
             }
-        }
         None
     }
 

@@ -17,11 +17,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable-x86_64-pc-windows-msvc
+          components: rustfmt, clippy
 
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+
+      - name: Check formatting
+        run: cargo fmt --check
 
       - name: Provision FFmpeg, build, and test
         shell: pwsh
@@ -29,4 +33,6 @@ jobs:
           & .\scripts\setup-ffmpeg.ps1
           cargo build --workspace
           cargo test --workspace
+      # clippy -D warnings joins this workflow when the R2 remediation
+      # milestone lands the count at zero (docs/AUDIT-2026-08.md, F8).
 

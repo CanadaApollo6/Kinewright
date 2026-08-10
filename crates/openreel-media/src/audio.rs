@@ -250,12 +250,9 @@ impl AudioRuntime {
                 self.exhausted = true;
                 return Ok(());
             };
-            match decoder.next_chunk()? {
-                Some(chunk) => self.pending = chunk,
-                None => {
-                    self.exhausted = true;
-                    return Ok(());
-                }
+            if let Some(chunk) = decoder.next_chunk()? { self.pending = chunk } else {
+                self.exhausted = true;
+                return Ok(());
             }
         }
     }
@@ -300,7 +297,7 @@ where
     let callback_channels = usize::from(channels).max(1);
     device
         .build_output_stream(
-            config.clone(),
+            *config,
             move |output: &mut [T], _| {
                 render_output(&mut consumer, output, callback_channels, &position);
             },
@@ -404,11 +401,10 @@ impl AudioDecoder {
 
     fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
         loop {
-            if let Some(chunk) = self.queued.pop_front() {
-                if !chunk.is_empty() {
+            if let Some(chunk) = self.queued.pop_front()
+                && !chunk.is_empty() {
                     return Ok(Some(chunk));
                 }
-            }
             if self.finished {
                 return Ok(None);
             }

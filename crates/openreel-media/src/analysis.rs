@@ -145,14 +145,11 @@ impl VisualAssetService {
         if !inserted {
             return true;
         }
-        match self.jobs.try_send(job) {
-            Ok(()) => true,
-            Err(_) => {
-                if let Ok(mut in_flight) = self.in_flight.lock() {
-                    in_flight.remove(&key);
-                }
-                false
+        if let Ok(()) = self.jobs.try_send(job) { true } else {
+            if let Ok(mut in_flight) = self.in_flight.lock() {
+                in_flight.remove(&key);
             }
+            false
         }
     }
 }

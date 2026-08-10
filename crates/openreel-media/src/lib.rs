@@ -1,4 +1,4 @@
-//! FFmpeg decode, frame caching, and cpal audio-master playback.
+//! `FFmpeg` decode, frame caching, and cpal audio-master playback.
 
 mod analysis;
 mod audio;
@@ -40,7 +40,7 @@ pub use transcript::{
     default_data_dir,
 };
 
-/// Initialize the linked FFmpeg libraries.
+/// Initialize the linked `FFmpeg` libraries.
 pub fn initialize_ffmpeg() -> Result<(), MediaError> {
     ffmpeg::init().map_err(|error| MediaError::Backend(error.to_string()))
 }

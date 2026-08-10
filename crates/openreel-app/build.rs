@@ -36,14 +36,12 @@ fn main() {
             "rc.exe was not found; build from a Visual Studio developer shell or run scripts/setup-ffmpeg.ps1 first",
         );
 
-    if !output.status.success() {
-        panic!(
-            "rc.exe failed with status {}\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    assert!(output.status.success(), 
+        "rc.exe failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     println!(
         "cargo:rustc-link-arg-bin=openreel-app={}",

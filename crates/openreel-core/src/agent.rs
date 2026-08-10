@@ -35,7 +35,7 @@ pub struct SessionConfig {
     pub working_directory: Option<PathBuf>,
     pub model: Option<String>,
     pub max_turns: Option<u32>,
-    /// Streamable HTTP endpoint for the live OpenReel MCP server.
+    /// Streamable HTTP endpoint for the live `OpenReel` MCP server.
     pub mcp_url: Option<String>,
 }
 

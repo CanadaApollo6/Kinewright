@@ -191,10 +191,10 @@ impl OpenReelApp {
     }
 
     pub(crate) fn save_project(&mut self, save_as: bool) -> bool {
-        let path = if !save_as {
-            self.project_path.clone()
-        } else {
+        let path = if save_as {
             None
+        } else {
+            self.project_path.clone()
         };
         let path = path.or_else(|| {
             rfd::FileDialog::new()

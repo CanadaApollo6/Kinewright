@@ -68,7 +68,7 @@ fn save_screenshot(output: PathBuf, image: Arc<egui::ColorImage>) {
     let rgba = image
         .pixels
         .iter()
-        .flat_map(|pixel| pixel.to_srgba_unmultiplied())
+        .flat_map(eframe::egui::Color32::to_srgba_unmultiplied)
         .collect::<Vec<_>>();
     let _ = image::save_buffer(output, &rgba, width, height, image::ColorType::Rgba8);
 }

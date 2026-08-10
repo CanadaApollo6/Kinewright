@@ -63,7 +63,7 @@ impl OpenReelApp {
             self.record_error("Export", "Add a clip to the timeline before exporting");
             return;
         }
-        if self.export_dialog.width % 2 != 0 || self.export_dialog.height % 2 != 0 {
+        if !self.export_dialog.width.is_multiple_of(2) || !self.export_dialog.height.is_multiple_of(2) {
             self.record_error("Export", "H.264 export width and height must be even");
             return;
         }
@@ -137,7 +137,7 @@ impl OpenReelApp {
                     ));
                 }
                 Err(mpsc::TryRecvError::Empty) => {
-                    ctx.request_repaint_after(Duration::from_millis(50))
+                    ctx.request_repaint_after(Duration::from_millis(50));
                 }
             }
         }
@@ -275,11 +275,10 @@ impl OpenReelApp {
         if start {
             self.start_export();
         }
-        if cancel {
-            if let Some(job) = &self.export_job {
+        if cancel
+            && let Some(job) = &self.export_job {
                 job.cancellation.cancel();
                 self.status = "Cancelling export…".to_owned();
             }
-        }
     }
 }

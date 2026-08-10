@@ -409,8 +409,8 @@ fn validate_settings(
     }
     if settings.resolution.0 == 0
         || settings.resolution.1 == 0
-        || settings.resolution.0 % 2 != 0
-        || settings.resolution.1 % 2 != 0
+        || !settings.resolution.0.is_multiple_of(2)
+        || !settings.resolution.1.is_multiple_of(2)
     {
         return Err(MediaError::Backend(
             "H.264 export resolution must be non-zero and even".to_owned(),

@@ -502,11 +502,10 @@ impl Worker {
     }
 
     fn pause(&mut self) {
-        if let Some(audio) = &self.audio {
-            if let Err(error) = audio.pause() {
+        if let Some(audio) = &self.audio
+            && let Err(error) = audio.pause() {
                 self.emit(MediaEvent::Error(error));
             }
-        }
         let position = self.clock.position();
         self.clock
             .fallback_frame
@@ -531,12 +530,11 @@ impl Worker {
             self.fail(MediaError::Backend("audio output stream failed".to_owned()));
             return;
         }
-        if let Some(audio) = &mut self.audio {
-            if let Err(error) = audio.fill() {
+        if let Some(audio) = &mut self.audio
+            && let Err(error) = audio.fill() {
                 self.fail(error);
                 return;
             }
-        }
         let position = self.clock.position();
         if position >= self.document.duration {
             let end = self.document.duration;

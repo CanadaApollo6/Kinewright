@@ -25,7 +25,7 @@ use crate::{audio::decode_audio_range, sha256::Sha256};
 const CACHE_VERSION: u32 = 2;
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
-/// OpenAI Whisper `small`, converted to GGML by the whisper.cpp project. The
+/// `OpenAI` Whisper `small`, converted to GGML by the whisper.cpp project. The
 /// revision, bytes, and digest are pinned so first-use download is reproducible.
 /// The model repository declares the converted weights under the MIT license.
 pub const WHISPER_MODEL_NAME: &str = "ggml-small.bin";

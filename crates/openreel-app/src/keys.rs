@@ -213,7 +213,7 @@ impl OpenReelApp {
             KeyAction::StepForward => self.step_frames(1),
             KeyAction::JumpStart => self.pause_and_seek(TimeCode::ZERO),
             KeyAction::JumpEnd => {
-                self.pause_and_seek(TimeCode(self.document.duration.0.saturating_sub(1).max(0)))
+                self.pause_and_seek(TimeCode(self.document.duration.0.saturating_sub(1).max(0)));
             }
             KeyAction::SetIn => self.trim_selected_at_playhead(true),
             KeyAction::SetOut => self.trim_selected_at_playhead(false),
