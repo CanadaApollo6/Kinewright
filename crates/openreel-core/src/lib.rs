@@ -26,7 +26,6 @@ pub use model::{
 };
 pub use operation::{ApplyOp, BatchError, OpError, Operation, apply_batch};
 pub use time::{
-    FrameRounding, Rational, TimeCode, TimeMappingError, map_frames,
-    map_frames_with_rounding, map_source_range_to_project,
+    FrameRounding, Rational, TimeCode, TimeMappingError, map_frames, map_frames_with_rounding,
+    map_source_range_to_project,
 };
-

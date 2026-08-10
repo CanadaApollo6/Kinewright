@@ -18,21 +18,24 @@ impl GpuContext {
     }
 
     pub fn headless(force_fallback_adapter: bool) -> Result<Self, MediaError> {
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
-        );
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             force_fallback_adapter,
             compatible_surface: None,
         }))
-        .map_err(|error| MediaError::Backend(format!("could not acquire a wgpu adapter: {error}")))?;
+        .map_err(|error| {
+            MediaError::Backend(format!("could not acquire a wgpu adapter: {error}"))
+        })?;
         let descriptor = wgpu::DeviceDescriptor {
             label: Some("OpenReel compositor device"),
             ..Default::default()
         };
-        let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))
-            .map_err(|error| MediaError::Backend(format!("could not create a wgpu device: {error}")))?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&descriptor)).map_err(|error| {
+                MediaError::Backend(format!("could not create a wgpu device: {error}"))
+            })?;
         Ok(Self { device, queue })
     }
 }
@@ -248,7 +251,9 @@ impl Compositor {
             .saturating_mul(usize::try_from(layer.frame.height).unwrap_or_default())
             .saturating_mul(4);
         if layer.frame.rgba.len() != expected_len || expected_len == 0 {
-            return Err(MediaError::Backend("invalid compositor input frame".to_owned()));
+            return Err(MediaError::Backend(
+                "invalid compositor input frame".to_owned(),
+            ));
         }
         let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("OpenReel compositor source"),
@@ -292,24 +297,27 @@ impl Compositor {
         });
         self.gpu.queue.write_buffer(&uniform, 0, &params.as_bytes());
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("OpenReel compositor layer bindings"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: uniform.as_entire_binding(),
-                },
-            ],
-        });
+        let bind_group = self
+            .gpu
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("OpenReel compositor layer bindings"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: uniform.as_entire_binding(),
+                    },
+                ],
+            });
         Ok(LayerResources {
             _texture: texture,
             _uniform: uniform,
@@ -484,10 +492,7 @@ mod tests {
         Effect {
             id: EffectId(id),
             name: name.to_owned(),
-            parameters: BTreeMap::from([(
-                parameter.to_owned(),
-                ParamValue::Integer(value),
-            )]),
+            parameters: BTreeMap::from([(parameter.to_owned(), ParamValue::Integer(value))]),
         }
     }
 

@@ -155,10 +155,7 @@ fn query_document(core: &Core) -> Arc<Document> {
     document
 }
 
-fn wait_for_transcript(
-    engine: &FfmpegMediaEngine,
-    asset: AssetId,
-) -> Arc<AssetTranscript> {
+fn wait_for_transcript(engine: &FfmpegMediaEngine, asset: AssetId) -> Arc<AssetTranscript> {
     let deadline = Instant::now() + Duration::from_secs(1_200);
     loop {
         match engine.transcript_status(asset) {

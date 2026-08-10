@@ -8,8 +8,8 @@ use std::{
 };
 
 use openreel_core::{
-    AssetId, Document, ExportCancellation, ExportSettings, MediaAsset, MediaKind,
-    Operation, Rational, TimeCode, Track, TrackId, TrackKind, map_source_range_to_project,
+    AssetId, Document, ExportCancellation, ExportSettings, MediaAsset, MediaKind, Operation,
+    Rational, TimeCode, Track, TrackId, TrackKind, map_source_range_to_project,
 };
 
 use crate::{
@@ -51,20 +51,14 @@ impl Drop for MatrixDirectory {
 
 fn ffmpeg() -> PathBuf {
     std::env::var_os("FFMPEG_DIR").map_or_else(
-        || {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../third_party/ffmpeg/bin/ffmpeg.exe")
-        },
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffmpeg.exe"),
         |directory| PathBuf::from(directory).join("bin/ffmpeg.exe"),
     )
 }
 
 fn ffprobe() -> PathBuf {
     std::env::var_os("FFMPEG_DIR").map_or_else(
-        || {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../third_party/ffmpeg/bin/ffprobe.exe")
-        },
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffprobe.exe"),
         |directory| PathBuf::from(directory).join("bin/ffprobe.exe"),
     )
 }
@@ -462,14 +456,7 @@ fn generate_rotated(output: &Path, directory: &MatrixDirectory) {
     );
     let encoded = encoded.to_string_lossy();
     run_ffmpeg(
-        &[
-            "-display_rotation:v:0",
-            "90",
-            "-i",
-            &encoded,
-            "-c",
-            "copy",
-        ],
+        &["-display_rotation:v:0", "90", "-i", &encoded, "-c", "copy"],
         output,
     );
 }
@@ -492,7 +479,10 @@ fn vfr_grid_holds_the_previous_pts_frame_and_is_deterministic() {
         .unwrap();
     let first = cache.frame_at_or_before(TimeCode(0)).unwrap();
     let held = cache.frame_at_or_before(TimeCode(1)).unwrap();
-    assert_eq!(first.rgba, held.rgba, "the 50ms grid slot must hold the 0ms frame");
+    assert_eq!(
+        first.rgba, held.rgba,
+        "the 50ms grid slot must hold the 0ms frame"
+    );
 
     let mut second_decoder = VideoDecoder::open(&path, asset.fps).unwrap();
     let mut second_cache = FrameCache::new(2);
@@ -569,7 +559,10 @@ fn decode_at(path: &Path, asset: &MediaAsset, at: TimeCode) -> openreel_core::Fr
     let mut decoder = VideoDecoder::open(path, asset.fps).unwrap();
     let mut cache = FrameCache::new(2);
     decoder.decode_window(at, at, &mut cache).unwrap();
-    assert!(cache.contains(at), "decoder did not populate exact CFR grid frame {at}");
+    assert!(
+        cache.contains(at),
+        "decoder did not populate exact CFR grid frame {at}"
+    );
     cache.frame_at_or_before(at).unwrap()
 }
 
@@ -589,9 +582,7 @@ fn validate_video_case(case: &MatrixCase, asset: &MediaAsset) {
         );
         assert_eq!(
             frame.rgba.len(),
-            usize::try_from(frame.width).unwrap()
-                * usize::try_from(frame.height).unwrap()
-                * 4,
+            usize::try_from(frame.width).unwrap() * usize::try_from(frame.height).unwrap() * 4,
             "wrong RGBA byte count for {} at {at}",
             case.name
         );
@@ -617,17 +608,17 @@ fn validate_audio_case(case: &MatrixCase, asset: &MediaAsset) {
         &ExportCancellation::default(),
     )
     .unwrap_or_else(|error| panic!("audio decode failed for {}: {error}", case.name));
-    assert!(!samples.is_empty(), "audio decode was empty for {}", case.name);
+    assert!(
+        !samples.is_empty(),
+        "audio decode was empty for {}",
+        case.name
+    );
     assert!(
         samples.iter().all(|sample| sample.is_finite()),
         "audio decode produced non-finite samples for {}",
         case.name
     );
-    let energy = samples
-        .iter()
-        .map(|sample| sample.abs())
-        .sum::<f32>()
-        / samples.len() as f32;
+    let energy = samples.iter().map(|sample| sample.abs()).sum::<f32>() / samples.len() as f32;
     assert!(energy > 0.01, "audio decode was silent for {}", case.name);
 }
 
@@ -678,21 +669,15 @@ fn build_mixed_document(assets: &[MediaAsset]) -> (Document, HashSet<AssetId>) {
         }
         .apply(&mut document)
         .unwrap();
-        let length = map_source_range_to_project(
-            TimeCode::ZERO..source_end,
-            asset.fps,
-            document.fps,
-        )
-        .unwrap();
+        let length =
+            map_source_range_to_project(TimeCode::ZERO..source_end, asset.fps, document.fps)
+                .unwrap();
         video_at = video_at.checked_add(length).unwrap();
         included.insert(asset.id);
     }
 
     let mut audio_at = TimeCode::ZERO;
-    for asset in assets
-        .iter()
-        .filter(|asset| asset.kind == MediaKind::Audio)
-    {
+    for asset in assets.iter().filter(|asset| asset.kind == MediaKind::Audio) {
         let source_end = TimeCode(asset.duration.0.min(12));
         Operation::AddClip {
             track: TrackId(2),
@@ -702,12 +687,9 @@ fn build_mixed_document(assets: &[MediaAsset]) -> (Document, HashSet<AssetId>) {
         }
         .apply(&mut document)
         .unwrap();
-        let length = map_source_range_to_project(
-            TimeCode::ZERO..source_end,
-            asset.fps,
-            document.fps,
-        )
-        .unwrap();
+        let length =
+            map_source_range_to_project(TimeCode::ZERO..source_end, asset.fps, document.fps)
+                .unwrap();
         audio_at = audio_at.checked_add(length).unwrap();
         included.insert(asset.id);
     }
@@ -715,14 +697,17 @@ fn build_mixed_document(assets: &[MediaAsset]) -> (Document, HashSet<AssetId>) {
     (document, included)
 }
 
-fn validate_mixed_export(
-    directory: &MatrixDirectory,
-    assets: &[MediaAsset],
-) -> HashSet<AssetId> {
+fn validate_mixed_export(directory: &MatrixDirectory, assets: &[MediaAsset]) -> HashSet<AssetId> {
     let (document, included) = build_mixed_document(assets);
-    assert_eq!(included.len(), assets.len(), "every matrix asset must be exported");
+    assert_eq!(
+        included.len(),
+        assets.len(),
+        "every matrix asset must be exported"
+    );
     let output = directory.path("mixed-hostile-export.mp4");
-    let gpu = GpuContext::headless(false).or_else(|_| GpuContext::headless(true)).unwrap();
+    let gpu = GpuContext::headless(false)
+        .or_else(|_| GpuContext::headless(true))
+        .unwrap();
     let (progress, updates) = crossbeam_channel::unbounded();
     export_document(
         &document,
@@ -779,7 +764,11 @@ fn validate_matrix(directory: &MatrixDirectory, cases: &[MatrixCase], note: Opti
             "wrong display resolution for {}",
             case.name
         );
-        assert_eq!(asset.kind, case.expected_kind, "wrong kind for {}", case.name);
+        assert_eq!(
+            asset.kind, case.expected_kind,
+            "wrong kind for {}",
+            case.name
+        );
         if case.has_video {
             validate_video_case(case, &asset);
         }
@@ -807,7 +796,11 @@ fn validate_matrix(directory: &MatrixDirectory, cases: &[MatrixCase], note: Opti
             if case.has_video { "pass" } else { "n/a" },
             if case.has_video { "pass" } else { "n/a" },
             if case.has_audio { "pass" } else { "n/a" },
-            if included.contains(&asset.id) { "pass" } else { "fail" },
+            if included.contains(&asset.id) {
+                "pass"
+            } else {
+                "fail"
+            },
         );
     }
     if let Some(note) = note {
@@ -929,9 +922,7 @@ fn measure_proxy_performance(case: &MatrixCase) -> PerfResult {
         VideoDecoder::open_scaled(&case.path, asset.fps, Some(PREVIEW_MAX_WIDTH)).unwrap();
     let mut scrub_samples = Vec::with_capacity(PERF_SEEKS);
     for index in 0..PERF_SEEKS {
-        let at = TimeCode(
-            (1 + i64::try_from(index).unwrap().saturating_mul(scrub_step)).min(last),
-        );
+        let at = TimeCode((1 + i64::try_from(index).unwrap().saturating_mul(scrub_step)).min(last));
         let mut cache = FrameCache::new(2);
         let started = Instant::now();
         scrub_decoder.decode_window(at, at, &mut cache).unwrap();

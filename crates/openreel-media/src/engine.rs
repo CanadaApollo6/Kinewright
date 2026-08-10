@@ -319,11 +319,8 @@ impl MediaEngine for FfmpegMediaEngine {
         range: Option<std::ops::Range<TimeCode>>,
         minimum_confidence_basis_points: u16,
     ) -> Result<Vec<TimelineSceneChange>, MediaError> {
-        self.derived_analysis.timeline_scenes(
-            document,
-            range,
-            minimum_confidence_basis_points,
-        )
+        self.derived_analysis
+            .timeline_scenes(document, range, minimum_confidence_basis_points)
     }
 
     fn thumbnail_at(&self, at: TimeCode, max_width: u32) -> Result<RgbaImage, MediaError> {

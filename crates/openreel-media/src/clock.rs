@@ -8,10 +8,8 @@ pub fn samples_to_frame(samples: u64, sample_rate: u32, fps: Rational) -> TimeCo
     if sample_rate == 0 {
         return TimeCode::ZERO;
     }
-    let numerator = u128::from(samples)
-        .saturating_mul(u128::from(fps.numerator()));
-    let denominator = u128::from(sample_rate)
-        .saturating_mul(u128::from(fps.denominator()));
+    let numerator = u128::from(samples).saturating_mul(u128::from(fps.numerator()));
+    let denominator = u128::from(sample_rate).saturating_mul(u128::from(fps.denominator()));
     let frames = numerator / denominator;
     TimeCode(i64::try_from(frames).unwrap_or(i64::MAX))
 }

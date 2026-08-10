@@ -62,8 +62,7 @@ const CODEX_DISABLED_FEATURES: &[&str] = &[
 ];
 static CODEX_SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub const CODEX_SANDBOX_NOTICE: &str =
-    "Codex sessions use a read-only empty scratch sandbox; shell, file-write, and web tools are disabled.";
+pub const CODEX_SANDBOX_NOTICE: &str = "Codex sessions use a read-only empty scratch sandbox; shell, file-write, and web tools are disabled.";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodexDriver;
@@ -124,10 +123,7 @@ impl AgentDriver for CodexDriver {
                 version.trim()
             )));
         }
-        let endpoint = cfg
-            .mcp_url
-            .clone()
-            .ok_or(AgentError::MissingMcpEndpoint)?;
+        let endpoint = cfg.mcp_url.clone().ok_or(AgentError::MissingMcpEndpoint)?;
         CodexSession::new(target, endpoint, cfg).map(|session| Box::new(session) as _)
     }
 }
@@ -143,10 +139,7 @@ impl AgentDriver for ClaudeCodeDriver {
 
     fn start_session(&self, cfg: SessionConfig) -> Result<Box<dyn AgentSession>, AgentError> {
         let executable = find_on_path("claude").ok_or(AgentError::NotInstalled)?;
-        let endpoint = cfg
-            .mcp_url
-            .clone()
-            .ok_or(AgentError::MissingMcpEndpoint)?;
+        let endpoint = cfg.mcp_url.clone().ok_or(AgentError::MissingMcpEndpoint)?;
         ClaudeSession::spawn(executable, endpoint, cfg).map(|session| Box::new(session) as _)
     }
 }
@@ -215,9 +208,9 @@ impl ClaudeSession {
             .stderr(Stdio::piped());
         hide_console_window(&mut command);
 
-        let mut child = command
-            .spawn()
-            .map_err(|error| AgentError::Harness(format!("could not start Claude Code: {error}")))?;
+        let mut child = command.spawn().map_err(|error| {
+            AgentError::Harness(format!("could not start Claude Code: {error}"))
+        })?;
         let stdin = child
             .stdin
             .take()
@@ -289,8 +282,8 @@ impl CodexSession {
         endpoint: String,
         cfg: SessionConfig,
     ) -> Result<Self, AgentError> {
-        let tool_names = all_tool_names()
-            .map_err(|error| AgentError::Harness(error.to_string()))?;
+        let tool_names =
+            all_tool_names().map_err(|error| AgentError::Harness(error.to_string()))?;
         let scratch_directory = create_codex_scratch_directory()?;
         let (model_catalog_directory, model_catalog_path) =
             match create_codex_direct_model_catalog(&target) {
@@ -469,8 +462,7 @@ fn build_codex_command(
     let endpoint = serde_json::to_string(endpoint).expect("serializing a string cannot fail");
     let model_catalog_path = serde_json::to_string(model_catalog_path)
         .expect("serializing a model catalog path cannot fail");
-    let tool_names =
-        serde_json::to_string(tool_names).expect("serializing tool names cannot fail");
+    let tool_names = serde_json::to_string(tool_names).expect("serializing tool names cannot fail");
     command
         .arg("-C")
         .arg(scratch_directory)
@@ -497,9 +489,7 @@ fn build_codex_command(
         .arg("-c")
         .arg(format!("mcp_servers.openreel.url={endpoint}"))
         .arg("-c")
-        .arg(format!(
-            "mcp_servers.openreel.enabled_tools={tool_names}"
-        ))
+        .arg(format!("mcp_servers.openreel.enabled_tools={tool_names}"))
         .arg("-c")
         .arg("mcp_servers.openreel.required=true")
         .arg("-c")
@@ -536,9 +526,8 @@ fn spawn_codex_reader(
                 let line = match line {
                     Ok(line) => line,
                     Err(error) => {
-                        let _ = events.send(AgentEvent::Error(format!(
-                            "Codex stream error: {error}"
-                        )));
+                        let _ =
+                            events.send(AgentEvent::Error(format!("Codex stream error: {error}")));
                         break;
                     }
                 };
@@ -628,7 +617,9 @@ fn create_codex_direct_model_catalog(
     let directory = create_codex_scratch_directory()?;
     let path = directory.join("models-direct.json");
     let serialized = serde_json::to_vec(&catalog).map_err(|error| {
-        AgentError::Harness(format!("could not serialize the Codex model catalog: {error}"))
+        AgentError::Harness(format!(
+            "could not serialize the Codex model catalog: {error}"
+        ))
     })?;
     if let Err(error) = fs::write(&path, serialized) {
         let _ = fs::remove_dir_all(&directory);
@@ -740,9 +731,8 @@ fn spawn_claude_reader(
                 let line = match line {
                     Ok(line) => line,
                     Err(error) => {
-                        let _ = events.send(AgentEvent::Error(format!(
-                            "Claude stream error: {error}"
-                        )));
+                        let _ =
+                            events.send(AgentEvent::Error(format!("Claude stream error: {error}")));
                         break;
                     }
                 };
@@ -1169,7 +1159,10 @@ mod tests {
     #[test]
     fn codex_replays_prior_user_requests_without_reusing_filesystem_state() {
         let prompt = codex_prompt(
-            &["split the first clip".to_owned(), "delete the second clip".to_owned()],
+            &[
+                "split the first clip".to_owned(),
+                "delete the second clip".to_owned(),
+            ],
             "undo that deletion",
         );
         assert!(prompt.contains("1. split the first clip"));

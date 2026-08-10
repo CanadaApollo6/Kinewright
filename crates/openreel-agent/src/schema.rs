@@ -98,8 +98,8 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
 }
 
 pub fn schema_object<T: schemars::JsonSchema>() -> Arc<JsonObject> {
-    let value = serde_json::to_value(schemars::schema_for!(T))
-        .expect("schemars output must serialize");
+    let value =
+        serde_json::to_value(schemars::schema_for!(T)).expect("schemars output must serialize");
     Arc::new(
         value
             .as_object()
@@ -119,7 +119,10 @@ fn operation_tool(
     if properties.len() != 1 {
         return Err(SchemaError::InvalidVariant);
     }
-    let (variant, input) = properties.iter().next().ok_or(SchemaError::InvalidVariant)?;
+    let (variant, input) = properties
+        .iter()
+        .next()
+        .ok_or(SchemaError::InvalidVariant)?;
     let mut input = input
         .as_object()
         .cloned()

@@ -20,8 +20,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/m4-manual"));
     fs::create_dir_all(&output_dir)?;
-    let ffmpeg = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../third_party/ffmpeg/bin/ffmpeg.exe");
+    let ffmpeg =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffmpeg.exe");
     let red_path = output_dir.join("red-source.mp4");
     let blue_path = output_dir.join("blue-source.mp4");
     generate_source(&ffmpeg, &red_path, "red", 440)?;
@@ -91,14 +91,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         engine.request_frame(at);
         let frame = receive_frame(&frames, at)?;
         let center = usize::try_from(frame.width * (frame.height / 2) + frame.width / 2)? * 4;
-        println!("preview frame {} center={:?}", at.0, &frame.rgba[center..center + 4]);
+        println!(
+            "preview frame {} center={:?}",
+            at.0,
+            &frame.rgba[center..center + 4]
+        );
     }
 
     engine.play(TimeCode::ZERO);
     let playback = wait_for_playback(&engine, &events, TimeCode(8));
     engine.pause();
     match playback {
-        Ok(()) => println!("preview playback advanced through frame {}", engine.position().0),
+        Ok(()) => println!(
+            "preview playback advanced through frame {}",
+            engine.position().0
+        ),
         Err(error) => println!("preview playback unavailable: {error}"),
     }
 

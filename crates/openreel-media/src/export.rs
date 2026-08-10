@@ -10,10 +10,7 @@ use openreel_core::{
 };
 
 use crate::{
-    audio::decode_audio_range,
-    clock::frame_to_samples,
-    compositor::GpuContext,
-    decode::backend,
+    audio::decode_audio_range, clock::frame_to_samples, compositor::GpuContext, decode::backend,
     render::FrameRenderer,
 };
 
@@ -121,8 +118,7 @@ fn export_to_temporary(
         .formats()
         .and_then(|formats| {
             formats.into_iter().find(|format| {
-                *format
-                    == ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Planar)
+                *format == ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Planar)
             })
         })
         .ok_or_else(|| MediaError::Backend("AAC encoder does not support planar f32".to_owned()))?;
@@ -174,13 +170,9 @@ fn export_to_temporary(
     for output_frame in 0..total_frames {
         check_cancelled(settings)?;
         let output_at = TimeCode(i64::try_from(output_frame).unwrap_or(i64::MAX));
-        let project_at = map_frames_with_rounding(
-            output_at,
-            settings.fps,
-            document.fps,
-            FrameRounding::Floor,
-        )
-        .map_err(|error| MediaError::Backend(error.to_string()))?;
+        let project_at =
+            map_frames_with_rounding(output_at, settings.fps, document.fps, FrameRounding::Floor)
+                .map_err(|error| MediaError::Backend(error.to_string()))?;
         let project_at = TimeCode(project_at.0.min(document.duration.0.saturating_sub(1)));
         let composed = renderer.render(
             document,
@@ -246,16 +238,15 @@ fn find_codec(name: &str, expected_id: ffmpeg::codec::Id) -> Result<ffmpeg::Code
     Ok(codec)
 }
 
-fn copy_rgba_to_frame(
-    rgba: &[u8],
-    frame: &mut ffmpeg::frame::Video,
-) -> Result<(), MediaError> {
+fn copy_rgba_to_frame(rgba: &[u8], frame: &mut ffmpeg::frame::Video) -> Result<(), MediaError> {
     let row_bytes = usize::try_from(frame.width())
         .unwrap_or_default()
         .saturating_mul(4);
     let height = usize::try_from(frame.height()).unwrap_or_default();
     if rgba.len() != row_bytes.saturating_mul(height) {
-        return Err(MediaError::Backend("compositor readback size is invalid".to_owned()));
+        return Err(MediaError::Backend(
+            "compositor readback size is invalid".to_owned(),
+        ));
     }
     let stride = frame.stride(0);
     let plane = frame.data_mut(0);
@@ -362,12 +353,9 @@ fn mix_audio(document: &Document, settings: &ExportSettings) -> Result<Vec<f32>,
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
             continue;
         }
-        let project_duration = map_source_range_to_project(
-            clip.source_range.clone(),
-            asset.fps,
-            document.fps,
-        )
-        .map_err(|error| MediaError::Backend(error.to_string()))?;
+        let project_duration =
+            map_source_range_to_project(clip.source_range.clone(), asset.fps, document.fps)
+                .map_err(|error| MediaError::Backend(error.to_string()))?;
         let project_end = clip
             .timeline_start
             .checked_add(project_duration)
@@ -410,10 +398,14 @@ fn validate_settings(
     settings: &ExportSettings,
 ) -> Result<(), MediaError> {
     if document.duration <= TimeCode::ZERO {
-        return Err(MediaError::Backend("cannot export an empty timeline".to_owned()));
+        return Err(MediaError::Backend(
+            "cannot export an empty timeline".to_owned(),
+        ));
     }
     if !settings.fps.is_valid() {
-        return Err(MediaError::Backend("export frame rate is invalid".to_owned()));
+        return Err(MediaError::Backend(
+            "export frame rate is invalid".to_owned(),
+        ));
     }
     if settings.resolution.0 == 0
         || settings.resolution.1 == 0
@@ -433,7 +425,9 @@ fn validate_settings(
         .parent()
         .is_some_and(|parent| !parent.as_os_str().is_empty() && !parent.exists())
     {
-        return Err(MediaError::Backend("export directory does not exist".to_owned()));
+        return Err(MediaError::Backend(
+            "export directory does not exist".to_owned(),
+        ));
     }
     Ok(())
 }

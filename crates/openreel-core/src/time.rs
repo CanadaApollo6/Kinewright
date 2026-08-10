@@ -9,7 +9,17 @@ use thiserror::Error;
 /// Project positions use the project's frame rate. `Clip::source_range` and
 /// `MediaAsset::duration` use that asset's frame rate.
 #[derive(
-    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
     JsonSchema,
 )]
 #[serde(transparent)]
@@ -104,7 +114,9 @@ pub enum FrameRounding {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TimeMappingError {
-    #[error("frame rates must have positive numerator and denominator, got {numerator}/{denominator}")]
+    #[error(
+        "frame rates must have positive numerator and denominator, got {numerator}/{denominator}"
+    )]
     InvalidRate { numerator: u32, denominator: u32 },
     #[error("negative frame counts cannot be mapped: {0}")]
     NegativeFrames(TimeCode),
@@ -147,14 +159,18 @@ pub fn map_frames_with_rounding(
 
     let mapped = match rounding {
         FrameRounding::Floor => numerator / denominator,
-        FrameRounding::Nearest => numerator
-            .checked_add(denominator / 2)
-            .ok_or(TimeMappingError::Overflow)?
-            / denominator,
-        FrameRounding::Ceil => numerator
-            .checked_add(denominator - 1)
-            .ok_or(TimeMappingError::Overflow)?
-            / denominator,
+        FrameRounding::Nearest => {
+            numerator
+                .checked_add(denominator / 2)
+                .ok_or(TimeMappingError::Overflow)?
+                / denominator
+        }
+        FrameRounding::Ceil => {
+            numerator
+                .checked_add(denominator - 1)
+                .ok_or(TimeMappingError::Overflow)?
+                / denominator
+        }
     };
 
     i64::try_from(mapped)
@@ -202,9 +218,18 @@ mod tests {
         let source = Rational::new(24_000, 1_001).unwrap();
         let project = Rational::new(30, 1).unwrap();
 
-        assert_eq!(map_frames(TimeCode(0), source, project).unwrap(), TimeCode(0));
-        assert_eq!(map_frames(TimeCode(24), source, project).unwrap(), TimeCode(30));
-        assert_eq!(map_frames(TimeCode(48), source, project).unwrap(), TimeCode(60));
+        assert_eq!(
+            map_frames(TimeCode(0), source, project).unwrap(),
+            TimeCode(0)
+        );
+        assert_eq!(
+            map_frames(TimeCode(24), source, project).unwrap(),
+            TimeCode(30)
+        );
+        assert_eq!(
+            map_frames(TimeCode(48), source, project).unwrap(),
+            TimeCode(60)
+        );
         assert_eq!(
             map_frames(TimeCode(24_000), source, project).unwrap(),
             TimeCode(30_030)

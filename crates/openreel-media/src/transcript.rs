@@ -11,9 +11,9 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use openreel_core::{
-    AssetId, AssetTranscript, Document, ExportCancellation, FrameRounding, MediaAsset,
-    MediaError, MediaKind, Rational, TimeCode, TimelineTranscriptWord, TranscriptStatus,
-    TranscriptWord, map_frames_with_rounding, map_source_range_to_project,
+    AssetId, AssetTranscript, Document, ExportCancellation, FrameRounding, MediaAsset, MediaError,
+    MediaKind, Rational, TimeCode, TimelineTranscriptWord, TranscriptStatus, TranscriptWord,
+    map_frames_with_rounding, map_source_range_to_project,
 };
 use serde::{Deserialize, Serialize};
 use whisper_rs::{
@@ -47,7 +47,9 @@ impl TranscriptService {
         thread::Builder::new()
             .name("openreel-transcript".to_owned())
             .spawn(move || TranscriptWorker::new(data_dir, jobs_rx, worker_states).run())
-            .map_err(|error| MediaError::Backend(format!("could not start transcript worker: {error}")))?;
+            .map_err(|error| {
+                MediaError::Backend(format!("could not start transcript worker: {error}"))
+            })?;
         Ok(Self { jobs, states })
     }
 
@@ -152,7 +154,9 @@ impl TranscriptWorker {
                     model_path.as_ref(),
                     WhisperContextParameters::default(),
                 )
-                .map_err(|error| MediaError::Backend(format!("could not load Whisper model: {error}")))?,
+                .map_err(|error| {
+                    MediaError::Backend(format!("could not load Whisper model: {error}"))
+                })?,
             );
         }
 
@@ -242,7 +246,11 @@ fn run_whisper(
         .full(params, &samples)
         .map_err(|error| MediaError::Backend(format!("Whisper inference failed: {error}")))?;
 
-    let words = extract_words(&state.as_iter().collect::<Vec<_>>(), asset.fps, asset.duration)?;
+    let words = extract_words(
+        &state.as_iter().collect::<Vec<_>>(),
+        asset.fps,
+        asset.duration,
+    )?;
     Ok(AssetTranscript {
         asset: asset.id,
         content_sha256,
@@ -280,9 +288,9 @@ fn extract_words(
         let before = result.len();
         append_token_words(&mut result, &tokens, fps, duration)?;
         if result.len() == before {
-            let text = segment
-                .to_str_lossy()
-                .map_err(|error| MediaError::Backend(format!("invalid Whisper segment: {error}")))?;
+            let text = segment.to_str_lossy().map_err(|error| {
+                MediaError::Backend(format!("invalid Whisper segment: {error}"))
+            })?;
             append_evenly_timed_words(
                 &mut result,
                 &text,
@@ -422,8 +430,8 @@ fn centiseconds_to_frames(
     if centiseconds < 0 {
         return Ok(TimeCode::ZERO);
     }
-    let centisecond_rate = Rational::new(100, 1)
-        .map_err(|error| MediaError::Backend(error.to_string()))?;
+    let centisecond_rate =
+        Rational::new(100, 1).map_err(|error| MediaError::Backend(error.to_string()))?;
     map_frames_with_rounding(TimeCode(centiseconds), centisecond_rate, fps, rounding)
         .map_err(|error| MediaError::Backend(error.to_string()))
 }
@@ -456,12 +464,9 @@ where
             let Some(transcript) = transcript else {
                 continue;
             };
-            let clip_duration = map_source_range_to_project(
-                clip.source_range.clone(),
-                asset.fps,
-                document.fps,
-            )
-            .map_err(|error| MediaError::Backend(error.to_string()))?;
+            let clip_duration =
+                map_source_range_to_project(clip.source_range.clone(), asset.fps, document.fps)
+                    .map_err(|error| MediaError::Backend(error.to_string()))?;
             let clip_end = clip
                 .timeline_start
                 .checked_add(clip_duration)
@@ -495,10 +500,12 @@ where
                     FrameRounding::Ceil,
                 )
                 .map_err(|error| MediaError::Backend(error.to_string()))?;
-                let project_start = clip
-                    .timeline_start
-                    .checked_add(mapped_start)
-                    .ok_or_else(|| MediaError::Backend("timeline position overflowed".to_owned()))?;
+                let project_start =
+                    clip.timeline_start
+                        .checked_add(mapped_start)
+                        .ok_or_else(|| {
+                            MediaError::Backend("timeline position overflowed".to_owned())
+                        })?;
                 let project_end = clip
                     .timeline_start
                     .checked_add(mapped_end)
@@ -523,14 +530,7 @@ where
             }
         }
     }
-    words.sort_by_key(|word| {
-        (
-            word.project_start,
-            word.track,
-            word.clip,
-            word.source_start,
-        )
-    });
+    words.sort_by_key(|word| (word.project_start, word.track, word.clip, word.source_start));
     Ok(words)
 }
 
@@ -565,7 +565,11 @@ impl TranscriptStore {
         let json = match fs::read_to_string(&path) {
             Ok(json) => json,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(MediaError::Backend(format!("could not read transcript cache: {error}"))),
+            Err(error) => {
+                return Err(MediaError::Backend(format!(
+                    "could not read transcript cache: {error}"
+                )));
+            }
         };
         let Ok(entry) = serde_json::from_str::<CacheEntry>(&json) else {
             return Ok(None);
@@ -585,8 +589,9 @@ impl TranscriptStore {
     }
 
     fn save(&self, transcript: &AssetTranscript) -> Result<(), MediaError> {
-        fs::create_dir_all(&self.root)
-            .map_err(|error| MediaError::Backend(format!("could not create transcript cache: {error}")))?;
+        fs::create_dir_all(&self.root).map_err(|error| {
+            MediaError::Backend(format!("could not create transcript cache: {error}"))
+        })?;
         let entry = CacheEntry {
             version: CACHE_VERSION,
             content_sha256: transcript.content_sha256.clone(),
@@ -594,19 +599,22 @@ impl TranscriptStore {
             source_fps: transcript.source_fps,
             words: transcript.words.clone(),
         };
-        let bytes = serde_json::to_vec(&entry)
-            .map_err(|error| MediaError::Backend(format!("could not encode transcript cache: {error}")))?;
+        let bytes = serde_json::to_vec(&entry).map_err(|error| {
+            MediaError::Backend(format!("could not encode transcript cache: {error}"))
+        })?;
         let path = self.path_for(&transcript.content_sha256);
         let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
-        fs::write(&temporary, bytes)
-            .map_err(|error| MediaError::Backend(format!("could not write transcript cache: {error}")))?;
+        fs::write(&temporary, bytes).map_err(|error| {
+            MediaError::Backend(format!("could not write transcript cache: {error}"))
+        })?;
         if path.exists() {
             fs::remove_file(&path).map_err(|error| {
                 MediaError::Backend(format!("could not replace transcript cache: {error}"))
             })?;
         }
-        fs::rename(&temporary, &path)
-            .map_err(|error| MediaError::Backend(format!("could not commit transcript cache: {error}")))?;
+        fs::rename(&temporary, &path).map_err(|error| {
+            MediaError::Backend(format!("could not commit transcript cache: {error}"))
+        })?;
         Ok(())
     }
 }
@@ -621,13 +629,16 @@ fn ensure_model(
     if model_path.is_file() && sha256_file(&model_path)? == WHISPER_MODEL_SHA256 {
         return Ok(model_path);
     }
-    fs::create_dir_all(&model_dir)
-        .map_err(|error| MediaError::Backend(format!("could not create model directory: {error}")))?;
+    fs::create_dir_all(&model_dir).map_err(|error| {
+        MediaError::Backend(format!("could not create model directory: {error}"))
+    })?;
     let temporary = model_dir.join(format!("{WHISPER_MODEL_NAME}.part-{}", std::process::id()));
     let mut response = reqwest::blocking::Client::builder()
         .build()
         .and_then(|client| client.get(WHISPER_MODEL_URL).send())
-        .map_err(|error| MediaError::Backend(format!("could not download Whisper model: {error}")))?;
+        .map_err(|error| {
+            MediaError::Backend(format!("could not download Whisper model: {error}"))
+        })?;
     if !response.status().is_success() {
         return Err(MediaError::Backend(format!(
             "Whisper model download returned HTTP {}",
@@ -643,19 +654,21 @@ fn ensure_model(
             total_bytes: total,
         },
     );
-    let mut file = File::create(&temporary)
-        .map_err(|error| MediaError::Backend(format!("could not create model download: {error}")))?;
+    let mut file = File::create(&temporary).map_err(|error| {
+        MediaError::Backend(format!("could not create model download: {error}"))
+    })?;
     let mut buffer = vec![0_u8; 1024 * 1024];
     let mut downloaded = 0_u64;
     loop {
-        let count = response
-            .read(&mut buffer)
-            .map_err(|error| MediaError::Backend(format!("could not read model download: {error}")))?;
+        let count = response.read(&mut buffer).map_err(|error| {
+            MediaError::Backend(format!("could not read model download: {error}"))
+        })?;
         if count == 0 {
             break;
         }
-        file.write_all(&buffer[..count])
-            .map_err(|error| MediaError::Backend(format!("could not write model download: {error}")))?;
+        file.write_all(&buffer[..count]).map_err(|error| {
+            MediaError::Backend(format!("could not write model download: {error}"))
+        })?;
         downloaded = downloaded.saturating_add(u64::try_from(count).unwrap_or_default());
         update_status(
             states,
@@ -676,23 +689,26 @@ fn ensure_model(
         )));
     }
     if model_path.exists() {
-        fs::remove_file(&model_path)
-            .map_err(|error| MediaError::Backend(format!("could not replace Whisper model: {error}")))?;
+        fs::remove_file(&model_path).map_err(|error| {
+            MediaError::Backend(format!("could not replace Whisper model: {error}"))
+        })?;
     }
-    fs::rename(&temporary, &model_path)
-        .map_err(|error| MediaError::Backend(format!("could not install Whisper model: {error}")))?;
+    fs::rename(&temporary, &model_path).map_err(|error| {
+        MediaError::Backend(format!("could not install Whisper model: {error}"))
+    })?;
     Ok(model_path)
 }
 
 fn sha256_file(path: &Path) -> Result<String, MediaError> {
-    let mut file = File::open(path)
-        .map_err(|error| MediaError::Backend(format!("could not hash {}: {error}", path.display())))?;
+    let mut file = File::open(path).map_err(|error| {
+        MediaError::Backend(format!("could not hash {}: {error}", path.display()))
+    })?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
-        let count = file
-            .read(&mut buffer)
-            .map_err(|error| MediaError::Backend(format!("could not hash {}: {error}", path.display())))?;
+        let count = file.read(&mut buffer).map_err(|error| {
+            MediaError::Backend(format!("could not hash {}: {error}", path.display()))
+        })?;
         if count == 0 {
             break;
         }
@@ -740,10 +756,8 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "openreel-{label}-{}-{nonce}",
-                std::process::id()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("openreel-{label}-{}-{nonce}", std::process::id()));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }
@@ -843,12 +857,16 @@ mod tests {
                 },
             ],
         });
-        let mapped = map_timeline_words(&document, None, |_| Some(Arc::clone(&transcript))).unwrap();
+        let mapped =
+            map_timeline_words(&document, None, |_| Some(Arc::clone(&transcript))).unwrap();
 
         assert_eq!(mapped.len(), 3);
         assert_eq!(mapped[0].source_start, TimeCode(10));
         assert_eq!(mapped[0].project_start, TimeCode(100));
-        assert_eq!(mapped[1].project_start..mapped[1].project_end, TimeCode(105)..TimeCode(108));
+        assert_eq!(
+            mapped[1].project_start..mapped[1].project_end,
+            TimeCode(105)..TimeCode(108)
+        );
         assert_eq!(mapped[2].source_end, TimeCode(40));
         assert_eq!(mapped[2].project_end, TimeCode(130));
     }
@@ -866,7 +884,8 @@ mod tests {
                 source_end: TimeCode(13),
             }],
         });
-        let mapped = map_timeline_words(&document, None, |_| Some(Arc::clone(&transcript))).unwrap();
+        let mapped =
+            map_timeline_words(&document, None, |_| Some(Arc::clone(&transcript))).unwrap();
 
         assert_eq!(mapped[0].project_start, TimeCode(101));
         assert_eq!(mapped[0].project_end, TimeCode(104));
@@ -897,19 +916,17 @@ mod tests {
             }],
         });
 
-        assert!(map_timeline_words(
-            &document,
-            Some(TimeCode(108)..TimeCode(110)),
-            |_| Some(Arc::clone(&transcript))
-        )
-        .unwrap()
-        .is_empty());
+        assert!(
+            map_timeline_words(&document, Some(TimeCode(108)..TimeCode(110)), |_| Some(
+                Arc::clone(&transcript)
+            ))
+            .unwrap()
+            .is_empty()
+        );
         assert_eq!(
-            map_timeline_words(
-                &document,
-                Some(TimeCode(107)..TimeCode(110)),
-                |_| Some(Arc::clone(&transcript))
-            )
+            map_timeline_words(&document, Some(TimeCode(107)..TimeCode(110)), |_| Some(
+                Arc::clone(&transcript)
+            ))
             .unwrap()
             .len(),
             1

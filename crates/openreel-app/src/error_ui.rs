@@ -43,11 +43,7 @@ impl ErrorLog {
 }
 
 impl OpenReelApp {
-    pub(crate) fn record_error(
-        &mut self,
-        source: &'static str,
-        message: impl Into<String>,
-    ) {
+    pub(crate) fn record_error(&mut self, source: &'static str, message: impl Into<String>) {
         let message = message.into();
         self.status.clone_from(&message);
         self.error_log.push(source, message);

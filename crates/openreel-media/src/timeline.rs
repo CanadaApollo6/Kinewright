@@ -1,7 +1,6 @@
 use openreel_core::{
     AssetId, Clip, ClipId, Document, Effect, FrameRounding, MediaError, TimeCode, Track, TrackId,
-    TrackKind,
-    map_frames_with_rounding, map_source_range_to_project,
+    TrackKind, map_frames_with_rounding, map_source_range_to_project,
 };
 
 /// The source frame selected by a project-frame position on the first video track.
@@ -65,7 +64,9 @@ pub fn video_layers_at(
                 .clips
                 .iter()
                 .find(|clip| clip.id == source.clip)
-                .ok_or_else(|| MediaError::Backend("active timeline clip disappeared".to_owned()))?;
+                .ok_or_else(|| {
+                    MediaError::Backend("active timeline clip disappeared".to_owned())
+                })?;
             layers.push(TimelineVideoLayer {
                 source,
                 effects: clip.effects.clone(),
@@ -86,14 +87,14 @@ fn source_on_track(
             break;
         }
         let asset = document.asset(clip.asset).ok_or_else(|| {
-            MediaError::Backend(format!("timeline clip {} references missing asset {}", clip.id, clip.asset))
+            MediaError::Backend(format!(
+                "timeline clip {} references missing asset {}",
+                clip.id, clip.asset
+            ))
         })?;
-        let duration = map_source_range_to_project(
-            clip.source_range.clone(),
-            asset.fps,
-            document.fps,
-        )
-        .map_err(|error| MediaError::Backend(error.to_string()))?;
+        let duration =
+            map_source_range_to_project(clip.source_range.clone(), asset.fps, document.fps)
+                .map_err(|error| MediaError::Backend(error.to_string()))?;
         let timeline_end = clip
             .timeline_start
             .checked_add(duration)
@@ -144,8 +145,8 @@ mod tests {
     use std::path::PathBuf;
 
     use openreel_core::{
-        AssetId, Clip, ClipId, Document, MediaAsset, MediaKind, Rational, TimeCode, Track,
-        TrackId, TrackKind,
+        AssetId, Clip, ClipId, Document, MediaAsset, MediaKind, Rational, TimeCode, Track, TrackId,
+        TrackKind,
     };
 
     use super::*;

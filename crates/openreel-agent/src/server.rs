@@ -42,9 +42,7 @@ use crate::{
         render_clip_info, render_timeline_scene_changes, render_timeline_silences,
         render_timeline_state, render_timeline_transcript,
     },
-    schema::{
-        SchemaError, decode_operation, operation_tool_name, operation_tools, schema_object,
-    },
+    schema::{SchemaError, decode_operation, operation_tool_name, operation_tools, schema_object},
 };
 
 const THUMBNAIL_MAX_WIDTH: u32 = 512;
@@ -121,7 +119,12 @@ impl ConfirmationBroker {
         let pending = self
             .pending
             .lock()
-            .map(|mut pending| pending.drain().map(|(_, sender)| sender).collect::<Vec<_>>())
+            .map(|mut pending| {
+                pending
+                    .drain()
+                    .map(|(_, sender)| sender)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         for sender in pending {
             let _ = sender.send(ConfirmationDecision::Rejected(reason.clone()));
@@ -137,11 +140,7 @@ impl ConfirmationBroker {
         sender.is_some_and(|sender| sender.send(decision).is_ok())
     }
 
-    fn confirm(
-        &self,
-        tool_name: &str,
-        description: String,
-    ) -> Result<(), String> {
+    fn confirm(&self, tool_name: &str, description: String) -> Result<(), String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (decision_tx, decision_rx) = crossbeam_channel::bounded(1);
         self.pending
@@ -291,11 +290,7 @@ struct OpenReelMcp {
 }
 
 impl OpenReelMcp {
-    fn new(
-        core: Core,
-        media: Arc<dyn MediaEngine>,
-        confirmations: ConfirmationBroker,
-    ) -> Self {
+    fn new(core: Core, media: Arc<dyn MediaEngine>, confirmations: ConfirmationBroker) -> Self {
         Self {
             core,
             media,
@@ -345,8 +340,7 @@ impl OpenReelMcp {
                 self.asset_silences(args.asset_id, args.min_duration_frames)
             }
             "get_timeline_silences" => {
-                let args: TimelineDerivedArgs =
-                    decode_args("get_timeline_silences", arguments)?;
+                let args: TimelineDerivedArgs = decode_args("get_timeline_silences", arguments)?;
                 self.timeline_silences(args.range)
             }
             "get_scene_changes" => {
@@ -381,17 +375,17 @@ impl OpenReelMcp {
         }
     }
 
-    fn confirmation_description(
-        &self,
-        operation: &Operation,
-    ) -> Result<Option<String>, McpError> {
+    fn confirmation_description(&self, operation: &Operation) -> Result<Option<String>, McpError> {
         match operation {
             Operation::DeleteClip { clip } => Ok(Some(format!(
                 "The agent wants to delete clip {clip}. This edit can be undone."
             ))),
             Operation::RemoveTrack { track } => {
                 let document = self.document()?;
-                let Some(track) = document.tracks.iter().find(|candidate| candidate.id == *track)
+                let Some(track) = document
+                    .tracks
+                    .iter()
+                    .find(|candidate| candidate.id == *track)
                 else {
                     return Ok(None);
                 };
@@ -559,7 +553,9 @@ impl OpenReelMcp {
             self.media.request_silence_detection(asset.clone());
             status = self.media.silence_status(asset_id);
         }
-        Ok(success_text(render_asset_silences(asset_id, &status, minimum)))
+        Ok(success_text(render_asset_silences(
+            asset_id, &status, minimum,
+        )))
     }
 
     fn asset_scene_changes(
@@ -596,9 +592,7 @@ impl OpenReelMcp {
         let range = requested.map_or(TimeCode::ZERO..document.duration, |range| {
             range.start..range.end
         });
-        if range.start < TimeCode::ZERO
-            || range.end <= range.start
-            || range.end > document.duration
+        if range.start < TimeCode::ZERO || range.end <= range.start || range.end > document.duration
         {
             return Ok(error_text(format!(
                 "timeline transcript range {}..{} is outside project range 0..{}",
@@ -620,7 +614,10 @@ impl OpenReelMcp {
         let mut rendered = render_timeline_transcript(&document, range, &words);
         for asset in &document.media_pool {
             let status = self.media.transcript_status(asset.id);
-            if !matches!(status, TranscriptStatus::Ready(_) | TranscriptStatus::NoSpeech) {
+            if !matches!(
+                status,
+                TranscriptStatus::Ready(_) | TranscriptStatus::NoSpeech
+            ) {
                 rendered.push('\n');
                 rendered.push_str(&render_asset_transcript(asset.id, &status));
             }
@@ -981,7 +978,10 @@ fn plan_confirmation_description(document: &Document, operations: &[Operation]) 
                 removed_clips = removed_clips.saturating_add(1);
             }
             Operation::RemoveTrack { track } => {
-                let existing = candidate.tracks.iter().find(|candidate| candidate.id == *track)?;
+                let existing = candidate
+                    .tracks
+                    .iter()
+                    .find(|candidate| candidate.id == *track)?;
                 if !existing.clips.is_empty() {
                     removed_tracks = removed_tracks.saturating_add(1);
                     removed_clips = removed_clips.saturating_add(existing.clips.len());
@@ -999,7 +999,11 @@ fn plan_confirmation_description(document: &Document, operations: &[Operation]) 
     Some(format!(
         "Plan removes {removed_clips} {} and {removed_tracks} {} - approve?",
         if removed_clips == 1 { "clip" } else { "clips" },
-        if removed_tracks == 1 { "track" } else { "tracks" },
+        if removed_tracks == 1 {
+            "track"
+        } else {
+            "tracks"
+        },
     ))
 }
 
@@ -1019,7 +1023,10 @@ fn render_plan_outcomes(
             (None, _) => "applied".to_owned(),
             (Some(openreel_core::BatchError::Empty), _) => "not run: empty plan".to_owned(),
             (Some(openreel_core::BatchError::OperationFailed { error, .. }), Some(failed))
-                if number == failed => format!("rejected: {error}"),
+                if number == failed =>
+            {
+                format!("rejected: {error}")
+            }
             (Some(_), Some(failed)) if number < failed => "rolled back".to_owned(),
             (Some(_), Some(_)) => "not run".to_owned(),
             _ => "not run".to_owned(),
@@ -1046,9 +1053,9 @@ fn render_plan_outcomes(
 mod tests {
     use super::*;
     use openreel_core::{
-        AssetId, Clip, ExportSettings, FrameTexture, MediaAsset, MediaError,
-        MediaEvent, MediaKind, ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus,
-        TimelineSceneChange, TimelineSilenceSpan, Track, TrackId, TrackKind,
+        AssetId, Clip, ExportSettings, FrameTexture, MediaAsset, MediaError, MediaEvent, MediaKind,
+        ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimelineSceneChange,
+        TimelineSilenceSpan, Track, TrackId, TrackKind,
     };
     use serde_json::json;
     use std::{path::Path, time::Instant};
@@ -1172,9 +1179,8 @@ mod tests {
     }
 
     fn delete_request() -> CallToolRequestParams {
-        CallToolRequestParams::new("delete_clip").with_arguments(
-            json!({"clip": 1}).as_object().unwrap().clone(),
-        )
+        CallToolRequestParams::new("delete_clip")
+            .with_arguments(json!({"clip": 1}).as_object().unwrap().clone())
     }
 
     fn plan_request(operations: serde_json::Value) -> CallToolRequestParams {
@@ -1192,7 +1198,10 @@ mod tests {
             if let Some(request) = broker.pending_requests().into_iter().next() {
                 return request;
             }
-            assert!(Instant::now() < deadline, "confirmation request was not published");
+            assert!(
+                Instant::now() < deadline,
+                "confirmation request was not published"
+            );
             thread::sleep(Duration::from_millis(2));
         }
     }
@@ -1218,7 +1227,10 @@ mod tests {
         );
         let request = wait_for_request(&broker);
         assert!(broker.approve(request.id));
-        let result = result.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
+        let result = result
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(result.is_error, Some(false));
         let Event::QueryResult(QueryResult::Document(document)) =
             core.request(Command::Query(Query::Document)).unwrap()
@@ -1238,13 +1250,18 @@ mod tests {
         );
         let request = wait_for_request(&broker);
         assert!(broker.reject(request.id, "rejected by user"));
-        let result = result.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
-        assert_eq!(result.is_error, Some(true));
-        assert!(result.content[0]
-            .as_text()
+        let result = result
+            .recv_timeout(Duration::from_secs(1))
             .unwrap()
-            .text
-            .contains("rejected by user"));
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("rejected by user")
+        );
     }
 
     #[test]
@@ -1254,11 +1271,13 @@ mod tests {
         let service = OpenReelMcp::new(core, media, broker);
         let result = service.call_blocking(delete_request()).unwrap();
         assert_eq!(result.is_error, Some(true));
-        assert!(result.content[0]
-            .as_text()
-            .unwrap()
-            .text
-            .contains("timed out"));
+        assert!(
+            result.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("timed out")
+        );
     }
 
     #[test]
@@ -1271,30 +1290,34 @@ mod tests {
         );
         let _request = wait_for_request(&broker);
         broker.reject_all("session interrupted");
-        let result = result.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
-        assert_eq!(result.is_error, Some(true));
-        assert!(result.content[0]
-            .as_text()
+        let result = result
+            .recv_timeout(Duration::from_secs(1))
             .unwrap()
-            .text
-            .contains("session interrupted"));
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("session interrupted")
+        );
     }
 
     #[test]
     fn removing_a_nonempty_track_requires_confirmation() {
         let (core, media) = fixture();
         let broker = ConfirmationBroker::with_timeout(Duration::from_secs(1));
-        let request = CallToolRequestParams::new("remove_track").with_arguments(
-            json!({"track": 1}).as_object().unwrap().clone(),
-        );
-        let result = invoke_in_background(
-            OpenReelMcp::new(core, media, broker.clone()),
-            request,
-        );
+        let request = CallToolRequestParams::new("remove_track")
+            .with_arguments(json!({"track": 1}).as_object().unwrap().clone());
+        let result = invoke_in_background(OpenReelMcp::new(core, media, broker.clone()), request);
         let request = wait_for_request(&broker);
         assert!(request.description.contains("1 clip(s)"));
         assert!(broker.reject(request.id, "keep the track"));
-        let result = result.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
+        let result = result
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(result.is_error, Some(true));
     }
 
@@ -1383,7 +1406,10 @@ mod tests {
             } else {
                 assert!(broker.reject(request.id, "keep the plan unchanged"));
             }
-            let result = result.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
+            let result = result
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .unwrap();
             assert_eq!(result.is_error, Some(!approve));
             let Event::QueryResult(QueryResult::Document(document)) =
                 core.request(Command::Query(Query::Document)).unwrap()

@@ -66,7 +66,10 @@ impl JournalWriter {
             .write(true)
             .open(path)
             .map_err(|error| {
-                format!("could not create recovery journal {}: {error}", path.display())
+                format!(
+                    "could not create recovery journal {}: {error}",
+                    path.display()
+                )
             })?;
         let header = serde_json::to_vec(&JournalHeader {
             format_version: FORMAT_VERSION,
@@ -473,7 +476,9 @@ fn record_event(
 }
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 enum PendingRecovery {
@@ -946,8 +951,7 @@ mod tests {
     #[test]
     #[ignore = "invoked as the deliberately crashing subprocess"]
     fn crash_child_process() {
-        let Some(path) = std::env::var_os("OPENREEL_TEST_CRASH_JOURNAL").map(PathBuf::from)
-        else {
+        let Some(path) = std::env::var_os("OPENREEL_TEST_CRASH_JOURNAL").map(PathBuf::from) else {
             return;
         };
         let core = Core::spawn(Document::default()).unwrap();

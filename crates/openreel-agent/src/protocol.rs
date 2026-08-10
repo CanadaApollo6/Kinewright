@@ -10,8 +10,9 @@ pub(crate) struct ClaudeProtocol {
 
 impl ClaudeProtocol {
     pub(crate) fn parse_line(&mut self, line: &str) -> Result<Vec<AgentEvent>, AgentError> {
-        let value: Value = serde_json::from_str(line)
-            .map_err(|error| AgentError::Protocol(format!("invalid Claude stream JSON: {error}")))?;
+        let value: Value = serde_json::from_str(line).map_err(|error| {
+            AgentError::Protocol(format!("invalid Claude stream JSON: {error}"))
+        })?;
         let mut events = Vec::new();
         match value.get("type").and_then(Value::as_str) {
             Some("assistant") => self.parse_assistant(&value, &mut events),
@@ -32,10 +33,7 @@ impl ClaudeProtocol {
     }
 
     fn parse_assistant(&mut self, value: &Value, events: &mut Vec<AgentEvent>) {
-        let Some(content) = value
-            .pointer("/message/content")
-            .and_then(Value::as_array)
-        else {
+        let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
             return;
         };
         for block in content {
@@ -48,10 +46,7 @@ impl ClaudeProtocol {
                     }
                 }
                 Some("tool_use") => {
-                    let id = block
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
+                    let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
                     let raw_name = block
                         .get("name")
                         .and_then(Value::as_str)
@@ -71,10 +66,7 @@ impl ClaudeProtocol {
     }
 
     fn parse_tool_results(&mut self, value: &Value, events: &mut Vec<AgentEvent>) {
-        let Some(content) = value
-            .pointer("/message/content")
-            .and_then(Value::as_array)
-        else {
+        let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
             return;
         };
         for block in content {
@@ -144,15 +136,12 @@ impl CodexProtocol {
             .map_err(|error| AgentError::Protocol(format!("invalid Codex JSONL: {error}")))?;
         let mut events = Vec::new();
         match value.get("type").and_then(Value::as_str) {
-            Some("item.started") | Some("item.completed") => {
-                self.parse_item(&value, &mut events)
-            }
+            Some("item.started") | Some("item.completed") => self.parse_item(&value, &mut events),
             Some("turn.completed") => {
                 let usage = value.get("usage").unwrap_or(&Value::Null);
                 events.push(AgentEvent::Cost {
                     input_tokens: token_value(usage, "input_tokens", "inputTokens").unwrap_or(0),
-                    output_tokens: token_value(usage, "output_tokens", "outputTokens")
-                        .unwrap_or(0),
+                    output_tokens: token_value(usage, "output_tokens", "outputTokens").unwrap_or(0),
                     cost_usd: value
                         .get("cost_usd")
                         .or_else(|| usage.get("cost_usd"))

@@ -13,9 +13,7 @@ use openreel_core::{
 };
 use openreel_media::FfmpegMediaEngine;
 use rmcp::{
-    ServiceExt as _,
-    model::CallToolRequestParams,
-    transport::StreamableHttpClientTransport,
+    ServiceExt as _, model::CallToolRequestParams, transport::StreamableHttpClientTransport,
 };
 use serde_json::json;
 
@@ -25,7 +23,10 @@ async fn mutator_tool_applies_through_the_real_core_actor() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let agent_media: Arc<dyn MediaEngine> = media;
     let server = McpServer::start(core.clone(), agent_media).unwrap();
-    let client = ().serve(StreamableHttpClientTransport::from_uri(server.endpoint())).await.unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
 
     let result = client
         .call_tool(
@@ -146,13 +147,15 @@ async fn get_frame_at_returns_a_downscaled_png_for_generated_media() {
     let core = Core::spawn(document).unwrap();
     let agent_media: Arc<dyn MediaEngine> = media;
     let server = McpServer::start(core, agent_media).unwrap();
-    let client = ().serve(StreamableHttpClientTransport::from_uri(server.endpoint())).await.unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
 
     let result = client
         .call_tool(
-            CallToolRequestParams::new("get_frame_at").with_arguments(
-                json!({"timecode": 30}).as_object().unwrap().clone(),
-            ),
+            CallToolRequestParams::new("get_frame_at")
+                .with_arguments(json!({"timecode": 30}).as_object().unwrap().clone()),
         )
         .await
         .unwrap();
@@ -277,10 +280,8 @@ impl TestClip {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let output = std::env::temp_dir().join(format!(
-            "openreel-m3-{}-{nonce}.mp4",
-            std::process::id()
-        ));
+        let output =
+            std::env::temp_dir().join(format!("openreel-m3-{}-{nonce}.mp4", std::process::id()));
         let status = ProcessCommand::new(ffmpeg)
             .args([
                 "-hide_banner",
@@ -319,10 +320,7 @@ impl TestClip {
 
 fn ffmpeg_executable() -> PathBuf {
     std::env::var_os("FFMPEG_DIR").map_or_else(
-        || {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../third_party/ffmpeg/bin/ffmpeg.exe")
-        },
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffmpeg.exe"),
         |directory| PathBuf::from(directory).join("bin/ffmpeg.exe"),
     )
 }

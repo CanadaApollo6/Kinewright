@@ -43,8 +43,14 @@ pub struct SessionConfig {
 pub enum AgentEvent {
     Text(String),
     Error(String),
-    ToolCall { name: String, arguments: String },
-    ToolResult { name: String, result: String },
+    ToolCall {
+        name: String,
+        arguments: String,
+    },
+    ToolResult {
+        name: String,
+        result: String,
+    },
     Cost {
         input_tokens: u64,
         output_tokens: u64,
@@ -78,4 +84,3 @@ pub trait AgentSession: Send {
     fn events(&self) -> Receiver<AgentEvent>;
     fn interrupt(&mut self);
 }
-

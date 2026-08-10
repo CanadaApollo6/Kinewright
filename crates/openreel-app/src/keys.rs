@@ -61,23 +61,125 @@ pub(crate) struct KeyBinding {
 }
 
 pub(crate) const KEYMAP: [KeyBinding; 17] = [
-    KeyBinding { key: egui::Key::Space, ctrl: false, action: KeyAction::TogglePlayback, shortcut: "Space", description: "Play / pause" },
-    KeyBinding { key: egui::Key::S, ctrl: false, action: KeyAction::Split, shortcut: "S", description: "Split selected or active clip" },
-    KeyBinding { key: egui::Key::Delete, ctrl: false, action: KeyAction::Delete, shortcut: "Del", description: "Delete selected clip" },
-    KeyBinding { key: egui::Key::Z, ctrl: true, action: KeyAction::Undo, shortcut: "Ctrl+Z", description: "Undo" },
-    KeyBinding { key: egui::Key::Y, ctrl: true, action: KeyAction::Redo, shortcut: "Ctrl+Y", description: "Redo" },
-    KeyBinding { key: egui::Key::J, ctrl: false, action: KeyAction::ShuttleBackwardFrame, shortcut: "J", description: "Step one frame backward (reverse shuttle unavailable)" },
-    KeyBinding { key: egui::Key::K, ctrl: false, action: KeyAction::Pause, shortcut: "K", description: "Pause" },
-    KeyBinding { key: egui::Key::L, ctrl: false, action: KeyAction::PlayForward, shortcut: "L", description: "Play forward" },
-    KeyBinding { key: egui::Key::ArrowLeft, ctrl: false, action: KeyAction::StepBackward, shortcut: "Left", description: "Step one frame backward" },
-    KeyBinding { key: egui::Key::ArrowRight, ctrl: false, action: KeyAction::StepForward, shortcut: "Right", description: "Step one frame forward" },
-    KeyBinding { key: egui::Key::Home, ctrl: false, action: KeyAction::JumpStart, shortcut: "Home", description: "Jump to project start" },
-    KeyBinding { key: egui::Key::End, ctrl: false, action: KeyAction::JumpEnd, shortcut: "End", description: "Jump to project end" },
-    KeyBinding { key: egui::Key::I, ctrl: false, action: KeyAction::SetIn, shortcut: "I", description: "Trim selected clip in to playhead" },
-    KeyBinding { key: egui::Key::O, ctrl: false, action: KeyAction::SetOut, shortcut: "O", description: "Trim selected clip out to playhead" },
-    KeyBinding { key: egui::Key::S, ctrl: true, action: KeyAction::Save, shortcut: "Ctrl+S", description: "Save project" },
-    KeyBinding { key: egui::Key::E, ctrl: true, action: KeyAction::Export, shortcut: "Ctrl+E", description: "Open export dialog" },
-    KeyBinding { key: egui::Key::Questionmark, ctrl: false, action: KeyAction::Help, shortcut: "?", description: "Show keyboard help" },
+    KeyBinding {
+        key: egui::Key::Space,
+        ctrl: false,
+        action: KeyAction::TogglePlayback,
+        shortcut: "Space",
+        description: "Play / pause",
+    },
+    KeyBinding {
+        key: egui::Key::S,
+        ctrl: false,
+        action: KeyAction::Split,
+        shortcut: "S",
+        description: "Split selected or active clip",
+    },
+    KeyBinding {
+        key: egui::Key::Delete,
+        ctrl: false,
+        action: KeyAction::Delete,
+        shortcut: "Del",
+        description: "Delete selected clip",
+    },
+    KeyBinding {
+        key: egui::Key::Z,
+        ctrl: true,
+        action: KeyAction::Undo,
+        shortcut: "Ctrl+Z",
+        description: "Undo",
+    },
+    KeyBinding {
+        key: egui::Key::Y,
+        ctrl: true,
+        action: KeyAction::Redo,
+        shortcut: "Ctrl+Y",
+        description: "Redo",
+    },
+    KeyBinding {
+        key: egui::Key::J,
+        ctrl: false,
+        action: KeyAction::ShuttleBackwardFrame,
+        shortcut: "J",
+        description: "Step one frame backward (reverse shuttle unavailable)",
+    },
+    KeyBinding {
+        key: egui::Key::K,
+        ctrl: false,
+        action: KeyAction::Pause,
+        shortcut: "K",
+        description: "Pause",
+    },
+    KeyBinding {
+        key: egui::Key::L,
+        ctrl: false,
+        action: KeyAction::PlayForward,
+        shortcut: "L",
+        description: "Play forward",
+    },
+    KeyBinding {
+        key: egui::Key::ArrowLeft,
+        ctrl: false,
+        action: KeyAction::StepBackward,
+        shortcut: "Left",
+        description: "Step one frame backward",
+    },
+    KeyBinding {
+        key: egui::Key::ArrowRight,
+        ctrl: false,
+        action: KeyAction::StepForward,
+        shortcut: "Right",
+        description: "Step one frame forward",
+    },
+    KeyBinding {
+        key: egui::Key::Home,
+        ctrl: false,
+        action: KeyAction::JumpStart,
+        shortcut: "Home",
+        description: "Jump to project start",
+    },
+    KeyBinding {
+        key: egui::Key::End,
+        ctrl: false,
+        action: KeyAction::JumpEnd,
+        shortcut: "End",
+        description: "Jump to project end",
+    },
+    KeyBinding {
+        key: egui::Key::I,
+        ctrl: false,
+        action: KeyAction::SetIn,
+        shortcut: "I",
+        description: "Trim selected clip in to playhead",
+    },
+    KeyBinding {
+        key: egui::Key::O,
+        ctrl: false,
+        action: KeyAction::SetOut,
+        shortcut: "O",
+        description: "Trim selected clip out to playhead",
+    },
+    KeyBinding {
+        key: egui::Key::S,
+        ctrl: true,
+        action: KeyAction::Save,
+        shortcut: "Ctrl+S",
+        description: "Save project",
+    },
+    KeyBinding {
+        key: egui::Key::E,
+        ctrl: true,
+        action: KeyAction::Export,
+        shortcut: "Ctrl+E",
+        description: "Open export dialog",
+    },
+    KeyBinding {
+        key: egui::Key::Questionmark,
+        ctrl: false,
+        action: KeyAction::Help,
+        shortcut: "?",
+        description: "Show keyboard help",
+    },
 ];
 
 impl OpenReelApp {
@@ -110,9 +212,9 @@ impl OpenReelApp {
             KeyAction::PlayForward => self.play_forward(),
             KeyAction::StepForward => self.step_frames(1),
             KeyAction::JumpStart => self.pause_and_seek(TimeCode::ZERO),
-            KeyAction::JumpEnd => self.pause_and_seek(TimeCode(
-                self.document.duration.0.saturating_sub(1).max(0),
-            )),
+            KeyAction::JumpEnd => {
+                self.pause_and_seek(TimeCode(self.document.duration.0.saturating_sub(1).max(0)))
+            }
             KeyAction::SetIn => self.trim_selected_at_playhead(true),
             KeyAction::SetOut => self.trim_selected_at_playhead(false),
             KeyAction::Save => {
@@ -144,7 +246,10 @@ impl OpenReelApp {
 
     fn trim_selected_at_playhead(&mut self, set_in: bool) {
         let Some(clip_id) = self.selected_clip else {
-            self.record_error("Operations", "Select a clip before setting an in or out point");
+            self.record_error(
+                "Operations",
+                "Select a clip before setting an in or out point",
+            );
             return;
         };
         let Some(clip) = self.document.clip(clip_id).cloned() else {
@@ -152,20 +257,24 @@ impl OpenReelApp {
             return;
         };
         let Some(asset) = self.document.asset(clip.asset) else {
-            self.record_error("Operations", format!("Asset {} no longer exists", clip.asset));
+            self.record_error(
+                "Operations",
+                format!("Asset {} no longer exists", clip.asset),
+            );
             return;
         };
-        let Ok(project_duration) = map_source_range_to_project(
-            clip.source_range.clone(),
-            asset.fps,
-            self.document.fps,
-        ) else {
+        let Ok(project_duration) =
+            map_source_range_to_project(clip.source_range.clone(), asset.fps, self.document.fps)
+        else {
             self.record_error("Operations", "Could not map the selected clip time base");
             return;
         };
         let project_end = clip.timeline_start.0.saturating_add(project_duration.0);
         if self.position < clip.timeline_start || self.position.0 > project_end {
-            self.record_error("Operations", "Move the playhead onto the selected clip first");
+            self.record_error(
+                "Operations",
+                "Move the playhead onto the selected clip first",
+            );
             return;
         }
         let project_offset = TimeCode(self.position.0.saturating_sub(clip.timeline_start.0));

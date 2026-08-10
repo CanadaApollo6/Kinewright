@@ -379,7 +379,10 @@ mod tests {
         assert_eq!(journaled, operations);
         assert!(doc.asset(AssetId(1)).is_some());
         assert_eq!(doc.tracks.len(), 1);
-        assert!(events.try_recv().is_err(), "batch emitted more than one broadcast");
+        assert!(
+            events.try_recv().is_err(),
+            "batch emitted more than one broadcast"
+        );
 
         core.send(Command::Query(Query::OpLog)).unwrap();
         let Event::QueryResult(QueryResult::OpLog(log)) =

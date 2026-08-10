@@ -19,7 +19,9 @@ fn windows_sapi_speech_is_transcribed_by_the_real_model() {
 
     let clip = SpeechClip::generate();
     let engine = test_engine();
-    let asset = engine.probe(&clip.mp4).expect("generated clip should probe");
+    let asset = engine
+        .probe(&clip.mp4)
+        .expect("generated clip should probe");
     engine.request_transcription(asset.clone());
     let transcript = wait_for_transcript(&engine, asset.id);
     let output = transcript
@@ -39,7 +41,10 @@ fn windows_sapi_speech_is_transcribed_by_the_real_model() {
         );
     }
     for word in &transcript.words {
-        assert!(word.source_start < word.source_end, "empty timestamp: {word:?}");
+        assert!(
+            word.source_start < word.source_end,
+            "empty timestamp: {word:?}"
+        );
         assert!(
             word.source_end <= asset.duration,
             "timestamp exceeds asset duration: {word:?}"

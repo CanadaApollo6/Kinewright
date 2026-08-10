@@ -191,9 +191,8 @@ impl OpenReelApp {
 
                     let mut clip_pointer_interaction = false;
                     for (track_index, track) in document.tracks.iter().enumerate() {
-                        let lane_top = rect.top()
-                            + size::RULER_HEIGHT
-                            + track_index as f32 * track_height;
+                        let lane_top =
+                            rect.top() + size::RULER_HEIGHT + track_index as f32 * track_height;
                         let lane = egui::Rect::from_min_size(
                             egui::pos2(rect.left(), lane_top),
                             egui::vec2(rect.width(), track_height),

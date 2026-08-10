@@ -120,7 +120,10 @@ impl TranscriptStatus {
     pub const fn is_running(&self) -> bool {
         matches!(
             self,
-            Self::Queued | Self::Hashing | Self::DownloadingModel { .. } | Self::Transcribing { .. }
+            Self::Queued
+                | Self::Hashing
+                | Self::DownloadingModel { .. }
+                | Self::Transcribing { .. }
         )
     }
 }
@@ -297,4 +300,3 @@ pub trait MediaEngine: Send + Sync {
         progress: ProgressSink,
     ) -> Result<(), MediaError>;
 }
-

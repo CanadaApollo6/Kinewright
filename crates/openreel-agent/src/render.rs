@@ -1,9 +1,9 @@
 use std::fmt::Write as _;
 
 use openreel_core::{
-    AssetId, ClipId, Document, Effect, ParamValue, Rational, SceneStatus, SilenceStatus,
-    TimeCode, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TrackKind,
-    TranscriptStatus, map_source_range_to_project,
+    AssetId, ClipId, Document, Effect, ParamValue, Rational, SceneStatus, SilenceStatus, TimeCode,
+    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TrackKind, TranscriptStatus,
+    map_source_range_to_project,
 };
 
 #[must_use]
@@ -46,12 +46,8 @@ pub fn render_timeline_state(document: &Document) -> String {
             let asset = document.asset(clip.asset);
             let duration = asset
                 .and_then(|asset| {
-                    map_source_range_to_project(
-                        clip.source_range.clone(),
-                        asset.fps,
-                        document.fps,
-                    )
-                    .ok()
+                    map_source_range_to_project(clip.source_range.clone(), asset.fps, document.fps)
+                        .ok()
                 })
                 .unwrap_or(TimeCode::ZERO);
             let end = clip
@@ -80,11 +76,10 @@ pub fn render_timeline_state(document: &Document) -> String {
         output.push_str("assets:\n");
     }
     for asset in &document.media_pool {
-        let resolution = asset
-            .resolution
-            .map_or_else(|| "audio-only".to_owned(), |(width, height)| {
-                format!("{width}x{height}")
-            });
+        let resolution = asset.resolution.map_or_else(
+            || "audio-only".to_owned(),
+            |(width, height)| format!("{width}x{height}"),
+        );
         let _ = writeln!(
             output,
             "  asset {} {:?} kind={:?} duration={} fps={}/{} size={} path={:?}",
@@ -119,12 +114,8 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
     let asset = document
         .asset(clip.asset)
         .ok_or_else(|| format!("asset {} does not exist", clip.asset))?;
-    let duration = map_source_range_to_project(
-        clip.source_range.clone(),
-        asset.fps,
-        document.fps,
-    )
-    .map_err(|error| error.to_string())?;
+    let duration = map_source_range_to_project(clip.source_range.clone(), asset.fps, document.fps)
+        .map_err(|error| error.to_string())?;
     let end = clip
         .timeline_start
         .checked_add(duration)
@@ -257,8 +248,7 @@ pub fn render_asset_silences(
                 .spans
                 .iter()
                 .filter(|span| {
-                    span.source_end.0.saturating_sub(span.source_start.0)
-                        >= minimum_duration.0
+                    span.source_end.0.saturating_sub(span.source_start.0) >= minimum_duration.0
                 })
                 .collect::<Vec<_>>();
             let mut output = format!(
@@ -298,7 +288,9 @@ pub fn render_timeline_silences(
         spans.len()
     );
     for span in spans {
-        let source_fps = document.asset(span.asset).map_or(document.fps, |asset| asset.fps);
+        let source_fps = document
+            .asset(span.asset)
+            .map_or(document.fps, |asset| asset.fps);
         let _ = writeln!(
             output,
             "clip={} asset={} project={}..{} source={}..{}",
@@ -333,9 +325,7 @@ pub fn render_asset_scene_changes(
             let changes = scenes
                 .changes
                 .iter()
-                .filter(|change| {
-                    change.confidence_basis_points >= minimum_confidence_basis_points
-                })
+                .filter(|change| change.confidence_basis_points >= minimum_confidence_basis_points)
                 .collect::<Vec<_>>();
             let mut output = format!(
                 "asset {asset} scene changes fps={}/{} min_confidence={:.2}% boundaries={}\n",
@@ -371,7 +361,9 @@ pub fn render_timeline_scene_changes(
         changes.len()
     );
     for change in changes {
-        let source_fps = document.asset(change.asset).map_or(document.fps, |asset| asset.fps);
+        let source_fps = document
+            .asset(change.asset)
+            .map_or(document.fps, |asset| asset.fps);
         let _ = writeln!(
             output,
             "clip={} asset={} project={} source={} confidence={:.2}%",
@@ -428,13 +420,15 @@ fn render_transition(transition: Option<&openreel_core::Transition>) -> String {
 }
 
 fn frame_and_seconds(frame: TimeCode, fps: Rational) -> String {
-    let seconds = (frame.0 as f64) * f64::from(fps.denominator())
-        / f64::from(fps.numerator());
+    let seconds = (frame.0 as f64) * f64::from(fps.denominator()) / f64::from(fps.numerator());
     format!("{}f/{seconds:.3}s", frame.0)
 }
 
 fn source_frame_and_seconds(frame: TimeCode, fps: Option<Rational>) -> String {
-    fps.map_or_else(|| format!("{}f/?s", frame.0), |fps| frame_and_seconds(frame, fps))
+    fps.map_or_else(
+        || format!("{}f/?s", frame.0),
+        |fps| frame_and_seconds(frame, fps),
+    )
 }
 
 #[cfg(test)]
@@ -443,7 +437,7 @@ mod tests {
 
     use openreel_core::{
         AssetId, AssetTranscript, Clip, Effect, EffectId, MediaAsset, MediaKind, ParamValue,
-        TimelineTranscriptWord, Track, TrackId, Transition, TranscriptStatus,
+        TimelineTranscriptWord, Track, TrackId, TranscriptStatus, Transition,
     };
 
     use super::*;
@@ -557,8 +551,7 @@ assets:
                 project_end: TimeCode(15),
             },
         ];
-        let rendered =
-            render_timeline_transcript(&fixture(), TimeCode(0)..TimeCode(30), &words);
+        let rendered = render_timeline_transcript(&fixture(), TimeCode(0)..TimeCode(30), &words);
         let expected = r#"timeline transcript range=0f/0.000s..30f/1.000s words=2
 clip=10 asset=4 project=0f/0.000s..6f/0.200s source=30f/1.000s..36f/1.200s "Hello"
 clip=10 asset=4 project=9f/0.300s..15f/0.500s source=39f/1.300s..45f/1.500s "um""#;

@@ -58,11 +58,8 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
     };
 
     let (fps, resolution, duration) = if let Some(stream) = video {
-        let timing = analyze_video_packets(
-            path,
-            stream.index(),
-            normalized_start(stream.start_time()),
-        )?;
+        let timing =
+            analyze_video_packets(path, stream.index(), normalized_start(stream.start_time()))?;
         let rate = select_video_rate(path, &stream, &timing)?;
         let rotation = stream_rotation(&stream).map_err(|error| {
             MediaError::Backend(format!(
@@ -91,7 +88,11 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
         (rate, Some(resolution), duration)
     } else {
         let rate = Rational::default();
-        (rate, None, TimeCode(duration_us_to_frames(input.duration(), rate)))
+        (
+            rate,
+            None,
+            TimeCode(duration_us_to_frames(input.duration(), rate)),
+        )
     };
 
     if duration <= TimeCode::ZERO {
@@ -237,10 +238,9 @@ fn timestamp_to_grid_ceil(timestamp: i64, time_base: ffmpeg::Rational, fps: Rati
     if timestamp <= 0 {
         return 0;
     }
-    let numerator = i64::from(time_base.numerator())
-        .saturating_mul(i64::from(fps.numerator()));
-    let denominator = i64::from(time_base.denominator())
-        .saturating_mul(i64::from(fps.denominator()));
+    let numerator = i64::from(time_base.numerator()).saturating_mul(i64::from(fps.numerator()));
+    let denominator =
+        i64::from(time_base.denominator()).saturating_mul(i64::from(fps.denominator()));
     mul_div_ceil(timestamp, numerator, denominator)
 }
 
@@ -463,8 +463,7 @@ impl VideoDecoder {
             .min(display_source.0)
             .max(1);
         let display_height = u32::try_from(
-            u64::from(display_source.1)
-                .saturating_mul(u64::from(display_width))
+            u64::from(display_source.1).saturating_mul(u64::from(display_width))
                 / u64::from(display_source.0.max(1)),
         )
         .unwrap_or(display_source.1)
@@ -578,9 +577,9 @@ impl VideoDecoder {
                 .next()
                 .map(|(stream, packet)| (stream.index(), packet));
             let Some((stream_index, packet)) = next else {
-                self.decoder
-                    .send_eof()
-                    .map_err(|error| media_error(&self.path, "video decoder flush failed", error))?;
+                self.decoder.send_eof().map_err(|error| {
+                    media_error(&self.path, "video decoder flush failed", error)
+                })?;
                 self.eof_sent = true;
                 continue;
             };
@@ -712,12 +711,8 @@ impl VideoDecoder {
             })?;
             pixels.extend_from_slice(source);
         }
-        let (width, height, pixels) = rotate_rgba(
-            self.rotation,
-            self.scaled_width,
-            self.scaled_height,
-            pixels,
-        )?;
+        let (width, height, pixels) =
+            rotate_rgba(self.rotation, self.scaled_width, self.scaled_height, pixels)?;
         Ok(FrameTexture {
             width,
             height,
@@ -791,11 +786,7 @@ pub(crate) fn thumbnail(
 }
 
 fn normalized_start(start: i64) -> i64 {
-    if start < -1_000_000_000_000 {
-        0
-    } else {
-        start
-    }
+    if start < -1_000_000_000_000 { 0 } else { start }
 }
 
 pub(crate) fn backend(error: impl std::fmt::Display) -> MediaError {

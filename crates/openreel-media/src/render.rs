@@ -93,10 +93,7 @@ impl FrameRenderer {
         let mut decoded_layers = Vec::with_capacity(layer_specs.len());
         for layer in layer_specs {
             let asset = document.asset(layer.source.asset).ok_or_else(|| {
-                MediaError::Backend(format!(
-                    "timeline asset {} disappeared",
-                    layer.source.asset
-                ))
+                MediaError::Backend(format!("timeline asset {} disappeared", layer.source.asset))
             })?;
             let frame = self.decode_video_frame(
                 asset.id,
@@ -168,15 +165,19 @@ impl FrameRenderer {
                     .saturating_add(prefetch)
                     .min(source_end.0.saturating_sub(1)),
             );
-            let window_frames = usize::try_from(end.0.saturating_sub(source_at.0).saturating_add(1))
-                .unwrap_or(usize::MAX);
+            let window_frames =
+                usize::try_from(end.0.saturating_sub(source_at.0).saturating_add(1))
+                    .unwrap_or(usize::MAX);
             self.reserve_cache_bytes(frame_bytes.saturating_mul(window_frames));
-            let source = self.video_sources.get_mut(&key).ok_or_else(|| {
-                MediaError::Backend("video decoder cache disappeared".to_owned())
-            })?;
+            let source = self
+                .video_sources
+                .get_mut(&key)
+                .ok_or_else(|| MediaError::Backend("video decoder cache disappeared".to_owned()))?;
             match strategy {
                 DecodeStrategy::Seek => {
-                    source.decoder.decode_window(source_at, end, &mut source.cache)?;
+                    source
+                        .decoder
+                        .decode_window(source_at, end, &mut source.cache)?;
                 }
                 DecodeStrategy::Sequential => {
                     source
@@ -233,10 +234,7 @@ impl FrameRenderer {
 fn bounded_resolution(source: (u32, u32), max_width: Option<u32>) -> (u32, u32) {
     let source_width = source.0.max(1);
     let source_height = source.1.max(1);
-    let width = max_width
-        .unwrap_or(source_width)
-        .min(source_width)
-        .max(1);
+    let width = max_width.unwrap_or(source_width).min(source_width).max(1);
     let height = u32::try_from(
         u64::from(source_height).saturating_mul(u64::from(width)) / u64::from(source_width),
     )

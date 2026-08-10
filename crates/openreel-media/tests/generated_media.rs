@@ -30,10 +30,8 @@ impl TestClip {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let output = std::env::temp_dir().join(format!(
-            "openreel-m1-{}-{nonce}.mp4",
-            std::process::id()
-        ));
+        let output =
+            std::env::temp_dir().join(format!("openreel-m1-{}-{nonce}.mp4", std::process::id()));
         let result = Command::new(ffmpeg)
             .args([
                 "-hide_banner",
@@ -254,12 +252,7 @@ fn two_track_effect_export_matches_preview_after_h264_redecode() {
 fn decode_stereo_audio(path: &Path) -> Vec<f32> {
     let ffmpeg = ffmpeg_executable();
     let output = Command::new(ffmpeg)
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-        ])
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
         .arg(path)
         .args([
             "-map",
@@ -294,26 +287,24 @@ fn decode_stereo_audio(path: &Path) -> Vec<f32> {
 
 fn ffmpeg_executable() -> PathBuf {
     std::env::var_os("FFMPEG_DIR").map_or_else(
-        || {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../third_party/ffmpeg/bin/ffmpeg.exe")
-        },
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffmpeg.exe"),
         |directory| PathBuf::from(directory).join("bin/ffmpeg.exe"),
     )
 }
 
 fn tone_amplitude(samples: &[f32], sample_rate: u32, frequency: f64) -> f64 {
     let angular_step = std::f64::consts::TAU * frequency / f64::from(sample_rate);
-    let (real, imaginary) = samples
-        .iter()
-        .enumerate()
-        .fold((0.0, 0.0), |(real, imaginary), (index, sample)| {
-            let phase = angular_step * index as f64;
-            (
-                real + f64::from(*sample) * phase.cos(),
-                imaginary - f64::from(*sample) * phase.sin(),
-            )
-        });
+    let (real, imaginary) =
+        samples
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(real, imaginary), (index, sample)| {
+                let phase = angular_step * index as f64;
+                (
+                    real + f64::from(*sample) * phase.cos(),
+                    imaginary - f64::from(*sample) * phase.sin(),
+                )
+            });
     2.0 * real.hypot(imaginary) / samples.len().max(1) as f64
 }
 
@@ -352,10 +343,12 @@ fn assert_frame_sample_close(
     actual: &openreel_core::FrameTexture,
     tolerance: u8,
 ) {
-    assert_eq!((expected.width, expected.height), (actual.width, actual.height));
-    let center = usize::try_from(expected.width * (expected.height / 2) + expected.width / 2)
-        .unwrap()
-        * 4;
+    assert_eq!(
+        (expected.width, expected.height),
+        (actual.width, actual.height)
+    );
+    let center =
+        usize::try_from(expected.width * (expected.height / 2) + expected.width / 2).unwrap() * 4;
     for channel in 0..3 {
         let difference = expected.rgba[center + channel].abs_diff(actual.rgba[center + channel]);
         assert!(
@@ -460,14 +453,25 @@ fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
     engine.request_frame(TimeCode(15));
     let second_clip = receive_frame(&frames, TimeCode(15));
 
-    assert!(first_clip.rgba.chunks_exact(4).any(|pixel| pixel[..3] != [0, 0, 0]));
-    assert!(second_clip.rgba.chunks_exact(4).any(|pixel| pixel[..3] != [0, 0, 0]));
-    assert_ne!(first_clip.rgba, second_clip.rgba);
-    for gap in [gap_start, gap_end] {
-        assert!(gap
+    assert!(
+        first_clip
             .rgba
             .chunks_exact(4)
-            .all(|pixel| pixel == [0, 0, 0, 255]));
+            .any(|pixel| pixel[..3] != [0, 0, 0])
+    );
+    assert!(
+        second_clip
+            .rgba
+            .chunks_exact(4)
+            .any(|pixel| pixel[..3] != [0, 0, 0])
+    );
+    assert_ne!(first_clip.rgba, second_clip.rgba);
+    for gap in [gap_start, gap_end] {
+        assert!(
+            gap.rgba
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0, 0, 0, 255])
+        );
     }
 }
 
@@ -496,7 +500,11 @@ fn audio_device_play_pause_and_seek_smoke_test() {
     wait_for_state(&events, PlaybackState::Paused);
     let paused = engine.position();
     std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(engine.position(), paused, "audio clock advanced while paused");
+    assert_eq!(
+        engine.position(),
+        paused,
+        "audio clock advanced while paused"
+    );
 }
 
 #[test]
@@ -592,10 +600,7 @@ fn receive_frame(
     }
 }
 
-fn wait_for_state(
-    events: &crossbeam_channel::Receiver<MediaEvent>,
-    expected: PlaybackState,
-) {
+fn wait_for_state(events: &crossbeam_channel::Receiver<MediaEvent>, expected: PlaybackState) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());

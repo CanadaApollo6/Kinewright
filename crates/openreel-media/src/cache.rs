@@ -61,10 +61,7 @@ impl FrameCache {
 
 /// Pick the most recent decoded frame whose presentation time is not after the audio clock.
 #[must_use]
-pub fn select_frame_for_position(
-    available: &[TimeCode],
-    position: TimeCode,
-) -> Option<TimeCode> {
+pub fn select_frame_for_position(available: &[TimeCode], position: TimeCode) -> Option<TimeCode> {
     available
         .iter()
         .copied()

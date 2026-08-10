@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{mpsc, Arc},
+    sync::{Arc, mpsc},
     time::Duration,
 };
 
@@ -819,10 +819,7 @@ pub(crate) fn run() -> eframe::Result {
                 if path.is_file() {
                     app.open_project(&path);
                 } else {
-                    app.record_error(
-                        "Project",
-                        format!("Startup project not found: {argument}"),
-                    );
+                    app.record_error("Project", format!("Startup project not found: {argument}"));
                 }
             }
             Ok(Box::new(app))

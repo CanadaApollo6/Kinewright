@@ -49,8 +49,7 @@ impl OpenReelApp {
             let aspect = egui::vec2(width.max(1) as f32, height.max(1) as f32);
             let inset = rect.shrink2(egui::vec2(space::FOUR, space::FOUR));
             let scale = (inset.width() / aspect.x).min(inset.height() / aspect.y);
-            let screen_rect =
-                egui::Rect::from_center_size(inset.center(), aspect * scale);
+            let screen_rect = egui::Rect::from_center_size(inset.center(), aspect * scale);
             painter.rect_filled(screen_rect, radius::XS, color::MEDIA_SHADOW);
             painter.rect_stroke(
                 screen_rect,

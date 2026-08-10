@@ -245,11 +245,7 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
         } => add_clip(doc, *track, *asset, *at, source.clone()),
         Operation::SplitClip { clip, at } => split_clip(doc, *clip, *at),
         Operation::TrimClip { clip, new_source } => trim_clip(doc, *clip, new_source.clone()),
-        Operation::MoveClip {
-            clip,
-            to_track,
-            to,
-        } => move_clip(doc, *clip, *to_track, *to),
+        Operation::MoveClip { clip, to_track, to } => move_clip(doc, *clip, *to_track, *to),
         Operation::DeleteClip { clip } => delete_clip(doc, *clip),
         Operation::AddEffect { clip, effect } => add_effect(doc, *clip, effect.clone()),
         Operation::RemoveEffect { clip, effect } => remove_effect(doc, *clip, *effect),
@@ -306,9 +302,7 @@ fn add_clip(
     if at < TimeCode::ZERO {
         return Err(OpError::NegativeTimelinePosition(at));
     }
-    let asset = doc
-        .asset(asset_id)
-        .ok_or(OpError::MissingAsset(asset_id))?;
+    let asset = doc.asset(asset_id).ok_or(OpError::MissingAsset(asset_id))?;
     validate_source_range(asset, &source)?;
     let track_index = doc
         .tracks
@@ -346,13 +340,9 @@ fn split_clip(doc: &mut Document, clip_id: ClipId, at: TimeCode) -> Result<(), O
     let offset = at
         .checked_sub(original.timeline_start)
         .ok_or(OpError::TimeOverflow)?;
-    let source_split = find_source_boundary(
-        original.source_range.clone(),
-        offset,
-        asset.fps,
-        doc.fps,
-    )
-    .ok_or(OpError::UnrepresentableSplit { clip: clip_id, at })?;
+    let source_split =
+        find_source_boundary(original.source_range.clone(), offset, asset.fps, doc.fps)
+            .ok_or(OpError::UnrepresentableSplit { clip: clip_id, at })?;
     let new_id = next_clip_id(doc)?;
 
     doc.tracks[track_index].clips[clip_index].source_range.end = source_split;
@@ -376,9 +366,7 @@ fn trim_clip(
     let (track_index, clip_index) = find_clip(doc, clip_id)?;
     let original = doc.tracks[track_index].clips[clip_index].clone();
     let asset_id = original.asset;
-    let asset = doc
-        .asset(asset_id)
-        .ok_or(OpError::MissingAsset(asset_id))?;
+    let asset = doc.asset(asset_id).ok_or(OpError::MissingAsset(asset_id))?;
     validate_source_range(asset, &new_source)?;
     let shifted_start = match new_source.start.cmp(&original.source_range.start) {
         std::cmp::Ordering::Greater => {
@@ -429,9 +417,7 @@ fn move_clip(
         .position(|track| track.id == target_track_id)
         .ok_or(OpError::MissingTrack(target_track_id))?;
     let asset_id = doc.tracks[source_track_index].clips[clip_index].asset;
-    let asset = doc
-        .asset(asset_id)
-        .ok_or(OpError::MissingAsset(asset_id))?;
+    let asset = doc.asset(asset_id).ok_or(OpError::MissingAsset(asset_id))?;
     validate_track_compatibility(asset, &doc.tracks[target_track_index])?;
 
     let mut clip = doc.tracks[source_track_index].clips.remove(clip_index);
@@ -562,12 +548,8 @@ fn find_source_boundary(
     while low <= high {
         let middle = low + (high - low) / 2;
         let candidate = TimeCode(middle);
-        let mapped = map_source_range_to_project(
-            source.start..candidate,
-            source_fps,
-            project_fps,
-        )
-        .ok()?;
+        let mapped =
+            map_source_range_to_project(source.start..candidate, source_fps, project_fps).ok()?;
         match mapped.cmp(&project_offset) {
             std::cmp::Ordering::Less => low = middle.checked_add(1)?,
             std::cmp::Ordering::Greater => high = middle.checked_sub(1)?,
@@ -604,11 +586,7 @@ fn validate_effect(effect: &Effect) -> Result<(), OpError> {
     Ok(())
 }
 
-fn validate_effect_parameter(
-    effect: &str,
-    name: &str,
-    value: &ParamValue,
-) -> Result<(), OpError> {
+fn validate_effect_parameter(effect: &str, name: &str, value: &ParamValue) -> Result<(), OpError> {
     let (min, max) = match (effect, name) {
         ("brightness" | "contrast" | "saturation", "percent") => (-100, 100),
         ("opacity", "percent") => (0, 100),
@@ -685,10 +663,7 @@ fn validate_source_range(
     Ok(())
 }
 
-fn validate_track_compatibility(
-    asset: &MediaAsset,
-    track: &crate::Track,
-) -> Result<(), OpError> {
+fn validate_track_compatibility(asset: &MediaAsset, track: &crate::Track) -> Result<(), OpError> {
     if asset.kind.supports(track.kind) {
         Ok(())
     } else {
@@ -789,4 +764,3 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
     }
     Ok(())
 }
-

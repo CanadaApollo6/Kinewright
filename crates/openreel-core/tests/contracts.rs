@@ -6,9 +6,8 @@ use std::{
 };
 
 use openreel_core::{
-    AssetId, Clip, ClipId, Command, Core, Document, Effect, EffectId, Event, MediaAsset,
-    MediaKind, OpError, Operation, ParamValue, Rational, TimeCode, Track, TrackId, TrackKind,
-    Transition,
+    AssetId, Clip, ClipId, Command, Core, Document, Effect, EffectId, Event, MediaAsset, MediaKind,
+    OpError, Operation, ParamValue, Rational, TimeCode, Track, TrackId, TrackKind, Transition,
 };
 
 fn asset(id: u64, fps: Rational, duration: i64) -> MediaAsset {
@@ -320,7 +319,10 @@ fn add_and_remove_track_are_validated_and_atomic() {
         .unwrap();
     assert!(doc.tracks.is_empty());
     assert_eq!(
-        Operation::RemoveTrack { track: TrackId(404) }.apply(&mut doc),
+        Operation::RemoveTrack {
+            track: TrackId(404)
+        }
+        .apply(&mut doc),
         Err(OpError::MissingTrack(TrackId(404)))
     );
 }
@@ -347,7 +349,10 @@ fn left_edge_trim_moves_the_timeline_start_as_one_atomic_edit() {
     .unwrap();
 
     assert_eq!(doc.tracks[0].clips[0].timeline_start, TimeCode(15));
-    assert_eq!(doc.tracks[0].clips[0].source_range, TimeCode(5)..TimeCode(30));
+    assert_eq!(
+        doc.tracks[0].clips[0].source_range,
+        TimeCode(5)..TimeCode(30)
+    );
     assert_eq!(doc.duration, TimeCode(40));
 }
 
@@ -599,4 +604,3 @@ fn mixed_rate_split_rejects_a_non_source_frame_boundary() {
     );
     assert_eq!(doc, before);
 }
-

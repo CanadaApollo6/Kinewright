@@ -450,8 +450,9 @@ impl AudioDecoder {
             }
             let decoded_rate = decoded.rate();
             if self.resampler.is_none() {
-                let output_layout =
-                    ffmpeg::ChannelLayout::default(i32::try_from(self.output_channels).unwrap_or(1));
+                let output_layout = ffmpeg::ChannelLayout::default(
+                    i32::try_from(self.output_channels).unwrap_or(1),
+                );
                 self.resampler = Some(
                     ffmpeg::software::resampling::Context::get(
                         decoded_format,
@@ -476,8 +477,8 @@ impl AudioDecoder {
                 .saturating_mul(u64::from(output.rate))
                 .saturating_add(u64::from(decoded_rate).saturating_sub(1))
                 / u64::from(decoded_rate.max(1));
-            let output_samples = usize::try_from(output_samples.saturating_add(64))
-                .unwrap_or(usize::MAX);
+            let output_samples =
+                usize::try_from(output_samples.saturating_add(64)).unwrap_or(usize::MAX);
             let mut converted =
                 ffmpeg::frame::Audio::new(output.format, output_samples, output.channel_layout);
             converted.set_rate(output.rate);
