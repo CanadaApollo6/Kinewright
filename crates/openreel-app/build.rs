@@ -36,7 +36,8 @@ fn main() {
             "rc.exe was not found; build from a Visual Studio developer shell or run scripts/setup-ffmpeg.ps1 first",
         );
 
-    assert!(output.status.success(), 
+    assert!(
+        output.status.success(),
         "rc.exe failed with status {}\nstdout:\n{}\nstderr:\n{}",
         output.status,
         String::from_utf8_lossy(&output.stdout),

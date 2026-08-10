@@ -435,22 +435,23 @@ impl OpenReelApp {
                         scrub_started = true;
                     }
                     if (playhead_response.dragged() || playhead_response.drag_stopped())
-                        && let Some(pointer) = playhead_response.interact_pointer_pos() {
-                            let raw =
-                                ((pointer.x - rect.left()) / self.pixels_per_frame).round() as i64;
-                            let candidates = clip_bounds
-                                .iter()
-                                .flat_map(|bounds| [bounds.start, bounds.end])
-                                .collect::<Vec<_>>();
-                            let (snapped, guide) = nearest_snap(
-                                raw.max(0),
-                                &candidates,
-                                minor_tick,
-                                self.pixels_per_frame,
-                            );
-                            seek = Some(TimeCode(snapped));
-                            snap_guide = guide.or(snap_guide);
-                        }
+                        && let Some(pointer) = playhead_response.interact_pointer_pos()
+                    {
+                        let raw =
+                            ((pointer.x - rect.left()) / self.pixels_per_frame).round() as i64;
+                        let candidates = clip_bounds
+                            .iter()
+                            .flat_map(|bounds| [bounds.start, bounds.end])
+                            .collect::<Vec<_>>();
+                        let (snapped, guide) = nearest_snap(
+                            raw.max(0),
+                            &candidates,
+                            minor_tick,
+                            self.pixels_per_frame,
+                        );
+                        seek = Some(TimeCode(snapped));
+                        snap_guide = guide.or(snap_guide);
+                    }
                     if playhead_response.drag_stopped() {
                         scrub_stopped = true;
                     }

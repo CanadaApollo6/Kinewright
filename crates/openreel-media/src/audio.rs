@@ -250,7 +250,9 @@ impl AudioRuntime {
                 self.exhausted = true;
                 return Ok(());
             };
-            if let Some(chunk) = decoder.next_chunk()? { self.pending = chunk } else {
+            if let Some(chunk) = decoder.next_chunk()? {
+                self.pending = chunk
+            } else {
                 self.exhausted = true;
                 return Ok(());
             }
@@ -402,9 +404,10 @@ impl AudioDecoder {
     fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
         loop {
             if let Some(chunk) = self.queued.pop_front()
-                && !chunk.is_empty() {
-                    return Ok(Some(chunk));
-                }
+                && !chunk.is_empty()
+            {
+                return Ok(Some(chunk));
+            }
             if self.finished {
                 return Ok(None);
             }

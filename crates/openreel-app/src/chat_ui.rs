@@ -351,10 +351,9 @@ impl OpenReelApp {
             Some(info) => {
                 // CLI version strings often repeat the product name; keep the
                 // number only.
-                let version = info
-                    .version
-                    .as_deref()
-                    .map_or("version unknown", |value| value.split_whitespace().next().unwrap_or(value));
+                let version = info.version.as_deref().map_or("version unknown", |value| {
+                    value.split_whitespace().next().unwrap_or(value)
+                });
                 ui.label(format!(
                     "Using {} {} · {}",
                     self.agent_harness.label(),
@@ -584,15 +583,17 @@ fn chat_frame(fill: egui::Color32, stroke: egui::Color32) -> egui::Frame {
 }
 
 fn harness_row(ui: &mut egui::Ui, name: &str, info: Option<&HarnessInfo>) {
-    ui.horizontal(|ui| if let Some(info) = info {
-        ui.colored_label(color::STATUS_SUCCESS, "●");
-        ui.label(format!(
-            "{name} {}",
-            info.version.as_deref().unwrap_or("(version unknown)")
-        ));
-    } else {
-        ui.colored_label(color::TEXT_MUTED, "○");
-        ui.colored_label(color::TEXT_MUTED, format!("{name} not detected"));
+    ui.horizontal(|ui| {
+        if let Some(info) = info {
+            ui.colored_label(color::STATUS_SUCCESS, "●");
+            ui.label(format!(
+                "{name} {}",
+                info.version.as_deref().unwrap_or("(version unknown)")
+            ));
+        } else {
+            ui.colored_label(color::TEXT_MUTED, "○");
+            ui.colored_label(color::TEXT_MUTED, format!("{name} not detected"));
+        }
     });
     if let Some(info) = info {
         ui.small(format!(

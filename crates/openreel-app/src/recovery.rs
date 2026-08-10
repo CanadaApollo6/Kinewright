@@ -673,7 +673,8 @@ impl Drop for Recovery {
 }
 
 fn default_journal_path() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA").map_or_else(std::env::temp_dir, PathBuf::from)
+    std::env::var_os("LOCALAPPDATA")
+        .map_or_else(std::env::temp_dir, PathBuf::from)
         .join("OpenReel")
         .join("recovery")
         .join("active.journal")
