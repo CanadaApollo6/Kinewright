@@ -827,6 +827,7 @@ fn empty_timeline_document(assets: Vec<MediaAsset>) -> Document {
             clips: Vec::new(),
         }],
         media_pool: assets,
+        markers: Vec::new(),
         fps: Rational::new(FPS, 1).expect("fixture fps is valid"),
         resolution: (320, 180),
         duration: TimeCode::ZERO,
@@ -853,6 +854,7 @@ fn timeline_document(
             timeline_start,
             effects: Vec::new(),
             transition_in: None,
+            link: None,
         });
         timeline_start = timeline_start
             .checked_add(duration)
@@ -865,6 +867,7 @@ fn timeline_document(
             clips: timeline_clips,
         }],
         media_pool: assets,
+        markers: Vec::new(),
         fps,
         resolution: (320, 180),
         duration: timeline_start,

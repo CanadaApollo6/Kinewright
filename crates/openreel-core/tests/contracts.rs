@@ -6,9 +6,11 @@ use std::{
 };
 
 use openreel_core::{
-    AssetId, Clip, ClipId, Command, Core, Document, Effect, EffectId, Event, MediaAsset, MediaKind,
-    OpError, Operation, ParamValue, Rational, TimeCode, Track, TrackId, TrackKind, Transition,
+    AssetId, Clip, ClipId, Command, Core, Document, Effect, EffectId, Event, LinkId, Marker,
+    MarkerId, MediaAsset, MediaKind, OpError, Operation, ParamValue, Rational, TimeCode, Track,
+    TrackId, TrackKind, Transition,
 };
+use proptest::prelude::*;
 
 fn asset(id: u64, fps: Rational, duration: i64) -> MediaAsset {
     MediaAsset {
@@ -30,6 +32,7 @@ fn empty_timeline(fps: Rational) -> Document {
             clips: Vec::new(),
         }],
         media_pool: Vec::new(),
+        markers: Vec::new(),
         fps,
         resolution: (1_920, 1_080),
         duration: TimeCode::ZERO,
@@ -52,6 +55,31 @@ fn document_with_one_clip() -> Document {
     }
     .apply(&mut doc)
     .unwrap();
+    doc
+}
+
+fn document_with_three_clips() -> Document {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut doc = empty_timeline(fps);
+    Operation::AddAsset {
+        asset: asset(1, fps, 300),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    for (at, source) in [
+        (0, TimeCode(0)..TimeCode(10)),
+        (20, TimeCode(10)..TimeCode(30)),
+        (50, TimeCode(30)..TimeCode(40)),
+    ] {
+        Operation::AddClip {
+            track: TrackId(1),
+            asset: AssetId(1),
+            at: TimeCode(at),
+            source,
+        }
+        .apply(&mut doc)
+        .unwrap();
+    }
     doc
 }
 
@@ -94,6 +122,33 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             to: TimeCode(60),
         },
         Operation::DeleteClip { clip: ClipId(1) },
+        Operation::RippleDeleteClip { clip: ClipId(1) },
+        Operation::RippleInsertGap {
+            track: TrackId(1),
+            at: TimeCode(90),
+            duration: TimeCode(15),
+        },
+        Operation::LinkClips {
+            clips: vec![ClipId(1), ClipId(2)],
+        },
+        Operation::UnlinkClips {
+            clips: vec![ClipId(1)],
+        },
+        Operation::AddMarker {
+            marker: Marker {
+                id: MarkerId(1),
+                position: TimeCode(12),
+                label: "Review".to_owned(),
+                color_token: 0,
+            },
+        },
+        Operation::RemoveMarker {
+            marker: MarkerId(1),
+        },
+        Operation::MoveMarker {
+            marker: MarkerId(1),
+            to: TimeCode(24),
+        },
         Operation::AddEffect {
             clip: ClipId(1),
             effect: Effect {
@@ -126,6 +181,265 @@ fn document_and_every_operation_variant_round_trip_through_json() {
         let encoded = serde_json::to_string(&operation).unwrap();
         let decoded: Operation = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, operation);
+    }
+}
+
+#[test]
+fn pre_m13_project_json_defaults_links_and_markers_cleanly() {
+    let document: Document =
+        serde_json::from_str(include_str!("fixtures/pre_m13_project.json")).unwrap();
+    document.validate().unwrap();
+    assert!(document.markers.is_empty());
+    assert_eq!(document.clip(ClipId(1)).unwrap().link, None);
+
+    let encoded = serde_json::to_string(&document).unwrap();
+    assert!(!encoded.contains("\"markers\""));
+    assert!(!encoded.contains("\"link\""));
+}
+
+#[test]
+fn ripple_operations_are_per_track_validated_and_atomic() {
+    let mut document = document_with_three_clips();
+    Operation::AddTrack {
+        track: Track {
+            id: TrackId(2),
+            kind: TrackKind::Video,
+            clips: Vec::new(),
+        },
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::AddClip {
+        track: TrackId(2),
+        asset: AssetId(1),
+        at: TimeCode(50),
+        source: TimeCode(50)..TimeCode(60),
+    }
+    .apply(&mut document)
+    .unwrap();
+
+    Operation::RippleDeleteClip { clip: ClipId(2) }
+        .apply(&mut document)
+        .unwrap();
+    assert_eq!(document.tracks[0].clips[1].id, ClipId(3));
+    assert_eq!(document.tracks[0].clips[1].timeline_start, TimeCode(30));
+    assert_eq!(document.tracks[1].clips[0].timeline_start, TimeCode(50));
+
+    Operation::RippleInsertGap {
+        track: TrackId(1),
+        at: TimeCode(30),
+        duration: TimeCode(7),
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(document.tracks[0].clips[1].timeline_start, TimeCode(37));
+    assert_eq!(document.tracks[1].clips[0].timeline_start, TimeCode(50));
+
+    for invalid in [
+        Operation::RippleDeleteClip { clip: ClipId(99) },
+        Operation::RippleInsertGap {
+            track: TrackId(99),
+            at: TimeCode(0),
+            duration: TimeCode(1),
+        },
+        Operation::RippleInsertGap {
+            track: TrackId(1),
+            at: TimeCode(0),
+            duration: TimeCode(0),
+        },
+        Operation::RippleInsertGap {
+            track: TrackId(1),
+            at: TimeCode(-1),
+            duration: TimeCode(1),
+        },
+    ] {
+        let before = document.clone();
+        assert!(invalid.apply(&mut document).is_err());
+        assert_eq!(document, before);
+    }
+}
+
+proptest! {
+    #[test]
+    fn ripple_delete_shift_math_matches_removed_project_duration(
+        first_duration in 1_i64..80,
+        removed_duration in 1_i64..80,
+        first_gap in 0_i64..20,
+        second_gap in 0_i64..20,
+    ) {
+        let fps = Rational::new(30, 1).unwrap();
+        let mut document = empty_timeline(fps);
+        Operation::AddAsset { asset: asset(1, fps, 300) }
+            .apply(&mut document)
+            .unwrap();
+        let second_start = first_duration.saturating_add(first_gap);
+        let third_start = second_start
+            .saturating_add(removed_duration)
+            .saturating_add(second_gap);
+        for (at, source) in [
+            (0, TimeCode(0)..TimeCode(first_duration)),
+            (
+                second_start,
+                TimeCode(first_duration)..TimeCode(first_duration + removed_duration),
+            ),
+            (
+                third_start,
+                TimeCode(first_duration + removed_duration)
+                    ..TimeCode(first_duration + removed_duration + 1),
+            ),
+        ] {
+            Operation::AddClip {
+                track: TrackId(1),
+                asset: AssetId(1),
+                at: TimeCode(at),
+                source,
+            }
+            .apply(&mut document)
+            .unwrap();
+        }
+
+        Operation::RippleDeleteClip { clip: ClipId(2) }
+            .apply(&mut document)
+            .unwrap();
+        prop_assert_eq!(document.clip(ClipId(3)).unwrap().timeline_start, TimeCode(third_start - removed_duration));
+        prop_assert!(document.validate().is_ok());
+    }
+}
+
+#[test]
+fn link_and_unlink_validate_selection_and_only_mutate_link_data() {
+    let mut document = document_with_three_clips();
+    let original_positions = document.tracks[0]
+        .clips
+        .iter()
+        .map(|clip| clip.timeline_start)
+        .collect::<Vec<_>>();
+    Operation::LinkClips {
+        clips: vec![ClipId(1), ClipId(3)],
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(document.clip(ClipId(1)).unwrap().link, Some(LinkId(1)));
+    assert_eq!(document.clip(ClipId(3)).unwrap().link, Some(LinkId(1)));
+    assert_eq!(document.clip(ClipId(2)).unwrap().link, None);
+    assert_eq!(
+        document.tracks[0]
+            .clips
+            .iter()
+            .map(|clip| clip.timeline_start)
+            .collect::<Vec<_>>(),
+        original_positions
+    );
+
+    Operation::UnlinkClips {
+        clips: vec![ClipId(1)],
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(document.clip(ClipId(1)).unwrap().link, None);
+    assert_eq!(document.clip(ClipId(3)).unwrap().link, Some(LinkId(1)));
+
+    for invalid in [
+        Operation::LinkClips {
+            clips: vec![ClipId(1)],
+        },
+        Operation::LinkClips {
+            clips: vec![ClipId(1), ClipId(1)],
+        },
+        Operation::LinkClips {
+            clips: vec![ClipId(1), ClipId(99)],
+        },
+        Operation::UnlinkClips { clips: Vec::new() },
+        Operation::UnlinkClips {
+            clips: vec![ClipId(99)],
+        },
+    ] {
+        let before = document.clone();
+        assert!(invalid.apply(&mut document).is_err());
+        assert_eq!(document, before);
+    }
+}
+
+#[test]
+fn marker_operations_validate_sort_move_remove_and_atomic_rejection() {
+    let mut document = document_with_one_clip();
+    for marker in [
+        Marker {
+            id: MarkerId(2),
+            position: TimeCode(20),
+            label: "Second".to_owned(),
+            color_token: 1,
+        },
+        Marker {
+            id: MarkerId(1),
+            position: TimeCode(5),
+            label: "First".to_owned(),
+            color_token: 0,
+        },
+    ] {
+        Operation::AddMarker { marker }
+            .apply(&mut document)
+            .unwrap();
+    }
+    assert_eq!(
+        document
+            .markers
+            .iter()
+            .map(|marker| marker.id)
+            .collect::<Vec<_>>(),
+        vec![MarkerId(1), MarkerId(2)]
+    );
+
+    Operation::MoveMarker {
+        marker: MarkerId(2),
+        to: TimeCode(3),
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(document.markers[0].id, MarkerId(2));
+    Operation::RemoveMarker {
+        marker: MarkerId(1),
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert!(document.marker(MarkerId(1)).is_none());
+
+    for invalid in [
+        Operation::AddMarker {
+            marker: Marker {
+                id: MarkerId(2),
+                position: TimeCode(8),
+                label: "Duplicate".to_owned(),
+                color_token: 0,
+            },
+        },
+        Operation::AddMarker {
+            marker: Marker {
+                id: MarkerId(3),
+                position: TimeCode(-1),
+                label: "Negative".to_owned(),
+                color_token: 0,
+            },
+        },
+        Operation::AddMarker {
+            marker: Marker {
+                id: MarkerId(3),
+                position: TimeCode(8),
+                label: "Bad color".to_owned(),
+                color_token: 4,
+            },
+        },
+        Operation::MoveMarker {
+            marker: MarkerId(2),
+            to: TimeCode(-1),
+        },
+        Operation::RemoveMarker {
+            marker: MarkerId(99),
+        },
+    ] {
+        let before = document.clone();
+        assert!(invalid.apply(&mut document).is_err());
+        assert_eq!(document, before);
     }
 }
 
@@ -307,6 +621,7 @@ fn add_and_remove_track_are_validated_and_atomic() {
             timeline_start: TimeCode::ZERO,
             effects: Vec::new(),
             transition_in: None,
+            link: None,
         }],
     };
     assert_eq!(
@@ -497,6 +812,7 @@ fn unsorted_input_document_is_rejected() {
         timeline_start: TimeCode(20),
         effects: Vec::new(),
         transition_in: None,
+        link: None,
     };
     let earlier = Clip {
         id: ClipId(2),
@@ -510,6 +826,7 @@ fn unsorted_input_document_is_rejected() {
             clips: vec![later, earlier],
         }],
         media_pool: vec![media],
+        markers: Vec::new(),
         fps,
         resolution: (1_920, 1_080),
         duration: TimeCode(30),

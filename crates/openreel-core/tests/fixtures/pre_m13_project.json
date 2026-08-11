@@ -1,0 +1,32 @@
+{
+  "tracks": [
+    {
+      "id": 1,
+      "kind": "Video",
+      "clips": [
+        {
+          "id": 1,
+          "asset": 1,
+          "source_range": { "start": 0, "end": 30 },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null
+        }
+      ]
+    }
+  ],
+  "media_pool": [
+    {
+      "id": 1,
+      "path": "pre-m13.mp4",
+      "name": "pre-m13.mp4",
+      "duration": 120,
+      "fps": { "numerator": 30, "denominator": 1 },
+      "kind": "Video",
+      "resolution": [1920, 1080]
+    }
+  ],
+  "fps": { "numerator": 30, "denominator": 1 },
+  "resolution": [1920, 1080],
+  "duration": 30
+}

@@ -859,6 +859,7 @@ mod tests {
                     timeline_start: TimeCode::ZERO,
                     effects: Vec::new(),
                     transition_in: None,
+                    link: None,
                 }],
             }],
             media_pool: vec![MediaAsset {
@@ -870,6 +871,7 @@ mod tests {
                 kind: MediaKind::Video,
                 resolution: Some((64, 64)),
             }],
+            markers: Vec::new(),
             fps,
             resolution: (64, 64),
             duration: TimeCode(2),
@@ -918,6 +920,7 @@ mod tests {
                 audio_asset(1, voice, "voice-440", fps),
                 audio_asset(2, bed, "bed-660", fps),
             ],
+            markers: Vec::new(),
             fps,
             resolution: (64, 64),
             duration: TimeCode(20),
@@ -932,6 +935,7 @@ mod tests {
             timeline_start: TimeCode(timeline_start),
             effects: Vec::new(),
             transition_in: None,
+            link: None,
         }
     }
 

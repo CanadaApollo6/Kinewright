@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use eframe::egui;
 use openreel_core::{
-    Analysis, ClipId, FrameRounding, MediaAsset, MediaKind, Operation, Rational, SceneStatus,
-    SilenceStatus, TimeCode, TrackKind, WaveformData, map_frames_with_rounding,
-    map_source_range_to_project,
+    Analysis, Clip, ClipId, Document, FrameRounding, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId,
+    MediaAsset, MediaKind, Operation, Rational, SceneStatus, SilenceStatus, TimeCode, TrackId,
+    TrackKind, WaveformData, map_frames_with_rounding, map_source_range_to_project,
 };
 use openreel_media::timeline_source_at;
 
@@ -26,6 +26,12 @@ struct ClipBounds {
     id: ClipId,
     start: i64,
     end: i64,
+}
+
+#[derive(Clone, Copy)]
+enum TrimEdge {
+    Left,
+    Right,
 }
 
 impl OpenReelApp {
@@ -50,11 +56,60 @@ impl OpenReelApp {
     }
 
     pub(crate) fn delete_selected(&mut self) {
+        if let Some(marker) = self.selected_marker {
+            self.send_operation(Operation::RemoveMarker { marker });
+            return;
+        }
+        self.delete_selected_clips(self.ripple_mode);
+    }
+
+    pub(crate) fn ripple_delete_selected(&mut self) {
+        self.delete_selected_clips(true);
+    }
+
+    fn delete_selected_clips(&mut self, ripple: bool) {
         let Some(clip) = self.selected_clip else {
             self.record_error("Operations", "Select a clip to delete");
             return;
         };
-        self.send_operation(Operation::DeleteClip { clip });
+        self.send_operations(linked_delete_operations(&self.document, clip, ripple));
+    }
+
+    pub(crate) fn add_marker_at_playhead(&mut self) {
+        let Some(id) = next_marker_id(&self.document) else {
+            self.record_error("Operations", "Marker id space is exhausted");
+            return;
+        };
+        let marker = Marker {
+            id,
+            position: self.position,
+            label: format!("Marker {id}"),
+            color_token: u8::try_from(id.0.saturating_sub(1) % u64::from(MARKER_COLOR_TOKEN_COUNT))
+                .expect("marker color token is bounded by a u8 constant"),
+        };
+        self.selected_marker = Some(id);
+        self.selected_clip = None;
+        self.send_operation(Operation::AddMarker { marker });
+    }
+
+    pub(crate) fn apply_linked_trim(
+        &mut self,
+        clip: ClipId,
+        new_source: std::ops::Range<TimeCode>,
+    ) {
+        let Some(original) = self.document.clip(clip) else {
+            self.record_error("Operations", format!("Clip {clip} no longer exists"));
+            return;
+        };
+        let edge = if new_source.start == original.source_range.start {
+            TrimEdge::Right
+        } else {
+            TrimEdge::Left
+        };
+        match linked_trim_operations(&self.document, clip, new_source, edge) {
+            Ok(operations) => self.send_operations(operations),
+            Err(error) => self.record_error("Operations", error),
+        }
     }
 
     // Timeline interaction intentionally maps exact frames to egui's f32 pixel coordinate space.
@@ -76,6 +131,19 @@ impl OpenReelApp {
                 }
                 if icons::button(ui, Icon::Delete, "Delete selected clip").clicked() {
                     self.delete_selected();
+                }
+                let ripple = ui
+                    .add(
+                        egui::Button::new("Ripple")
+                            .selected(self.ripple_mode)
+                            .min_size(egui::vec2(54.0, 22.0)),
+                    )
+                    .on_hover_text("Ripple mode: deletes close space per track");
+                if ripple.clicked() {
+                    self.ripple_mode = !self.ripple_mode;
+                }
+                if self.ripple_mode {
+                    ui.colored_label(color::ACCENT, "RIPPLE");
                 }
                 ui.separator();
                 if icons::button(ui, Icon::Undo, "Undo (Ctrl+Z)").clicked() {
@@ -155,9 +223,16 @@ impl OpenReelApp {
             / track_count)
             .clamp(size::TRACK_HEIGHT, 132.0);
         let total_height = size::RULER_HEIGHT + track_height * track_count;
+        let marker_end = document
+            .markers
+            .iter()
+            .map(|marker| marker.position.0.saturating_add(1))
+            .max()
+            .unwrap_or(0);
         let content_frames = document
             .duration
             .0
+            .max(marker_end)
             .max(self.position.0.saturating_add(1))
             .max(i64::from(nominal_fps(document.fps)).saturating_mul(10));
         let viewport_width = (ui.available_width() - TRACK_LABEL_WIDTH - space::TWO).max(100.0);
@@ -165,11 +240,12 @@ impl OpenReelApp {
             ((content_frames as f32) * self.pixels_per_frame + space::SIX).max(viewport_width);
         let (major_tick, minor_tick) = tick_density(self.pixels_per_frame, document.fps);
         let clip_bounds = collect_clip_bounds(&document);
-        let mut pending_operation = None;
+        let mut pending_operations = None;
         let mut seek = None;
         let mut scrub_started = false;
         let mut scrub_stopped = false;
         let mut snap_guide = None;
+        let snapping_disabled = ui.input(|input| input.modifiers.alt);
 
         ui.horizontal_top(|ui| {
             paint_track_labels(ui, &document, total_height, track_height);
@@ -197,6 +273,7 @@ impl OpenReelApp {
                     );
 
                     let mut clip_pointer_interaction = false;
+                    let mut marker_pointer_interaction = false;
                     for (track_index, track) in document.tracks.iter().enumerate() {
                         let lane_top =
                             rect.top() + size::RULER_HEIGHT + track_index as f32 * track_height;
@@ -280,6 +357,7 @@ impl OpenReelApp {
                                 || right.dragged();
                             if body.clicked() {
                                 self.selected_clip = Some(clip.id);
+                                self.selected_marker = None;
                                 self.selected_asset = Some(clip.asset);
                             }
 
@@ -290,30 +368,44 @@ impl OpenReelApp {
                                 || right.dragged()
                                 || right.drag_stopped();
                             let candidates = if interacting {
-                                snap_candidates(&clip_bounds, clip.id, self.position.0)
+                                snap_candidates(
+                                    &clip_bounds,
+                                    &document.markers,
+                                    clip.id,
+                                    self.position.0,
+                                )
                             } else {
                                 Vec::new()
                             };
                             let project_delta =
                                 (body.drag_delta().x / self.pixels_per_frame).round() as i64;
-                            let raw_start =
-                                clip.timeline_start.0.saturating_add(project_delta).max(0);
-                            let (snapped_start, body_guide) = snap_move(
-                                raw_start,
-                                duration.0,
-                                &candidates,
-                                minor_tick,
-                                self.pixels_per_frame,
-                            );
+                            let minimum_start = linked_minimum_primary_start(&document, clip.id);
+                            let raw_start = clip
+                                .timeline_start
+                                .0
+                                .saturating_add(project_delta)
+                                .max(minimum_start);
+                            let (snapped_start, body_guide) = if snapping_disabled {
+                                (raw_start, None)
+                            } else {
+                                snap_move(
+                                    raw_start,
+                                    duration.0,
+                                    &candidates,
+                                    minor_tick,
+                                    self.pixels_per_frame,
+                                )
+                            };
                             if body.dragged() {
                                 snap_guide = body_guide.or(snap_guide);
                             }
                             if body.drag_stopped() && snapped_start != clip.timeline_start.0 {
-                                pending_operation = Some(Operation::MoveClip {
-                                    clip: clip.id,
-                                    to_track: track.id,
-                                    to: TimeCode(snapped_start),
-                                });
+                                pending_operations = Some(linked_move_operations(
+                                    &document,
+                                    clip.id,
+                                    track.id,
+                                    TimeCode(snapped_start),
+                                ));
                             }
 
                             if left.drag_stopped() {
@@ -325,12 +417,16 @@ impl OpenReelApp {
                                             as i64,
                                     )
                                     .max(0);
-                                let (edge, _) = nearest_snap(
-                                    raw_edge,
-                                    &candidates,
-                                    minor_tick,
-                                    self.pixels_per_frame,
-                                );
+                                let (edge, _) = if snapping_disabled {
+                                    (raw_edge, None)
+                                } else {
+                                    nearest_snap(
+                                        raw_edge,
+                                        &candidates,
+                                        minor_tick,
+                                        self.pixels_per_frame,
+                                    )
+                                };
                                 let source_delta = project_delta_to_source(
                                     edge.saturating_sub(clip.timeline_start.0),
                                     document.fps,
@@ -344,10 +440,13 @@ impl OpenReelApp {
                                         .clamp(0, clip.source_range.end.0.saturating_sub(1)),
                                 );
                                 if new_start != clip.source_range.start {
-                                    pending_operation = Some(Operation::TrimClip {
-                                        clip: clip.id,
-                                        new_source: new_start..clip.source_range.end,
-                                    });
+                                    pending_operations = linked_trim_operations(
+                                        &document,
+                                        clip.id,
+                                        new_start..clip.source_range.end,
+                                        TrimEdge::Left,
+                                    )
+                                    .ok();
                                 }
                             }
                             if right.drag_stopped() {
@@ -355,12 +454,16 @@ impl OpenReelApp {
                                 let raw_edge = clip_end.saturating_add(
                                     (right.drag_delta().x / self.pixels_per_frame).round() as i64,
                                 );
-                                let (edge, _) = nearest_snap(
-                                    raw_edge,
-                                    &candidates,
-                                    minor_tick,
-                                    self.pixels_per_frame,
-                                );
+                                let (edge, _) = if snapping_disabled {
+                                    (raw_edge, None)
+                                } else {
+                                    nearest_snap(
+                                        raw_edge,
+                                        &candidates,
+                                        minor_tick,
+                                        self.pixels_per_frame,
+                                    )
+                                };
                                 let source_delta = project_delta_to_source(
                                     edge.saturating_sub(clip_end),
                                     document.fps,
@@ -373,10 +476,13 @@ impl OpenReelApp {
                                     ),
                                 );
                                 if new_end != clip.source_range.end {
-                                    pending_operation = Some(Operation::TrimClip {
-                                        clip: clip.id,
-                                        new_source: clip.source_range.start..new_end,
-                                    });
+                                    pending_operations = linked_trim_operations(
+                                        &document,
+                                        clip.id,
+                                        clip.source_range.start..new_end,
+                                        TrimEdge::Right,
+                                    )
+                                    .ok();
                                 }
                             }
 
@@ -405,6 +511,71 @@ impl OpenReelApp {
                                 dragging,
                             );
                         }
+                    }
+
+                    for marker in &document.markers {
+                        let x = rect.left() + marker.position.0 as f32 * self.pixels_per_frame;
+                        let marker_rect = egui::Rect::from_center_size(
+                            egui::pos2(x + 3.0, rect.top() + size::RULER_HEIGHT / 2.0),
+                            egui::vec2(14.0, size::RULER_HEIGHT),
+                        );
+                        let response = ui
+                            .interact(
+                                marker_rect,
+                                ui.make_persistent_id(("timeline-marker", marker.id.0)),
+                                egui::Sense::click_and_drag(),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                            .on_hover_text(&marker.label);
+                        marker_pointer_interaction |=
+                            response.hovered() || response.dragged() || response.drag_stopped();
+                        if response.clicked() || response.drag_started() {
+                            self.selected_marker = Some(marker.id);
+                            self.selected_clip = None;
+                        }
+                        if response.secondary_clicked() {
+                            self.selected_marker = Some(marker.id);
+                            self.selected_clip = None;
+                            pending_operations =
+                                Some(vec![Operation::RemoveMarker { marker: marker.id }]);
+                        }
+                        let raw = marker.position.0.saturating_add(
+                            (response.drag_delta().x / self.pixels_per_frame).round() as i64,
+                        );
+                        let candidates = marker_snap_candidates(
+                            &clip_bounds,
+                            &document.markers,
+                            marker.id,
+                            self.position.0,
+                        );
+                        let (snapped, guide) = if snapping_disabled {
+                            (raw.max(0), None)
+                        } else {
+                            nearest_snap(raw.max(0), &candidates, minor_tick, self.pixels_per_frame)
+                        };
+                        if response.dragged() {
+                            snap_guide = guide.or(snap_guide);
+                        }
+                        if response.drag_stopped() && snapped != marker.position.0 {
+                            pending_operations = Some(vec![Operation::MoveMarker {
+                                marker: marker.id,
+                                to: TimeCode(snapped),
+                            }]);
+                        }
+                        let draw_position = if response.dragged() || response.drag_stopped() {
+                            snapped
+                        } else {
+                            marker.position.0
+                        };
+                        paint_project_marker(
+                            &painter,
+                            rect,
+                            draw_position,
+                            marker.color_token,
+                            self.selected_marker == Some(marker.id),
+                            response.dragged(),
+                            self.pixels_per_frame,
+                        );
                     }
 
                     let playhead_x = rect.left() + self.position.0 as f32 * self.pixels_per_frame;
@@ -449,13 +620,13 @@ impl OpenReelApp {
                         let candidates = clip_bounds
                             .iter()
                             .flat_map(|bounds| [bounds.start, bounds.end])
+                            .chain(document.markers.iter().map(|marker| marker.position.0))
                             .collect::<Vec<_>>();
-                        let (snapped, guide) = nearest_snap(
-                            raw.max(0),
-                            &candidates,
-                            minor_tick,
-                            self.pixels_per_frame,
-                        );
+                        let (snapped, guide) = if snapping_disabled {
+                            (raw.max(0), None)
+                        } else {
+                            nearest_snap(raw.max(0), &candidates, minor_tick, self.pixels_per_frame)
+                        };
                         seek = Some(TimeCode(snapped));
                         snap_guide = guide.or(snap_guide);
                     }
@@ -464,6 +635,7 @@ impl OpenReelApp {
                     }
                     if canvas_response.clicked()
                         && !clip_pointer_interaction
+                        && !marker_pointer_interaction
                         && !playhead_response.hovered()
                         && let Some(pointer) = canvas_response.interact_pointer_pos()
                     {
@@ -496,8 +668,8 @@ impl OpenReelApp {
             }
         });
 
-        if let Some(operation) = pending_operation {
-            self.send_operation(operation);
+        if let Some(operations) = pending_operations {
+            self.send_operations(operations);
         }
         if scrub_started {
             self.resume_after_scrub = self.playing;
@@ -637,6 +809,48 @@ fn paint_ruler(
         }
         frame = frame.saturating_add(minor_tick);
     }
+}
+
+// Marker frame positions intentionally project into the ruler's f32 pixel space.
+#[allow(clippy::cast_precision_loss)]
+fn paint_project_marker(
+    painter: &egui::Painter,
+    timeline_rect: egui::Rect,
+    position: i64,
+    color_token: u8,
+    selected: bool,
+    dragging: bool,
+    pixels_per_frame: f32,
+) {
+    let x = timeline_rect.left() + position as f32 * pixels_per_frame;
+    let token_color = match color_token {
+        1 => color::TEXT_PRIMARY,
+        2 => color::TEXT_SECONDARY,
+        3 => color::TEXT_MUTED,
+        _ => color::ACCENT,
+    };
+    let marker_color = if selected { color::ACCENT } else { token_color };
+    let top = timeline_rect.top() + space::ONE;
+    painter.line_segment(
+        [
+            egui::pos2(x, top),
+            egui::pos2(x, timeline_rect.top() + size::RULER_HEIGHT - space::HALF),
+        ],
+        egui::Stroke::new(if selected || dragging { 2.0 } else { 1.0 }, marker_color),
+    );
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(x, top),
+            egui::pos2(x + 8.0, top + 3.5),
+            egui::pos2(x, top + 7.0),
+        ],
+        if dragging {
+            color::SURFACE_ACTIVE
+        } else {
+            marker_color
+        },
+        egui::Stroke::new(if selected { 1.0 } else { 0.0 }, color::ACCENT),
+    ));
 }
 
 // One clip paint pass keeps its layered drawing order explicit and reviewable.
@@ -945,6 +1159,196 @@ fn paint_waveform(
     }
 }
 
+fn linked_members(document: &Document, primary: ClipId) -> Vec<(TrackId, Clip)> {
+    let Some(primary_clip) = document.clip(primary) else {
+        return Vec::new();
+    };
+    let Some(link) = primary_clip.link else {
+        return document
+            .tracks
+            .iter()
+            .find_map(|track| {
+                track
+                    .clips
+                    .iter()
+                    .find(|clip| clip.id == primary)
+                    .cloned()
+                    .map(|clip| vec![(track.id, clip)])
+            })
+            .unwrap_or_default();
+    };
+    document
+        .tracks
+        .iter()
+        .flat_map(|track| {
+            track
+                .clips
+                .iter()
+                .filter(move |clip| clip.link == Some(link))
+                .cloned()
+                .map(move |clip| (track.id, clip))
+        })
+        .collect()
+}
+
+fn linked_minimum_primary_start(document: &Document, primary: ClipId) -> i64 {
+    let Some(primary_start) = document.clip(primary).map(|clip| clip.timeline_start.0) else {
+        return 0;
+    };
+    let minimum_member = linked_members(document, primary)
+        .iter()
+        .map(|(_, clip)| clip.timeline_start.0)
+        .min()
+        .unwrap_or(primary_start);
+    primary_start.saturating_sub(minimum_member)
+}
+
+fn linked_move_operations(
+    document: &Document,
+    primary: ClipId,
+    primary_track: TrackId,
+    to: TimeCode,
+) -> Vec<Operation> {
+    let Some(primary_start) = document.clip(primary).map(|clip| clip.timeline_start.0) else {
+        return Vec::new();
+    };
+    let delta = to.0.saturating_sub(primary_start);
+    let mut members = linked_members(document, primary);
+    members.sort_by(|(left_track, left), (right_track, right)| {
+        let track_order = left_track.cmp(right_track);
+        if track_order != std::cmp::Ordering::Equal {
+            return track_order;
+        }
+        if delta > 0 {
+            right.timeline_start.cmp(&left.timeline_start)
+        } else {
+            left.timeline_start.cmp(&right.timeline_start)
+        }
+    });
+    members
+        .into_iter()
+        .filter_map(|(track, clip)| {
+            let target = TimeCode(clip.timeline_start.0.saturating_add(delta));
+            (target != clip.timeline_start || (clip.id == primary && track != primary_track))
+                .then_some(Operation::MoveClip {
+                    clip: clip.id,
+                    to_track: if clip.id == primary {
+                        primary_track
+                    } else {
+                        track
+                    },
+                    to: target,
+                })
+        })
+        .collect()
+}
+
+fn linked_trim_operations(
+    document: &Document,
+    primary: ClipId,
+    new_source: std::ops::Range<TimeCode>,
+    edge: TrimEdge,
+) -> Result<Vec<Operation>, String> {
+    let primary_clip = document
+        .clip(primary)
+        .ok_or_else(|| format!("Clip {primary} no longer exists"))?;
+    let primary_asset = document
+        .asset(primary_clip.asset)
+        .ok_or_else(|| format!("Asset {} no longer exists", primary_clip.asset))?;
+    let (old_boundary, new_boundary) = match edge {
+        TrimEdge::Left => (primary_clip.source_range.start, new_source.start),
+        TrimEdge::Right => (primary_clip.source_range.end, new_source.end),
+    };
+    let project_delta =
+        source_boundary_project_delta(old_boundary, new_boundary, primary_asset.fps, document.fps)?;
+    let mut operations = Vec::new();
+    for (_, clip) in linked_members(document, primary) {
+        let asset = document
+            .asset(clip.asset)
+            .ok_or_else(|| format!("Asset {} no longer exists", clip.asset))?;
+        let linked_source = if clip.id == primary {
+            new_source.clone()
+        } else {
+            let source_delta = project_delta_to_source(project_delta, document.fps, asset.fps);
+            match edge {
+                TrimEdge::Left => {
+                    let start = TimeCode(
+                        clip.source_range
+                            .start
+                            .0
+                            .saturating_add(source_delta)
+                            .clamp(0, clip.source_range.end.0.saturating_sub(1)),
+                    );
+                    start..clip.source_range.end
+                }
+                TrimEdge::Right => {
+                    let end = TimeCode(clip.source_range.end.0.saturating_add(source_delta).clamp(
+                        clip.source_range.start.0.saturating_add(1),
+                        asset.duration.0,
+                    ));
+                    clip.source_range.start..end
+                }
+            }
+        };
+        if linked_source != clip.source_range {
+            operations.push(Operation::TrimClip {
+                clip: clip.id,
+                new_source: linked_source,
+            });
+        }
+    }
+    Ok(operations)
+}
+
+fn source_boundary_project_delta(
+    old: TimeCode,
+    new: TimeCode,
+    source_fps: Rational,
+    project_fps: Rational,
+) -> Result<i64, String> {
+    match new.cmp(&old) {
+        std::cmp::Ordering::Greater => {
+            map_source_range_to_project(old..new, source_fps, project_fps)
+                .map(|delta| delta.0)
+                .map_err(|error| error.to_string())
+        }
+        std::cmp::Ordering::Less => map_source_range_to_project(new..old, source_fps, project_fps)
+            .map(|delta| delta.0.saturating_neg())
+            .map_err(|error| error.to_string()),
+        std::cmp::Ordering::Equal => Ok(0),
+    }
+}
+
+fn linked_delete_operations(document: &Document, primary: ClipId, ripple: bool) -> Vec<Operation> {
+    let mut members = linked_members(document, primary);
+    members.sort_by(|(left_track, left), (right_track, right)| {
+        left_track
+            .cmp(right_track)
+            .then_with(|| right.timeline_start.cmp(&left.timeline_start))
+    });
+    members
+        .into_iter()
+        .map(|(_, clip)| {
+            if ripple {
+                Operation::RippleDeleteClip { clip: clip.id }
+            } else {
+                Operation::DeleteClip { clip: clip.id }
+            }
+        })
+        .collect()
+}
+
+fn next_marker_id(document: &Document) -> Option<MarkerId> {
+    document
+        .markers
+        .iter()
+        .map(|marker| marker.id.0)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .map(MarkerId)
+}
+
 fn collect_clip_bounds(document: &openreel_core::Document) -> Vec<ClipBounds> {
     document
         .tracks
@@ -964,13 +1368,36 @@ fn collect_clip_bounds(document: &openreel_core::Document) -> Vec<ClipBounds> {
         .collect()
 }
 
-fn snap_candidates(bounds: &[ClipBounds], exclude: ClipId, playhead: i64) -> Vec<i64> {
+fn snap_candidates(
+    bounds: &[ClipBounds],
+    markers: &[Marker],
+    exclude: ClipId,
+    playhead: i64,
+) -> Vec<i64> {
     let mut candidates = vec![playhead];
+    candidates.extend(markers.iter().map(|marker| marker.position.0));
     candidates.extend(
         bounds
             .iter()
             .filter(|bounds| bounds.id != exclude)
             .flat_map(|bounds| [bounds.start, bounds.end]),
+    );
+    candidates
+}
+
+fn marker_snap_candidates(
+    bounds: &[ClipBounds],
+    markers: &[Marker],
+    exclude: MarkerId,
+    playhead: i64,
+) -> Vec<i64> {
+    let mut candidates = vec![playhead];
+    candidates.extend(bounds.iter().flat_map(|bounds| [bounds.start, bounds.end]));
+    candidates.extend(
+        markers
+            .iter()
+            .filter(|marker| marker.id != exclude)
+            .map(|marker| marker.position.0),
     );
     candidates
 }
@@ -1078,7 +1505,52 @@ fn project_delta_to_source(project_delta: i64, project_fps: Rational, source_fps
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use openreel_core::{AssetId, LinkId, MediaAsset, Track};
+
     use super::*;
+
+    fn linked_fixture() -> Document {
+        let fps = Rational::new(30, 1).unwrap();
+        let asset = MediaAsset {
+            id: AssetId(1),
+            path: PathBuf::from("linked.mp4"),
+            name: "linked.mp4".to_owned(),
+            duration: TimeCode(120),
+            fps,
+            kind: MediaKind::AudioVideo,
+            resolution: Some((1_920, 1_080)),
+        };
+        let clip = |id, track_start| Clip {
+            id: ClipId(id),
+            asset: asset.id,
+            source_range: TimeCode(0)..TimeCode(30),
+            timeline_start: TimeCode(track_start),
+            effects: Vec::new(),
+            transition_in: None,
+            link: Some(LinkId(7)),
+        };
+        Document {
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    clips: vec![clip(1, 0)],
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    clips: vec![clip(2, 0)],
+                },
+            ],
+            media_pool: vec![asset],
+            markers: Vec::new(),
+            fps,
+            resolution: (1_920, 1_080),
+            duration: TimeCode(30),
+        }
+    }
 
     #[test]
     // This test checks the same intentional frame-to-pixel projection as tick_density.
@@ -1106,5 +1578,77 @@ mod tests {
         assert_eq!(nearest_snap(97, &candidates, 30, 2.0), (100, Some(100)));
         assert_eq!(nearest_snap(80, &candidates, 30, 2.0), (80, None));
         assert_eq!(snap_move(191, 50, &candidates, 30, 2.0), (190, Some(240)));
+    }
+
+    #[test]
+    fn snapping_candidates_include_markers_and_other_tracks() {
+        let bounds = [
+            ClipBounds {
+                id: ClipId(1),
+                start: 10,
+                end: 40,
+            },
+            ClipBounds {
+                id: ClipId(2),
+                start: 60,
+                end: 90,
+            },
+        ];
+        let markers = [Marker {
+            id: MarkerId(3),
+            position: TimeCode(50),
+            label: "Review".to_owned(),
+            color_token: 0,
+        }];
+        assert_eq!(
+            snap_candidates(&bounds, &markers, ClipId(1), 25),
+            vec![25, 50, 60, 90]
+        );
+    }
+
+    #[test]
+    fn linked_move_trim_and_delete_expand_to_atomic_batch_members() {
+        let document = linked_fixture();
+        assert_eq!(
+            linked_move_operations(&document, ClipId(1), TrackId(1), TimeCode(10)),
+            vec![
+                Operation::MoveClip {
+                    clip: ClipId(1),
+                    to_track: TrackId(1),
+                    to: TimeCode(10),
+                },
+                Operation::MoveClip {
+                    clip: ClipId(2),
+                    to_track: TrackId(2),
+                    to: TimeCode(10),
+                },
+            ]
+        );
+        assert_eq!(
+            linked_trim_operations(
+                &document,
+                ClipId(1),
+                TimeCode(5)..TimeCode(30),
+                TrimEdge::Left,
+            )
+            .unwrap(),
+            vec![
+                Operation::TrimClip {
+                    clip: ClipId(1),
+                    new_source: TimeCode(5)..TimeCode(30),
+                },
+                Operation::TrimClip {
+                    clip: ClipId(2),
+                    new_source: TimeCode(5)..TimeCode(30),
+                },
+            ]
+        );
+        assert_eq!(
+            linked_delete_operations(&document, ClipId(1), true),
+            vec![
+                Operation::RippleDeleteClip { clip: ClipId(1) },
+                Operation::RippleDeleteClip { clip: ClipId(2) },
+            ]
+        );
     }
 }

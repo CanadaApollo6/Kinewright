@@ -706,8 +706,8 @@ mod tests {
     };
 
     use openreel_core::{
-        AssetId, ClipId, Command, Effect, EffectId, Event, MediaAsset, MediaKind, Operation,
-        Rational, TimeCode, Track, TrackId, TrackKind,
+        AssetId, ClipId, Command, Effect, EffectId, Event, Marker, MarkerId, MediaAsset, MediaKind,
+        Operation, Rational, TimeCode, Track, TrackId, TrackKind,
     };
     use proptest::prelude::*;
 
@@ -863,6 +863,68 @@ mod tests {
         let once = execute(&Document::default(), &[commands[0].clone()]);
         assert!(once.asset(AssetId(1)).is_some());
         assert_eq!(once.tracks.len(), 1);
+    }
+
+    #[test]
+    fn m13_operations_replay_to_the_exact_document() {
+        let initial = Document::default();
+        let commands = vec![
+            JournalCommand::Do(Operation::AddTrack {
+                track: Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    clips: Vec::new(),
+                },
+            }),
+            JournalCommand::Do(Operation::AddAsset { asset: asset(1) }),
+            JournalCommand::Do(Operation::AddClip {
+                track: TrackId(1),
+                asset: AssetId(1),
+                at: TimeCode(0),
+                source: TimeCode(0)..TimeCode(30),
+            }),
+            JournalCommand::Do(Operation::AddClip {
+                track: TrackId(1),
+                asset: AssetId(1),
+                at: TimeCode(60),
+                source: TimeCode(30)..TimeCode(60),
+            }),
+            JournalCommand::Do(Operation::LinkClips {
+                clips: vec![ClipId(1), ClipId(2)],
+            }),
+            JournalCommand::Do(Operation::AddMarker {
+                marker: Marker {
+                    id: MarkerId(1),
+                    position: TimeCode(15),
+                    label: "Review".to_owned(),
+                    color_token: 0,
+                },
+            }),
+            JournalCommand::Do(Operation::MoveMarker {
+                marker: MarkerId(1),
+                to: TimeCode(20),
+            }),
+            JournalCommand::Do(Operation::RippleInsertGap {
+                track: TrackId(1),
+                at: TimeCode(60),
+                duration: TimeCode(10),
+            }),
+            JournalCommand::Do(Operation::UnlinkClips {
+                clips: vec![ClipId(2)],
+            }),
+            JournalCommand::Do(Operation::RippleDeleteClip { clip: ClipId(1) }),
+            JournalCommand::Do(Operation::RemoveMarker {
+                marker: MarkerId(1),
+            }),
+        ];
+        let expected = execute(&initial, &commands);
+        let Inspection::Recoverable(report) = inspect_bytes(&encoded_journal(&initial, &commands))
+        else {
+            panic!("M13 journal must be recoverable");
+        };
+        assert_eq!(report.recovered_commands, commands.len());
+        assert_eq!(report.document, expected);
+        assert!(report.damage.is_none());
     }
 
     #[test]

@@ -277,6 +277,7 @@ mod tests {
                         timeline_start: TimeCode(0),
                         effects: Vec::new(),
                         transition_in: None,
+                        link: None,
                     },
                     Clip {
                         id: ClipId(2),
@@ -285,6 +286,7 @@ mod tests {
                         timeline_start: TimeCode(15),
                         effects: Vec::new(),
                         transition_in: None,
+                        link: None,
                     },
                 ],
             }],
@@ -308,6 +310,7 @@ mod tests {
                     resolution: Some((320, 180)),
                 },
             ],
+            markers: Vec::new(),
             fps: Rational::new(30, 1).unwrap(),
             resolution: (320, 180),
             duration: TimeCode(25),
@@ -368,6 +371,7 @@ mod tests {
                 timeline_start: TimeCode::ZERO,
                 effects: Vec::new(),
                 transition_in: None,
+                link: None,
             }],
         });
 
@@ -415,6 +419,7 @@ mod tests {
                     timeline_start: TimeCode(8),
                     effects: Vec::new(),
                     transition_in: None,
+                    link: None,
                 }],
             },
             Track {
@@ -427,6 +432,7 @@ mod tests {
                     timeline_start: TimeCode::ZERO,
                     effects: Vec::new(),
                     transition_in: None,
+                    link: None,
                 }],
             },
         ]);

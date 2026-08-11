@@ -103,6 +103,13 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::TrimClip { .. } => "trim_clip",
         Operation::MoveClip { .. } => "move_clip",
         Operation::DeleteClip { .. } => "delete_clip",
+        Operation::RippleDeleteClip { .. } => "ripple_delete_clip",
+        Operation::RippleInsertGap { .. } => "ripple_insert_gap",
+        Operation::LinkClips { .. } => "link_clips",
+        Operation::UnlinkClips { .. } => "unlink_clips",
+        Operation::AddMarker { .. } => "add_marker",
+        Operation::RemoveMarker { .. } => "remove_marker",
+        Operation::MoveMarker { .. } => "move_marker",
         Operation::AddEffect { .. } => "add_effect",
         Operation::RemoveEffect { .. } => "remove_effect",
         Operation::SetEffectParam { .. } => "set_effect_param",
@@ -147,7 +154,10 @@ fn operation_tool(
     let name = camel_to_snake(variant);
     let annotations = ToolAnnotations::new()
         .read_only(false)
-        .destructive(matches!(name.as_str(), "delete_clip" | "remove_track"))
+        .destructive(matches!(
+            name.as_str(),
+            "delete_clip" | "ripple_delete_clip" | "remove_track"
+        ))
         .idempotent(false)
         .open_world(false);
     let mut description = format!(
@@ -156,6 +166,18 @@ fn operation_tool(
     if matches!(variant.as_str(), "AddEffect" | "SetEffectParam") {
         write!(description, " {}", effect_documentation())
             .expect("writing effect documentation to a String cannot fail");
+    }
+    match variant.as_str() {
+        "RippleDeleteClip" | "RippleInsertGap" => description.push_str(
+            " M13 ripple is per-track only; other tracks remain unchanged. Cross-track sync-lock is future work.",
+        ),
+        "LinkClips" | "UnlinkClips" => description.push_str(
+            " Links are metadata: moving, trimming, or deleting a member requires an atomic plan covering its whole link group.",
+        ),
+        "AddMarker" | "MoveMarker" | "RemoveMarker" => description.push_str(
+            " Markers are non-destructive editorial suggestions and are preferred when reviewing footage.",
+        ),
+        _ => {}
     }
     let tool =
         Tool::new(name, Cow::Owned(description), Arc::new(input)).with_annotations(annotations);
@@ -224,6 +246,13 @@ mod tests {
                 "trim_clip",
                 "move_clip",
                 "delete_clip",
+                "ripple_delete_clip",
+                "ripple_insert_gap",
+                "link_clips",
+                "unlink_clips",
+                "add_marker",
+                "remove_marker",
+                "move_marker",
                 "add_effect",
                 "remove_effect",
                 "set_effect_param",
@@ -246,13 +275,36 @@ mod tests {
     #[test]
     fn operation_exhaustiveness_guard_requires_new_variants_to_be_acknowledged() {
         assert_eq!(
-            operation_tool_name(&Operation::SplitClip {
-                clip: ClipId(4),
+            operation_tool_name(&Operation::RippleInsertGap {
+                track: TrackId(1),
                 at: TimeCode(30),
+                duration: TimeCode(15),
             }),
-            "split_clip"
+            "ripple_insert_gap"
         );
-        let _ = (AssetId(1), TrackId(1));
+        let _ = (AssetId(1), ClipId(4));
+    }
+
+    #[test]
+    fn destructive_annotations_cover_ripple_delete_but_not_markers() {
+        let tools = operation_tools().unwrap();
+        for (name, destructive) in [
+            ("ripple_delete_clip", true),
+            ("add_marker", false),
+            ("move_marker", false),
+            ("remove_marker", false),
+        ] {
+            let tool = tools
+                .iter()
+                .find(|definition| definition.tool.name == name)
+                .unwrap();
+            let serialized = serde_json::to_value(&tool.tool).unwrap();
+            assert_eq!(
+                serialized["annotations"]["destructiveHint"],
+                serde_json::Value::Bool(destructive),
+                "wrong destructive annotation for {name}"
+            );
+        }
     }
 
     #[test]

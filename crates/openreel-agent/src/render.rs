@@ -1,7 +1,7 @@
-use std::fmt::Write as _;
+use std::{collections::BTreeMap, fmt::Write as _};
 
 use openreel_core::{
-    AssetId, ClipId, Document, Effect, FrameRounding, ParamValue, Rational, SceneStatus,
+    AssetId, ClipId, Document, Effect, FrameRounding, LinkId, ParamValue, Rational, SceneStatus,
     SilenceSpan, SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
     TimelineTranscriptWord, TrackKind, TranscriptStatus, map_frames_with_rounding,
     map_source_range_to_project,
@@ -30,10 +30,12 @@ pub fn render_timeline_state(document: &Document) -> String {
         .sum::<usize>();
     let _ = writeln!(
         output,
-        "tracks={} clips={} assets={}",
+        "tracks={} clips={} assets={} markers={} link_groups={}",
         document.tracks.len(),
         clip_count,
-        document.media_pool.len()
+        document.media_pool.len(),
+        document.markers.len(),
+        link_groups(document).len(),
     );
 
     for track in &document.tracks {
@@ -77,6 +79,8 @@ pub fn render_timeline_state(document: &Document) -> String {
         }
     }
 
+    render_links_and_markers(&mut output, document);
+
     if !document.media_pool.is_empty() {
         output.push_str("assets:\n");
     }
@@ -102,6 +106,34 @@ pub fn render_timeline_state(document: &Document) -> String {
         output.pop();
     }
     output
+}
+
+fn render_links_and_markers(output: &mut String, document: &Document) {
+    let links = link_groups(document);
+    if !links.is_empty() {
+        output.push_str("links:\n");
+        for (link, clips) in links {
+            let clips = clips
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let _ = writeln!(output, "  link {link} clips={clips}");
+        }
+    }
+    if !document.markers.is_empty() {
+        output.push_str("markers:\n");
+        for marker in &document.markers {
+            let _ = writeln!(
+                output,
+                "  marker {} at={} color={} label={:?}",
+                marker.id,
+                frame_and_seconds(marker.position, document.fps),
+                marker.color_token,
+                marker.label,
+            );
+        }
+    }
 }
 
 /// Render detailed state for one clip.
@@ -131,12 +163,14 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
         .checked_add(duration)
         .ok_or_else(|| "time calculation overflowed".to_owned())?;
     Ok(format!(
-        "clip {}\ntrack={} kind={:?}\nasset={} {:?}\ntimeline={}..{} duration={}\nsource={}..{} duration={}\neffects={}\ntransition_in={}",
+        "clip {}\ntrack={} kind={:?}\nasset={} {:?}\nlink={}\ntimeline={}..{} duration={}\nsource={}..{} duration={}\neffects={}\ntransition_in={}",
         clip.id,
         track.id,
         track.kind,
         asset.id,
         asset.name,
+        clip.link
+            .map_or_else(|| "none".to_owned(), |link| link.to_string()),
         frame_and_seconds(clip.timeline_start, document.fps),
         frame_and_seconds(end, document.fps),
         frame_and_seconds(duration, document.fps),
@@ -152,6 +186,16 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
         render_effects(&clip.effects),
         render_transition(clip.transition_in.as_ref()),
     ))
+}
+
+fn link_groups(document: &Document) -> BTreeMap<LinkId, Vec<ClipId>> {
+    let mut groups = BTreeMap::<LinkId, Vec<ClipId>>::new();
+    for clip in document.tracks.iter().flat_map(|track| &track.clips) {
+        if let Some(link) = clip.link {
+            groups.entry(link).or_default().push(clip.id);
+        }
+    }
+    groups
 }
 
 #[must_use]
@@ -488,9 +532,9 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
     use openreel_core::{
-        AssetId, AssetSilences, AssetTranscript, Clip, Effect, EffectId, MediaAsset, MediaKind,
-        ParamValue, SilenceSpan, TimelineTranscriptWord, Track, TrackId, TranscriptStatus,
-        Transition,
+        AssetId, AssetSilences, AssetTranscript, Clip, Effect, EffectId, LinkId, Marker, MarkerId,
+        MediaAsset, MediaKind, ParamValue, SilenceSpan, TimelineTranscriptWord, Track, TrackId,
+        TranscriptStatus, Transition,
     };
 
     use super::*;
@@ -518,6 +562,7 @@ mod tests {
                             name: "crossfade".to_owned(),
                             duration: TimeCode(15),
                         }),
+                        link: Some(LinkId(2)),
                     },
                     Clip {
                         id: ClipId(11),
@@ -526,6 +571,7 @@ mod tests {
                         timeline_start: TimeCode(120),
                         effects: Vec::new(),
                         transition_in: None,
+                        link: Some(LinkId(2)),
                     },
                 ],
             }],
@@ -538,6 +584,12 @@ mod tests {
                 kind: MediaKind::AudioVideo,
                 resolution: Some((1_920, 1_080)),
             }],
+            markers: vec![Marker {
+                id: MarkerId(3),
+                position: TimeCode(45),
+                label: "Check reaction".to_owned(),
+                color_token: 0,
+            }],
             fps: Rational::new(30, 1).unwrap(),
             resolution: (1_920, 1_080),
             duration: TimeCode(180),
@@ -547,10 +599,14 @@ mod tests {
     #[test]
     fn timeline_state_matches_the_compact_golden_rendering() {
         let expected = r#"project fps=30/1 size=1920x1080 duration=180f/6.000s
-tracks=1 clips=2 assets=1
+tracks=1 clips=2 assets=1 markers=1 link_groups=1
 track 7 video clips=2
   clip 10 asset=4 "interview.mp4" timeline=0f/0.000s..90f/3.000s duration=90f/3.000s source=30f/1.000s..120f/4.000s effects=[3:brightness(percent=25)] transition_in=crossfade:15f
   clip 11 asset=4 "interview.mp4" timeline=120f/4.000s..180f/6.000s duration=60f/2.000s source=150f/5.000s..210f/7.000s effects=none transition_in=none
+links:
+  link 2 clips=10,11
+markers:
+  marker 3 at=45f/1.500s color=0 label="Check reaction"
 assets:
   asset 4 "interview.mp4" kind=AudioVideo duration=300f/10.000s fps=30/1 size=1920x1080 path="fixtures/interview.mp4""#;
         assert_eq!(render_timeline_state(&fixture()), expected);
@@ -561,6 +617,7 @@ assets:
         let rendered = render_clip_info(&fixture(), ClipId(10)).unwrap();
         assert!(rendered.contains("timeline=0f/0.000s..90f/3.000s"));
         assert!(rendered.contains("source=30f/1.000s..120f/4.000s"));
+        assert!(rendered.contains("link=2"));
         assert!(rendered.contains("effects=[3:brightness(percent=25)]"));
         assert!(rendered.contains("transition_in=crossfade:15f"));
     }

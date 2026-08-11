@@ -461,6 +461,7 @@ mod tests {
                     timeline_start: TimeCode(timeline_start),
                     effects: Vec::new(),
                     transition_in: None,
+                    link: None,
                 };
                 timeline_start += length;
                 clip
@@ -481,6 +482,7 @@ mod tests {
                 kind: MediaKind::Video,
                 resolution: Some((1_920, 1_080)),
             }],
+            markers: Vec::new(),
             fps: Rational::new(30, 1).unwrap(),
             resolution: (1_920, 1_080),
             duration: TimeCode(timeline_start),

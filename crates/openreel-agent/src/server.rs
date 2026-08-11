@@ -395,9 +395,9 @@ impl OpenReelMcp {
 
     fn confirmation_description(&self, operation: &Operation) -> Result<Option<String>, McpError> {
         match operation {
-            Operation::DeleteClip { clip } => Ok(Some(format!(
-                "The agent wants to delete clip {clip}. This edit can be undone."
-            ))),
+            Operation::DeleteClip { clip } | Operation::RippleDeleteClip { clip } => Ok(Some(
+                format!("The agent wants to delete clip {clip}. This edit can be undone."),
+            )),
             Operation::RemoveTrack { track } => {
                 let document = self.document()?;
                 let Some(track) = document
@@ -993,7 +993,9 @@ fn plan_confirmation_description(document: &Document, operations: &[Operation]) 
     let mut removed_tracks = 0_usize;
     for operation in operations {
         match operation {
-            Operation::DeleteClip { clip } if candidate.clip(*clip).is_some() => {
+            Operation::DeleteClip { clip } | Operation::RippleDeleteClip { clip }
+                if candidate.clip(*clip).is_some() =>
+            {
                 removed_clips = removed_clips.saturating_add(1);
             }
             Operation::RemoveTrack { track } => {
@@ -1071,9 +1073,9 @@ fn render_plan_outcomes(
 mod tests {
     use super::*;
     use openreel_core::{
-        AssetId, Clip, FrameTexture, MediaAsset, MediaError, MediaEvent, MediaKind, Rational,
-        RgbaImage, SceneStatus, SilenceStatus, TimelineSceneChange, TimelineSilenceSpan, Track,
-        TrackId, TrackKind, VisualAssetResult,
+        AssetId, Clip, FrameTexture, Marker, MarkerId, MediaAsset, MediaError, MediaEvent,
+        MediaKind, Rational, RgbaImage, SceneStatus, SilenceStatus, TimelineSceneChange,
+        TimelineSilenceSpan, Track, TrackId, TrackKind, VisualAssetResult,
     };
     use serde_json::json;
     use std::{path::Path, time::Instant};
@@ -1196,9 +1198,11 @@ mod tests {
                     timeline_start: TimeCode::ZERO,
                     effects: Vec::new(),
                     transition_in: None,
+                    link: None,
                 }],
             }],
             media_pool: vec![asset],
+            markers: Vec::new(),
             fps: Rational::new(30, 1).unwrap(),
             resolution: (320, 180),
             duration: TimeCode(60),
@@ -1348,6 +1352,42 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn ripple_delete_is_destructive_while_marker_edits_are_suggestions() {
+        let (core, playback, analysis) = fixture();
+        let service = OpenReelMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        assert!(
+            service
+                .confirmation_description(&Operation::RippleDeleteClip { clip: ClipId(1) })
+                .unwrap()
+                .is_some()
+        );
+        for operation in [
+            Operation::AddMarker {
+                marker: Marker {
+                    id: MarkerId(1),
+                    position: TimeCode(5),
+                    label: "Review".to_owned(),
+                    color_token: 0,
+                },
+            },
+            Operation::MoveMarker {
+                marker: MarkerId(1),
+                to: TimeCode(10),
+            },
+            Operation::RemoveMarker {
+                marker: MarkerId(1),
+            },
+        ] {
+            assert!(
+                service
+                    .confirmation_description(&operation)
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[test]

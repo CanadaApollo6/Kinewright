@@ -36,6 +36,13 @@ id_type!(AssetId);
 id_type!(TrackId);
 id_type!(ClipId);
 id_type!(EffectId);
+id_type!(LinkId);
+id_type!(MarkerId);
+
+/// Number of presentation-token choices available to project markers.
+///
+/// The stable index-to-token mapping is documented in `docs/DESIGN.md`.
+pub const MARKER_COLOR_TOKEN_COUNT: u8 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum TrackKind {
@@ -111,6 +118,11 @@ pub struct Clip {
     pub timeline_start: TimeCode,
     pub effects: Vec<Effect>,
     pub transition_in: Option<Transition>,
+    /// Optional A/V edit group. Core operations remain deliberately per-clip;
+    /// UI and agent orchestration apply linked edits as atomic batches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub link: Option<LinkId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -121,10 +133,25 @@ pub struct Track {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Marker {
+    pub id: MarkerId,
+    /// Position on the project timeline, in project frames.
+    pub position: TimeCode,
+    pub label: String,
+    /// Stable index into the marker token mapping in `docs/DESIGN.md`.
+    pub color_token: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Document {
     /// Video and audio tracks, ordered z-bottom to top.
     pub tracks: Vec<Track>,
     pub media_pool: Vec<MediaAsset>,
+    /// Project-level editorial notes. Missing in pre-M13 files and therefore
+    /// defaulted for backward-compatible project loading.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub markers: Vec<Marker>,
     pub fps: Rational,
     pub resolution: (u32, u32),
     pub duration: TimeCode,
@@ -135,6 +162,7 @@ impl Default for Document {
         Self {
             tracks: Vec::new(),
             media_pool: Vec::new(),
+            markers: Vec::new(),
             fps: Rational::default(),
             resolution: (1_920, 1_080),
             duration: TimeCode::ZERO,
@@ -154,6 +182,11 @@ impl Document {
             .iter()
             .flat_map(|track| &track.clips)
             .find(|clip| clip.id == id)
+    }
+
+    #[must_use]
+    pub fn marker(&self, id: MarkerId) -> Option<&Marker> {
+        self.markers.iter().find(|marker| marker.id == id)
     }
 
     /// Validate every cross-reference and timeline invariant in the document.

@@ -11,8 +11,8 @@ use openreel_agent::{
 };
 use openreel_core::{
     AgentDriver, AgentEvent, AgentSession, Analysis, AssetId, ClipId, Command, Core, Document,
-    Event, Export, HarnessInfo, MediaAsset, MediaError, MediaEvent, Operation, Playback,
-    PlaybackState, TimeCode, Track, TrackId, TrackKind,
+    Event, Export, HarnessInfo, JournalCommand, MarkerId, MediaAsset, MediaError, MediaEvent,
+    Operation, Playback, PlaybackState, TimeCode, Track, TrackId, TrackKind,
 };
 use openreel_media::{FfmpegMediaEngine, GpuContext};
 
@@ -66,6 +66,7 @@ pub(crate) struct OpenReelApp {
     pub(crate) playing: bool,
     pub(crate) resume_after_scrub: bool,
     pub(crate) selected_clip: Option<ClipId>,
+    pub(crate) selected_marker: Option<MarkerId>,
     pub(crate) selected_asset: Option<AssetId>,
     pub(crate) transcript_scope: TranscriptScope,
     pub(crate) pixels_per_frame: f32,
@@ -80,6 +81,7 @@ pub(crate) struct OpenReelApp {
     pub(crate) export_dialog: ExportDialog,
     pub(crate) export_job: Option<ExportJob>,
     pub(crate) help_open: bool,
+    pub(crate) ripple_mode: bool,
     pub(crate) error_log: ErrorLog,
     pub(crate) error_log_open: bool,
     recovery: crate::recovery::Recovery,
@@ -156,6 +158,7 @@ impl OpenReelApp {
             playing: false,
             resume_after_scrub: false,
             selected_clip: None,
+            selected_marker: None,
             selected_asset: None,
             transcript_scope: TranscriptScope::default(),
             pixels_per_frame: 6.0,
@@ -177,6 +180,7 @@ impl OpenReelApp {
             },
             export_job: None,
             help_open: false,
+            ripple_mode: false,
             error_log,
             error_log_open,
             recovery,
@@ -458,6 +462,7 @@ impl OpenReelApp {
         self.playing = false;
         self.resume_after_scrub = false;
         self.selected_clip = None;
+        self.selected_marker = None;
         self.selected_asset = None;
         self.texture = None;
         self.visual_cache.clear();
@@ -474,6 +479,28 @@ impl OpenReelApp {
             self.record_error("Operations", "Core actor stopped while applying the edit");
         } else {
             "Applying edit…".clone_into(&mut self.status);
+        }
+    }
+
+    pub(crate) fn send_operations(&mut self, operations: Vec<Operation>) {
+        match operations.len() {
+            0 => {}
+            1 => self.send_operation(
+                operations
+                    .into_iter()
+                    .next()
+                    .expect("a one-operation vector has one item"),
+            ),
+            count => {
+                if self.core.send(Command::DoBatch(operations)).is_err() {
+                    self.record_error(
+                        "Operations",
+                        "Core actor stopped while applying the linked edit",
+                    );
+                } else {
+                    self.status = format!("Applying {count} linked editsâ€¦");
+                }
+            }
         }
     }
 
@@ -528,7 +555,11 @@ impl OpenReelApp {
 
         while let Ok(event) = self.core_events.try_recv() {
             match event {
-                Event::DocumentChanged { doc, last_op, .. } => {
+                Event::DocumentChanged {
+                    doc,
+                    last_op,
+                    journal_command,
+                } => {
                     let new_assets = doc
                         .media_pool
                         .iter()
@@ -541,6 +572,12 @@ impl OpenReelApp {
                         .is_some_and(|clip| doc.clip(clip).is_none())
                     {
                         self.selected_clip = None;
+                    }
+                    if self
+                        .selected_marker
+                        .is_some_and(|marker| doc.marker(marker).is_none())
+                    {
+                        self.selected_marker = None;
                     }
                     if self
                         .selected_asset
@@ -566,6 +603,8 @@ impl OpenReelApp {
                     }
                     if let Some(operation) = last_op {
                         self.status = operation_status(&operation);
+                    } else if let Some(JournalCommand::DoBatch(operations)) = journal_command {
+                        self.status = format!("Applied {} linked edits", operations.len());
                     }
                 }
                 Event::OpRejected { error, .. } => {
@@ -770,6 +809,17 @@ fn operation_status(operation: &Operation) -> String {
         Operation::TrimClip { clip, .. } => format!("Trimmed clip {clip}"),
         Operation::MoveClip { clip, to, .. } => format!("Moved clip {clip} to frame {to}"),
         Operation::DeleteClip { clip } => format!("Deleted clip {clip}"),
+        Operation::RippleDeleteClip { clip } => format!("Ripple deleted clip {clip}"),
+        Operation::RippleInsertGap {
+            track,
+            at,
+            duration,
+        } => format!("Inserted a {duration}-frame gap on track {track} at frame {at}"),
+        Operation::LinkClips { clips } => format!("Linked {} clips", clips.len()),
+        Operation::UnlinkClips { clips } => format!("Unlinked {} clips", clips.len()),
+        Operation::AddMarker { marker } => format!("Added marker {}", marker.id),
+        Operation::RemoveMarker { marker } => format!("Removed marker {marker}"),
+        Operation::MoveMarker { marker, to } => format!("Moved marker {marker} to frame {to}"),
         Operation::AddEffect { clip, effect } => {
             format!("Added {} effect {} to clip {clip}", effect.name, effect.id)
         }

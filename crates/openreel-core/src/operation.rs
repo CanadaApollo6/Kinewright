@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AssetId, Clip, ClipId, Document, Effect, EffectId, MediaAsset, ParamValue, TimeCode,
-    TimeMappingError, Track, TrackId, Transition, map_source_range_to_project,
+    AssetId, Clip, ClipId, Document, Effect, EffectId, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker,
+    MarkerId, MediaAsset, ParamValue, TimeCode, TimeMappingError, Track, TrackId, Transition,
+    map_source_range_to_project,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -42,6 +43,44 @@ pub enum Operation {
     },
     DeleteClip {
         clip: ClipId,
+    },
+    /// Delete one clip and close its duration on that clip's track only.
+    ///
+    /// M13 deliberately uses predictable per-track ripple. Other tracks are
+    /// unchanged; cross-track sync-lock ripple is future work.
+    RippleDeleteClip {
+        clip: ClipId,
+    },
+    /// Insert empty time on one track by shifting clips that start at or after
+    /// `at`. Other tracks are deliberately unchanged in M13; cross-track
+    /// sync-lock ripple is future work.
+    RippleInsertGap {
+        track: TrackId,
+        at: TimeCode,
+        duration: TimeCode,
+    },
+    /// Assign one fresh link id to the listed clips.
+    ///
+    /// Link-follow enforcement intentionally does not live in core apply:
+    /// core operations stay independently pure, while the UI and agent build
+    /// one `DoBatch` containing the corresponding edits for every member.
+    LinkClips {
+        clips: Vec<ClipId>,
+    },
+    /// Clear the link id on each listed clip. This is per-clip data mutation;
+    /// remaining members of a group are not rewritten implicitly.
+    UnlinkClips {
+        clips: Vec<ClipId>,
+    },
+    AddMarker {
+        marker: Marker,
+    },
+    RemoveMarker {
+        marker: MarkerId,
+    },
+    MoveMarker {
+        marker: MarkerId,
+        to: TimeCode,
     },
     AddEffect {
         clip: ClipId,
@@ -192,6 +231,24 @@ pub enum OpError {
     },
     #[error("clip id space is exhausted")]
     ClipIdExhausted,
+    #[error("link id space is exhausted")]
+    LinkIdExhausted,
+    #[error("link operation requires at least {minimum} clip(s)")]
+    TooFewLinkedClips { minimum: usize },
+    #[error("clip {0} occurs more than once in the link operation")]
+    DuplicateClipSelection(ClipId),
+    #[error("marker {0} already exists")]
+    DuplicateMarker(MarkerId),
+    #[error("marker {0} does not exist")]
+    MissingMarker(MarkerId),
+    #[error("markers are not sorted: {previous} appears before {next}")]
+    MarkersUnsorted { previous: MarkerId, next: MarkerId },
+    #[error("marker positions must be non-negative: {0}")]
+    NegativeMarkerPosition(TimeCode),
+    #[error("marker color token {actual} is outside the supported range 0..{maximum_exclusive}")]
+    InvalidMarkerColor { actual: u8, maximum_exclusive: u8 },
+    #[error("ripple gap duration must be positive: {0}")]
+    InvalidRippleDuration(TimeCode),
     #[error("effect {effect} already exists on clip {clip}")]
     DuplicateEffect { clip: ClipId, effect: EffectId },
     #[error("effect {effect} does not exist on clip {clip}")]
@@ -260,6 +317,17 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
         Operation::TrimClip { clip, new_source } => trim_clip(doc, *clip, new_source.clone()),
         Operation::MoveClip { clip, to_track, to } => move_clip(doc, *clip, *to_track, *to),
         Operation::DeleteClip { clip } => delete_clip(doc, *clip),
+        Operation::RippleDeleteClip { clip } => ripple_delete_clip(doc, *clip),
+        Operation::RippleInsertGap {
+            track,
+            at,
+            duration,
+        } => ripple_insert_gap(doc, *track, *at, *duration),
+        Operation::LinkClips { clips } => link_clips(doc, clips),
+        Operation::UnlinkClips { clips } => unlink_clips(doc, clips),
+        Operation::AddMarker { marker } => add_marker(doc, marker.clone()),
+        Operation::RemoveMarker { marker } => remove_marker(doc, *marker),
+        Operation::MoveMarker { marker, to } => move_marker(doc, *marker, *to),
         Operation::AddEffect { clip, effect } => add_effect(doc, *clip, effect.clone()),
         Operation::RemoveEffect { clip, effect } => remove_effect(doc, *clip, *effect),
         Operation::SetEffectParam {
@@ -331,6 +399,7 @@ fn add_clip(
         timeline_start: at,
         effects: Vec::new(),
         transition_in: None,
+        link: None,
     };
     doc.tracks[track_index].clips.push(clip);
     doc.tracks[track_index]
@@ -448,6 +517,127 @@ fn delete_clip(doc: &mut Document, clip_id: ClipId) -> Result<(), OpError> {
     Ok(())
 }
 
+fn ripple_delete_clip(doc: &mut Document, clip_id: ClipId) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let removed = doc.tracks[track_index].clips[clip_index].clone();
+    let duration = doc.clip_duration(&removed)?;
+    doc.tracks[track_index].clips.remove(clip_index);
+    for clip in &mut doc.tracks[track_index].clips[clip_index..] {
+        clip.timeline_start = clip
+            .timeline_start
+            .checked_sub(duration)
+            .ok_or(OpError::TimeOverflow)?;
+    }
+    Ok(())
+}
+
+fn ripple_insert_gap(
+    doc: &mut Document,
+    track_id: TrackId,
+    at: TimeCode,
+    duration: TimeCode,
+) -> Result<(), OpError> {
+    if at < TimeCode::ZERO {
+        return Err(OpError::NegativeTimelinePosition(at));
+    }
+    if duration <= TimeCode::ZERO {
+        return Err(OpError::InvalidRippleDuration(duration));
+    }
+    let track = doc
+        .tracks
+        .iter_mut()
+        .find(|track| track.id == track_id)
+        .ok_or(OpError::MissingTrack(track_id))?;
+    for clip in track
+        .clips
+        .iter_mut()
+        .filter(|clip| clip.timeline_start >= at)
+    {
+        clip.timeline_start = clip
+            .timeline_start
+            .checked_add(duration)
+            .ok_or(OpError::TimeOverflow)?;
+    }
+    Ok(())
+}
+
+fn validate_clip_selection(
+    doc: &Document,
+    clips: &[ClipId],
+    minimum: usize,
+) -> Result<(), OpError> {
+    if clips.len() < minimum {
+        return Err(OpError::TooFewLinkedClips { minimum });
+    }
+    let mut selected = HashSet::new();
+    for clip in clips {
+        if !selected.insert(*clip) {
+            return Err(OpError::DuplicateClipSelection(*clip));
+        }
+        find_clip(doc, *clip)?;
+    }
+    Ok(())
+}
+
+fn link_clips(doc: &mut Document, clips: &[ClipId]) -> Result<(), OpError> {
+    validate_clip_selection(doc, clips, 2)?;
+    let link = next_link_id(doc)?;
+    let selected = clips.iter().copied().collect::<HashSet<_>>();
+    for clip in doc.tracks.iter_mut().flat_map(|track| &mut track.clips) {
+        if selected.contains(&clip.id) {
+            clip.link = Some(link);
+        }
+    }
+    Ok(())
+}
+
+fn unlink_clips(doc: &mut Document, clips: &[ClipId]) -> Result<(), OpError> {
+    validate_clip_selection(doc, clips, 1)?;
+    let selected = clips.iter().copied().collect::<HashSet<_>>();
+    for clip in doc.tracks.iter_mut().flat_map(|track| &mut track.clips) {
+        if selected.contains(&clip.id) {
+            clip.link = None;
+        }
+    }
+    Ok(())
+}
+
+fn add_marker(doc: &mut Document, marker: Marker) -> Result<(), OpError> {
+    if doc.marker(marker.id).is_some() {
+        return Err(OpError::DuplicateMarker(marker.id));
+    }
+    validate_marker(&marker)?;
+    doc.markers.push(marker);
+    doc.markers
+        .sort_by_key(|marker| (marker.position, marker.id));
+    Ok(())
+}
+
+fn remove_marker(doc: &mut Document, marker_id: MarkerId) -> Result<(), OpError> {
+    let index = doc
+        .markers
+        .iter()
+        .position(|marker| marker.id == marker_id)
+        .ok_or(OpError::MissingMarker(marker_id))?;
+    doc.markers.remove(index);
+    Ok(())
+}
+
+fn move_marker(doc: &mut Document, marker_id: MarkerId, to: TimeCode) -> Result<(), OpError> {
+    if to < TimeCode::ZERO {
+        return Err(OpError::NegativeMarkerPosition(to));
+    }
+    let marker = doc
+        .markers
+        .iter_mut()
+        .find(|marker| marker.id == marker_id)
+        .ok_or(OpError::MissingMarker(marker_id))?;
+    marker.position = to;
+    doc.markers
+        .sort_by_key(|marker| (marker.position, marker.id));
+    Ok(())
+}
+
 fn add_effect(doc: &mut Document, clip_id: ClipId, effect: Effect) -> Result<(), OpError> {
     validate_effect(&effect)?;
     let (track_index, clip_index) = find_clip(doc, clip_id)?;
@@ -548,6 +738,19 @@ fn next_clip_id(doc: &Document) -> Result<ClipId, OpError> {
         .checked_add(1)
         .map(ClipId)
         .ok_or(OpError::ClipIdExhausted)
+}
+
+fn next_link_id(doc: &Document) -> Result<LinkId, OpError> {
+    doc.tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .filter_map(|clip| clip.link)
+        .map(|link| link.0)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .map(LinkId)
+        .ok_or(OpError::LinkIdExhausted)
 }
 
 fn find_source_boundary(
@@ -654,6 +857,19 @@ fn validate_transition(
             clip: clip.id,
             duration: transition.duration,
             clip_duration,
+        });
+    }
+    Ok(())
+}
+
+fn validate_marker(marker: &Marker) -> Result<(), OpError> {
+    if marker.position < TimeCode::ZERO {
+        return Err(OpError::NegativeMarkerPosition(marker.position));
+    }
+    if marker.color_token >= MARKER_COLOR_TOKEN_COUNT {
+        return Err(OpError::InvalidMarkerColor {
+            actual: marker.color_token,
+            maximum_exclusive: MARKER_COLOR_TOKEN_COUNT,
         });
     }
     Ok(())
@@ -770,6 +986,24 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
             previous = Some((clip, clip_end));
             expected_duration = expected_duration.max(clip_end);
         }
+    }
+
+    let mut marker_ids = HashSet::new();
+    let mut previous_marker: Option<&Marker> = None;
+    for marker in &doc.markers {
+        if !marker_ids.insert(marker.id) {
+            return Err(OpError::DuplicateMarker(marker.id));
+        }
+        validate_marker(marker)?;
+        if let Some(previous) = previous_marker
+            && marker.position < previous.position
+        {
+            return Err(OpError::MarkersUnsorted {
+                previous: previous.id,
+                next: marker.id,
+            });
+        }
+        previous_marker = Some(marker);
     }
 
     if doc.duration != expected_duration {

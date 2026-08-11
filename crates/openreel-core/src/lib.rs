@@ -28,8 +28,8 @@ pub use media::{
     WaveformPeak,
 };
 pub use model::{
-    AssetId, Clip, ClipId, Document, Effect, EffectId, MediaAsset, MediaKind, ParamValue, Track,
-    TrackId, TrackKind, Transition,
+    AssetId, Clip, ClipId, Document, Effect, EffectId, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker,
+    MarkerId, MediaAsset, MediaKind, ParamValue, Track, TrackId, TrackKind, Transition,
 };
 pub use operation::{ApplyOp, BatchError, OpError, Operation, apply_batch};
 pub use time::{

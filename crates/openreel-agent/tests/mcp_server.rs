@@ -3,8 +3,8 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use openreel_agent::McpServer;
 use openreel_core::{
-    Analysis, AssetId, Clip, ClipId, Command, Core, Document, Event, MediaAsset, MediaKind, Query,
-    QueryResult, Rational, TimeCode, Track, TrackId, TrackKind,
+    Analysis, AssetId, Clip, ClipId, Command, Core, Document, Event, MarkerId, MediaAsset,
+    MediaKind, Query, QueryResult, Rational, TimeCode, Track, TrackId, TrackKind,
 };
 use openreel_media::{
     FfmpegMediaEngine,
@@ -47,6 +47,34 @@ async fn mutator_tool_applies_through_the_real_core_actor() {
         panic!("expected document query result");
     };
     assert_eq!(document.tracks[0].id, TrackId(7));
+
+    let marker = client
+        .call_tool(
+            CallToolRequestParams::new("add_marker").with_arguments(
+                json!({
+                    "marker": {
+                        "id": 1,
+                        "position": 0,
+                        "label": "Review",
+                        "color_token": 0
+                    }
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(marker.is_error, Some(false));
+    assert!(
+        marker.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("applied add_marker")
+    );
+    assert_eq!(query_document(&core).markers[0].id, MarkerId(1));
 
     let rejected = client
         .call_tool(
@@ -219,9 +247,11 @@ fn edit_plan_document() -> Document {
                 timeline_start: TimeCode::ZERO,
                 effects: Vec::new(),
                 transition_in: None,
+                link: None,
             }],
         }],
         media_pool: vec![asset],
+        markers: Vec::new(),
         fps: Rational::new(30, 1).unwrap(),
         resolution: (320, 180),
         duration: TimeCode(60),

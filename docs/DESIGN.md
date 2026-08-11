@@ -67,6 +67,22 @@ system.
 | `status-warning` | `#D7B26D` | Confirmation, cost, or degraded state |
 | `status-danger` | `#F06C75` | Destructive action and error |
 
+### Marker color token indices
+
+Project files store marker color as a stable token index, never as an RGB
+value. M13 keeps markers inside the existing accent and neutral system:
+
+| Index | Token | Use |
+| ---: | --- | --- |
+| `0` | `accent` | Default editorial marker |
+| `1` | `text-primary` | High-emphasis neutral marker |
+| `2` | `text-secondary` | Supporting neutral marker |
+| `3` | `text-muted` | Low-emphasis neutral marker |
+
+Selection still uses `accent` regardless of the stored marker token. New marker
+colors require a design-token change and a corresponding stable index; raw or
+decorative per-marker colors are not allowed.
+
 ### Color application
 
 - Window and central canvas: `canvas`.
@@ -218,9 +234,15 @@ Each clip has three visual layers:
 Hover adds an `accent` 16% wash. Selection uses the selected fill/border tokens.
 Active drag uses `surface-active`, a `border-focus` outline, and 92% opacity.
 Trim handles are 6 points wide and appear on hover/selection. Snap candidates
-are clip edges, the playhead, and visible ruler ticks. A snap uses a 1 px
-`accent` guide through the timeline plus a 4 point `accent` diamond at the
-snapped edge. The snap tolerance is 8 screen points, independent of zoom.
+are clip edges on every track, project markers, the playhead, and visible ruler
+ticks. Holding Alt during a drag disables snapping. A snap uses a 1 px `accent`
+guide through the timeline plus a 4 point `accent` diamond at the snapped edge.
+The snap tolerance is 8 screen points, independent of zoom.
+
+Project markers are compact ruler flags using their stored marker color token.
+Hover reveals the marker label; selection and active drag use `accent`. The
+timeline toolbar's ripple-mode control uses the standard selected button fill
+and border plus a compact `RIPPLE` accent state label while enabled.
 
 The playhead is a 2 px `accent` line with a 10 by 8 downward handle in the ruler.
 The ruler and handle use immediate pointer tracking. Zoom and horizontal scroll

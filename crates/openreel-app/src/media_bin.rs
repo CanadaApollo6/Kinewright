@@ -1,7 +1,7 @@
 use std::{sync::Arc, thread};
 
 use eframe::egui;
-use openreel_core::{AssetId, MediaKind, Operation, TimeCode};
+use openreel_core::{AssetId, ClipId, MediaKind, Operation, TimeCode, Track, TrackId, TrackKind};
 
 use crate::{
     app::OpenReelApp,
@@ -31,10 +31,15 @@ impl OpenReelApp {
     }
 
     pub(crate) fn add_asset_to_timeline(&mut self, asset_id: AssetId) {
-        let Some(asset) = self.document.asset(asset_id) else {
+        let Some(asset) = self.document.asset(asset_id).cloned() else {
             self.record_error("Operations", format!("Asset {asset_id} no longer exists"));
             return;
         };
+        if asset.kind == MediaKind::AudioVideo {
+            self.add_audio_video_asset_to_timeline(&asset);
+            self.selected_asset = Some(asset_id);
+            return;
+        }
         let Some(track) = self
             .document
             .tracks
@@ -54,6 +59,13 @@ impl OpenReelApp {
             source: TimeCode::ZERO..asset.duration,
         });
         self.selected_asset = Some(asset_id);
+    }
+
+    fn add_audio_video_asset_to_timeline(&mut self, asset: &openreel_core::MediaAsset) {
+        match audio_video_placement_operations(&self.document, asset) {
+            Ok(operations) => self.send_operations(operations),
+            Err(error) => self.record_error("Operations", error),
+        }
     }
 
     // The media-bin immediate-mode pass keeps filtering, selection, and actions together.
@@ -184,6 +196,85 @@ impl OpenReelApp {
     }
 }
 
+fn audio_video_placement_operations(
+    document: &openreel_core::Document,
+    asset: &openreel_core::MediaAsset,
+) -> Result<Vec<Operation>, String> {
+    let video_track = document
+        .tracks
+        .iter()
+        .find(|track| track.kind == TrackKind::Video)
+        .map(|track| track.id)
+        .ok_or_else(|| format!("No video track exists for {}", asset.name))?;
+    let mut operations = Vec::new();
+    let audio_track = if let Some(track) = document
+        .tracks
+        .iter()
+        .find(|track| track.kind == TrackKind::Audio)
+    {
+        track.id
+    } else {
+        let track_id = next_track_id(document).ok_or("Track id space is exhausted")?;
+        operations.push(Operation::AddTrack {
+            track: Track {
+                id: track_id,
+                kind: TrackKind::Audio,
+                clips: Vec::new(),
+            },
+        });
+        track_id
+    };
+    let first_clip = next_clip_id(document).ok_or("Clip id space is exhausted")?;
+    let second_clip = first_clip
+        .0
+        .checked_add(1)
+        .map(ClipId)
+        .ok_or("Clip id space is exhausted")?;
+    let at = document.duration;
+    let source = TimeCode::ZERO..asset.duration;
+    operations.extend([
+        Operation::AddClip {
+            track: video_track,
+            asset: asset.id,
+            at,
+            source: source.clone(),
+        },
+        Operation::AddClip {
+            track: audio_track,
+            asset: asset.id,
+            at,
+            source,
+        },
+        Operation::LinkClips {
+            clips: vec![first_clip, second_clip],
+        },
+    ]);
+    Ok(operations)
+}
+
+fn next_track_id(document: &openreel_core::Document) -> Option<TrackId> {
+    document
+        .tracks
+        .iter()
+        .map(|track| track.id.0)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .map(TrackId)
+}
+
+fn next_clip_id(document: &openreel_core::Document) -> Option<ClipId> {
+    document
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .map(|clip| clip.id.0)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .map(ClipId)
+}
+
 fn asset_metadata(asset: &openreel_core::MediaAsset) -> String {
     let kind = match asset.kind {
         MediaKind::Video => "VIDEO",
@@ -199,4 +290,66 @@ fn asset_metadata(asset: &openreel_core::MediaAsset) -> String {
         asset.fps.numerator(),
         asset.fps.denominator()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use openreel_core::{Document, MediaAsset, Rational};
+
+    use super::*;
+
+    #[test]
+    fn audio_video_placement_creates_audio_track_and_links_both_clips() {
+        let fps = Rational::new(30, 1).unwrap();
+        let asset = MediaAsset {
+            id: AssetId(4),
+            path: PathBuf::from("interview.mp4"),
+            name: "interview.mp4".to_owned(),
+            duration: TimeCode(90),
+            fps,
+            kind: MediaKind::AudioVideo,
+            resolution: Some((1_920, 1_080)),
+        };
+        let document = Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                clips: Vec::new(),
+            }],
+            media_pool: vec![asset.clone()],
+            markers: Vec::new(),
+            fps,
+            resolution: (1_920, 1_080),
+            duration: TimeCode::ZERO,
+        };
+        assert_eq!(
+            audio_video_placement_operations(&document, &asset).unwrap(),
+            vec![
+                Operation::AddTrack {
+                    track: Track {
+                        id: TrackId(2),
+                        kind: TrackKind::Audio,
+                        clips: Vec::new(),
+                    },
+                },
+                Operation::AddClip {
+                    track: TrackId(1),
+                    asset: AssetId(4),
+                    at: TimeCode::ZERO,
+                    source: TimeCode::ZERO..TimeCode(90),
+                },
+                Operation::AddClip {
+                    track: TrackId(2),
+                    asset: AssetId(4),
+                    at: TimeCode::ZERO,
+                    source: TimeCode::ZERO..TimeCode(90),
+                },
+                Operation::LinkClips {
+                    clips: vec![ClipId(1), ClipId(2)],
+                },
+            ]
+        );
+    }
 }

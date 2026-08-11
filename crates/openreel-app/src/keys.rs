@@ -3,7 +3,7 @@ use std::collections::HashSet;
 
 use eframe::egui;
 use openreel_core::{
-    FrameRounding, Operation, TimeCode, map_frames_with_rounding, map_source_range_to_project,
+    FrameRounding, TimeCode, map_frames_with_rounding, map_source_range_to_project,
 };
 
 use crate::app::OpenReelApp;
@@ -13,6 +13,8 @@ pub(crate) enum KeyAction {
     TogglePlayback,
     Split,
     Delete,
+    RippleDelete,
+    AddMarker,
     Undo,
     Redo,
     ShuttleBackwardFrame,
@@ -30,10 +32,12 @@ pub(crate) enum KeyAction {
 }
 
 #[cfg(test)]
-const ALL_ACTIONS: [KeyAction; 17] = [
+const ALL_ACTIONS: [KeyAction; 19] = [
     KeyAction::TogglePlayback,
     KeyAction::Split,
     KeyAction::Delete,
+    KeyAction::RippleDelete,
+    KeyAction::AddMarker,
     KeyAction::Undo,
     KeyAction::Redo,
     KeyAction::ShuttleBackwardFrame,
@@ -54,15 +58,17 @@ const ALL_ACTIONS: [KeyAction; 17] = [
 pub(crate) struct KeyBinding {
     pub(crate) key: egui::Key,
     pub(crate) ctrl: bool,
+    pub(crate) shift: bool,
     pub(crate) action: KeyAction,
     pub(crate) shortcut: &'static str,
     pub(crate) description: &'static str,
 }
 
-pub(crate) const KEYMAP: [KeyBinding; 17] = [
+pub(crate) const KEYMAP: [KeyBinding; 19] = [
     KeyBinding {
         key: egui::Key::Space,
         ctrl: false,
+        shift: false,
         action: KeyAction::TogglePlayback,
         shortcut: "Space",
         description: "Play / pause",
@@ -70,6 +76,7 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::S,
         ctrl: false,
+        shift: false,
         action: KeyAction::Split,
         shortcut: "S",
         description: "Split selected or active clip",
@@ -77,13 +84,31 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::Delete,
         ctrl: false,
+        shift: false,
         action: KeyAction::Delete,
         shortcut: "Del",
         description: "Delete selected clip",
     },
     KeyBinding {
+        key: egui::Key::Delete,
+        ctrl: false,
+        shift: true,
+        action: KeyAction::RippleDelete,
+        shortcut: "Shift+Del",
+        description: "Ripple delete selected linked clip group",
+    },
+    KeyBinding {
+        key: egui::Key::M,
+        ctrl: false,
+        shift: false,
+        action: KeyAction::AddMarker,
+        shortcut: "M",
+        description: "Add marker at playhead",
+    },
+    KeyBinding {
         key: egui::Key::Z,
         ctrl: true,
+        shift: false,
         action: KeyAction::Undo,
         shortcut: "Ctrl+Z",
         description: "Undo",
@@ -91,6 +116,7 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::Y,
         ctrl: true,
+        shift: false,
         action: KeyAction::Redo,
         shortcut: "Ctrl+Y",
         description: "Redo",
@@ -98,6 +124,7 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::J,
         ctrl: false,
+        shift: false,
         action: KeyAction::ShuttleBackwardFrame,
         shortcut: "J",
         description: "Step one frame backward (reverse shuttle unavailable)",
@@ -105,6 +132,7 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::K,
         ctrl: false,
+        shift: false,
         action: KeyAction::Pause,
         shortcut: "K",
         description: "Pause",
@@ -112,6 +140,7 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::L,
         ctrl: false,
+        shift: false,
         action: KeyAction::PlayForward,
         shortcut: "L",
         description: "Play forward",
@@ -119,6 +148,7 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::ArrowLeft,
         ctrl: false,
+        shift: false,
         action: KeyAction::StepBackward,
         shortcut: "Left",
         description: "Step one frame backward",
@@ -126,6 +156,7 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::ArrowRight,
         ctrl: false,
+        shift: false,
         action: KeyAction::StepForward,
         shortcut: "Right",
         description: "Step one frame forward",
@@ -133,6 +164,7 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::Home,
         ctrl: false,
+        shift: false,
         action: KeyAction::JumpStart,
         shortcut: "Home",
         description: "Jump to project start",
@@ -140,6 +172,7 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::End,
         ctrl: false,
+        shift: false,
         action: KeyAction::JumpEnd,
         shortcut: "End",
         description: "Jump to project end",
@@ -147,6 +180,7 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::I,
         ctrl: false,
+        shift: false,
         action: KeyAction::SetIn,
         shortcut: "I",
         description: "Trim selected clip in to playhead",
@@ -154,6 +188,7 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::O,
         ctrl: false,
+        shift: false,
         action: KeyAction::SetOut,
         shortcut: "O",
         description: "Trim selected clip out to playhead",
@@ -161,6 +196,7 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::S,
         ctrl: true,
+        shift: false,
         action: KeyAction::Save,
         shortcut: "Ctrl+S",
         description: "Save project",
@@ -168,6 +204,7 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::E,
         ctrl: true,
+        shift: false,
         action: KeyAction::Export,
         shortcut: "Ctrl+E",
         description: "Open export dialog",
@@ -175,6 +212,7 @@ pub(crate) const KEYMAP: [KeyBinding; 17] = [
     KeyBinding {
         key: egui::Key::Questionmark,
         ctrl: false,
+        shift: true,
         action: KeyAction::Help,
         shortcut: "?",
         description: "Show keyboard help",
@@ -190,7 +228,10 @@ impl OpenReelApp {
             KEYMAP
                 .iter()
                 .find(|binding| {
-                    binding.ctrl == input.modifiers.ctrl && input.key_pressed(binding.key)
+                    binding.ctrl == input.modifiers.ctrl
+                        && binding.shift == input.modifiers.shift
+                        && !input.modifiers.alt
+                        && input.key_pressed(binding.key)
                 })
                 .map(|binding| binding.action)
         });
@@ -204,6 +245,8 @@ impl OpenReelApp {
             KeyAction::TogglePlayback => self.toggle_playback(),
             KeyAction::Split => self.split_at_playhead(),
             KeyAction::Delete => self.delete_selected(),
+            KeyAction::RippleDelete => self.ripple_delete_selected(),
+            KeyAction::AddMarker => self.add_marker_at_playhead(),
             KeyAction::Undo => self.undo(),
             KeyAction::Redo => self.redo(),
             KeyAction::ShuttleBackwardFrame | KeyAction::StepBackward => self.step_frames(-1),
@@ -312,10 +355,7 @@ impl OpenReelApp {
             }
             clip.source_range.start..source_at
         };
-        self.send_operation(Operation::TrimClip {
-            clip: clip_id,
-            new_source,
-        });
+        self.apply_linked_trim(clip_id, new_source);
     }
 
     pub(crate) fn show_help(&mut self, ctx: &egui::Context) {
@@ -345,7 +385,7 @@ mod tests {
     fn keymap_has_no_duplicates_and_every_action_is_reachable() {
         let bindings = KEYMAP
             .iter()
-            .map(|binding| (binding.key, binding.ctrl))
+            .map(|binding| (binding.key, binding.ctrl, binding.shift))
             .collect::<HashSet<_>>();
         assert_eq!(bindings.len(), KEYMAP.len(), "duplicate key binding");
 
