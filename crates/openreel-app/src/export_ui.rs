@@ -7,7 +7,8 @@ use std::{
 
 use eframe::egui;
 use openreel_core::{
-    ExportCancellation, ExportProgress, ExportSettings, MediaError, Rational, TimeCode,
+    CaptionCue, ExportCancellation, ExportProgress, ExportSettings, MediaError, Rational, TimeCode,
+    srt, vtt,
 };
 
 use crate::{
@@ -30,6 +31,28 @@ pub(crate) struct ExportJob {
     pub(crate) progress_rx: crossbeam_channel::Receiver<ExportProgress>,
     pub(crate) result_rx: mpsc::Receiver<(PathBuf, Result<(), MediaError>)>,
     pub(crate) progress: ExportProgress,
+}
+
+#[derive(Clone, Copy)]
+enum CaptionFormat {
+    Srt,
+    Vtt,
+}
+
+impl CaptionFormat {
+    const fn extension(self) -> &'static str {
+        match self {
+            Self::Srt => "srt",
+            Self::Vtt => "vtt",
+        }
+    }
+
+    const fn filter_name(self) -> &'static str {
+        match self {
+            Self::Srt => "SubRip captions",
+            Self::Vtt => "WebVTT captions",
+        }
+    }
 }
 
 impl OpenReelApp {
@@ -124,6 +147,51 @@ impl OpenReelApp {
         });
     }
 
+    fn save_caption_sidecar(&mut self, format: CaptionFormat, cues: &[CaptionCue]) {
+        let extension = format.extension();
+        let default_name = self.caption_default_file_name(extension);
+        let Some(mut path) = rfd::FileDialog::new()
+            .add_filter(format.filter_name(), &[extension])
+            .set_file_name(default_name)
+            .save_file()
+        else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension(extension);
+        }
+        let contents = match format {
+            CaptionFormat::Srt => srt(cues, self.document.fps),
+            CaptionFormat::Vtt => vtt(cues, self.document.fps),
+        };
+        match std::fs::write(&path, contents) {
+            Ok(()) => self.status = format!("Saved captions to {}", path.display()),
+            Err(error) => self.record_error(
+                "Captions",
+                format!("Could not save {}: {error}", path.display()),
+            ),
+        }
+    }
+
+    fn caption_default_file_name(&self, extension: &str) -> String {
+        let output = PathBuf::from(self.export_dialog.output.trim());
+        let stem = output
+            .file_stem()
+            .filter(|stem| !stem.is_empty())
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .or_else(|| {
+                self.document.media_pool.first().map(|asset| {
+                    std::path::Path::new(&asset.name)
+                        .file_stem()
+                        .unwrap_or(asset.name.as_ref())
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            })
+            .unwrap_or_else(|| "captions".to_owned());
+        format!("{stem}.{extension}")
+    }
+
     pub(crate) fn poll_export(&mut self, ctx: &egui::Context) {
         let mut completed = None;
         if let Some(job) = &mut self.export_job {
@@ -165,6 +233,8 @@ impl OpenReelApp {
         let mut browse = false;
         let mut start = false;
         let mut cancel = false;
+        let caption_cues = self.timeline_caption_cues();
+        let mut caption_format = None;
         egui::Window::new("Export")
             .open(&mut open)
             .resizable(false)
@@ -230,6 +300,27 @@ impl OpenReelApp {
                             );
                         });
                         ui.end_row();
+                        ui.label("Captions");
+                        ui.horizontal(|ui| {
+                            let enabled = caption_cues.is_ok();
+                            let disabled_reason =
+                                caption_cues.as_ref().err().map_or("", String::as_str);
+                            if ui
+                                .add_enabled(enabled, egui::Button::new("Save .srt"))
+                                .on_disabled_hover_text(disabled_reason)
+                                .clicked()
+                            {
+                                caption_format = Some(CaptionFormat::Srt);
+                            }
+                            if ui
+                                .add_enabled(enabled, egui::Button::new("Save .vtt"))
+                                .on_disabled_hover_text(disabled_reason)
+                                .clicked()
+                            {
+                                caption_format = Some(CaptionFormat::Vtt);
+                            }
+                        });
+                        ui.end_row();
                     });
                 ui.separator();
                 if let Some(job) = &self.export_job {
@@ -280,6 +371,9 @@ impl OpenReelApp {
         }
         if start {
             self.start_export();
+        }
+        if let (Some(format), Ok(cues)) = (caption_format, caption_cues) {
+            self.save_caption_sidecar(format, &cues);
         }
         if cancel && let Some(job) = &self.export_job {
             job.cancellation.cancel();

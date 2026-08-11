@@ -2,6 +2,7 @@
 
 mod actor;
 mod agent;
+mod captions;
 mod effect;
 mod journal;
 mod media;
@@ -16,6 +17,7 @@ pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,
 };
+pub use captions::{CaptionCue, caption_cues, srt, vtt};
 pub use effect::{
     EFFECT_DESCRIPTORS, EffectDescriptor, EffectParameterDescriptor, EffectUniform,
     effect_descriptor,

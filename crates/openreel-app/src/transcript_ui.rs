@@ -214,6 +214,7 @@ impl OpenReelApp {
                 .timeline_transcript(&self.document, None)
                 .unwrap_or_default(),
         );
+        let caption_cues = self.timeline_caption_cues();
         let statuses = self
             .document
             .media_pool
@@ -222,6 +223,9 @@ impl OpenReelApp {
             .collect::<Vec<_>>();
         if words.is_empty() {
             self.transcript_selection = None;
+            ui.horizontal(|ui| {
+                add_captions_button(ui, &caption_cues);
+            });
             if statuses.iter().any(|(_, status)| status.is_running()) {
                 ui.label("Transcribing…");
                 ui.ctx().request_repaint_after(Duration::from_millis(100));
@@ -270,41 +274,39 @@ impl OpenReelApp {
         let filler_count = crate::transcript_edit::filler_word_indices(&words).len();
         let mut cut_requested = false;
         let mut remove_fillers_requested = false;
-        if selection_summary.is_some() || filler_count > 0 {
-            ui.horizontal(|ui| {
-                if let Some((count, start, end)) = selection_summary {
-                    let noun = if count == 1 { "word" } else { "words" };
-                    if icons::button(ui, Icon::Delete, &format!("Cut {count} {noun} (Del)"))
-                        .clicked()
-                    {
-                        cut_requested = true;
-                    }
-                    ui.label(
-                        egui::RichText::new(format!("{count} {noun} selected"))
-                            .color(color::TEXT_SECONDARY),
-                    );
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{} – {}",
-                            format_timecode(start, self.document.fps),
-                            format_timecode(end, self.document.fps)
-                        ))
-                        .monospace()
-                        .color(color::TEXT_MUTED),
-                    );
+        let mut add_captions_requested = false;
+        ui.horizontal(|ui| {
+            if let Some((count, start, end)) = selection_summary {
+                let noun = if count == 1 { "word" } else { "words" };
+                if icons::button(ui, Icon::Delete, &format!("Cut {count} {noun} (Del)")).clicked() {
+                    cut_requested = true;
                 }
-                if filler_count > 0 {
-                    let label = filler_count_label(filler_count);
-                    ui.label(egui::RichText::new(&label).color(color::TEXT_MUTED));
-                    if icons::button(ui, Icon::Delete, &format!("Remove {label}"))
-                        .on_hover_text(format!("Remove {label} in one edit"))
-                        .clicked()
-                    {
-                        remove_fillers_requested = true;
-                    }
+                ui.label(
+                    egui::RichText::new(format!("{count} {noun} selected"))
+                        .color(color::TEXT_SECONDARY),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} – {}",
+                        format_timecode(start, self.document.fps),
+                        format_timecode(end, self.document.fps)
+                    ))
+                    .monospace()
+                    .color(color::TEXT_MUTED),
+                );
+            }
+            if filler_count > 0 {
+                let label = filler_count_label(filler_count);
+                ui.label(egui::RichText::new(&label).color(color::TEXT_MUTED));
+                if icons::button(ui, Icon::Delete, &format!("Remove {label}"))
+                    .on_hover_text(format!("Remove {label} in one edit"))
+                    .clicked()
+                {
+                    remove_fillers_requested = true;
                 }
-            });
-        }
+            }
+            add_captions_requested = add_captions_button(ui, &caption_cues);
+        });
 
         let panel_rect =
             egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 130.0));
@@ -370,6 +372,9 @@ impl OpenReelApp {
         if remove_fillers_requested {
             self.remove_filler_words();
         }
+        if add_captions_requested {
+            self.add_captions();
+        }
     }
 
     fn selected_transcript_asset(&self) -> Option<&MediaAsset> {
@@ -391,6 +396,18 @@ impl OpenReelApp {
         }
         ui.ctx().request_repaint_after(Duration::from_millis(100));
     }
+}
+
+fn add_captions_button(
+    ui: &mut egui::Ui,
+    cues: &Result<Vec<openreel_core::CaptionCue>, String>,
+) -> bool {
+    let enabled = cues.is_ok();
+    let disabled_reason = cues.as_ref().err().map_or("", String::as_str);
+    ui.add_enabled_ui(enabled, |ui| icons::button(ui, Icon::Add, "Add captions"))
+        .inner
+        .on_disabled_hover_text(disabled_reason)
+        .clicked()
 }
 
 fn transcript_word_button(

@@ -1,4 +1,5 @@
 mod app;
+mod captions;
 mod chat_ui;
 mod error_ui;
 mod export_ui;
