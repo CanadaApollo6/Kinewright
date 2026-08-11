@@ -56,51 +56,34 @@ pub(crate) enum ChatEntry {
     Cost {
         input_tokens: u64,
         output_tokens: u64,
-        cost_usd: Option<f64>,
     },
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct CostAccumulator {
+/// Session token usage. Dollar figures are deliberately not surfaced: the
+/// supported harnesses run on flat-fee subscriptions, so a running cost
+/// readout is noise; the turn cap bounds runaway sessions instead.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct UsageAccumulator {
     pub(crate) input_tokens: u64,
     pub(crate) output_tokens: u64,
-    pub(crate) total_usd: f64,
-    pub(crate) soft_cap_usd: f64,
 }
 
-impl Default for CostAccumulator {
-    fn default() -> Self {
-        Self {
-            input_tokens: 0,
-            output_tokens: 0,
-            total_usd: 0.0,
-            soft_cap_usd: 1.0,
-        }
-    }
-}
-
-impl CostAccumulator {
+impl UsageAccumulator {
     pub(crate) fn record(&mut self, event: &AgentEvent) {
         if let AgentEvent::Cost {
             input_tokens,
             output_tokens,
-            cost_usd,
+            ..
         } = event
         {
             self.input_tokens = self.input_tokens.saturating_add(*input_tokens);
             self.output_tokens = self.output_tokens.saturating_add(*output_tokens);
-            self.total_usd += cost_usd.unwrap_or_default();
         }
-    }
-
-    pub(crate) fn cap_reached(&self) -> bool {
-        self.total_usd >= self.soft_cap_usd
     }
 
     pub(crate) fn reset_usage(&mut self) {
         self.input_tokens = 0;
         self.output_tokens = 0;
-        self.total_usd = 0.0;
     }
 }
 
@@ -108,16 +91,6 @@ impl OpenReelApp {
     pub(crate) fn start_agent_turn(&mut self) {
         let message = self.agent_input.trim().to_owned();
         if message.is_empty() || self.agent_running {
-            return;
-        }
-        if self.agent_cost.cap_reached() {
-            self.record_error(
-                "Agent",
-                format!(
-                    "Agent cost cap reached (${:.4} / ${:.2}); raise the cap to continue",
-                    self.agent_cost.total_usd, self.agent_cost.soft_cap_usd
-                ),
-            );
             return;
         }
         let Some(endpoint) = self
@@ -141,7 +114,7 @@ impl OpenReelApp {
         }
 
         if self.agent_session.is_none() {
-            self.agent_cost.reset_usage();
+            self.agent_usage.reset_usage();
             let working_directory = self
                 .project_path
                 .as_deref()
@@ -217,7 +190,7 @@ impl OpenReelApp {
             .map(|receiver| receiver.try_iter().collect::<Vec<_>>())
             .unwrap_or_default();
         for event in events {
-            self.agent_cost.record(&event);
+            self.agent_usage.record(&event);
             match event {
                 AgentEvent::Text(text) => self.chat.push(ChatEntry::Text(text)),
                 AgentEvent::Error(error) => {
@@ -233,11 +206,10 @@ impl OpenReelApp {
                 AgentEvent::Cost {
                     input_tokens,
                     output_tokens,
-                    cost_usd,
+                    ..
                 } => self.chat.push(ChatEntry::Cost {
                     input_tokens,
                     output_tokens,
-                    cost_usd,
                 }),
                 AgentEvent::Done => {
                     self.agent_running = false;
@@ -379,27 +351,10 @@ impl OpenReelApp {
                 egui::DragValue::new(&mut self.agent_turn_cap).range(1..=20),
             );
         });
-        ui.horizontal(|ui| {
-            ui.label(format!(
-                "Session: ${:.4} · {} in / {} out",
-                self.agent_cost.total_usd,
-                self.agent_cost.input_tokens,
-                self.agent_cost.output_tokens
-            ));
-            ui.label("Soft cap $");
-            ui.add(
-                egui::DragValue::new(&mut self.agent_cost.soft_cap_usd)
-                    .range(0.01..=1_000.0)
-                    .speed(0.05)
-                    .max_decimals(2),
-            );
-        });
-        if self.agent_cost.cap_reached() {
-            ui.colored_label(
-                color::STATUS_WARNING,
-                "Cost cap reached. Raise the soft cap to send another message.",
-            );
-        }
+        ui.label(format!(
+            "Session: {} in / {} out tokens",
+            self.agent_usage.input_tokens, self.agent_usage.output_tokens
+        ));
         ui.separator();
 
         let mut confirmation_decision = None;
@@ -513,15 +468,11 @@ impl OpenReelApp {
                         ChatEntry::Cost {
                             input_tokens,
                             output_tokens,
-                            cost_usd,
                         } => {
-                            let cost = cost_usd
-                                .map(|cost| format!(", ${cost:.4}"))
-                                .unwrap_or_default();
                             ui.colored_label(
                                 color::TEXT_MUTED,
                                 egui::RichText::new(format!(
-                                    "{input_tokens} input / {output_tokens} output tokens{cost}"
+                                    "{input_tokens} input / {output_tokens} output tokens"
                                 ))
                                 .size(type_size::MICRO),
                             );
@@ -549,7 +500,6 @@ impl OpenReelApp {
             let can_send = !self.agent_running
                 && !self.agent_input.trim().is_empty()
                 && selected_available
-                && !self.agent_cost.cap_reached()
                 && self.mcp_server.is_some();
             if ui
                 .add_enabled(
@@ -627,11 +577,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cost_events_accumulate_and_enforce_the_soft_cap() {
-        let mut costs = CostAccumulator {
-            soft_cap_usd: 0.05,
-            ..CostAccumulator::default()
-        };
+    fn cost_events_accumulate_token_usage() {
+        let mut usage = UsageAccumulator::default();
         let events = [
             AgentEvent::Cost {
                 input_tokens: 100,
@@ -651,13 +598,12 @@ mod tests {
             },
         ];
         for event in &events {
-            costs.record(event);
+            usage.record(event);
         }
-        assert_eq!(costs.input_tokens, 225);
-        assert_eq!(costs.output_tokens, 45);
-        assert!((costs.total_usd - 0.05).abs() < f64::EPSILON);
-        assert!(costs.cap_reached());
-        costs.soft_cap_usd = 0.06;
-        assert!(!costs.cap_reached());
+        assert_eq!(usage.input_tokens, 225);
+        assert_eq!(usage.output_tokens, 45);
+        usage.reset_usage();
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
     }
 }

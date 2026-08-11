@@ -17,7 +17,7 @@ use openreel_core::{
 use openreel_media::{FfmpegMediaEngine, GpuContext};
 
 use crate::{
-    chat_ui::{AgentHarnessChoice, ChatEntry, CostAccumulator},
+    chat_ui::{AgentHarnessChoice, ChatEntry, UsageAccumulator},
     error_ui::ErrorLog,
     export_ui::{ExportDialog, ExportJob},
     icons::Icon,
@@ -54,7 +54,7 @@ pub(crate) struct OpenReelApp {
     pub(crate) agent_running: bool,
     pub(crate) agent_input: String,
     pub(crate) agent_turn_cap: u32,
-    pub(crate) agent_cost: CostAccumulator,
+    pub(crate) agent_usage: UsageAccumulator,
     pub(crate) chat: Vec<ChatEntry>,
     pub(crate) confirmations: Option<ConfirmationBroker>,
     pub(crate) pending_confirmations: Vec<ConfirmationRequest>,
@@ -150,7 +150,7 @@ impl OpenReelApp {
             agent_running: false,
             agent_input: String::new(),
             agent_turn_cap: 8,
-            agent_cost: CostAccumulator::default(),
+            agent_usage: UsageAccumulator::default(),
             chat,
             confirmations,
             pending_confirmations: Vec::new(),
