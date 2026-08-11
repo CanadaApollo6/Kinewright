@@ -62,5 +62,16 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   framework, `MediaEngine` split into Playback/Analysis/Export facets, fmt and
   clippy (`-D warnings`) enforced in CI (see `docs/AUDIT-2026-08.md`)
 - OpenReel icon set by GPT-5.6 Luna (app, taskbar, installer, README)
+- Text-based editing: select words in the transcript panel and Delete to
+  ripple-cut the media underneath — atomic across sync-locked tracks, one undo
+  entry, retained words protected by an fps-aware safety margin, linked-A/V
+  word copies collapsed to one editable sentence
+- One-click filler-word removal (um, uh, erm, hmm, mm, mhm — deliberately
+  conservative) cutting every filler in a single undoable batch, with fillers
+  rendered muted-and-underlined in the transcript
+- Captions: SRT/WebVTT sidecar export with exact integer timestamp math, and
+  burn-in as lower-third scrimmed title clips on their own sync-locked track —
+  one undo removes the caption track, and the shared render path means
+  burned-in captions export exactly as previewed
 
 [Unreleased]: https://github.com/CanadaApollo6/OpenReel/commits/main
