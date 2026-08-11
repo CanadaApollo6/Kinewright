@@ -114,6 +114,10 @@ impl OpenReelApp {
     }
 
     pub(crate) fn delete_selected(&mut self) {
+        if self.transcript_selection.is_some() {
+            self.cut_selected_transcript_words();
+            return;
+        }
         if let Some(marker) = self.selected_marker {
             self.send_operation(Operation::RemoveMarker { marker });
             return;

@@ -224,6 +224,17 @@ impl OpenReelApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
+        if self.transcript_selection.is_some()
+            && ctx.input(|input| {
+                !input.modifiers.ctrl
+                    && !input.modifiers.shift
+                    && !input.modifiers.alt
+                    && input.key_pressed(egui::Key::Backspace)
+            })
+        {
+            self.delete_selected();
+            return;
+        }
         let action = ctx.input(|input| {
             KEYMAP
                 .iter()

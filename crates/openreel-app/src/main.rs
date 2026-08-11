@@ -11,6 +11,7 @@ mod recovery;
 mod screenshot;
 mod theme;
 mod timeline_ui;
+mod transcript_edit;
 mod transcript_ui;
 mod transport;
 mod visual_cache;

@@ -1,9 +1,14 @@
-use std::time::Duration;
+use std::{ops::RangeInclusive, time::Duration};
 
 use eframe::egui;
-use openreel_core::{MediaAsset, TimelineTranscriptWord, TranscriptStatus};
+use openreel_core::{ClipId, MediaAsset, TimeCode, TimelineTranscriptWord, TranscriptStatus};
 
-use crate::{app::OpenReelApp, theme::color};
+use crate::{
+    app::OpenReelApp,
+    icons::{self, Icon},
+    theme::{color, radius, space},
+    timeline_ui::format_timecode,
+};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TranscriptScope {
@@ -12,11 +17,60 @@ pub(crate) enum TranscriptScope {
     Timeline,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TranscriptWordIdentity {
+    clip: ClipId,
+    source_start: TimeCode,
+}
+
+impl From<&TimelineTranscriptWord> for TranscriptWordIdentity {
+    fn from(word: &TimelineTranscriptWord) -> Self {
+        Self {
+            clip: word.clip,
+            source_start: word.source_start,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TranscriptSelection {
+    anchor: TranscriptWordIdentity,
+    head: TranscriptWordIdentity,
+}
+
+impl TranscriptSelection {
+    pub(crate) fn single(word: &TimelineTranscriptWord) -> Self {
+        let identity = TranscriptWordIdentity::from(word);
+        Self {
+            anchor: identity,
+            head: identity,
+        }
+    }
+
+    fn extend_to(self, word: &TimelineTranscriptWord) -> Self {
+        Self {
+            head: TranscriptWordIdentity::from(word),
+            ..self
+        }
+    }
+
+    pub(crate) fn indices(self, words: &[TimelineTranscriptWord]) -> Option<RangeInclusive<usize>> {
+        let anchor = words
+            .iter()
+            .position(|word| TranscriptWordIdentity::from(word) == self.anchor)?;
+        let head = words
+            .iter()
+            .position(|word| TranscriptWordIdentity::from(word) == self.head)?;
+        Some(anchor.min(head)..=anchor.max(head))
+    }
+}
+
 impl OpenReelApp {
     pub(crate) fn transcript_panel(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Transcript")
             .default_open(true)
             .show(ui, |ui| {
+                let previous_scope = self.transcript_scope;
                 ui.horizontal(|ui| {
                     ui.selectable_value(
                         &mut self.transcript_scope,
@@ -29,6 +83,9 @@ impl OpenReelApp {
                         "Selected asset",
                     );
                 });
+                if self.transcript_scope != previous_scope {
+                    self.transcript_selection = None;
+                }
                 match self.transcript_scope {
                     TranscriptScope::Asset => self.asset_transcript_ui(ui),
                     TranscriptScope::Timeline => self.timeline_transcript_ui(ui),
@@ -145,11 +202,16 @@ impl OpenReelApp {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn timeline_transcript_ui(&mut self, ui: &mut egui::Ui) {
-        let words = self
-            .analysis
-            .timeline_transcript(&self.document, None)
-            .unwrap_or_default();
+        if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.transcript_selection = None;
+        }
+        let words = crate::transcript_edit::dedup_linked_timeline_words(
+            self.analysis
+                .timeline_transcript(&self.document, None)
+                .unwrap_or_default(),
+        );
         let statuses = self
             .document
             .media_pool
@@ -157,6 +219,7 @@ impl OpenReelApp {
             .map(|asset| (asset, self.analysis.transcript_status(asset.id)))
             .collect::<Vec<_>>();
         if words.is_empty() {
+            self.transcript_selection = None;
             if statuses.iter().any(|(_, status)| status.is_running()) {
                 ui.label("Transcribing…");
                 ui.ctx().request_repaint_after(Duration::from_millis(100));
@@ -180,20 +243,102 @@ impl OpenReelApp {
             return;
         }
 
-        let mut seek = None;
+        let mut selected = self
+            .transcript_selection
+            .and_then(|selection| selection.indices(&words));
+        if self.transcript_selection.is_some() && selected.is_none() {
+            self.transcript_selection = None;
+        }
+
+        let mut cut_requested = false;
+        if let Some(range) = &selected {
+            let selection_words = &words[*range.start()..=*range.end()];
+            let start = selection_words
+                .iter()
+                .map(|word| word.project_start)
+                .min()
+                .expect("a transcript selection is non-empty");
+            let end = selection_words
+                .iter()
+                .map(|word| word.project_end)
+                .max()
+                .expect("a transcript selection is non-empty");
+            let count = range.end().saturating_sub(*range.start()).saturating_add(1);
+            let noun = if count == 1 { "word" } else { "words" };
+            ui.horizontal(|ui| {
+                if icons::button(ui, Icon::Delete, &format!("Cut {count} {noun} (Del)")).clicked() {
+                    cut_requested = true;
+                }
+                ui.label(
+                    egui::RichText::new(format!("{count} {noun} selected"))
+                        .color(color::TEXT_SECONDARY),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} – {}",
+                        format_timecode(start, self.document.fps),
+                        format_timecode(end, self.document.fps)
+                    ))
+                    .monospace()
+                    .color(color::TEXT_MUTED),
+                );
+            });
+        }
+
+        let panel_rect =
+            egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 130.0));
+        let panel_hovered = ui.rect_contains_pointer(panel_rect);
+        let mut clicked_word = None;
+        let mut empty_clicked = false;
         egui::ScrollArea::vertical()
             .max_height(130.0)
             .show(ui, |ui| {
+                ui.set_min_size(panel_rect.size());
+                let panel_response = ui.interact(
+                    egui::Rect::from_min_size(ui.cursor().min, panel_rect.size()),
+                    ui.id().with("timeline-transcript-empty"),
+                    egui::Sense::click(),
+                );
                 ui.horizontal_wrapped(|ui| {
-                    for word in &words {
-                        if transcript_word_button(ui, word).clicked() {
-                            seek = Some(word.project_start);
+                    for (index, word) in words.iter().enumerate() {
+                        let is_selected = selected
+                            .as_ref()
+                            .is_some_and(|range| range.contains(&index));
+                        let is_playhead =
+                            self.position >= word.project_start && self.position < word.project_end;
+                        let response = transcript_word_button(ui, word, is_selected, is_playhead);
+                        if self.playing && selected.is_none() && !panel_hovered && is_playhead {
+                            response.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        if response.clicked() {
+                            clicked_word = Some((index, ui.input(|input| input.modifiers.shift)));
                         }
                     }
                 });
+                empty_clicked = panel_response.clicked();
             });
-        if let Some(position) = seek {
-            self.seek_to(position);
+
+        if let Some((index, extend)) = clicked_word {
+            let word = &words[index];
+            self.seek_to(word.project_start);
+            self.transcript_selection = Some(if extend {
+                self.transcript_selection.map_or_else(
+                    || TranscriptSelection::single(word),
+                    |selection| selection.extend_to(word),
+                )
+            } else {
+                TranscriptSelection::single(word)
+            });
+            selected = self
+                .transcript_selection
+                .and_then(|selection| selection.indices(&words));
+        } else if empty_clicked {
+            self.transcript_selection = None;
+            selected = None;
+        }
+
+        if cut_requested && selected.is_some() {
+            self.cut_selected_transcript_words();
         }
     }
 
@@ -218,9 +363,79 @@ impl OpenReelApp {
     }
 }
 
-fn transcript_word_button(ui: &mut egui::Ui, word: &TimelineTranscriptWord) -> egui::Response {
-    ui.small_button(&word.text).on_hover_text(format!(
+fn transcript_word_button(
+    ui: &mut egui::Ui,
+    word: &TimelineTranscriptWord,
+    selected: bool,
+    playhead: bool,
+) -> egui::Response {
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = egui::vec2(space::HALF, space::HALF);
+        ui.spacing_mut().interact_size = egui::Vec2::ZERO;
+        let idle_fill = if selected {
+            color::ACCENT_28
+        } else {
+            color::PANEL
+        };
+        let hover_fill = if selected {
+            color::ACCENT_28
+        } else {
+            color::SURFACE_ACTIVE
+        };
+        ui.style_mut().visuals.widgets.inactive.bg_fill = idle_fill;
+        ui.style_mut().visuals.widgets.inactive.weak_bg_fill = idle_fill;
+        ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+        ui.style_mut().visuals.widgets.active.bg_fill = idle_fill;
+        ui.style_mut().visuals.widgets.active.weak_bg_fill = idle_fill;
+        ui.style_mut().visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+        ui.style_mut().visuals.widgets.hovered.bg_fill = hover_fill;
+        ui.style_mut().visuals.widgets.hovered.weak_bg_fill = hover_fill;
+        ui.style_mut().visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+        let text = if playhead {
+            egui::RichText::new(&word.text).color(color::ACCENT)
+        } else {
+            egui::RichText::new(&word.text)
+        };
+        ui.add(
+            egui::Button::new(text)
+                .fill(idle_fill)
+                .stroke(egui::Stroke::NONE)
+                .corner_radius(radius::XS)
+                .min_size(egui::Vec2::ZERO),
+        )
+    })
+    .inner
+    .on_hover_text(format!(
         "project {}..{} frames · source {}..{} frames · clip {}",
         word.project_start.0, word.project_end.0, word.source_start.0, word.source_end.0, word.clip
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use openreel_core::{AssetId, TrackId};
+
+    use super::*;
+
+    fn word(clip: u64, source_start: i64) -> TimelineTranscriptWord {
+        TimelineTranscriptWord {
+            text: format!("word-{source_start}"),
+            asset: AssetId(clip),
+            track: TrackId(1),
+            clip: ClipId(clip),
+            source_start: TimeCode(source_start),
+            source_end: TimeCode(source_start + 5),
+            project_start: TimeCode(source_start),
+            project_end: TimeCode(source_start + 5),
+        }
+    }
+
+    #[test]
+    fn selection_anchor_and_head_resolve_by_clip_and_source_identity() {
+        let original = [word(1, 10), word(1, 20)];
+        let selection = TranscriptSelection::single(&original[0]).extend_to(&original[1]);
+        let rerendered = [word(2, 0), original[0].clone(), original[1].clone()];
+
+        assert_eq!(selection.indices(&rerendered), Some(1..=2));
+    }
 }

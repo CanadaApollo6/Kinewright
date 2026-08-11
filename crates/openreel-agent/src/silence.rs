@@ -1,17 +1,6 @@
 use openreel_core::{Rational, SilenceSpan, TimeCode, TranscriptWord};
 
-/// Return the 100 ms speech-safety margin in exact source frames.
-#[must_use]
-pub fn silence_cut_margin_frames(source_fps: Rational) -> TimeCode {
-    if !source_fps.is_valid() {
-        return TimeCode::ZERO;
-    }
-
-    let numerator = u64::from(source_fps.numerator());
-    let denominator = u64::from(source_fps.denominator()) * 10;
-    let rounded = (numerator + denominator / 2) / denominator;
-    TimeCode(i64::try_from(rounded).unwrap_or(i64::MAX))
-}
+pub use openreel_core::silence_cut_margin_frames;
 
 /// Shrink a raw detector span on both sides for safe cutting.
 ///

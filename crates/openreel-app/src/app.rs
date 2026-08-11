@@ -22,7 +22,7 @@ use crate::{
     export_ui::{ExportDialog, ExportJob},
     icons::Icon,
     theme::{self, color, size, space, type_size},
-    transcript_ui::TranscriptScope,
+    transcript_ui::{TranscriptScope, TranscriptSelection},
 };
 
 const DEFAULT_TRACK_ID: TrackId = TrackId(1);
@@ -72,6 +72,7 @@ pub(crate) struct OpenReelApp {
     pub(crate) marker_label_draft: Option<(MarkerId, String)>,
     pub(crate) title_text_focus: Option<ClipId>,
     pub(crate) transcript_scope: TranscriptScope,
+    pub(crate) transcript_selection: Option<TranscriptSelection>,
     pub(crate) pixels_per_frame: f32,
     pub(crate) timeline_zoom_target: f32,
     pub(crate) timeline_scroll_target: f32,
@@ -167,6 +168,7 @@ impl OpenReelApp {
             marker_label_draft: None,
             title_text_focus: None,
             transcript_scope: TranscriptScope::default(),
+            transcript_selection: None,
             pixels_per_frame: 6.0,
             timeline_zoom_target: 6.0,
             timeline_scroll_target: 0.0,
@@ -472,6 +474,7 @@ impl OpenReelApp {
         self.selected_clip = None;
         self.selected_marker = None;
         self.selected_asset = None;
+        self.transcript_selection = None;
         self.texture = None;
         self.visual_cache.clear();
         self.playback.set_document(Arc::clone(&self.document));
@@ -491,24 +494,17 @@ impl OpenReelApp {
     }
 
     pub(crate) fn send_operations(&mut self, operations: Vec<Operation>) {
-        match operations.len() {
-            0 => {}
-            1 => self.send_operation(
-                operations
-                    .into_iter()
-                    .next()
-                    .expect("a one-operation vector has one item"),
-            ),
-            count => {
-                if self.core.send(Command::DoBatch(operations)).is_err() {
-                    self.record_error(
-                        "Operations",
-                        "Core actor stopped while applying the linked edit",
-                    );
-                } else {
-                    self.status = format!("Applying {count} linked editsâ€¦");
-                }
-            }
+        let count = operations.len();
+        if count == 0 {
+            return;
+        }
+        if self.core.send(Command::DoBatch(operations)).is_err() {
+            self.record_error(
+                "Operations",
+                "Core actor stopped while applying the edit batch",
+            );
+        } else {
+            self.status = format!("Applying {count} batched editsâ€¦");
         }
     }
 
@@ -575,6 +571,7 @@ impl OpenReelApp {
                         .cloned()
                         .collect::<Vec<_>>();
                     self.document = Arc::clone(&doc);
+                    self.transcript_selection = None;
                     if self
                         .selected_clip
                         .is_some_and(|clip| doc.clip(clip).is_none())

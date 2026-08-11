@@ -9,6 +9,7 @@ mod model;
 mod operation;
 mod time;
 mod title;
+mod transcript_edit;
 
 pub use actor::{Command, Core, CoreDisconnected, Event, Query, QueryResult};
 pub use agent::{
@@ -43,3 +44,4 @@ pub use title::{
     TitleFontSizeDescriptor, TitleParameterDescriptor, TitleParameterKind, TitlePosition,
     title_color, title_font_size, title_parameter_descriptor, title_parameter_value,
 };
+pub use transcript_edit::{TranscriptCutRange, silence_cut_margin_frames, transcript_cut_ranges};
