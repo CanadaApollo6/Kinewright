@@ -474,7 +474,12 @@ fn standard_budget(max_operations: u32, max_undos: u32) -> EvalBudgets {
         max_tool_calls: 16,
         max_operations,
         max_tokens: 30_000,
-        max_cost_usd: 0.75,
+        // The first session of any batch pays a ~3x cold-cache billing
+        // premium, and in full-suite runs that lands on whichever eval runs
+        // first. The ceiling catches runaways, not positional billing
+        // variance (observed: a correct $0.40-class e1 billed $1.67 as the
+        // suite opener).
+        max_cost_usd: 2.00,
         max_wall_time: Duration::from_mins(5),
         max_undos,
     }

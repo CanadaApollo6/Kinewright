@@ -16,13 +16,13 @@ Results are written as timestamped, environment-stamped JSONL under `target/eval
 
 | Eval | Rationale | USD ceiling |
 |---|---|---:|
-| e1 split-and-delete | Measures the original M3 compound edit with exact source-range semantics. | $0.75 |
-| e2 silence-gap removal | Measures analysis-led dead-air removal without coupling success to Whisper spelling. | $0.75 |
-| e3 filler-word removal | Measures transcript-driven deletion while retaining every non-filler word heard pre-edit. | $0.75 |
-| e4 scene-cut | Measures scene analysis and exact splitting without prescribing a plan shape. | $0.75 |
-| e5 effect-and-transition | Measures non-destructive effect and transition orchestration on an ordinal target. | $0.75 |
-| e6 ordinal-resolution stress | Catches the M3 trap where an early split renumbers later ordinal targets. | $0.75 |
-| e7 flagship rough cut | Measures deterministic rough-cut assembly, cleanup, ordering, and reversibility from an empty timeline. | $1.50 |
+| e1 split-and-delete | Measures the original M3 compound edit with exact source-range semantics. | $2.00 |
+| e2 silence-gap removal | Measures analysis-led dead-air removal without coupling success to Whisper spelling. | $2.00 |
+| e3 filler-word removal | Measures transcript-driven deletion while retaining every non-filler word heard pre-edit. | $2.00 |
+| e4 scene-cut | Measures scene analysis and exact splitting without prescribing a plan shape. | $2.00 |
+| e5 effect-and-transition | Measures non-destructive effect and transition orchestration on an ordinal target. | $2.00 |
+| e6 ordinal-resolution stress | Catches the M3 trap where an early split renumbers later ordinal targets. | $2.00 |
+| e7 flagship rough cut | Measures deterministic rough-cut assembly, cleanup, ordering, and reversibility from an empty timeline. | $2.50 |
 
 ## Baseline snapshot
 
@@ -33,19 +33,19 @@ This is the latest complete live run. Assertion failures remain part of the meas
 - Harness version: `2.1.227 (Claude Code)`
 - Model: `harness-default`
 - Platform: `windows-x86_64`
-- Result artifact: `target/evals\openreel-eval-20260811-020441-claude-code.jsonl`
+- Result artifact: `target/evals\openreel-eval-20260811-145547-claude-code.jsonl`
 
 | Eval | Pass | Assertions | Turns | Tools | Tokens | USD | Wall | Ops |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| e1 split-and-delete | PASS | 13/13 | 1 | 3 | 434 | $0.6946 | 12.7s | 2 |
-| e2 silence-gap removal | PASS | 15/15 | 1 | 6 | 1855 | $0.2840 | 32.9s | 3 |
-| e3 filler-word removal | PASS | 14/14 | 1 | 4 | 836 | $0.2254 | 23.1s | 4 |
-| e4 scene-cut | PASS | 13/13 | 1 | 4 | 683 | $0.2088 | 16.8s | 2 |
-| e5 effect-and-transition | PASS | 15/15 | 1 | 3 | 406 | $0.1601 | 23.4s | 2 |
-| e6 ordinal-resolution stress | PASS | 14/14 | 1 | 3 | 614 | $0.1809 | 16.2s | 4 |
-| e7 flagship rough cut | FAIL | 22/24 | 1 | 11 | 4894 | $0.5263 | 73.3s | 7 |
-| **TOTAL** | **FAIL** | **106/108** | **7** | **34** | **9722** | **$2.2802** | **198.8s** | **24** |
+| e1 split-and-delete | PASS | 13/13 | 1 | 3 | 416 | $0.3260 | 13.9s | 2 |
+| e2 silence-gap removal | PASS | 15/15 | 1 | 5 | 1105 | $0.4443 | 25.9s | 3 |
+| e3 filler-word removal | PASS | 14/14 | 1 | 4 | 874 | $0.3721 | 24.2s | 3 |
+| e4 scene-cut | PASS | 13/13 | 1 | 4 | 660 | $0.3479 | 16.1s | 2 |
+| e5 effect-and-transition | PASS | 15/15 | 1 | 2 | 337 | $0.2460 | 12.2s | 2 |
+| e6 ordinal-resolution stress | PASS | 14/14 | 1 | 3 | 608 | $0.3509 | 17.7s | 3 |
+| e7 flagship rough cut | FAIL | 22/24 | 1 | 9 | 2810 | $0.5943 | 45.8s | 7 |
+| **TOTAL** | **FAIL** | **106/108** | **7** | **30** | **6810** | **$2.6815** | **156.0s** | **22** |
 
 ### Failures
 
-- `e7 flagship rough cut`: long silence absent (observed 3 silence spans at least 20 source frames); duration bounds (expected 162..=405 frames, observed 437)
+- `e7 flagship rough cut`: long silence absent (observed 3 cuttable silence spans from raw spans at least 20 source frames); duration bounds (expected 178..=445 frames, observed 459)
