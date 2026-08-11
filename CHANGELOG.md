@@ -111,5 +111,10 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   computation understands ripples: a shifted-but-identical tail is not a
   change. The composer anchors to the bottom of the session with the
   harness picker, auth state, and session tokens in the composer row
+- Slash commands in the composer: type / for filtered suggestions; Enter
+  runs the top match, Enter sends plain messages (Shift+Enter for a
+  newline). Ships with instant local commands (/remove-fillers, /captions,
+  /freeze, /export, /undo, /redo, /help) and agent prompt commands
+  (/cut-silences, /tighten)
 
 [Unreleased]: https://github.com/CanadaApollo6/OpenReel/commits/main

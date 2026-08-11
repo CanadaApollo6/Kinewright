@@ -182,6 +182,29 @@ impl OpenReelApp {
         }
     }
 
+    /// Run one registry command: prompt commands expand into an agent turn;
+    /// local commands act instantly and log themselves to the stream.
+    fn run_slash_command(&mut self, command: &'static crate::slash::SlashCommand) {
+        use crate::slash::SlashAction;
+        if let SlashAction::Prompt(template) = command.action {
+            template.clone_into(&mut self.agent_input);
+            self.start_agent_turn();
+            return;
+        }
+        self.chat
+            .push(ChatEntry::User(format!("/{}", command.name)));
+        match command.action {
+            SlashAction::RemoveFillers => self.remove_filler_words(),
+            SlashAction::AddCaptions => self.add_captions(),
+            SlashAction::FreezeFrame => self.freeze_frame_at_playhead(),
+            SlashAction::Export => self.open_export_dialog(),
+            SlashAction::Undo => self.undo(),
+            SlashAction::Redo => self.redo(),
+            SlashAction::Help => self.chat.push(ChatEntry::Text(crate::slash::help_text())),
+            SlashAction::Prompt(_) => {}
+        }
+    }
+
     pub(crate) fn stop_agent(&mut self) {
         if let Some(confirmations) = &self.confirmations {
             confirmations.reject_all("the agent session was interrupted");
@@ -494,20 +517,27 @@ impl OpenReelApp {
             Some(EditCardAction::Undo) => self.undo(),
             None => {}
         }
-        if self.chat.is_empty() {
-            ui.label(
-                egui::RichText::new(
-                    "Ask for an edit in plain language. The agent sees your timeline, \
-                     transcript, silences, and scene changes, and every change it makes is \
-                     one undo away.",
-                )
-                .color(color::TEXT_MUTED)
-                .italics(),
-            );
-            ui.add_space(space::ONE);
+        // Slash suggestions float directly above the composer while typing.
+        let matches = crate::slash::matching_commands(&self.agent_input);
+        let mut run_command: Option<&'static crate::slash::SlashCommand> = None;
+        if !matches.is_empty() {
+            chat_frame(color::SURFACE_RAISED, color::BORDER_SUBTLE).show(ui, |ui| {
+                for command in &matches {
+                    let label = format!("/{}", command.name);
+                    ui.horizontal(|ui| {
+                        if ui.small_button(&label).clicked() {
+                            run_command = Some(*command);
+                        }
+                        ui.colored_label(
+                            color::TEXT_MUTED,
+                            egui::RichText::new(command.description).size(type_size::CAPTION),
+                        );
+                    });
+                }
+            });
         }
         ui.add_space(space::ONE);
-        egui::Frame::new()
+        let input_response = egui::Frame::new()
             .fill(color::CANVAS)
             .stroke(egui::Stroke::new(1.0, color::BORDER_STRONG))
             .corner_radius(radius::MD)
@@ -519,9 +549,26 @@ impl OpenReelApp {
                         .desired_rows(3)
                         .desired_width(f32::INFINITY)
                         .frame(egui::Frame::NONE)
-                        .hint_text("Describe an edit…"),
-                );
-            });
+                        .hint_text("Describe an edit, or / for commands"),
+                )
+            })
+            .inner;
+        // Enter sends (Shift+Enter for a newline); with a slash query active,
+        // Enter runs the top match.
+        if input_response.has_focus()
+            && ui.input(|input| input.key_pressed(egui::Key::Enter) && !input.modifiers.shift)
+        {
+            if let Some(first) = matches.first() {
+                run_command = Some(first);
+            } else if !self.agent_input.trim().is_empty() {
+                self.agent_input = self.agent_input.trim().to_owned();
+                self.start_agent_turn();
+            }
+        }
+        if let Some(command) = run_command {
+            self.agent_input.clear();
+            self.run_slash_command(command);
+        }
         // The composer row carries the session controls, T3-style: harness on
         // the left, transport on the right, everything else is the stream.
         ui.horizontal(|ui| {

@@ -11,6 +11,7 @@ mod media_bin;
 mod preview_ui;
 mod recovery;
 mod screenshot;
+mod slash;
 mod theme;
 mod timeline_ui;
 mod transcript_edit;
