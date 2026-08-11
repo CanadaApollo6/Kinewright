@@ -5,13 +5,17 @@ use std::{
 
 use ffmpeg_next as ffmpeg;
 use openreel_core::{
-    Document, ExportProgress, ExportSettings, FrameRounding, MediaError, MediaKind, ProgressSink,
-    TimeCode, map_frames_with_rounding, map_source_range_to_project,
+    Document, ExportProgress, ExportSettings, FrameRounding, MediaError, ProgressSink, TimeCode,
+    map_frames_with_rounding,
 };
 
 use crate::{
-    audio::decode_audio_range, clock::frame_to_samples, compositor::GpuContext, decode::backend,
+    audio::{decode_audio_range, limit_audio_mix},
+    clock::frame_to_samples,
+    compositor::GpuContext,
+    decode::backend,
     render::FrameRenderer,
+    timeline::timeline_audio_segments,
 };
 
 const AUDIO_RATE: u32 = 48_000;
@@ -340,30 +344,24 @@ fn drain_audio_packets(
     Ok(())
 }
 
-fn mix_audio(document: &Document, settings: &ExportSettings) -> Result<Vec<f32>, MediaError> {
+pub(crate) fn mix_audio(
+    document: &Document,
+    settings: &ExportSettings,
+) -> Result<Vec<f32>, MediaError> {
     let total_sample_frames = frame_to_samples(document.duration, AUDIO_RATE, document.fps);
     let total_samples = usize::try_from(total_sample_frames)
         .map_err(|_| MediaError::Backend("audio mix is too large".to_owned()))?
         .checked_mul(usize::from(AUDIO_CHANNELS))
         .ok_or_else(|| MediaError::Backend("audio mix is too large".to_owned()))?;
     let mut mix = vec![0.0_f32; total_samples];
-    for clip in document.tracks.iter().flat_map(|track| &track.clips) {
+    let segments = timeline_audio_segments(document, TimeCode::ZERO..document.duration)?;
+    for segment in segments {
         check_cancelled(settings)?;
-        let asset = document.asset(clip.asset).ok_or_else(|| {
-            MediaError::Backend(format!("timeline asset {} disappeared", clip.asset))
+        let asset = document.asset(segment.asset).ok_or_else(|| {
+            MediaError::Backend(format!("timeline asset {} disappeared", segment.asset))
         })?;
-        if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
-            continue;
-        }
-        let project_duration =
-            map_source_range_to_project(clip.source_range.clone(), asset.fps, document.fps)
-                .map_err(|error| MediaError::Backend(error.to_string()))?;
-        let project_end = clip
-            .timeline_start
-            .checked_add(project_duration)
-            .ok_or_else(|| MediaError::Backend("audio clip end overflowed".to_owned()))?;
-        let start_frame = frame_to_samples(clip.timeline_start, AUDIO_RATE, document.fps);
-        let end_frame = frame_to_samples(project_end, AUDIO_RATE, document.fps);
+        let start_frame = frame_to_samples(segment.project.start, AUDIO_RATE, document.fps);
+        let end_frame = frame_to_samples(segment.project.end, AUDIO_RATE, document.fps);
         let wanted_frames = usize::try_from(end_frame.saturating_sub(start_frame))
             .map_err(|_| MediaError::Backend("audio clip is too large".to_owned()))?;
         let wanted_samples = wanted_frames
@@ -372,8 +370,8 @@ fn mix_audio(document: &Document, settings: &ExportSettings) -> Result<Vec<f32>,
         let mut decoded = decode_audio_range(
             &asset.path,
             asset.fps,
-            clip.source_range.start,
-            clip.source_range.end,
+            segment.source.start,
+            segment.source.end,
             AUDIO_RATE,
             AUDIO_CHANNELS,
             &settings.cancellation,
@@ -388,9 +386,7 @@ fn mix_audio(document: &Document, settings: &ExportSettings) -> Result<Vec<f32>,
             *destination += sample;
         }
     }
-    for sample in &mut mix {
-        *sample = sample.clamp(-1.0, 1.0);
-    }
+    limit_audio_mix(&mut mix);
     Ok(mix)
 }
 

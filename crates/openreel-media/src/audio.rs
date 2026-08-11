@@ -1,5 +1,4 @@
 use std::{
-    collections::VecDeque,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -9,16 +8,18 @@ use std::{
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ffmpeg_next as ffmpeg;
-use openreel_core::{ExportCancellation, MediaError, Rational, TimeCode};
+use openreel_core::{Document, ExportCancellation, MediaError, Rational, TimeCode};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::{
     clock::frame_to_samples,
     decode::{backend, ensure_decoder, media_error, media_input, stream_timestamp_to_global},
+    timeline::timeline_audio_segments,
 };
 
 const AV_TIME_BASE: i64 = 1_000_000;
 const BUFFER_SECONDS: usize = 2;
+const MIX_CHUNK_SAMPLE_FRAMES: usize = 1_024;
 
 pub(crate) fn decode_audio_range(
     path: &Path,
@@ -130,58 +131,212 @@ fn quantize_peak(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16
 }
 
-pub(crate) struct AudioSourceSpec<'a> {
-    pub(crate) path: &'a Path,
-    pub(crate) fps: Rational,
-    pub(crate) from: TimeCode,
-    pub(crate) end: TimeCode,
+pub(crate) fn limit_audio_mix(samples: &mut [f32]) {
+    for sample in samples {
+        *sample = sample.clamp(-1.0, 1.0);
+    }
+}
+
+struct AudioMixSource {
+    path: PathBuf,
+    output_rate: u32,
+    output_channels: u16,
+    source_sample_start: u64,
+    source_sample_end: u64,
+    project_sample_start: u64,
+    project_sample_end: u64,
+    decoder: Option<AudioDecoder>,
+    opened: bool,
+    pending: Vec<f32>,
+    pending_index: usize,
+    finished: bool,
+}
+
+impl AudioMixSource {
+    fn open_decoder(&mut self) -> Result<(), MediaError> {
+        if self.opened {
+            return Ok(());
+        }
+        self.opened = true;
+        if self.source_sample_start >= self.source_sample_end {
+            self.finished = true;
+            return Ok(());
+        }
+        self.decoder = Some(AudioDecoder::open(
+            &self.path,
+            self.output_rate,
+            self.output_channels,
+            self.source_sample_start,
+            self.source_sample_end,
+        )?);
+        Ok(())
+    }
+
+    fn add_samples(&mut self, destination: &mut [f32]) -> Result<(), MediaError> {
+        if self.finished {
+            return Ok(());
+        }
+        self.open_decoder()?;
+        let mut destination_index = 0;
+        while destination_index < destination.len() {
+            while self.pending_index < self.pending.len() && destination_index < destination.len() {
+                destination[destination_index] += self.pending[self.pending_index];
+                destination_index += 1;
+                self.pending_index += 1;
+            }
+            if destination_index == destination.len() {
+                break;
+            }
+            self.pending.clear();
+            self.pending_index = 0;
+            let Some(decoder) = &mut self.decoder else {
+                self.finished = true;
+                break;
+            };
+            if let Some(chunk) = decoder.next_chunk()? {
+                self.pending = chunk;
+            } else {
+                self.finished = true;
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn retire(&mut self) {
+        self.decoder = None;
+        self.pending.clear();
+        self.pending_index = 0;
+        self.finished = true;
+    }
+}
+
+struct AudioMixer {
+    sources: Vec<AudioMixSource>,
+    output_channels: usize,
+    cursor_sample: u64,
+    end_sample: u64,
+}
+
+impl AudioMixer {
+    fn open(
+        document: &Document,
+        project_from: TimeCode,
+        output_rate: u32,
+        output_channels: u16,
+    ) -> Result<Self, MediaError> {
+        let project_end = document.duration;
+        let segments = timeline_audio_segments(document, project_from..project_end)?;
+        let mut sources = Vec::with_capacity(segments.len());
+        for segment in segments {
+            let clip = document.clip(segment.clip).ok_or_else(|| {
+                MediaError::Backend(format!("timeline clip {} disappeared", segment.clip))
+            })?;
+            let asset = document.asset(segment.asset).ok_or_else(|| {
+                MediaError::Backend(format!("timeline asset {} disappeared", segment.asset))
+            })?;
+            let clip_project_start =
+                frame_to_samples(clip.timeline_start, output_rate, document.fps);
+            let project_sample_start =
+                frame_to_samples(segment.project.start, output_rate, document.fps);
+            let project_sample_end =
+                frame_to_samples(segment.project.end, output_rate, document.fps);
+            let source_clip_start =
+                frame_to_samples(clip.source_range.start, output_rate, asset.fps);
+            let source_sample_end = frame_to_samples(clip.source_range.end, output_rate, asset.fps);
+            let source_sample_start = source_clip_start
+                .saturating_add(project_sample_start.saturating_sub(clip_project_start));
+            sources.push(AudioMixSource {
+                path: asset.path.clone(),
+                output_rate,
+                output_channels,
+                source_sample_start,
+                source_sample_end,
+                project_sample_start,
+                project_sample_end,
+                decoder: None,
+                opened: false,
+                pending: Vec::new(),
+                pending_index: 0,
+                finished: false,
+            });
+        }
+        Ok(Self {
+            sources,
+            output_channels: usize::from(output_channels),
+            cursor_sample: frame_to_samples(project_from, output_rate, document.fps),
+            end_sample: frame_to_samples(project_end, output_rate, document.fps),
+        })
+    }
+
+    fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
+        if self.cursor_sample >= self.end_sample {
+            return Ok(None);
+        }
+        let remaining = self.end_sample.saturating_sub(self.cursor_sample);
+        let sample_frames = usize::try_from(remaining)
+            .unwrap_or(usize::MAX)
+            .min(MIX_CHUNK_SAMPLE_FRAMES);
+        let chunk_end = self
+            .cursor_sample
+            .saturating_add(u64::try_from(sample_frames).unwrap_or(u64::MAX));
+        let mut mixed = vec![
+            0.0;
+            sample_frames
+                .checked_mul(self.output_channels)
+                .ok_or_else(|| MediaError::Backend(
+                    "audio mix chunk is too large".to_owned()
+                ))?
+        ];
+        for source in &mut self.sources {
+            let overlap_start = self.cursor_sample.max(source.project_sample_start);
+            let overlap_end = chunk_end.min(source.project_sample_end);
+            if overlap_end <= overlap_start {
+                continue;
+            }
+            let start = usize::try_from(overlap_start.saturating_sub(self.cursor_sample))
+                .unwrap_or(usize::MAX)
+                .saturating_mul(self.output_channels);
+            let end = usize::try_from(overlap_end.saturating_sub(self.cursor_sample))
+                .unwrap_or(usize::MAX)
+                .saturating_mul(self.output_channels)
+                .min(mixed.len());
+            source.add_samples(&mut mixed[start..end])?;
+            if overlap_end >= source.project_sample_end {
+                source.retire();
+            }
+        }
+        limit_audio_mix(&mut mixed);
+        self.cursor_sample = chunk_end;
+        Ok(Some(mixed))
+    }
+
+    #[cfg(test)]
+    fn render_remaining(&mut self) -> Result<Vec<f32>, MediaError> {
+        let sample_frames = self.end_sample.saturating_sub(self.cursor_sample);
+        let capacity = usize::try_from(sample_frames)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(self.output_channels);
+        let mut rendered = Vec::with_capacity(capacity);
+        while let Some(chunk) = self.next_chunk()? {
+            rendered.extend_from_slice(&chunk);
+        }
+        Ok(rendered)
+    }
 }
 
 pub(crate) struct AudioRuntime {
     stream: cpal::Stream,
     producer: Producer<f32>,
-    decoder: Option<AudioDecoder>,
+    mixer: AudioMixer,
     pending: Vec<f32>,
     pending_index: usize,
     pub(crate) error_flag: Arc<AtomicBool>,
-    exhausted: bool,
 }
 
 impl AudioRuntime {
     pub(crate) fn open(
-        source: AudioSourceSpec<'_>,
-        project_fps: Rational,
-        project_from: TimeCode,
-        position_samples: &Arc<AtomicU64>,
-        sample_rate_atomic: &Arc<AtomicU32>,
-    ) -> Result<Self, MediaError> {
-        Self::open_output(
-            Some(source),
-            project_fps,
-            project_from,
-            position_samples,
-            sample_rate_atomic,
-        )
-    }
-
-    pub(crate) fn open_silence(
-        project_fps: Rational,
-        project_from: TimeCode,
-        position_samples: &Arc<AtomicU64>,
-        sample_rate_atomic: &Arc<AtomicU32>,
-    ) -> Result<Self, MediaError> {
-        Self::open_output(
-            None,
-            project_fps,
-            project_from,
-            position_samples,
-            sample_rate_atomic,
-        )
-    }
-
-    fn open_output(
-        source: Option<AudioSourceSpec<'_>>,
-        project_fps: Rational,
+        document: &Document,
         project_from: TimeCode,
         position_samples: &Arc<AtomicU64>,
         sample_rate_atomic: &Arc<AtomicU32>,
@@ -200,7 +355,7 @@ impl AudioRuntime {
             .saturating_mul(usize::from(channels))
             .saturating_mul(BUFFER_SECONDS);
         let (producer, consumer) = RingBuffer::new(capacity.max(1));
-        let start_sample = frame_to_samples(project_from, sample_rate, project_fps);
+        let start_sample = frame_to_samples(project_from, sample_rate, document.fps);
         position_samples.store(start_sample, Ordering::Release);
         sample_rate_atomic.store(sample_rate, Ordering::Release);
         let error_flag = Arc::new(AtomicBool::new(false));
@@ -213,21 +368,14 @@ impl AudioRuntime {
             Arc::clone(position_samples),
             Arc::clone(&error_flag),
         )?;
-        let decoder = source
-            .map(|source| {
-                let source_start = frame_to_samples(source.from, sample_rate, source.fps);
-                let source_end = frame_to_samples(source.end, sample_rate, source.fps);
-                AudioDecoder::open(source.path, sample_rate, channels, source_start, source_end)
-            })
-            .transpose()?;
+        let mixer = AudioMixer::open(document, project_from, sample_rate, channels)?;
         let mut runtime = Self {
             stream,
             producer,
-            decoder,
+            mixer,
             pending: Vec::new(),
             pending_index: 0,
             error_flag,
-            exhausted: false,
         };
         runtime.fill()?;
         Ok(runtime)
@@ -252,14 +400,9 @@ impl AudioRuntime {
             }
             self.pending.clear();
             self.pending_index = 0;
-            let Some(decoder) = &mut self.decoder else {
-                self.exhausted = true;
-                return Ok(());
-            };
-            if let Some(chunk) = decoder.next_chunk()? {
+            if let Some(chunk) = self.mixer.next_chunk()? {
                 self.pending = chunk;
             } else {
-                self.exhausted = true;
                 return Ok(());
             }
         }
@@ -351,7 +494,6 @@ struct AudioDecoder {
     started: bool,
     finished: bool,
     eof_sent: bool,
-    queued: VecDeque<Vec<f32>>,
 }
 
 impl AudioDecoder {
@@ -403,21 +545,20 @@ impl AudioDecoder {
             started: false,
             finished: false,
             eof_sent: false,
-            queued: VecDeque::new(),
         })
     }
 
     fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
         loop {
-            if let Some(chunk) = self.queued.pop_front()
+            if self.finished {
+                return Ok(None);
+            }
+            if let Some(chunk) = self.receive_frame()?
                 && !chunk.is_empty()
             {
                 return Ok(Some(chunk));
             }
-            if self.finished {
-                return Ok(None);
-            }
-            if self.eof_sent {
+            if self.finished || self.eof_sent {
                 return Ok(None);
             }
             let next = self
@@ -432,129 +573,126 @@ impl AudioDecoder {
                 self.decoder
                     .send_packet(&packet)
                     .map_err(|error| media_error(&self.path, "audio decode failed", error))?;
-                self.receive_frames()?;
             } else {
                 self.decoder.send_eof().map_err(|error| {
                     media_error(&self.path, "audio decoder flush failed", error)
                 })?;
                 self.eof_sent = true;
-                self.receive_frames()?;
             }
         }
     }
 
-    // FFmpeg frame receipt, resampling, clipping, and queueing form one ordered state transition.
+    // FFmpeg frame receipt, resampling, and clipping form one ordered state transition.
     #[allow(clippy::too_many_lines)]
-    fn receive_frames(&mut self) -> Result<(), MediaError> {
+    fn receive_frame(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
         let mut decoded = ffmpeg::frame::Audio::empty();
-        while self.decoder.receive_frame(&mut decoded).is_ok() {
-            let pts = decoded.timestamp();
-            let decoded_format = decoded.format();
-            let mut decoded_layout = decoded.channel_layout();
-            if decoded_layout.is_empty() {
-                decoded_layout = ffmpeg::ChannelLayout::default(i32::from(decoded.channels()));
-                decoded.set_channel_layout(decoded_layout);
-            }
-            let decoded_rate = decoded.rate();
-            if self.resampler.is_none() {
-                let output_layout = ffmpeg::ChannelLayout::default(
-                    i32::try_from(self.output_channels).unwrap_or(1),
-                );
-                self.resampler = Some(
-                    ffmpeg::software::resampling::Context::get(
-                        decoded_format,
-                        decoded_layout,
-                        decoded_rate,
-                        ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Planar),
-                        output_layout,
-                        self.output_rate,
-                    )
-                    .map_err(|error| {
-                        media_error(&self.path, "could not create audio resampler", error)
-                    })?,
-                );
-            }
-            let output = *self
-                .resampler
-                .as_ref()
-                .expect("resampler is initialized from the first decoded frame")
-                .output();
-            let output_samples = u64::try_from(decoded.samples())
-                .unwrap_or(u64::MAX)
-                .saturating_mul(u64::from(output.rate))
-                .saturating_add(u64::from(decoded_rate).saturating_sub(1))
-                / u64::from(decoded_rate.max(1));
-            let output_samples =
-                usize::try_from(output_samples.saturating_add(64)).unwrap_or(usize::MAX);
-            let mut converted =
-                ffmpeg::frame::Audio::new(output.format, output_samples, output.channel_layout);
-            converted.set_rate(output.rate);
-            self.resampler
-                .as_mut()
-                .expect("resampler is initialized from the first decoded frame")
-                .run(&decoded, &mut converted)
-                .map_err(|error| {
-                    MediaError::Backend(format!(
-                        "audio resampling failed for {} ({decoded_format:?}, {decoded_layout:?}, {decoded_rate} Hz): {error}",
-                        self.path.display()
-                    ))
-                })?;
-            let samples = converted.samples();
-            if samples == 0 {
-                continue;
-            }
-            let chunk_start = pts.map_or(self.target_sample, |timestamp| {
-                timestamp_to_samples(
-                    timestamp.saturating_sub(self.stream_start),
-                    self.stream_time_base,
+        if self.decoder.receive_frame(&mut decoded).is_err() {
+            return Ok(None);
+        }
+        let pts = decoded.timestamp();
+        let decoded_format = decoded.format();
+        let mut decoded_layout = decoded.channel_layout();
+        if decoded_layout.is_empty() {
+            decoded_layout = ffmpeg::ChannelLayout::default(i32::from(decoded.channels()));
+            decoded.set_channel_layout(decoded_layout);
+        }
+        let decoded_rate = decoded.rate();
+        if self.resampler.is_none() {
+            let output_layout =
+                ffmpeg::ChannelLayout::default(i32::try_from(self.output_channels).unwrap_or(1));
+            self.resampler = Some(
+                ffmpeg::software::resampling::Context::get(
+                    decoded_format,
+                    decoded_layout,
+                    decoded_rate,
+                    ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Planar),
+                    output_layout,
                     self.output_rate,
                 )
-            });
-            let chunk_end = chunk_start.saturating_add(u64::try_from(samples).unwrap_or(u64::MAX));
-            if chunk_start >= self.end_sample {
-                self.finished = true;
-                return Ok(());
-            }
-            if !self.started && chunk_end <= self.target_sample {
-                continue;
-            }
-            let wanted_start = chunk_start.max(self.target_sample);
-            let wanted_end = chunk_end.min(self.end_sample);
-            if wanted_end <= wanted_start {
-                self.finished = chunk_end >= self.end_sample;
-                continue;
-            }
-            let skip = usize::try_from(wanted_start.saturating_sub(chunk_start))
-                .unwrap_or(samples)
-                .min(samples);
-            let gap = if self.started {
-                0
-            } else {
-                chunk_start.saturating_sub(self.target_sample)
-            };
-            let gap = usize::try_from(gap)
-                .unwrap_or_default()
-                .min(usize::try_from(self.output_rate).unwrap_or_default());
-            let remaining = usize::try_from(wanted_end.saturating_sub(wanted_start))
-                .unwrap_or(samples.saturating_sub(skip))
-                .min(samples.saturating_sub(skip));
-            let mut interleaved = Vec::with_capacity(
-                gap.saturating_add(remaining)
-                    .saturating_mul(self.output_channels),
+                .map_err(|error| {
+                    media_error(&self.path, "could not create audio resampler", error)
+                })?,
             );
-            interleaved.resize(gap.saturating_mul(self.output_channels), 0.0);
-            for sample_index in skip..skip.saturating_add(remaining) {
-                for channel in 0..self.output_channels {
-                    interleaved.push(converted.plane::<f32>(channel)[sample_index]);
-                }
-            }
-            self.started = true;
-            self.queued.push_back(interleaved);
-            if wanted_end >= self.end_sample {
-                self.finished = true;
+        }
+        let output = *self
+            .resampler
+            .as_ref()
+            .expect("resampler is initialized from the first decoded frame")
+            .output();
+        let output_samples = u64::try_from(decoded.samples())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::from(output.rate))
+            .saturating_add(u64::from(decoded_rate).saturating_sub(1))
+            / u64::from(decoded_rate.max(1));
+        let output_samples =
+            usize::try_from(output_samples.saturating_add(64)).unwrap_or(usize::MAX);
+        let mut converted =
+            ffmpeg::frame::Audio::new(output.format, output_samples, output.channel_layout);
+        converted.set_rate(output.rate);
+        self.resampler
+            .as_mut()
+            .expect("resampler is initialized from the first decoded frame")
+            .run(&decoded, &mut converted)
+            .map_err(|error| {
+                MediaError::Backend(format!(
+                    "audio resampling failed for {} ({decoded_format:?}, {decoded_layout:?}, {decoded_rate} Hz): {error}",
+                    self.path.display()
+                ))
+            })?;
+        let samples = converted.samples();
+        if samples == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        let chunk_start = pts.map_or(self.target_sample, |timestamp| {
+            timestamp_to_samples(
+                timestamp.saturating_sub(self.stream_start),
+                self.stream_time_base,
+                self.output_rate,
+            )
+        });
+        let chunk_end = chunk_start.saturating_add(u64::try_from(samples).unwrap_or(u64::MAX));
+        if chunk_start >= self.end_sample {
+            self.finished = true;
+            return Ok(None);
+        }
+        if !self.started && chunk_end <= self.target_sample {
+            return Ok(Some(Vec::new()));
+        }
+        let wanted_start = chunk_start.max(self.target_sample);
+        let wanted_end = chunk_end.min(self.end_sample);
+        if wanted_end <= wanted_start {
+            self.finished = chunk_end >= self.end_sample;
+            return Ok(Some(Vec::new()));
+        }
+        let skip = usize::try_from(wanted_start.saturating_sub(chunk_start))
+            .unwrap_or(samples)
+            .min(samples);
+        let gap = if self.started {
+            0
+        } else {
+            chunk_start.saturating_sub(self.target_sample)
+        };
+        let gap = usize::try_from(gap)
+            .unwrap_or_default()
+            .min(usize::try_from(self.output_rate).unwrap_or_default());
+        let remaining = usize::try_from(wanted_end.saturating_sub(wanted_start))
+            .unwrap_or(samples.saturating_sub(skip))
+            .min(samples.saturating_sub(skip));
+        let mut interleaved = Vec::with_capacity(
+            gap.saturating_add(remaining)
+                .saturating_mul(self.output_channels),
+        );
+        interleaved.resize(gap.saturating_mul(self.output_channels), 0.0);
+        for sample_index in skip..skip.saturating_add(remaining) {
+            for channel in 0..self.output_channels {
+                interleaved.push(converted.plane::<f32>(channel)[sample_index]);
             }
         }
-        Ok(())
+        self.started = true;
+        if wanted_end >= self.end_sample {
+            self.finished = true;
+        }
+        Ok(Some(interleaved))
     }
 }
 
@@ -575,6 +713,12 @@ fn normalized_start(start: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use openreel_core::{
+        AssetId, Clip, ClipId, ExportSettings, MediaAsset, MediaKind, Track, TrackId, TrackKind,
+    };
+
+    use crate::test_support::GeneratedMedia;
+
     use super::*;
 
     #[test]
@@ -625,5 +769,204 @@ mod tests {
         accumulator.extend(&[0.5, -0.5]);
 
         assert_eq!(accumulator.finish()[1..], [(0, 0), (0, 0), (0, 0)]);
+    }
+
+    #[test]
+    fn playback_feeder_mix_matches_export_across_overlap_trim_gap_and_clamp() {
+        crate::initialize_ffmpeg().unwrap();
+        let voice = loud_sine("m12-voice", 440);
+        let bed = loud_sine("m12-bed", 660);
+        let fps = Rational::new(10, 1).unwrap();
+        let document = parity_document(voice.path(), bed.path(), fps);
+        document.validate().unwrap();
+        let settings = ExportSettings {
+            fps,
+            resolution: (64, 64),
+            video_codec: "libx264".to_owned(),
+            audio_codec: "aac".to_owned(),
+            video_bitrate: 1_000_000,
+            audio_bitrate: 128_000,
+            cancellation: ExportCancellation::default(),
+        };
+
+        let exported = crate::export::mix_audio(&document, &settings).unwrap();
+        let mut playback = AudioMixer::open(&document, TimeCode::ZERO, 48_000, 2).unwrap();
+        let played = playback.render_remaining().unwrap();
+
+        assert_eq!(played.len(), exported.len());
+        for (name, frames) in [
+            ("single source", 0..4),
+            ("overlap", 4..6),
+            ("trimmed source", 6..14),
+            ("silence", 14..16),
+            ("post-gap source", 16..20),
+        ] {
+            let samples = interleaved_sample_range(frames, fps, 48_000, 2);
+            let maximum_difference = exported[samples.clone()]
+                .iter()
+                .zip(&played[samples])
+                .map(|(exported, played)| (exported - played).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                maximum_difference <= 1.0e-6,
+                "{name} differs by {maximum_difference}"
+            );
+        }
+
+        let overlap = interleaved_sample_range(4..6, fps, 48_000, 2);
+        assert!(
+            exported[overlap]
+                .iter()
+                .any(|sample| sample.abs() >= 1.0 - f32::EPSILON),
+            "fixture did not exercise the hard-clamp limiter"
+        );
+        let silence = interleaved_sample_range(14..16, fps, 48_000, 2);
+        assert!(
+            exported[silence]
+                .iter()
+                .all(|sample| sample.abs() <= 1.0e-7),
+            "fixture gap was not silent"
+        );
+
+        let seek_sample = usize::try_from(frame_to_samples(TimeCode(5), 48_000, fps))
+            .unwrap()
+            .saturating_mul(2);
+        let mut seeked_playback = AudioMixer::open(&document, TimeCode(5), 48_000, 2).unwrap();
+        let seeked = seeked_playback.render_remaining().unwrap();
+        let seek_difference = exported[seek_sample..]
+            .iter()
+            .zip(&seeked)
+            .map(|(exported, played)| (exported - played).abs())
+            .fold(0.0_f32, f32::max);
+        assert_eq!(seeked.len(), exported.len() - seek_sample);
+        assert!(
+            seek_difference <= 1.0e-6,
+            "coherent feeder seek differs by {seek_difference}"
+        );
+    }
+
+    #[test]
+    fn video_only_timeline_feeds_silence_for_the_audio_master_clock() {
+        let fps = Rational::new(10, 1).unwrap();
+        let document = Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                clips: vec![Clip {
+                    id: ClipId(1),
+                    asset: AssetId(1),
+                    source_range: TimeCode(0)..TimeCode(2),
+                    timeline_start: TimeCode::ZERO,
+                    effects: Vec::new(),
+                    transition_in: None,
+                }],
+            }],
+            media_pool: vec![MediaAsset {
+                id: AssetId(1),
+                path: PathBuf::from("video-only.mp4"),
+                name: "video only".to_owned(),
+                duration: TimeCode(2),
+                fps,
+                kind: MediaKind::Video,
+                resolution: Some((64, 64)),
+            }],
+            fps,
+            resolution: (64, 64),
+            duration: TimeCode(2),
+        };
+
+        let mut mixer = AudioMixer::open(&document, TimeCode::ZERO, 48_000, 2).unwrap();
+        let rendered = mixer.render_remaining().unwrap();
+
+        assert_eq!(rendered.len(), 19_200);
+        assert!(rendered.iter().all(|sample| *sample == 0.0));
+    }
+
+    fn loud_sine(label: &str, frequency: u16) -> GeneratedMedia {
+        let source = format!("sine=frequency={frequency}:sample_rate=48000:duration=2");
+        GeneratedMedia::ffmpeg(
+            label,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                &source,
+                "-filter:a",
+                "volume=6",
+                "-c:a",
+                "pcm_f32le",
+            ],
+            "wav",
+        )
+    }
+
+    fn parity_document(voice: &Path, bed: &Path, fps: Rational) -> Document {
+        Document {
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Audio,
+                    clips: vec![audio_clip(1, 1, 0..6, 0), audio_clip(2, 1, 16..20, 16)],
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    clips: vec![audio_clip(3, 2, 4..14, 4)],
+                },
+            ],
+            media_pool: vec![
+                audio_asset(1, voice, "voice-440", fps),
+                audio_asset(2, bed, "bed-660", fps),
+            ],
+            fps,
+            resolution: (64, 64),
+            duration: TimeCode(20),
+        }
+    }
+
+    fn audio_clip(id: u64, asset: u64, source: std::ops::Range<i64>, timeline_start: i64) -> Clip {
+        Clip {
+            id: ClipId(id),
+            asset: AssetId(asset),
+            source_range: TimeCode(source.start)..TimeCode(source.end),
+            timeline_start: TimeCode(timeline_start),
+            effects: Vec::new(),
+            transition_in: None,
+        }
+    }
+
+    fn audio_asset(id: u64, path: &Path, name: &str, fps: Rational) -> MediaAsset {
+        MediaAsset {
+            id: AssetId(id),
+            path: path.to_path_buf(),
+            name: name.to_owned(),
+            duration: TimeCode(20),
+            fps,
+            kind: MediaKind::Audio,
+            resolution: None,
+        }
+    }
+
+    fn interleaved_sample_range(
+        project_frames: std::ops::Range<i64>,
+        fps: Rational,
+        sample_rate: u32,
+        channels: usize,
+    ) -> std::ops::Range<usize> {
+        let start = usize::try_from(frame_to_samples(
+            TimeCode(project_frames.start),
+            sample_rate,
+            fps,
+        ))
+        .unwrap()
+        .saturating_mul(channels);
+        let end = usize::try_from(frame_to_samples(
+            TimeCode(project_frames.end),
+            sample_rate,
+            fps,
+        ))
+        .unwrap()
+        .saturating_mul(channels);
+        start..end
     }
 }

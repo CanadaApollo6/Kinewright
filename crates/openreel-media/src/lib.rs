@@ -38,7 +38,10 @@ pub use engine::FfmpegMediaEngine;
 pub use openreel_core::{
     ThumbnailFrame, ThumbnailKey, VisualAssetResult, VisualRequestKind, WaveformData, WaveformPeak,
 };
-pub use timeline::{TimelineSource, TimelineVideoLayer, timeline_source_at, video_layers_at};
+pub use timeline::{
+    TimelineAudioSegment, TimelineSource, TimelineVideoLayer, timeline_audio_segments,
+    timeline_source_at, video_layers_at,
+};
 pub use transcript::{
     WHISPER_MODEL_LICENSE, WHISPER_MODEL_NAME, WHISPER_MODEL_SHA256, WHISPER_MODEL_URL,
     default_data_dir,
