@@ -12,15 +12,13 @@ base64.workspace = true
 crossbeam-channel.workspace = true
 image.workspace = true
 openreel-core = { path = "../openreel-core" }
+openreel-media = { path = "../openreel-media", features = ["test-util"] }
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-
-[dev-dependencies]
-openreel-media = { path = "../openreel-media", features = ["test-util"] }
 
 [lints]
 workspace = true

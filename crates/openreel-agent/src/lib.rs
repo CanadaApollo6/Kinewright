@@ -1,6 +1,7 @@
 //! `MCP` tools and installed-agent CLI drivers for the live `OpenReel` process.
 
 mod drivers;
+pub mod eval;
 mod protocol;
 mod render;
 mod schema;
