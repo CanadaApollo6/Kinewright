@@ -707,7 +707,7 @@ mod tests {
 
     use openreel_core::{
         AssetId, ClipId, Command, Effect, EffectId, Event, Marker, MarkerId, MediaAsset, MediaKind,
-        Operation, Rational, TimeCode, Track, TrackId, TrackKind,
+        Operation, ParamValue, Rational, TimeCode, Title, Track, TrackId, TrackKind,
     };
     use proptest::prelude::*;
 
@@ -921,6 +921,59 @@ mod tests {
         let Inspection::Recoverable(report) = inspect_bytes(&encoded_journal(&initial, &commands))
         else {
             panic!("M13 journal must be recoverable");
+        };
+        assert_eq!(report.recovered_commands, commands.len());
+        assert_eq!(report.document, expected);
+        assert!(report.damage.is_none());
+    }
+
+    #[test]
+    fn m14_title_and_inspector_operations_replay_to_the_exact_document() {
+        let initial = Document::default();
+        let commands = vec![
+            JournalCommand::Do(Operation::AddTrack {
+                track: Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    clips: Vec::new(),
+                },
+            }),
+            JournalCommand::Do(Operation::AddTitle {
+                track: TrackId(1),
+                at: TimeCode(30),
+                duration: TimeCode(90),
+                title: Title::default(),
+            }),
+            JournalCommand::Do(Operation::SetTitleParam {
+                clip: ClipId(1),
+                name: "text".to_owned(),
+                value: ParamValue::Text("Recovered title".to_owned()),
+            }),
+            JournalCommand::Do(Operation::SetTitleParam {
+                clip: ClipId(1),
+                name: "fade_in_frames".to_owned(),
+                value: ParamValue::Integer(12),
+            }),
+            JournalCommand::Do(Operation::AddMarker {
+                marker: Marker {
+                    id: MarkerId(1),
+                    position: TimeCode(45),
+                    label: "Review".to_owned(),
+                    color_token: 0,
+                },
+            }),
+            JournalCommand::Do(Operation::SetMarkerParam {
+                marker: MarkerId(1),
+                name: "label".to_owned(),
+                value: ParamValue::Text("Approved".to_owned()),
+            }),
+            JournalCommand::Undo,
+            JournalCommand::Redo,
+        ];
+        let expected = execute(&initial, &commands);
+        let Inspection::Recoverable(report) = inspect_bytes(&encoded_journal(&initial, &commands))
+        else {
+            panic!("M14 journal must be recoverable");
         };
         assert_eq!(report.recovered_commands, commands.len());
         assert_eq!(report.document, expected);

@@ -64,6 +64,22 @@ swscale conversion used by thumbnails, but `thumbnail_at` continues to honor
 the caller's independent `max_width`. Export continues to open full-resolution
 decoders and renders at the requested export resolution.
 
+## Titles and the shared compositor path
+
+Titles are declarative video-track clips. The media crate rasterizes their text
+with the embedded Inter variable font into a full-frame transparent RGBA layer,
+then submits that layer to the same wgpu compositor used for decoded media.
+Preview and export both call `FrameRenderer::render`; there is no export-only
+text path. Font-size and color indices resolve through the core title descriptor
+tables, positions are fixed presets, and fade lengths remain integer project
+frames. Title fade alpha multiplies the existing transition/opacity alpha before
+the compositor blends layers bottom to top.
+
+Rasterization is deterministic for a title, token set, and output resolution.
+Preview proxies rasterize at preview resolution; full-resolution export
+rasterizes again at export resolution from the same embedded font bytes and
+declarative title data.
+
 Decoder/cache identity includes the asset ID and proxy-width limit. A future
 preview resize or zoom that selects another width therefore opens a matching
 scaler and cannot reuse pixels from a differently sized proxy. `FrameTexture`

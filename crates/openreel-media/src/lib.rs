@@ -13,6 +13,7 @@ mod export;
 mod render;
 mod sha256;
 mod timeline;
+mod title;
 mod transcript;
 
 #[cfg(any(test, feature = "test-util"))]
@@ -39,8 +40,9 @@ pub use openreel_core::{
     ThumbnailFrame, ThumbnailKey, VisualAssetResult, VisualRequestKind, WaveformData, WaveformPeak,
 };
 pub use timeline::{
-    TimelineAudioSegment, TimelineSource, TimelineVideoLayer, timeline_audio_segments,
-    timeline_source_at, video_layers_at,
+    TimelineAudioSegment, TimelineSource, TimelineTitleLayer, TimelineVideoLayer,
+    TimelineVisualLayer, timeline_audio_segments, timeline_source_at, video_layers_at,
+    visual_layers_at,
 };
 pub use transcript::{
     WHISPER_MODEL_LICENSE, WHISPER_MODEL_NAME, WHISPER_MODEL_SHA256, WHISPER_MODEL_URL,

@@ -244,6 +244,7 @@ fn edit_plan_document() -> Document {
                 id: ClipId(1),
                 asset: asset.id,
                 source_range: TimeCode::ZERO..TimeCode(60),
+                content: openreel_core::ClipContent::Media,
                 timeline_start: TimeCode::ZERO,
                 effects: Vec::new(),
                 transition_in: None,

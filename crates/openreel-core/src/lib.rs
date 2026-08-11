@@ -8,6 +8,7 @@ mod media;
 mod model;
 mod operation;
 mod time;
+mod title;
 
 pub use actor::{Command, Core, CoreDisconnected, Event, Query, QueryResult};
 pub use agent::{
@@ -28,11 +29,17 @@ pub use media::{
     WaveformPeak,
 };
 pub use model::{
-    AssetId, Clip, ClipId, Document, Effect, EffectId, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker,
-    MarkerId, MediaAsset, MediaKind, ParamValue, Track, TrackId, TrackKind, Transition,
+    AssetId, Clip, ClipContent, ClipId, Document, Effect, EffectId, LinkId,
+    MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaKind, ParamValue, Track, TrackId,
+    TrackKind, Transition,
 };
 pub use operation::{ApplyOp, BatchError, OpError, Operation, apply_batch};
 pub use time::{
     FrameRounding, Rational, TimeCode, TimeMappingError, map_frames, map_frames_with_rounding,
     map_source_range_to_project,
+};
+pub use title::{
+    TITLE_COLORS, TITLE_FONT_SIZES, TITLE_PARAMETER_DESCRIPTORS, Title, TitleColorDescriptor,
+    TitleFontSizeDescriptor, TitleParameterDescriptor, TitleParameterKind, TitlePosition,
+    title_color, title_font_size, title_parameter_descriptor, title_parameter_value,
 };

@@ -25,7 +25,7 @@ use crate::{
     schema::all_tool_names,
 };
 
-const OPENREEL_SYSTEM_PROMPT: &str = "You are OpenReel's video editing agent. Inspect the live timeline before editing, then use transcript, silence, and scene-change inspectors when relevant. Resolve ordinal references such as first, second, and last against that initial timeline state, and decide all target clip ids before mutation unless the user explicitly says otherwise. Prefer one atomic apply_edit_plan containing the complete ordered edit over separate operation tool calls. Link enforcement is orchestration, not core behavior: moving, trimming, or deleting one linked clip requires the same atomic plan to edit every member reported in its link group. When asked to review footage, prefer placing markers as suggestions over changing the edit unless the user asks for an edit. Use only the OpenReel MCP tools. All edit time values are exact integer project frames; use the reported fps to convert seconds. After applying a plan, verify the result with the SAME inspectors that motivated it - if the user asked for dead air to be removed, re-run the silence inspector on the edited timeline and submit a follow-up plan when long silences remain. Do not declare the task done until the inspectors confirm it. Then answer briefly.";
+const OPENREEL_SYSTEM_PROMPT: &str = "You are OpenReel's video editing agent. Inspect the live timeline before editing, then use transcript, silence, and scene-change inspectors when relevant. Resolve ordinal references such as first, second, and last against that initial timeline state, and decide all target clip ids before mutation unless the user explicitly says otherwise. Prefer one atomic apply_edit_plan containing the complete ordered edit over separate operation tool calls. Link enforcement is orchestration, not core behavior: moving, trimming, or deleting one linked clip requires the same atomic plan to edit every member reported in its link group. Titles are first-class video-track clips: use add_title to create one and set_title_param to change its declarative style, position, text, or frame-based fades. When asked to review footage, prefer placing markers as suggestions over changing the edit unless the user asks for an edit. Use only the OpenReel MCP tools. All edit time values are exact integer project frames; use the reported fps to convert seconds. After applying a plan, verify the result with the SAME inspectors that motivated it - if the user asked for dead air to be removed, re-run the silence inspector on the edited timeline and submit a follow-up plan when long silences remain. Do not declare the task done until the inspectors confirm it. Then answer briefly.";
 const MINIMUM_CODEX_VERSION: (u64, u64, u64) = (0, 147, 0);
 const CODEX_DISABLED_FEATURES: &[&str] = &[
     "shell_tool",
@@ -1165,5 +1165,6 @@ mod tests {
         assert!(prompt.contains("2. delete the second clip"));
         assert!(prompt.contains("Current user request:\nundo that deletion"));
         assert!(prompt.contains("The live timeline is authoritative"));
+        assert!(prompt.contains("use add_title to create one and set_title_param"));
     }
 }

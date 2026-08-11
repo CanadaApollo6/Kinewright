@@ -3,13 +3,16 @@ use std::{
     path::Path,
 };
 
-use openreel_core::{AssetId, Document, FrameTexture, MediaError, Rational, TimeCode};
+use openreel_core::{
+    AssetId, ClipId, Document, FrameTexture, MediaError, Rational, TimeCode, Title,
+};
 
 use crate::{
+    TimelineVisualLayer,
     cache::FrameCache,
     compositor::{Compositor, CompositorLayer, GpuContext},
     decode::VideoDecoder,
-    video_layers_at,
+    visual_layers_at,
 };
 
 /// Preview decode and compositor output are capped at 720p for 16:9 media.
@@ -65,6 +68,8 @@ pub(crate) struct FrameRenderer {
     video_sources: HashMap<VideoSourceKey, VideoSource>,
     source_order: VecDeque<VideoSourceKey>,
     compositor: Compositor,
+    title_rasterizer: crate::title::TitleRasterizer,
+    title_cache: HashMap<(ClipId, (u32, u32), Title), FrameTexture>,
 }
 
 impl FrameRenderer {
@@ -73,12 +78,15 @@ impl FrameRenderer {
             video_sources: HashMap::new(),
             source_order: VecDeque::new(),
             compositor: Compositor::new(gpu),
+            title_rasterizer: crate::title::TitleRasterizer::new(),
+            title_cache: HashMap::new(),
         }
     }
 
     pub(crate) fn clear(&mut self) {
         self.video_sources.clear();
         self.source_order.clear();
+        self.title_cache.clear();
     }
 
     pub(crate) fn render(
@@ -89,23 +97,41 @@ impl FrameRenderer {
         scale: RenderScale,
         strategy: DecodeStrategy,
     ) -> Result<FrameTexture, MediaError> {
-        let layer_specs = video_layers_at(document, project_at)?;
+        let layer_specs = visual_layers_at(document, project_at)?;
         let mut decoded_layers = Vec::with_capacity(layer_specs.len());
         for layer in layer_specs {
-            let asset = document.asset(layer.source.asset).ok_or_else(|| {
-                MediaError::Backend(format!("timeline asset {} disappeared", layer.source.asset))
-            })?;
-            let frame = self.decode_video_frame(
-                asset.id,
-                &asset.path,
-                asset.fps,
-                asset.resolution,
-                layer.source.source_at,
-                layer.source.source_end,
-                scale,
-                strategy,
-            )?;
-            decoded_layers.push((frame, layer.effects, layer.transition_alpha));
+            match layer {
+                TimelineVisualLayer::Video(layer) => {
+                    let asset = document.asset(layer.source.asset).ok_or_else(|| {
+                        MediaError::Backend(format!(
+                            "timeline asset {} disappeared",
+                            layer.source.asset
+                        ))
+                    })?;
+                    let frame = self.decode_video_frame(
+                        asset.id,
+                        &asset.path,
+                        asset.fps,
+                        asset.resolution,
+                        layer.source.source_at,
+                        layer.source.source_end,
+                        scale,
+                        strategy,
+                    )?;
+                    decoded_layers.push((frame, layer.effects, layer.transition_alpha));
+                }
+                TimelineVisualLayer::Title(layer) => {
+                    let key = (layer.clip, resolution, layer.title.clone());
+                    let frame = if let Some(frame) = self.title_cache.get(&key) {
+                        frame.clone()
+                    } else {
+                        let frame = self.title_rasterizer.rasterize(&layer.title, resolution)?;
+                        self.title_cache.insert(key, frame.clone());
+                        frame
+                    };
+                    decoded_layers.push((frame, layer.effects, layer.transition_alpha));
+                }
+            }
         }
         let layers = decoded_layers
             .iter()

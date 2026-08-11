@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use eframe::egui;
 use openreel_core::{
-    Analysis, Clip, ClipId, Document, FrameRounding, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId,
-    MediaAsset, MediaKind, Operation, Rational, SceneStatus, SilenceStatus, TimeCode, TrackId,
-    TrackKind, WaveformData, map_frames_with_rounding, map_source_range_to_project,
+    Analysis, Clip, ClipContent, ClipId, Document, FrameRounding, MARKER_COLOR_TOKEN_COUNT, Marker,
+    MarkerId, MediaAsset, MediaKind, Operation, Rational, SceneStatus, SilenceStatus, TimeCode,
+    Title, TrackId, TrackKind, WaveformData, map_frames_with_rounding, map_source_range_to_project,
 };
 use openreel_media::timeline_source_at;
 
@@ -35,6 +35,63 @@ enum TrimEdge {
 }
 
 impl OpenReelApp {
+    pub(crate) fn add_title_at_playhead(&mut self) {
+        let at = self.position;
+        let duration = TimeCode(i64::from(nominal_fps(self.document.fps)).saturating_mul(3));
+        let end = TimeCode(at.0.saturating_add(duration.0));
+        let available_track = self
+            .document
+            .tracks
+            .iter()
+            .rev()
+            .filter(|track| track.kind == TrackKind::Video)
+            .find(|track| {
+                track.clips.iter().all(|clip| {
+                    let clip_end = self.document.clip_duration(clip).map_or(
+                        clip.timeline_start,
+                        |clip_duration| {
+                            TimeCode(clip.timeline_start.0.saturating_add(clip_duration.0))
+                        },
+                    );
+                    clip_end <= at || clip.timeline_start >= end
+                })
+            })
+            .map(|track| track.id);
+        let add_title = |track| Operation::AddTitle {
+            track,
+            at,
+            duration,
+            title: Title::default(),
+        };
+        if let Some(track) = available_track {
+            self.send_operation(add_title(track));
+            return;
+        }
+        let Some(next_track) = self
+            .document
+            .tracks
+            .iter()
+            .map(|track| track.id.0)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .map(TrackId)
+        else {
+            self.record_error("Operations", "Track id space is exhausted");
+            return;
+        };
+        self.send_operations(vec![
+            Operation::AddTrack {
+                track: openreel_core::Track {
+                    id: next_track,
+                    kind: TrackKind::Video,
+                    clips: Vec::new(),
+                },
+            },
+            add_title(next_track),
+        ]);
+    }
+
     pub(crate) fn split_at_playhead(&mut self) {
         let clip = self.selected_clip.or_else(|| {
             timeline_source_at(&self.document, self.position)
@@ -131,6 +188,13 @@ impl OpenReelApp {
                 }
                 if icons::button(ui, Icon::Delete, "Delete selected clip").clicked() {
                     self.delete_selected();
+                }
+                if ui
+                    .button("T  Title")
+                    .on_hover_text("Add a three-second title")
+                    .clicked()
+                {
+                    self.add_title_at_playhead();
                 }
                 let ripple = ui
                     .add(
@@ -288,16 +352,19 @@ impl OpenReelApp {
                         );
 
                         for clip in &track.clips {
-                            let Some(asset) = document.asset(clip.asset) else {
+                            let Ok(duration) = document.clip_duration(clip) else {
                                 continue;
                             };
-                            let Ok(duration) = map_source_range_to_project(
-                                clip.source_range.clone(),
-                                asset.fps,
-                                document.fps,
-                            ) else {
-                                continue;
+                            let asset = match &clip.content {
+                                ClipContent::Media => document.asset(clip.asset),
+                                ClipContent::Title(_) => None,
                             };
+                            if matches!(&clip.content, ClipContent::Media) && asset.is_none() {
+                                continue;
+                            }
+                            let source_fps = asset.map_or(document.fps, |asset| asset.fps);
+                            let maximum_source_end =
+                                asset.map_or(TimeCode(i64::MAX), |asset| asset.duration);
                             let x =
                                 rect.left() + clip.timeline_start.0 as f32 * self.pixels_per_frame;
                             let clip_width = (duration.0 as f32 * self.pixels_per_frame).max(24.0);
@@ -358,7 +425,12 @@ impl OpenReelApp {
                             if body.clicked() {
                                 self.selected_clip = Some(clip.id);
                                 self.selected_marker = None;
-                                self.selected_asset = Some(clip.asset);
+                                self.selected_asset = asset.map(|asset| asset.id);
+                            }
+                            if body.double_clicked()
+                                && matches!(&clip.content, ClipContent::Title(_))
+                            {
+                                self.title_text_focus = Some(clip.id);
                             }
 
                             let interacting = body.dragged()
@@ -430,7 +502,7 @@ impl OpenReelApp {
                                 let source_delta = project_delta_to_source(
                                     edge.saturating_sub(clip.timeline_start.0),
                                     document.fps,
-                                    asset.fps,
+                                    source_fps,
                                 );
                                 let new_start = TimeCode(
                                     clip.source_range
@@ -467,12 +539,12 @@ impl OpenReelApp {
                                 let source_delta = project_delta_to_source(
                                     edge.saturating_sub(clip_end),
                                     document.fps,
-                                    asset.fps,
+                                    source_fps,
                                 );
                                 let new_end = TimeCode(
                                     clip.source_range.end.0.saturating_add(source_delta).clamp(
                                         clip.source_range.start.0.saturating_add(1),
-                                        asset.duration.0,
+                                        maximum_source_end.0,
                                     ),
                                 );
                                 if new_end != clip.source_range.end {
@@ -498,18 +570,29 @@ impl OpenReelApp {
                             let draw_rect = clip_rect.translate(draw_delta);
                             let selected = self.selected_clip == Some(clip.id);
                             let dragging = body.dragged() || left.dragged() || right.dragged();
-                            paint_clip(
-                                &painter,
-                                ui.clip_rect(),
-                                &mut self.visual_cache,
-                                self.analysis.as_ref(),
-                                asset,
-                                clip.source_range.clone(),
-                                draw_rect,
-                                body.hovered() || left.hovered() || right.hovered(),
-                                selected,
-                                dragging,
-                            );
+                            match (&clip.content, asset) {
+                                (ClipContent::Media, Some(asset)) => paint_clip(
+                                    &painter,
+                                    ui.clip_rect(),
+                                    &mut self.visual_cache,
+                                    self.analysis.as_ref(),
+                                    asset,
+                                    clip.source_range.clone(),
+                                    draw_rect,
+                                    body.hovered() || left.hovered() || right.hovered(),
+                                    selected,
+                                    dragging,
+                                ),
+                                (ClipContent::Title(title), _) => paint_title_clip(
+                                    &painter,
+                                    title,
+                                    draw_rect,
+                                    body.hovered() || left.hovered() || right.hovered(),
+                                    selected,
+                                    dragging,
+                                ),
+                                (ClipContent::Media, None) => {}
+                            }
                         }
                     }
 
@@ -823,10 +906,13 @@ fn paint_project_marker(
     pixels_per_frame: f32,
 ) {
     let x = timeline_rect.left() + position as f32 * pixels_per_frame;
+    // Markers exist to draw the eye to moments; their tokens are the chromatic
+    // status palette, never the greyscale text ramp (which camouflages against
+    // the ruler).
     let token_color = match color_token {
-        1 => color::TEXT_PRIMARY,
-        2 => color::TEXT_SECONDARY,
-        3 => color::TEXT_MUTED,
+        1 => color::STATUS_SUCCESS,
+        2 => color::STATUS_WARNING,
+        3 => color::STATUS_DANGER,
         _ => color::ACCENT,
     };
     let marker_color = if selected { color::ACCENT } else { token_color };
@@ -836,13 +922,13 @@ fn paint_project_marker(
             egui::pos2(x, top),
             egui::pos2(x, timeline_rect.top() + size::RULER_HEIGHT - space::HALF),
         ],
-        egui::Stroke::new(if selected || dragging { 2.0 } else { 1.0 }, marker_color),
+        egui::Stroke::new(if selected || dragging { 2.0 } else { 1.5 }, marker_color),
     );
     painter.add(egui::Shape::convex_polygon(
         vec![
             egui::pos2(x, top),
-            egui::pos2(x + 8.0, top + 3.5),
-            egui::pos2(x, top + 7.0),
+            egui::pos2(x + 10.0, top + 4.0),
+            egui::pos2(x, top + 8.0),
         ],
         if dragging {
             color::SURFACE_ACTIVE
@@ -981,6 +1067,70 @@ fn paint_clip(
             color::ACCENT_72,
         );
     }
+}
+
+fn paint_title_clip(
+    painter: &egui::Painter,
+    title: &Title,
+    rect: egui::Rect,
+    hovered: bool,
+    selected: bool,
+    dragging: bool,
+) {
+    // Accent discipline: an unselected title is a neutral raised surface with
+    // a small accent badge - the accent field/border is earned by selection,
+    // never outranking the playhead at rest.
+    let fill = if dragging {
+        color::SURFACE_ACTIVE
+    } else if selected {
+        color::ACCENT_28
+    } else {
+        color::SURFACE_RAISED
+    };
+    painter.rect_filled(rect, radius::SM, fill);
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            rect.min,
+            egui::pos2((rect.left() + 28.0).min(rect.right()), rect.bottom()),
+        ),
+        radius::SM,
+        if selected || dragging {
+            color::ACCENT_28
+        } else {
+            color::ACCENT_16
+        },
+    );
+    painter.text(
+        egui::pos2(rect.left() + space::TWO, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "T",
+        egui::FontId::new(type_size::HEADING, egui::FontFamily::Proportional),
+        color::ACCENT,
+    );
+    let label = title.text.lines().next().unwrap_or("Title");
+    painter.text(
+        egui::pos2(rect.left() + 32.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::new(type_size::CAPTION, egui::FontFamily::Proportional),
+        color::TEXT_PRIMARY,
+    );
+    if hovered {
+        painter.rect_filled(rect, radius::SM, color::ACCENT_10);
+    }
+    painter.rect_stroke(
+        rect,
+        radius::SM,
+        egui::Stroke::new(
+            if dragging { 2.0 } else { 1.0 },
+            if selected || dragging {
+                color::ACCENT
+            } else {
+                color::BORDER_STRONG
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
 }
 
 // Derived source-frame positions are intentionally projected into f32 clip pixels.
@@ -1252,24 +1402,36 @@ fn linked_trim_operations(
     let primary_clip = document
         .clip(primary)
         .ok_or_else(|| format!("Clip {primary} no longer exists"))?;
-    let primary_asset = document
-        .asset(primary_clip.asset)
-        .ok_or_else(|| format!("Asset {} no longer exists", primary_clip.asset))?;
+    let primary_fps = match &primary_clip.content {
+        ClipContent::Media => {
+            document
+                .asset(primary_clip.asset)
+                .ok_or_else(|| format!("Asset {} no longer exists", primary_clip.asset))?
+                .fps
+        }
+        ClipContent::Title(_) => document.fps,
+    };
     let (old_boundary, new_boundary) = match edge {
         TrimEdge::Left => (primary_clip.source_range.start, new_source.start),
         TrimEdge::Right => (primary_clip.source_range.end, new_source.end),
     };
     let project_delta =
-        source_boundary_project_delta(old_boundary, new_boundary, primary_asset.fps, document.fps)?;
+        source_boundary_project_delta(old_boundary, new_boundary, primary_fps, document.fps)?;
     let mut operations = Vec::new();
     for (_, clip) in linked_members(document, primary) {
-        let asset = document
-            .asset(clip.asset)
-            .ok_or_else(|| format!("Asset {} no longer exists", clip.asset))?;
+        let (source_fps, maximum_end) = match &clip.content {
+            ClipContent::Media => {
+                let asset = document
+                    .asset(clip.asset)
+                    .ok_or_else(|| format!("Asset {} no longer exists", clip.asset))?;
+                (asset.fps, asset.duration.0)
+            }
+            ClipContent::Title(_) => (document.fps, i64::MAX),
+        };
         let linked_source = if clip.id == primary {
             new_source.clone()
         } else {
-            let source_delta = project_delta_to_source(project_delta, document.fps, asset.fps);
+            let source_delta = project_delta_to_source(project_delta, document.fps, source_fps);
             match edge {
                 TrimEdge::Left => {
                     let start = TimeCode(
@@ -1282,10 +1444,13 @@ fn linked_trim_operations(
                     start..clip.source_range.end
                 }
                 TrimEdge::Right => {
-                    let end = TimeCode(clip.source_range.end.0.saturating_add(source_delta).clamp(
-                        clip.source_range.start.0.saturating_add(1),
-                        asset.duration.0,
-                    ));
+                    let end = TimeCode(
+                        clip.source_range
+                            .end
+                            .0
+                            .saturating_add(source_delta)
+                            .clamp(clip.source_range.start.0.saturating_add(1), maximum_end),
+                    );
                     clip.source_range.start..end
                 }
             }
@@ -1355,10 +1520,7 @@ fn collect_clip_bounds(document: &openreel_core::Document) -> Vec<ClipBounds> {
         .iter()
         .flat_map(|track| &track.clips)
         .filter_map(|clip| {
-            let asset = document.asset(clip.asset)?;
-            let duration =
-                map_source_range_to_project(clip.source_range.clone(), asset.fps, document.fps)
-                    .ok()?;
+            let duration = document.clip_duration(clip).ok()?;
             Some(ClipBounds {
                 id: clip.id,
                 start: clip.timeline_start.0,
@@ -1526,6 +1688,7 @@ mod tests {
             id: ClipId(id),
             asset: asset.id,
             source_range: TimeCode(0)..TimeCode(30),
+            content: openreel_core::ClipContent::Media,
             timeline_start: TimeCode(track_start),
             effects: Vec::new(),
             transition_in: None,

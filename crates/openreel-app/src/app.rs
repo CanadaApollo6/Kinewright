@@ -68,6 +68,9 @@ pub(crate) struct OpenReelApp {
     pub(crate) selected_clip: Option<ClipId>,
     pub(crate) selected_marker: Option<MarkerId>,
     pub(crate) selected_asset: Option<AssetId>,
+    pub(crate) title_text_draft: Option<(ClipId, String)>,
+    pub(crate) marker_label_draft: Option<(MarkerId, String)>,
+    pub(crate) title_text_focus: Option<ClipId>,
     pub(crate) transcript_scope: TranscriptScope,
     pub(crate) pixels_per_frame: f32,
     pub(crate) timeline_zoom_target: f32,
@@ -160,6 +163,9 @@ impl OpenReelApp {
             selected_clip: None,
             selected_marker: None,
             selected_asset: None,
+            title_text_draft: None,
+            marker_label_draft: None,
+            title_text_focus: None,
             transcript_scope: TranscriptScope::default(),
             pixels_per_frame: 6.0,
             timeline_zoom_target: 6.0,
@@ -775,7 +781,7 @@ impl eframe::App for OpenReelApp {
             .min_size(280.0)
             .resizable(true)
             .frame(theme::panel_frame())
-            .show(ui, |ui| self.agent_panel(ui));
+            .show(ui, |ui| self.right_dock(ui));
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -805,6 +811,7 @@ fn operation_status(operation: &Operation) -> String {
         Operation::AddTrack { track } => format!("Added {:?} track {}", track.kind, track.id),
         Operation::RemoveTrack { track } => format!("Removed track {track}"),
         Operation::AddClip { asset, .. } => format!("Added asset {asset} to timeline"),
+        Operation::AddTitle { title, .. } => format!("Added title {:?}", title.text),
         Operation::SplitClip { clip, at } => format!("Split clip {clip} at frame {at}"),
         Operation::TrimClip { clip, .. } => format!("Trimmed clip {clip}"),
         Operation::MoveClip { clip, to, .. } => format!("Moved clip {clip} to frame {to}"),
@@ -829,11 +836,17 @@ fn operation_status(operation: &Operation) -> String {
         Operation::SetEffectParam {
             clip, effect, name, ..
         } => format!("Set {name} on effect {effect} for clip {clip}"),
+        Operation::SetTitleParam { clip, name, .. } => {
+            format!("Set {name} on title clip {clip}")
+        }
         Operation::AddTransition { clip, transition } => {
             format!("Added {} transition to clip {clip}", transition.name)
         }
         Operation::RemoveTransition { clip } => {
             format!("Removed transition from clip {clip}")
+        }
+        Operation::SetMarkerParam { marker, name, .. } => {
+            format!("Set {name} on marker {marker}")
         }
     }
 }

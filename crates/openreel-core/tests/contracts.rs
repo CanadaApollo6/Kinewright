@@ -6,9 +6,9 @@ use std::{
 };
 
 use openreel_core::{
-    AssetId, Clip, ClipId, Command, Core, Document, Effect, EffectId, Event, LinkId, Marker,
-    MarkerId, MediaAsset, MediaKind, OpError, Operation, ParamValue, Rational, TimeCode, Track,
-    TrackId, TrackKind, Transition,
+    AssetId, Clip, ClipContent, ClipId, Command, Core, Document, Effect, EffectId, Event, LinkId,
+    Marker, MarkerId, MediaAsset, MediaKind, OpError, Operation, ParamValue, Rational, TimeCode,
+    Title, TitlePosition, Track, TrackId, TrackKind, Transition,
 };
 use proptest::prelude::*;
 
@@ -84,6 +84,7 @@ fn document_with_three_clips() -> Document {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn document_and_every_operation_variant_round_trip_through_json() {
     let doc = document_with_one_clip();
     let encoded = serde_json::to_string(&doc).unwrap();
@@ -107,6 +108,12 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             asset: AssetId(1),
             at: TimeCode(100),
             source: TimeCode(5)..TimeCode(25),
+        },
+        Operation::AddTitle {
+            track: TrackId(1),
+            at: TimeCode(100),
+            duration: TimeCode(90),
+            title: Title::default(),
         },
         Operation::SplitClip {
             clip: ClipId(1),
@@ -167,6 +174,11 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             name: "percent".to_owned(),
             value: ParamValue::Integer(25),
         },
+        Operation::SetTitleParam {
+            clip: ClipId(1),
+            name: "text".to_owned(),
+            value: ParamValue::Text("Chapter one".to_owned()),
+        },
         Operation::AddTransition {
             clip: ClipId(1),
             transition: Transition {
@@ -175,6 +187,11 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             },
         },
         Operation::RemoveTransition { clip: ClipId(1) },
+        Operation::SetMarkerParam {
+            marker: MarkerId(1),
+            name: "label".to_owned(),
+            value: ParamValue::Text("Review this".to_owned()),
+        },
     ];
 
     for operation in operations {
@@ -185,16 +202,173 @@ fn document_and_every_operation_variant_round_trip_through_json() {
 }
 
 #[test]
-fn pre_m13_project_json_defaults_links_and_markers_cleanly() {
+fn pre_m14_project_json_defaults_title_content_without_changing_legacy_shape() {
     let document: Document =
         serde_json::from_str(include_str!("fixtures/pre_m13_project.json")).unwrap();
     document.validate().unwrap();
     assert!(document.markers.is_empty());
     assert_eq!(document.clip(ClipId(1)).unwrap().link, None);
+    assert_eq!(
+        document.clip(ClipId(1)).unwrap().content,
+        ClipContent::Media
+    );
 
     let encoded = serde_json::to_string(&document).unwrap();
     assert!(!encoded.contains("\"markers\""));
     assert!(!encoded.contains("\"link\""));
+    assert!(!encoded.contains("\"content\""));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn title_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    Operation::AddTrack {
+        track: Track {
+            id: TrackId(2),
+            kind: TrackKind::Video,
+            clips: Vec::new(),
+        },
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::AddTitle {
+        track: TrackId(1),
+        at: TimeCode(30),
+        duration: TimeCode(90),
+        title: Title {
+            text: "Lower third".to_owned(),
+            position: TitlePosition::LowerThird,
+            fade_in_frames: TimeCode(10),
+            fade_out_frames: TimeCode(12),
+            ..Title::default()
+        },
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(document.duration, TimeCode(120));
+    assert!(matches!(
+        document.clip(ClipId(1)).unwrap().content,
+        ClipContent::Title(_)
+    ));
+
+    Operation::SplitClip {
+        clip: ClipId(1),
+        at: TimeCode(75),
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(
+        document
+            .clip_duration(document.clip(ClipId(1)).unwrap())
+            .unwrap(),
+        TimeCode(45)
+    );
+    assert_eq!(
+        document
+            .clip_duration(document.clip(ClipId(2)).unwrap())
+            .unwrap(),
+        TimeCode(45)
+    );
+    let ClipContent::Title(left) = &document.clip(ClipId(1)).unwrap().content else {
+        panic!("left split must remain a title");
+    };
+    let ClipContent::Title(right) = &document.clip(ClipId(2)).unwrap().content else {
+        panic!("right split must remain a title");
+    };
+    assert_eq!(left.fade_out_frames, TimeCode::ZERO);
+    assert_eq!(right.fade_in_frames, TimeCode::ZERO);
+
+    Operation::MoveClip {
+        clip: ClipId(2),
+        to_track: TrackId(2),
+        to: TimeCode(90),
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::TrimClip {
+        clip: ClipId(2),
+        new_source: TimeCode(50)..TimeCode(80),
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(
+        document.clip(ClipId(2)).unwrap().timeline_start,
+        TimeCode(95)
+    );
+    Operation::LinkClips {
+        clips: vec![ClipId(1), ClipId(2)],
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(
+        document.clip(ClipId(1)).unwrap().link,
+        document.clip(ClipId(2)).unwrap().link
+    );
+    Operation::RippleDeleteClip { clip: ClipId(1) }
+        .apply(&mut document)
+        .unwrap();
+    assert!(document.clip(ClipId(1)).is_none());
+
+    let core = Core::spawn(document.clone()).unwrap();
+    core.request(Command::Do(Operation::SetTitleParam {
+        clip: ClipId(2),
+        name: "text".to_owned(),
+        value: ParamValue::Text("Updated".to_owned()),
+    }))
+    .unwrap();
+    let undone = match core.request(Command::Undo).unwrap() {
+        Event::DocumentChanged { doc, .. } => doc,
+        other => panic!("unexpected event: {other:?}"),
+    };
+    let ClipContent::Title(title) = &undone.clip(ClipId(2)).unwrap().content else {
+        panic!("clip must remain a title");
+    };
+    assert_eq!(title.text, "Lower third");
+}
+
+#[test]
+fn title_and_marker_parameter_validation_is_atomic() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    Operation::AddTitle {
+        track: TrackId(1),
+        at: TimeCode::ZERO,
+        duration: TimeCode(30),
+        title: Title::default(),
+    }
+    .apply(&mut document)
+    .unwrap();
+    let before = document.clone();
+    let error = Operation::SetTitleParam {
+        clip: ClipId(1),
+        name: "fade_in_frames".to_owned(),
+        value: ParamValue::Integer(31),
+    }
+    .apply(&mut document)
+    .unwrap_err();
+    assert!(matches!(error, OpError::TitleFadeTooLong { .. }));
+    assert_eq!(document, before);
+
+    Operation::AddMarker {
+        marker: Marker {
+            id: MarkerId(1),
+            position: TimeCode(5),
+            label: "Review".to_owned(),
+            color_token: 0,
+        },
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::SetMarkerParam {
+        marker: MarkerId(1),
+        name: "color_token".to_owned(),
+        value: ParamValue::Integer(3),
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(document.marker(MarkerId(1)).unwrap().color_token, 3);
 }
 
 #[test]
@@ -303,6 +477,36 @@ proptest! {
             .unwrap();
         prop_assert_eq!(document.clip(ClipId(3)).unwrap().timeline_start, TimeCode(third_start - removed_duration));
         prop_assert!(document.validate().is_ok());
+    }
+
+    #[test]
+    fn title_fades_accept_exact_integer_bounds(
+        duration in 1_i64..600,
+        fade_in in 0_i64..600,
+        fade_out in 0_i64..600,
+    ) {
+        let fps = Rational::new(30, 1).unwrap();
+        let mut document = empty_timeline(fps);
+        let operation = Operation::AddTitle {
+            track: TrackId(1),
+            at: TimeCode::ZERO,
+            duration: TimeCode(duration),
+            title: Title {
+                fade_in_frames: TimeCode(fade_in),
+                fade_out_frames: TimeCode(fade_out),
+                ..Title::default()
+            },
+        };
+        let before = document.clone();
+        let result = operation.apply(&mut document);
+        if fade_in <= duration && fade_out <= duration {
+            prop_assert!(result.is_ok());
+            prop_assert_eq!(document.duration, TimeCode(duration));
+        } else {
+            let rejected_for_fade = matches!(result, Err(OpError::TitleFadeTooLong { .. }));
+            prop_assert!(rejected_for_fade);
+            prop_assert_eq!(document, before);
+        }
     }
 }
 
@@ -618,6 +822,7 @@ fn add_and_remove_track_are_validated_and_atomic() {
             id: ClipId(99),
             asset: AssetId(99),
             source_range: TimeCode(0)..TimeCode(1),
+            content: ClipContent::Media,
             timeline_start: TimeCode::ZERO,
             effects: Vec::new(),
             transition_in: None,
@@ -809,6 +1014,7 @@ fn unsorted_input_document_is_rejected() {
         id: ClipId(1),
         asset: AssetId(1),
         source_range: TimeCode(0)..TimeCode(10),
+        content: ClipContent::Media,
         timeline_start: TimeCode(20),
         effects: Vec::new(),
         transition_in: None,

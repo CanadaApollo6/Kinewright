@@ -6,9 +6,9 @@ use std::{
 };
 
 use openreel_core::{
-    Analysis, Clip, ClipId, Document, Effect, EffectId, Export, ExportCancellation, ExportSettings,
-    MediaAsset, MediaError, MediaEvent, MediaKind, ParamValue, Playback, PlaybackState, Rational,
-    TimeCode, Track, TrackId, TrackKind, Transition,
+    Analysis, AssetId, Clip, ClipContent, ClipId, Document, Effect, EffectId, Export,
+    ExportCancellation, ExportSettings, MediaAsset, MediaError, MediaEvent, MediaKind, ParamValue,
+    Playback, PlaybackState, Rational, TimeCode, Title, Track, TrackId, TrackKind, Transition,
 };
 use openreel_media::FfmpegMediaEngine;
 
@@ -141,6 +141,7 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
                     id: ClipId(1),
                     asset: red_asset.id,
                     source_range: TimeCode(0)..TimeCode(10),
+                    content: openreel_core::ClipContent::Media,
                     timeline_start: TimeCode::ZERO,
                     effects: Vec::new(),
                     transition_in: None,
@@ -154,6 +155,7 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
                     id: ClipId(2),
                     asset: blue_asset.id,
                     source_range: TimeCode(0)..TimeCode(10),
+                    content: openreel_core::ClipContent::Media,
                     timeline_start: TimeCode::ZERO,
                     effects: vec![Effect {
                         id: EffectId(1),
@@ -254,6 +256,83 @@ fn two_track_effect_export_matches_preview_after_h264_redecode() {
     assert_frame_sample_close(&preview_start, &decoded_start, 28);
     assert_frame_sample_close(&preview_blended, &decoded_blended, 28);
     remove_fixture_assets(&document);
+}
+
+#[test]
+fn title_export_pixels_match_preview_after_h264_redecode() {
+    let engine = FfmpegMediaEngine::new().unwrap();
+    let document = Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            clips: vec![Clip {
+                id: ClipId(1),
+                asset: AssetId::default(),
+                source_range: TimeCode(0)..TimeCode(10),
+                content: ClipContent::Title(Title {
+                    text: "Preview = Export".to_owned(),
+                    ..Title::default()
+                }),
+                timeline_start: TimeCode::ZERO,
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+            }],
+        }],
+        media_pool: Vec::new(),
+        markers: Vec::new(),
+        fps: Rational::new(10, 1).unwrap(),
+        resolution: (320, 180),
+        duration: TimeCode(10),
+    };
+    document.validate().unwrap();
+    let frames = engine.frames();
+    engine.set_document(std::sync::Arc::new(document.clone()));
+    engine.request_frame(TimeCode(5));
+    let preview = receive_frame(&frames, TimeCode(5));
+    assert!(
+        preview
+            .rgba
+            .chunks_exact(4)
+            .filter(|pixel| pixel[..3] != [0, 0, 0])
+            .count()
+            > 500,
+        "preview contains no visible title pixels"
+    );
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let output = TemporaryFile(std::env::temp_dir().join(format!(
+        "openreel-title-export-{}-{nonce}.mp4",
+        std::process::id()
+    )));
+    let (progress, _) = crossbeam_channel::unbounded();
+    engine
+        .export(
+            &output.0,
+            ExportSettings {
+                fps: document.fps,
+                resolution: document.resolution,
+                video_codec: "libx264".to_owned(),
+                audio_codec: "aac".to_owned(),
+                video_bitrate: 1_000_000,
+                audio_bitrate: 128_000,
+                cancellation: ExportCancellation::default(),
+            },
+            progress,
+        )
+        .unwrap();
+
+    let decode_engine = FfmpegMediaEngine::new().unwrap();
+    let exported_asset = decode_engine.probe(&output.0).unwrap();
+    let exported_document = full_timeline(exported_asset);
+    let exported_frames = decode_engine.frames();
+    decode_engine.set_document(std::sync::Arc::new(exported_document));
+    decode_engine.request_frame(TimeCode(5));
+    let decoded = receive_frame(&exported_frames, TimeCode(5));
+    assert_title_frame_close(&preview, &decoded);
 }
 
 fn decode_stereo_audio(path: &Path) -> Vec<f32> {
@@ -362,6 +441,40 @@ fn assert_frame_sample_close(
     }
 }
 
+fn assert_title_frame_close(
+    preview: &openreel_core::FrameTexture,
+    exported: &openreel_core::FrameTexture,
+) {
+    assert_eq!(
+        (preview.width, preview.height),
+        (exported.width, exported.height)
+    );
+    let differences = preview
+        .rgba
+        .chunks_exact(4)
+        .zip(exported.rgba.chunks_exact(4))
+        .flat_map(|(left, right)| (0..3).map(move |channel| left[channel].abs_diff(right[channel])))
+        .collect::<Vec<_>>();
+    let total = differences
+        .iter()
+        .map(|value| u64::from(*value))
+        .sum::<u64>();
+    #[allow(clippy::cast_precision_loss)]
+    let mean = total as f64 / differences.len() as f64;
+    let outliers = differences
+        .iter()
+        .filter(|difference| **difference > 40)
+        .count();
+    assert!(
+        mean <= 8.0,
+        "mean preview/export channel delta was {mean:.2}"
+    );
+    assert!(
+        outliers * 100 <= differences.len(),
+        "more than one percent of title channels exceeded codec tolerance"
+    );
+}
+
 fn assert_frame_center_close(
     frame: &openreel_core::FrameTexture,
     expected: [u8; 3],
@@ -423,6 +536,7 @@ fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
                     id: ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode(5)..TimeCode(15),
+                    content: openreel_core::ClipContent::Media,
                     timeline_start: TimeCode(0),
                     effects: Vec::new(),
                     transition_in: None,
@@ -432,6 +546,7 @@ fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
                     id: ClipId(2),
                     asset: asset.id,
                     source_range: TimeCode(30)..TimeCode(40),
+                    content: openreel_core::ClipContent::Media,
                     timeline_start: TimeCode(15),
                     effects: Vec::new(),
                     transition_in: None,
@@ -538,6 +653,7 @@ fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
                     id: ClipId(1),
                     asset: voice_asset.id,
                     source_range: TimeCode::ZERO..duration,
+                    content: openreel_core::ClipContent::Media,
                     timeline_start: TimeCode::ZERO,
                     effects: Vec::new(),
                     transition_in: None,
@@ -551,6 +667,7 @@ fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
                     id: ClipId(2),
                     asset: bed_asset.id,
                     source_range: TimeCode(2)..duration,
+                    content: openreel_core::ClipContent::Media,
                     timeline_start: TimeCode::ZERO,
                     effects: Vec::new(),
                     transition_in: None,
@@ -605,6 +722,7 @@ fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
                     id: ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode(0)..TimeCode(10),
+                    content: openreel_core::ClipContent::Media,
                     timeline_start: TimeCode(0),
                     effects: Vec::new(),
                     transition_in: None,
@@ -614,6 +732,7 @@ fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
                     id: ClipId(2),
                     asset: asset.id,
                     source_range: TimeCode(20)..TimeCode(40),
+                    content: openreel_core::ClipContent::Media,
                     timeline_start: TimeCode(15),
                     effects: Vec::new(),
                     transition_in: None,
@@ -656,6 +775,7 @@ fn full_timeline(asset: MediaAsset) -> Document {
                 id: ClipId(1),
                 asset: asset_id,
                 source_range: TimeCode::ZERO..asset_duration,
+                content: openreel_core::ClipContent::Media,
                 timeline_start: TimeCode::ZERO,
                 effects: Vec::new(),
                 transition_in: None,

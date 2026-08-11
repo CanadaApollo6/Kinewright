@@ -471,7 +471,7 @@ fn parameter_value(effect: &Effect, descriptor: &EffectParameterDescriptor) -> f
 mod tests {
     use std::collections::BTreeMap;
 
-    use openreel_core::{EffectId, ParamValue};
+    use openreel_core::{EffectId, ParamValue, Title};
 
     use super::*;
 
@@ -627,5 +627,48 @@ mod tests {
             )
             .unwrap();
         assert_pixel_close(&output.rgba[0..4], [128, 0, 128, 255], 2);
+    }
+
+    #[test]
+    fn rasterized_title_is_composited_by_the_existing_layer_pipeline() {
+        let Some(compositor) = fallback() else {
+            eprintln!("skipped: no usable wgpu adapter in this environment");
+            return;
+        };
+        let background = solid(320, 180, [12, 18, 24, 255]);
+        let title = crate::title::TitleRasterizer::new()
+            .rasterize(
+                &Title {
+                    text: "OpenReel".to_owned(),
+                    ..Title::default()
+                },
+                (320, 180),
+            )
+            .unwrap();
+        let output = compositor
+            .render(
+                (320, 180),
+                &[
+                    CompositorLayer {
+                        frame: &background,
+                        effects: &[],
+                        transition_alpha: 1.0,
+                    },
+                    CompositorLayer {
+                        frame: &title,
+                        effects: &[],
+                        transition_alpha: 1.0,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_pixel_close(&output.rgba[0..4], [12, 18, 24, 255], 2);
+        assert!(
+            output
+                .rgba
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] != [12, 18, 24]),
+            "title layer did not change any compositor output pixels"
+        );
     }
 }

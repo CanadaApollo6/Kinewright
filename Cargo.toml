@@ -17,6 +17,7 @@ repository = "https://github.com/CanadaApollo6/OpenReel"
 # Every third-party version is pinned here. Member manifests only opt in with
 # `workspace = true`, keeping the dependency graph versioned in one place.
 [workspace.dependencies]
+ab_glyph = "=0.2.32"
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio"] }
 base64 = "=0.23.1"
 cpal = "=0.18.1"

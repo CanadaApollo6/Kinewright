@@ -851,6 +851,7 @@ fn timeline_document(
             id: ClipId(u64::try_from(index + 1).unwrap_or(u64::MAX)),
             asset: asset.id,
             source_range: source_range.clone(),
+            content: openreel_core::ClipContent::Media,
             timeline_start,
             effects: Vec::new(),
             transition_in: None,

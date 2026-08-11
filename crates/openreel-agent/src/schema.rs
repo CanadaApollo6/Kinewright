@@ -1,6 +1,6 @@
 use std::{borrow::Cow, fmt::Write, sync::Arc};
 
-use openreel_core::{EFFECT_DESCRIPTORS, Operation};
+use openreel_core::{EFFECT_DESCRIPTORS, Operation, TITLE_PARAMETER_DESCRIPTORS};
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -99,6 +99,7 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::AddTrack { .. } => "add_track",
         Operation::RemoveTrack { .. } => "remove_track",
         Operation::AddClip { .. } => "add_clip",
+        Operation::AddTitle { .. } => "add_title",
         Operation::SplitClip { .. } => "split_clip",
         Operation::TrimClip { .. } => "trim_clip",
         Operation::MoveClip { .. } => "move_clip",
@@ -113,8 +114,10 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::AddEffect { .. } => "add_effect",
         Operation::RemoveEffect { .. } => "remove_effect",
         Operation::SetEffectParam { .. } => "set_effect_param",
+        Operation::SetTitleParam { .. } => "set_title_param",
         Operation::AddTransition { .. } => "add_transition",
         Operation::RemoveTransition { .. } => "remove_transition",
+        Operation::SetMarkerParam { .. } => "set_marker_param",
     }
 }
 
@@ -167,6 +170,16 @@ fn operation_tool(
         write!(description, " {}", effect_documentation())
             .expect("writing effect documentation to a String cannot fail");
     }
+    if matches!(variant.as_str(), "AddTitle" | "SetTitleParam") {
+        description.push_str(" Titles are video-track clips, so move, trim, split, ripple, link, and undo apply normally. Parameters: ");
+        for (index, parameter) in TITLE_PARAMETER_DESCRIPTORS.iter().enumerate() {
+            if index != 0 {
+                description.push_str(", ");
+            }
+            description.push_str(parameter.name);
+        }
+        description.push('.');
+    }
     match variant.as_str() {
         "RippleDeleteClip" | "RippleInsertGap" => description.push_str(
             " M13 ripple is per-track only; other tracks remain unchanged. Cross-track sync-lock is future work.",
@@ -174,7 +187,7 @@ fn operation_tool(
         "LinkClips" | "UnlinkClips" => description.push_str(
             " Links are metadata: moving, trimming, or deleting a member requires an atomic plan covering its whole link group.",
         ),
-        "AddMarker" | "MoveMarker" | "RemoveMarker" => description.push_str(
+        "AddMarker" | "MoveMarker" | "RemoveMarker" | "SetMarkerParam" => description.push_str(
             " Markers are non-destructive editorial suggestions and are preferred when reviewing footage.",
         ),
         _ => {}
@@ -242,6 +255,7 @@ mod tests {
                 "add_track",
                 "remove_track",
                 "add_clip",
+                "add_title",
                 "split_clip",
                 "trim_clip",
                 "move_clip",
@@ -256,8 +270,10 @@ mod tests {
                 "add_effect",
                 "remove_effect",
                 "set_effect_param",
+                "set_title_param",
                 "add_transition",
                 "remove_transition",
+                "set_marker_param",
             ]
         );
         for definition in tools {
@@ -293,6 +309,8 @@ mod tests {
             ("add_marker", false),
             ("move_marker", false),
             ("remove_marker", false),
+            ("add_title", false),
+            ("set_title_param", false),
         ] {
             let tool = tools
                 .iter()

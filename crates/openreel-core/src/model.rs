@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{OpError, Rational, TimeCode, map_source_range_to_project};
+use crate::{OpError, Rational, TimeCode, Title, map_source_range_to_project};
 
 macro_rules! id_type {
     ($name:ident) => {
@@ -108,12 +108,41 @@ pub struct Transition {
     pub duration: TimeCode,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipContent {
+    #[default]
+    Media,
+    Title(Title),
+}
+
+impl ClipContent {
+    #[must_use]
+    pub const fn is_media(&self) -> bool {
+        matches!(self, Self::Media)
+    }
+
+    #[must_use]
+    pub const fn title(&self) -> Option<&Title> {
+        match self {
+            Self::Media => None,
+            Self::Title(title) => Some(title),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Clip {
     pub id: ClipId,
+    /// Media asset id. Title clips use the default id and ignore this field;
+    /// keeping it preserves the pre-M14 serialized media-clip shape.
     pub asset: AssetId,
-    /// In/out within the source, in source frames.
+    /// Media in/out in source frames, or a title-local span in project frames.
     pub source_range: std::ops::Range<TimeCode>,
+    /// Missing on pre-M14 clips, which are media by definition.
+    #[serde(default, skip_serializing_if = "ClipContent::is_media")]
+    #[schemars(default)]
+    pub content: ClipContent,
     /// Position on the track, in project frames.
     pub timeline_start: TimeCode,
     pub effects: Vec<Effect>,
@@ -198,7 +227,19 @@ impl Document {
         crate::operation::validate_document(self)
     }
 
-    pub(crate) fn clip_duration(&self, clip: &Clip) -> Result<TimeCode, OpError> {
+    /// Return a clip's duration on the project frame grid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing media asset or an unrepresentable frame-rate mapping.
+    pub fn clip_duration(&self, clip: &Clip) -> Result<TimeCode, OpError> {
+        if matches!(clip.content, ClipContent::Title(_)) {
+            return clip
+                .source_range
+                .end
+                .checked_sub(clip.source_range.start)
+                .ok_or(OpError::TimeOverflow);
+        }
         let asset = self
             .asset(clip.asset)
             .ok_or(OpError::MissingAsset(clip.asset))?;

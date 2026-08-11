@@ -83,6 +83,15 @@ Selection still uses `accent` regardless of the stored marker token. New marker
 colors require a design-token change and a corresponding stable index; raw or
 decorative per-marker colors are not allowed.
 
+### Title presentation token indices
+
+Title project data stores stable indices rather than raw presentation values.
+Font-size index `0` is Small (40 px at 1080 lines), `1` is Standard (64 px),
+and `2` is Display (96 px). The media renderer scales these sizes with output
+height. Color index `0` resolves to `text-primary`, `1` to `text-secondary`,
+and `2` to `accent`. Title scrims use `media-shadow` at 72%. Inter is the only
+title family in M14; its embedded bytes are shared with the media renderer.
+
 ### Color application
 
 - Window and central canvas: `canvas`.
@@ -244,6 +253,11 @@ Hover reveals the marker label; selection and active drag use `accent`. The
 timeline toolbar's ripple-mode control uses the standard selected button fill
 and border plus a compact `RIPPLE` accent state label while enabled.
 
+Title clips use an `accent` 16% fill, an `accent` 72% border, a compact Inter
+`T` glyph, and the first line of title text. Selection and drag reuse the
+standard timeline states. They remain ordinary video-track clips; their visual
+treatment distinguishes content without adding a decorative per-clip color.
+
 The playhead is a 2 px `accent` line with a 10 by 8 downward handle in the ruler.
 The ruler and handle use immediate pointer tracking. Zoom and horizontal scroll
 settle over `motion-navigation` without decoding or file access.
@@ -264,6 +278,15 @@ use `surface-raised`, a `border-subtle` left rule, and `type-code` for arguments
 Tool results remain collapsible. Cost and token usage are compact metadata, not
 chat bubbles. Confirmations use `status-warning`; rejection/destructive actions
 use `status-danger`.
+
+### Inspector panel
+
+The inspector occupies the top of the existing right dock, above the agent
+panel. It is collapsible, remembers disclosure through egui panel state, and
+caps its expanded height at 360 points so it never claims another timeline
+column. Exact frame and second ranges, paths, and raster dimensions use the
+monospace data treatment. Controls stay in compact descriptor-driven rows;
+the empty state is a single `text-muted` sentence with `space-3` breathing room.
 
 ### Transport
 

@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, fmt::Write as _};
 
 use openreel_core::{
-    AssetId, ClipId, Document, Effect, FrameRounding, LinkId, ParamValue, Rational, SceneStatus,
-    SilenceSpan, SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, TrackKind, TranscriptStatus, map_frames_with_rounding,
+    AssetId, ClipContent, ClipId, Document, Effect, FrameRounding, LinkId, ParamValue, Rational,
+    SceneStatus, SilenceSpan, SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
+    TimelineTranscriptWord, Title, TrackKind, TranscriptStatus, map_frames_with_rounding,
     map_source_range_to_project,
 };
 
@@ -11,7 +11,7 @@ use crate::shrink_silence_span_for_cutting;
 
 #[must_use]
 // Debug formatting keeps asset paths quoted and escaped in the stable text protocol.
-#[allow(clippy::unnecessary_debug_formatting)]
+#[allow(clippy::too_many_lines, clippy::unnecessary_debug_formatting)]
 pub fn render_timeline_state(document: &Document) -> String {
     let mut output = String::new();
     let _ = writeln!(
@@ -50,6 +50,26 @@ pub fn render_timeline_state(document: &Document) -> String {
             track.clips.len()
         );
         for clip in &track.clips {
+            if let ClipContent::Title(title) = &clip.content {
+                let duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
+                let end = clip
+                    .timeline_start
+                    .checked_add(duration)
+                    .unwrap_or(clip.timeline_start);
+                let _ = writeln!(
+                    output,
+                    "  clip {} title={} timeline={}..{} duration={} params={} effects={} transition_in={}",
+                    clip.id,
+                    title.text.escape_debug(),
+                    frame_and_seconds(clip.timeline_start, document.fps),
+                    frame_and_seconds(end, document.fps),
+                    frame_and_seconds(duration, document.fps),
+                    render_title(title),
+                    render_effects(&clip.effects),
+                    render_transition(clip.transition_in.as_ref()),
+                );
+                continue;
+            }
             let asset = document.asset(clip.asset);
             let duration = asset
                 .and_then(|asset| {
@@ -153,6 +173,29 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
                 .map(|clip| (track, clip))
         })
         .ok_or_else(|| format!("clip {clip_id} does not exist"))?;
+    if let ClipContent::Title(title) = &clip.content {
+        let duration = document
+            .clip_duration(clip)
+            .map_err(|error| error.to_string())?;
+        let end = clip
+            .timeline_start
+            .checked_add(duration)
+            .ok_or_else(|| "time calculation overflowed".to_owned())?;
+        return Ok(format!(
+            "clip {}\ntrack={} kind={:?}\ncontent=title\nlink={}\ntimeline={}..{} duration={}\ntitle={}\neffects={}\ntransition_in={}",
+            clip.id,
+            track.id,
+            track.kind,
+            clip.link
+                .map_or_else(|| "none".to_owned(), |link| link.to_string()),
+            frame_and_seconds(clip.timeline_start, document.fps),
+            frame_and_seconds(end, document.fps),
+            frame_and_seconds(duration, document.fps),
+            render_title(title),
+            render_effects(&clip.effects),
+            render_transition(clip.transition_in.as_ref()),
+        ));
+    }
     let asset = document
         .asset(clip.asset)
         .ok_or_else(|| format!("asset {} does not exist", clip.asset))?;
@@ -186,6 +229,19 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
         render_effects(&clip.effects),
         render_transition(clip.transition_in.as_ref()),
     ))
+}
+
+fn render_title(title: &Title) -> String {
+    format!(
+        "text={:?} font_size_token={} color_token={} position={} scrim={} fade_in_frames={} fade_out_frames={}",
+        title.text,
+        title.font_size_token,
+        title.color_token,
+        title.position.as_str(),
+        title.background_scrim,
+        title.fade_in_frames,
+        title.fade_out_frames,
+    )
 }
 
 fn link_groups(document: &Document) -> BTreeMap<LinkId, Vec<ClipId>> {
@@ -549,6 +605,7 @@ mod tests {
                         id: ClipId(10),
                         asset: AssetId(4),
                         source_range: TimeCode(30)..TimeCode(120),
+                        content: ClipContent::Media,
                         timeline_start: TimeCode(0),
                         effects: vec![Effect {
                             id: EffectId(3),
@@ -568,6 +625,7 @@ mod tests {
                         id: ClipId(11),
                         asset: AssetId(4),
                         source_range: TimeCode(150)..TimeCode(210),
+                        content: ClipContent::Media,
                         timeline_start: TimeCode(120),
                         effects: Vec::new(),
                         transition_in: None,
@@ -620,6 +678,43 @@ assets:
         assert!(rendered.contains("link=2"));
         assert!(rendered.contains("effects=[3:brightness(percent=25)]"));
         assert!(rendered.contains("transition_in=crossfade:15f"));
+    }
+
+    #[test]
+    fn timeline_state_and_clip_info_include_declarative_title_parameters() {
+        let mut document = fixture();
+        document.tracks.push(Track {
+            id: TrackId(8),
+            kind: TrackKind::Video,
+            clips: vec![Clip {
+                id: ClipId(12),
+                asset: AssetId::default(),
+                source_range: TimeCode(0)..TimeCode(60),
+                content: ClipContent::Title(Title {
+                    text: "Lower third".to_owned(),
+                    font_size_token: 2,
+                    color_token: 2,
+                    position: openreel_core::TitlePosition::LowerThird,
+                    background_scrim: false,
+                    fade_in_frames: TimeCode(6),
+                    fade_out_frames: TimeCode(9),
+                }),
+                timeline_start: TimeCode(30),
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+            }],
+        });
+        let timeline = render_timeline_state(&document);
+        assert!(timeline.contains("clip 12 title=Lower third"));
+        assert!(timeline.contains(
+            "text=\"Lower third\" font_size_token=2 color_token=2 position=lower_third scrim=false fade_in_frames=6 fade_out_frames=9"
+        ));
+
+        let info = render_clip_info(&document, ClipId(12)).unwrap();
+        assert!(info.contains("content=title"));
+        assert!(info.contains("timeline=30f/1.000s..90f/3.000s duration=60f/2.000s"));
+        assert!(info.contains("position=lower_third"));
     }
 
     #[test]

@@ -1,8 +1,9 @@
 use std::ops::Range;
 
 use openreel_core::{
-    AssetId, Clip, ClipId, Document, Effect, FrameRounding, MediaError, MediaKind, TimeCode, Track,
-    TrackId, TrackKind, map_frames_with_rounding, map_source_range_to_project,
+    AssetId, Clip, ClipContent, ClipId, Document, Effect, FrameRounding, MediaError, MediaKind,
+    TimeCode, Title, Track, TrackId, TrackKind, map_frames_with_rounding,
+    map_source_range_to_project,
 };
 
 /// The source frame selected by a project-frame position on the first video track.
@@ -23,6 +24,21 @@ pub struct TimelineVideoLayer {
     pub source: TimelineSource,
     pub effects: Vec<Effect>,
     pub transition_alpha: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineTitleLayer {
+    pub track: TrackId,
+    pub clip: ClipId,
+    pub title: Title,
+    pub effects: Vec<Effect>,
+    pub transition_alpha: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TimelineVisualLayer {
+    Video(TimelineVideoLayer),
+    Title(TimelineTitleLayer),
 }
 
 /// One audio-bearing portion of a timeline clip within a requested project range.
@@ -101,6 +117,51 @@ pub fn video_layers_at(
     Ok(layers)
 }
 
+/// Resolve every active visual layer at a project frame in bottom-to-top track order.
+///
+/// # Errors
+///
+/// Returns a media error when exact source/project frame mapping fails.
+pub fn visual_layers_at(
+    document: &Document,
+    project_at: TimeCode,
+) -> Result<Vec<TimelineVisualLayer>, MediaError> {
+    if project_at < TimeCode::ZERO {
+        return Ok(Vec::new());
+    }
+    let mut layers = Vec::new();
+    for track in document
+        .tracks
+        .iter()
+        .filter(|track| track.kind == TrackKind::Video)
+    {
+        let Some(clip) = active_clip_on_track(document, track, project_at)? else {
+            continue;
+        };
+        match &clip.content {
+            ClipContent::Media => {
+                let source = media_source_for_clip(document, track.id, clip, project_at)?;
+                layers.push(TimelineVisualLayer::Video(TimelineVideoLayer {
+                    source,
+                    effects: clip.effects.clone(),
+                    transition_alpha: transition_alpha(clip, project_at),
+                }));
+            }
+            ClipContent::Title(title) => {
+                layers.push(TimelineVisualLayer::Title(TimelineTitleLayer {
+                    track: track.id,
+                    clip: clip.id,
+                    title: title.clone(),
+                    effects: clip.effects.clone(),
+                    transition_alpha: transition_alpha(clip, project_at)
+                        * title_alpha(document, clip, title, project_at)?,
+                }));
+            }
+        }
+    }
+    Ok(layers)
+}
+
 /// Enumerate every audio-bearing clip portion intersecting a project range.
 ///
 /// Both audio tracks and video tracks backed by audio/video assets participate.
@@ -128,6 +189,9 @@ pub fn timeline_audio_segments(
     let mut segments = Vec::new();
     for track in &document.tracks {
         for clip in &track.clips {
+            if matches!(clip.content, ClipContent::Title(_)) {
+                continue;
+            }
             let asset = document.asset(clip.asset).ok_or_else(|| {
                 MediaError::Backend(format!(
                     "timeline clip {} references missing asset {}",
@@ -193,51 +257,79 @@ fn source_on_track(
     track: &Track,
     project_at: TimeCode,
 ) -> Result<Option<TimelineSource>, MediaError> {
+    let Some(clip) = active_clip_on_track(document, track, project_at)? else {
+        return Ok(None);
+    };
+    if matches!(clip.content, ClipContent::Title(_)) {
+        return Ok(None);
+    }
+    media_source_for_clip(document, track.id, clip, project_at).map(Some)
+}
+
+fn active_clip_on_track<'a>(
+    document: &Document,
+    track: &'a Track,
+    project_at: TimeCode,
+) -> Result<Option<&'a Clip>, MediaError> {
     for clip in &track.clips {
         if project_at < clip.timeline_start {
             break;
         }
-        let asset = document.asset(clip.asset).ok_or_else(|| {
-            MediaError::Backend(format!(
-                "timeline clip {} references missing asset {}",
-                clip.id, clip.asset
-            ))
-        })?;
-        let duration =
-            map_source_range_to_project(clip.source_range.clone(), asset.fps, document.fps)
-                .map_err(|error| MediaError::Backend(error.to_string()))?;
+        let duration = document
+            .clip_duration(clip)
+            .map_err(|error| MediaError::Backend(error.to_string()))?;
         let timeline_end = clip
             .timeline_start
             .checked_add(duration)
             .ok_or_else(|| MediaError::Backend("timeline position overflowed".to_owned()))?;
-        if project_at >= timeline_end {
-            continue;
+        if project_at < timeline_end {
+            return Ok(Some(clip));
         }
-        let project_offset = project_at
-            .checked_sub(clip.timeline_start)
-            .ok_or_else(|| MediaError::Backend("timeline position underflowed".to_owned()))?;
-        let source_offset = map_frames_with_rounding(
-            project_offset,
-            document.fps,
-            asset.fps,
-            FrameRounding::Floor,
-        )
-        .map_err(|error| MediaError::Backend(error.to_string()))?;
-        let source_at = clip
-            .source_range
-            .start
-            .checked_add(source_offset)
-            .ok_or_else(|| MediaError::Backend("source position overflowed".to_owned()))?;
-        return Ok(Some(TimelineSource {
-            track: track.id,
-            clip: clip.id,
-            asset: clip.asset,
-            source_at: TimeCode(source_at.0.min(clip.source_range.end.0.saturating_sub(1))),
-            source_end: clip.source_range.end,
-            timeline_end,
-        }));
     }
     Ok(None)
+}
+
+fn media_source_for_clip(
+    document: &Document,
+    track: TrackId,
+    clip: &Clip,
+    project_at: TimeCode,
+) -> Result<TimelineSource, MediaError> {
+    let asset = document.asset(clip.asset).ok_or_else(|| {
+        MediaError::Backend(format!(
+            "timeline clip {} references missing asset {}",
+            clip.id, clip.asset
+        ))
+    })?;
+    let duration = map_source_range_to_project(clip.source_range.clone(), asset.fps, document.fps)
+        .map_err(|error| MediaError::Backend(error.to_string()))?;
+    let timeline_end = clip
+        .timeline_start
+        .checked_add(duration)
+        .ok_or_else(|| MediaError::Backend("timeline position overflowed".to_owned()))?;
+    let project_offset = project_at
+        .checked_sub(clip.timeline_start)
+        .ok_or_else(|| MediaError::Backend("timeline position underflowed".to_owned()))?;
+    let source_offset = map_frames_with_rounding(
+        project_offset,
+        document.fps,
+        asset.fps,
+        FrameRounding::Floor,
+    )
+    .map_err(|error| MediaError::Backend(error.to_string()))?;
+    let source_at = clip
+        .source_range
+        .start
+        .checked_add(source_offset)
+        .ok_or_else(|| MediaError::Backend("source position overflowed".to_owned()))?;
+    Ok(TimelineSource {
+        track,
+        clip: clip.id,
+        asset: clip.asset,
+        source_at: TimeCode(source_at.0.min(clip.source_range.end.0.saturating_sub(1))),
+        source_end: clip.source_range.end,
+        timeline_end,
+    })
 }
 
 // GPU alpha is f32; projecting integer frame offsets is the intended final conversion.
@@ -251,6 +343,31 @@ fn transition_alpha(clip: &Clip, project_at: TimeCode) -> f32 {
     }
     let offset = project_at.0.saturating_sub(clip.timeline_start.0);
     (offset as f32 / (transition.duration.0 - 1) as f32).clamp(0.0, 1.0)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn title_alpha(
+    document: &Document,
+    clip: &Clip,
+    title: &Title,
+    project_at: TimeCode,
+) -> Result<f32, MediaError> {
+    let duration = document
+        .clip_duration(clip)
+        .map_err(|error| MediaError::Backend(error.to_string()))?;
+    let offset = project_at.0.saturating_sub(clip.timeline_start.0);
+    let remaining = duration.0.saturating_sub(offset).saturating_sub(1);
+    let fade_in = if title.fade_in_frames.0 <= 1 {
+        1.0
+    } else {
+        (offset as f32 / (title.fade_in_frames.0 - 1) as f32).clamp(0.0, 1.0)
+    };
+    let fade_out = if title.fade_out_frames.0 <= 1 {
+        1.0
+    } else {
+        (remaining as f32 / (title.fade_out_frames.0 - 1) as f32).clamp(0.0, 1.0)
+    };
+    Ok(fade_in.min(fade_out))
 }
 
 #[cfg(test)]
@@ -274,6 +391,7 @@ mod tests {
                         id: ClipId(1),
                         asset: AssetId(1),
                         source_range: TimeCode(10)..TimeCode(20),
+                        content: ClipContent::Media,
                         timeline_start: TimeCode(0),
                         effects: Vec::new(),
                         transition_in: None,
@@ -283,6 +401,7 @@ mod tests {
                         id: ClipId(2),
                         asset: AssetId(2),
                         source_range: TimeCode(30)..TimeCode(40),
+                        content: ClipContent::Media,
                         timeline_start: TimeCode(15),
                         effects: Vec::new(),
                         transition_in: None,
@@ -368,6 +487,7 @@ mod tests {
                 id: ClipId(3),
                 asset: AssetId(2),
                 source_range: TimeCode(0)..TimeCode(10),
+                content: ClipContent::Media,
                 timeline_start: TimeCode::ZERO,
                 effects: Vec::new(),
                 transition_in: None,
@@ -383,6 +503,51 @@ mod tests {
                 .collect::<Vec<_>>(),
             [TrackId(7), TrackId(8)]
         );
+    }
+
+    #[test]
+    fn title_layers_keep_track_order_and_map_integer_fades_to_layer_alpha() {
+        let mut document = fixture();
+        document.tracks.push(Track {
+            id: TrackId(8),
+            kind: TrackKind::Video,
+            clips: vec![Clip {
+                id: ClipId(3),
+                asset: AssetId::default(),
+                source_range: TimeCode(0)..TimeCode(10),
+                content: ClipContent::Title(Title {
+                    text: "Overlay".to_owned(),
+                    fade_in_frames: TimeCode(3),
+                    fade_out_frames: TimeCode(3),
+                    ..Title::default()
+                }),
+                timeline_start: TimeCode::ZERO,
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+            }],
+        });
+        document.validate().unwrap();
+
+        let start = visual_layers_at(&document, TimeCode(0)).unwrap();
+        assert!(matches!(start[0], TimelineVisualLayer::Video(_)));
+        let TimelineVisualLayer::Title(title) = &start[1] else {
+            panic!("top track must resolve to a title layer");
+        };
+        assert_eq!(title.track, TrackId(8));
+        assert!(title.transition_alpha.abs() < f32::EPSILON);
+
+        let middle = visual_layers_at(&document, TimeCode(5)).unwrap();
+        let TimelineVisualLayer::Title(title) = &middle[1] else {
+            panic!("top track must resolve to a title layer");
+        };
+        assert!((title.transition_alpha - 1.0).abs() < f32::EPSILON);
+
+        let end = visual_layers_at(&document, TimeCode(9)).unwrap();
+        let TimelineVisualLayer::Title(title) = &end[1] else {
+            panic!("top track must resolve to a title layer");
+        };
+        assert!(title.transition_alpha.abs() < f32::EPSILON);
     }
 
     #[test]
@@ -416,6 +581,7 @@ mod tests {
                     id: ClipId(3),
                     asset: AssetId(3),
                     source_range: TimeCode(4)..TimeCode(14),
+                    content: ClipContent::Media,
                     timeline_start: TimeCode(8),
                     effects: Vec::new(),
                     transition_in: None,
@@ -429,6 +595,7 @@ mod tests {
                     id: ClipId(4),
                     asset: AssetId(4),
                     source_range: TimeCode(0)..TimeCode(20),
+                    content: ClipContent::Media,
                     timeline_start: TimeCode::ZERO,
                     effects: Vec::new(),
                     transition_in: None,

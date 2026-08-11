@@ -717,7 +717,7 @@ impl ServerHandler for OpenReelMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openreel", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Inspect the timeline, transcript, silences, and scene changes before editing. Resolve ordinal targets against the initial timeline state. Frame values are exact project frames. Prefer one atomic apply_edit_plan after inspection instead of separate operation tools. Use import_media for filesystem paths.",
+        "Inspect the timeline, transcript, silences, and scene changes before editing. Resolve ordinal targets against the initial timeline state. Frame values are exact project frames. Prefer one atomic apply_edit_plan after inspection instead of separate operation tools. Use add_title for first-class video-track titles and import_media for filesystem paths.",
             )
     }
 
@@ -1074,8 +1074,9 @@ mod tests {
     use super::*;
     use openreel_core::{
         AssetId, Clip, FrameTexture, Marker, MarkerId, MediaAsset, MediaError, MediaEvent,
-        MediaKind, Rational, RgbaImage, SceneStatus, SilenceStatus, TimelineSceneChange,
-        TimelineSilenceSpan, Track, TrackId, TrackKind, VisualAssetResult,
+        MediaKind, ParamValue, Rational, RgbaImage, SceneStatus, SilenceStatus,
+        TimelineSceneChange, TimelineSilenceSpan, Title, Track, TrackId, TrackKind,
+        VisualAssetResult,
     };
     use serde_json::json;
     use std::{path::Path, time::Instant};
@@ -1195,6 +1196,7 @@ mod tests {
                     id: ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode::ZERO..TimeCode(60),
+                    content: openreel_core::ClipContent::Media,
                     timeline_start: TimeCode::ZERO,
                     effects: Vec::new(),
                     transition_in: None,
@@ -1355,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn ripple_delete_is_destructive_while_marker_edits_are_suggestions() {
+    fn ripple_delete_is_destructive_while_marker_and_title_edits_are_suggestions() {
         let (core, playback, analysis) = fixture();
         let service = OpenReelMcp::new(core, playback, analysis, ConfirmationBroker::default());
         assert!(
@@ -1379,6 +1381,17 @@ mod tests {
             },
             Operation::RemoveMarker {
                 marker: MarkerId(1),
+            },
+            Operation::AddTitle {
+                track: TrackId(1),
+                at: TimeCode(60),
+                duration: TimeCode(30),
+                title: Title::default(),
+            },
+            Operation::SetTitleParam {
+                clip: ClipId(1),
+                name: "text".to_owned(),
+                value: ParamValue::Text("Title".to_owned()),
             },
         ] {
             assert!(

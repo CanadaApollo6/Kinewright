@@ -282,8 +282,8 @@ fn broadcast(subscribers: &mut Vec<Sender<Event>>, event: &Event) {
 mod tests {
     use super::*;
     use crate::{
-        AssetId, Clip, ClipId, Effect, EffectId, MediaAsset, MediaKind, ParamValue, Rational,
-        TimeCode, Track, TrackId, TrackKind, Transition,
+        AssetId, Clip, ClipContent, ClipId, Effect, EffectId, MediaAsset, MediaKind, ParamValue,
+        Rational, TimeCode, Track, TrackId, TrackKind, Transition,
     };
     use proptest::prelude::*;
     use std::{collections::BTreeMap, path::PathBuf, time::Duration};
@@ -458,6 +458,7 @@ mod tests {
                     id: ClipId(index as u64 + 1),
                     asset: AssetId(1),
                     source_range: TimeCode(0)..TimeCode(length),
+                    content: ClipContent::Media,
                     timeline_start: TimeCode(timeline_start),
                     effects: Vec::new(),
                     transition_in: None,

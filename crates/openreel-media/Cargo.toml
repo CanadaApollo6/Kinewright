@@ -10,6 +10,7 @@ repository.workspace = true
 test-util = []
 
 [dependencies]
+ab_glyph.workspace = true
 cpal.workspace = true
 crossbeam-channel.workspace = true
 ffmpeg-next.workspace = true

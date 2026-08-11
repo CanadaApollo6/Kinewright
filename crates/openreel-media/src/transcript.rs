@@ -10,9 +10,9 @@ use std::{
 
 use crossbeam_channel::{Sender, unbounded};
 use openreel_core::{
-    AssetId, AssetTranscript, Document, ExportCancellation, FrameRounding, MediaAsset, MediaError,
-    MediaKind, Rational, TimeCode, TimelineTranscriptWord, TranscriptStatus, TranscriptWord,
-    map_frames_with_rounding, map_source_range_to_project,
+    AssetId, AssetTranscript, ClipContent, Document, ExportCancellation, FrameRounding, MediaAsset,
+    MediaError, MediaKind, Rational, TimeCode, TimelineTranscriptWord, TranscriptStatus,
+    TranscriptWord, map_frames_with_rounding, map_source_range_to_project,
 };
 use serde::{Deserialize, Serialize};
 use whisper_rs::{
@@ -442,6 +442,9 @@ where
     let mut words = Vec::new();
     for track in &document.tracks {
         for clip in &track.clips {
+            if matches!(clip.content, ClipContent::Title(_)) {
+                continue;
+            }
             let Some(asset) = document.asset(clip.asset) else {
                 continue;
             };
@@ -859,6 +862,7 @@ mod tests {
                     id: ClipId(9),
                     asset: asset.id,
                     source_range: TimeCode(10)..TimeCode(40),
+                    content: ClipContent::Media,
                     timeline_start: TimeCode(100),
                     effects: Vec::new(),
                     transition_in: None,

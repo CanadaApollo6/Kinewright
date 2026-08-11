@@ -3,6 +3,7 @@ mod chat_ui;
 mod error_ui;
 mod export_ui;
 mod icons;
+mod inspector_ui;
 mod keys;
 mod media_bin;
 mod preview_ui;

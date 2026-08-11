@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AssetId, Clip, ClipId, Document, Effect, EffectId, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker,
-    MarkerId, MediaAsset, ParamValue, TimeCode, TimeMappingError, Track, TrackId, Transition,
-    map_source_range_to_project,
+    AssetId, Clip, ClipContent, ClipId, Document, Effect, EffectId, LinkId,
+    MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, ParamValue, TimeCode, TimeMappingError,
+    Title, TitleParameterKind, TitlePosition, Track, TrackId, TrackKind, Transition,
+    map_source_range_to_project, title_parameter_descriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -26,6 +27,12 @@ pub enum Operation {
         asset: AssetId,
         at: TimeCode,
         source: std::ops::Range<TimeCode>,
+    },
+    AddTitle {
+        track: TrackId,
+        at: TimeCode,
+        duration: TimeCode,
+        title: Title,
     },
     SplitClip {
         clip: ClipId,
@@ -96,12 +103,22 @@ pub enum Operation {
         name: String,
         value: ParamValue,
     },
+    SetTitleParam {
+        clip: ClipId,
+        name: String,
+        value: ParamValue,
+    },
     AddTransition {
         clip: ClipId,
         transition: Transition,
     },
     RemoveTransition {
         clip: ClipId,
+    },
+    SetMarkerParam {
+        marker: MarkerId,
+        name: String,
+        value: ParamValue,
     },
 }
 
@@ -188,6 +205,8 @@ pub enum OpError {
         track: &'static str,
         track_id: TrackId,
     },
+    #[error("title clips can only be placed on video track {0}")]
+    TitleOnAudioTrack(TrackId),
     #[error("source range must be non-empty and non-negative: {start}..{end}")]
     InvalidSourceRange { start: i64, end: i64 },
     #[error("source range ends at {end}, beyond asset {asset}'s duration {duration}")]
@@ -249,6 +268,34 @@ pub enum OpError {
     InvalidMarkerColor { actual: u8, maximum_exclusive: u8 },
     #[error("ripple gap duration must be positive: {0}")]
     InvalidRippleDuration(TimeCode),
+    #[error("title duration must be positive: {0}")]
+    InvalidTitleDuration(TimeCode),
+    #[error("clip {0} is not a title")]
+    NotTitleClip(ClipId),
+    #[error("unknown title parameter {0:?}")]
+    UnknownTitleParam(String),
+    #[error("title parameter {name:?} has the wrong value type")]
+    InvalidTitleParamType { name: String },
+    #[error("title parameter {name:?} is {actual}, outside the inclusive range {min}..={max}")]
+    TitleParamOutOfRange {
+        name: String,
+        min: i64,
+        max: i64,
+        actual: i64,
+    },
+    #[error("title text exceeds the maximum length of {maximum} characters")]
+    TitleTextTooLong { maximum: usize },
+    #[error("title fade {name:?} ({frames} frames) exceeds clip {clip} duration {duration}")]
+    TitleFadeTooLong {
+        clip: ClipId,
+        name: &'static str,
+        frames: TimeCode,
+        duration: TimeCode,
+    },
+    #[error("marker {marker} has no parameter {name:?}")]
+    UnknownMarkerParam { marker: MarkerId, name: String },
+    #[error("marker {marker} parameter {name:?} has the wrong value type")]
+    InvalidMarkerParamType { marker: MarkerId, name: String },
     #[error("effect {effect} already exists on clip {clip}")]
     DuplicateEffect { clip: ClipId, effect: EffectId },
     #[error("effect {effect} does not exist on clip {clip}")]
@@ -313,6 +360,12 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
             at,
             source,
         } => add_clip(doc, *track, *asset, *at, source.clone()),
+        Operation::AddTitle {
+            track,
+            at,
+            duration,
+            title,
+        } => add_title(doc, *track, *at, *duration, title.clone()),
         Operation::SplitClip { clip, at } => split_clip(doc, *clip, *at),
         Operation::TrimClip { clip, new_source } => trim_clip(doc, *clip, new_source.clone()),
         Operation::MoveClip { clip, to_track, to } => move_clip(doc, *clip, *to_track, *to),
@@ -336,10 +389,18 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
             name,
             value,
         } => set_effect_param(doc, *clip, *effect, name, value.clone()),
+        Operation::SetTitleParam { clip, name, value } => {
+            set_title_param(doc, *clip, name, value.clone())
+        }
         Operation::AddTransition { clip, transition } => {
             add_transition(doc, *clip, transition.clone())
         }
         Operation::RemoveTransition { clip } => remove_transition(doc, *clip),
+        Operation::SetMarkerParam {
+            marker,
+            name,
+            value,
+        } => set_marker_param(doc, *marker, name, value.clone()),
     }
 }
 
@@ -396,12 +457,52 @@ fn add_clip(
         id: next_clip_id(doc)?,
         asset: asset_id,
         source_range: source,
+        content: ClipContent::Media,
         timeline_start: at,
         effects: Vec::new(),
         transition_in: None,
         link: None,
     };
     doc.tracks[track_index].clips.push(clip);
+    doc.tracks[track_index]
+        .clips
+        .sort_by_key(|clip| (clip.timeline_start, clip.id));
+    Ok(())
+}
+
+fn add_title(
+    doc: &mut Document,
+    track_id: TrackId,
+    at: TimeCode,
+    duration: TimeCode,
+    title: Title,
+) -> Result<(), OpError> {
+    if at < TimeCode::ZERO {
+        return Err(OpError::NegativeTimelinePosition(at));
+    }
+    if duration <= TimeCode::ZERO {
+        return Err(OpError::InvalidTitleDuration(duration));
+    }
+    let track_index = doc
+        .tracks
+        .iter()
+        .position(|track| track.id == track_id)
+        .ok_or(OpError::MissingTrack(track_id))?;
+    if doc.tracks[track_index].kind != TrackKind::Video {
+        return Err(OpError::TitleOnAudioTrack(track_id));
+    }
+    let clip_id = next_clip_id(doc)?;
+    validate_title(clip_id, &title, duration)?;
+    doc.tracks[track_index].clips.push(Clip {
+        id: clip_id,
+        asset: AssetId::default(),
+        source_range: TimeCode::ZERO..duration,
+        content: ClipContent::Title(title),
+        timeline_start: at,
+        effects: Vec::new(),
+        transition_in: None,
+        link: None,
+    });
     doc.tracks[track_index]
         .clips
         .sort_by_key(|clip| (clip.timeline_start, clip.id));
@@ -416,15 +517,23 @@ fn split_clip(doc: &mut Document, clip_id: ClipId, at: TimeCode) -> Result<(), O
         return Err(OpError::SplitOutsideClip { clip: clip_id, at });
     }
 
-    let asset = doc
-        .asset(original.asset)
-        .ok_or(OpError::MissingAsset(original.asset))?;
     let offset = at
         .checked_sub(original.timeline_start)
         .ok_or(OpError::TimeOverflow)?;
-    let source_split =
-        find_source_boundary(original.source_range.clone(), offset, asset.fps, doc.fps)
-            .ok_or(OpError::UnrepresentableSplit { clip: clip_id, at })?;
+    let source_split = match &original.content {
+        ClipContent::Media => {
+            let asset = doc
+                .asset(original.asset)
+                .ok_or(OpError::MissingAsset(original.asset))?;
+            find_source_boundary(original.source_range.clone(), offset, asset.fps, doc.fps)
+                .ok_or(OpError::UnrepresentableSplit { clip: clip_id, at })?
+        }
+        ClipContent::Title(_) => original
+            .source_range
+            .start
+            .checked_add(offset)
+            .ok_or(OpError::TimeOverflow)?,
+    };
     let new_id = next_clip_id(doc)?;
 
     doc.tracks[track_index].clips[clip_index].source_range.end = source_split;
@@ -433,6 +542,15 @@ fn split_clip(doc: &mut Document, clip_id: ClipId, at: TimeCode) -> Result<(), O
     right.source_range.start = source_split;
     right.timeline_start = at;
     right.transition_in = None;
+    if let ClipContent::Title(title) = &mut doc.tracks[track_index].clips[clip_index].content {
+        title.fade_in_frames = title.fade_in_frames.min(offset);
+        title.fade_out_frames = TimeCode::ZERO;
+    }
+    if let ClipContent::Title(title) = &mut right.content {
+        title.fade_in_frames = TimeCode::ZERO;
+        let right_duration = end.checked_sub(at).ok_or(OpError::TimeOverflow)?;
+        title.fade_out_frames = title.fade_out_frames.min(right_duration);
+    }
     doc.tracks[track_index].clips.push(right);
     doc.tracks[track_index]
         .clips
@@ -447,14 +565,24 @@ fn trim_clip(
 ) -> Result<(), OpError> {
     let (track_index, clip_index) = find_clip(doc, clip_id)?;
     let original = doc.tracks[track_index].clips[clip_index].clone();
-    let asset_id = original.asset;
-    let asset = doc.asset(asset_id).ok_or(OpError::MissingAsset(asset_id))?;
-    validate_source_range(asset, &new_source)?;
+    let source_fps = match &original.content {
+        ClipContent::Media => {
+            let asset = doc
+                .asset(original.asset)
+                .ok_or(OpError::MissingAsset(original.asset))?;
+            validate_source_range(asset, &new_source)?;
+            asset.fps
+        }
+        ClipContent::Title(_) => {
+            validate_title_range(&new_source)?;
+            doc.fps
+        }
+    };
     let shifted_start = match new_source.start.cmp(&original.source_range.start) {
         std::cmp::Ordering::Greater => {
             let offset = map_source_range_to_project(
                 original.source_range.start..new_source.start,
-                asset.fps,
+                source_fps,
                 doc.fps,
             )?;
             original
@@ -465,7 +593,7 @@ fn trim_clip(
         std::cmp::Ordering::Less => {
             let offset = map_source_range_to_project(
                 new_source.start..original.source_range.start,
-                asset.fps,
+                source_fps,
                 doc.fps,
             )?;
             original
@@ -478,8 +606,16 @@ fn trim_clip(
     if shifted_start < TimeCode::ZERO {
         return Err(OpError::NegativeTimelinePosition(shifted_start));
     }
+    let duration = new_source
+        .end
+        .checked_sub(new_source.start)
+        .ok_or(OpError::TimeOverflow)?;
     doc.tracks[track_index].clips[clip_index].timeline_start = shifted_start;
     doc.tracks[track_index].clips[clip_index].source_range = new_source;
+    if let ClipContent::Title(title) = &mut doc.tracks[track_index].clips[clip_index].content {
+        title.fade_in_frames = title.fade_in_frames.min(duration);
+        title.fade_out_frames = title.fade_out_frames.min(duration);
+    }
     Ok(())
 }
 
@@ -498,9 +634,18 @@ fn move_clip(
         .iter()
         .position(|track| track.id == target_track_id)
         .ok_or(OpError::MissingTrack(target_track_id))?;
-    let asset_id = doc.tracks[source_track_index].clips[clip_index].asset;
-    let asset = doc.asset(asset_id).ok_or(OpError::MissingAsset(asset_id))?;
-    validate_track_compatibility(asset, &doc.tracks[target_track_index])?;
+    match &doc.tracks[source_track_index].clips[clip_index].content {
+        ClipContent::Media => {
+            let asset_id = doc.tracks[source_track_index].clips[clip_index].asset;
+            let asset = doc.asset(asset_id).ok_or(OpError::MissingAsset(asset_id))?;
+            validate_track_compatibility(asset, &doc.tracks[target_track_index])?;
+        }
+        ClipContent::Title(_) => {
+            if doc.tracks[target_track_index].kind != TrackKind::Video {
+                return Err(OpError::TitleOnAudioTrack(target_track_id));
+            }
+        }
+    }
 
     let mut clip = doc.tracks[source_track_index].clips.remove(clip_index);
     clip.timeline_start = to;
@@ -638,6 +783,45 @@ fn move_marker(doc: &mut Document, marker_id: MarkerId, to: TimeCode) -> Result<
     Ok(())
 }
 
+fn set_marker_param(
+    doc: &mut Document,
+    marker_id: MarkerId,
+    name: &str,
+    value: ParamValue,
+) -> Result<(), OpError> {
+    let marker = doc
+        .markers
+        .iter_mut()
+        .find(|marker| marker.id == marker_id)
+        .ok_or(OpError::MissingMarker(marker_id))?;
+    match (name, value) {
+        ("label", ParamValue::Text(label)) => marker.label = label,
+        ("color_token", ParamValue::Integer(token)) => {
+            marker.color_token = u8::try_from(token).map_err(|_| OpError::InvalidMarkerColor {
+                actual: u8::MAX,
+                maximum_exclusive: MARKER_COLOR_TOKEN_COUNT,
+            })?;
+        }
+        ("position", ParamValue::Integer(position)) => marker.position = TimeCode(position),
+        ("label" | "color_token" | "position", _) => {
+            return Err(OpError::InvalidMarkerParamType {
+                marker: marker_id,
+                name: name.to_owned(),
+            });
+        }
+        _ => {
+            return Err(OpError::UnknownMarkerParam {
+                marker: marker_id,
+                name: name.to_owned(),
+            });
+        }
+    }
+    validate_marker(marker)?;
+    doc.markers
+        .sort_by_key(|marker| (marker.position, marker.id));
+    Ok(())
+}
+
 fn add_effect(doc: &mut Document, clip_id: ClipId, effect: Effect) -> Result<(), OpError> {
     validate_effect(&effect)?;
     let (track_index, clip_index) = find_clip(doc, clip_id)?;
@@ -686,6 +870,58 @@ fn set_effect_param(
     validate_effect_parameter(&effect.name, name, &value)?;
     effect.parameters.insert(name.to_owned(), value);
     Ok(())
+}
+
+fn set_title_param(
+    doc: &mut Document,
+    clip_id: ClipId,
+    name: &str,
+    value: ParamValue,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let duration = doc.clip_duration(&doc.tracks[track_index].clips[clip_index])?;
+    let ClipContent::Title(title) = &mut doc.tracks[track_index].clips[clip_index].content else {
+        return Err(OpError::NotTitleClip(clip_id));
+    };
+    validate_title_parameter(name, &value)?;
+    match (name, value) {
+        ("text", ParamValue::Text(value)) => title.text = value,
+        ("font_size_token", ParamValue::Integer(value)) => {
+            title.font_size_token =
+                u8::try_from(value).map_err(|_| OpError::TitleParamOutOfRange {
+                    name: name.to_owned(),
+                    min: 0,
+                    max: i64::from(u8::MAX),
+                    actual: value,
+                })?;
+        }
+        ("color_token", ParamValue::Integer(value)) => {
+            title.color_token = u8::try_from(value).map_err(|_| OpError::TitleParamOutOfRange {
+                name: name.to_owned(),
+                min: 0,
+                max: i64::from(u8::MAX),
+                actual: value,
+            })?;
+        }
+        ("position", ParamValue::Text(value)) => {
+            title.position = value.parse().map_err(|()| OpError::InvalidTitleParamType {
+                name: name.to_owned(),
+            })?;
+        }
+        ("background_scrim", ParamValue::Boolean(value)) => title.background_scrim = value,
+        ("fade_in_frames", ParamValue::Integer(value)) => {
+            title.fade_in_frames = TimeCode(value);
+        }
+        ("fade_out_frames", ParamValue::Integer(value)) => {
+            title.fade_out_frames = TimeCode(value);
+        }
+        _ => {
+            return Err(OpError::InvalidTitleParamType {
+                name: name.to_owned(),
+            });
+        }
+    }
+    validate_title(clip_id, title, duration)
 }
 
 fn add_transition(
@@ -875,6 +1111,76 @@ fn validate_marker(marker: &Marker) -> Result<(), OpError> {
     Ok(())
 }
 
+fn validate_title_parameter(name: &str, value: &ParamValue) -> Result<(), OpError> {
+    let descriptor = title_parameter_descriptor(name)
+        .ok_or_else(|| OpError::UnknownTitleParam(name.to_owned()))?;
+    match (descriptor.kind, value) {
+        (TitleParameterKind::Text { maximum_characters }, ParamValue::Text(text)) => {
+            if text.chars().count() > maximum_characters {
+                return Err(OpError::TitleTextTooLong {
+                    maximum: maximum_characters,
+                });
+            }
+        }
+        (TitleParameterKind::Integer { min, max }, ParamValue::Integer(actual)) => {
+            if !(min..=max).contains(actual) {
+                return Err(OpError::TitleParamOutOfRange {
+                    name: name.to_owned(),
+                    min,
+                    max,
+                    actual: *actual,
+                });
+            }
+        }
+        (TitleParameterKind::Boolean, ParamValue::Boolean(_)) => {}
+        (TitleParameterKind::Position, ParamValue::Text(position)) => {
+            if position.parse::<TitlePosition>().is_err() {
+                return Err(OpError::InvalidTitleParamType {
+                    name: name.to_owned(),
+                });
+            }
+        }
+        _ => {
+            return Err(OpError::InvalidTitleParamType {
+                name: name.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_title(clip: ClipId, title: &Title, duration: TimeCode) -> Result<(), OpError> {
+    for descriptor in crate::TITLE_PARAMETER_DESCRIPTORS {
+        let value = crate::title_parameter_value(title, descriptor.name)
+            .expect("every title descriptor has a typed value");
+        validate_title_parameter(descriptor.name, &value)?;
+    }
+    for (name, frames) in [
+        ("fade_in_frames", title.fade_in_frames),
+        ("fade_out_frames", title.fade_out_frames),
+    ] {
+        if frames > duration {
+            return Err(OpError::TitleFadeTooLong {
+                clip,
+                name,
+                frames,
+                duration,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_title_range(source: &std::ops::Range<TimeCode>) -> Result<(), OpError> {
+    if source.start < TimeCode::ZERO || source.end <= source.start {
+        return Err(OpError::InvalidSourceRange {
+            start: source.start.0,
+            end: source.end.0,
+        });
+    }
+    Ok(())
+}
+
 fn validate_source_range(
     asset: &MediaAsset,
     source: &std::ops::Range<TimeCode>,
@@ -910,6 +1216,7 @@ fn validate_track_compatibility(asset: &MediaAsset, track: &crate::Track) -> Res
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
     if !doc.fps.is_valid() {
         return Err(OpError::InvalidProjectRate);
@@ -941,11 +1248,23 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
             if clip.timeline_start < TimeCode::ZERO {
                 return Err(OpError::NegativeTimelinePosition(clip.timeline_start));
             }
-            let asset = doc
-                .asset(clip.asset)
-                .ok_or(OpError::MissingAsset(clip.asset))?;
-            validate_track_compatibility(asset, track)?;
-            validate_source_range(asset, &clip.source_range)?;
+            match &clip.content {
+                ClipContent::Media => {
+                    let asset = doc
+                        .asset(clip.asset)
+                        .ok_or(OpError::MissingAsset(clip.asset))?;
+                    validate_track_compatibility(asset, track)?;
+                    validate_source_range(asset, &clip.source_range)?;
+                }
+                ClipContent::Title(title) => {
+                    if track.kind != TrackKind::Video {
+                        return Err(OpError::TitleOnAudioTrack(track.id));
+                    }
+                    validate_title_range(&clip.source_range)?;
+                    let duration = doc.clip_duration(clip)?;
+                    validate_title(clip.id, title, duration)?;
+                }
+            }
             let clip_duration = doc.clip_duration(clip)?;
             if clip_duration <= TimeCode::ZERO {
                 return Err(OpError::ZeroProjectDuration(clip.id));

@@ -1349,6 +1349,7 @@ mod tests {
                     id: ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode(0)..TimeCode(60),
+                    content: openreel_core::ClipContent::Media,
                     timeline_start: TimeCode::ZERO,
                     effects: Vec::new(),
                     transition_in: None,
