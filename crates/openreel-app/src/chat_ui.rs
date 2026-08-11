@@ -403,10 +403,28 @@ impl OpenReelApp {
             }
         }
 
+        // Reserve room below the history for the composer and send row - an
+        // uncapped scroll area consumes the whole dock and pushes the input
+        // out of the clipped panel, leaving no visible way to talk to the
+        // agent.
+        let composer_reserve = 132.0;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .stick_to_bottom(true)
+            .max_height((ui.available_height() - composer_reserve).max(96.0))
             .show(ui, |ui| {
+                if self.chat.is_empty() {
+                    ui.add_space(space::TWO);
+                    ui.label(
+                        egui::RichText::new(
+                            "Ask for an edit in plain language. The agent sees your timeline, \
+                             transcript, silences, and scene changes, and every change it makes \
+                             is one undo away.",
+                        )
+                        .color(color::TEXT_MUTED)
+                        .italics(),
+                    );
+                }
                 for (index, entry) in self.chat.iter().enumerate() {
                     match entry {
                         ChatEntry::User(text) => {
