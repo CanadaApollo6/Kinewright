@@ -16,7 +16,7 @@ use crate::{
 const INSPECTOR_MAX_HEIGHT: f32 = 360.0;
 
 impl OpenReelApp {
-    pub(crate) fn right_dock(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn inspector_dock(&mut self, ui: &mut egui::Ui) {
         let id = ui.make_persistent_id("inspector-panel");
         let mut state =
             egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
@@ -32,10 +32,6 @@ impl OpenReelApp {
                     .auto_shrink([false, true])
                     .show(ui, |ui| self.inspector(ui));
             });
-        ui.add_space(space::ONE);
-        ui.separator();
-        ui.add_space(space::ONE);
-        self.agent_panel(ui);
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {

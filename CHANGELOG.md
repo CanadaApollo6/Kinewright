@@ -97,5 +97,12 @@ The initial development cycle (milestones M0–M7), building the editor end to e
 - Agent panel cleanup: the chat composer is always visible and full width,
   an empty session explains what the agent can see, and the turn cap is
   gone - subscription sessions run until done or stopped
+- Conversation-first layout: the session owns the center of the app and the
+  program monitor commands the right - the two-surface default of an
+  agentic editor. The timeline and transcript live in a compact tabbed
+  strip and the media rail beside them, both summoned on demand rather
+  than resident, with contextual self-raising: an empty project leads with
+  the media rail, and a pending destructive confirmation raises the
+  timeline with the affected spans
 
 [Unreleased]: https://github.com/CanadaApollo6/OpenReel/commits/main

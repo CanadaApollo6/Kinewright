@@ -34,6 +34,14 @@ enum ProjectAction {
     Close,
 }
 
+/// Which view the bottom material strip shows (M24 conversation-first layout).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MaterialTab {
+    #[default]
+    Timeline,
+    Transcript,
+}
+
 // Independent transport, agent, dialog, and window flags model separate UI state machines.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct OpenReelApp {
@@ -73,6 +81,9 @@ pub(crate) struct OpenReelApp {
     pub(crate) title_text_focus: Option<ClipId>,
     pub(crate) transcript_scope: TranscriptScope,
     pub(crate) transcript_selection: Option<TranscriptSelection>,
+    pub(crate) material_tab: MaterialTab,
+    pub(crate) show_material_strip: bool,
+    pub(crate) show_media_rail: bool,
     pub(crate) pixels_per_frame: f32,
     pub(crate) timeline_zoom_target: f32,
     pub(crate) timeline_scroll_target: f32,
@@ -169,6 +180,9 @@ impl OpenReelApp {
             title_text_focus: None,
             transcript_scope: TranscriptScope::default(),
             transcript_selection: None,
+            material_tab: MaterialTab::default(),
+            show_material_strip: false,
+            show_media_rail: false,
             pixels_per_frame: 6.0,
             timeline_zoom_target: 6.0,
             timeline_scroll_target: 0.0,
@@ -716,6 +730,18 @@ impl eframe::App for OpenReelApp {
             self.status = crate::recovery::restore_status(self.replace_core(document));
         }
 
+        self.app_top_bar(ui);
+        self.panel_layout(ui);
+        self.show_export_dialog(ui.ctx());
+        self.show_help(ui.ctx());
+        self.show_error_log(ui.ctx());
+        self.show_unsaved_confirmation(ui.ctx());
+        self.screenshot.update(ui.ctx());
+    }
+}
+
+impl OpenReelApp {
+    fn app_top_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("app-top-bar")
             .exact_size(size::TOP_BAR_HEIGHT)
             .frame(
@@ -765,24 +791,79 @@ impl eframe::App for OpenReelApp {
                         {
                             self.error_log_open = true;
                         }
+                        // Summon toggles for the non-resident surfaces.
+                        if ui
+                            .selectable_label(self.show_material_strip, "Timeline")
+                            .on_hover_text("Show the timeline and transcript strip")
+                            .clicked()
+                        {
+                            self.show_material_strip = !self.show_material_strip;
+                        }
+                        if ui
+                            .selectable_label(self.show_media_rail, "Media")
+                            .on_hover_text("Show the media rail")
+                            .clicked()
+                        {
+                            self.show_media_rail = !self.show_media_rail;
+                        }
+                        ui.separator();
                         ui.colored_label(color::TEXT_MUTED, &self.status);
                     });
                 });
             });
+    }
 
-        egui::Panel::left("media-bin-panel")
-            .default_size(240.0)
-            .min_size(208.0)
+    fn panel_layout(&mut self, ui: &mut egui::Ui) {
+        // Conversation-first geometry (M24): the session owns the center; the
+        // monitor shows the cut; the material surfaces are summoned, not
+        // resident. Two contextual self-raises keep the right surface present
+        // at the right moment: an empty project leads with the media rail
+        // (import is the first act), and a pending destructive confirmation
+        // raises the timeline (span-level truth beats watching for approvals).
+        let strip_visible = self.show_material_strip || !self.pending_confirmations.is_empty();
+        let rail_visible = self.show_media_rail || self.document.media_pool.is_empty();
+        if strip_visible {
+            egui::Panel::bottom("timeline-dock")
+                .default_size(240.0)
+                .min_size(160.0)
+                .resizable(true)
+                .frame(
+                    egui::Frame::new()
+                        .fill(color::CANVAS)
+                        .inner_margin(egui::Margin::same(theme::margin(space::TWO))),
+                )
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(
+                            &mut self.material_tab,
+                            MaterialTab::Timeline,
+                            "Timeline",
+                        );
+                        ui.selectable_value(
+                            &mut self.material_tab,
+                            MaterialTab::Transcript,
+                            "Transcript",
+                        );
+                    });
+                    ui.separator();
+                    match self.material_tab {
+                        MaterialTab::Timeline => self.timeline(ui),
+                        MaterialTab::Transcript => self.transcript_panel(ui),
+                    }
+                });
+        }
+        if rail_visible {
+            egui::Panel::left("media-rail")
+                .default_size(220.0)
+                .min_size(64.0)
+                .resizable(true)
+                .frame(theme::panel_frame())
+                .show(ui, |ui| self.media_bin(ui));
+        }
+        egui::Panel::right("monitor-dock")
+            .default_size(460.0)
+            .min_size(340.0)
             .resizable(true)
-            .frame(theme::panel_frame())
-            .show(ui, |ui| self.media_bin(ui));
-        egui::Panel::right("agent-panel")
-            .default_size(340.0)
-            .min_size(280.0)
-            .resizable(true)
-            .frame(theme::panel_frame())
-            .show(ui, |ui| self.right_dock(ui));
-        egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(color::CANVAS)
@@ -792,16 +873,17 @@ impl eframe::App for OpenReelApp {
                 self.preview(ui);
                 ui.separator();
                 self.transport(ui);
+                ui.add_space(space::ONE);
                 ui.separator();
-                self.timeline(ui);
-                ui.separator();
-                self.transcript_panel(ui);
+                self.inspector_dock(ui);
             });
-        self.show_export_dialog(ui.ctx());
-        self.show_help(ui.ctx());
-        self.show_error_log(ui.ctx());
-        self.show_unsaved_confirmation(ui.ctx());
-        self.screenshot.update(ui.ctx());
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(color::PANEL)
+                    .inner_margin(egui::Margin::same(theme::margin(space::THREE))),
+            )
+            .show(ui, |ui| self.agent_panel(ui));
     }
 }
 

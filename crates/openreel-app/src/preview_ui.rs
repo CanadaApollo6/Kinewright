@@ -10,10 +10,14 @@ impl OpenReelApp {
     // Project pixel dimensions are intentionally projected into egui's f32 coordinate space.
     #[allow(clippy::cast_precision_loss)]
     pub(crate) fn preview(&self, ui: &mut egui::Ui) {
-        // The timeline is the editing surface; the monitor takes what is left
-        // after the timeline's reservation, never the other way around.
+        // The monitor owns its dock (M24): its height follows the dock width
+        // at the project aspect, capped so the transport and inspector below
+        // always keep room.
         let available = ui.available_size();
-        let preview_height = (available.y - 470.0).max(160.0);
+        let (width_px, height_px) = self.document.resolution;
+        let aspect = height_px.max(1) as f32 / width_px.max(1) as f32;
+        let preview_height =
+            (available.x * aspect + space::FOUR * 2.0).clamp(160.0, (available.y * 0.6).max(160.0));
         let (rect, _) = ui.allocate_exact_size(
             egui::vec2(available.x, preview_height),
             egui::Sense::hover(),

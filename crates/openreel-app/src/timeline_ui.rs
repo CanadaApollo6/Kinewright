@@ -194,8 +194,6 @@ impl OpenReelApp {
             egui::vec2(ui.available_width(), size::TIMELINE_TOOLBAR_HEIGHT),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.strong("Timeline");
-                ui.add_space(space::ONE);
                 if icons::button(ui, Icon::Split, "Split at playhead (S)").clicked() {
                     self.split_at_playhead();
                 }
@@ -301,13 +299,12 @@ impl OpenReelApp {
         // Spare vertical space belongs to the editing surface: lanes stretch
         // (within bounds) so filmstrips and waveforms get taller, instead of
         // slack pooling at the bottom of the window.
-        let transcript_reserve = 160.0;
-        let track_height = ((ui.available_height()
-            - size::RULER_HEIGHT
-            - size::CONTROL_HEIGHT
-            - transcript_reserve)
+        // Compact filmstrip lanes (M24): the timeline verifies and orients;
+        // it no longer earns workbench height by default. Dragging the dock
+        // taller grows lanes up to the classic height.
+        let track_height = ((ui.available_height() - size::RULER_HEIGHT - size::CONTROL_HEIGHT)
             / track_count)
-            .clamp(size::TRACK_HEIGHT, 132.0);
+            .clamp(44.0, size::TRACK_HEIGHT);
         let total_height = size::RULER_HEIGHT + track_height * track_count;
         let marker_end = document
             .markers
