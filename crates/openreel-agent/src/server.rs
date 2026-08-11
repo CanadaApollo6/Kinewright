@@ -490,10 +490,14 @@ impl OpenReelMcp {
                 for asset in added_assets {
                     self.request_asset_analysis(asset);
                 }
-                success_text(render_plan_outcomes(
-                    operations,
-                    None,
-                    Some(state_delta("apply_edit_plan", Some(&before), &doc)),
+                let footer = self.remaining_silence_footer(&doc);
+                success_text(format!(
+                    "{}{footer}",
+                    render_plan_outcomes(
+                        operations,
+                        None,
+                        Some(state_delta("apply_edit_plan", Some(&before), &doc)),
+                    )
                 ))
             }
             Event::BatchRejected { error, .. } => {
@@ -507,6 +511,60 @@ impl OpenReelMcp {
         self.analysis.request_transcription(asset.clone());
         self.analysis.request_silence_detection(asset.clone());
         self.analysis.request_scene_detection(asset);
+    }
+
+    /// Deterministic completion feedback: the plan result itself reports how
+    /// much cuttable silence remains, so an agent asked to remove dead air
+    /// cannot mistake a partial plan for a finished one.
+    fn remaining_silence_footer(&self, document: &openreel_core::Document) -> String {
+        let spans = match self.analysis.timeline_silences(
+            document,
+            None,
+            TimeCode(DEFAULT_MINIMUM_SILENCE_FRAMES),
+        ) {
+            Ok(spans) => spans,
+            Err(_) => return String::new(),
+        };
+        let mut cuttable = 0_usize;
+        for span in &spans {
+            let Some(asset) = document.asset(span.asset) else {
+                continue;
+            };
+            let words = match self.analysis.transcript_status(span.asset) {
+                TranscriptStatus::Ready(transcript) => Some(transcript),
+                _ => None,
+            };
+            cuttable += crate::silence::shrink_silence_span_for_cutting_with_transcript(
+                openreel_core::SilenceSpan {
+                    source_start: span.source_start,
+                    source_end: span.source_end,
+                },
+                asset.fps,
+                words.as_ref().map(|transcript| transcript.words.as_slice()),
+            )
+            .len();
+        }
+        let pending = document
+            .media_pool
+            .iter()
+            .filter(|asset| {
+                !matches!(
+                    self.analysis.silence_status(asset.id),
+                    SilenceStatus::Ready(_) | SilenceStatus::NoAudio
+                )
+            })
+            .count();
+        let mut footer = if cuttable == 0 {
+            "\nno cuttable silence remains on the timeline".to_owned()
+        } else {
+            format!("\ncuttable silence spans remaining on the timeline: {cuttable}")
+        };
+        if pending > 0 {
+            footer.push_str(&format!(
+                " (silence analysis pending for {pending} asset(s))"
+            ));
+        }
+        footer
     }
 
     fn frame_at(&self, timecode: TimeCode) -> Result<CallToolResult, McpError> {

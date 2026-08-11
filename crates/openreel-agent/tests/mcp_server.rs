@@ -148,6 +148,12 @@ async fn edit_plans_cross_the_real_mcp_server_atomically_with_one_confirmation()
     let applied_text = &applied.content[0].as_text().unwrap().text;
     assert!(applied_text.contains("op 1 add_track: applied"));
     assert!(applied_text.contains("op 2 move_clip: applied"));
+    // Every plan result self-reports remaining cuttable silence so the agent
+    // cannot mistake a partial cleanup for a finished one.
+    assert!(
+        applied_text.contains("cuttable silence"),
+        "plan result must include the silence completion footer: {applied_text}"
+    );
     let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
         panic!("one undo should restore the pre-plan document");
     };
