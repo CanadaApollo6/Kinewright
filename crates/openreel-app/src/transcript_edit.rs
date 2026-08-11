@@ -1,6 +1,7 @@
 use openreel_core::{
     Clip, ClipId, Document, FrameRounding, Operation, TimeCode, TimelineTranscriptWord, TrackId,
-    TranscriptCutRange, map_frames_with_rounding, transcript_cut_ranges,
+    TranscriptCutRange, is_filler_word, map_frames_with_rounding, transcript_cut_ranges,
+    transcript_cut_ranges_for_indices,
 };
 
 use crate::{app::OpenReelApp, transcript_ui::TranscriptSelection};
@@ -35,6 +36,14 @@ pub(crate) fn dedup_linked_timeline_words(
         .collect()
 }
 
+pub(crate) fn filler_word_indices(words: &[TimelineTranscriptWord]) -> Vec<usize> {
+    words
+        .iter()
+        .enumerate()
+        .filter_map(|(index, word)| is_filler_word(&word.text).then_some(index))
+        .collect()
+}
+
 impl OpenReelApp {
     pub(crate) fn cut_selected_transcript_words(&mut self) {
         let Some(selection) = self.transcript_selection else {
@@ -52,6 +61,35 @@ impl OpenReelApp {
                 self.record_error(
                     "Transcript edit",
                     "The selected words contain no cuttable frames",
+                );
+            }
+            Ok(operations) => self.send_operations(operations),
+            Err(error) => self.record_error("Transcript edit", error),
+        }
+    }
+
+    pub(crate) fn remove_filler_words(&mut self) {
+        let words = match self.analysis.timeline_transcript(&self.document, None) {
+            Ok(words) => dedup_linked_timeline_words(words),
+            Err(error) => {
+                self.record_error("Transcript edit", error.to_string());
+                return;
+            }
+        };
+        let selected_indices = filler_word_indices(&words);
+        if selected_indices.is_empty() {
+            self.record_error(
+                "Transcript edit",
+                "There are no filler words available to remove",
+            );
+            return;
+        }
+        let cuts = transcript_cut_ranges_for_indices(&self.document, &words, &selected_indices);
+        match transcript_word_cut_operations(&self.document, &cuts) {
+            Ok(operations) if operations.is_empty() => {
+                self.record_error(
+                    "Transcript edit",
+                    "The filler words contain no cuttable frames",
                 );
             }
             Ok(operations) => self.send_operations(operations),
@@ -395,9 +433,9 @@ mod tests {
         }
     }
 
-    fn word(start: i64, end: i64) -> TimelineTranscriptWord {
+    fn word_with_text(text: &str, start: i64, end: i64) -> TimelineTranscriptWord {
         TimelineTranscriptWord {
-            text: "selected".to_owned(),
+            text: text.to_owned(),
             asset: AssetId(1),
             track: TrackId(1),
             clip: ClipId(1),
@@ -406,6 +444,10 @@ mod tests {
             project_start: TimeCode(start),
             project_end: TimeCode(end),
         }
+    }
+
+    fn word(start: i64, end: i64) -> TimelineTranscriptWord {
+        word_with_text("selected", start, end)
     }
 
     fn track_segments(document: &Document, track: TrackId) -> Vec<(i64, i64, i64)> {
@@ -519,6 +561,60 @@ mod tests {
         let unique = word(60, 70);
         let deduped = dedup_linked_timeline_words(vec![video.clone(), audio, unique.clone()]);
         assert_eq!(deduped, vec![video, unique]);
+    }
+
+    #[test]
+    fn linked_duplicate_fillers_are_counted_once() {
+        let video = word_with_text("Um,", 30, 50);
+        let mut audio = video.clone();
+        audio.track = TrackId(2);
+        audio.clip = ClipId(2);
+        let keep = word_with_text("keep", 60, 70);
+
+        let deduped = dedup_linked_timeline_words(vec![video.clone(), audio, keep.clone()]);
+
+        assert_eq!(deduped, vec![video, keep]);
+        assert_eq!(filler_word_indices(&deduped), vec![0]);
+    }
+
+    #[test]
+    fn filler_runs_apply_as_one_batch_and_one_undo_restores_the_snapshot() {
+        let mut original = fixture();
+        original.tracks.truncate(1);
+        let words = vec![
+            word_with_text("keep", 0, 5),
+            word_with_text("um", 10, 15),
+            word_with_text("keep", 20, 25),
+            word_with_text("uh", 30, 35),
+            word_with_text("UH", 40, 45),
+            word_with_text("keep", 50, 55),
+        ];
+        let selected_indices = filler_word_indices(&words);
+        assert_eq!(selected_indices, vec![1, 3, 4]);
+        let cuts = transcript_cut_ranges_for_indices(&original, &words, &selected_indices);
+        assert_eq!(cuts, vec![cut(1, 10, 17), cut(1, 30, 47)]);
+
+        let operations = transcript_word_cut_operations(&original, &cuts).unwrap();
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|operation| matches!(operation, Operation::RippleDeleteClip { .. }))
+                .count(),
+            2
+        );
+        let mut applied = original.clone();
+        apply_batch(&mut applied, &operations).unwrap();
+        assert_ne!(applied, original);
+
+        let core = Core::spawn(original.clone()).unwrap();
+        assert!(matches!(
+            core.request(Command::DoBatch(operations)).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
+            panic!("undo must return the restored document");
+        };
+        assert_eq!(*doc, original);
     }
 
     #[test]

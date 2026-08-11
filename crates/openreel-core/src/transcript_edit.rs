@@ -2,6 +2,28 @@ use std::{collections::HashSet, ops::RangeInclusive};
 
 use crate::{ClipId, Document, Rational, TimeCode, TimelineTranscriptWord, TrackId};
 
+/// Return whether transcript text is one of the deliberately narrow filler sounds.
+///
+/// These are unambiguous hesitation sounds. Context-dependent words such as
+/// "like", "you know", "ah", "oh", and "so" are excluded because a
+/// one-click destructive action should prefer misses over false positives.
+#[must_use]
+pub fn is_filler_word(text: &str) -> bool {
+    let normalized = text
+        .trim_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '.' | ',' | '!' | '?' | ';' | ':' | '\'' | '"' | '(' | ')' | '-' | '…'
+                )
+        })
+        .to_lowercase();
+    matches!(
+        normalized.as_str(),
+        "um" | "uh" | "erm" | "hmm" | "mm" | "mhm"
+    )
+}
+
 /// One source-frame range selected for removal from a timeline clip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptCutRange {
@@ -40,9 +62,34 @@ pub fn transcript_cut_ranges(
         return Vec::new();
     }
 
+    let selected_indices = (selected_start..=selected_end).collect::<Vec<_>>();
+    transcript_cut_ranges_for_indices(document, words, &selected_indices)
+}
+
+/// Convert arbitrary timeline-word indices into source-frame cut ranges.
+///
+/// Duplicate and out-of-range indices are ignored. Within each clip, selected
+/// words that are consecutive in source-sorted word order form one run. Every
+/// run uses the same trailing-gap and retained-neighbor safety semantics as a
+/// contiguous transcript selection.
+#[must_use]
+pub fn transcript_cut_ranges_for_indices(
+    document: &Document,
+    words: &[TimelineTranscriptWord],
+    selected_indices: &[usize],
+) -> Vec<TranscriptCutRange> {
+    let selected = selected_indices
+        .iter()
+        .copied()
+        .filter(|index| *index < words.len())
+        .collect::<HashSet<_>>();
+    if selected.is_empty() {
+        return Vec::new();
+    }
+
     let mut selected_clips = Vec::new();
-    for word in &words[selected_start..=selected_end] {
-        if !selected_clips.contains(&word.clip) {
+    for (index, word) in words.iter().enumerate() {
+        if selected.contains(&index) && !selected_clips.contains(&word.clip) {
             selected_clips.push(word.clip);
         }
     }
@@ -65,7 +112,7 @@ pub fn transcript_cut_ranges(
 
         let mut cursor = 0;
         while cursor < clip_words.len() {
-            let is_selected = |index: usize| (selected_start..=selected_end).contains(&index);
+            let is_selected = |index: usize| selected.contains(&index);
             if !is_selected(clip_words[cursor].0) {
                 cursor += 1;
                 continue;
@@ -111,20 +158,15 @@ pub fn transcript_cut_ranges(
         }
     }
 
-    debug_assert!(retained_words_are_clear(
-        words,
-        selected_start..=selected_end,
-        &cuts
-    ));
+    debug_assert!(retained_words_are_clear(words, &selected, &cuts));
     cuts
 }
 
 fn retained_words_are_clear(
     words: &[TimelineTranscriptWord],
-    selected: RangeInclusive<usize>,
+    selected: &HashSet<usize>,
     cuts: &[TranscriptCutRange],
 ) -> bool {
-    let selected = selected.collect::<HashSet<_>>();
     words.iter().enumerate().all(|(index, word)| {
         selected.contains(&index)
             || cuts.iter().filter(|cut| cut.clip == word.clip).all(|cut| {
@@ -209,6 +251,16 @@ mod tests {
     }
 
     #[test]
+    fn filler_word_normalization_is_deliberately_conservative() {
+        for text in ["Um,", "UH", "hmm...", "(erm)", " mm ", "\"mhm\"", "uh…"] {
+            assert!(is_filler_word(text), "{text:?} should match");
+        }
+        for text in ["umbrella", "drum", "like", "ah", "oh", "so", "you know"] {
+            assert!(!is_filler_word(text), "{text:?} should not match");
+        }
+    }
+
+    #[test]
     fn single_word_takes_the_trailing_gap_and_keeps_the_next_margin() {
         let document = fixture(&[(1, 0..100)]);
         let words = [word(1, 0, 5), word(1, 10, 15), word(1, 30, 35)];
@@ -278,6 +330,54 @@ mod tests {
     }
 
     #[test]
+    fn non_contiguous_indices_produce_multiple_ranges_in_one_call() {
+        let document = fixture(&[(1, 0..100)]);
+        let words = [
+            word(1, 0, 5),
+            word(1, 10, 15),
+            word(1, 20, 25),
+            word(1, 30, 35),
+            word(1, 40, 45),
+        ];
+        assert_eq!(
+            transcript_cut_ranges_for_indices(&document, &words, &[0, 2, 4]),
+            vec![cut(1, 0, 7), cut(1, 20, 27), cut(1, 40, 48)]
+        );
+    }
+
+    #[test]
+    fn separated_selected_words_keep_the_retained_word_and_both_margins() {
+        let document = fixture(&[(1, 0..100)]);
+        let words = [
+            word(1, 0, 5),
+            word(1, 10, 15),
+            word(1, 20, 25),
+            word(1, 30, 35),
+            word(1, 40, 45),
+        ];
+        assert_eq!(
+            transcript_cut_ranges_for_indices(&document, &words, &[1, 3]),
+            vec![cut(1, 10, 17), cut(1, 30, 37)]
+        );
+    }
+
+    #[test]
+    fn contiguous_wrapper_matches_the_index_set_api() {
+        let document = fixture(&[(1, 0..100)]);
+        let words = [
+            word(1, 0, 5),
+            word(1, 10, 15),
+            word(1, 20, 25),
+            word(1, 30, 35),
+            word(1, 40, 45),
+        ];
+        assert_eq!(
+            transcript_cut_ranges(&document, &words, 1..=3),
+            transcript_cut_ranges_for_indices(&document, &words, &[1, 2, 3])
+        );
+    }
+
+    #[test]
     fn empty_or_inverted_ranges_are_dropped() {
         let document = fixture(&[(1, 0..100)]);
         let words = [word(1, 100, 100)];
@@ -310,6 +410,43 @@ mod tests {
             let cuts = transcript_cut_ranges(&document, &words, start..=end);
             for (index, retained) in words.iter().enumerate() {
                 if (start..=end).contains(&index) {
+                    continue;
+                }
+                for cut in cuts.iter().filter(|cut| cut.clip == retained.clip) {
+                    prop_assert!(
+                        cut.source_range.end <= retained.source_start
+                            || cut.source_range.start >= retained.source_end
+                    );
+                }
+            }
+        }
+
+
+        #[test]
+        fn retained_word_integrity_for_index_sets(
+            gaps in prop::collection::vec(0_i64..8, 2..12),
+            lengths in prop::collection::vec(1_i64..8, 2..12),
+            selected_flags in prop::collection::vec(any::<bool>(), 2..12),
+        ) {
+            let count = gaps.len().min(lengths.len()).min(selected_flags.len());
+            let mut cursor = 0_i64;
+            let mut words = Vec::with_capacity(count);
+            for index in 0..count {
+                cursor += gaps[index];
+                let end = cursor + lengths[index];
+                words.push(word(1, cursor, end));
+                cursor = end;
+            }
+            let selected = selected_flags
+                .iter()
+                .take(count)
+                .enumerate()
+                .filter_map(|(index, selected)| selected.then_some(index))
+                .collect::<Vec<_>>();
+            let document = fixture(&[(1, 0..cursor.saturating_add(30))]);
+            let cuts = transcript_cut_ranges_for_indices(&document, &words, &selected);
+            for (index, retained) in words.iter().enumerate() {
+                if selected.contains(&index) {
                     continue;
                 }
                 for cut in cuts.iter().filter(|cut| cut.clip == retained.clip) {

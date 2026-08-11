@@ -44,4 +44,7 @@ pub use title::{
     TitleFontSizeDescriptor, TitleParameterDescriptor, TitleParameterKind, TitlePosition,
     title_color, title_font_size, title_parameter_descriptor, title_parameter_value,
 };
-pub use transcript_edit::{TranscriptCutRange, silence_cut_margin_frames, transcript_cut_ranges};
+pub use transcript_edit::{
+    TranscriptCutRange, is_filler_word, silence_cut_margin_frames, transcript_cut_ranges,
+    transcript_cut_ranges_for_indices,
+};

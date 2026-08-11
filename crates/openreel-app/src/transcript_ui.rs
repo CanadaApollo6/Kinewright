@@ -1,7 +1,9 @@
 use std::{ops::RangeInclusive, time::Duration};
 
 use eframe::egui;
-use openreel_core::{ClipId, MediaAsset, TimeCode, TimelineTranscriptWord, TranscriptStatus};
+use openreel_core::{
+    ClipId, MediaAsset, TimeCode, TimelineTranscriptWord, TranscriptStatus, is_filler_word,
+};
 
 use crate::{
     app::OpenReelApp,
@@ -250,8 +252,7 @@ impl OpenReelApp {
             self.transcript_selection = None;
         }
 
-        let mut cut_requested = false;
-        if let Some(range) = &selected {
+        let selection_summary = selected.as_ref().map(|range| {
             let selection_words = &words[*range.start()..=*range.end()];
             let start = selection_words
                 .iter()
@@ -264,24 +265,44 @@ impl OpenReelApp {
                 .max()
                 .expect("a transcript selection is non-empty");
             let count = range.end().saturating_sub(*range.start()).saturating_add(1);
-            let noun = if count == 1 { "word" } else { "words" };
+            (count, start, end)
+        });
+        let filler_count = crate::transcript_edit::filler_word_indices(&words).len();
+        let mut cut_requested = false;
+        let mut remove_fillers_requested = false;
+        if selection_summary.is_some() || filler_count > 0 {
             ui.horizontal(|ui| {
-                if icons::button(ui, Icon::Delete, &format!("Cut {count} {noun} (Del)")).clicked() {
-                    cut_requested = true;
+                if let Some((count, start, end)) = selection_summary {
+                    let noun = if count == 1 { "word" } else { "words" };
+                    if icons::button(ui, Icon::Delete, &format!("Cut {count} {noun} (Del)"))
+                        .clicked()
+                    {
+                        cut_requested = true;
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("{count} {noun} selected"))
+                            .color(color::TEXT_SECONDARY),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} – {}",
+                            format_timecode(start, self.document.fps),
+                            format_timecode(end, self.document.fps)
+                        ))
+                        .monospace()
+                        .color(color::TEXT_MUTED),
+                    );
                 }
-                ui.label(
-                    egui::RichText::new(format!("{count} {noun} selected"))
-                        .color(color::TEXT_SECONDARY),
-                );
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{} – {}",
-                        format_timecode(start, self.document.fps),
-                        format_timecode(end, self.document.fps)
-                    ))
-                    .monospace()
-                    .color(color::TEXT_MUTED),
-                );
+                if filler_count > 0 {
+                    let label = filler_count_label(filler_count);
+                    ui.label(egui::RichText::new(&label).color(color::TEXT_MUTED));
+                    if icons::button(ui, Icon::Delete, &format!("Remove {label}"))
+                        .on_hover_text(format!("Remove {label} in one edit"))
+                        .clicked()
+                    {
+                        remove_fillers_requested = true;
+                    }
+                }
             });
         }
 
@@ -306,7 +327,13 @@ impl OpenReelApp {
                             .is_some_and(|range| range.contains(&index));
                         let is_playhead =
                             self.position >= word.project_start && self.position < word.project_end;
-                        let response = transcript_word_button(ui, word, is_selected, is_playhead);
+                        let response = transcript_word_button(
+                            ui,
+                            word,
+                            is_selected,
+                            is_playhead,
+                            is_filler_word(&word.text),
+                        );
                         if self.playing && selected.is_none() && !panel_hovered && is_playhead {
                             response.scroll_to_me(Some(egui::Align::Center));
                         }
@@ -340,6 +367,9 @@ impl OpenReelApp {
         if cut_requested && selected.is_some() {
             self.cut_selected_transcript_words();
         }
+        if remove_fillers_requested {
+            self.remove_filler_words();
+        }
     }
 
     fn selected_transcript_asset(&self) -> Option<&MediaAsset> {
@@ -368,47 +398,65 @@ fn transcript_word_button(
     word: &TimelineTranscriptWord,
     selected: bool,
     playhead: bool,
+    filler: bool,
 ) -> egui::Response {
-    ui.scope(|ui| {
-        ui.spacing_mut().button_padding = egui::vec2(space::HALF, space::HALF);
-        ui.spacing_mut().interact_size = egui::Vec2::ZERO;
-        let idle_fill = if selected {
-            color::ACCENT_28
-        } else {
-            color::PANEL
-        };
-        let hover_fill = if selected {
-            color::ACCENT_28
-        } else {
-            color::SURFACE_ACTIVE
-        };
-        ui.style_mut().visuals.widgets.inactive.bg_fill = idle_fill;
-        ui.style_mut().visuals.widgets.inactive.weak_bg_fill = idle_fill;
-        ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-        ui.style_mut().visuals.widgets.active.bg_fill = idle_fill;
-        ui.style_mut().visuals.widgets.active.weak_bg_fill = idle_fill;
-        ui.style_mut().visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
-        ui.style_mut().visuals.widgets.hovered.bg_fill = hover_fill;
-        ui.style_mut().visuals.widgets.hovered.weak_bg_fill = hover_fill;
-        ui.style_mut().visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
-        let text = if playhead {
-            egui::RichText::new(&word.text).color(color::ACCENT)
-        } else {
-            egui::RichText::new(&word.text)
-        };
-        ui.add(
-            egui::Button::new(text)
-                .fill(idle_fill)
-                .stroke(egui::Stroke::NONE)
-                .corner_radius(radius::XS)
-                .min_size(egui::Vec2::ZERO),
-        )
-    })
-    .inner
-    .on_hover_text(format!(
+    let response = ui
+        .scope(|ui| {
+            ui.spacing_mut().button_padding = egui::vec2(space::HALF, space::HALF);
+            ui.spacing_mut().interact_size = egui::Vec2::ZERO;
+            let idle_fill = if selected {
+                color::ACCENT_28
+            } else {
+                color::PANEL
+            };
+            let hover_fill = if selected {
+                color::ACCENT_28
+            } else {
+                color::SURFACE_ACTIVE
+            };
+            ui.style_mut().visuals.widgets.inactive.bg_fill = idle_fill;
+            ui.style_mut().visuals.widgets.inactive.weak_bg_fill = idle_fill;
+            ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+            ui.style_mut().visuals.widgets.active.bg_fill = idle_fill;
+            ui.style_mut().visuals.widgets.active.weak_bg_fill = idle_fill;
+            ui.style_mut().visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+            ui.style_mut().visuals.widgets.hovered.bg_fill = hover_fill;
+            ui.style_mut().visuals.widgets.hovered.weak_bg_fill = hover_fill;
+            ui.style_mut().visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+            let text = if playhead {
+                egui::RichText::new(&word.text).color(color::ACCENT)
+            } else if selected {
+                egui::RichText::new(&word.text).color(color::TEXT_PRIMARY)
+            } else if filler {
+                egui::RichText::new(&word.text).color(color::TEXT_MUTED)
+            } else {
+                egui::RichText::new(&word.text)
+            };
+            ui.add(
+                egui::Button::new(text)
+                    .fill(idle_fill)
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(radius::XS)
+                    .min_size(egui::Vec2::ZERO),
+            )
+        })
+        .inner;
+    if filler && !selected && !playhead {
+        let y = response.rect.bottom() - 1.0;
+        let left = egui::pos2(response.rect.left() + space::HALF, y);
+        let right = egui::pos2(response.rect.right() - space::HALF, y);
+        ui.painter()
+            .line_segment([left, right], egui::Stroke::new(1.0, color::BORDER_STRONG));
+    }
+    response.on_hover_text(format!(
         "project {}..{} frames · source {}..{} frames · clip {}",
         word.project_start.0, word.project_end.0, word.source_start.0, word.source_end.0, word.clip
     ))
+}
+
+fn filler_count_label(count: usize) -> String {
+    let noun = if count == 1 { "filler" } else { "fillers" };
+    format!("{count} {noun}")
 }
 
 #[cfg(test)]
@@ -437,5 +485,11 @@ mod tests {
         let rerendered = [word(2, 0), original[0].clone(), original[1].clone()];
 
         assert_eq!(selection.indices(&rerendered), Some(1..=2));
+    }
+
+    #[test]
+    fn filler_count_labels_use_singular_and_plural() {
+        assert_eq!(filler_count_label(1), "1 filler");
+        assert_eq!(filler_count_label(2), "2 fillers");
     }
 }

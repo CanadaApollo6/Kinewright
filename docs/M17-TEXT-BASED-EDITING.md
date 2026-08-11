@@ -46,3 +46,11 @@ Linked A/V clips of the same asset each contribute a copy of every word to the t
 ## Undo
 
 The complete split, cross-track delete, and ripple plan is sent as one `DoBatch`. Core applies the batch atomically against a cloned document. A failure exposes no partial edit, and one Undo restores the exact pre-cut document snapshot. This human-initiated edit does not use the agent confirmation broker.
+
+## Filler-word removal (M18)
+
+The timeline transcript identifies exactly six filler sounds: `um`, `uh`, `erm`, `hmm`, `mm`, and `mhm`. Matching trims surrounding whitespace plus leading and trailing `. , ! ? ; : ' " ( ) -` punctuation and the Unicode ellipsis, then lowercases the result. The vocabulary deliberately excludes context-dependent words and interjections such as “like,” “you know,” “ah,” “oh,” and “so.” A one-click removal action should prefer missing an ambiguous filler over deleting intended speech.
+
+When the ready timeline transcript contains fillers, the panel shows their deduplicated count and a Remove fillers action. Filler words remain readable but use muted text with a subtle underline; selection and playhead treatments take precedence. The action can select non-contiguous word indices, merges consecutive fillers within a clip into one source run, and applies the same trailing-gap and 100 ms retained-neighbor margin rules as a normal transcript selection.
+
+All filler ranges are planned together and sent as one `DoBatch`, so the complete cleanup is one atomic edit and one Undo restores the exact pre-removal snapshot. The count, source-range calculation, and planner all use the same `dedup_linked_timeline_words` view. Linked A/V copies are therefore counted once and do not create duplicate or overlapping cuts; sync-locked companion media is still removed by the existing cross-track planner.
