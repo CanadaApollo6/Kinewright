@@ -493,7 +493,10 @@ fn flagship_budget() -> EvalBudgets {
         max_tool_calls: 36,
         max_operations: 30,
         max_tokens: 70_000,
-        max_cost_usd: 1.50,
+        // Calibrated from 20 live samples: correct runs cluster at ~$0.60-0.70
+        // with one ~$2.00 cold-cache-priced outlier per batch. The ceiling
+        // catches runaways, not billing variance.
+        max_cost_usd: 2.50,
         max_wall_time: Duration::from_mins(40),
         max_undos: 30,
     }
