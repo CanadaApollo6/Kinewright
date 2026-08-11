@@ -25,12 +25,15 @@ OpenReel is a native Windows video editor written in Rust that is, at its core, 
 
 ## Features
 
-- Timeline editing: cut, trim, move, split, multi-track, snapping, filmstrip thumbnails, audio waveforms
-- Playback with sample-accurate A/V sync (the audio clock is the master; video never leads)
-- Multi-track GPU compositing (wgpu) with effects and crossfades — **preview and export share one render path**, so what you see is what you export
+- Timeline editing: cut, trim, move, split, multi-track, ripple delete/insert with cross-track sync-lock, A/V clip linking, project markers, snapping (markers, cross-track edges, Alt to bypass), filmstrip thumbnails, audio waveforms
+- Playback with sample-accurate A/V sync (the audio clock is the master; video never leads) and **multi-track audio mixing that matches the export mixdown to sample-level parity**
+- Smooth 4K scrubbing via proxy-resolution preview decode, with performance budgets asserted in tests — and hostile real-world media (VFR phone footage, rotation metadata, HEVC, odd audio) handled by written policy
+- Multi-track GPU compositing (wgpu) with effects, crossfades, and **titles as first-class clips** — preview and export share one render path, so what you see is what you export
 - Export to H.264/AAC mp4 with progress and cancellation
-- Agent chat panel: streaming responses, tool-call display, per-session cost tracking with a spending cap, confirmation prompts before destructive operations
+- Agent editing with senses and plans: transcript, silence, and scene-change inspectors; atomic multi-operation edit plans with a **single undo entry** and one summarized confirmation for anything destructive; plan results self-report remaining dead air so the agent finishes the job
 - The agent has *eyes*: it can fetch actual frames from your timeline, not just metadata
+- **Measured agent competence**: a scored eval suite (`openreel-eval`) with pass-rate sampling and committed baselines — see `docs/EVALS.md`
+- Context-sensitive inspector panel (clips, titles, markers) driven by the same effect table that validates operations
 - Transcript panel with click-word-to-seek
 - Crash recovery from an operation journal
 - Project save/load (`.openreel` JSON), keyboard-first editing (J/K/L, I/O, frame stepping — press `?` in-app)
