@@ -81,50 +81,84 @@ fn run() -> Result<bool, EvalError> {
         options.model.as_deref(),
     );
     let definitions = seed_suite();
+    let definitions = match &options.only {
+        Some(name) => {
+            let filtered: Vec<_> = definitions
+                .into_iter()
+                .filter(|definition| {
+                    definition.name == *name
+                        || definition.name.split_whitespace().next() == Some(name.as_str())
+                })
+                .collect();
+            if filtered.is_empty() {
+                return Err(EvalError::Agent(format!(
+                    "--only {name:?} matched no eval in the suite"
+                )));
+            }
+            filtered
+        }
+        None => definitions,
+    };
     let working_directory = env::current_dir().ok();
-    let mut results = Vec::with_capacity(definitions.len());
-    for (index, definition) in definitions.iter().enumerate() {
-        println!(
-            "\n[{}/{}] {} - {}",
-            index + 1,
-            definitions.len(),
-            definition.name,
-            definition.rationale
-        );
-        let result = run_eval(
-            definition,
-            driver.as_ref(),
-            options.model.as_deref(),
-            working_directory.as_deref(),
-        )
-        .unwrap_or_else(|error| EvalResult::execution_failure(definition, &error));
-        print_result_details(&result);
-        results.push(result);
+    let total_runs = definitions.len() * options.samples as usize;
+    let mut results = Vec::with_capacity(total_runs);
+    let mut run_number = 0_usize;
+    for definition in &definitions {
+        for sample in 0..options.samples {
+            run_number += 1;
+            println!(
+                "\n[{run_number}/{total_runs}] {} (sample {}/{}) - {}",
+                definition.name,
+                sample + 1,
+                options.samples,
+                definition.rationale
+            );
+            let result = run_eval(
+                definition,
+                driver.as_ref(),
+                options.model.as_deref(),
+                working_directory.as_deref(),
+            )
+            .unwrap_or_else(|error| EvalResult::execution_failure(definition, &error));
+            print_result_details(&result);
+            results.push(result);
+        }
     }
 
     let scoreboard = render_scoreboard(&results);
     println!("\n{scoreboard}");
+    if options.samples > 1 {
+        print_pass_rates(&definitions, &results, options.samples);
+    }
     let output_root = Path::new("target/evals");
     fs::create_dir_all(output_root).map_err(|error| EvalError::Output(error.to_string()))?;
     let output_path = result_path(output_root, &environment);
     let jsonl = render_jsonl(&environment, &results)?;
     fs::write(&output_path, jsonl).map_err(|error| EvalError::Output(error.to_string()))?;
-    let docs = render_evals_document(&definitions, &environment, &results, &output_path);
-    fs::write("docs/EVALS.md", docs).map_err(|error| EvalError::Output(error.to_string()))?;
+    // A filtered or multi-sample run is a measurement exercise, not a new
+    // baseline: docs/EVALS.md only records complete single-pass suites.
+    if options.only.is_none() && options.samples == 1 {
+        let docs = render_evals_document(&definitions, &environment, &results, &output_path);
+        fs::write("docs/EVALS.md", docs).map_err(|error| EvalError::Output(error.to_string()))?;
+        println!("Docs: docs/EVALS.md");
+    }
     println!("JSONL: {}", output_path.display());
-    println!("Docs: docs/EVALS.md");
     Ok(results.iter().all(|result| result.passed))
 }
 
 struct Options {
     harness: String,
     model: Option<String>,
+    only: Option<String>,
+    samples: u32,
 }
 
 impl Options {
     fn parse(arguments: impl Iterator<Item = String>) -> Result<Self, EvalError> {
         let mut harness = "claude-code".to_owned();
         let mut model = None;
+        let mut only = None;
+        let mut samples = 1_u32;
         let mut arguments = arguments.peekable();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -139,9 +173,26 @@ impl Options {
                             EvalError::Agent("--model requires a value".to_owned())
                         })?);
                 }
+                "--only" => {
+                    only = Some(arguments.next().ok_or_else(|| {
+                        EvalError::Agent("--only requires an eval name (e.g. e7)".to_owned())
+                    })?);
+                }
+                "--samples" => {
+                    let value = arguments
+                        .next()
+                        .ok_or_else(|| EvalError::Agent("--samples requires a count".to_owned()))?;
+                    samples = value
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|n| (1..=25).contains(n))
+                        .ok_or_else(|| {
+                            EvalError::Agent("--samples must be an integer in 1..=25".to_owned())
+                        })?;
+                }
                 "-h" | "--help" => {
                     println!(
-                        "Usage: OPENREEL_EVAL=1 cargo run -p openreel-agent --bin openreel-eval -- [--harness claude-code|codex] [--model MODEL]"
+                        "Usage: OPENREEL_EVAL=1 cargo run -p openreel-agent --bin openreel-eval -- [--harness claude-code|codex] [--model MODEL] [--only EVAL] [--samples N]"
                     );
                     return Err(EvalError::Agent("help requested".to_owned()));
                 }
@@ -150,7 +201,29 @@ impl Options {
                 }
             }
         }
-        Ok(Self { harness, model })
+        Ok(Self {
+            harness,
+            model,
+            only,
+            samples,
+        })
+    }
+}
+
+fn print_pass_rates(definitions: &[EvalDefinition], results: &[EvalResult], samples: u32) {
+    println!("\nPass rates over {samples} samples:");
+    for definition in definitions {
+        let runs: Vec<_> = results
+            .iter()
+            .filter(|result| result.name == definition.name)
+            .collect();
+        let passes = runs.iter().filter(|result| result.passed).count();
+        let total_usd: f64 = runs.iter().filter_map(|result| result.cost_usd).sum();
+        println!(
+            "  {}: {passes}/{} passed · ${total_usd:.2} total",
+            definition.name,
+            runs.len()
+        );
     }
 }
 
