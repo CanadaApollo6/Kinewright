@@ -3,8 +3,8 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use openreel_agent::McpServer;
 use openreel_core::{
-    AssetId, Clip, ClipId, Command, Core, Document, Event, MediaAsset, MediaEngine, MediaKind,
-    Query, QueryResult, Rational, TimeCode, Track, TrackId, TrackKind,
+    Analysis, AssetId, Clip, ClipId, Command, Core, Document, Event, MediaAsset, MediaKind, Query,
+    QueryResult, Rational, TimeCode, Track, TrackId, TrackKind,
 };
 use openreel_media::{
     FfmpegMediaEngine,
@@ -19,8 +19,7 @@ use serde_json::json;
 async fn mutator_tool_applies_through_the_real_core_actor() {
     let core = Core::spawn(Document::default()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
-    let agent_media: Arc<dyn MediaEngine> = media;
-    let server = McpServer::start(core.clone(), agent_media).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
             .await
@@ -75,8 +74,7 @@ async fn edit_plans_cross_the_real_mcp_server_atomically_with_one_confirmation()
     let original = edit_plan_document();
     let core = Core::spawn(original.clone()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
-    let agent_media: Arc<dyn MediaEngine> = media;
-    let server = McpServer::start(core.clone(), agent_media).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let confirmations = server.confirmations();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -169,8 +167,7 @@ async fn get_frame_at_returns_a_downscaled_png_for_generated_media() {
     let asset = media.probe(generated.path()).unwrap();
     let document = single_clip_document(asset);
     let core = Core::spawn(document).unwrap();
-    let agent_media: Arc<dyn MediaEngine> = media;
-    let server = McpServer::start(core, agent_media).unwrap();
+    let server = McpServer::start(core, media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
             .await

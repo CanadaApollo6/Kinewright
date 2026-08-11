@@ -15,8 +15,8 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use openreel_core::{
-    AssetId, ClipId, Command, Core, Document, Event, MediaEngine, Operation, Query, QueryResult,
-    SceneStatus, SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
+    Analysis, AssetId, ClipId, Command, Core, Document, Event, Operation, Playback, Query,
+    QueryResult, SceneStatus, SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
     TimelineTranscriptWord, TranscriptStatus,
 };
 use rmcp::{
@@ -202,13 +202,18 @@ impl McpServer {
     /// # Errors
     ///
     /// Returns an MCP server error when the listener or server thread cannot start.
-    pub fn start(core: Core, media: Arc<dyn MediaEngine>) -> Result<Self, McpServerError> {
-        Self::start_with_broker(core, media, ConfirmationBroker::default())
+    pub fn start(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+    ) -> Result<Self, McpServerError> {
+        Self::start_with_broker(core, playback, analysis, ConfirmationBroker::default())
     }
 
     fn start_with_broker(
         core: Core,
-        media: Arc<dyn MediaEngine>,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
         confirmations: ConfirmationBroker,
     ) -> Result<Self, McpServerError> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
@@ -219,7 +224,7 @@ impl McpServer {
             .map_err(McpServerError::Listener)?;
         let endpoint = format!("http://{address}/mcp");
         let (shutdown, shutdown_rx) = oneshot::channel();
-        let handler = OpenReelMcp::new(core, media, confirmations.clone());
+        let handler = OpenReelMcp::new(core, playback, analysis, confirmations.clone());
         let server_thread = thread::Builder::new()
             .name("openreel-mcp".to_owned())
             .spawn(move || run_server(listener, handler, shutdown_rx))
@@ -291,15 +296,22 @@ fn run_server(listener: TcpListener, handler: OpenReelMcp, shutdown: oneshot::Re
 #[derive(Clone)]
 struct OpenReelMcp {
     core: Core,
-    media: Arc<dyn MediaEngine>,
+    playback: Arc<dyn Playback>,
+    analysis: Arc<dyn Analysis>,
     confirmations: ConfirmationBroker,
 }
 
 impl OpenReelMcp {
-    fn new(core: Core, media: Arc<dyn MediaEngine>, confirmations: ConfirmationBroker) -> Self {
+    fn new(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        confirmations: ConfirmationBroker,
+    ) -> Self {
         Self {
             core,
-            media,
+            playback,
+            analysis,
             confirmations,
         }
     }
@@ -431,7 +443,7 @@ impl OpenReelMcp {
         let before = self.document().ok();
         match self.core.request(Command::Do(operation)) {
             Ok(Event::DocumentChanged { doc, .. }) => {
-                self.media.set_document(Arc::clone(&doc));
+                self.playback.set_document(Arc::clone(&doc));
                 if let Some(asset) = imported_asset {
                     self.request_asset_analysis(asset);
                 }
@@ -445,7 +457,7 @@ impl OpenReelMcp {
     }
 
     fn import_media(&self, path: &Path) -> CallToolResult {
-        let asset = match self.media.probe(path) {
+        let asset = match self.analysis.probe(path) {
             Ok(asset) => asset,
             Err(error) => return error_text(error.to_string()),
         };
@@ -474,7 +486,7 @@ impl OpenReelMcp {
             .map_err(|error| McpError::internal_error(error.to_string(), None))?;
         Ok(match event {
             Event::DocumentChanged { doc, .. } => {
-                self.media.set_document(Arc::clone(&doc));
+                self.playback.set_document(Arc::clone(&doc));
                 for asset in added_assets {
                     self.request_asset_analysis(asset);
                 }
@@ -492,9 +504,9 @@ impl OpenReelMcp {
     }
 
     fn request_asset_analysis(&self, asset: openreel_core::MediaAsset) {
-        self.media.request_transcription(asset.clone());
-        self.media.request_silence_detection(asset.clone());
-        self.media.request_scene_detection(asset);
+        self.analysis.request_transcription(asset.clone());
+        self.analysis.request_silence_detection(asset.clone());
+        self.analysis.request_scene_detection(asset);
     }
 
     fn frame_at(&self, timecode: TimeCode) -> Result<CallToolResult, McpError> {
@@ -505,8 +517,8 @@ impl OpenReelMcp {
                 timecode.0, document.duration.0
             )));
         }
-        self.media.set_document(document);
-        let image = match self.media.thumbnail_at(timecode, THUMBNAIL_MAX_WIDTH) {
+        self.playback.set_document(document);
+        let image = match self.analysis.thumbnail_at(timecode, THUMBNAIL_MAX_WIDTH) {
             Ok(image) => image,
             Err(error) => return Ok(error_text(error.to_string())),
         };
@@ -533,10 +545,10 @@ impl OpenReelMcp {
         let Some(asset) = document.asset(asset_id) else {
             return Ok(error_text(format!("asset {asset_id} does not exist")));
         };
-        let mut status = self.media.transcript_status(asset_id);
+        let mut status = self.analysis.transcript_status(asset_id);
         if status == TranscriptStatus::NotRequested {
-            self.media.request_transcription(asset.clone());
-            status = self.media.transcript_status(asset_id);
+            self.analysis.request_transcription(asset.clone());
+            status = self.analysis.transcript_status(asset_id);
         }
         Ok(success_text(render_asset_transcript(asset_id, &status)))
     }
@@ -554,10 +566,10 @@ impl OpenReelMcp {
         if minimum <= TimeCode::ZERO {
             return Ok(error_text("min_duration_frames must be positive"));
         }
-        let mut status = self.media.silence_status(asset_id);
+        let mut status = self.analysis.silence_status(asset_id);
         if status == SilenceStatus::NotRequested {
-            self.media.request_silence_detection(asset.clone());
-            status = self.media.silence_status(asset_id);
+            self.analysis.request_silence_detection(asset.clone());
+            status = self.analysis.silence_status(asset_id);
         }
         Ok(success_text(render_asset_silences(
             asset_id, &status, minimum,
@@ -580,10 +592,10 @@ impl OpenReelMcp {
             },
             None => DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS,
         };
-        let mut status = self.media.scene_status(asset_id);
+        let mut status = self.analysis.scene_status(asset_id);
         if status == SceneStatus::NotRequested {
-            self.media.request_scene_detection(asset.clone());
-            status = self.media.scene_status(asset_id);
+            self.analysis.request_scene_detection(asset.clone());
+            status = self.analysis.scene_status(asset_id);
         }
         Ok(success_text(render_asset_scene_changes(
             asset_id, &status, minimum,
@@ -606,12 +618,12 @@ impl OpenReelMcp {
             )));
         }
         for asset in &document.media_pool {
-            if self.media.transcript_status(asset.id) == TranscriptStatus::NotRequested {
-                self.media.request_transcription(asset.clone());
+            if self.analysis.transcript_status(asset.id) == TranscriptStatus::NotRequested {
+                self.analysis.request_transcription(asset.clone());
             }
         }
         let words: Vec<TimelineTranscriptWord> = match self
-            .media
+            .analysis
             .timeline_transcript(&document, Some(range.clone()))
         {
             Ok(words) => words,
@@ -619,7 +631,7 @@ impl OpenReelMcp {
         };
         let mut rendered = render_timeline_transcript(&document, range, &words);
         for asset in &document.media_pool {
-            let status = self.media.transcript_status(asset.id);
+            let status = self.analysis.transcript_status(asset.id);
             if !matches!(
                 status,
                 TranscriptStatus::Ready(_) | TranscriptStatus::NoSpeech
@@ -638,11 +650,11 @@ impl OpenReelMcp {
         let document = self.document()?;
         let range = validated_timeline_range(&document, requested, "timeline silence")?;
         for asset in &document.media_pool {
-            if self.media.silence_status(asset.id) == SilenceStatus::NotRequested {
-                self.media.request_silence_detection(asset.clone());
+            if self.analysis.silence_status(asset.id) == SilenceStatus::NotRequested {
+                self.analysis.request_silence_detection(asset.clone());
             }
         }
-        let spans: Vec<TimelineSilenceSpan> = match self.media.timeline_silences(
+        let spans: Vec<TimelineSilenceSpan> = match self.analysis.timeline_silences(
             &document,
             Some(range.clone()),
             TimeCode(DEFAULT_MINIMUM_SILENCE_FRAMES),
@@ -652,7 +664,7 @@ impl OpenReelMcp {
         };
         let mut rendered = render_timeline_silences(&document, range, &spans);
         for asset in &document.media_pool {
-            let status = self.media.silence_status(asset.id);
+            let status = self.analysis.silence_status(asset.id);
             if !matches!(status, SilenceStatus::Ready(_) | SilenceStatus::NoAudio) {
                 rendered.push('\n');
                 rendered.push_str(&render_asset_silences(
@@ -672,11 +684,11 @@ impl OpenReelMcp {
         let document = self.document()?;
         let range = validated_timeline_range(&document, requested, "timeline scene")?;
         for asset in &document.media_pool {
-            if self.media.scene_status(asset.id) == SceneStatus::NotRequested {
-                self.media.request_scene_detection(asset.clone());
+            if self.analysis.scene_status(asset.id) == SceneStatus::NotRequested {
+                self.analysis.request_scene_detection(asset.clone());
             }
         }
-        let changes: Vec<TimelineSceneChange> = match self.media.timeline_scene_changes(
+        let changes: Vec<TimelineSceneChange> = match self.analysis.timeline_scene_changes(
             &document,
             Some(range.clone()),
             DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS,
@@ -686,7 +698,7 @@ impl OpenReelMcp {
         };
         let mut rendered = render_timeline_scene_changes(&document, range, &changes);
         for asset in &document.media_pool {
-            let status = self.media.scene_status(asset.id);
+            let status = self.analysis.scene_status(asset.id);
             if !matches!(status, SceneStatus::Ready(_) | SceneStatus::NoVideo) {
                 rendered.push('\n');
                 rendered.push_str(&render_asset_scene_changes(
@@ -1059,20 +1071,16 @@ fn render_plan_outcomes(
 mod tests {
     use super::*;
     use openreel_core::{
-        AssetId, Clip, ExportSettings, FrameTexture, MediaAsset, MediaError, MediaEvent, MediaKind,
-        ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimelineSceneChange,
-        TimelineSilenceSpan, Track, TrackId, TrackKind,
+        AssetId, Clip, FrameTexture, MediaAsset, MediaError, MediaEvent, MediaKind, Rational,
+        RgbaImage, SceneStatus, SilenceStatus, TimelineSceneChange, TimelineSilenceSpan, Track,
+        TrackId, TrackKind, VisualAssetResult,
     };
     use serde_json::json;
     use std::{path::Path, time::Instant};
 
     struct NoopMedia;
 
-    impl MediaEngine for NoopMedia {
-        fn probe(&self, _path: &Path) -> Result<MediaAsset, MediaError> {
-            Err(MediaError::NotImplemented)
-        }
-
+    impl Playback for NoopMedia {
         fn set_document(&self, _doc: Arc<Document>) {}
 
         fn request_frame(&self, _t: TimeCode) {}
@@ -1093,6 +1101,12 @@ mod tests {
 
         fn position(&self) -> TimeCode {
             TimeCode::ZERO
+        }
+    }
+
+    impl Analysis for NoopMedia {
+        fn probe(&self, _path: &Path) -> Result<MediaAsset, MediaError> {
+            Err(MediaError::NotImplemented)
         }
 
         fn request_transcription(&self, _asset: MediaAsset) {}
@@ -1143,17 +1157,25 @@ mod tests {
             Err(MediaError::NotImplemented)
         }
 
-        fn export(
+        fn request_waveform(&self, _asset: MediaAsset) -> bool {
+            false
+        }
+
+        fn request_thumbnail(
             &self,
-            _out: &Path,
-            _settings: ExportSettings,
-            _progress: ProgressSink,
-        ) -> Result<(), MediaError> {
-            Err(MediaError::NotImplemented)
+            _asset: MediaAsset,
+            _source_at: TimeCode,
+            _max_width: u32,
+        ) -> bool {
+            false
+        }
+
+        fn visual_asset_results(&self) -> crossbeam_channel::Receiver<VisualAssetResult> {
+            crossbeam_channel::never()
         }
     }
 
-    fn fixture() -> (Core, Arc<dyn MediaEngine>) {
+    fn fixture() -> (Core, Arc<dyn Playback>, Arc<dyn Analysis>) {
         let asset = MediaAsset {
             id: AssetId(1),
             path: PathBuf::from("fixture.mp4"),
@@ -1181,7 +1203,8 @@ mod tests {
             resolution: (320, 180),
             duration: TimeCode(60),
         };
-        (Core::spawn(document).unwrap(), Arc::new(NoopMedia))
+        let media = Arc::new(NoopMedia);
+        (Core::spawn(document).unwrap(), media.clone(), media)
     }
 
     fn delete_request() -> CallToolRequestParams {
@@ -1222,10 +1245,10 @@ mod tests {
 
     #[test]
     fn approved_confirmation_applies_the_operation() {
-        let (core, media) = fixture();
+        let (core, playback, analysis) = fixture();
         let broker = ConfirmationBroker::with_timeout(Duration::from_secs(1));
         let result = invoke_in_background(
-            OpenReelMcp::new(core.clone(), media, broker.clone()),
+            OpenReelMcp::new(core.clone(), playback, analysis, broker.clone()),
             delete_request(),
         );
         let request = wait_for_request(&broker);
@@ -1245,10 +1268,10 @@ mod tests {
 
     #[test]
     fn rejected_confirmation_returns_a_refusal_tool_result() {
-        let (core, media) = fixture();
+        let (core, playback, analysis) = fixture();
         let broker = ConfirmationBroker::with_timeout(Duration::from_secs(1));
         let result = invoke_in_background(
-            OpenReelMcp::new(core, media, broker.clone()),
+            OpenReelMcp::new(core, playback, analysis, broker.clone()),
             delete_request(),
         );
         let request = wait_for_request(&broker);
@@ -1269,9 +1292,9 @@ mod tests {
 
     #[test]
     fn confirmation_timeout_rejects_the_operation() {
-        let (core, media) = fixture();
+        let (core, playback, analysis) = fixture();
         let broker = ConfirmationBroker::with_timeout(Duration::from_millis(10));
-        let service = OpenReelMcp::new(core, media, broker);
+        let service = OpenReelMcp::new(core, playback, analysis, broker);
         let result = service.call_blocking(delete_request()).unwrap();
         assert_eq!(result.is_error, Some(true));
         assert!(
@@ -1285,10 +1308,10 @@ mod tests {
 
     #[test]
     fn interrupting_a_pending_confirmation_does_not_deadlock() {
-        let (core, media) = fixture();
+        let (core, playback, analysis) = fixture();
         let broker = ConfirmationBroker::with_timeout(Duration::from_secs(30));
         let result = invoke_in_background(
-            OpenReelMcp::new(core, media, broker.clone()),
+            OpenReelMcp::new(core, playback, analysis, broker.clone()),
             delete_request(),
         );
         let _request = wait_for_request(&broker);
@@ -1309,11 +1332,14 @@ mod tests {
 
     #[test]
     fn removing_a_nonempty_track_requires_confirmation() {
-        let (core, media) = fixture();
+        let (core, playback, analysis) = fixture();
         let broker = ConfirmationBroker::with_timeout(Duration::from_secs(1));
         let request = CallToolRequestParams::new("remove_track")
             .with_arguments(json!({"track": 1}).as_object().unwrap().clone());
-        let result = invoke_in_background(OpenReelMcp::new(core, media, broker.clone()), request);
+        let result = invoke_in_background(
+            OpenReelMcp::new(core, playback, analysis, broker.clone()),
+            request,
+        );
         let request = wait_for_request(&broker);
         assert!(request.description.contains("1 clip(s)"));
         assert!(broker.reject(request.id, "keep the track"));
@@ -1339,13 +1365,18 @@ mod tests {
 
     #[test]
     fn edit_plan_applies_atomically_and_undoes_once() {
-        let (core, media) = fixture();
+        let (core, playback, analysis) = fixture();
         let Event::QueryResult(QueryResult::Document(original)) =
             core.request(Command::Query(Query::Document)).unwrap()
         else {
             panic!("expected document");
         };
-        let service = OpenReelMcp::new(core.clone(), media, ConfirmationBroker::default());
+        let service = OpenReelMcp::new(
+            core.clone(),
+            playback,
+            analysis,
+            ConfirmationBroker::default(),
+        );
         let result = service
             .call_blocking(plan_request(json!([
                 {"AddTrack": {"track": {"id": 2, "kind": "Video", "clips": []}}},
@@ -1365,8 +1396,13 @@ mod tests {
 
     #[test]
     fn mixed_validity_edit_plan_rejects_without_partial_state() {
-        let (core, media) = fixture();
-        let service = OpenReelMcp::new(core.clone(), media, ConfirmationBroker::default());
+        let (core, playback, analysis) = fixture();
+        let service = OpenReelMcp::new(
+            core.clone(),
+            playback,
+            analysis,
+            ConfirmationBroker::default(),
+        );
         let result = service
             .call_blocking(plan_request(json!([
                 {"AddTrack": {"track": {"id": 2, "kind": "Video", "clips": []}}},
@@ -1388,10 +1424,10 @@ mod tests {
     #[test]
     fn destructive_edit_plan_uses_one_summary_confirmation_for_approve_and_reject() {
         for approve in [true, false] {
-            let (core, media) = fixture();
+            let (core, playback, analysis) = fixture();
             let broker = ConfirmationBroker::with_timeout(Duration::from_secs(1));
             let result = invoke_in_background(
-                OpenReelMcp::new(core.clone(), media, broker.clone()),
+                OpenReelMcp::new(core.clone(), playback, analysis, broker.clone()),
                 plan_request(json!([
                     {"RemoveTrack": {"track": 1}}
                 ])),

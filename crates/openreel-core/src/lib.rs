@@ -20,10 +20,12 @@ pub use effect::{
 };
 pub use journal::JournalCommand;
 pub use media::{
-    AssetSceneChanges, AssetSilences, AssetTranscript, ExportCancellation, ExportProgress,
-    ExportSettings, FrameTexture, MediaEngine, MediaError, MediaEvent, PlaybackState, ProgressSink,
-    RgbaImage, SceneChange, SceneStatus, SilenceSpan, SilenceStatus, TimelineSceneChange,
-    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, TranscriptWord,
+    Analysis, AssetSceneChanges, AssetSilences, AssetTranscript, Export, ExportCancellation,
+    ExportProgress, ExportSettings, FrameTexture, MediaError, MediaEvent, Playback, PlaybackState,
+    ProgressSink, RgbaImage, SceneChange, SceneStatus, SilenceSpan, SilenceStatus, ThumbnailFrame,
+    ThumbnailKey, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TranscriptStatus, TranscriptWord, VisualAssetResult, VisualRequestKind, WaveformData,
+    WaveformPeak,
 };
 pub use model::{
     AssetId, Clip, ClipId, Document, Effect, EffectId, MediaAsset, MediaKind, ParamValue, Track,

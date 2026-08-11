@@ -9,8 +9,8 @@ use std::{
 };
 
 use openreel_core::{
-    Clip, ClipId, Document, Effect, EffectId, ExportCancellation, ExportSettings, MediaEngine,
-    MediaEvent, ParamValue, Rational, TimeCode, Track, TrackId, TrackKind, Transition,
+    Analysis, Clip, ClipId, Document, Effect, EffectId, Export, ExportCancellation, ExportSettings,
+    MediaEvent, ParamValue, Playback, Rational, TimeCode, Track, TrackId, TrackKind, Transition,
 };
 use openreel_media::FfmpegMediaEngine;
 
@@ -189,7 +189,7 @@ fn receive_frame(
 }
 
 fn wait_for_playback(
-    engine: &FfmpegMediaEngine,
+    engine: &dyn Playback,
     events: &crossbeam_channel::Receiver<MediaEvent>,
     minimum: TimeCode,
 ) -> Result<(), String> {

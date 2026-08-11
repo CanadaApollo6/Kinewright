@@ -10,14 +10,14 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use openreel_core::{
-    AssetId, ClipId, Document, ExportSettings, FrameTexture, MediaAsset, MediaEngine, MediaError,
-    MediaEvent, MediaKind, PlaybackState, ProgressSink, Rational, RgbaImage, SceneStatus,
-    SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TranscriptStatus,
+    Analysis, AssetId, ClipId, Document, Export, ExportSettings, FrameTexture, MediaAsset,
+    MediaError, MediaEvent, MediaKind, Playback, PlaybackState, ProgressSink, Rational, RgbaImage,
+    SceneStatus, SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
+    TimelineTranscriptWord, TranscriptStatus, VisualAssetResult,
 };
 
 use crate::{
-    analysis::{VisualAssetResult, VisualAssetService},
+    analysis::VisualAssetService,
     audio::{AudioRuntime, AudioSourceSpec},
     clock::samples_to_frame,
     compositor::GpuContext,
@@ -210,27 +210,6 @@ impl FfmpegMediaEngine {
             derived_analysis,
         })
     }
-
-    /// Queue a content-addressed waveform extraction without blocking the caller.
-    pub fn request_waveform(&self, asset: MediaAsset) -> bool {
-        self.visual_assets.request_waveform(asset)
-    }
-
-    /// Queue one source-frame thumbnail without blocking the caller.
-    pub fn request_thumbnail(
-        &self,
-        asset: MediaAsset,
-        source_at: TimeCode,
-        max_width: u32,
-    ) -> bool {
-        self.visual_assets
-            .request_thumbnail(asset, source_at, max_width)
-    }
-
-    /// Bounded stream of ready waveform and thumbnail data.
-    pub fn visual_asset_results(&self) -> Receiver<VisualAssetResult> {
-        self.visual_assets.results()
-    }
 }
 
 #[derive(Default)]
@@ -241,12 +220,7 @@ struct RequestedPositions {
     seek_sequence: AtomicU64,
 }
 
-impl MediaEngine for FfmpegMediaEngine {
-    fn probe(&self, path: &Path) -> Result<MediaAsset, MediaError> {
-        let id = AssetId(self.next_asset_id.fetch_add(1, Ordering::Relaxed));
-        probe_path(path, id)
-    }
-
+impl Playback for FfmpegMediaEngine {
     fn set_document(&self, doc: Arc<Document>) {
         self.clock.set_fps(doc.fps);
         let next_id = doc
@@ -296,6 +270,13 @@ impl MediaEngine for FfmpegMediaEngine {
 
     fn position(&self) -> TimeCode {
         self.clock.position()
+    }
+}
+
+impl Analysis for FfmpegMediaEngine {
+    fn probe(&self, path: &Path) -> Result<MediaAsset, MediaError> {
+        let id = AssetId(self.next_asset_id.fetch_add(1, Ordering::Relaxed));
+        probe_path(path, id)
     }
 
     fn request_transcription(&self, asset: MediaAsset) {
@@ -364,6 +345,21 @@ impl MediaEngine for FfmpegMediaEngine {
             .map_err(|_| MediaError::Backend("media worker stopped".to_owned()))?
     }
 
+    fn request_waveform(&self, asset: MediaAsset) -> bool {
+        self.visual_assets.request_waveform(asset)
+    }
+
+    fn request_thumbnail(&self, asset: MediaAsset, source_at: TimeCode, max_width: u32) -> bool {
+        self.visual_assets
+            .request_thumbnail(asset, source_at, max_width)
+    }
+
+    fn visual_asset_results(&self) -> Receiver<VisualAssetResult> {
+        self.visual_assets.results()
+    }
+}
+
+impl Export for FfmpegMediaEngine {
     fn export(
         &self,
         out: &Path,

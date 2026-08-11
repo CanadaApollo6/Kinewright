@@ -6,9 +6,9 @@ use std::{
 };
 
 use openreel_core::{
-    Clip, ClipId, Document, Effect, EffectId, ExportCancellation, ExportSettings, MediaAsset,
-    MediaEngine, MediaError, MediaEvent, MediaKind, ParamValue, PlaybackState, Rational, TimeCode,
-    Track, TrackId, TrackKind, Transition,
+    Analysis, Clip, ClipId, Document, Effect, EffectId, Export, ExportCancellation, ExportSettings,
+    MediaAsset, MediaError, MediaEvent, MediaKind, ParamValue, Playback, PlaybackState, Rational,
+    TimeCode, Track, TrackId, TrackKind, Transition,
 };
 use openreel_media::FfmpegMediaEngine;
 
@@ -121,7 +121,7 @@ fn generate_solid(name: &str, color: &str, frequency: &str) -> TemporaryFile {
     TemporaryFile(output)
 }
 
-fn export_fixture(engine: &FfmpegMediaEngine) -> Document {
+fn export_fixture(engine: &dyn Analysis) -> Document {
     let red = generate_solid("red", "red", "440");
     let blue = generate_solid("blue", "blue", "660");
     let mut red_asset = engine.probe(&red.0).unwrap();
@@ -616,7 +616,7 @@ fn wait_for_state(events: &crossbeam_channel::Receiver<MediaEvent>, expected: Pl
     }
 }
 
-fn wait_for_position(engine: &FfmpegMediaEngine, minimum: TimeCode) {
+fn wait_for_position(engine: &dyn Playback, minimum: TimeCode) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if engine.position() >= minimum {

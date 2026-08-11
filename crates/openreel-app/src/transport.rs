@@ -1,5 +1,5 @@
 use eframe::egui;
-use openreel_core::{MediaEngine, TimeCode};
+use openreel_core::TimeCode;
 
 use crate::{
     app::OpenReelApp,
@@ -15,20 +15,20 @@ impl OpenReelApp {
             return;
         }
         if self.playing {
-            self.media.pause();
+            self.playback.pause();
         } else {
             if self.position >= self.document.duration {
                 self.position = TimeCode::ZERO;
             }
-            self.media.play(self.position);
+            self.playback.play(self.position);
         }
     }
 
     pub(crate) fn seek_to(&mut self, position: TimeCode) {
         let maximum = self.document.duration.0.saturating_sub(1).max(0);
         self.position = TimeCode(position.0.clamp(0, maximum));
-        self.media.seek(self.position);
-        self.media.request_frame(self.position);
+        self.playback.seek(self.position);
+        self.playback.request_frame(self.position);
     }
 
     pub(crate) fn transport(&mut self, ui: &mut egui::Ui) {
@@ -68,17 +68,17 @@ impl OpenReelApp {
                 if response.drag_started() {
                     self.resume_after_scrub = self.playing;
                     if self.playing {
-                        self.media.pause();
+                        self.playback.pause();
                     }
                 }
                 if response.changed() {
                     self.position = TimeCode(slider_position);
-                    self.media.request_frame(self.position);
+                    self.playback.request_frame(self.position);
                 }
                 if response.drag_stopped() || (response.changed() && !response.dragged()) {
-                    self.media.seek(self.position);
+                    self.playback.seek(self.position);
                     if self.resume_after_scrub {
-                        self.media.play(self.position);
+                        self.playback.play(self.position);
                     }
                     self.resume_after_scrub = false;
                 }

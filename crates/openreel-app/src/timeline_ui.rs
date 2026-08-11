@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use eframe::egui;
 use openreel_core::{
-    ClipId, FrameRounding, MediaAsset, MediaEngine, MediaKind, Operation, Rational, SceneStatus,
-    SilenceStatus, TimeCode, TrackKind, map_frames_with_rounding, map_source_range_to_project,
+    Analysis, ClipId, FrameRounding, MediaAsset, MediaKind, Operation, Rational, SceneStatus,
+    SilenceStatus, TimeCode, TrackKind, WaveformData, map_frames_with_rounding,
+    map_source_range_to_project,
 };
-use openreel_media::{WaveformData, timeline_source_at};
+use openreel_media::timeline_source_at;
 
 use crate::{
     app::OpenReelApp,
@@ -395,7 +396,7 @@ impl OpenReelApp {
                                 &painter,
                                 ui.clip_rect(),
                                 &mut self.visual_cache,
-                                self.media.as_ref(),
+                                self.analysis.as_ref(),
                                 asset,
                                 clip.source_range.clone(),
                                 draw_rect,
@@ -501,20 +502,20 @@ impl OpenReelApp {
         if scrub_started {
             self.resume_after_scrub = self.playing;
             if self.playing {
-                self.media.pause();
+                self.playback.pause();
             }
         }
         if let Some(position) = seek {
             let maximum = self.document.duration.0.saturating_sub(1).max(0);
             self.position = TimeCode(position.0.clamp(0, maximum));
-            self.media.request_frame(self.position);
+            self.playback.request_frame(self.position);
             if scrub_stopped {
-                self.media.seek(self.position);
+                self.playback.seek(self.position);
             }
         }
         if scrub_stopped {
             if self.resume_after_scrub {
-                self.media.play(self.position);
+                self.playback.play(self.position);
             }
             self.resume_after_scrub = false;
         }
@@ -644,7 +645,7 @@ fn paint_clip(
     painter: &egui::Painter,
     clip_bounds: egui::Rect,
     visual_cache: &mut VisualCache,
-    media: &openreel_media::FfmpegMediaEngine,
+    media: &dyn Analysis,
     asset: &MediaAsset,
     source_range: std::ops::Range<TimeCode>,
     rect: egui::Rect,
@@ -773,7 +774,7 @@ fn paint_clip(
 fn paint_derived_markers(
     painter: &egui::Painter,
     clip_bounds: egui::Rect,
-    media: &openreel_media::FfmpegMediaEngine,
+    media: &dyn Analysis,
     asset: &MediaAsset,
     source_range: std::ops::Range<TimeCode>,
     rect: egui::Rect,
@@ -844,7 +845,7 @@ fn paint_filmstrip(
     painter: &egui::Painter,
     clip_bounds: egui::Rect,
     visual_cache: &mut VisualCache,
-    media: &openreel_media::FfmpegMediaEngine,
+    media: &dyn Analysis,
     asset: &MediaAsset,
     source_range: std::ops::Range<TimeCode>,
     rect: egui::Rect,

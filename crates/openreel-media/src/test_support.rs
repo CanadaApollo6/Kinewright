@@ -9,7 +9,7 @@ use std::{
 };
 
 use openreel_core::{
-    AssetId, AssetTranscript, Clip, ClipId, Document, MediaAsset, MediaEngine, TimeCode, Track,
+    Analysis, AssetId, AssetTranscript, Clip, ClipId, Document, MediaAsset, TimeCode, Track,
     TrackId, TrackKind, TranscriptStatus,
 };
 
@@ -152,7 +152,7 @@ pub fn test_engine(data_dir_env: &str) -> FfmpegMediaEngine {
 ///
 /// Panics if transcription fails or does not finish within twenty minutes.
 pub fn wait_for_transcript(
-    engine: &FfmpegMediaEngine,
+    engine: &dyn Analysis,
     asset: AssetId,
     report_progress: bool,
 ) -> Arc<AssetTranscript> {

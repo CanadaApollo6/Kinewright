@@ -10,9 +10,9 @@ use openreel_agent::{
     ClaudeCodeDriver, CodexDriver, ConfirmationBroker, ConfirmationRequest, McpServer,
 };
 use openreel_core::{
-    AgentDriver, AgentEvent, AgentSession, AssetId, ClipId, Command, Core, Document, Event,
-    HarnessInfo, MediaAsset, MediaEngine, MediaError, MediaEvent, Operation, PlaybackState,
-    TimeCode, Track, TrackId, TrackKind,
+    AgentDriver, AgentEvent, AgentSession, Analysis, AssetId, ClipId, Command, Core, Document,
+    Event, Export, HarnessInfo, MediaAsset, MediaError, MediaEvent, Operation, Playback,
+    PlaybackState, TimeCode, Track, TrackId, TrackKind,
 };
 use openreel_media::{FfmpegMediaEngine, GpuContext};
 
@@ -39,7 +39,9 @@ enum ProjectAction {
 pub(crate) struct OpenReelApp {
     pub(crate) core: Core,
     pub(crate) core_events: crossbeam_channel::Receiver<Event>,
-    pub(crate) media: Arc<FfmpegMediaEngine>,
+    pub(crate) playback: Arc<dyn Playback>,
+    pub(crate) analysis: Arc<dyn Analysis>,
+    pub(crate) exporter: Arc<dyn Export>,
     pub(crate) frames: crossbeam_channel::Receiver<(TimeCode, openreel_core::FrameTexture)>,
     pub(crate) media_events: crossbeam_channel::Receiver<MediaEvent>,
     pub(crate) visual_cache: crate::visual_cache::VisualCache,
@@ -97,18 +99,21 @@ impl OpenReelApp {
         let media_events = media.events();
         let visual_cache = crate::visual_cache::VisualCache::new(media.visual_asset_results());
         let (probe_tx, probe_rx) = mpsc::channel();
-        let agent_media: Arc<dyn MediaEngine> = media.clone();
+        let playback: Arc<dyn Playback> = media.clone();
+        let analysis: Arc<dyn Analysis> = media.clone();
+        let exporter: Arc<dyn Export> = media;
         let mut chat = Vec::new();
         let mut error_log = ErrorLog::default();
-        let mcp_server = match McpServer::start(core.clone(), agent_media) {
-            Ok(server) => Some(server),
-            Err(error) => {
-                let message = format!("Could not start the OpenReel agent server: {error}");
-                error_log.push("Agent", message.clone());
-                chat.push(ChatEntry::Text(message));
-                None
-            }
-        };
+        let mcp_server =
+            match McpServer::start(core.clone(), Arc::clone(&playback), Arc::clone(&analysis)) {
+                Ok(server) => Some(server),
+                Err(error) => {
+                    let message = format!("Could not start the OpenReel agent server: {error}");
+                    error_log.push("Agent", message.clone());
+                    chat.push(ChatEntry::Text(message));
+                    None
+                }
+            };
         let confirmations = mcp_server.as_ref().map(McpServer::confirmations);
         let claude_info = ClaudeCodeDriver.detect();
         let codex_info = CodexDriver.detect();
@@ -124,7 +129,9 @@ impl OpenReelApp {
         let mut app = Self {
             core,
             core_events,
-            media,
+            playback,
+            analysis,
+            exporter,
             frames,
             media_events,
             visual_cache,
@@ -422,9 +429,12 @@ impl OpenReelApp {
     fn replace_core(&mut self, document: Document) -> Result<(), String> {
         let core = Core::spawn(document.clone()).map_err(|error| error.to_string())?;
         let events = core.subscribe().map_err(|error| error.to_string())?;
-        let agent_media: Arc<dyn MediaEngine> = self.media.clone();
-        let mcp_server = McpServer::start(core.clone(), agent_media)
-            .map_err(|error| format!("agent server: {error}"))?;
+        let mcp_server = McpServer::start(
+            core.clone(),
+            Arc::clone(&self.playback),
+            Arc::clone(&self.analysis),
+        )
+        .map_err(|error| format!("agent server: {error}"))?;
         let confirmations = mcp_server.confirmations();
         if let Some(session) = &mut self.agent_session {
             session.interrupt();
@@ -432,7 +442,7 @@ impl OpenReelApp {
         if let Some(confirmations) = &self.confirmations {
             confirmations.reject_all("the project changed during confirmation");
         }
-        self.media.pause();
+        self.playback.pause();
         self.recovery.attach(&core);
         self.core = core;
         self.core_events = events;
@@ -451,11 +461,11 @@ impl OpenReelApp {
         self.selected_asset = None;
         self.texture = None;
         self.visual_cache.clear();
-        self.media.set_document(Arc::clone(&self.document));
+        self.playback.set_document(Arc::clone(&self.document));
         for asset in &self.document.media_pool {
             self.request_asset_analysis(asset.clone());
         }
-        self.media.request_frame(TimeCode::ZERO);
+        self.playback.request_frame(TimeCode::ZERO);
         Ok(())
     }
 
@@ -468,9 +478,9 @@ impl OpenReelApp {
     }
 
     fn request_asset_analysis(&self, asset: MediaAsset) {
-        self.media.request_transcription(asset.clone());
-        self.media.request_silence_detection(asset.clone());
-        self.media.request_scene_detection(asset);
+        self.analysis.request_transcription(asset.clone());
+        self.analysis.request_silence_detection(asset.clone());
+        self.analysis.request_scene_detection(asset);
     }
 
     pub(crate) fn undo(&mut self) {
@@ -545,9 +555,9 @@ impl OpenReelApp {
                             TimeCode(self.position.0.clamp(0, doc.duration.0.saturating_sub(1)));
                     }
                     self.playing = false;
-                    self.media.set_document(Arc::clone(&doc));
-                    self.media.seek(self.position);
-                    self.media.request_frame(self.position);
+                    self.playback.set_document(Arc::clone(&doc));
+                    self.playback.seek(self.position);
+                    self.playback.request_frame(self.position);
                     if let Some(Operation::AddAsset { asset }) = &last_op {
                         self.selected_asset = Some(asset.id);
                     }
@@ -569,8 +579,8 @@ impl OpenReelApp {
         }
 
         if self.document.media_pool.iter().any(|asset| {
-            self.media.silence_status(asset.id).is_running()
-                || self.media.scene_status(asset.id).is_running()
+            self.analysis.silence_status(asset.id).is_running()
+                || self.analysis.scene_status(asset.id).is_running()
         }) {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -616,7 +626,7 @@ impl OpenReelApp {
         }
 
         if self.playing {
-            self.position = self.media.position();
+            self.position = self.playback.position();
             ctx.request_repaint_after(Duration::from_millis(10));
         }
     }

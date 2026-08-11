@@ -6,15 +6,13 @@ use std::{
 
 use openreel_agent::{ClaudeCodeDriver, McpServer};
 use openreel_core::{
-    AgentDriver, AgentEvent, AssetId, Command as CoreCommand, Core, Document, Event, MediaEngine,
-    Query, QueryResult, SessionConfig, SilenceStatus, TimeCode, map_source_range_to_project,
+    AgentDriver, AgentEvent, Analysis, AssetId, Command as CoreCommand, Core, Document, Event,
+    Playback, Query, QueryResult, SessionConfig, SilenceStatus, TimeCode,
+    map_source_range_to_project,
 };
-use openreel_media::{
-    FfmpegMediaEngine,
-    test_support::{
-        SpeechClip, joined_words, normalized_words, single_clip_document, test_engine,
-        wait_for_transcript,
-    },
+use openreel_media::test_support::{
+    SpeechClip, joined_words, normalized_words, single_clip_document, test_engine,
+    wait_for_transcript,
 };
 
 const TTS_SSML: &str = "<speak version='1.0' xml:lang='en-US'>Alpha.<break time='1400ms'/>Bravo.<break time='1400ms'/>Charlie.</speak>";
@@ -34,8 +32,8 @@ fn claude_removes_long_silences_with_one_atomic_plan() {
     media.request_transcription(asset.clone());
     media.request_silence_detection(asset.clone());
     media.request_scene_detection(asset.clone());
-    let transcript = wait_for_transcript(&media, asset.id, false);
-    let silences = wait_for_silences(&media, asset.id);
+    let transcript = wait_for_transcript(media.as_ref(), asset.id, false);
+    let silences = wait_for_silences(media.as_ref(), asset.id);
     let transcript_text = joined_words(&transcript);
     let long_silences = silences
         .spans
@@ -47,8 +45,8 @@ fn claude_removes_long_silences_with_one_atomic_plan() {
     let original = single_clip_document(asset);
     media.set_document(Arc::new(original.clone()));
     let core = Core::spawn(original.clone()).expect("core should start");
-    let agent_media: Arc<dyn MediaEngine> = media.clone();
-    let server = McpServer::start(core.clone(), agent_media).expect("MCP server should start");
+    let server = McpServer::start(core.clone(), media.clone(), media.clone())
+        .expect("MCP server should start");
     let confirmations = server.confirmations();
     let mut session = ClaudeCodeDriver
         .start_session(SessionConfig {
@@ -175,10 +173,7 @@ fn claude_removes_long_silences_with_one_atomic_plan() {
     server.shutdown();
 }
 
-fn wait_for_silences(
-    engine: &FfmpegMediaEngine,
-    asset: AssetId,
-) -> Arc<openreel_core::AssetSilences> {
+fn wait_for_silences(engine: &dyn Analysis, asset: AssetId) -> Arc<openreel_core::AssetSilences> {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         match engine.silence_status(asset) {

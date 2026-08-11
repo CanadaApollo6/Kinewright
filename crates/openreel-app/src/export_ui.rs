@@ -7,7 +7,7 @@ use std::{
 
 use eframe::egui;
 use openreel_core::{
-    ExportCancellation, ExportProgress, ExportSettings, MediaEngine, MediaError, Rational, TimeCode,
+    ExportCancellation, ExportProgress, ExportSettings, MediaError, Rational, TimeCode,
 };
 
 use crate::{
@@ -100,7 +100,7 @@ impl OpenReelApp {
         };
         let (progress_tx, progress_rx) = crossbeam_channel::unbounded();
         let (result_tx, result_rx) = mpsc::channel();
-        let media = Arc::clone(&self.media);
+        let media = Arc::clone(&self.exporter);
         let worker_output = output.clone();
         let spawn = thread::Builder::new()
             .name("openreel-export".to_owned())

@@ -5,7 +5,10 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender, bounded};
-use openreel_core::{AssetId, MediaAsset, MediaError, MediaKind, Rational, RgbaImage, TimeCode};
+use openreel_core::{
+    AssetId, MediaAsset, MediaError, MediaKind, Rational, RgbaImage, ThumbnailFrame, ThumbnailKey,
+    TimeCode, VisualAssetResult, VisualRequestKind, WaveformData, WaveformPeak,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -27,51 +30,6 @@ pub const MAX_THUMBNAIL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_WAVEFORM_FILES: usize = 128;
 const MAX_WAVEFORM_BYTES: u64 = 32 * 1024 * 1024;
 const THUMBNAIL_MAGIC: &[u8; 8] = b"ORTH0001";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WaveformPeak {
-    pub minimum: i16,
-    pub maximum: i16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WaveformData {
-    pub asset: AssetId,
-    pub content_sha256: String,
-    pub source_fps: Rational,
-    pub source_frames: TimeCode,
-    pub peaks: Vec<WaveformPeak>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ThumbnailKey {
-    pub asset: AssetId,
-    pub source_at: TimeCode,
-    pub max_width: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct ThumbnailFrame {
-    pub key: ThumbnailKey,
-    pub image: Arc<RgbaImage>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VisualRequestKind {
-    Waveform,
-    Thumbnail(ThumbnailKey),
-}
-
-#[derive(Debug, Clone)]
-pub enum VisualAssetResult {
-    Waveform(Arc<WaveformData>),
-    Thumbnail(ThumbnailFrame),
-    Failed {
-        asset: AssetId,
-        request: VisualRequestKind,
-        message: String,
-    },
-}
 
 pub(crate) struct VisualAssetService {
     jobs: Sender<Job>,

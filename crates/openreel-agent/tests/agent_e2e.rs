@@ -7,8 +7,7 @@ use std::{
 use openreel_agent::{ClaudeCodeDriver, McpServer};
 use openreel_core::{
     AgentDriver, AgentEvent, AssetId, Clip, ClipId, Command, Core, Document, Event, MediaAsset,
-    MediaEngine, MediaKind, Query, QueryResult, Rational, SessionConfig, TimeCode, Track, TrackId,
-    TrackKind,
+    MediaKind, Query, QueryResult, Rational, SessionConfig, TimeCode, Track, TrackId, TrackKind,
 };
 use openreel_media::FfmpegMediaEngine;
 
@@ -22,8 +21,7 @@ fn claude_splits_then_deletes_via_the_live_mcp_server() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let original = fixture_document();
     let core = Core::spawn(original.clone()).unwrap();
-    let agent_media: Arc<dyn MediaEngine> = media;
-    let server = McpServer::start(core.clone(), agent_media).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let confirmations = server.confirmations();
     let mut session = ClaudeCodeDriver
         .start_session(SessionConfig {
@@ -92,8 +90,7 @@ fn codex_splits_then_deletes_via_the_live_mcp_server() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let original = fixture_document();
     let core = Core::spawn(original.clone()).unwrap();
-    let agent_media: Arc<dyn MediaEngine> = media;
-    let server = McpServer::start(core.clone(), agent_media).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let confirmations = server.confirmations();
     let mut session = openreel_agent::CodexDriver
         .start_session(SessionConfig {

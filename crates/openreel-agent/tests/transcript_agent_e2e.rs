@@ -5,8 +5,8 @@ use std::{
 
 use openreel_agent::{ClaudeCodeDriver, McpServer};
 use openreel_core::{
-    AgentDriver, AgentEvent, Command as CoreCommand, Core, Document, Event, MediaEngine, Query,
-    QueryResult, SessionConfig,
+    AgentDriver, AgentEvent, Analysis, Command as CoreCommand, Core, Document, Event, Playback,
+    Query, QueryResult, SessionConfig,
 };
 use openreel_media::test_support::{
     SpeechClip, joined_words, normalized_words, single_clip_document, test_engine,
@@ -26,7 +26,7 @@ fn one_agent_message_removes_the_transcribed_filler_word() {
     let media = Arc::new(test_engine("OPENREEL_TRANSCRIPT_TEST_DATA_DIR"));
     let asset = media.probe(&clip.mp4).expect("generated clip should probe");
     media.request_transcription(asset.clone());
-    let transcript = wait_for_transcript(&media, asset.id, false);
+    let transcript = wait_for_transcript(media.as_ref(), asset.id, false);
     let whisper_output = joined_words(&transcript);
     let whisper_words = normalized_words(&whisper_output);
     assert!(
@@ -37,8 +37,8 @@ fn one_agent_message_removes_the_transcribed_filler_word() {
     let original = single_clip_document(asset);
     media.set_document(Arc::new(original.clone()));
     let core = Core::spawn(original).expect("core should start");
-    let agent_media: Arc<dyn MediaEngine> = media.clone();
-    let server = McpServer::start(core.clone(), agent_media).expect("MCP server should start");
+    let server = McpServer::start(core.clone(), media.clone(), media.clone())
+        .expect("MCP server should start");
     let confirmations = server.confirmations();
     let mut session = ClaudeCodeDriver
         .start_session(SessionConfig {

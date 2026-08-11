@@ -1,7 +1,7 @@
 use std::{sync::Arc, thread};
 
 use eframe::egui;
-use openreel_core::{AssetId, MediaEngine, MediaKind, Operation, TimeCode};
+use openreel_core::{AssetId, MediaKind, Operation, TimeCode};
 
 use crate::{
     app::OpenReelApp,
@@ -19,7 +19,7 @@ impl OpenReelApp {
             return;
         };
         self.status = format!("Probing {}…", path.display());
-        let media = Arc::clone(&self.media);
+        let media = Arc::clone(&self.analysis);
         let result_tx = self.probe_tx.clone();
         thread::Builder::new()
             .name("openreel-probe".to_owned())
@@ -95,7 +95,7 @@ impl OpenReelApp {
             return;
         }
         let assets = self.document.media_pool.clone();
-        let media = Arc::clone(&self.media);
+        let media = Arc::clone(&self.analysis);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {

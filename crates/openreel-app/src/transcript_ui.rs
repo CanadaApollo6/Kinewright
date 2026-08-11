@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use eframe::egui;
-use openreel_core::{MediaAsset, MediaEngine, TimelineTranscriptWord, TranscriptStatus};
+use openreel_core::{MediaAsset, TimelineTranscriptWord, TranscriptStatus};
 
 use crate::{app::OpenReelApp, theme::color};
 
@@ -49,10 +49,10 @@ impl OpenReelApp {
             asset.fps.numerator(),
             asset.fps.denominator()
         ));
-        let status = self.media.transcript_status(asset.id);
+        let status = self.analysis.transcript_status(asset.id);
         match status {
             TranscriptStatus::NotRequested => {
-                self.media.request_transcription(asset);
+                self.analysis.request_transcription(asset);
                 ui.label("Transcription queued…");
                 ui.ctx().request_repaint_after(Duration::from_millis(100));
             }
@@ -100,12 +100,12 @@ impl OpenReelApp {
                     format!("Transcription failed: {error}"),
                 );
                 if ui.button("Retry").clicked() {
-                    self.media.request_transcription(asset);
+                    self.analysis.request_transcription(asset);
                 }
             }
             TranscriptStatus::Ready(transcript) => {
                 let mapped = self
-                    .media
+                    .analysis
                     .timeline_transcript(&self.document, None)
                     .unwrap_or_default();
                 let selected_clip = self.selected_clip;
@@ -147,14 +147,14 @@ impl OpenReelApp {
 
     fn timeline_transcript_ui(&mut self, ui: &mut egui::Ui) {
         let words = self
-            .media
+            .analysis
             .timeline_transcript(&self.document, None)
             .unwrap_or_default();
         let statuses = self
             .document
             .media_pool
             .iter()
-            .map(|asset| (asset, self.media.transcript_status(asset.id)))
+            .map(|asset| (asset, self.analysis.transcript_status(asset.id)))
             .collect::<Vec<_>>();
         if words.is_empty() {
             if statuses.iter().any(|(_, status)| status.is_running()) {
@@ -171,7 +171,7 @@ impl OpenReelApp {
             } else {
                 for (asset, status) in statuses {
                     if status == TranscriptStatus::NotRequested {
-                        self.media.request_transcription(asset.clone());
+                        self.analysis.request_transcription(asset.clone());
                     }
                 }
                 ui.label("Transcript is not ready yet.");

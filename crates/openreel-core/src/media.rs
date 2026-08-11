@@ -25,6 +25,51 @@ pub struct RgbaImage {
     pub pixels: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WaveformPeak {
+    pub minimum: i16,
+    pub maximum: i16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WaveformData {
+    pub asset: AssetId,
+    pub content_sha256: String,
+    pub source_fps: Rational,
+    pub source_frames: TimeCode,
+    pub peaks: Vec<WaveformPeak>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ThumbnailKey {
+    pub asset: AssetId,
+    pub source_at: TimeCode,
+    pub max_width: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ThumbnailFrame {
+    pub key: ThumbnailKey,
+    pub image: Arc<RgbaImage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisualRequestKind {
+    Waveform,
+    Thumbnail(ThumbnailKey),
+}
+
+#[derive(Debug, Clone)]
+pub enum VisualAssetResult {
+    Waveform(Arc<WaveformData>),
+    Thumbnail(ThumbnailFrame),
+    Failed {
+        asset: AssetId,
+        request: VisualRequestKind,
+        message: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportSettings {
     pub fps: Rational,
@@ -249,13 +294,7 @@ pub enum MediaError {
     Backend(String),
 }
 
-pub trait MediaEngine: Send + Sync {
-    /// Inspect a media file and return its project metadata.
-    ///
-    /// # Errors
-    ///
-    /// Returns a media error when the file cannot be probed.
-    fn probe(&self, path: &Path) -> Result<MediaAsset, MediaError>;
+pub trait Playback: Send + Sync {
     fn set_document(&self, doc: Arc<Document>);
     fn request_frame(&self, t: TimeCode);
     fn frames(&self) -> Receiver<(TimeCode, FrameTexture)>;
@@ -267,6 +306,21 @@ pub trait MediaEngine: Send + Sync {
     fn seek(&self, to: TimeCode);
     /// Read the atomically published audio-master position.
     fn position(&self) -> TimeCode;
+}
+
+pub trait Analysis: Send + Sync {
+    /// Inspect a media file and return its project metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the file cannot be probed.
+    fn probe(&self, path: &Path) -> Result<MediaAsset, MediaError>;
+    /// Decode a thumbnail at an exact project frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when decoding or compositing fails.
+    fn thumbnail_at(&self, t: TimeCode, max_w: u32) -> Result<RgbaImage, MediaError>;
     /// Queue derived speech recognition without blocking the caller. Repeated
     /// requests for the same asset are coalesced by the implementation.
     fn request_transcription(&self, asset: MediaAsset);
@@ -311,12 +365,15 @@ pub trait MediaEngine: Send + Sync {
         range: Option<std::ops::Range<TimeCode>>,
         minimum_confidence_basis_points: u16,
     ) -> Result<Vec<TimelineSceneChange>, MediaError>;
-    /// Decode a thumbnail at an exact project frame.
-    ///
-    /// # Errors
-    ///
-    /// Returns a media error when decoding or compositing fails.
-    fn thumbnail_at(&self, t: TimeCode, max_w: u32) -> Result<RgbaImage, MediaError>;
+    /// Queue a content-addressed waveform extraction without blocking the caller.
+    fn request_waveform(&self, asset: MediaAsset) -> bool;
+    /// Queue one source-frame thumbnail without blocking the caller.
+    fn request_thumbnail(&self, asset: MediaAsset, source_at: TimeCode, max_width: u32) -> bool;
+    /// Bounded stream of ready waveform and thumbnail data.
+    fn visual_asset_results(&self) -> Receiver<VisualAssetResult>;
+}
+
+pub trait Export: Send + Sync {
     /// Export the current document to a media file.
     ///
     /// # Errors

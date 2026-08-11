@@ -24,10 +24,7 @@ mod media_matrix_tests;
 use ffmpeg_next as ffmpeg;
 use openreel_core::MediaError;
 
-pub use analysis::{
-    MAX_THUMBNAIL_BYTES, MAX_THUMBNAIL_FILES, MAX_WAVEFORM_PEAKS, ThumbnailFrame, ThumbnailKey,
-    VisualAssetResult, VisualRequestKind, WaveformData, WaveformPeak,
-};
+pub use analysis::{MAX_THUMBNAIL_BYTES, MAX_THUMBNAIL_FILES, MAX_WAVEFORM_PEAKS};
 pub use cache::select_frame_for_position;
 pub use clock::{frame_to_samples, samples_to_frame};
 pub use compositor::{Compositor, CompositorLayer, GpuContext};
@@ -38,6 +35,9 @@ pub use derived::{
     SilenceDetectionConfig,
 };
 pub use engine::FfmpegMediaEngine;
+pub use openreel_core::{
+    ThumbnailFrame, ThumbnailKey, VisualAssetResult, VisualRequestKind, WaveformData, WaveformPeak,
+};
 pub use timeline::{TimelineSource, TimelineVideoLayer, timeline_source_at, video_layers_at};
 pub use transcript::{
     WHISPER_MODEL_LICENSE, WHISPER_MODEL_NAME, WHISPER_MODEL_SHA256, WHISPER_MODEL_URL,

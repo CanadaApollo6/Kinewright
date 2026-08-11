@@ -4,11 +4,11 @@ use std::{
 };
 
 use eframe::egui;
-use openreel_core::{AssetId, MediaAsset, TimeCode};
-use openreel_media::{
-    FfmpegMediaEngine, MAX_THUMBNAIL_BYTES, MAX_THUMBNAIL_FILES, ThumbnailKey, VisualAssetResult,
-    VisualRequestKind, WaveformData,
+use openreel_core::{
+    Analysis, AssetId, MediaAsset, ThumbnailKey, TimeCode, VisualAssetResult, VisualRequestKind,
+    WaveformData,
 };
+use openreel_media::{MAX_THUMBNAIL_BYTES, MAX_THUMBNAIL_FILES};
 
 pub(crate) struct VisualCache {
     results: crossbeam_channel::Receiver<VisualAssetResult>,
@@ -56,7 +56,7 @@ impl VisualCache {
 
     pub(crate) fn waveform(
         &mut self,
-        media: &FfmpegMediaEngine,
+        media: &dyn Analysis,
         asset: &MediaAsset,
     ) -> Option<Arc<WaveformData>> {
         if let Some(waveform) = self.waveforms.get(&asset.id) {
@@ -73,7 +73,7 @@ impl VisualCache {
 
     pub(crate) fn thumbnail(
         &mut self,
-        media: &FfmpegMediaEngine,
+        media: &dyn Analysis,
         asset: &MediaAsset,
         source_at: TimeCode,
         max_width: u32,

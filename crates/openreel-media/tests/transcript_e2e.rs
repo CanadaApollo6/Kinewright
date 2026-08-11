@@ -1,4 +1,4 @@
-use openreel_core::MediaEngine;
+use openreel_core::Analysis;
 use openreel_media::FfmpegMediaEngine;
 
 #[path = "../src/test_support.rs"]

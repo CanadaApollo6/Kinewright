@@ -3,8 +3,7 @@ use std::collections::HashSet;
 
 use eframe::egui;
 use openreel_core::{
-    FrameRounding, MediaEngine, Operation, TimeCode, map_frames_with_rounding,
-    map_source_range_to_project,
+    FrameRounding, Operation, TimeCode, map_frames_with_rounding, map_source_range_to_project,
 };
 
 use crate::app::OpenReelApp;
@@ -226,7 +225,7 @@ impl OpenReelApp {
     }
 
     fn pause_playback(&mut self) {
-        self.media.pause();
+        self.playback.pause();
     }
 
     fn play_forward(&mut self) {
@@ -240,7 +239,7 @@ impl OpenReelApp {
     }
 
     fn pause_and_seek(&mut self, position: TimeCode) {
-        self.media.pause();
+        self.playback.pause();
         self.seek_to(position);
     }
 
