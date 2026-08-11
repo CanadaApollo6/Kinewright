@@ -384,6 +384,7 @@ mod tests {
                 track: Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    sync_lock: true,
                     clips: Vec::new(),
                 },
             },
@@ -472,6 +473,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips,
             }],
             media_pool: vec![MediaAsset {
@@ -509,6 +511,7 @@ mod tests {
                             track: Track {
                                 id: TrackId(next_track),
                                 kind: TrackKind::Video,
+                                sync_lock: true,
                                 clips: Vec::new(),
                             },
                         };
@@ -583,6 +586,7 @@ mod tests {
                             track: Track {
                                 id: TrackId(next_track_id),
                                 kind: TrackKind::Video,
+                                sync_lock: true,
                                 clips: Vec::new(),
                             },
                         };

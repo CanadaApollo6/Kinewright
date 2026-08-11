@@ -833,7 +833,7 @@ fn inspector_tools() -> Vec<Tool> {
     vec![
         Tool::new(
             "get_timeline_state",
-            "Return the compact live project state: tracks, clips, ids, timeline/source ranges in frames and seconds, and assets.",
+            "Return the compact live project state: tracks and sync-lock flags, clips, ids, timeline/source ranges in frames and seconds, and assets.",
             schema_object::<EmptyArgs>(),
         )
         .with_annotations(read_only()),
@@ -1192,6 +1192,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips: vec![Clip {
                     id: ClipId(1),
                     asset: asset.id,

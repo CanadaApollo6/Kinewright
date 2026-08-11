@@ -852,6 +852,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips: vec![Clip {
                     id: ClipId(1),
                     asset: AssetId(1),
@@ -909,11 +910,13 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Audio,
+                    sync_lock: true,
                     clips: vec![audio_clip(1, 1, 0..6, 0), audio_clip(2, 1, 16..20, 16)],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    sync_lock: true,
                     clips: vec![audio_clip(3, 2, 4..14, 4)],
                 },
             ],

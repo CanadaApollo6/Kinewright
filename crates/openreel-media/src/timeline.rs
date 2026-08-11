@@ -386,6 +386,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips: vec![
                     Clip {
                         id: ClipId(1),
@@ -483,6 +484,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(8),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: vec![Clip {
                 id: ClipId(3),
                 asset: AssetId(2),
@@ -511,6 +513,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(8),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: vec![Clip {
                 id: ClipId(3),
                 asset: AssetId::default(),
@@ -577,6 +580,7 @@ mod tests {
             Track {
                 id: TrackId(8),
                 kind: TrackKind::Audio,
+                sync_lock: true,
                 clips: vec![Clip {
                     id: ClipId(3),
                     asset: AssetId(3),
@@ -591,6 +595,7 @@ mod tests {
             Track {
                 id: TrackId(9),
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips: vec![Clip {
                     id: ClipId(4),
                     asset: AssetId(4),

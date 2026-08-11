@@ -18,6 +18,9 @@ lanes unless sync intent is explicit. Per-track ripple is predictable. A
 future sync-lock model can opt tracks into cross-track ripple without changing
 the M13 primitives.
 
+M15 implements that filed follow-up. Its exact cross-track boundary and marker
+decisions are recorded in `M15-CROSS-TRACK-RIPPLE-SYNC-LOCK.md`.
+
 Both operations use normal core validation and snapshot undo. Ripple delete is
 classified as destructive by the MCP schema and confirmation broker;
 insert-gap is reversible and non-destructive.

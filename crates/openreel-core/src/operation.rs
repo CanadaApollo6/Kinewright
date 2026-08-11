@@ -22,6 +22,11 @@ pub enum Operation {
     RemoveTrack {
         track: TrackId,
     },
+    /// Enable or disable cross-track ripple participation for one track.
+    SetTrackSyncLock {
+        track: TrackId,
+        locked: bool,
+    },
     AddClip {
         track: TrackId,
         asset: AssetId,
@@ -51,16 +56,22 @@ pub enum Operation {
     DeleteClip {
         clip: ClipId,
     },
-    /// Delete one clip and close its duration on that clip's track only.
+    /// Delete one clip and close its duration on that clip's track and every
+    /// other sync-locked track.
     ///
-    /// M13 deliberately uses predictable per-track ripple. Other tracks are
-    /// unchanged; cross-track sync-lock ripple is future work.
+    /// The ripple point is the deleted clip's pre-edit end. On participating
+    /// tracks, only clips whose start is at or after that point shift left.
+    /// A clip that starts before the point is not shifted or trimmed, even
+    /// when it straddles the point. Normal validation atomically rejects any
+    /// overlap caused by shifting a later clip beside that unchanged clip.
+    /// Project markers are deliberately not shifted in M15.
     RippleDeleteClip {
         clip: ClipId,
     },
-    /// Insert empty time on one track by shifting clips that start at or after
-    /// `at`. Other tracks are deliberately unchanged in M13; cross-track
-    /// sync-lock ripple is future work.
+    /// Insert empty time by shifting clips that start at or after `at` on the
+    /// target track and every other sync-locked track. Clips that start before
+    /// `at` remain unchanged. Project markers are deliberately not shifted in
+    /// M15.
     RippleInsertGap {
         track: TrackId,
         at: TimeCode,
@@ -354,6 +365,7 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
         Operation::AddAsset { asset } => add_asset(doc, asset.clone()),
         Operation::AddTrack { track } => add_track(doc, track.clone()),
         Operation::RemoveTrack { track } => remove_track(doc, *track),
+        Operation::SetTrackSyncLock { track, locked } => set_track_sync_lock(doc, *track, *locked),
         Operation::AddClip {
             track,
             asset,
@@ -422,6 +434,16 @@ fn remove_track(doc: &mut Document, track_id: TrackId) -> Result<(), OpError> {
         .position(|track| track.id == track_id)
         .ok_or(OpError::MissingTrack(track_id))?;
     doc.tracks.remove(index);
+    Ok(())
+}
+
+fn set_track_sync_lock(doc: &mut Document, track_id: TrackId, locked: bool) -> Result<(), OpError> {
+    let track = doc
+        .tracks
+        .iter_mut()
+        .find(|track| track.id == track_id)
+        .ok_or(OpError::MissingTrack(track_id))?;
+    track.sync_lock = locked;
     Ok(())
 }
 
@@ -666,12 +688,26 @@ fn ripple_delete_clip(doc: &mut Document, clip_id: ClipId) -> Result<(), OpError
     let (track_index, clip_index) = find_clip(doc, clip_id)?;
     let removed = doc.tracks[track_index].clips[clip_index].clone();
     let duration = doc.clip_duration(&removed)?;
+    let ripple_point = removed
+        .timeline_start
+        .checked_add(duration)
+        .ok_or(OpError::TimeOverflow)?;
+    let source_track = doc.tracks[track_index].id;
     doc.tracks[track_index].clips.remove(clip_index);
-    for clip in &mut doc.tracks[track_index].clips[clip_index..] {
-        clip.timeline_start = clip
-            .timeline_start
-            .checked_sub(duration)
-            .ok_or(OpError::TimeOverflow)?;
+    for track in &mut doc.tracks {
+        if track.id != source_track && !track.sync_lock {
+            continue;
+        }
+        for clip in track
+            .clips
+            .iter_mut()
+            .filter(|clip| clip.timeline_start >= ripple_point)
+        {
+            clip.timeline_start = clip
+                .timeline_start
+                .checked_sub(duration)
+                .ok_or(OpError::TimeOverflow)?;
+        }
     }
     Ok(())
 }
@@ -688,20 +724,23 @@ fn ripple_insert_gap(
     if duration <= TimeCode::ZERO {
         return Err(OpError::InvalidRippleDuration(duration));
     }
-    let track = doc
-        .tracks
-        .iter_mut()
-        .find(|track| track.id == track_id)
-        .ok_or(OpError::MissingTrack(track_id))?;
-    for clip in track
-        .clips
-        .iter_mut()
-        .filter(|clip| clip.timeline_start >= at)
-    {
-        clip.timeline_start = clip
-            .timeline_start
-            .checked_add(duration)
-            .ok_or(OpError::TimeOverflow)?;
+    if !doc.tracks.iter().any(|track| track.id == track_id) {
+        return Err(OpError::MissingTrack(track_id));
+    }
+    for track in &mut doc.tracks {
+        if track.id != track_id && !track.sync_lock {
+            continue;
+        }
+        for clip in track
+            .clips
+            .iter_mut()
+            .filter(|clip| clip.timeline_start >= at)
+        {
+            clip.timeline_start = clip
+                .timeline_start
+                .checked_add(duration)
+                .ok_or(OpError::TimeOverflow)?;
+        }
     }
     Ok(())
 }

@@ -858,6 +858,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips: vec![Clip {
                     id: ClipId(9),
                     asset: asset.id,

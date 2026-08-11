@@ -210,11 +210,11 @@ through widget state; selected/playing uses `accent`.
 | `icon-md` | 16 | Standard toolbar and panel action |
 | `icon-lg` | 18 | Primary transport action |
 
-The initial set covers play, pause, step backward, step forward, split, delete,
-undo, redo, import, add-to-timeline, send, stop, export, folder, filmstrip,
-waveform, and panel/chat identity. Icons are original OpenReel assets and ship
-under the repository's GPL-3.0-only license; no external icon library is
-bundled.
+The set covers play, pause, step backward, step forward, split, delete, undo,
+redo, import, add-to-timeline, send, stop, export, folder, filmstrip, waveform,
+sync lock/unlock, and panel/chat identity. Icons are original OpenReel assets
+and ship under the repository's GPL-3.0-only license; no external icon library
+is bundled.
 
 ## Component rules
 
@@ -252,6 +252,13 @@ Project markers are compact ruler flags using their stored marker color token.
 Hover reveals the marker label; selection and active drag use `accent`. The
 timeline toolbar's ripple-mode control uses the standard selected button fill
 and border plus a compact `RIPPLE` accent state label while enabled.
+
+Each track header has a compact sync-lock toggle. The default locked state uses
+the closed-lock icon in `text-muted` so it remains subordinate to edit content.
+The exceptional free-running state uses the open-lock icon and a `FREE`
+micro-label in `status-warning`. Its tooltip describes whether ripple edits on
+other tracks will shift the track. The control does not reuse `accent`, which
+remains reserved for selection and direct manipulation.
 
 Title clips use an `accent` 16% fill, an `accent` 72% border, a compact Inter
 `T` glyph, and the first line of title text. Selection and drag reuse the

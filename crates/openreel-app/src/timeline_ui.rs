@@ -85,6 +85,7 @@ impl OpenReelApp {
                 track: openreel_core::Track {
                     id: next_track,
                     kind: TrackKind::Video,
+                    sync_lock: true,
                     clips: Vec::new(),
                 },
             },
@@ -202,7 +203,9 @@ impl OpenReelApp {
                             .selected(self.ripple_mode)
                             .min_size(egui::vec2(54.0, 22.0)),
                     )
-                    .on_hover_text("Ripple mode: deletes close space per track");
+                    .on_hover_text(
+                        "Ripple mode: deletes close space on the edited and sync-locked tracks",
+                    );
                 if ripple.clicked() {
                     self.ripple_mode = !self.ripple_mode;
                 }
@@ -312,7 +315,9 @@ impl OpenReelApp {
         let snapping_disabled = ui.input(|input| input.modifiers.alt);
 
         ui.horizontal_top(|ui| {
-            paint_track_labels(ui, &document, total_height, track_height);
+            if let Some(operation) = paint_track_labels(ui, &document, total_height, track_height) {
+                pending_operations = Some(vec![operation]);
+            }
             let output = egui::ScrollArea::horizontal()
                 .id_salt("timeline-scroll")
                 .auto_shrink([false, false])
@@ -784,7 +789,8 @@ fn paint_track_labels(
     document: &openreel_core::Document,
     total_height: f32,
     track_height: f32,
-) {
+) -> Option<Operation> {
+    let mut pending_operation = None;
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(TRACK_LABEL_WIDTH, total_height),
         egui::Sense::hover(),
@@ -830,11 +836,82 @@ fn paint_track_labels(
         icon.image(size::ICON_SM)
             .tint(color::TEXT_MUTED)
             .paint_at(ui, icon_rect);
+
+        if let Some(operation) = paint_sync_lock_toggle(ui, &painter, lane, track) {
+            pending_operation = Some(operation);
+        }
     }
     painter.line_segment(
         [rect.right_top(), rect.right_bottom()],
         egui::Stroke::new(1.0, color::BORDER_SUBTLE),
     );
+    pending_operation
+}
+
+fn paint_sync_lock_toggle(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    lane: egui::Rect,
+    track: &openreel_core::Track,
+) -> Option<Operation> {
+    let toggle_rect = egui::Rect::from_center_size(
+        egui::pos2(
+            lane.right() - space::TWO - size::ICON_BUTTON / 2.0,
+            lane.center().y,
+        ),
+        egui::vec2(size::ICON_BUTTON, size::TIMELINE_TOOLBAR_HEIGHT),
+    );
+    let tooltip = if track.sync_lock {
+        "Sync lock on: ripple edits on other tracks shift this track to preserve sync"
+    } else {
+        "Sync lock off: this track runs free and stays put during ripple edits on other tracks"
+    };
+    let response = ui
+        .interact(
+            toggle_rect,
+            ui.make_persistent_id(("track-sync-lock", track.id.0)),
+            egui::Sense::click(),
+        )
+        .on_hover_text(tooltip);
+    let lock_icon = if track.sync_lock {
+        Icon::Lock
+    } else {
+        Icon::Unlock
+    };
+    let lock_color = if track.sync_lock {
+        color::TEXT_MUTED
+    } else {
+        color::STATUS_WARNING
+    };
+    if response.hovered() || !track.sync_lock {
+        painter.rect_filled(toggle_rect, radius::SM, color::SURFACE_RAISED);
+    }
+    let lock_offset = if track.sync_lock {
+        0.0
+    } else {
+        space::ONE_HALF
+    };
+    let lock_rect = egui::Rect::from_center_size(
+        egui::pos2(toggle_rect.center().x, toggle_rect.center().y + lock_offset),
+        egui::vec2(size::ICON_SM, size::ICON_SM),
+    );
+    lock_icon
+        .image(size::ICON_SM)
+        .tint(lock_color)
+        .paint_at(ui, lock_rect);
+    if !track.sync_lock {
+        painter.text(
+            egui::pos2(toggle_rect.center().x, toggle_rect.top() + space::ONE_HALF),
+            egui::Align2::CENTER_CENTER,
+            "FREE",
+            egui::FontId::new(type_size::MICRO, egui::FontFamily::Proportional),
+            color::STATUS_WARNING,
+        );
+    }
+    response.clicked().then_some(Operation::SetTrackSyncLock {
+        track: track.id,
+        locked: !track.sync_lock,
+    })
 }
 
 // Ruler bounds intentionally convert between exact frames and f32 viewport pixels.
@@ -1486,21 +1563,28 @@ fn source_boundary_project_delta(
 
 fn linked_delete_operations(document: &Document, primary: ClipId, ripple: bool) -> Vec<Operation> {
     let mut members = linked_members(document, primary);
+    if members.is_empty() {
+        return Vec::new();
+    }
     members.sort_by(|(left_track, left), (right_track, right)| {
         left_track
             .cmp(right_track)
             .then_with(|| right.timeline_start.cmp(&left.timeline_start))
     });
-    members
+    if !ripple {
+        return members
+            .into_iter()
+            .map(|(_, clip)| Operation::DeleteClip { clip: clip.id })
+            .collect();
+    }
+
+    let mut operations = members
         .into_iter()
-        .map(|(_, clip)| {
-            if ripple {
-                Operation::RippleDeleteClip { clip: clip.id }
-            } else {
-                Operation::DeleteClip { clip: clip.id }
-            }
-        })
-        .collect()
+        .filter(|(_, clip)| clip.id != primary)
+        .map(|(_, clip)| Operation::DeleteClip { clip: clip.id })
+        .collect::<Vec<_>>();
+    operations.push(Operation::RippleDeleteClip { clip: primary });
+    operations
 }
 
 fn next_marker_id(document: &Document) -> Option<MarkerId> {
@@ -1699,11 +1783,13 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    sync_lock: true,
                     clips: vec![clip(1, 0)],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    sync_lock: true,
                     clips: vec![clip(2, 0)],
                 },
             ],
@@ -1809,8 +1895,8 @@ mod tests {
         assert_eq!(
             linked_delete_operations(&document, ClipId(1), true),
             vec![
+                Operation::DeleteClip { clip: ClipId(2) },
                 Operation::RippleDeleteClip { clip: ClipId(1) },
-                Operation::RippleDeleteClip { clip: ClipId(2) },
             ]
         );
     }

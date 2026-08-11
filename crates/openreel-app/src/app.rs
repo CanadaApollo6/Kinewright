@@ -198,6 +198,7 @@ impl OpenReelApp {
                 track: Track {
                     id: DEFAULT_TRACK_ID,
                     kind: TrackKind::Video,
+                    sync_lock: true,
                     clips: Vec::new(),
                 },
             }))
@@ -275,6 +276,7 @@ impl OpenReelApp {
             track: Track {
                 id: DEFAULT_TRACK_ID,
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips: Vec::new(),
             },
         });
@@ -810,6 +812,10 @@ fn operation_status(operation: &Operation) -> String {
         Operation::AddAsset { asset } => format!("Imported {}", asset.name),
         Operation::AddTrack { track } => format!("Added {:?} track {}", track.kind, track.id),
         Operation::RemoveTrack { track } => format!("Removed track {track}"),
+        Operation::SetTrackSyncLock { track, locked } => format!(
+            "Turned sync lock {} for track {track}",
+            if *locked { "on" } else { "off" }
+        ),
         Operation::AddClip { asset, .. } => format!("Added asset {asset} to timeline"),
         Operation::AddTitle { title, .. } => format!("Added title {:?}", title.text),
         Operation::SplitClip { clip, at } => format!("Split clip {clip} at frame {at}"),

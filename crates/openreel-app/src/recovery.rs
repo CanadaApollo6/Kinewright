@@ -757,6 +757,7 @@ mod tests {
                 track: Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    sync_lock: true,
                     clips: Vec::new(),
                 },
             }),
@@ -848,6 +849,7 @@ mod tests {
                 track: Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    sync_lock: true,
                     clips: Vec::new(),
                 },
             },
@@ -873,6 +875,7 @@ mod tests {
                 track: Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    sync_lock: true,
                     clips: Vec::new(),
                 },
             }),
@@ -935,6 +938,7 @@ mod tests {
                 track: Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    sync_lock: true,
                     clips: Vec::new(),
                 },
             }),
@@ -977,6 +981,90 @@ mod tests {
         };
         assert_eq!(report.recovered_commands, commands.len());
         assert_eq!(report.document, expected);
+        assert!(report.damage.is_none());
+    }
+
+    #[test]
+    fn m15_sync_lock_and_cross_track_ripple_replay_to_the_exact_document() {
+        let initial = Document::default();
+        let commands = vec![
+            JournalCommand::Do(Operation::AddTrack {
+                track: Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: Vec::new(),
+                },
+            }),
+            JournalCommand::Do(Operation::AddTrack {
+                track: Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: Vec::new(),
+                },
+            }),
+            JournalCommand::Do(Operation::AddAsset { asset: asset(1) }),
+            JournalCommand::Do(Operation::AddClip {
+                track: TrackId(1),
+                asset: AssetId(1),
+                at: TimeCode(0),
+                source: TimeCode(0)..TimeCode(30),
+            }),
+            JournalCommand::Do(Operation::AddClip {
+                track: TrackId(1),
+                asset: AssetId(1),
+                at: TimeCode(60),
+                source: TimeCode(30)..TimeCode(60),
+            }),
+            JournalCommand::Do(Operation::AddClip {
+                track: TrackId(2),
+                asset: AssetId(1),
+                at: TimeCode(60),
+                source: TimeCode(60)..TimeCode(90),
+            }),
+            JournalCommand::Do(Operation::AddMarker {
+                marker: Marker {
+                    id: MarkerId(1),
+                    position: TimeCode(60),
+                    label: "Fixed marker".to_owned(),
+                    color_token: 0,
+                },
+            }),
+            JournalCommand::Do(Operation::SetTrackSyncLock {
+                track: TrackId(2),
+                locked: false,
+            }),
+            JournalCommand::Do(Operation::RippleInsertGap {
+                track: TrackId(1),
+                at: TimeCode(60),
+                duration: TimeCode(10),
+            }),
+            JournalCommand::Do(Operation::SetTrackSyncLock {
+                track: TrackId(2),
+                locked: true,
+            }),
+            JournalCommand::Do(Operation::RippleDeleteClip { clip: ClipId(1) }),
+        ];
+        let expected = execute(&initial, &commands);
+        let Inspection::Recoverable(report) = inspect_bytes(&encoded_journal(&initial, &commands))
+        else {
+            panic!("M15 journal must be recoverable");
+        };
+        assert_eq!(report.recovered_commands, commands.len());
+        assert_eq!(report.document, expected);
+        assert_eq!(
+            report.document.clip(ClipId(2)).unwrap().timeline_start,
+            TimeCode(40)
+        );
+        assert_eq!(
+            report.document.clip(ClipId(3)).unwrap().timeline_start,
+            TimeCode(30)
+        );
+        assert_eq!(
+            report.document.marker(MarkerId(1)).unwrap().position,
+            TimeCode(60)
+        );
         assert!(report.damage.is_none());
     }
 
@@ -1130,6 +1218,7 @@ mod tests {
                             track: Track {
                                 id: TrackId(id),
                                 kind: TrackKind::Video,
+                                sync_lock: true,
                                 clips: Vec::new(),
                             },
                         })

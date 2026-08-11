@@ -29,6 +29,7 @@ fn empty_timeline(fps: Rational) -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: Vec::new(),
         }],
         media_pool: Vec::new(),
@@ -99,10 +100,15 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             track: Track {
                 id: TrackId(2),
                 kind: TrackKind::Audio,
+                sync_lock: true,
                 clips: Vec::new(),
             },
         },
         Operation::RemoveTrack { track: TrackId(2) },
+        Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: false,
+        },
         Operation::AddClip {
             track: TrackId(1),
             asset: AssetId(1),
@@ -202,11 +208,12 @@ fn document_and_every_operation_variant_round_trip_through_json() {
 }
 
 #[test]
-fn pre_m14_project_json_defaults_title_content_without_changing_legacy_shape() {
+fn pre_m15_project_json_defaults_additive_fields_without_changing_legacy_shape() {
     let document: Document =
         serde_json::from_str(include_str!("fixtures/pre_m13_project.json")).unwrap();
     document.validate().unwrap();
     assert!(document.markers.is_empty());
+    assert!(document.tracks[0].sync_lock);
     assert_eq!(document.clip(ClipId(1)).unwrap().link, None);
     assert_eq!(
         document.clip(ClipId(1)).unwrap().content,
@@ -215,8 +222,23 @@ fn pre_m14_project_json_defaults_title_content_without_changing_legacy_shape() {
 
     let encoded = serde_json::to_string(&document).unwrap();
     assert!(!encoded.contains("\"markers\""));
+    assert!(!encoded.contains("\"sync_lock\""));
     assert!(!encoded.contains("\"link\""));
     assert!(!encoded.contains("\"content\""));
+
+    let mut unlocked = document;
+    Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    }
+    .apply(&mut unlocked)
+    .unwrap();
+    let unlocked_json = serde_json::to_string(&unlocked).unwrap();
+    assert!(unlocked_json.contains("\"sync_lock\":false"));
+    assert_eq!(
+        serde_json::from_str::<Document>(&unlocked_json).unwrap(),
+        unlocked
+    );
 }
 
 #[test]
@@ -228,6 +250,7 @@ fn title_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
         track: Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: Vec::new(),
         },
     }
@@ -372,12 +395,14 @@ fn title_and_marker_parameter_validation_is_atomic() {
 }
 
 #[test]
-fn ripple_operations_are_per_track_validated_and_atomic() {
+#[allow(clippy::too_many_lines)]
+fn ripple_operations_follow_sync_locks_preserve_boundaries_and_leave_markers_fixed() {
     let mut document = document_with_three_clips();
     Operation::AddTrack {
         track: Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: Vec::new(),
         },
     }
@@ -386,8 +411,58 @@ fn ripple_operations_are_per_track_validated_and_atomic() {
     Operation::AddClip {
         track: TrackId(2),
         asset: AssetId(1),
-        at: TimeCode(50),
-        source: TimeCode(50)..TimeCode(60),
+        at: TimeCode(25),
+        source: TimeCode(70)..TimeCode(80),
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::AddClip {
+        track: TrackId(2),
+        asset: AssetId(1),
+        at: TimeCode(35),
+        source: TimeCode(80)..TimeCode(90),
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::AddClip {
+        track: TrackId(2),
+        asset: AssetId(1),
+        at: TimeCode(70),
+        source: TimeCode(90)..TimeCode(100),
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::AddTrack {
+        track: Track {
+            id: TrackId(3),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: Vec::new(),
+        },
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::SetTrackSyncLock {
+        track: TrackId(3),
+        locked: false,
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::AddClip {
+        track: TrackId(3),
+        asset: AssetId(1),
+        at: TimeCode(70),
+        source: TimeCode(100)..TimeCode(110),
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::AddMarker {
+        marker: Marker {
+            id: MarkerId(1),
+            position: TimeCode(70),
+            label: "Do not ripple".to_owned(),
+            color_token: 0,
+        },
     }
     .apply(&mut document)
     .unwrap();
@@ -397,8 +472,30 @@ fn ripple_operations_are_per_track_validated_and_atomic() {
         .unwrap();
     assert_eq!(document.tracks[0].clips[1].id, ClipId(3));
     assert_eq!(document.tracks[0].clips[1].timeline_start, TimeCode(30));
-    assert_eq!(document.tracks[1].clips[0].timeline_start, TimeCode(50));
+    assert_eq!(
+        document.clip(ClipId(4)).unwrap().timeline_start,
+        TimeCode(25)
+    );
+    assert_eq!(
+        document.clip(ClipId(5)).unwrap().timeline_start,
+        TimeCode(35)
+    );
+    assert_eq!(
+        document.clip(ClipId(6)).unwrap().timeline_start,
+        TimeCode(50)
+    );
+    assert_eq!(
+        document.clip(ClipId(7)).unwrap().timeline_start,
+        TimeCode(70)
+    );
+    assert_eq!(document.marker(MarkerId(1)).unwrap().position, TimeCode(70));
 
+    Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    }
+    .apply(&mut document)
+    .unwrap();
     Operation::RippleInsertGap {
         track: TrackId(1),
         at: TimeCode(30),
@@ -407,7 +504,23 @@ fn ripple_operations_are_per_track_validated_and_atomic() {
     .apply(&mut document)
     .unwrap();
     assert_eq!(document.tracks[0].clips[1].timeline_start, TimeCode(37));
-    assert_eq!(document.tracks[1].clips[0].timeline_start, TimeCode(50));
+    assert_eq!(
+        document.clip(ClipId(4)).unwrap().timeline_start,
+        TimeCode(25)
+    );
+    assert_eq!(
+        document.clip(ClipId(5)).unwrap().timeline_start,
+        TimeCode(42)
+    );
+    assert_eq!(
+        document.clip(ClipId(6)).unwrap().timeline_start,
+        TimeCode(57)
+    );
+    assert_eq!(
+        document.clip(ClipId(7)).unwrap().timeline_start,
+        TimeCode(70)
+    );
+    assert_eq!(document.marker(MarkerId(1)).unwrap().position, TimeCode(70));
 
     for invalid in [
         Operation::RippleDeleteClip { clip: ClipId(99) },
@@ -426,11 +539,79 @@ fn ripple_operations_are_per_track_validated_and_atomic() {
             at: TimeCode(-1),
             duration: TimeCode(1),
         },
+        Operation::SetTrackSyncLock {
+            track: TrackId(99),
+            locked: false,
+        },
     ] {
         let before = document.clone();
         assert!(invalid.apply(&mut document).is_err());
         assert_eq!(document, before);
     }
+}
+
+#[test]
+fn ripple_delete_rejects_straddling_boundary_overlap_atomically() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    Operation::AddAsset {
+        asset: asset(1, fps, 300),
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::AddClip {
+        track: TrackId(1),
+        asset: AssetId(1),
+        at: TimeCode(10),
+        source: TimeCode(0)..TimeCode(10),
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::AddClip {
+        track: TrackId(1),
+        asset: AssetId(1),
+        at: TimeCode(30),
+        source: TimeCode(10)..TimeCode(20),
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::AddTrack {
+        track: Track {
+            id: TrackId(2),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: Vec::new(),
+        },
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::AddClip {
+        track: TrackId(2),
+        asset: AssetId(1),
+        at: TimeCode(15),
+        source: TimeCode(20)..TimeCode(30),
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::AddClip {
+        track: TrackId(2),
+        asset: AssetId(1),
+        at: TimeCode(30),
+        source: TimeCode(30)..TimeCode(40),
+    }
+    .apply(&mut document)
+    .unwrap();
+
+    let before = document.clone();
+    assert_eq!(
+        Operation::RippleDeleteClip { clip: ClipId(1) }.apply(&mut document),
+        Err(OpError::ClipOverlap {
+            track: TrackId(2),
+            clip: ClipId(3),
+            with: ClipId(4),
+        })
+    );
+    assert_eq!(document, before);
 }
 
 proptest! {
@@ -440,12 +621,36 @@ proptest! {
         removed_duration in 1_i64..80,
         first_gap in 0_i64..20,
         second_gap in 0_i64..20,
+        source_locked in any::<bool>(),
+        secondary_locked in any::<bool>(),
     ) {
         let fps = Rational::new(30, 1).unwrap();
         let mut document = empty_timeline(fps);
         Operation::AddAsset { asset: asset(1, fps, 300) }
             .apply(&mut document)
             .unwrap();
+        Operation::AddTrack {
+            track: Track {
+                id: TrackId(2),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: Vec::new(),
+            },
+        }
+        .apply(&mut document)
+        .unwrap();
+        Operation::SetTrackSyncLock {
+            track: TrackId(2),
+            locked: secondary_locked,
+        }
+        .apply(&mut document)
+        .unwrap();
+        Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: source_locked,
+        }
+        .apply(&mut document)
+        .unwrap();
         let second_start = first_duration.saturating_add(first_gap);
         let third_start = second_start
             .saturating_add(removed_duration)
@@ -471,11 +676,36 @@ proptest! {
             .apply(&mut document)
             .unwrap();
         }
+        Operation::AddClip {
+            track: TrackId(2),
+            asset: AssetId(1),
+            at: TimeCode(third_start),
+            source: TimeCode(0)..TimeCode(1),
+        }
+        .apply(&mut document)
+        .unwrap();
+        Operation::AddMarker {
+            marker: Marker {
+                id: MarkerId(1),
+                position: TimeCode(third_start),
+                label: String::new(),
+                color_token: 0,
+            },
+        }
+        .apply(&mut document)
+        .unwrap();
 
         Operation::RippleDeleteClip { clip: ClipId(2) }
             .apply(&mut document)
             .unwrap();
         prop_assert_eq!(document.clip(ClipId(3)).unwrap().timeline_start, TimeCode(third_start - removed_duration));
+        let expected_secondary = if secondary_locked {
+            third_start - removed_duration
+        } else {
+            third_start
+        };
+        prop_assert_eq!(document.clip(ClipId(4)).unwrap().timeline_start, TimeCode(expected_secondary));
+        prop_assert_eq!(document.marker(MarkerId(1)).unwrap().position, TimeCode(third_start));
         prop_assert!(document.validate().is_ok());
     }
 
@@ -796,6 +1026,7 @@ fn add_and_remove_track_are_validated_and_atomic() {
     let video = Track {
         id: TrackId(1),
         kind: TrackKind::Video,
+        sync_lock: true,
         clips: Vec::new(),
     };
     Operation::AddTrack {
@@ -818,6 +1049,7 @@ fn add_and_remove_track_are_validated_and_atomic() {
     let non_empty = Track {
         id: TrackId(2),
         kind: TrackKind::Video,
+        sync_lock: true,
         clips: vec![Clip {
             id: ClipId(99),
             asset: AssetId(99),
@@ -886,6 +1118,31 @@ fn project_json_round_trip_preserves_exact_document_equality() {
 }
 
 #[test]
+fn track_sync_lock_uses_snapshot_undo_and_redo() {
+    let core = Core::spawn(empty_timeline(Rational::new(30, 1).unwrap())).unwrap();
+    let Event::DocumentChanged { doc, .. } = core
+        .request(Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: false,
+        }))
+        .unwrap()
+    else {
+        panic!("sync-lock operation should be accepted");
+    };
+    assert!(!doc.tracks[0].sync_lock);
+
+    let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
+        panic!("sync-lock operation should be undoable");
+    };
+    assert!(doc.tracks[0].sync_lock);
+
+    let Event::DocumentChanged { doc, .. } = core.request(Command::Redo).unwrap() else {
+        panic!("sync-lock operation should be redoable");
+    };
+    assert!(!doc.tracks[0].sync_lock);
+}
+
+#[test]
 fn public_actor_builds_undoes_redoes_saves_and_reopens_a_rough_cut() {
     let core = Core::spawn(Document::default()).unwrap();
     let events = core.subscribe().unwrap();
@@ -896,6 +1153,7 @@ fn public_actor_builds_undoes_redoes_saves_and_reopens_a_rough_cut() {
             track: Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips: Vec::new(),
             },
         },
@@ -1029,6 +1287,7 @@ fn unsorted_input_document_is_rejected() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: vec![later, earlier],
         }],
         media_pool: vec![media],

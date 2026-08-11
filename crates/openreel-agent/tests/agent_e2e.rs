@@ -175,6 +175,7 @@ fn fixture_document() -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: vec![
                 Clip {
                     id: ClipId(1),

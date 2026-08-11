@@ -590,6 +590,7 @@ fn build_mixed_document(assets: &[MediaAsset]) -> (Document, HashSet<AssetId>) {
         track: Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: Vec::new(),
         },
     }
@@ -599,6 +600,7 @@ fn build_mixed_document(assets: &[MediaAsset]) -> (Document, HashSet<AssetId>) {
         track: Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            sync_lock: true,
             clips: Vec::new(),
         },
     }

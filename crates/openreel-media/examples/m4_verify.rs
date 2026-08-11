@@ -36,6 +36,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips: vec![Clip {
                     id: ClipId(1),
                     asset: red.id,
@@ -50,6 +51,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Track {
                 id: TrackId(2),
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips: vec![Clip {
                     id: ClipId(2),
                     asset: blue.id,

@@ -158,7 +158,26 @@ pub struct Clip {
 pub struct Track {
     pub id: TrackId,
     pub kind: TrackKind,
+    /// Whether ripple edits initiated on other tracks shift this track to
+    /// preserve cross-track synchronization. The edited track always ripples
+    /// itself even when this flag is false. Defaults to true when omitted.
+    #[serde(
+        default = "default_track_sync_lock",
+        skip_serializing_if = "track_sync_lock_is_default"
+    )]
+    #[schemars(extend("default" = true))]
+    pub sync_lock: bool,
     pub clips: Vec<Clip>,
+}
+
+const fn default_track_sync_lock() -> bool {
+    true
+}
+
+// Serde's `skip_serializing_if` callback receives a reference to the field.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn track_sync_lock_is_default(sync_lock: &bool) -> bool {
+    *sync_lock
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

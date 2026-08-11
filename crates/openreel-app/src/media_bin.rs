@@ -219,6 +219,7 @@ fn audio_video_placement_operations(
             track: Track {
                 id: track_id,
                 kind: TrackKind::Audio,
+                sync_lock: true,
                 clips: Vec::new(),
             },
         });
@@ -316,6 +317,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips: Vec::new(),
             }],
             media_pool: vec![asset.clone()],
@@ -331,6 +333,7 @@ mod tests {
                     track: Track {
                         id: TrackId(2),
                         kind: TrackKind::Audio,
+                        sync_lock: true,
                         clips: Vec::new(),
                     },
                 },

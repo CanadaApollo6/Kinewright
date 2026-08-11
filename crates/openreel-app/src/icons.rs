@@ -12,6 +12,7 @@ pub(crate) enum Icon {
     Filmstrip,
     Folder,
     Import,
+    Lock,
     Pause,
     Play,
     Redo,
@@ -21,6 +22,7 @@ pub(crate) enum Icon {
     StepForward,
     Stop,
     Undo,
+    Unlock,
     Waveform,
 }
 
@@ -35,6 +37,7 @@ impl Icon {
             Self::Filmstrip => "bytes://openreel/icons/filmstrip.svg",
             Self::Folder => "bytes://openreel/icons/folder.svg",
             Self::Import => "bytes://openreel/icons/import.svg",
+            Self::Lock => "bytes://openreel/icons/lock.svg",
             Self::Pause => "bytes://openreel/icons/pause.svg",
             Self::Play => "bytes://openreel/icons/play.svg",
             Self::Redo => "bytes://openreel/icons/redo.svg",
@@ -44,6 +47,7 @@ impl Icon {
             Self::StepForward => "bytes://openreel/icons/step-forward.svg",
             Self::Stop => "bytes://openreel/icons/stop.svg",
             Self::Undo => "bytes://openreel/icons/undo.svg",
+            Self::Unlock => "bytes://openreel/icons/unlock.svg",
             Self::Waveform => "bytes://openreel/icons/waveform.svg",
         }
     }
@@ -58,6 +62,7 @@ impl Icon {
             Self::Filmstrip => include_bytes!("../assets/icons/filmstrip.svg"),
             Self::Folder => include_bytes!("../assets/icons/folder.svg"),
             Self::Import => include_bytes!("../assets/icons/import.svg"),
+            Self::Lock => include_bytes!("../assets/icons/lock.svg"),
             Self::Pause => include_bytes!("../assets/icons/pause.svg"),
             Self::Play => include_bytes!("../assets/icons/play.svg"),
             Self::Redo => include_bytes!("../assets/icons/redo.svg"),
@@ -67,6 +72,7 @@ impl Icon {
             Self::StepForward => include_bytes!("../assets/icons/step-forward.svg"),
             Self::Stop => include_bytes!("../assets/icons/stop.svg"),
             Self::Undo => include_bytes!("../assets/icons/undo.svg"),
+            Self::Unlock => include_bytes!("../assets/icons/unlock.svg"),
             Self::Waveform => include_bytes!("../assets/icons/waveform.svg"),
         }
     }

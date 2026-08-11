@@ -897,6 +897,7 @@ fn empty_timeline_document(assets: Vec<MediaAsset>) -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: Vec::new(),
         }],
         media_pool: assets,
@@ -938,6 +939,7 @@ fn timeline_document(
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: timeline_clips,
         }],
         media_pool: assets,

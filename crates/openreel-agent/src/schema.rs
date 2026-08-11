@@ -98,6 +98,7 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::AddAsset { .. } => "add_asset",
         Operation::AddTrack { .. } => "add_track",
         Operation::RemoveTrack { .. } => "remove_track",
+        Operation::SetTrackSyncLock { .. } => "set_track_sync_lock",
         Operation::AddClip { .. } => "add_clip",
         Operation::AddTitle { .. } => "add_title",
         Operation::SplitClip { .. } => "split_clip",
@@ -182,7 +183,10 @@ fn operation_tool(
     }
     match variant.as_str() {
         "RippleDeleteClip" | "RippleInsertGap" => description.push_str(
-            " M13 ripple is per-track only; other tracks remain unchanged. Cross-track sync-lock is future work.",
+            " Ripple shifts the edited track and every other sync-locked track. Unlocked tracks and project markers remain fixed. The delete ripple point is the removed clip's pre-edit end; insert uses its explicit at frame. Only clips starting at or after that point shift, and a straddling clip remains unchanged.",
+        ),
+        "SetTrackSyncLock" => description.push_str(
+            " Sync lock is enabled by default. Disable it only when a track should run free during ripple edits on other tracks.",
         ),
         "LinkClips" | "UnlinkClips" => description.push_str(
             " Links are metadata: moving, trimming, or deleting a member requires an atomic plan covering its whole link group.",
@@ -254,6 +258,7 @@ mod tests {
                 "add_asset",
                 "add_track",
                 "remove_track",
+                "set_track_sync_lock",
                 "add_clip",
                 "add_title",
                 "split_clip",
@@ -289,7 +294,35 @@ mod tests {
     }
 
     #[test]
+    fn add_track_schema_exposes_optional_true_sync_lock_default() {
+        let tools = operation_tools().unwrap();
+        let add_track = tools
+            .iter()
+            .find(|definition| definition.tool.name == "add_track")
+            .unwrap();
+        let track_schema = &add_track.tool.input_schema["$defs"]["Track"];
+        assert_eq!(
+            track_schema["properties"]["sync_lock"]["default"],
+            serde_json::json!(true)
+        );
+        assert!(
+            track_schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|field| field != "sync_lock")
+        );
+    }
+
+    #[test]
     fn operation_exhaustiveness_guard_requires_new_variants_to_be_acknowledged() {
+        assert_eq!(
+            operation_tool_name(&Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            }),
+            "set_track_sync_lock"
+        );
         assert_eq!(
             operation_tool_name(&Operation::RippleInsertGap {
                 track: TrackId(1),
@@ -306,6 +339,7 @@ mod tests {
         let tools = operation_tools().unwrap();
         for (name, destructive) in [
             ("ripple_delete_clip", true),
+            ("set_track_sync_lock", false),
             ("add_marker", false),
             ("move_marker", false),
             ("remove_marker", false),

@@ -45,8 +45,9 @@ pub fn render_timeline_state(document: &Document) -> String {
         };
         let _ = writeln!(
             output,
-            "track {} {kind} clips={}",
+            "track {} {kind} sync_lock={} clips={}",
             track.id,
+            track.sync_lock,
             track.clips.len()
         );
         for clip in &track.clips {
@@ -600,6 +601,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips: vec![
                     Clip {
                         id: ClipId(10),
@@ -658,7 +660,7 @@ mod tests {
     fn timeline_state_matches_the_compact_golden_rendering() {
         let expected = r#"project fps=30/1 size=1920x1080 duration=180f/6.000s
 tracks=1 clips=2 assets=1 markers=1 link_groups=1
-track 7 video clips=2
+track 7 video sync_lock=true clips=2
   clip 10 asset=4 "interview.mp4" timeline=0f/0.000s..90f/3.000s duration=90f/3.000s source=30f/1.000s..120f/4.000s effects=[3:brightness(percent=25)] transition_in=crossfade:15f
   clip 11 asset=4 "interview.mp4" timeline=120f/4.000s..180f/6.000s duration=60f/2.000s source=150f/5.000s..210f/7.000s effects=none transition_in=none
 links:
@@ -686,6 +688,7 @@ assets:
         document.tracks.push(Track {
             id: TrackId(8),
             kind: TrackKind::Video,
+            sync_lock: false,
             clips: vec![Clip {
                 id: ClipId(12),
                 asset: AssetId::default(),
@@ -706,6 +709,7 @@ assets:
             }],
         });
         let timeline = render_timeline_state(&document);
+        assert!(timeline.contains("track 8 video sync_lock=false clips=1"));
         assert!(timeline.contains("clip 12 title=Lower third"));
         assert!(timeline.contains(
             "text=\"Lower third\" font_size_token=2 color_token=2 position=lower_third scrim=false fade_in_frames=6 fade_out_frames=9"

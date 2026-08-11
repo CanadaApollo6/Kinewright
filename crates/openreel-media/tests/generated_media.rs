@@ -137,6 +137,7 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
             Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips: vec![Clip {
                     id: ClipId(1),
                     asset: red_asset.id,
@@ -151,6 +152,7 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
             Track {
                 id: TrackId(2),
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips: vec![Clip {
                     id: ClipId(2),
                     asset: blue_asset.id,
@@ -265,6 +267,7 @@ fn title_export_pixels_match_preview_after_h264_redecode() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: vec![Clip {
                 id: ClipId(1),
                 asset: AssetId::default(),
@@ -531,6 +534,7 @@ fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: vec![
                 Clip {
                     id: ClipId(1),
@@ -649,6 +653,7 @@ fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
             Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                sync_lock: true,
                 clips: vec![Clip {
                     id: ClipId(1),
                     asset: voice_asset.id,
@@ -663,6 +668,7 @@ fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
             Track {
                 id: TrackId(2),
                 kind: TrackKind::Audio,
+                sync_lock: true,
                 clips: vec![Clip {
                     id: ClipId(2),
                     asset: bed_asset.id,
@@ -717,6 +723,7 @@ fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: vec![
                 Clip {
                     id: ClipId(1),
@@ -771,6 +778,7 @@ fn full_timeline(asset: MediaAsset) -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: vec![Clip {
                 id: ClipId(1),
                 asset: asset_id,

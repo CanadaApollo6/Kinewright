@@ -47,6 +47,34 @@ async fn mutator_tool_applies_through_the_real_core_actor() {
         panic!("expected document query result");
     };
     assert_eq!(document.tracks[0].id, TrackId(7));
+    assert!(document.tracks[0].sync_lock);
+
+    let sync_lock = client
+        .call_tool(
+            CallToolRequestParams::new("set_track_sync_lock").with_arguments(
+                json!({"track": 7, "locked": false})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sync_lock.is_error, Some(false));
+    assert!(!query_document(&core).tracks[0].sync_lock);
+
+    let timeline_state = client
+        .call_tool(CallToolRequestParams::new("get_timeline_state"))
+        .await
+        .unwrap();
+    assert_eq!(timeline_state.is_error, Some(false));
+    assert!(
+        timeline_state.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("track 7 video sync_lock=false clips=0")
+    );
 
     let marker = client
         .call_tool(
@@ -240,6 +268,7 @@ fn edit_plan_document() -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            sync_lock: true,
             clips: vec![Clip {
                 id: ClipId(1),
                 asset: asset.id,
