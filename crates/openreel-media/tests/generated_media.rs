@@ -192,6 +192,7 @@ fn remove_fixture_assets(document: &Document) {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn two_track_effect_export_matches_preview_after_h264_redecode() {
     let engine = FfmpegMediaEngine::new().unwrap();
     let document = export_fixture(&engine);
@@ -257,6 +258,49 @@ fn two_track_effect_export_matches_preview_after_h264_redecode() {
 
     assert_frame_sample_close(&preview_start, &decoded_start, 28);
     assert_frame_sample_close(&preview_blended, &decoded_blended, 28);
+
+    let mut fade_document = document.clone();
+    fade_document.tracks[1].clips[0].transition_in = Some(Transition {
+        name: "fade_from_white".to_owned(),
+        duration: TimeCode(5),
+    });
+    fade_document.validate().unwrap();
+    engine.set_document(std::sync::Arc::new(fade_document.clone()));
+    engine.request_frame(TimeCode(0));
+    let fade_preview_start = receive_frame(&frames, TimeCode(0));
+    engine.request_frame(TimeCode(2));
+    let fade_preview_middle = receive_frame(&frames, TimeCode(2));
+    assert_frame_center_close(&fade_preview_start, [255, 255, 255], 5);
+    assert_frame_center_close(&fade_preview_middle, [128, 128, 255], 8);
+
+    let fade_output = TemporaryFile(std::env::temp_dir().join(format!(
+        "openreel-fade-export-{}-{nonce}.mp4",
+        std::process::id()
+    )));
+    let (fade_progress_tx, _) = crossbeam_channel::unbounded();
+    engine
+        .export(
+            &fade_output.0,
+            ExportSettings {
+                fps: fade_document.fps,
+                resolution: fade_document.resolution,
+                video_codec: "libx264".to_owned(),
+                audio_codec: "aac".to_owned(),
+                video_bitrate: 500_000,
+                audio_bitrate: 128_000,
+                cancellation: ExportCancellation::default(),
+            },
+            fade_progress_tx,
+        )
+        .unwrap();
+    let fade_asset = decode_engine.probe(&fade_output.0).unwrap();
+    decode_engine.set_document(std::sync::Arc::new(full_timeline(fade_asset)));
+    decode_engine.request_frame(TimeCode(0));
+    let fade_decoded_start = receive_frame(&exported_frames, TimeCode(0));
+    decode_engine.request_frame(TimeCode(2));
+    let fade_decoded_middle = receive_frame(&exported_frames, TimeCode(2));
+    assert_frame_sample_close(&fade_preview_start, &fade_decoded_start, 28);
+    assert_frame_sample_close(&fade_preview_middle, &fade_decoded_middle, 28);
     remove_fixture_assets(&document);
 }
 

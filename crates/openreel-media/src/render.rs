@@ -118,7 +118,7 @@ impl FrameRenderer {
                         scale,
                         strategy,
                     )?;
-                    decoded_layers.push((frame, layer.effects, layer.transition_alpha));
+                    decoded_layers.push((frame, layer.effects, layer.transition));
                 }
                 TimelineVisualLayer::Title(layer) => {
                     let key = (layer.clip, resolution, layer.title.clone());
@@ -129,16 +129,16 @@ impl FrameRenderer {
                         self.title_cache.insert(key, frame.clone());
                         frame
                     };
-                    decoded_layers.push((frame, layer.effects, layer.transition_alpha));
+                    decoded_layers.push((frame, layer.effects, layer.transition));
                 }
             }
         }
         let layers = decoded_layers
             .iter()
-            .map(|(frame, effects, transition_alpha)| CompositorLayer {
+            .map(|(frame, effects, transition)| CompositorLayer {
                 frame,
                 effects,
-                transition_alpha: *transition_alpha,
+                transition: *transition,
             })
             .collect::<Vec<_>>();
         self.compositor.render(resolution, &layers)

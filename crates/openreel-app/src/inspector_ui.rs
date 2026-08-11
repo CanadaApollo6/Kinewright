@@ -3,13 +3,14 @@ use std::collections::BTreeMap;
 use eframe::egui;
 use openreel_core::{
     Clip, ClipContent, ClipId, EFFECT_DESCRIPTORS, Effect, EffectId, MARKER_COLOR_TOKEN_COUNT,
-    Marker, MarkerId, Operation, ParamValue, TITLE_COLORS, TITLE_FONT_SIZES, TimeCode, Title,
-    TitlePosition, Transition,
+    Marker, MarkerId, Operation, ParamValue, TITLE_COLORS, TITLE_FONT_SIZES,
+    TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition, Transition,
 };
 
 use crate::{
     app::OpenReelApp,
     theme::{color, space},
+    timeline_ui::linked_transition_operations,
 };
 
 const INSPECTOR_MAX_HEIGHT: f32 = 360.0;
@@ -155,31 +156,68 @@ impl OpenReelApp {
                 .document
                 .clip_duration(clip)
                 .map_or(1, |value| value.0.max(1));
+            let mut name = transition.name.clone();
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label("Type");
+                egui::ComboBox::from_id_salt(("transition-type", clip.id.0))
+                    .selected_text(&name)
+                    .show_ui(ui, |ui| {
+                        for descriptor in TRANSITION_DESCRIPTORS {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut name,
+                                    descriptor.name.to_owned(),
+                                    descriptor.name,
+                                )
+                                .on_hover_text(descriptor.description)
+                                .changed();
+                        }
+                    });
+            });
             let mut duration = transition.duration.0;
-            if ui
+            changed |= ui
                 .add(
                     egui::Slider::new(&mut duration, 1..=maximum)
                         .text("frames")
                         .integer(),
                 )
-                .changed()
-            {
-                pending.extend(transition_duration_operations(clip.id, duration));
+                .changed();
+            if changed {
+                pending.extend(transition_duration_operations(
+                    &self.document,
+                    clip.id,
+                    &name,
+                    duration,
+                ));
             }
             if ui.small_button("Remove transition").clicked() {
-                pending.push(Operation::RemoveTransition { clip: clip.id });
+                pending.extend(linked_transition_operations(&self.document, clip.id, None));
             }
-        } else if ui.button("Add crossfade").clicked() {
+        } else {
             let duration = self
                 .document
                 .clip_duration(clip)
                 .map_or(1, |value| value.0.clamp(1, 15));
-            pending.push(Operation::AddTransition {
-                clip: clip.id,
-                transition: Transition {
-                    name: "crossfade".to_owned(),
-                    duration: TimeCode(duration),
-                },
+            ui.menu_button("+ Transition", |ui| {
+                for descriptor in TRANSITION_DESCRIPTORS {
+                    if ui
+                        .button(descriptor.name)
+                        .on_hover_text(descriptor.description)
+                        .clicked()
+                    {
+                        let transition = Transition {
+                            name: descriptor.name.to_owned(),
+                            duration: TimeCode(duration),
+                        };
+                        pending.extend(linked_transition_operations(
+                            &self.document,
+                            clip.id,
+                            Some(&transition),
+                        ));
+                        ui.close();
+                    }
+                }
             });
         }
         self.send_operations(pending);
@@ -429,17 +467,17 @@ fn add_effect_operation(clip: &Clip, descriptor: &openreel_core::EffectDescripto
     }
 }
 
-fn transition_duration_operations(clip: ClipId, duration: i64) -> Vec<Operation> {
-    vec![
-        Operation::RemoveTransition { clip },
-        Operation::AddTransition {
-            clip,
-            transition: Transition {
-                name: "crossfade".to_owned(),
-                duration: TimeCode(duration),
-            },
-        },
-    ]
+fn transition_duration_operations(
+    document: &openreel_core::Document,
+    clip: ClipId,
+    name: &str,
+    duration: i64,
+) -> Vec<Operation> {
+    let transition = Transition {
+        name: name.to_owned(),
+        duration: TimeCode(duration),
+    };
+    linked_transition_operations(document, clip, Some(&transition))
 }
 
 fn data_row(ui: &mut egui::Ui, label: &str, value: &str) {
@@ -465,7 +503,10 @@ fn range_readout(range: &std::ops::Range<TimeCode>, fps: openreel_core::Rational
 
 #[cfg(test)]
 mod tests {
-    use openreel_core::{AssetId, EffectDescriptor, EffectParameterDescriptor, EffectUniform};
+    use openreel_core::{
+        AssetId, Document, EffectDescriptor, EffectParameterDescriptor, EffectUniform, Track,
+        TrackId, TrackKind,
+    };
 
     use super::*;
 
@@ -487,14 +528,33 @@ mod tests {
                 value: ParamValue::Integer(90),
             }
         );
+        let mut document = Document::default();
+        document.tracks.push(Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![Clip {
+                id: ClipId(3),
+                asset: AssetId(1),
+                source_range: TimeCode(0)..TimeCode(30),
+                content: ClipContent::Media,
+                timeline_start: TimeCode::ZERO,
+                effects: Vec::new(),
+                transition_in: Some(Transition {
+                    name: "crossfade".to_owned(),
+                    duration: TimeCode(6),
+                }),
+                link: None,
+            }],
+        });
         assert_eq!(
-            transition_duration_operations(ClipId(3), 12),
+            transition_duration_operations(&document, ClipId(3), "fade_from_black", 12),
             vec![
                 Operation::RemoveTransition { clip: ClipId(3) },
                 Operation::AddTransition {
                     clip: ClipId(3),
                     transition: Transition {
-                        name: "crossfade".to_owned(),
+                        name: "fade_from_black".to_owned(),
                         duration: TimeCode(12),
                     },
                 },

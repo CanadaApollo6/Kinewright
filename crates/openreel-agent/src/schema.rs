@@ -1,6 +1,8 @@
 use std::{borrow::Cow, fmt::Write, sync::Arc};
 
-use openreel_core::{EFFECT_DESCRIPTORS, Operation, TITLE_PARAMETER_DESCRIPTORS};
+use openreel_core::{
+    EFFECT_DESCRIPTORS, Operation, TITLE_PARAMETER_DESCRIPTORS, TRANSITION_DESCRIPTORS,
+};
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -181,6 +183,10 @@ fn operation_tool(
         }
         description.push('.');
     }
+    if matches!(variant.as_str(), "AddTransition" | "RemoveTransition") {
+        write!(description, " {}", transition_documentation())
+            .expect("writing transition documentation to a String cannot fail");
+    }
     match variant.as_str() {
         "RippleDeleteClip" | "RippleInsertGap" => description.push_str(
             " Ripple shifts the edited track and every other sync-locked track. Unlocked tracks remain fixed. Project markers at or after the ripple point always shift regardless of track sync locks. The delete ripple point is the removed clip's pre-edit end; insert uses its explicit at frame. Only clips starting at or after that point shift, and a straddling clip remains unchanged.",
@@ -226,6 +232,25 @@ fn effect_documentation() -> String {
         documentation.push(')');
     }
     documentation.push('.');
+    documentation
+}
+
+fn transition_documentation() -> String {
+    let mut documentation = String::from("Supported transitions: ");
+    for (index, transition) in TRANSITION_DESCRIPTORS.iter().enumerate() {
+        if index != 0 {
+            documentation.push_str("; ");
+        }
+        write!(
+            documentation,
+            "{}: {}",
+            transition.name, transition.description
+        )
+        .expect("writing transition documentation to a String cannot fail");
+    }
+    documentation.push_str(
+        ". Duration is a positive integer number of project frames no longer than the clip; one frame is fully visible. Every transition also ramps the clip's audio gain from silence to full across the same window.",
+    );
     documentation
 }
 
@@ -312,6 +337,24 @@ mod tests {
                 .iter()
                 .all(|field| field != "sync_lock")
         );
+    }
+
+    #[test]
+    fn add_transition_schema_documents_every_registered_transition() {
+        let tools = operation_tools().unwrap();
+        let add_transition = tools
+            .iter()
+            .find(|definition| definition.tool.name == "add_transition")
+            .unwrap();
+        let description = add_transition.tool.description.as_deref().unwrap();
+        for name in ["crossfade", "fade_from_black", "fade_from_white"] {
+            assert!(
+                description.contains(name),
+                "add_transition description omitted {name}"
+            );
+        }
+        assert!(description.contains("positive integer"));
+        assert!(description.contains("audio gain"));
     }
 
     #[test]

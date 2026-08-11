@@ -1157,7 +1157,7 @@ fn validate_transition(
     clip: &Clip,
     transition: &Transition,
 ) -> Result<(), OpError> {
-    if transition.name != "crossfade" {
+    if crate::transition_descriptor(&transition.name).is_none() {
         return Err(OpError::UnknownTransition(transition.name.clone()));
     }
     if transition.duration <= TimeCode::ZERO {

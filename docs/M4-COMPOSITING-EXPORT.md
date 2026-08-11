@@ -31,10 +31,10 @@ neutral value.
 Multiple effects are folded into one shader parameter block. Brightness and offsets add;
 contrast, saturation, opacity, and scale multiply. The result is clamped by the shader.
 
-The only M4 transition is `crossfade`. `transition_in.duration` is a positive number of project
-frames no longer than the clip. During those first frames, the entering clip fades from the
-already-composited lower video tracks to full opacity. A one-frame crossfade is fully visible on
-that frame.
+M4 introduced `crossfade`; the current registered transition set and exact shading/audio semantics
+are defined by the core descriptor table and documented in [M20 transitions](M20-TRANSITIONS.md).
+`transition_in.duration` remains a positive number of project frames no longer than the clip, and
+a one-frame transition is fully visible on that frame.
 
 ## Export and cancellation
 

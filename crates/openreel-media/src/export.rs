@@ -10,7 +10,7 @@ use openreel_core::{
 };
 
 use crate::{
-    audio::{decode_audio_range, limit_audio_mix},
+    audio::{decode_audio_range, limit_audio_mix, transition_audio_ramp},
     clock::frame_to_samples,
     compositor::GpuContext,
     decode::backend,
@@ -357,6 +357,9 @@ pub(crate) fn mix_audio(
     let segments = timeline_audio_segments(document, TimeCode::ZERO..document.duration)?;
     for segment in segments {
         check_cancelled(settings)?;
+        let clip = document.clip(segment.clip).ok_or_else(|| {
+            MediaError::Backend(format!("timeline clip {} disappeared", segment.clip))
+        })?;
         let asset = document.asset(segment.asset).ok_or_else(|| {
             MediaError::Backend(format!("timeline asset {} disappeared", segment.asset))
         })?;
@@ -382,8 +385,15 @@ pub(crate) fn mix_audio(
             .map_err(|_| MediaError::Backend("audio clip start is too large".to_owned()))?
             .checked_mul(usize::from(AUDIO_CHANNELS))
             .ok_or_else(|| MediaError::Backend("audio clip start is too large".to_owned()))?;
-        for (destination, sample) in mix.iter_mut().skip(start).zip(decoded) {
-            *destination += sample;
+        let transition_ramp = transition_audio_ramp(clip, AUDIO_RATE, document.fps);
+        let channel_count = usize::from(AUDIO_CHANNELS);
+        for (sample_index, (destination, sample)) in
+            mix.iter_mut().skip(start).zip(decoded).enumerate()
+        {
+            let frame_offset = u64::try_from(sample_index / channel_count).unwrap_or(u64::MAX);
+            let project_sample = start_frame.saturating_add(frame_offset);
+            let gain = transition_ramp.map_or(1.0, |ramp| ramp.gain_at(project_sample));
+            *destination += sample * gain;
         }
     }
     limit_audio_mix(&mut mix);

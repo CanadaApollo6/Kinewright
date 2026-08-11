@@ -2,8 +2,8 @@ use std::ops::Range;
 
 use openreel_core::{
     AssetId, Clip, ClipContent, ClipId, Document, Effect, FrameRounding, MediaError, MediaKind,
-    TimeCode, Title, Track, TrackId, TrackKind, map_frames_with_rounding,
-    map_source_range_to_project,
+    TimeCode, Title, Track, TrackId, TrackKind, TransitionShading, map_frames_with_rounding,
+    map_source_range_to_project, transition_descriptor,
 };
 
 /// The source frame selected by a project-frame position on the first video track.
@@ -23,7 +23,7 @@ pub struct TimelineSource {
 pub struct TimelineVideoLayer {
     pub source: TimelineSource,
     pub effects: Vec<Effect>,
-    pub transition_alpha: f32,
+    pub transition: TransitionRenderParams,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,7 +32,25 @@ pub struct TimelineTitleLayer {
     pub clip: ClipId,
     pub title: Title,
     pub effects: Vec<Effect>,
-    pub transition_alpha: f32,
+    pub transition: TransitionRenderParams,
+}
+
+/// Per-layer transition shading evaluated for one project frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TransitionRenderParams {
+    pub alpha: f32,
+    pub fade_mix: f32,
+    pub fade_white: f32,
+}
+
+impl Default for TransitionRenderParams {
+    fn default() -> Self {
+        Self {
+            alpha: 1.0,
+            fade_mix: 0.0,
+            fade_white: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -110,7 +128,7 @@ pub fn video_layers_at(
             layers.push(TimelineVideoLayer {
                 source,
                 effects: clip.effects.clone(),
-                transition_alpha: transition_alpha(clip, project_at),
+                transition: transition_render_params(clip, project_at),
             });
         }
     }
@@ -144,17 +162,18 @@ pub fn visual_layers_at(
                 layers.push(TimelineVisualLayer::Video(TimelineVideoLayer {
                     source,
                     effects: clip.effects.clone(),
-                    transition_alpha: transition_alpha(clip, project_at),
+                    transition: transition_render_params(clip, project_at),
                 }));
             }
             ClipContent::Title(title) => {
+                let mut transition = transition_render_params(clip, project_at);
+                transition.alpha *= title_alpha(document, clip, title, project_at)?;
                 layers.push(TimelineVisualLayer::Title(TimelineTitleLayer {
                     track: track.id,
                     clip: clip.id,
                     title: title.clone(),
                     effects: clip.effects.clone(),
-                    transition_alpha: transition_alpha(clip, project_at)
-                        * title_alpha(document, clip, title, project_at)?,
+                    transition,
                 }));
             }
         }
@@ -332,17 +351,31 @@ fn media_source_for_clip(
     })
 }
 
-// GPU alpha is f32; projecting integer frame offsets is the intended final conversion.
+// GPU shading is f32; projecting integer frame offsets is the intended final conversion.
 #[allow(clippy::cast_precision_loss)]
-fn transition_alpha(clip: &Clip, project_at: TimeCode) -> f32 {
+fn transition_render_params(clip: &Clip, project_at: TimeCode) -> TransitionRenderParams {
     let Some(transition) = &clip.transition_in else {
-        return 1.0;
+        return TransitionRenderParams::default();
     };
-    if transition.name != "crossfade" || transition.duration.0 <= 1 {
-        return 1.0;
+    if transition.duration.0 <= 1 {
+        return TransitionRenderParams::default();
     }
+    let Some(descriptor) = transition_descriptor(&transition.name) else {
+        return TransitionRenderParams::default();
+    };
     let offset = project_at.0.saturating_sub(clip.timeline_start.0);
-    (offset as f32 / (transition.duration.0 - 1) as f32).clamp(0.0, 1.0)
+    let progress = (offset as f32 / (transition.duration.0 - 1) as f32).clamp(0.0, 1.0);
+    match descriptor.shading {
+        TransitionShading::CrossfadeAlpha => TransitionRenderParams {
+            alpha: progress,
+            ..TransitionRenderParams::default()
+        },
+        TransitionShading::FadeFromColor { white } => TransitionRenderParams {
+            fade_mix: 1.0 - progress,
+            fade_white: if white { 1.0 } else { 0.0 },
+            ..TransitionRenderParams::default()
+        },
+    }
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -376,7 +409,7 @@ mod tests {
 
     use openreel_core::{
         AssetId, Clip, ClipId, Document, MediaAsset, MediaKind, Rational, TimeCode, Track, TrackId,
-        TrackKind,
+        TrackKind, Transition,
     };
 
     use super::*;
@@ -508,6 +541,59 @@ mod tests {
     }
 
     #[test]
+    // These transition endpoints and midpoint are exact binary fractions.
+    #[allow(clippy::float_cmp)]
+    fn media_crossfade_ramps_alpha_across_integer_frames() {
+        let mut document = fixture();
+        document.tracks[0].clips[0].transition_in = Some(Transition {
+            name: "crossfade".to_owned(),
+            duration: TimeCode(3),
+        });
+
+        let alphas = [0, 1, 2].map(|frame| {
+            video_layers_at(&document, TimeCode(frame)).unwrap()[0]
+                .transition
+                .alpha
+        });
+        assert_eq!(alphas, [0.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    // These transition endpoints and midpoint are exact binary fractions.
+    #[allow(clippy::float_cmp)]
+    fn media_color_fades_ramp_mix_down_and_keep_layer_alpha_opaque() {
+        for (name, fade_white) in [("fade_from_black", 0.0), ("fade_from_white", 1.0)] {
+            let mut document = fixture();
+            document.tracks[0].clips[0].transition_in = Some(Transition {
+                name: name.to_owned(),
+                duration: TimeCode(3),
+            });
+
+            let shading = [0, 1, 2]
+                .map(|frame| video_layers_at(&document, TimeCode(frame)).unwrap()[0].transition);
+            assert_eq!(shading.map(|value| value.alpha), [1.0, 1.0, 1.0]);
+            assert_eq!(shading.map(|value| value.fade_mix), [1.0, 0.5, 0.0]);
+            assert_eq!(shading.map(|value| value.fade_white), [fade_white; 3]);
+        }
+    }
+
+    #[test]
+    fn one_frame_transition_is_a_fully_visible_no_op() {
+        for name in ["crossfade", "fade_from_black", "fade_from_white"] {
+            let mut document = fixture();
+            document.tracks[0].clips[0].transition_in = Some(Transition {
+                name: name.to_owned(),
+                duration: TimeCode(1),
+            });
+
+            assert_eq!(
+                video_layers_at(&document, TimeCode::ZERO).unwrap()[0].transition,
+                TransitionRenderParams::default()
+            );
+        }
+    }
+
+    #[test]
     fn title_layers_keep_track_order_and_map_integer_fades_to_layer_alpha() {
         let mut document = fixture();
         document.tracks.push(Track {
@@ -538,19 +624,19 @@ mod tests {
             panic!("top track must resolve to a title layer");
         };
         assert_eq!(title.track, TrackId(8));
-        assert!(title.transition_alpha.abs() < f32::EPSILON);
+        assert!(title.transition.alpha.abs() < f32::EPSILON);
 
         let middle = visual_layers_at(&document, TimeCode(5)).unwrap();
         let TimelineVisualLayer::Title(title) = &middle[1] else {
             panic!("top track must resolve to a title layer");
         };
-        assert!((title.transition_alpha - 1.0).abs() < f32::EPSILON);
+        assert!((title.transition.alpha - 1.0).abs() < f32::EPSILON);
 
         let end = visual_layers_at(&document, TimeCode(9)).unwrap();
         let TimelineVisualLayer::Title(title) = &end[1] else {
             panic!("top track must resolve to a title layer");
         };
-        assert!(title.transition_alpha.abs() < f32::EPSILON);
+        assert!(title.transition.alpha.abs() < f32::EPSILON);
     }
 
     #[test]

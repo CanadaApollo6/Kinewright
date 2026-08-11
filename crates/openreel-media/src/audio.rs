@@ -8,7 +8,7 @@ use std::{
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ffmpeg_next as ffmpeg;
-use openreel_core::{Document, ExportCancellation, MediaError, Rational, TimeCode};
+use openreel_core::{Clip, Document, ExportCancellation, MediaError, Rational, TimeCode};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::{
@@ -137,6 +137,43 @@ pub(crate) fn limit_audio_mix(samples: &mut [f32]) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AudioGainRamp {
+    start_sample: u64,
+    end_sample: u64,
+}
+
+impl AudioGainRamp {
+    // Per-sample gain is the intentional final float conversion after integer boundaries.
+    #[allow(clippy::cast_precision_loss)]
+    pub(crate) fn gain_at(self, project_sample: u64) -> f32 {
+        let sample_span = self.end_sample.saturating_sub(self.start_sample);
+        if sample_span <= 1 || project_sample >= self.end_sample.saturating_sub(1) {
+            return 1.0;
+        }
+        let offset = project_sample.saturating_sub(self.start_sample);
+        (offset as f32 / (sample_span - 1) as f32).clamp(0.0, 1.0)
+    }
+}
+
+pub(crate) fn transition_audio_ramp(
+    clip: &Clip,
+    sample_rate: u32,
+    project_fps: Rational,
+) -> Option<AudioGainRamp> {
+    let transition = clip.transition_in.as_ref()?;
+    if transition.duration.0 <= 1 {
+        return None;
+    }
+    let end_frame = clip.timeline_start.checked_add(transition.duration)?;
+    let start_sample = frame_to_samples(clip.timeline_start, sample_rate, project_fps);
+    let end_sample = frame_to_samples(end_frame, sample_rate, project_fps);
+    (end_sample > start_sample).then_some(AudioGainRamp {
+        start_sample,
+        end_sample,
+    })
+}
+
 struct AudioMixSource {
     path: PathBuf,
     output_rate: u32,
@@ -145,6 +182,9 @@ struct AudioMixSource {
     source_sample_end: u64,
     project_sample_start: u64,
     project_sample_end: u64,
+    transition_ramp: Option<AudioGainRamp>,
+    next_project_sample: u64,
+    next_channel: usize,
     decoder: Option<AudioDecoder>,
     opened: bool,
     pending: Vec<f32>,
@@ -180,9 +220,17 @@ impl AudioMixSource {
         let mut destination_index = 0;
         while destination_index < destination.len() {
             while self.pending_index < self.pending.len() && destination_index < destination.len() {
-                destination[destination_index] += self.pending[self.pending_index];
+                let gain = self
+                    .transition_ramp
+                    .map_or(1.0, |ramp| ramp.gain_at(self.next_project_sample));
+                destination[destination_index] += self.pending[self.pending_index] * gain;
                 destination_index += 1;
                 self.pending_index += 1;
+                self.next_channel = self.next_channel.saturating_add(1);
+                if self.next_channel >= usize::from(self.output_channels).max(1) {
+                    self.next_channel = 0;
+                    self.next_project_sample = self.next_project_sample.saturating_add(1);
+                }
             }
             if destination_index == destination.len() {
                 break;
@@ -254,6 +302,9 @@ impl AudioMixer {
                 source_sample_end,
                 project_sample_start,
                 project_sample_end,
+                transition_ramp: transition_audio_ramp(clip, output_rate, document.fps),
+                next_project_sample: project_sample_start,
+                next_channel: 0,
                 decoder: None,
                 opened: false,
                 pending: Vec::new(),
@@ -715,6 +766,7 @@ fn normalized_start(start: i64) -> i64 {
 mod tests {
     use openreel_core::{
         AssetId, Clip, ClipId, ExportSettings, MediaAsset, MediaKind, Track, TrackId, TrackKind,
+        Transition,
     };
 
     use crate::test_support::GeneratedMedia;
@@ -777,7 +829,11 @@ mod tests {
         let voice = loud_sine("m12-voice", 440);
         let bed = loud_sine("m12-bed", 660);
         let fps = Rational::new(10, 1).unwrap();
-        let document = parity_document(voice.path(), bed.path(), fps);
+        let mut document = parity_document(voice.path(), bed.path(), fps);
+        document.tracks[0].clips[1].transition_in = Some(Transition {
+            name: "fade_from_black".to_owned(),
+            duration: TimeCode(2),
+        });
         document.validate().unwrap();
         let settings = ExportSettings {
             fps,
@@ -799,7 +855,8 @@ mod tests {
             ("overlap", 4..6),
             ("trimmed source", 6..14),
             ("silence", 14..16),
-            ("post-gap source", 16..20),
+            ("transition fade-in", 16..18),
+            ("post-transition steady state", 18..20),
         ] {
             let samples = interleaved_sample_range(frames, fps, 48_000, 2);
             let maximum_difference = exported[samples.clone()]
@@ -826,6 +883,20 @@ mod tests {
                 .iter()
                 .all(|sample| sample.abs() <= 1.0e-7),
             "fixture gap was not silent"
+        );
+        let transition_start = interleaved_sample_range(16..17, fps, 48_000, 2);
+        let steady_state = interleaved_sample_range(18..20, fps, 48_000, 2);
+        let transition_peak = exported[transition_start]
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0_f32, f32::max);
+        let steady_peak = exported[steady_state]
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            transition_peak < steady_peak * 0.75,
+            "transition first-frame peak {transition_peak} was not attenuated below steady {steady_peak}"
         );
 
         let seek_sample = usize::try_from(frame_to_samples(TimeCode(5), 48_000, fps))

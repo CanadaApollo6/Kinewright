@@ -11,6 +11,7 @@ mod operation;
 mod time;
 mod title;
 mod transcript_edit;
+mod transition;
 
 pub use actor::{Command, Core, CoreDisconnected, Event, Query, QueryResult};
 pub use agent::{
@@ -49,4 +50,7 @@ pub use title::{
 pub use transcript_edit::{
     TranscriptCutRange, is_filler_word, silence_cut_margin_frames, transcript_cut_ranges,
     transcript_cut_ranges_for_indices,
+};
+pub use transition::{
+    TRANSITION_DESCRIPTORS, TransitionDescriptor, TransitionShading, transition_descriptor,
 };

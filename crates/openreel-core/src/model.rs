@@ -101,8 +101,8 @@ pub struct Effect {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Transition {
-    /// Currently `crossfade`. It fades the clip from the already-composited
-    /// lower layers during the first `duration` project frames.
+    /// A registered transition name from `TRANSITION_DESCRIPTORS`.
+    /// Its compositor semantics are defined by the descriptor table.
     pub name: String,
     /// Transition length in project frames.
     pub duration: TimeCode,

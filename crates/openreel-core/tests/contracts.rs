@@ -7,8 +7,9 @@ use std::{
 
 use openreel_core::{
     AssetId, Clip, ClipContent, ClipId, Command, Core, Document, Effect, EffectId, Event, LinkId,
-    Marker, MarkerId, MediaAsset, MediaKind, OpError, Operation, ParamValue, Rational, TimeCode,
-    Title, TitlePosition, Track, TrackId, TrackKind, Transition,
+    Marker, MarkerId, MediaAsset, MediaKind, OpError, Operation, ParamValue, Rational,
+    TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition, Track, TrackId, TrackKind, Transition,
+    transition_descriptor,
 };
 use proptest::prelude::*;
 
@@ -1035,6 +1036,72 @@ fn transition_operations_validate_crossfade_duration_and_are_atomic() {
             clip_duration: TimeCode(30),
         })
     );
+
+    let before_invalid = doc.clone();
+    assert_eq!(
+        Operation::AddTransition {
+            clip: ClipId(1),
+            transition: Transition {
+                name: "unknown".to_owned(),
+                duration: TimeCode(4),
+            },
+        }
+        .apply(&mut doc),
+        Err(OpError::UnknownTransition("unknown".to_owned()))
+    );
+    assert_eq!(doc, before_invalid);
+
+    assert_eq!(
+        Operation::AddTransition {
+            clip: ClipId(1),
+            transition: Transition {
+                name: "fade_from_black".to_owned(),
+                duration: TimeCode::ZERO,
+            },
+        }
+        .apply(&mut doc),
+        Err(OpError::InvalidTransitionDuration {
+            clip: ClipId(1),
+            duration: TimeCode::ZERO,
+        })
+    );
+    assert_eq!(doc, before_invalid);
+}
+
+#[test]
+fn transition_descriptors_validate_all_registered_names_and_document_loads() {
+    assert_eq!(TRANSITION_DESCRIPTORS.len(), 3);
+    assert!(transition_descriptor("crossfade").is_some());
+    assert!(transition_descriptor("fade_from_black").is_some());
+    assert!(transition_descriptor("fade_from_white").is_some());
+    assert!(transition_descriptor("dip_to_black").is_none());
+
+    for name in ["fade_from_black", "fade_from_white"] {
+        let mut document = document_with_one_clip();
+        Operation::AddTransition {
+            clip: ClipId(1),
+            transition: Transition {
+                name: name.to_owned(),
+                duration: TimeCode(12),
+            },
+        }
+        .apply(&mut document)
+        .unwrap();
+
+        let encoded = serde_json::to_string(&document).unwrap();
+        let loaded: Document = serde_json::from_str(&encoded).unwrap();
+        loaded.validate().unwrap();
+        assert_eq!(
+            loaded
+                .clip(ClipId(1))
+                .unwrap()
+                .transition_in
+                .as_ref()
+                .unwrap()
+                .name,
+            name
+        );
+    }
 }
 
 #[test]

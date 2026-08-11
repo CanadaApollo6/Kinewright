@@ -4,7 +4,8 @@ use eframe::egui;
 use openreel_core::{
     Analysis, Clip, ClipContent, ClipId, Document, FrameRounding, MARKER_COLOR_TOKEN_COUNT, Marker,
     MarkerId, MediaAsset, MediaKind, Operation, Rational, SceneStatus, SilenceStatus, TimeCode,
-    Title, TrackId, TrackKind, WaveformData, map_frames_with_rounding, map_source_range_to_project,
+    Title, TrackId, TrackKind, Transition, WaveformData, map_frames_with_rounding,
+    map_source_range_to_project,
 };
 use openreel_media::timeline_source_at;
 
@@ -591,6 +592,10 @@ impl OpenReelApp {
                                     body.hovered() || left.hovered() || right.hovered(),
                                     selected,
                                     dragging,
+                                    clip.transition_in
+                                        .as_ref()
+                                        .map(|transition| transition.duration),
+                                    self.pixels_per_frame,
                                 ),
                                 (ClipContent::Title(title), _) => paint_title_clip(
                                     &painter,
@@ -599,6 +604,10 @@ impl OpenReelApp {
                                     body.hovered() || left.hovered() || right.hovered(),
                                     selected,
                                     dragging,
+                                    clip.transition_in
+                                        .as_ref()
+                                        .map(|transition| transition.duration),
+                                    self.pixels_per_frame,
                                 ),
                                 (ClipContent::Media, None) => {}
                             }
@@ -1033,6 +1042,8 @@ fn paint_clip(
     hovered: bool,
     selected: bool,
     dragging: bool,
+    transition_duration: Option<TimeCode>,
+    pixels_per_frame: f32,
 ) {
     painter.rect_filled(rect, radius::SM, color::SURFACE);
     if rect.intersects(clip_bounds)
@@ -1071,6 +1082,7 @@ fn paint_clip(
             );
         }
     }
+    paint_transition_affordance(painter, rect, transition_duration, pixels_per_frame);
 
     let label_strip = egui::Rect::from_min_max(
         rect.min,
@@ -1150,6 +1162,7 @@ fn paint_clip(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_title_clip(
     painter: &egui::Painter,
     title: &Title,
@@ -1157,6 +1170,8 @@ fn paint_title_clip(
     hovered: bool,
     selected: bool,
     dragging: bool,
+    transition_duration: Option<TimeCode>,
+    pixels_per_frame: f32,
 ) {
     // Accent discipline: an unselected title is a neutral raised surface with
     // a small accent badge - the accent field/border is earned by selection,
@@ -1169,6 +1184,7 @@ fn paint_title_clip(
         color::SURFACE_RAISED
     };
     painter.rect_filled(rect, radius::SM, fill);
+    paint_transition_affordance(painter, rect, transition_duration, pixels_per_frame);
     painter.rect_filled(
         egui::Rect::from_min_max(
             rect.min,
@@ -1212,6 +1228,36 @@ fn paint_title_clip(
         ),
         egui::StrokeKind::Inside,
     );
+}
+
+// Transition frame widths are intentionally projected into f32 timeline pixels.
+#[allow(clippy::cast_precision_loss)]
+fn paint_transition_affordance(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    duration: Option<TimeCode>,
+    pixels_per_frame: f32,
+) {
+    let Some(duration) = duration.filter(|duration| duration.0 > 0) else {
+        return;
+    };
+    let left = rect.left() + EDGE_HANDLE_WIDTH;
+    let width = duration.0 as f32 * pixels_per_frame;
+    let right = (left + width).min(rect.right() - EDGE_HANDLE_WIDTH);
+    if right <= left || rect.height() <= space::ONE * 2.0 {
+        return;
+    }
+    let top = rect.top() + space::ONE;
+    let bottom = rect.bottom() - space::ONE;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(left, top),
+            egui::pos2(left, bottom),
+            egui::pos2(right, bottom),
+        ],
+        color::MEDIA_SCRIM_78,
+        egui::Stroke::new(1.0, color::ACCENT_16),
+    ));
 }
 
 // Derived source-frame positions are intentionally projected into f32 clip pixels.
@@ -1591,6 +1637,26 @@ fn linked_delete_operations(document: &Document, primary: ClipId, ripple: bool) 
     operations
 }
 
+pub(super) fn linked_transition_operations(
+    document: &Document,
+    primary: ClipId,
+    transition: Option<&Transition>,
+) -> Vec<Operation> {
+    let mut operations = Vec::new();
+    for (_, clip) in linked_members(document, primary) {
+        if clip.transition_in.is_some() {
+            operations.push(Operation::RemoveTransition { clip: clip.id });
+        }
+        if let Some(transition) = transition {
+            operations.push(Operation::AddTransition {
+                clip: clip.id,
+                transition: transition.clone(),
+            });
+        }
+    }
+    operations
+}
+
 fn next_marker_id(document: &Document) -> Option<MarkerId> {
     document
         .markers
@@ -1902,6 +1968,38 @@ mod tests {
                 Operation::DeleteClip { clip: ClipId(2) },
                 Operation::RippleDeleteClip { clip: ClipId(1) },
             ]
+        );
+    }
+
+    #[test]
+    fn linked_transition_operations_replace_each_member_in_one_batch() {
+        let mut document = linked_fixture();
+        document.tracks[0].clips[0].transition_in = Some(Transition {
+            name: "crossfade".to_owned(),
+            duration: TimeCode(6),
+        });
+        let replacement = Transition {
+            name: "fade_from_white".to_owned(),
+            duration: TimeCode(12),
+        };
+
+        assert_eq!(
+            linked_transition_operations(&document, ClipId(1), Some(&replacement)),
+            vec![
+                Operation::RemoveTransition { clip: ClipId(1) },
+                Operation::AddTransition {
+                    clip: ClipId(1),
+                    transition: replacement.clone(),
+                },
+                Operation::AddTransition {
+                    clip: ClipId(2),
+                    transition: replacement,
+                },
+            ]
+        );
+        assert_eq!(
+            linked_transition_operations(&document, ClipId(1), None),
+            vec![Operation::RemoveTransition { clip: ClipId(1) }]
         );
     }
 }

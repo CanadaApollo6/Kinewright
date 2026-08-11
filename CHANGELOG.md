@@ -73,5 +73,10 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   burn-in as lower-third scrimmed title clips on their own sync-locked track —
   one undo removes the caption track, and the shared render path means
   burned-in captions export exactly as previewed
+- Transitions completed: fade-from-black and fade-from-white join crossfade,
+  defined by a descriptor table shared by validation, the compositor, the
+  inspector's transition picker, and agent tool docs; every transition also
+  ramps the clip's audio from silence with feeder/export parity at 1e-6, and
+  transitioned clips show their fade window on the timeline
 
 [Unreleased]: https://github.com/CanadaApollo6/OpenReel/commits/main

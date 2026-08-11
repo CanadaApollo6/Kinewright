@@ -5,9 +5,11 @@ use openreel_core::{
     effect_descriptor,
 };
 
+use crate::timeline::TransitionRenderParams;
+
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const UNIFORM_SIZE: u64 = 8 * 4;
-const UNIFORM_BYTES: usize = 8 * 4;
+const UNIFORM_SIZE: u64 = 12 * 4;
+const UNIFORM_BYTES: usize = 12 * 4;
 
 #[derive(Clone)]
 pub struct GpuContext {
@@ -52,8 +54,7 @@ impl GpuContext {
 pub struct CompositorLayer<'a> {
     pub frame: &'a FrameTexture,
     pub effects: &'a [Effect],
-    /// Additional clip alpha, normally the transition-in crossfade progress.
-    pub transition_alpha: f32,
+    pub transition: TransitionRenderParams,
 }
 
 pub struct Compositor {
@@ -78,6 +79,8 @@ struct LayerParams {
     scale: f32,
     offset_x: f32,
     offset_y: f32,
+    fade_mix: f32,
+    fade_white: f32,
 }
 
 impl Default for LayerParams {
@@ -90,6 +93,8 @@ impl Default for LayerParams {
             scale: 1.0,
             offset_x: 0.0,
             offset_y: 0.0,
+            fade_mix: 0.0,
+            fade_white: 0.0,
         }
     }
 }
@@ -302,7 +307,7 @@ impl Compositor {
                 depth_or_array_layers: 1,
             },
         );
-        let params = params_for(layer.effects, layer.transition_alpha);
+        let params = params_for(layer.effects, layer.transition);
         let uniform = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("OpenReel compositor layer parameters"),
             size: UNIFORM_SIZE,
@@ -422,6 +427,10 @@ impl LayerParams {
             self.scale,
             self.offset_x,
             self.offset_y,
+            self.fade_mix,
+            self.fade_white,
+            0.0,
+            0.0,
             0.0,
         ];
         let mut bytes = [0_u8; UNIFORM_BYTES];
@@ -433,9 +442,11 @@ impl LayerParams {
     }
 }
 
-fn params_for(effects: &[Effect], transition_alpha: f32) -> LayerParams {
+fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerParams {
     let mut params = LayerParams {
-        opacity: transition_alpha.clamp(0.0, 1.0),
+        opacity: transition.alpha.clamp(0.0, 1.0),
+        fade_mix: transition.fade_mix.clamp(0.0, 1.0),
+        fade_white: transition.fade_white.clamp(0.0, 1.0),
         ..Default::default()
     };
     for effect in effects {
@@ -529,7 +540,7 @@ mod tests {
                 &[CompositorLayer {
                     frame: &input,
                     effects: &[brightness],
-                    transition_alpha: 1.0,
+                    transition: TransitionRenderParams::default(),
                 }],
             )
             .unwrap();
@@ -551,7 +562,7 @@ mod tests {
                 &[CompositorLayer {
                     frame: &contrast_input,
                     effects: &[contrast],
-                    transition_alpha: 1.0,
+                    transition: TransitionRenderParams::default(),
                 }],
             )
             .unwrap();
@@ -565,7 +576,7 @@ mod tests {
                 &[CompositorLayer {
                     frame: &saturated_input,
                     effects: &[saturation],
-                    transition_alpha: 1.0,
+                    transition: TransitionRenderParams::default(),
                 }],
             )
             .unwrap();
@@ -579,7 +590,7 @@ mod tests {
                 &[CompositorLayer {
                     frame: &red,
                     effects: &[opacity],
-                    transition_alpha: 1.0,
+                    transition: TransitionRenderParams::default(),
                 }],
             )
             .unwrap();
@@ -592,7 +603,7 @@ mod tests {
                 &[CompositorLayer {
                     frame: &red,
                     effects: &[transform],
-                    transition_alpha: 1.0,
+                    transition: TransitionRenderParams::default(),
                 }],
             )
             .unwrap();
@@ -616,17 +627,49 @@ mod tests {
                     CompositorLayer {
                         frame: &red,
                         effects: &[],
-                        transition_alpha: 1.0,
+                        transition: TransitionRenderParams::default(),
                     },
                     CompositorLayer {
                         frame: &blue,
                         effects: &[],
-                        transition_alpha: 0.5,
+                        transition: TransitionRenderParams {
+                            alpha: 0.5,
+                            ..TransitionRenderParams::default()
+                        },
                     },
                 ],
             )
             .unwrap();
         assert_pixel_close(&output.rgba[0..4], [128, 0, 128, 255], 2);
+
+        for (name, fade_white, expected) in [
+            ("fade_from_black", 0.0, [0, 0, 128, 255]),
+            ("fade_from_white", 1.0, [128, 128, 255, 255]),
+        ] {
+            let output = compositor
+                .render(
+                    (2, 2),
+                    &[
+                        CompositorLayer {
+                            frame: &red,
+                            effects: &[],
+                            transition: TransitionRenderParams::default(),
+                        },
+                        CompositorLayer {
+                            frame: &blue,
+                            effects: &[],
+                            transition: TransitionRenderParams {
+                                alpha: 1.0,
+                                fade_mix: 0.5,
+                                fade_white,
+                            },
+                        },
+                    ],
+                )
+                .unwrap();
+            assert_pixel_close(&output.rgba[0..4], expected, 2);
+            assert_eq!(output.rgba[3], 255, "{name} must occlude lower layers");
+        }
     }
 
     #[test]
@@ -652,12 +695,12 @@ mod tests {
                     CompositorLayer {
                         frame: &background,
                         effects: &[],
-                        transition_alpha: 1.0,
+                        transition: TransitionRenderParams::default(),
                     },
                     CompositorLayer {
                         frame: &title,
                         effects: &[],
-                        transition_alpha: 1.0,
+                        transition: TransitionRenderParams::default(),
                     },
                 ],
             )
