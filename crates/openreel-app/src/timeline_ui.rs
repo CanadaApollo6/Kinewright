@@ -1436,7 +1436,7 @@ fn paint_waveform(
     }
 }
 
-fn linked_members(document: &Document, primary: ClipId) -> Vec<(TrackId, Clip)> {
+pub(crate) fn linked_members(document: &Document, primary: ClipId) -> Vec<(TrackId, Clip)> {
     let Some(primary_clip) = document.clip(primary) else {
         return Vec::new();
     };
@@ -1847,6 +1847,9 @@ mod tests {
             effects: Vec::new(),
             transition_in: None,
             link: Some(LinkId(7)),
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
         };
         Document {
             tracks: vec![

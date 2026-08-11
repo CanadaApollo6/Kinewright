@@ -137,6 +137,52 @@ pub(crate) fn limit_audio_mix(samples: &mut [f32]) {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct MeterState {
+    peaks: [AtomicU32; 2],
+}
+
+impl Default for MeterState {
+    fn default() -> Self {
+        Self {
+            peaks: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
+        }
+    }
+}
+
+impl MeterState {
+    pub(crate) fn peaks(&self) -> [f32; 2] {
+        self.peaks
+            .each_ref()
+            .map(|peak| f32::from_bits(peak.load(Ordering::Acquire)))
+    }
+
+    pub(crate) fn clear(&self) {
+        for peak in &self.peaks {
+            peak.store(0.0_f32.to_bits(), Ordering::Release);
+        }
+    }
+
+    fn record_chunk(&self, samples: &[f32], channel_count: usize) {
+        let mut peaks = [0.0_f32; 2];
+        let channel_count = channel_count.max(1);
+        for (sample_index, sample) in samples.iter().enumerate() {
+            let channel = sample_index % channel_count;
+            if channel < peaks.len() {
+                peaks[channel] = peaks[channel].max(sample.abs());
+            }
+        }
+        for (state, peak) in self.peaks.iter().zip(peaks) {
+            state.store(peak.to_bits(), Ordering::Release);
+        }
+    }
+}
+
+fn limit_and_meter_audio_mix(samples: &mut [f32], channel_count: usize, meter: &MeterState) {
+    limit_audio_mix(samples);
+    meter.record_chunk(samples, channel_count);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AudioGainRamp {
     start_sample: u64,
@@ -162,16 +208,88 @@ pub(crate) fn transition_audio_ramp(
     project_fps: Rational,
 ) -> Option<AudioGainRamp> {
     let transition = clip.transition_in.as_ref()?;
-    if transition.duration.0 <= 1 {
+    audio_gain_ramp(
+        clip.timeline_start,
+        transition.duration,
+        sample_rate,
+        project_fps,
+    )
+}
+
+fn audio_gain_ramp(
+    start_frame: TimeCode,
+    duration: TimeCode,
+    sample_rate: u32,
+    project_fps: Rational,
+) -> Option<AudioGainRamp> {
+    if duration.0 <= 1 {
         return None;
     }
-    let end_frame = clip.timeline_start.checked_add(transition.duration)?;
-    let start_sample = frame_to_samples(clip.timeline_start, sample_rate, project_fps);
+    let end_frame = start_frame.checked_add(duration)?;
+    let start_sample = frame_to_samples(start_frame, sample_rate, project_fps);
     let end_sample = frame_to_samples(end_frame, sample_rate, project_fps);
     (end_sample > start_sample).then_some(AudioGainRamp {
         start_sample,
         end_sample,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ClipAudioShaping {
+    constant_gain: f32,
+    fade_in: Option<AudioGainRamp>,
+    fade_out: Option<AudioGainRamp>,
+    transition: Option<AudioGainRamp>,
+}
+
+impl ClipAudioShaping {
+    pub(crate) fn new(
+        clip: &Clip,
+        clip_duration: TimeCode,
+        sample_rate: u32,
+        project_fps: Rational,
+    ) -> Self {
+        let clip_end = clip
+            .timeline_start
+            .checked_add(clip_duration)
+            .unwrap_or(clip.timeline_start);
+        let fade_out_start = clip_end
+            .checked_sub(clip.audio_fade_out_frames)
+            .unwrap_or(clip.timeline_start);
+        #[allow(clippy::cast_precision_loss)]
+        let constant_gain = 10.0_f32.powf(clip.audio_gain_tenth_db as f32 / 200.0);
+        Self {
+            constant_gain,
+            fade_in: audio_gain_ramp(
+                clip.timeline_start,
+                clip.audio_fade_in_frames,
+                sample_rate,
+                project_fps,
+            ),
+            fade_out: audio_gain_ramp(
+                fade_out_start,
+                clip.audio_fade_out_frames,
+                sample_rate,
+                project_fps,
+            ),
+            transition: transition_audio_ramp(clip, sample_rate, project_fps),
+        }
+    }
+
+    pub(crate) fn gain_at(self, project_sample: u64) -> f32 {
+        let gain = self.constant_gain;
+        let gain = gain
+            * self
+                .fade_in
+                .map_or(1.0, |ramp| ramp.gain_at(project_sample));
+        let gain = gain
+            * self
+                .fade_out
+                .map_or(1.0, |ramp| 1.0 - ramp.gain_at(project_sample));
+        gain * self
+            .transition
+            .map_or(1.0, |ramp| ramp.gain_at(project_sample))
+    }
 }
 
 struct AudioMixSource {
@@ -182,7 +300,7 @@ struct AudioMixSource {
     source_sample_end: u64,
     project_sample_start: u64,
     project_sample_end: u64,
-    transition_ramp: Option<AudioGainRamp>,
+    shaping: ClipAudioShaping,
     next_project_sample: u64,
     next_channel: usize,
     decoder: Option<AudioDecoder>,
@@ -220,9 +338,7 @@ impl AudioMixSource {
         let mut destination_index = 0;
         while destination_index < destination.len() {
             while self.pending_index < self.pending.len() && destination_index < destination.len() {
-                let gain = self
-                    .transition_ramp
-                    .map_or(1.0, |ramp| ramp.gain_at(self.next_project_sample));
+                let gain = self.shaping.gain_at(self.next_project_sample);
                 destination[destination_index] += self.pending[self.pending_index] * gain;
                 destination_index += 1;
                 self.pending_index += 1;
@@ -264,6 +380,7 @@ struct AudioMixer {
     output_channels: usize,
     cursor_sample: u64,
     end_sample: u64,
+    meter: Option<Arc<MeterState>>,
 }
 
 impl AudioMixer {
@@ -272,6 +389,7 @@ impl AudioMixer {
         project_from: TimeCode,
         output_rate: u32,
         output_channels: u16,
+        meter: Option<Arc<MeterState>>,
     ) -> Result<Self, MediaError> {
         let project_end = document.duration;
         let segments = timeline_audio_segments(document, project_from..project_end)?;
@@ -294,6 +412,9 @@ impl AudioMixer {
             let source_sample_end = frame_to_samples(clip.source_range.end, output_rate, asset.fps);
             let source_sample_start = source_clip_start
                 .saturating_add(project_sample_start.saturating_sub(clip_project_start));
+            let clip_duration = document
+                .clip_duration(clip)
+                .map_err(|error| MediaError::Backend(error.to_string()))?;
             sources.push(AudioMixSource {
                 path: asset.path.clone(),
                 output_rate,
@@ -302,7 +423,7 @@ impl AudioMixer {
                 source_sample_end,
                 project_sample_start,
                 project_sample_end,
-                transition_ramp: transition_audio_ramp(clip, output_rate, document.fps),
+                shaping: ClipAudioShaping::new(clip, clip_duration, output_rate, document.fps),
                 next_project_sample: project_sample_start,
                 next_channel: 0,
                 decoder: None,
@@ -317,6 +438,7 @@ impl AudioMixer {
             output_channels: usize::from(output_channels),
             cursor_sample: frame_to_samples(project_from, output_rate, document.fps),
             end_sample: frame_to_samples(project_end, output_rate, document.fps),
+            meter,
         })
     }
 
@@ -357,7 +479,11 @@ impl AudioMixer {
                 source.retire();
             }
         }
-        limit_audio_mix(&mut mixed);
+        if let Some(meter) = &self.meter {
+            limit_and_meter_audio_mix(&mut mixed, self.output_channels, meter);
+        } else {
+            limit_audio_mix(&mut mixed);
+        }
         self.cursor_sample = chunk_end;
         Ok(Some(mixed))
     }
@@ -391,6 +517,7 @@ impl AudioRuntime {
         project_from: TimeCode,
         position_samples: &Arc<AtomicU64>,
         sample_rate_atomic: &Arc<AtomicU32>,
+        meter: Arc<MeterState>,
     ) -> Result<Self, MediaError> {
         let host = cpal::default_host();
         let device = host
@@ -419,7 +546,7 @@ impl AudioRuntime {
             Arc::clone(position_samples),
             Arc::clone(&error_flag),
         )?;
-        let mixer = AudioMixer::open(document, project_from, sample_rate, channels)?;
+        let mixer = AudioMixer::open(document, project_from, sample_rate, channels, Some(meter))?;
         let mut runtime = Self {
             stream,
             producer,
@@ -824,6 +951,81 @@ mod tests {
     }
 
     #[test]
+    fn clip_audio_shaping_applies_constant_tenth_db_gain() {
+        let mut clip = audio_clip(1, 1, 0..10, 10);
+        clip.audio_gain_tenth_db = -60;
+        let shaping =
+            ClipAudioShaping::new(&clip, TimeCode(10), 100, Rational::new(10, 1).unwrap());
+
+        assert_close(shaping.gain_at(150), 10.0_f32.powf(-60.0 / 200.0));
+    }
+
+    #[test]
+    fn clip_audio_shaping_fades_linearly_and_anchors_fade_out_to_clip_end() {
+        let mut clip = audio_clip(1, 1, 0..10, 10);
+        clip.audio_fade_in_frames = TimeCode(2);
+        clip.audio_fade_out_frames = TimeCode(2);
+        let shaping =
+            ClipAudioShaping::new(&clip, TimeCode(10), 100, Rational::new(10, 1).unwrap());
+
+        assert_close(shaping.gain_at(100), 0.0);
+        assert_close(shaping.gain_at(119), 1.0);
+        assert_close(shaping.gain_at(150), 1.0);
+        assert_close(shaping.gain_at(179), 1.0);
+        assert_close(shaping.gain_at(180), 1.0);
+        assert_close(shaping.gain_at(199), 0.0);
+    }
+
+    #[test]
+    fn clip_audio_shaping_multiplies_gain_fade_and_transition_in_fixed_order() {
+        let mut clip = audio_clip(1, 1, 0..10, 10);
+        clip.audio_gain_tenth_db = -60;
+        clip.audio_fade_in_frames = TimeCode(2);
+        clip.transition_in = Some(Transition {
+            name: "crossfade".to_owned(),
+            duration: TimeCode(4),
+        });
+        let shaping =
+            ClipAudioShaping::new(&clip, TimeCode(10), 100, Rational::new(10, 1).unwrap());
+        let constant = 10.0_f32.powf(-60.0 / 200.0);
+        let expected = (constant * (10.0 / 19.0)) * (10.0 / 39.0);
+
+        assert_close(shaping.gain_at(110), expected);
+    }
+
+    #[test]
+    fn one_frame_audio_fades_and_transition_are_no_ops() {
+        let mut clip = audio_clip(1, 1, 0..10, 10);
+        clip.audio_fade_in_frames = TimeCode(1);
+        clip.audio_fade_out_frames = TimeCode(1);
+        clip.transition_in = Some(Transition {
+            name: "crossfade".to_owned(),
+            duration: TimeCode(1),
+        });
+        let shaping =
+            ClipAudioShaping::new(&clip, TimeCode(10), 100, Rational::new(10, 1).unwrap());
+
+        assert_close(shaping.gain_at(100), 1.0);
+        assert_close(shaping.gain_at(199), 1.0);
+    }
+
+    #[test]
+    fn meter_state_records_post_limiter_stereo_chunk_peaks() {
+        let meter = MeterState::default();
+        let mut chunk = [1.5, -0.25, -0.5, 0.75];
+
+        limit_and_meter_audio_mix(&mut chunk, 2, &meter);
+
+        for (actual, expected) in chunk.into_iter().zip([1.0, -0.25, -0.5, 0.75]) {
+            assert_close(actual, expected);
+        }
+        for (actual, expected) in meter.peaks().into_iter().zip([1.0, 0.75]) {
+            assert_close(actual, expected);
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
     fn playback_feeder_mix_matches_export_across_overlap_trim_gap_and_clamp() {
         crate::initialize_ffmpeg().unwrap();
         let voice = loud_sine("m12-voice", 440);
@@ -846,7 +1048,7 @@ mod tests {
         };
 
         let exported = crate::export::mix_audio(&document, &settings).unwrap();
-        let mut playback = AudioMixer::open(&document, TimeCode::ZERO, 48_000, 2).unwrap();
+        let mut playback = AudioMixer::open(&document, TimeCode::ZERO, 48_000, 2, None).unwrap();
         let played = playback.render_remaining().unwrap();
 
         assert_eq!(played.len(), exported.len());
@@ -857,6 +1059,9 @@ mod tests {
             ("silence", 14..16),
             ("transition fade-in", 16..18),
             ("post-transition steady state", 18..20),
+            ("clip fade-in", 20..22),
+            ("gained clip steady state", 22..28),
+            ("clip fade-out", 28..30),
         ] {
             let samples = interleaved_sample_range(frames, fps, 48_000, 2);
             let maximum_difference = exported[samples.clone()]
@@ -899,10 +1104,29 @@ mod tests {
             "transition first-frame peak {transition_peak} was not attenuated below steady {steady_peak}"
         );
 
+        let gained_head = peak_in(&exported, 20..21, fps);
+        let gained_steady = peak_in(&exported, 22..28, fps);
+        let gained_tail = peak_in(&exported, 29..30, fps);
+        assert!(
+            gained_head < gained_steady * 0.75,
+            "clip fade-in head {gained_head} was not attenuated below steady {gained_steady}"
+        );
+        assert!(
+            gained_tail < gained_steady * 0.75,
+            "clip fade-out tail {gained_tail} was not attenuated below steady {gained_steady}"
+        );
+        let expected_gain = 10.0_f32.powf(-60.0 / 200.0);
+        let gained_ratio = gained_steady / steady_peak;
+        assert!(
+            (gained_ratio - expected_gain).abs() <= 0.02,
+            "-6.0 dB steady peak ratio {gained_ratio} did not approximate {expected_gain}"
+        );
+
         let seek_sample = usize::try_from(frame_to_samples(TimeCode(5), 48_000, fps))
             .unwrap()
             .saturating_mul(2);
-        let mut seeked_playback = AudioMixer::open(&document, TimeCode(5), 48_000, 2).unwrap();
+        let mut seeked_playback =
+            AudioMixer::open(&document, TimeCode(5), 48_000, 2, None).unwrap();
         let seeked = seeked_playback.render_remaining().unwrap();
         let seek_difference = exported[seek_sample..]
             .iter()
@@ -933,6 +1157,9 @@ mod tests {
                     effects: Vec::new(),
                     transition_in: None,
                     link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
                 }],
             }],
             media_pool: vec![MediaAsset {
@@ -950,7 +1177,7 @@ mod tests {
             duration: TimeCode(2),
         };
 
-        let mut mixer = AudioMixer::open(&document, TimeCode::ZERO, 48_000, 2).unwrap();
+        let mut mixer = AudioMixer::open(&document, TimeCode::ZERO, 48_000, 2, None).unwrap();
         let rendered = mixer.render_remaining().unwrap();
 
         assert_eq!(rendered.len(), 19_200);
@@ -990,6 +1217,17 @@ mod tests {
                     sync_lock: true,
                     clips: vec![audio_clip(3, 2, 4..14, 4)],
                 },
+                Track {
+                    id: TrackId(3),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: vec![Clip {
+                        audio_gain_tenth_db: -60,
+                        audio_fade_in_frames: TimeCode(2),
+                        audio_fade_out_frames: TimeCode(2),
+                        ..audio_clip(4, 2, 0..10, 20)
+                    }],
+                },
             ],
             media_pool: vec![
                 audio_asset(1, voice, "voice-440", fps),
@@ -998,7 +1236,7 @@ mod tests {
             markers: Vec::new(),
             fps,
             resolution: (64, 64),
-            duration: TimeCode(20),
+            duration: TimeCode(30),
         }
     }
 
@@ -1012,6 +1250,9 @@ mod tests {
             effects: Vec::new(),
             transition_in: None,
             link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
         }
     }
 
@@ -1048,5 +1289,19 @@ mod tests {
         .unwrap()
         .saturating_mul(channels);
         start..end
+    }
+
+    fn peak_in(samples: &[f32], frames: std::ops::Range<i64>, fps: Rational) -> f32 {
+        samples[interleaved_sample_range(frames, fps, 48_000, 2)]
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0_f32, f32::max)
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-6,
+            "expected {expected}, got {actual}"
+        );
     }
 }

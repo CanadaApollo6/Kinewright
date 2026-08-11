@@ -85,7 +85,7 @@ pub fn render_timeline_state(document: &Document) -> String {
             let asset_name = asset.map_or("<missing>", |asset| asset.name.as_str());
             let _ = writeln!(
                 output,
-                "  clip {} asset={} {:?} timeline={}..{} duration={} source={}..{} effects={} transition_in={}",
+                "  clip {} asset={} {:?} timeline={}..{} duration={} source={}..{} effects={} transition_in={}{}",
                 clip.id,
                 clip.asset,
                 asset_name,
@@ -96,6 +96,7 @@ pub fn render_timeline_state(document: &Document) -> String {
                 source_frame_and_seconds(clip.source_range.end, asset.map(|asset| asset.fps)),
                 render_effects(&clip.effects),
                 render_transition(clip.transition_in.as_ref()),
+                render_clip_audio(clip),
             );
         }
     }
@@ -243,6 +244,20 @@ fn render_title(title: &Title) -> String {
         title.fade_in_frames,
         title.fade_out_frames,
     )
+}
+
+fn render_clip_audio(clip: &openreel_core::Clip) -> String {
+    if clip.audio_gain_tenth_db == 0
+        && clip.audio_fade_in_frames == TimeCode::ZERO
+        && clip.audio_fade_out_frames == TimeCode::ZERO
+    {
+        String::new()
+    } else {
+        format!(
+            " audio=gain:{},fade_in:{}f,fade_out:{}f",
+            clip.audio_gain_tenth_db, clip.audio_fade_in_frames.0, clip.audio_fade_out_frames.0
+        )
+    }
 }
 
 fn link_groups(document: &Document) -> BTreeMap<LinkId, Vec<ClipId>> {
@@ -644,6 +659,9 @@ mod tests {
                             duration: TimeCode(15),
                         }),
                         link: Some(LinkId(2)),
+                        audio_gain_tenth_db: 0,
+                        audio_fade_in_frames: TimeCode::ZERO,
+                        audio_fade_out_frames: TimeCode::ZERO,
                     },
                     Clip {
                         id: ClipId(11),
@@ -654,6 +672,9 @@ mod tests {
                         effects: Vec::new(),
                         transition_in: None,
                         link: Some(LinkId(2)),
+                        audio_gain_tenth_db: 0,
+                        audio_fade_in_frames: TimeCode::ZERO,
+                        audio_fade_out_frames: TimeCode::ZERO,
                     },
                 ],
             }],
@@ -705,6 +726,24 @@ assets:
     }
 
     #[test]
+    fn timeline_state_appends_non_default_clip_audio_values() {
+        let mut document = fixture();
+        let clip = document
+            .tracks
+            .iter_mut()
+            .flat_map(|track| &mut track.clips)
+            .find(|clip| clip.id == ClipId(11))
+            .unwrap();
+        clip.audio_gain_tenth_db = -60;
+        clip.audio_fade_in_frames = TimeCode(12);
+        clip.audio_fade_out_frames = TimeCode::ZERO;
+        let rendered = render_timeline_state(&document);
+        assert!(rendered.contains(
+            "clip 11 asset=4 \"interview.mp4\" timeline=120f/4.000s..180f/6.000s duration=60f/2.000s source=150f/5.000s..210f/7.000s effects=none transition_in=none audio=gain:-60,fade_in:12f,fade_out:0f"
+        ));
+    }
+
+    #[test]
     fn timeline_state_and_clip_info_include_declarative_title_parameters() {
         let mut document = fixture();
         document.tracks.push(Track {
@@ -728,6 +767,9 @@ assets:
                 effects: Vec::new(),
                 transition_in: None,
                 link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
             }],
         });
         let timeline = render_timeline_state(&document);

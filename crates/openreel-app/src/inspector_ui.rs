@@ -3,14 +3,14 @@ use std::collections::BTreeMap;
 use eframe::egui;
 use openreel_core::{
     Clip, ClipContent, ClipId, EFFECT_DESCRIPTORS, Effect, EffectId, MARKER_COLOR_TOKEN_COUNT,
-    Marker, MarkerId, Operation, ParamValue, TITLE_COLORS, TITLE_FONT_SIZES,
+    Marker, MarkerId, MediaKind, Operation, ParamValue, TITLE_COLORS, TITLE_FONT_SIZES,
     TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition, Transition,
 };
 
 use crate::{
     app::OpenReelApp,
     theme::{color, space},
-    timeline_ui::linked_transition_operations,
+    timeline_ui::{linked_members, linked_transition_operations},
 };
 
 const INSPECTOR_MAX_HEIGHT: f32 = 360.0;
@@ -87,9 +87,77 @@ impl OpenReelApp {
             data_row(ui, "Raster", &format!("{width} × {height}"));
         }
 
+        let mut pending = Vec::new();
+        if let Some(audio_clip) = audio_target_clip(&self.document, clip.id) {
+            ui.add_space(space::TWO);
+            ui.strong("Audio");
+            let duration = self
+                .document
+                .clip_duration(&audio_clip)
+                .map_or(0, |duration| duration.0.max(0));
+            let mut gain_tenth_db = audio_clip.audio_gain_tenth_db;
+            let mut fade_in_frames = audio_clip.audio_fade_in_frames.0;
+            let mut fade_out_frames = audio_clip.audio_fade_out_frames.0;
+            let mut changed = ui
+                .add(
+                    egui::Slider::new(&mut gain_tenth_db, -600..=120)
+                        .text("Gain")
+                        .integer()
+                        .custom_formatter(|value, _| format!("{:+.1} dB", value / 10.0)),
+                )
+                .changed();
+            ui.horizontal(|ui| {
+                ui.label("Fade in");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut fade_in_frames)
+                            .range(0..=duration.saturating_sub(fade_out_frames))
+                            .suffix(" f"),
+                    )
+                    .changed();
+                ui.label("Fade out");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut fade_out_frames)
+                            .range(0..=duration.saturating_sub(fade_in_frames))
+                            .suffix(" f"),
+                    )
+                    .changed();
+            });
+            if audio_clip.audio_gain_tenth_db != 0
+                || audio_clip.audio_fade_in_frames != TimeCode::ZERO
+                || audio_clip.audio_fade_out_frames != TimeCode::ZERO
+            {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        color::TEXT_MUTED,
+                        format!(
+                            "gain:{:+.1} dB  fade_in:{}f  fade_out:{}f",
+                            tenth_db_to_db(audio_clip.audio_gain_tenth_db),
+                            audio_clip.audio_fade_in_frames.0,
+                            audio_clip.audio_fade_out_frames.0
+                        ),
+                    );
+                    if ui.small_button("Reset").clicked() {
+                        gain_tenth_db = 0;
+                        fade_in_frames = 0;
+                        fade_out_frames = 0;
+                        changed = true;
+                    }
+                });
+            }
+            if changed {
+                pending.push(clip_audio_operation(
+                    audio_clip.id,
+                    gain_tenth_db,
+                    fade_in_frames,
+                    fade_out_frames,
+                ));
+            }
+        }
+
         ui.add_space(space::TWO);
         ui.strong("Effects");
-        let mut pending = Vec::new();
         for effect in &clip.effects {
             ui.group(|ui| {
                 ui.horizontal(|ui| {
@@ -422,6 +490,45 @@ fn title_param_operation(clip: ClipId, name: &str, value: ParamValue) -> Operati
     }
 }
 
+fn audio_target_clip(document: &openreel_core::Document, selected: ClipId) -> Option<Clip> {
+    let mut members = linked_members(document, selected);
+    members.sort_by_key(|(_, clip)| clip.id != selected);
+    members
+        .into_iter()
+        .map(|(_, clip)| clip)
+        .find(|clip| clip_carries_audio(document, clip))
+}
+
+fn clip_carries_audio(document: &openreel_core::Document, clip: &Clip) -> bool {
+    document
+        .asset(clip.asset)
+        .is_some_and(|asset| matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo))
+}
+
+const fn clip_audio_operation(
+    clip: ClipId,
+    gain_tenth_db: i32,
+    fade_in_frames: i64,
+    fade_out_frames: i64,
+) -> Operation {
+    Operation::SetClipAudio {
+        clip,
+        gain_tenth_db,
+        fade_in_frames: TimeCode(fade_in_frames),
+        fade_out_frames: TimeCode(fade_out_frames),
+    }
+}
+
+fn tenth_db_to_db(value: i32) -> f64 {
+    f64::from(value) / 10.0
+}
+
+#[cfg(test)]
+#[allow(clippy::cast_possible_truncation)]
+fn db_to_tenth_db(value: f64) -> i32 {
+    (value * 10.0).round() as i32
+}
+
 fn marker_param_operation(marker: MarkerId, name: &str, value: ParamValue) -> Operation {
     Operation::SetMarkerParam {
         marker,
@@ -503,9 +610,11 @@ fn range_readout(range: &std::ops::Range<TimeCode>, fps: openreel_core::Rational
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use openreel_core::{
-        AssetId, Document, EffectDescriptor, EffectParameterDescriptor, EffectUniform, Track,
-        TrackId, TrackKind,
+        AssetId, Document, EffectDescriptor, EffectParameterDescriptor, EffectUniform, LinkId,
+        MediaAsset, Rational, Track, TrackId, TrackKind,
     };
 
     use super::*;
@@ -545,6 +654,9 @@ mod tests {
                     duration: TimeCode(6),
                 }),
                 link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
             }],
         });
         assert_eq!(
@@ -588,6 +700,9 @@ mod tests {
             }],
             transition_in: None,
             link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
         };
         assert_eq!(
             add_effect_operation(&clip, &descriptor),
@@ -600,5 +715,86 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn audio_controls_route_to_the_linked_audio_member() {
+        let link = Some(LinkId(7));
+        let document = Document {
+            media_pool: vec![
+                MediaAsset {
+                    id: AssetId(1),
+                    path: PathBuf::from("picture.mov"),
+                    name: "Picture".to_owned(),
+                    duration: TimeCode(30),
+                    fps: Rational::new(30, 1).expect("valid fps"),
+                    kind: MediaKind::Video,
+                    resolution: Some((1920, 1080)),
+                },
+                MediaAsset {
+                    id: AssetId(2),
+                    path: PathBuf::from("sound.wav"),
+                    name: "Sound".to_owned(),
+                    duration: TimeCode(30),
+                    fps: Rational::new(30, 1).expect("valid fps"),
+                    kind: MediaKind::Audio,
+                    resolution: None,
+                },
+            ],
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![media_clip(ClipId(10), AssetId(1), link)],
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: vec![media_clip(ClipId(11), AssetId(2), link)],
+                },
+            ],
+            ..Document::default()
+        };
+
+        let target = audio_target_clip(&document, ClipId(10)).expect("linked audio target");
+        assert_eq!(target.id, ClipId(11));
+        assert_eq!(
+            clip_audio_operation(target.id, -60, 12, 4),
+            Operation::SetClipAudio {
+                clip: ClipId(11),
+                gain_tenth_db: -60,
+                fade_in_frames: TimeCode(12),
+                fade_out_frames: TimeCode(4),
+            }
+        );
+        assert_eq!(
+            audio_target_clip(&document, ClipId(11)).map(|clip| clip.id),
+            Some(ClipId(11))
+        );
+    }
+
+    #[test]
+    fn gain_slider_boundaries_round_trip_through_tenth_decibels() {
+        for value in [-600, 120] {
+            assert_eq!(db_to_tenth_db(tenth_db_to_db(value)), value);
+        }
+    }
+
+    fn media_clip(id: ClipId, asset: AssetId, link: Option<LinkId>) -> Clip {
+        Clip {
+            id,
+            asset,
+            source_range: TimeCode(0)..TimeCode(30),
+            content: ClipContent::Media,
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+            link,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+        }
     }
 }

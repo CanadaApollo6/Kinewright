@@ -464,6 +464,9 @@ mod tests {
                     effects: Vec::new(),
                     transition_in: None,
                     link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
                 };
                 timeline_start += length;
                 clip

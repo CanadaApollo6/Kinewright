@@ -18,7 +18,7 @@ use openreel_core::{
 
 use crate::{
     analysis::VisualAssetService,
-    audio::AudioRuntime,
+    audio::{AudioRuntime, MeterState},
     clock::samples_to_frame,
     compositor::GpuContext,
     decode::{probe_path, thumbnail},
@@ -96,6 +96,7 @@ pub struct FfmpegMediaEngine {
     events_rx: Receiver<MediaEvent>,
     requested: Arc<RequestedPositions>,
     clock: Arc<SharedClock>,
+    meter: Arc<MeterState>,
     next_asset_id: AtomicU64,
     gpu: GpuContext,
     export_document: Arc<RwLock<Arc<Document>>>,
@@ -168,6 +169,8 @@ impl FfmpegMediaEngine {
         let (events_tx, events_rx) = bounded(16);
         let clock = Arc::new(SharedClock::new());
         let worker_clock = Arc::clone(&clock);
+        let meter = Arc::new(MeterState::default());
+        let worker_meter = Arc::clone(&meter);
         let frames_drop_rx = frames_rx.clone();
         let events_drop_rx = events_rx.clone();
         // Scrub positions use shared atomics so rapid mouse movement is coalesced
@@ -187,6 +190,7 @@ impl FfmpegMediaEngine {
                         events_drop_rx,
                     },
                     worker_clock,
+                    worker_meter,
                     worker_requested,
                     worker_gpu,
                 )
@@ -202,6 +206,7 @@ impl FfmpegMediaEngine {
             events_rx,
             requested,
             clock,
+            meter,
             next_asset_id: AtomicU64::new(1),
             gpu,
             export_document: Arc::new(RwLock::new(Arc::new(Document::default()))),
@@ -253,11 +258,13 @@ impl Playback for FfmpegMediaEngine {
     }
 
     fn play(&self, from: TimeCode) {
+        self.meter.clear();
         self.clock.set_frame(from);
         let _ = self.control_tx.send(Control::Play(from));
     }
 
     fn pause(&self) {
+        self.meter.clear();
         let _ = self.control_tx.send(Control::Pause);
     }
 
@@ -270,6 +277,10 @@ impl Playback for FfmpegMediaEngine {
 
     fn position(&self) -> TimeCode {
         self.clock.position()
+    }
+
+    fn output_peaks(&self) -> [f32; 2] {
+        self.meter.peaks()
     }
 }
 
@@ -389,6 +400,7 @@ struct Worker {
     events_tx: Sender<MediaEvent>,
     events_drop_rx: Receiver<MediaEvent>,
     clock: Arc<SharedClock>,
+    meter: Arc<MeterState>,
     requested: Arc<RequestedPositions>,
     handled_frame_sequence: u64,
     handled_seek_sequence: u64,
@@ -411,6 +423,7 @@ impl Worker {
     fn new(
         channels: WorkerChannels,
         clock: Arc<SharedClock>,
+        meter: Arc<MeterState>,
         requested: Arc<RequestedPositions>,
         gpu: GpuContext,
     ) -> Self {
@@ -421,6 +434,7 @@ impl Worker {
             events_tx: channels.events_tx,
             events_drop_rx: channels.events_drop_rx,
             clock,
+            meter,
             requested,
             handled_frame_sequence: 0,
             handled_seek_sequence: 0,
@@ -501,6 +515,7 @@ impl Worker {
 
     fn start_playback(&mut self, from: TimeCode) {
         self.audio = None;
+        self.meter.clear();
         if self.document.duration <= TimeCode::ZERO {
             self.fail(MediaError::Backend("the timeline is empty".to_owned()));
             return;
@@ -532,6 +547,7 @@ impl Worker {
             .fallback_frame
             .store(position.0, Ordering::Release);
         self.audio = None;
+        self.meter.clear();
         self.clock.sample_rate.store(0, Ordering::Release);
         if self.playing {
             self.playing = false;
@@ -602,6 +618,7 @@ impl Worker {
             project_at,
             &self.clock.position_samples,
             &self.clock.sample_rate,
+            Arc::clone(&self.meter),
         )
     }
 

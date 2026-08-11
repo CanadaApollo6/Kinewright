@@ -152,6 +152,32 @@ pub struct Clip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(default)]
     pub link: Option<LinkId>,
+    /// Constant gain for this clip's audio contribution, in integer tenths of
+    /// a decibel. The validated range is -600..=120 (-60.0 dB..=+12.0 dB).
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    #[schemars(default)]
+    pub audio_gain_tenth_db: i32,
+    /// Linear fade-in length for this clip's audio contribution, in project frames.
+    /// The value is non-negative and composes with any transition audio ramp.
+    #[serde(default, skip_serializing_if = "time_code_is_zero")]
+    #[schemars(default)]
+    pub audio_fade_in_frames: TimeCode,
+    /// Linear fade-out length for this clip's audio contribution, in project frames.
+    /// The value is non-negative and the fade window anchors to the clip's project end.
+    #[serde(default, skip_serializing_if = "time_code_is_zero")]
+    #[schemars(default)]
+    pub audio_fade_out_frames: TimeCode,
+}
+
+// Serde's `skip_serializing_if` callbacks receive references to the fields.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn i32_is_zero(value: &i32) -> bool {
+    *value == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn time_code_is_zero(value: &TimeCode) -> bool {
+    value.0 == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -120,6 +120,16 @@ pub enum Operation {
         name: String,
         value: ParamValue,
     },
+    /// Replace all constant audio shaping values for one media clip.
+    SetClipAudio {
+        clip: ClipId,
+        /// Integer tenths of a decibel, in the inclusive range -600..=120.
+        gain_tenth_db: i32,
+        /// Fade-in length in project frames.
+        fade_in_frames: TimeCode,
+        /// Fade-out length in project frames, anchored to the clip end.
+        fade_out_frames: TimeCode,
+    },
     AddTransition {
         clip: ClipId,
         transition: Transition,
@@ -342,6 +352,28 @@ pub enum OpError {
         duration: TimeCode,
         clip_duration: TimeCode,
     },
+    #[error(
+        "audio gain on clip {clip} is {gain_tenth_db} tenth-dB, outside the inclusive range -600..=120"
+    )]
+    AudioGainOutOfRange { clip: ClipId, gain_tenth_db: i32 },
+    #[error("audio {name} on clip {clip} must be non-negative, got {frames} frames")]
+    NegativeAudioFade {
+        clip: ClipId,
+        name: &'static str,
+        frames: TimeCode,
+    },
+    #[error(
+        "audio fades on clip {clip} total {fade_total} frames (in {fade_in_frames} + out {fade_out_frames}), exceeding clip duration {clip_duration}"
+    )]
+    AudioFadesTooLong {
+        clip: ClipId,
+        fade_in_frames: TimeCode,
+        fade_out_frames: TimeCode,
+        fade_total: TimeCode,
+        clip_duration: TimeCode,
+    },
+    #[error("title clip {0} has no audio contribution; SetClipAudio accepts media clips only")]
+    TitleClipHasNoAudio(ClipId),
     #[error("time calculation overflowed")]
     TimeOverflow,
     #[error(transparent)]
@@ -405,6 +437,18 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
         Operation::SetTitleParam { clip, name, value } => {
             set_title_param(doc, *clip, name, value.clone())
         }
+        Operation::SetClipAudio {
+            clip,
+            gain_tenth_db,
+            fade_in_frames,
+            fade_out_frames,
+        } => set_clip_audio(
+            doc,
+            *clip,
+            *gain_tenth_db,
+            *fade_in_frames,
+            *fade_out_frames,
+        ),
         Operation::AddTransition { clip, transition } => {
             add_transition(doc, *clip, transition.clone())
         }
@@ -485,6 +529,9 @@ fn add_clip(
         effects: Vec::new(),
         transition_in: None,
         link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
     };
     doc.tracks[track_index].clips.push(clip);
     doc.tracks[track_index]
@@ -525,6 +572,9 @@ fn add_title(
         effects: Vec::new(),
         transition_in: None,
         link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
     });
     doc.tracks[track_index]
         .clips
@@ -1029,6 +1079,33 @@ fn remove_transition(doc: &mut Document, clip_id: ClipId) -> Result<(), OpError>
     Ok(())
 }
 
+fn set_clip_audio(
+    doc: &mut Document,
+    clip_id: ClipId,
+    gain_tenth_db: i32,
+    fade_in_frames: TimeCode,
+    fade_out_frames: TimeCode,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let clip = &doc.tracks[track_index].clips[clip_index];
+    if matches!(clip.content, ClipContent::Title(_)) {
+        return Err(OpError::TitleClipHasNoAudio(clip_id));
+    }
+    let clip_duration = doc.clip_duration(clip)?;
+    validate_clip_audio_values(
+        clip_id,
+        gain_tenth_db,
+        fade_in_frames,
+        fade_out_frames,
+        clip_duration,
+    )?;
+    let clip = &mut doc.tracks[track_index].clips[clip_index];
+    clip.audio_gain_tenth_db = gain_tenth_db;
+    clip.audio_fade_in_frames = fade_in_frames;
+    clip.audio_fade_out_frames = fade_out_frames;
+    Ok(())
+}
+
 fn find_clip(doc: &Document, id: ClipId) -> Result<(usize, usize), OpError> {
     doc.tracks
         .iter()
@@ -1171,6 +1248,56 @@ fn validate_transition(
         return Err(OpError::TransitionTooLong {
             clip: clip.id,
             duration: transition.duration,
+            clip_duration,
+        });
+    }
+    Ok(())
+}
+
+fn validate_clip_audio(doc: &Document, clip: &Clip) -> Result<(), OpError> {
+    if matches!(clip.content, ClipContent::Title(_))
+        && (clip.audio_gain_tenth_db != 0
+            || clip.audio_fade_in_frames != TimeCode::ZERO
+            || clip.audio_fade_out_frames != TimeCode::ZERO)
+    {
+        return Err(OpError::TitleClipHasNoAudio(clip.id));
+    }
+    validate_clip_audio_values(
+        clip.id,
+        clip.audio_gain_tenth_db,
+        clip.audio_fade_in_frames,
+        clip.audio_fade_out_frames,
+        doc.clip_duration(clip)?,
+    )
+}
+
+fn validate_clip_audio_values(
+    clip: ClipId,
+    gain_tenth_db: i32,
+    fade_in_frames: TimeCode,
+    fade_out_frames: TimeCode,
+    clip_duration: TimeCode,
+) -> Result<(), OpError> {
+    if !(-600..=120).contains(&gain_tenth_db) {
+        return Err(OpError::AudioGainOutOfRange {
+            clip,
+            gain_tenth_db,
+        });
+    }
+    for (name, frames) in [("fade-in", fade_in_frames), ("fade-out", fade_out_frames)] {
+        if frames < TimeCode::ZERO {
+            return Err(OpError::NegativeAudioFade { clip, name, frames });
+        }
+    }
+    let fade_total = fade_in_frames
+        .checked_add(fade_out_frames)
+        .ok_or(OpError::TimeOverflow)?;
+    if fade_total > clip_duration {
+        return Err(OpError::AudioFadesTooLong {
+            clip,
+            fade_in_frames,
+            fade_out_frames,
+            fade_total,
             clip_duration,
         });
     }
@@ -1365,6 +1492,7 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
             if let Some(transition) = &clip.transition_in {
                 validate_transition(doc, clip, transition)?;
             }
+            validate_clip_audio(doc, clip)?;
             if let Some((previous_clip, previous_end)) = previous {
                 if clip.timeline_start < previous_clip.timeline_start {
                     return Err(OpError::ClipsUnsorted {

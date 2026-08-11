@@ -64,6 +64,7 @@ pub(crate) struct OpenReelApp {
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) position: TimeCode,
     pub(crate) playing: bool,
+    pub(crate) meter_levels: [f32; 2],
     pub(crate) resume_after_scrub: bool,
     pub(crate) selected_clip: Option<ClipId>,
     pub(crate) selected_marker: Option<MarkerId>,
@@ -160,6 +161,7 @@ impl OpenReelApp {
             texture: None,
             position: TimeCode::ZERO,
             playing: false,
+            meter_levels: [0.0; 2],
             resume_after_scrub: false,
             selected_clip: None,
             selected_marker: None,
@@ -470,6 +472,7 @@ impl OpenReelApp {
         self.position = TimeCode::ZERO;
         self.timeline_scroll_target = 0.0;
         self.playing = false;
+        self.meter_levels = [0.0; 2];
         self.resume_after_scrub = false;
         self.selected_clip = None;
         self.selected_marker = None;
@@ -842,6 +845,7 @@ fn operation_status(operation: &Operation) -> String {
         Operation::SetTitleParam { clip, name, .. } => {
             format!("Set {name} on title clip {clip}")
         }
+        Operation::SetClipAudio { clip, .. } => format!("Set audio on clip {clip}"),
         Operation::AddTransition { clip, transition } => {
             format!("Added {} transition to clip {clip}", transition.name)
         }

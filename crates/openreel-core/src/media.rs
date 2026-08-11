@@ -306,6 +306,8 @@ pub trait Playback: Send + Sync {
     fn seek(&self, to: TimeCode);
     /// Read the atomically published audio-master position.
     fn position(&self) -> TimeCode;
+    /// Read the current post-limiter master output peaks for left and right.
+    fn output_peaks(&self) -> [f32; 2];
 }
 
 pub trait Analysis: Send + Sync {

@@ -1176,6 +1176,10 @@ mod tests {
         fn position(&self) -> TimeCode {
             TimeCode::ZERO
         }
+
+        fn output_peaks(&self) -> [f32; 2] {
+            [0.0; 2]
+        }
     }
 
     impl Analysis for NoopMedia {
@@ -1273,6 +1277,9 @@ mod tests {
                     effects: Vec::new(),
                     transition_in: None,
                     link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
                 }],
             }],
             media_pool: vec![asset],

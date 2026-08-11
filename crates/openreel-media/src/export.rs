@@ -10,7 +10,7 @@ use openreel_core::{
 };
 
 use crate::{
-    audio::{decode_audio_range, limit_audio_mix, transition_audio_ramp},
+    audio::{ClipAudioShaping, decode_audio_range, limit_audio_mix},
     clock::frame_to_samples,
     compositor::GpuContext,
     decode::backend,
@@ -385,14 +385,17 @@ pub(crate) fn mix_audio(
             .map_err(|_| MediaError::Backend("audio clip start is too large".to_owned()))?
             .checked_mul(usize::from(AUDIO_CHANNELS))
             .ok_or_else(|| MediaError::Backend("audio clip start is too large".to_owned()))?;
-        let transition_ramp = transition_audio_ramp(clip, AUDIO_RATE, document.fps);
+        let clip_duration = document
+            .clip_duration(clip)
+            .map_err(|error| MediaError::Backend(error.to_string()))?;
+        let shaping = ClipAudioShaping::new(clip, clip_duration, AUDIO_RATE, document.fps);
         let channel_count = usize::from(AUDIO_CHANNELS);
         for (sample_index, (destination, sample)) in
             mix.iter_mut().skip(start).zip(decoded).enumerate()
         {
             let frame_offset = u64::try_from(sample_index / channel_count).unwrap_or(u64::MAX);
             let project_sample = start_frame.saturating_add(frame_offset);
-            let gain = transition_ramp.map_or(1.0, |ramp| ramp.gain_at(project_sample));
+            let gain = shaping.gain_at(project_sample);
             *destination += sample * gain;
         }
     }

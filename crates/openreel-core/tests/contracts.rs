@@ -186,6 +186,12 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             name: "text".to_owned(),
             value: ParamValue::Text("Chapter one".to_owned()),
         },
+        Operation::SetClipAudio {
+            clip: ClipId(1),
+            gain_tenth_db: -60,
+            fade_in_frames: TimeCode(6),
+            fade_out_frames: TimeCode(9),
+        },
         Operation::AddTransition {
             clip: ClipId(1),
             transition: Transition {
@@ -216,6 +222,15 @@ fn pre_m15_project_json_defaults_additive_fields_without_changing_legacy_shape()
     assert!(document.markers.is_empty());
     assert!(document.tracks[0].sync_lock);
     assert_eq!(document.clip(ClipId(1)).unwrap().link, None);
+    assert_eq!(document.clip(ClipId(1)).unwrap().audio_gain_tenth_db, 0);
+    assert_eq!(
+        document.clip(ClipId(1)).unwrap().audio_fade_in_frames,
+        TimeCode::ZERO
+    );
+    assert_eq!(
+        document.clip(ClipId(1)).unwrap().audio_fade_out_frames,
+        TimeCode::ZERO
+    );
     assert_eq!(
         document.clip(ClipId(1)).unwrap().content,
         ClipContent::Media
@@ -226,6 +241,9 @@ fn pre_m15_project_json_defaults_additive_fields_without_changing_legacy_shape()
     assert!(!encoded.contains("\"sync_lock\""));
     assert!(!encoded.contains("\"link\""));
     assert!(!encoded.contains("\"content\""));
+    assert!(!encoded.contains("\"audio_gain_tenth_db\""));
+    assert!(!encoded.contains("\"audio_fade_in_frames\""));
+    assert!(!encoded.contains("\"audio_fade_out_frames\""));
 
     let mut unlocked = document;
     Operation::SetTrackSyncLock {
@@ -1105,6 +1123,177 @@ fn transition_descriptors_validate_all_registered_names_and_document_loads() {
 }
 
 #[test]
+fn clip_audio_operation_validates_bounds_fades_and_titles_atomically() {
+    let mut document = document_with_one_clip();
+    for gain_tenth_db in [-600, 120] {
+        Operation::SetClipAudio {
+            clip: ClipId(1),
+            gain_tenth_db,
+            fade_in_frames: TimeCode(10),
+            fade_out_frames: TimeCode(20),
+        }
+        .apply(&mut document)
+        .unwrap();
+        assert_eq!(
+            document.clip(ClipId(1)).unwrap().audio_gain_tenth_db,
+            gain_tenth_db
+        );
+    }
+
+    for gain_tenth_db in [-601, 121] {
+        let before = document.clone();
+        assert_eq!(
+            Operation::SetClipAudio {
+                clip: ClipId(1),
+                gain_tenth_db,
+                fade_in_frames: TimeCode::ZERO,
+                fade_out_frames: TimeCode::ZERO,
+            }
+            .apply(&mut document),
+            Err(OpError::AudioGainOutOfRange {
+                clip: ClipId(1),
+                gain_tenth_db,
+            })
+        );
+        assert_eq!(document, before);
+    }
+
+    for (fade_in_frames, fade_out_frames, expected) in [
+        (
+            TimeCode(-1),
+            TimeCode::ZERO,
+            OpError::NegativeAudioFade {
+                clip: ClipId(1),
+                name: "fade-in",
+                frames: TimeCode(-1),
+            },
+        ),
+        (
+            TimeCode::ZERO,
+            TimeCode(-1),
+            OpError::NegativeAudioFade {
+                clip: ClipId(1),
+                name: "fade-out",
+                frames: TimeCode(-1),
+            },
+        ),
+        (
+            TimeCode(15),
+            TimeCode(16),
+            OpError::AudioFadesTooLong {
+                clip: ClipId(1),
+                fade_in_frames: TimeCode(15),
+                fade_out_frames: TimeCode(16),
+                fade_total: TimeCode(31),
+                clip_duration: TimeCode(30),
+            },
+        ),
+    ] {
+        let before = document.clone();
+        assert_eq!(
+            Operation::SetClipAudio {
+                clip: ClipId(1),
+                gain_tenth_db: 0,
+                fade_in_frames,
+                fade_out_frames,
+            }
+            .apply(&mut document),
+            Err(expected)
+        );
+        assert_eq!(document, before);
+    }
+
+    let mut titles = empty_timeline(Rational::new(30, 1).unwrap());
+    Operation::AddTitle {
+        track: TrackId(1),
+        at: TimeCode::ZERO,
+        duration: TimeCode(30),
+        title: Title::default(),
+    }
+    .apply(&mut titles)
+    .unwrap();
+    assert_eq!(
+        Operation::SetClipAudio {
+            clip: ClipId(1),
+            gain_tenth_db: 0,
+            fade_in_frames: TimeCode::ZERO,
+            fade_out_frames: TimeCode::ZERO,
+        }
+        .apply(&mut titles),
+        Err(OpError::TitleClipHasNoAudio(ClipId(1)))
+    );
+}
+
+#[test]
+fn hand_edited_clip_audio_values_are_rejected_during_document_validation() {
+    let valid = document_with_one_clip();
+    for (gain, fade_in, fade_out, expected) in [
+        (
+            121,
+            TimeCode::ZERO,
+            TimeCode::ZERO,
+            OpError::AudioGainOutOfRange {
+                clip: ClipId(1),
+                gain_tenth_db: 121,
+            },
+        ),
+        (
+            0,
+            TimeCode(-1),
+            TimeCode::ZERO,
+            OpError::NegativeAudioFade {
+                clip: ClipId(1),
+                name: "fade-in",
+                frames: TimeCode(-1),
+            },
+        ),
+        (
+            0,
+            TimeCode(20),
+            TimeCode(11),
+            OpError::AudioFadesTooLong {
+                clip: ClipId(1),
+                fade_in_frames: TimeCode(20),
+                fade_out_frames: TimeCode(11),
+                fade_total: TimeCode(31),
+                clip_duration: TimeCode(30),
+            },
+        ),
+    ] {
+        let mut value = serde_json::to_value(&valid).unwrap();
+        let clip = &mut value["tracks"][0]["clips"][0];
+        clip["audio_gain_tenth_db"] = serde_json::json!(gain);
+        clip["audio_fade_in_frames"] = serde_json::json!(fade_in.0);
+        clip["audio_fade_out_frames"] = serde_json::json!(fade_out.0);
+        let loaded: Document = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.validate(), Err(expected));
+    }
+}
+
+#[test]
+fn clip_audio_uses_exact_snapshot_undo() {
+    let initial = document_with_one_clip();
+    let core = Core::spawn(initial.clone()).unwrap();
+    let Event::DocumentChanged { doc, .. } = core
+        .request(Command::Do(Operation::SetClipAudio {
+            clip: ClipId(1),
+            gain_tenth_db: -60,
+            fade_in_frames: TimeCode(6),
+            fade_out_frames: TimeCode(9),
+        }))
+        .unwrap()
+    else {
+        panic!("clip audio operation should be accepted");
+    };
+    assert_eq!(doc.clip(ClipId(1)).unwrap().audio_gain_tenth_db, -60);
+
+    let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
+        panic!("clip audio operation should be undoable");
+    };
+    assert_eq!(&*doc, &initial);
+}
+
+#[test]
 fn add_and_remove_track_are_validated_and_atomic() {
     let mut doc = Document::default();
     let video = Track {
@@ -1143,6 +1332,9 @@ fn add_and_remove_track_are_validated_and_atomic() {
             effects: Vec::new(),
             transition_in: None,
             link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
         }],
     };
     assert_eq!(
@@ -1409,6 +1601,9 @@ fn unsorted_input_document_is_rejected() {
         effects: Vec::new(),
         transition_in: None,
         link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
     };
     let earlier = Clip {
         id: ClipId(2),

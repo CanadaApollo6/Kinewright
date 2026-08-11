@@ -363,6 +363,9 @@ mod tests {
             effects: Vec::new(),
             transition_in: None,
             link,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
         }
     }
 

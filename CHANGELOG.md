@@ -78,5 +78,10 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   inspector's transition picker, and agent tool docs; every transition also
   ramps the clip's audio from silence with feeder/export parity at 1e-6, and
   transitioned clips show their fade window on the timeline
+- Per-clip audio control: gain (-60 dB..+12 dB in exact tenths) and audio
+  fade in/out as clip properties with one idempotent operation, composed with
+  transition ramps by a single shared evaluator in both playback and export
+  (parity held at 1e-6), inspector controls that route to the linked audio
+  member, and a master stereo peak meter in the transport bar
 
 [Unreleased]: https://github.com/CanadaApollo6/OpenReel/commits/main

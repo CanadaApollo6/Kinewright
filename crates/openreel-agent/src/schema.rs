@@ -118,6 +118,7 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::RemoveEffect { .. } => "remove_effect",
         Operation::SetEffectParam { .. } => "set_effect_param",
         Operation::SetTitleParam { .. } => "set_title_param",
+        Operation::SetClipAudio { .. } => "set_clip_audio",
         Operation::AddTransition { .. } => "add_transition",
         Operation::RemoveTransition { .. } => "remove_transition",
         Operation::SetMarkerParam { .. } => "set_marker_param",
@@ -164,7 +165,7 @@ fn operation_tool(
             name.as_str(),
             "delete_clip" | "ripple_delete_clip" | "remove_track"
         ))
-        .idempotent(false)
+        .idempotent(name == "set_clip_audio")
         .open_world(false);
     let mut description = format!(
         "Apply Operation::{variant} to the live timeline. All frame values are exact integers."
@@ -199,6 +200,9 @@ fn operation_tool(
         ),
         "AddMarker" | "MoveMarker" | "RemoveMarker" | "SetMarkerParam" => description.push_str(
             " Markers are non-destructive editorial suggestions and are preferred when reviewing footage.",
+        ),
+        "SetClipAudio" => description.push_str(
+            " gain_tenth_db is an integer number of tenths of a decibel in -600..=120. Fade values are non-negative project frames whose sum cannot exceed the clip duration. Fade-out anchors to the clip's project end. Gain and clip fades compose multiplicatively with transition audio ramps.",
         ),
         _ => {}
     }
@@ -301,6 +305,7 @@ mod tests {
                 "remove_effect",
                 "set_effect_param",
                 "set_title_param",
+                "set_clip_audio",
                 "add_transition",
                 "remove_transition",
                 "set_marker_param",
@@ -355,6 +360,25 @@ mod tests {
         }
         assert!(description.contains("positive integer"));
         assert!(description.contains("audio gain"));
+    }
+
+    #[test]
+    fn set_clip_audio_schema_documents_units_and_composition() {
+        let tools = operation_tools().unwrap();
+        let set_clip_audio = tools
+            .iter()
+            .find(|definition| definition.tool.name == "set_clip_audio")
+            .unwrap();
+        let description = set_clip_audio.tool.description.as_deref().unwrap();
+        assert!(description.contains("tenths of a decibel"));
+        assert!(description.contains("-600..=120"));
+        assert!(description.contains("Fade-out anchors to the clip's project end"));
+        assert!(description.contains("transition audio ramps"));
+        let serialized = serde_json::to_value(&set_clip_audio.tool).unwrap();
+        assert_eq!(
+            serialized["annotations"]["idempotentHint"],
+            serde_json::Value::Bool(true)
+        );
     }
 
     #[test]
