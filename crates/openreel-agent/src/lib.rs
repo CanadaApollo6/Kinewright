@@ -14,4 +14,7 @@ pub use render::{
 };
 pub use schema::{all_tool_names, operation_tools};
 pub use server::{ConfirmationBroker, ConfirmationRequest, McpServer, McpServerError};
-pub use silence::{shrink_silence_span_for_cutting, silence_cut_margin_frames};
+pub use silence::{
+    shrink_silence_span_for_cutting, shrink_silence_span_for_cutting_with_transcript,
+    silence_cut_margin_frames,
+};

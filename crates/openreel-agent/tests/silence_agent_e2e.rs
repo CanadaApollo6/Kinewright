@@ -4,10 +4,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use openreel_agent::{ClaudeCodeDriver, McpServer};
+use openreel_agent::{
+    ClaudeCodeDriver, McpServer, shrink_silence_span_for_cutting_with_transcript,
+};
 use openreel_core::{
     AgentDriver, AgentEvent, Analysis, AssetId, Command as CoreCommand, Core, Document, Event,
-    Playback, Query, QueryResult, SessionConfig, SilenceStatus, TimeCode,
+    Playback, Query, QueryResult, SessionConfig, SilenceSpan, SilenceStatus, TimeCode,
     map_source_range_to_project,
 };
 use openreel_media::test_support::{
@@ -121,9 +123,26 @@ fn claude_removes_long_silences_with_one_atomic_plan() {
     let remaining_silences = media
         .timeline_silences(&edited, None, TimeCode(20))
         .expect("edited silence mapping should succeed");
+    let remaining_cuttable = remaining_silences
+        .iter()
+        .flat_map(|span| {
+            let source_fps = edited
+                .asset(span.asset)
+                .expect("remaining silence must retain its asset")
+                .fps;
+            shrink_silence_span_for_cutting_with_transcript(
+                SilenceSpan {
+                    source_start: span.source_start,
+                    source_end: span.source_end,
+                },
+                source_fps,
+                Some(&transcript.words),
+            )
+        })
+        .collect::<Vec<_>>();
     assert!(
-        remaining_silences.is_empty(),
-        "long silence remains after edit: {remaining_silences:?}"
+        remaining_cuttable.is_empty(),
+        "cuttable long silence remains after edit: raw={remaining_silences:?} clamped={remaining_cuttable:?}"
     );
     for adjacent in edited.tracks[0].clips.windows(2) {
         let asset = edited

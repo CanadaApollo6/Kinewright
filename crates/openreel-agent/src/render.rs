@@ -1,13 +1,13 @@
-use std::{collections::BTreeMap, fmt::Write as _};
+use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
 
 use openreel_core::{
-    AssetId, ClipContent, ClipId, Document, Effect, FrameRounding, LinkId, ParamValue, Rational,
-    SceneStatus, SilenceSpan, SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, Title, TrackKind, TranscriptStatus, map_frames_with_rounding,
-    map_source_range_to_project,
+    AssetId, AssetTranscript, ClipContent, ClipId, Document, Effect, FrameRounding, LinkId,
+    ParamValue, Rational, SceneStatus, SilenceSpan, SilenceStatus, TimeCode, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, Title, TrackKind, TranscriptStatus,
+    map_frames_with_rounding, map_source_range_to_project,
 };
 
-use crate::shrink_silence_span_for_cutting;
+use crate::shrink_silence_span_for_cutting_with_transcript;
 
 #[must_use]
 // Debug formatting keeps asset paths quoted and escaped in the stable text protocol.
@@ -344,6 +344,7 @@ pub fn render_asset_silences(
     asset: AssetId,
     status: &SilenceStatus,
     minimum_duration: TimeCode,
+    transcript: Option<&AssetTranscript>,
 ) -> String {
     match status {
         SilenceStatus::NotRequested => format!("asset {asset} silences status=not-requested"),
@@ -361,7 +362,13 @@ pub fn render_asset_silences(
                 .filter(|span| {
                     span.source_end.0.saturating_sub(span.source_start.0) >= minimum_duration.0
                 })
-                .filter_map(|span| shrink_silence_span_for_cutting(*span, silences.source_fps))
+                .flat_map(|span| {
+                    shrink_silence_span_for_cutting_with_transcript(
+                        *span,
+                        silences.source_fps,
+                        transcript.map(|transcript| transcript.words.as_slice()),
+                    )
+                })
                 .collect::<Vec<_>>();
             let mut output = format!(
                 "asset {asset} silences fps={}/{} threshold={:.2}dBFS min_duration={} spans={}\n",
@@ -392,10 +399,17 @@ pub fn render_timeline_silences(
     document: &Document,
     range: std::ops::Range<TimeCode>,
     spans: &[TimelineSilenceSpan],
+    transcripts: &BTreeMap<AssetId, Arc<AssetTranscript>>,
 ) -> String {
     let spans = spans
         .iter()
-        .filter_map(|span| padded_timeline_silence(document, *span))
+        .flat_map(|span| {
+            clamped_timeline_silences(
+                document,
+                *span,
+                transcripts.get(&span.asset).map(Arc::as_ref),
+            )
+        })
         .filter(|span| span.project_end > range.start && span.project_start < range.end)
         .collect::<Vec<_>>();
     let mut output = format!(
@@ -423,38 +437,46 @@ pub fn render_timeline_silences(
     output
 }
 
-fn padded_timeline_silence(
+fn clamped_timeline_silences(
     document: &Document,
     span: TimelineSilenceSpan,
-) -> Option<TimelineSilenceSpan> {
-    let asset = document.asset(span.asset)?;
-    let clip = document.clip(span.clip)?;
-    let padded = shrink_silence_span_for_cutting(
+    transcript: Option<&AssetTranscript>,
+) -> Vec<TimelineSilenceSpan> {
+    let Some(asset) = document.asset(span.asset) else {
+        return Vec::new();
+    };
+    let Some(clip) = document.clip(span.clip) else {
+        return Vec::new();
+    };
+    shrink_silence_span_for_cutting_with_transcript(
         SilenceSpan {
             source_start: span.source_start,
             source_end: span.source_end,
         },
         asset.fps,
-    )?;
-    let start_offset = padded.source_start.checked_sub(clip.source_range.start)?;
-    let end_offset = padded.source_end.checked_sub(clip.source_range.start)?;
-    let project_start = clip.timeline_start.checked_add(
-        map_frames_with_rounding(start_offset, asset.fps, document.fps, FrameRounding::Floor)
-            .ok()?,
-    )?;
-    let project_end = clip.timeline_start.checked_add(
-        map_frames_with_rounding(end_offset, asset.fps, document.fps, FrameRounding::Ceil).ok()?,
-    )?;
-    if project_end <= project_start {
-        return None;
-    }
-    Some(TimelineSilenceSpan {
-        source_start: padded.source_start,
-        source_end: padded.source_end,
-        project_start,
-        project_end,
-        ..span
+        transcript.map(|transcript| transcript.words.as_slice()),
+    )
+    .into_iter()
+    .filter_map(|clamped| {
+        let start_offset = clamped.source_start.checked_sub(clip.source_range.start)?;
+        let end_offset = clamped.source_end.checked_sub(clip.source_range.start)?;
+        let project_start = clip.timeline_start.checked_add(
+            map_frames_with_rounding(start_offset, asset.fps, document.fps, FrameRounding::Floor)
+                .ok()?,
+        )?;
+        let project_end = clip.timeline_start.checked_add(
+            map_frames_with_rounding(end_offset, asset.fps, document.fps, FrameRounding::Ceil)
+                .ok()?,
+        )?;
+        (project_end > project_start).then_some(TimelineSilenceSpan {
+            source_start: clamped.source_start,
+            source_end: clamped.source_end,
+            project_start,
+            project_end,
+            ..span
+        })
     })
+    .collect()
 }
 
 #[must_use]
@@ -788,7 +810,7 @@ clip=10 asset=4 project=9f/0.300s..15f/0.500s source=39f/1.300s..45f/1.500s "um"
             ],
         }));
 
-        let rendered = render_asset_silences(AssetId(4), &status, TimeCode(6));
+        let rendered = render_asset_silences(AssetId(4), &status, TimeCode(6), None);
         let expected = r"asset 4 silences fps=30/1 threshold=-40.00dBFS min_duration=6f/0.200s spans=1
 36f/1.200s..60f/2.000s duration=24f/0.800s";
         assert_eq!(rendered, expected);
@@ -817,7 +839,12 @@ clip=10 asset=4 project=9f/0.300s..15f/0.500s source=39f/1.300s..45f/1.500s "um"
             },
         ];
 
-        let rendered = render_timeline_silences(&fixture(), TimeCode(0)..TimeCode(90), &spans);
+        let rendered = render_timeline_silences(
+            &fixture(),
+            TimeCode(0)..TimeCode(90),
+            &spans,
+            &BTreeMap::new(),
+        );
         let expected = r"timeline silences range=0f/0.000s..90f/3.000s spans=1
 clip=10 asset=4 project=6f/0.200s..30f/1.000s source=36f/1.200s..60f/2.000s";
         assert_eq!(rendered, expected);

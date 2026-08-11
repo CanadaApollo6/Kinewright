@@ -31,11 +31,6 @@ use openreel_media::{
 
 const FPS: u32 = 30;
 const LONG_SILENCE_FRAMES: i64 = 20;
-/// Post-edit absence threshold. Cutting a padded span leaves up to
-/// 2 x margin (6 source frames at the 30 fps fixtures) of raw silence the
-/// agent's pre-shrunk tool view cannot see; the assertion must not fail on
-/// that invisible residue while still catching planted spans left uncut.
-const RESIDUAL_SILENCE_FRAMES: i64 = LONG_SILENCE_FRAMES + 6;
 const SCENE_CONFIDENCE_BASIS_POINTS: u16 = 1_000;
 const FILLER_WORDS: &[&str] = &["um", "uh", "erm", "er"];
 
@@ -292,7 +287,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
                     word_set: "spoken-content".to_owned(),
                 },
                 EvalAssertion::NoSilenceAtLeast {
-                    source_frames: TimeCode(RESIDUAL_SILENCE_FRAMES),
+                    source_frames: TimeCode(LONG_SILENCE_FRAMES),
                 },
                 EvalAssertion::DurationBounds {
                     bounds: "without-long-silence".to_owned(),
@@ -439,7 +434,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
                     word_set: "selected-fillers".to_owned(),
                 },
                 EvalAssertion::NoSilenceAtLeast {
-                    source_frames: TimeCode(RESIDUAL_SILENCE_FRAMES),
+                    source_frames: TimeCode(LONG_SILENCE_FRAMES),
                 },
                 EvalAssertion::DurationBounds {
                     bounds: "rough-cut".to_owned(),
@@ -552,8 +547,10 @@ fn fixture_e2() -> Result<PreparedFixture, EvalError> {
     let maximum = maximum_duration_after_expected_silence_cuts(
         asset.duration,
         &silences,
+        Some(transcript.as_ref()),
         TimeCode(LONG_SILENCE_FRAMES),
     );
+    context.transcripts.insert(asset.id, transcript);
     let minimum = TimeCode(maximum.0.saturating_mul(2) / 5);
     context
         .duration_bounds
@@ -708,6 +705,11 @@ fn fixture_e7() -> Result<PreparedFixture, EvalError> {
     for ((name, _, _), asset) in takes.iter().zip(&assets) {
         context.asset_aliases.insert((*name).to_owned(), asset.id);
     }
+    context.transcripts.extend(
+        transcripts
+            .iter()
+            .map(|(asset, transcript)| (*asset, Arc::clone(transcript))),
+    );
     let selected = [0_usize, 2, 3];
     let mut selected_union = BTreeSet::new();
     let mut selected_fillers = BTreeSet::new();
@@ -731,6 +733,7 @@ fn fixture_e7() -> Result<PreparedFixture, EvalError> {
             maximum_duration_after_expected_silence_cuts(
                 asset.duration,
                 &silences[&asset.id],
+                Some(transcripts[&asset.id].as_ref()),
                 TimeCode(LONG_SILENCE_FRAMES),
             )
             .0,

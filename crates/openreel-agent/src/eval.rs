@@ -9,14 +9,15 @@ use std::{
 };
 
 use openreel_core::{
-    AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, Command, Core, Document, Event,
-    HarnessInfo, Operation, ParamValue, Playback, Query, QueryResult, SessionConfig, TimeCode,
-    TimelineSceneChange, TimelineSilenceSpan, map_source_range_to_project,
+    AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, AssetTranscript, Command, Core,
+    Document, Event, HarnessInfo, Operation, ParamValue, Playback, Query, QueryResult,
+    SessionConfig, SilenceSpan, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
+    map_source_range_to_project,
 };
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::{ConfirmationBroker, McpServer, shrink_silence_span_for_cutting};
+use crate::{ConfirmationBroker, McpServer, shrink_silence_span_for_cutting_with_transcript};
 
 /// Compute the upper duration bound after cutting every qualifying reported
 /// silence. Each cut receives one project-frame boundary-rounding allowance.
@@ -24,6 +25,7 @@ use crate::{ConfirmationBroker, McpServer, shrink_silence_span_for_cutting};
 pub fn maximum_duration_after_expected_silence_cuts(
     source_duration: TimeCode,
     silences: &AssetSilences,
+    transcript: Option<&AssetTranscript>,
     minimum_source_frames: TimeCode,
 ) -> TimeCode {
     let (removable_frames, cut_count) = silences
@@ -32,7 +34,13 @@ pub fn maximum_duration_after_expected_silence_cuts(
         .filter(|span| {
             span.source_end.0.saturating_sub(span.source_start.0) >= minimum_source_frames.0
         })
-        .filter_map(|span| shrink_silence_span_for_cutting(*span, silences.source_fps))
+        .flat_map(|span| {
+            shrink_silence_span_for_cutting_with_transcript(
+                *span,
+                silences.source_fps,
+                transcript.map(|transcript| transcript.words.as_slice()),
+            )
+        })
         .fold((0_i64, 0_i64), |(frames, cuts), span| {
             (
                 frames.saturating_add(span.source_end.0.saturating_sub(span.source_start.0)),
@@ -128,6 +136,7 @@ pub enum EvalAssertion {
 #[derive(Debug, Clone, Default)]
 pub struct FixtureContext {
     pub asset_aliases: BTreeMap<String, AssetId>,
+    pub transcripts: BTreeMap<AssetId, Arc<AssetTranscript>>,
     pub word_sets: BTreeMap<String, Vec<String>>,
     pub scene_sets: BTreeMap<String, Vec<(AssetId, TimeCode)>>,
     pub duration_bounds: BTreeMap<String, (TimeCode, TimeCode)>,
@@ -637,12 +646,27 @@ fn evaluate_assertion(
                 .filter(|span| {
                     span.source_end.0.saturating_sub(span.source_start.0) >= source_frames.0
                 })
+                .flat_map(|span| {
+                    let source_fps = outcome
+                        .final_document
+                        .asset(span.asset)
+                        .map_or(outcome.final_document.fps, |asset| asset.fps);
+                    let transcript = outcome.context.transcripts.get(&span.asset);
+                    shrink_silence_span_for_cutting_with_transcript(
+                        SilenceSpan {
+                            source_start: span.source_start,
+                            source_end: span.source_end,
+                        },
+                        source_fps,
+                        transcript.map(|transcript| transcript.words.as_slice()),
+                    )
+                })
                 .count();
             assertion_result(
                 "long silence absent",
                 remaining == 0,
                 format!(
-                    "observed {remaining} silence spans at least {} source frames",
+                    "observed {remaining} cuttable silence spans from raw spans at least {} source frames",
                     source_frames.0
                 ),
             )
@@ -1406,7 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn fake_driver_eval_accepts_the_padded_silence_bound_and_rounding_allowance() {
+    fn fake_driver_eval_accepts_the_transcript_clamped_bound_and_rounding_allowance() {
         let silences = AssetSilences {
             asset: AssetId(1),
             content_sha256: "fixture".to_owned(),
@@ -1425,9 +1449,35 @@ mod tests {
                 },
             ],
         };
-        let maximum =
-            maximum_duration_after_expected_silence_cuts(TimeCode(100), &silences, TimeCode(20));
-        assert_eq!(maximum, TimeCode(54));
+        let transcript = AssetTranscript {
+            asset: AssetId(1),
+            content_sha256: "fixture".to_owned(),
+            source_fps: Rational::new(30, 1).unwrap(),
+            words: vec![
+                openreel_core::TranscriptWord {
+                    text: "left".to_owned(),
+                    source_start: TimeCode(0),
+                    source_end: TimeCode(15),
+                },
+                openreel_core::TranscriptWord {
+                    text: "middle".to_owned(),
+                    source_start: TimeCode(38),
+                    source_end: TimeCode(52),
+                },
+                openreel_core::TranscriptWord {
+                    text: "right".to_owned(),
+                    source_start: TimeCode(78),
+                    source_end: TimeCode(90),
+                },
+            ],
+        };
+        let maximum = maximum_duration_after_expected_silence_cuts(
+            TimeCode(100),
+            &silences,
+            Some(&transcript),
+            TimeCode(20),
+        );
+        assert_eq!(maximum, TimeCode(65));
 
         let driver = FakeDriver {
             events: vec![AgentEvent::Done],
@@ -1446,6 +1496,7 @@ mod tests {
         final_document.tracks[0].clips[0].source_range.end = maximum;
         final_document.duration = maximum;
         let mut context = FixtureContext::default();
+        context.transcripts.insert(AssetId(1), Arc::new(transcript));
         context
             .duration_bounds
             .insert("padded-cut".to_owned(), (TimeCode(20), maximum));

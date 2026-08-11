@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fmt::Write as _,
     future::Future,
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
@@ -571,8 +571,15 @@ impl OpenReelMcp {
             self.analysis.request_silence_detection(asset.clone());
             status = self.analysis.silence_status(asset_id);
         }
+        let transcript = match self.analysis.transcript_status(asset_id) {
+            TranscriptStatus::Ready(transcript) => Some(transcript),
+            _ => None,
+        };
         Ok(success_text(render_asset_silences(
-            asset_id, &status, minimum,
+            asset_id,
+            &status,
+            minimum,
+            transcript.as_deref(),
         )))
     }
 
@@ -654,6 +661,14 @@ impl OpenReelMcp {
                 self.analysis.request_silence_detection(asset.clone());
             }
         }
+        let transcripts = document
+            .media_pool
+            .iter()
+            .filter_map(|asset| match self.analysis.transcript_status(asset.id) {
+                TranscriptStatus::Ready(transcript) => Some((asset.id, transcript)),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
         let spans: Vec<TimelineSilenceSpan> = match self.analysis.timeline_silences(
             &document,
             Some(range.clone()),
@@ -662,7 +677,7 @@ impl OpenReelMcp {
             Ok(spans) => spans,
             Err(error) => return Ok(error_text(error.to_string())),
         };
-        let mut rendered = render_timeline_silences(&document, range, &spans);
+        let mut rendered = render_timeline_silences(&document, range, &spans, &transcripts);
         for asset in &document.media_pool {
             let status = self.analysis.silence_status(asset.id);
             if !matches!(status, SilenceStatus::Ready(_) | SilenceStatus::NoAudio) {
@@ -671,6 +686,7 @@ impl OpenReelMcp {
                     asset.id,
                     &status,
                     TimeCode(DEFAULT_MINIMUM_SILENCE_FRAMES),
+                    transcripts.get(&asset.id).map(Arc::as_ref),
                 ));
             }
         }
@@ -839,13 +855,13 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_silences",
-            "Return cached windowed-RMS silence spans for one asset in exact source frames and seconds, or background analysis status. Reported spans are pre-shrunk by a 100 ms speech-safety margin on each side for safe cutting; cached detector spans remain unchanged.",
+            "Return cached windowed-RMS silence spans for one asset in exact source frames and seconds, or background analysis status. For safe cutting, reported spans are clamped against cached transcribed words plus a 100 ms fps-aware margin; when no transcript is cached, the existing fixed 100 ms margin is used. Cached detector spans remain unchanged.",
             schema_object::<SilencesArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
             "get_timeline_silences",
-            "Return cached silence spans mapped through clips to exact project frames and seconds. Reported spans are pre-shrunk in source space by a 100 ms speech-safety margin on each side for safe cutting before project mapping; cached detector spans remain unchanged.",
+            "Return cached silence spans mapped through clips to exact project frames and seconds. For safe cutting, reported spans are clamped in source space against cached transcribed words plus a 100 ms fps-aware margin before project mapping; when no transcript is cached, the existing fixed 100 ms margin is used. Cached detector spans remain unchanged.",
             schema_object::<TimelineDerivedArgs>(),
         )
         .with_annotations(read_only()),
