@@ -177,6 +177,41 @@ pub struct Clip {
     #[serde(default, skip_serializing_if = "time_code_is_zero")]
     #[schemars(default)]
     pub audio_fade_out_frames: TimeCode,
+    /// Constant playback speed for a media clip as an integer percentage.
+    /// The validated range is 10..=1000; 100 is real time. Speed scales the
+    /// clip's effective source frame rate, so 50 doubles the project duration
+    /// (slow motion) and 200 halves it. Title and freeze clips are always 100.
+    /// Audio for clips at any speed other than 100 is muted.
+    #[serde(
+        default = "default_clip_speed",
+        skip_serializing_if = "speed_is_real_time"
+    )]
+    #[schemars(default)]
+    pub speed_percent: u32,
+}
+
+const fn default_clip_speed() -> u32 {
+    100
+}
+
+/// Return the frame rate at which a clip consumes its source, honoring its
+/// playback speed. Every source-to-project mapping for a clip must go through
+/// this — never scale fps at a call site.
+///
+/// # Errors
+///
+/// Returns [`crate::TimeMappingError`] when the scaled rate is invalid.
+pub fn clip_effective_fps(
+    asset_fps: crate::Rational,
+    clip: &Clip,
+) -> Result<crate::Rational, crate::TimeMappingError> {
+    crate::speed_scaled_fps(asset_fps, clip.speed_percent)
+}
+
+// Serde's `skip_serializing_if` callbacks receive references to the fields.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn speed_is_real_time(speed_percent: &u32) -> bool {
+    *speed_percent == 100
 }
 
 // Serde's `skip_serializing_if` callbacks receive references to the fields.
@@ -298,7 +333,8 @@ impl Document {
         let asset = self
             .asset(clip.asset)
             .ok_or(OpError::MissingAsset(clip.asset))?;
-        map_source_range_to_project(clip.source_range.clone(), asset.fps, self.fps)
+        let effective = clip_effective_fps(asset.fps, clip).map_err(OpError::TimeMapping)?;
+        map_source_range_to_project(clip.source_range.clone(), effective, self.fps)
             .map_err(OpError::TimeMapping)
     }
 

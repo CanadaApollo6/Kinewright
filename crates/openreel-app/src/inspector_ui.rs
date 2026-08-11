@@ -89,6 +89,36 @@ impl OpenReelApp {
         }
 
         let mut pending = Vec::new();
+        ui.add_space(space::TWO);
+        ui.strong("Speed");
+        let mut speed_percent = clip.speed_percent;
+        let speed_changed = ui
+            .add(
+                egui::Slider::new(&mut speed_percent, 10..=1000)
+                    .integer()
+                    .custom_formatter(|value, _| format!("{:.2}x", value / 100.0))
+                    .custom_parser(|text| {
+                        text.trim()
+                            .trim_end_matches(['x', 'X'])
+                            .parse::<f64>()
+                            .ok()
+                            .map(|value| value * 100.0)
+                    }),
+            )
+            .changed();
+        if clip.speed_percent != 100 {
+            ui.colored_label(
+                color::TEXT_MUTED,
+                "Audio is muted while the speed is not 1.00x",
+            );
+        }
+        if speed_changed {
+            match crate::timeline_ui::clip_speed_operations(&self.document, clip.id, speed_percent)
+            {
+                Ok(operations) => pending.extend(operations),
+                Err(error) => self.record_error("Operations", error),
+            }
+        }
         if let Some(audio_clip) = audio_target_clip(&self.document, clip.id) {
             ui.add_space(space::TWO);
             ui.strong("Audio");
@@ -692,6 +722,7 @@ mod tests {
                 audio_gain_tenth_db: 0,
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
             }],
         });
         assert_eq!(
@@ -738,6 +769,7 @@ mod tests {
             audio_gain_tenth_db: 0,
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
         };
         assert_eq!(
             add_effect_operation(&clip, &descriptor),
@@ -770,6 +802,7 @@ mod tests {
             audio_gain_tenth_db: 0,
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
         };
         let mut freeze = media.clone();
         freeze.content = ClipContent::Freeze(openreel_core::FreezeFrame {
@@ -891,6 +924,7 @@ mod tests {
             audio_gain_tenth_db: 0,
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
         }
     }
 }

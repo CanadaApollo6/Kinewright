@@ -101,6 +101,33 @@ impl Default for Rational {
     }
 }
 
+/// Scale a source frame rate by an integer playback speed percentage.
+///
+/// A clip at `speed_percent` consumes source frames as if the source ran at
+/// `fps * speed_percent / 100` — 50 percent halves the effective rate (slow
+/// motion doubles the project duration), 200 percent doubles it. The result
+/// stays an exact reduced rational, so every source-to-project mapping built
+/// on it remains integer-exact.
+///
+/// # Errors
+///
+/// Returns [`TimeMappingError::InvalidRate`] when the speed is zero or the
+/// scaled numerator/denominator overflow `u32`.
+pub fn speed_scaled_fps(fps: Rational, speed_percent: u32) -> Result<Rational, TimeMappingError> {
+    if speed_percent == 100 {
+        return Ok(fps);
+    }
+    let numerator = fps
+        .numerator()
+        .checked_mul(speed_percent)
+        .ok_or(TimeMappingError::Overflow)?;
+    let denominator = fps
+        .denominator()
+        .checked_mul(100)
+        .ok_or(TimeMappingError::Overflow)?;
+    Rational::new(numerator, denominator)
+}
+
 const fn gcd(mut lhs: u32, mut rhs: u32) -> u32 {
     while rhs != 0 {
         let remainder = lhs % rhs;

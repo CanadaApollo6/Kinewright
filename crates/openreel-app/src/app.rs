@@ -53,7 +53,6 @@ pub(crate) struct OpenReelApp {
     pub(crate) agent_events: Option<crossbeam_channel::Receiver<AgentEvent>>,
     pub(crate) agent_running: bool,
     pub(crate) agent_input: String,
-    pub(crate) agent_turn_cap: u32,
     pub(crate) agent_usage: UsageAccumulator,
     pub(crate) chat: Vec<ChatEntry>,
     pub(crate) confirmations: Option<ConfirmationBroker>,
@@ -150,7 +149,6 @@ impl OpenReelApp {
             agent_events: None,
             agent_running: false,
             agent_input: String::new(),
-            agent_turn_cap: 8,
             agent_usage: UsageAccumulator::default(),
             chat,
             confirmations,
@@ -860,6 +858,10 @@ fn operation_status(operation: &Operation) -> String {
         Operation::SetMarkerParam { marker, name, .. } => {
             format!("Set {name} on marker {marker}")
         }
+        Operation::SetClipSpeed {
+            clip,
+            speed_percent,
+        } => format!("Set clip {clip} speed to {speed_percent}%"),
     }
 }
 

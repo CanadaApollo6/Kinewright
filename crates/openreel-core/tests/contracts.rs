@@ -1583,6 +1583,7 @@ fn add_and_remove_track_are_validated_and_atomic() {
             audio_gain_tenth_db: 0,
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
         }],
     };
     assert_eq!(
@@ -1852,6 +1853,7 @@ fn unsorted_input_document_is_rejected() {
         audio_gain_tenth_db: 0,
         audio_fade_in_frames: TimeCode::ZERO,
         audio_fade_out_frames: TimeCode::ZERO,
+        speed_percent: 100,
     };
     let earlier = Clip {
         id: ClipId(2),
@@ -1960,4 +1962,222 @@ fn mixed_rate_split_rejects_a_non_source_frame_boundary() {
         }
     );
     assert_eq!(doc, before);
+}
+
+#[test]
+fn clip_speed_scales_duration_exactly_and_validates_bounds() {
+    let mut doc = document_with_one_clip();
+    let clip = doc.clip(ClipId(1)).unwrap().clone();
+    assert_eq!(doc.clip_duration(&clip).unwrap(), TimeCode(30));
+
+    Operation::SetClipSpeed {
+        clip: ClipId(1),
+        speed_percent: 50,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let clip = doc.clip(ClipId(1)).unwrap().clone();
+    assert_eq!(doc.clip_duration(&clip).unwrap(), TimeCode(60));
+
+    Operation::SetClipSpeed {
+        clip: ClipId(1),
+        speed_percent: 200,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let clip = doc.clip(ClipId(1)).unwrap().clone();
+    assert_eq!(doc.clip_duration(&clip).unwrap(), TimeCode(15));
+
+    let before = doc.clone();
+    for out_of_range in [0, 9, 1001, u32::MAX] {
+        assert!(matches!(
+            Operation::SetClipSpeed {
+                clip: ClipId(1),
+                speed_percent: out_of_range,
+            }
+            .apply(&mut doc),
+            Err(OpError::ClipSpeedOutOfRange(value)) if value == out_of_range
+        ));
+        assert_eq!(doc, before);
+    }
+}
+
+#[test]
+fn slowing_a_clip_into_a_neighbor_is_rejected_atomically() {
+    let mut doc = document_with_three_clips();
+    let before = doc.clone();
+    assert!(matches!(
+        Operation::SetClipSpeed {
+            clip: ClipId(1),
+            speed_percent: 25,
+        }
+        .apply(&mut doc),
+        Err(OpError::ClipOverlap { .. })
+    ));
+    assert_eq!(doc, before);
+
+    Operation::SetClipSpeed {
+        clip: ClipId(1),
+        speed_percent: 50,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let clip = doc.clip(ClipId(1)).unwrap().clone();
+    assert_eq!(doc.clip_duration(&clip).unwrap(), TimeCode(20));
+}
+
+#[test]
+fn non_media_clips_reject_speed_everywhere() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut doc = empty_timeline(fps);
+    Operation::AddTitle {
+        track: TrackId(1),
+        at: TimeCode(0),
+        duration: TimeCode(30),
+        title: Title::default(),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(matches!(
+        Operation::SetClipSpeed {
+            clip: ClipId(1),
+            speed_percent: 50,
+        }
+        .apply(&mut doc),
+        Err(OpError::SpeedOnNonMediaClip(ClipId(1)))
+    ));
+
+    let mut hand_edited = doc.clone();
+    hand_edited.tracks[0].clips[0].speed_percent = 50;
+    assert!(matches!(
+        hand_edited.validate(),
+        Err(OpError::SpeedOnNonMediaClip(ClipId(1)))
+    ));
+}
+
+#[test]
+fn split_preserves_project_adjacency_and_total_duration_at_any_speed() {
+    for speed in [10_u32, 33, 50, 100, 150, 1000] {
+        let project_fps = Rational::new(30, 1).unwrap();
+        let source_fps = Rational::new(24_000, 1_001).unwrap();
+        let mut doc = empty_timeline(project_fps);
+        Operation::AddAsset {
+            asset: asset(1, source_fps, 480),
+        }
+        .apply(&mut doc)
+        .unwrap();
+        Operation::AddClip {
+            track: TrackId(1),
+            asset: AssetId(1),
+            at: TimeCode(0),
+            source: TimeCode(0)..TimeCode(480),
+        }
+        .apply(&mut doc)
+        .unwrap();
+        Operation::SetClipSpeed {
+            clip: ClipId(1),
+            speed_percent: speed,
+        }
+        .apply(&mut doc)
+        .unwrap();
+        let original = doc.clip(ClipId(1)).unwrap().clone();
+        let total = doc.clip_duration(&original).unwrap();
+        assert!(
+            total > TimeCode(1),
+            "speed {speed} produced a degenerate clip"
+        );
+
+        // Not every project frame maps to an exact source boundary at odd
+        // speeds; scan outward from the midpoint for a representable split,
+        // mirroring how interactive splitting snaps.
+        let mid = total.0 / 2;
+        let mut split_at = None;
+        for offset in 0..total.0 / 2 {
+            for candidate in [mid - offset, mid + offset] {
+                if candidate <= 0 || candidate >= total.0 {
+                    continue;
+                }
+                let mut attempt = doc.clone();
+                let split = Operation::SplitClip {
+                    clip: ClipId(1),
+                    at: TimeCode(candidate),
+                };
+                if split.apply(&mut attempt).is_ok() {
+                    doc = attempt;
+                    split_at = Some(candidate);
+                    break;
+                }
+            }
+            if split_at.is_some() {
+                break;
+            }
+        }
+        let split_at =
+            split_at.unwrap_or_else(|| panic!("no representable split at speed {speed}"));
+
+        let left = doc.clip(ClipId(1)).unwrap().clone();
+        let right = doc.clip(ClipId(2)).unwrap().clone();
+        assert_eq!(left.speed_percent, speed);
+        assert_eq!(
+            right.speed_percent, speed,
+            "split right half must inherit speed"
+        );
+        let left_duration = doc.clip_duration(&left).unwrap();
+        let right_duration = doc.clip_duration(&right).unwrap();
+        assert_eq!(left.timeline_start, TimeCode(0));
+        assert_eq!(
+            left_duration,
+            TimeCode(split_at),
+            "left half must end at the split"
+        );
+        assert_eq!(right.timeline_start, TimeCode(split_at));
+        assert_eq!(
+            left_duration.0 + right_duration.0,
+            total.0,
+            "speed {speed}: split must conserve total project duration"
+        );
+        doc.validate().unwrap();
+    }
+}
+
+#[test]
+fn clip_speed_serde_defaults_skips_and_round_trips() {
+    let doc = document_with_one_clip();
+    let encoded = serde_json::to_string(&doc).unwrap();
+    assert!(
+        !encoded.contains("speed_percent"),
+        "real-time speed must not serialize"
+    );
+    let legacy: Document = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(legacy.clip(ClipId(1)).unwrap().speed_percent, 100);
+
+    let mut speeded = doc.clone();
+    Operation::SetClipSpeed {
+        clip: ClipId(1),
+        speed_percent: 150,
+    }
+    .apply(&mut speeded)
+    .unwrap();
+    let encoded = serde_json::to_string(&speeded).unwrap();
+    assert!(encoded.contains("\"speed_percent\":150"));
+    let round: Document = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(round, speeded);
+}
+
+#[test]
+fn clip_speed_change_is_one_undo_step() {
+    let original = document_with_one_clip();
+    let core = Core::spawn(original.clone()).unwrap();
+    assert!(matches!(
+        core.request(Command::Do(Operation::SetClipSpeed {
+            clip: ClipId(1),
+            speed_percent: 400,
+        }))
+        .unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
+        panic!("undo must return the restored document");
+    };
+    assert_eq!(*doc, original);
 }

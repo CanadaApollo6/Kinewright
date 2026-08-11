@@ -149,6 +149,15 @@ pub enum Operation {
         asset: AssetId,
         source_frame: TimeCode,
     },
+    /// Set a media clip's constant playback speed as an integer percentage.
+    SetClipSpeed {
+        clip: ClipId,
+        /// Inclusive range 10..=1000; 100 is real time. Changing speed changes
+        /// the clip's project duration; the operation fails if the new
+        /// duration would overlap a later clip. Audio is muted at any speed
+        /// other than 100.
+        speed_percent: u32,
+    },
 }
 
 pub trait ApplyOp {
@@ -393,6 +402,10 @@ pub enum OpError {
     TitleClipHasNoAudio(ClipId),
     #[error("freeze clip {0} has no audio contribution; SetClipAudio accepts media clips only")]
     FreezeClipHasNoAudio(ClipId),
+    #[error("clip speed must be an integer percentage in 10..=1000, got {0}")]
+    ClipSpeedOutOfRange(u32),
+    #[error("clip {0} is not a media clip; only media clips have playback speed")]
+    SpeedOnNonMediaClip(ClipId),
     #[error("time calculation overflowed")]
     TimeOverflow,
     #[error(transparent)]
@@ -484,6 +497,10 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
             name,
             value,
         } => set_marker_param(doc, *marker, name, value.clone()),
+        Operation::SetClipSpeed {
+            clip,
+            speed_percent,
+        } => set_clip_speed(doc, *clip, *speed_percent),
     }
 }
 
@@ -558,6 +575,7 @@ fn add_clip(
         audio_gain_tenth_db: 0,
         audio_fade_in_frames: TimeCode::ZERO,
         audio_fade_out_frames: TimeCode::ZERO,
+        speed_percent: 100,
     };
     doc.tracks[track_index].clips.push(clip);
     doc.tracks[track_index]
@@ -601,6 +619,7 @@ fn add_title(
         audio_gain_tenth_db: 0,
         audio_fade_in_frames: TimeCode::ZERO,
         audio_fade_out_frames: TimeCode::ZERO,
+        speed_percent: 100,
     });
     doc.tracks[track_index]
         .clips
@@ -646,6 +665,7 @@ fn add_freeze_frame(
         audio_gain_tenth_db: 0,
         audio_fade_in_frames: TimeCode::ZERO,
         audio_fade_out_frames: TimeCode::ZERO,
+        speed_percent: 100,
     });
     doc.tracks[track_index]
         .clips
@@ -669,7 +689,9 @@ fn split_clip(doc: &mut Document, clip_id: ClipId, at: TimeCode) -> Result<(), O
             let asset = doc
                 .asset(original.asset)
                 .ok_or(OpError::MissingAsset(original.asset))?;
-            find_source_boundary(original.source_range.clone(), offset, asset.fps, doc.fps)
+            let effective =
+                crate::clip_effective_fps(asset.fps, &original).map_err(OpError::TimeMapping)?;
+            find_source_boundary(original.source_range.clone(), offset, effective, doc.fps)
                 .ok_or(OpError::UnrepresentableSplit { clip: clip_id, at })?
         }
         ClipContent::Title(_) | ClipContent::Freeze(_) => original
@@ -715,7 +737,7 @@ fn trim_clip(
                 .asset(original.asset)
                 .ok_or(OpError::MissingAsset(original.asset))?;
             validate_source_range(asset, &new_source)?;
-            asset.fps
+            crate::clip_effective_fps(asset.fps, &original).map_err(OpError::TimeMapping)?
         }
         ClipContent::Title(_) | ClipContent::Freeze(_) => {
             validate_title_range(&new_source)?;
@@ -1155,6 +1177,27 @@ fn remove_transition(doc: &mut Document, clip_id: ClipId) -> Result<(), OpError>
     Ok(())
 }
 
+/// Bounds for [`crate::Clip::speed_percent`]: 0.1x through 10x real time.
+pub const CLIP_SPEED_MIN_PERCENT: u32 = 10;
+pub const CLIP_SPEED_MAX_PERCENT: u32 = 1000;
+
+fn set_clip_speed(doc: &mut Document, clip_id: ClipId, speed_percent: u32) -> Result<(), OpError> {
+    validate_clip_speed(speed_percent)?;
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    if !doc.tracks[track_index].clips[clip_index].content.is_media() {
+        return Err(OpError::SpeedOnNonMediaClip(clip_id));
+    }
+    doc.tracks[track_index].clips[clip_index].speed_percent = speed_percent;
+    Ok(())
+}
+
+fn validate_clip_speed(speed_percent: u32) -> Result<(), OpError> {
+    if !(CLIP_SPEED_MIN_PERCENT..=CLIP_SPEED_MAX_PERCENT).contains(&speed_percent) {
+        return Err(OpError::ClipSpeedOutOfRange(speed_percent));
+    }
+    Ok(())
+}
+
 fn set_clip_audio(
     doc: &mut Document,
     clip_id: ClipId,
@@ -1554,6 +1597,7 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                         .ok_or(OpError::MissingAsset(clip.asset))?;
                     validate_track_compatibility(asset, track)?;
                     validate_source_range(asset, &clip.source_range)?;
+                    validate_clip_speed(clip.speed_percent)?;
                 }
                 ClipContent::Title(title) => {
                     if track.kind != TrackKind::Video {
@@ -1574,6 +1618,9 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                     validate_freeze_source_frame(asset, freeze.source_frame)?;
                     validate_title_range(&clip.source_range)?;
                 }
+            }
+            if !clip.content.is_media() && clip.speed_percent != 100 {
+                return Err(OpError::SpeedOnNonMediaClip(clip.id));
             }
             let clip_duration = doc.clip_duration(clip)?;
             if clip_duration <= TimeCode::ZERO {

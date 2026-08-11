@@ -97,7 +97,8 @@ pub fn render_timeline_state(document: &Document) -> String {
             let asset = document.asset(clip.asset);
             let duration = asset
                 .and_then(|asset| {
-                    map_source_range_to_project(clip.source_range.clone(), asset.fps, document.fps)
+                    let effective = openreel_core::clip_effective_fps(asset.fps, clip).ok()?;
+                    map_source_range_to_project(clip.source_range.clone(), effective, document.fps)
                         .ok()
                 })
                 .unwrap_or(TimeCode::ZERO);
@@ -108,7 +109,7 @@ pub fn render_timeline_state(document: &Document) -> String {
             let asset_name = asset.map_or("<missing>", |asset| asset.name.as_str());
             let _ = writeln!(
                 output,
-                "  clip {} asset={} {:?} timeline={}..{} duration={} source={}..{} effects={} transition_in={}{}",
+                "  clip {} asset={} {:?} timeline={}..{} duration={} source={}..{} effects={} transition_in={}{}{}",
                 clip.id,
                 clip.asset,
                 asset_name,
@@ -120,6 +121,7 @@ pub fn render_timeline_state(document: &Document) -> String {
                 render_effects(&clip.effects),
                 render_transition(clip.transition_in.as_ref()),
                 render_clip_audio(clip),
+                render_clip_speed(clip),
             );
         }
     }
@@ -252,14 +254,17 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
     let asset = document
         .asset(clip.asset)
         .ok_or_else(|| format!("asset {} does not exist", clip.asset))?;
-    let duration = map_source_range_to_project(clip.source_range.clone(), asset.fps, document.fps)
-        .map_err(|error| error.to_string())?;
+    let effective_fps =
+        openreel_core::clip_effective_fps(asset.fps, clip).map_err(|error| error.to_string())?;
+    let duration =
+        map_source_range_to_project(clip.source_range.clone(), effective_fps, document.fps)
+            .map_err(|error| error.to_string())?;
     let end = clip
         .timeline_start
         .checked_add(duration)
         .ok_or_else(|| "time calculation overflowed".to_owned())?;
     Ok(format!(
-        "clip {}\ntrack={} kind={:?}\nasset={} {:?}\nlink={}\ntimeline={}..{} duration={}\nsource={}..{} duration={}\neffects={}\ntransition_in={}",
+        "clip {}\ntrack={} kind={:?}\nasset={} {:?}\nlink={}\ntimeline={}..{} duration={}\nsource={}..{} duration={}\neffects={}\ntransition_in={}{}",
         clip.id,
         track.id,
         track.kind,
@@ -281,6 +286,7 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
         ),
         render_effects(&clip.effects),
         render_transition(clip.transition_in.as_ref()),
+        render_clip_speed(clip),
     ))
 }
 
@@ -308,6 +314,14 @@ fn render_clip_audio(clip: &openreel_core::Clip) -> String {
             " audio=gain:{},fade_in:{}f,fade_out:{}f",
             clip.audio_gain_tenth_db, clip.audio_fade_in_frames.0, clip.audio_fade_out_frames.0
         )
+    }
+}
+
+fn render_clip_speed(clip: &openreel_core::Clip) -> String {
+    if clip.speed_percent == 100 {
+        String::new()
+    } else {
+        format!(" speed={}% (audio muted)", clip.speed_percent)
     }
 }
 
@@ -713,6 +727,7 @@ mod tests {
                         audio_gain_tenth_db: 0,
                         audio_fade_in_frames: TimeCode::ZERO,
                         audio_fade_out_frames: TimeCode::ZERO,
+                        speed_percent: 100,
                     },
                     Clip {
                         id: ClipId(11),
@@ -726,6 +741,7 @@ mod tests {
                         audio_gain_tenth_db: 0,
                         audio_fade_in_frames: TimeCode::ZERO,
                         audio_fade_out_frames: TimeCode::ZERO,
+                        speed_percent: 100,
                     },
                 ],
             }],
@@ -795,6 +811,30 @@ assets:
     }
 
     #[test]
+    fn timeline_state_appends_speed_and_scales_duration_for_speeded_clips() {
+        let mut document = fixture();
+        let clip = document
+            .tracks
+            .iter_mut()
+            .flat_map(|track| &mut track.clips)
+            .find(|clip| clip.id == ClipId(11))
+            .unwrap();
+        clip.speed_percent = 200;
+        let rendered = render_timeline_state(&document);
+        assert!(
+            rendered.contains("clip 11") && rendered.contains("speed=200% (audio muted)"),
+            "speeded clip must carry the speed suffix: {rendered}"
+        );
+        // Source 150..210 at doubled effective rate covers half the frames.
+        assert!(
+            rendered.contains("clip 11 asset=4 \"interview.mp4\" timeline=120f/4.000s..150f/5.000s duration=30f/1.000s"),
+            "speeded clip duration must reflect the effective rate: {rendered}"
+        );
+        let info = render_clip_info(&document, ClipId(11)).unwrap();
+        assert!(info.contains("speed=200% (audio muted)"));
+    }
+
+    #[test]
     fn timeline_state_and_clip_info_include_declarative_title_parameters() {
         let mut document = fixture();
         document.tracks.push(Track {
@@ -821,6 +861,7 @@ assets:
                 audio_gain_tenth_db: 0,
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
             }],
         });
         let timeline = render_timeline_state(&document);
@@ -867,6 +908,7 @@ assets:
                 audio_gain_tenth_db: 0,
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
             }],
         });
 

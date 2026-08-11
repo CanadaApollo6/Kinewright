@@ -389,10 +389,15 @@ impl OpenReelApp {
                                 continue;
                             }
                             let (source_fps, maximum_source_end) = match &clip.content {
-                                ClipContent::Media => asset
-                                    .map_or((document.fps, TimeCode(i64::MAX)), |asset| {
-                                        (asset.fps, asset.duration)
-                                    }),
+                                ClipContent::Media => {
+                                    asset.map_or((document.fps, TimeCode(i64::MAX)), |asset| {
+                                        (
+                                            openreel_core::clip_effective_fps(asset.fps, clip)
+                                                .unwrap_or(asset.fps),
+                                            asset.duration,
+                                        )
+                                    })
+                                }
                                 ClipContent::Title(_) | ClipContent::Freeze(_) => {
                                     (document.fps, TimeCode(i64::MAX))
                                 }
@@ -618,6 +623,8 @@ impl OpenReelApp {
                                         .as_ref()
                                         .map(|transition| transition.duration),
                                     self.pixels_per_frame,
+                                    duration,
+                                    document.fps,
                                 ),
                                 (ClipContent::Title(title), _) => paint_title_clip(
                                     &painter,
@@ -648,6 +655,9 @@ impl OpenReelApp {
                                     self.pixels_per_frame,
                                 ),
                                 (ClipContent::Media | ClipContent::Freeze(_), None) => {}
+                            }
+                            if clip.content.is_media() && clip.speed_percent != 100 {
+                                paint_speed_badge(&painter, draw_rect, clip.speed_percent);
                             }
                         }
                     }
@@ -1082,6 +1092,8 @@ fn paint_clip(
     dragging: bool,
     transition_duration: Option<TimeCode>,
     pixels_per_frame: f32,
+    project_duration: TimeCode,
+    project_fps: Rational,
 ) {
     painter.rect_filled(rect, radius::SM, color::SURFACE);
     if rect.intersects(clip_bounds)
@@ -1135,13 +1147,11 @@ fn paint_clip(
         color::TEXT_PRIMARY,
     );
     if rect.width() >= 140.0 {
+        // Project duration, not source length: they differ on speeded clips.
         painter.text(
             egui::pos2(rect.right() - space::TWO, rect.top() + space::ONE),
             egui::Align2::RIGHT_TOP,
-            format_timecode(
-                TimeCode(source_range.end.0.saturating_sub(source_range.start.0)),
-                asset.fps,
-            ),
+            format_timecode(project_duration, project_fps),
             theme::code_font(),
             color::TEXT_SECONDARY,
         );
@@ -1665,10 +1675,11 @@ fn linked_trim_operations(
         .ok_or_else(|| format!("Clip {primary} no longer exists"))?;
     let primary_fps = match &primary_clip.content {
         ClipContent::Media => {
-            document
+            let asset = document
                 .asset(primary_clip.asset)
-                .ok_or_else(|| format!("Asset {} no longer exists", primary_clip.asset))?
-                .fps
+                .ok_or_else(|| format!("Asset {} no longer exists", primary_clip.asset))?;
+            openreel_core::clip_effective_fps(asset.fps, primary_clip)
+                .map_err(|error| error.to_string())?
         }
         ClipContent::Title(_) | ClipContent::Freeze(_) => document.fps,
     };
@@ -1685,7 +1696,11 @@ fn linked_trim_operations(
                 let asset = document
                     .asset(clip.asset)
                     .ok_or_else(|| format!("Asset {} no longer exists", clip.asset))?;
-                (asset.fps, asset.duration.0)
+                (
+                    openreel_core::clip_effective_fps(asset.fps, &clip)
+                        .map_err(|error| error.to_string())?,
+                    asset.duration.0,
+                )
             }
             ClipContent::Title(_) | ClipContent::Freeze(_) => (document.fps, i64::MAX),
         };
@@ -1801,6 +1816,95 @@ fn linked_delete_operations(document: &Document, primary: ClipId, ripple: bool) 
         .collect::<Vec<_>>();
     operations.push(Operation::RippleDeleteClip { clip: primary });
     operations
+}
+
+// Speed percentages are small integers; the f64 division is display-only.
+#[allow(clippy::cast_precision_loss)]
+fn paint_speed_badge(painter: &egui::Painter, rect: egui::Rect, speed_percent: u32) {
+    if rect.width() < 64.0 {
+        return;
+    }
+    // Below the label strip: the strip's right side belongs to the duration
+    // timecode, and the badge must never collide with it.
+    painter.text(
+        egui::pos2(rect.right() - space::ONE, rect.top() + 21.0),
+        egui::Align2::RIGHT_TOP,
+        format!("{:.2}x", f64::from(speed_percent) / 100.0),
+        egui::FontId::new(type_size::MICRO, egui::FontFamily::Monospace),
+        color::TEXT_PRIMARY,
+    );
+}
+
+/// Build the operations for a speed change. When the clip grows and a later
+/// clip on its track would collide, a ripple gap opens first so the speed
+/// change lands in cleared space; sync-locked tracks and markers shift with
+/// the gap, preserving relative layout. Shrinking leaves a gap by design.
+pub(super) fn clip_speed_operations(
+    document: &Document,
+    clip_id: ClipId,
+    speed_percent: u32,
+) -> Result<Vec<Operation>, String> {
+    let (track, clip) = document
+        .tracks
+        .iter()
+        .find_map(|track| {
+            track
+                .clips
+                .iter()
+                .find(|clip| clip.id == clip_id)
+                .map(|clip| (track, clip))
+        })
+        .ok_or_else(|| format!("Clip {clip_id} no longer exists"))?;
+    if !clip.content.is_media() {
+        return Err("Only media clips have a playback speed".to_owned());
+    }
+    let current_duration = document
+        .clip_duration(clip)
+        .map_err(|error| error.to_string())?;
+    let mut resped = clip.clone();
+    resped.speed_percent = speed_percent;
+    let new_duration = document
+        .clip_duration(&resped)
+        .map_err(|error| error.to_string())?;
+    let current_end = clip
+        .timeline_start
+        .checked_add(current_duration)
+        .ok_or_else(|| "Clip end overflowed".to_owned())?;
+    let new_end = clip
+        .timeline_start
+        .checked_add(new_duration)
+        .ok_or_else(|| "Clip end overflowed".to_owned())?;
+
+    let mut operations = Vec::new();
+    if new_end > current_end {
+        let collides = track.clips.iter().any(|other| {
+            other.id != clip_id
+                && other.timeline_start >= current_end
+                && other.timeline_start < new_end
+        });
+        if collides {
+            let delta = new_end
+                .checked_sub(current_end)
+                .ok_or_else(|| "Speed delta overflowed".to_owned())?;
+            operations.push(Operation::RippleInsertGap {
+                track: track.id,
+                at: current_end,
+                duration: delta,
+            });
+        }
+    }
+    // Linked members share source geometry, so they take the same speed in
+    // the same batch - otherwise the pair desynchronizes structurally. The
+    // gap decision above covers them: sync-locked tracks shift together.
+    for (_, member) in linked_members(document, clip_id) {
+        if member.content.is_media() {
+            operations.push(Operation::SetClipSpeed {
+                clip: member.id,
+                speed_percent,
+            });
+        }
+    }
+    Ok(operations)
 }
 
 pub(super) fn linked_transition_operations(
@@ -2016,6 +2120,7 @@ mod tests {
             audio_gain_tenth_db: 0,
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
         };
         Document {
             tracks: vec![
@@ -2233,6 +2338,92 @@ mod tests {
         assert_eq!(
             linked_transition_operations(&document, ClipId(1), None),
             vec![Operation::RemoveTransition { clip: ClipId(1) }]
+        );
+    }
+
+    #[test]
+    fn clip_speed_operations_open_a_gap_only_when_growth_collides() {
+        let fps = Rational::new(30, 1).unwrap();
+        let mut document = Document {
+            fps,
+            ..Document::default()
+        };
+        document.media_pool.push(MediaAsset {
+            id: AssetId(1),
+            path: std::path::PathBuf::from("speed.mp4"),
+            name: "speed.mp4".to_owned(),
+            duration: TimeCode(300),
+            fps,
+            kind: MediaKind::Video,
+            resolution: Some((1_920, 1_080)),
+        });
+        document.tracks.push(Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![
+                Clip {
+                    id: ClipId(1),
+                    asset: AssetId(1),
+                    source_range: TimeCode(0)..TimeCode(30),
+                    content: ClipContent::Media,
+                    timeline_start: TimeCode::ZERO,
+                    effects: Vec::new(),
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                },
+                Clip {
+                    id: ClipId(2),
+                    asset: AssetId(1),
+                    source_range: TimeCode(60)..TimeCode(90),
+                    content: ClipContent::Media,
+                    timeline_start: TimeCode(30),
+                    effects: Vec::new(),
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                },
+            ],
+        });
+        document.duration = TimeCode(60);
+
+        // Slowing clip 1 to half speed doubles it into clip 2: gap first.
+        assert_eq!(
+            clip_speed_operations(&document, ClipId(1), 50).unwrap(),
+            vec![
+                Operation::RippleInsertGap {
+                    track: TrackId(1),
+                    at: TimeCode(30),
+                    duration: TimeCode(30),
+                },
+                Operation::SetClipSpeed {
+                    clip: ClipId(1),
+                    speed_percent: 50,
+                },
+            ]
+        );
+        // Speeding up shrinks and needs no gap.
+        assert_eq!(
+            clip_speed_operations(&document, ClipId(1), 200).unwrap(),
+            vec![Operation::SetClipSpeed {
+                clip: ClipId(1),
+                speed_percent: 200,
+            }]
+        );
+        // The trailing clip grows into open space: no gap needed either.
+        assert_eq!(
+            clip_speed_operations(&document, ClipId(2), 50).unwrap(),
+            vec![Operation::SetClipSpeed {
+                clip: ClipId(2),
+                speed_percent: 50,
+            }]
         );
     }
 }

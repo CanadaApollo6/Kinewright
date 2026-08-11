@@ -244,6 +244,13 @@ pub fn timeline_audio_segments(
             if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
                 continue;
             }
+            // Speed-changed clips are muted in v1: varispeed shifts pitch and
+            // pitch-preserving stretch is deferred, and silence is the honest
+            // middle ground. Remaining clips are all real time, so the asset
+            // rate below is already the effective rate.
+            if clip.speed_percent != 100 {
+                continue;
+            }
             let duration =
                 map_source_range_to_project(clip.source_range.clone(), asset.fps, document.fps)
                     .map_err(|error| MediaError::Backend(error.to_string()))?;
@@ -346,8 +353,11 @@ fn media_source_for_clip(
             clip.id, clip.asset
         ))
     })?;
-    let duration = map_source_range_to_project(clip.source_range.clone(), asset.fps, document.fps)
+    let effective_fps = openreel_core::clip_effective_fps(asset.fps, clip)
         .map_err(|error| MediaError::Backend(error.to_string()))?;
+    let duration =
+        map_source_range_to_project(clip.source_range.clone(), effective_fps, document.fps)
+            .map_err(|error| MediaError::Backend(error.to_string()))?;
     let timeline_end = clip
         .timeline_start
         .checked_add(duration)
@@ -358,7 +368,7 @@ fn media_source_for_clip(
     let source_offset = map_frames_with_rounding(
         project_offset,
         document.fps,
-        asset.fps,
+        effective_fps,
         FrameRounding::Floor,
     )
     .map_err(|error| MediaError::Backend(error.to_string()))?;
@@ -459,6 +469,7 @@ mod tests {
                         audio_gain_tenth_db: 0,
                         audio_fade_in_frames: TimeCode::ZERO,
                         audio_fade_out_frames: TimeCode::ZERO,
+                        speed_percent: 100,
                     },
                     Clip {
                         id: ClipId(2),
@@ -472,6 +483,7 @@ mod tests {
                         audio_gain_tenth_db: 0,
                         audio_fade_in_frames: TimeCode::ZERO,
                         audio_fade_out_frames: TimeCode::ZERO,
+                        speed_percent: 100,
                     },
                 ],
             }],
@@ -562,6 +574,7 @@ mod tests {
                 audio_gain_tenth_db: 0,
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
             }],
         });
 
@@ -652,6 +665,7 @@ mod tests {
                 audio_gain_tenth_db: 0,
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
             }],
         });
         document.validate().unwrap();
@@ -708,6 +722,7 @@ mod tests {
                 audio_gain_tenth_db: 0,
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
             }],
         }];
         document.duration = TimeCode(10);
@@ -753,6 +768,7 @@ mod tests {
                 audio_gain_tenth_db: 0,
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
             }],
         }];
         document.duration = TimeCode(10);
@@ -804,6 +820,7 @@ mod tests {
                     audio_gain_tenth_db: 0,
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
                 }],
             },
             Track {
@@ -822,6 +839,7 @@ mod tests {
                     audio_gain_tenth_db: 0,
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
                 }],
             },
         ]);
@@ -881,6 +899,44 @@ mod tests {
             timeline_audio_segments(&document, TimeCode(30)..TimeCode(40))
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn speeded_clip_maps_project_offsets_through_effective_fps() {
+        let mut document = fixture();
+        document.tracks[0].clips[0].speed_percent = 200;
+
+        // Source 10..20 at an effective 60 fps in a 30 fps project: the clip
+        // now covers 5 project frames, consuming two source frames per one.
+        let layers = video_layers_at(&document, TimeCode(2)).unwrap();
+        assert_eq!(layers.len(), 1);
+        let source = &layers[0].source;
+        assert_eq!(source.source_at, TimeCode(14));
+        assert_eq!(source.timeline_end, TimeCode(5));
+
+        document.tracks[0].clips[0].speed_percent = 50;
+        // Effective 15 fps: 20 project frames, one source frame per two.
+        let layers = video_layers_at(&document, TimeCode(6)).unwrap();
+        let source = &layers[0].source;
+        assert_eq!(source.source_at, TimeCode(13));
+        assert_eq!(source.timeline_end, TimeCode(20));
+    }
+
+    #[test]
+    fn speeded_clips_are_muted_in_audio_segments() {
+        let mut document = fixture();
+        document.tracks[0].clips[0].speed_percent = 200;
+        document.duration = TimeCode(40);
+
+        let segments = timeline_audio_segments(&document, TimeCode(0)..TimeCode(40)).unwrap();
+        assert!(
+            segments.iter().all(|segment| segment.clip != ClipId(1)),
+            "speed-changed clip must not contribute audio"
+        );
+        assert!(
+            segments.iter().any(|segment| segment.clip == ClipId(2)),
+            "real-time clip must still contribute audio"
         );
     }
 }

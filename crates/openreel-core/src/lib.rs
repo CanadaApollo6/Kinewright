@@ -35,12 +35,12 @@ pub use media::{
 pub use model::{
     AssetId, Clip, ClipContent, ClipId, Document, Effect, EffectId, FreezeFrame, LinkId,
     MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaKind, ParamValue, Track, TrackId,
-    TrackKind, Transition,
+    TrackKind, Transition, clip_effective_fps,
 };
 pub use operation::{ApplyOp, BatchError, OpError, Operation, apply_batch};
 pub use time::{
     FrameRounding, Rational, TimeCode, TimeMappingError, map_frames, map_frames_with_rounding,
-    map_source_range_to_project,
+    map_source_range_to_project, speed_scaled_fps,
 };
 pub use title::{
     TITLE_COLORS, TITLE_FONT_SIZES, TITLE_PARAMETER_DESCRIPTORS, Title, TitleColorDescriptor,

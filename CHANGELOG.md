@@ -88,5 +88,14 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   source frame as first-class timeline content, inserted at the playhead as
   a single undoable split-gap-insert batch, painted with a repeated
   thumbnail, rendered through the same path as everything else
+- Constant-rate clip speed (0.1x–10x in exact integer percentages): speed
+  scales the clip's effective source rate through one shared helper, so
+  duration, splitting, trimming, and decode positioning stay integer-exact
+  at every speed; the inspector slider opens ripple gaps when slowing a
+  clip would collide, linked A/V members change speed together, and clips
+  show a multiplier badge (audio is muted at non-real-time speeds for now)
+- Agent panel cleanup: the chat composer is always visible and full width,
+  an empty session explains what the agent can see, and the turn cap is
+  gone - subscription sessions run until done or stopped
 
 [Unreleased]: https://github.com/CanadaApollo6/OpenReel/commits/main

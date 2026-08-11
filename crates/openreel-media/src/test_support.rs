@@ -223,6 +223,7 @@ pub fn single_clip_document(asset: MediaAsset) -> Document {
                 audio_gain_tenth_db: 0,
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
             }],
         }],
         media_pool: vec![asset],

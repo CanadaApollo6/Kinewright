@@ -529,6 +529,11 @@ where
             if !clip.content.is_media() {
                 continue;
             }
+            // Derived source timestamps no longer align project-linearly on a
+            // speed-changed clip; remapping them is deferred, so skip for now.
+            if clip.speed_percent != 100 {
+                continue;
+            }
             let Some(asset) = document.asset(clip.asset) else {
                 continue;
             };
@@ -621,6 +626,11 @@ where
     for track in &document.tracks {
         for clip in &track.clips {
             if !clip.content.is_media() {
+                continue;
+            }
+            // Derived source timestamps no longer align project-linearly on a
+            // speed-changed clip; remapping them is deferred, so skip for now.
+            if clip.speed_percent != 100 {
                 continue;
             }
             let Some(asset) = document.asset(clip.asset) else {
@@ -1181,6 +1191,7 @@ mod tests {
                     audio_gain_tenth_db: 0,
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
                 }],
             }],
             media_pool: vec![asset],

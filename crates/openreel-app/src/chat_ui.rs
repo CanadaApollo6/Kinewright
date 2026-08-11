@@ -124,7 +124,9 @@ impl OpenReelApp {
             let config = SessionConfig {
                 working_directory,
                 model: None,
-                max_turns: Some(self.agent_turn_cap),
+                // Subscription harnesses are flat fee and the Stop button is
+                // always available, so sessions run without a turn ceiling.
+                max_turns: None,
                 mcp_url: Some(endpoint),
             };
             let session = match self.agent_harness {
@@ -344,13 +346,6 @@ impl OpenReelApp {
         if self.agent_harness == AgentHarnessChoice::Codex {
             ui.small(CODEX_SANDBOX_NOTICE);
         }
-        ui.horizontal(|ui| {
-            ui.label("Turn cap");
-            ui.add_enabled(
-                !self.agent_running && self.agent_session.is_none(),
-                egui::DragValue::new(&mut self.agent_turn_cap).range(1..=20),
-            );
-        });
         ui.label(format!(
             "Session: {} in / {} out tokens",
             self.agent_usage.input_tokens, self.agent_usage.output_tokens
@@ -408,8 +403,12 @@ impl OpenReelApp {
         // out of the clipped panel, leaving no visible way to talk to the
         // agent.
         let composer_reserve = 132.0;
+        // Vertical auto-shrink keeps an empty or short history compact - the
+        // composer sits right below the last message instead of being pinned
+        // under a column of dead space - while long histories cap out and
+        // scroll with the composer held visible.
         egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
+            .auto_shrink([false, true])
             .stick_to_bottom(true)
             .max_height((ui.available_height() - composer_reserve).max(96.0))
             .show(ui, |ui| {
@@ -510,6 +509,7 @@ impl OpenReelApp {
                     !self.agent_running,
                     egui::TextEdit::multiline(&mut self.agent_input)
                         .desired_rows(3)
+                        .desired_width(f32::INFINITY)
                         .frame(egui::Frame::NONE)
                         .hint_text("Describe an edit…"),
                 );

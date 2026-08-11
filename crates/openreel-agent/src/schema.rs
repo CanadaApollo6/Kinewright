@@ -123,6 +123,7 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::RemoveTransition { .. } => "remove_transition",
         Operation::SetMarkerParam { .. } => "set_marker_param",
         Operation::AddFreezeFrame { .. } => "add_freeze_frame",
+        Operation::SetClipSpeed { .. } => "set_clip_speed",
     }
 }
 
@@ -207,6 +208,9 @@ fn operation_tool(
         ),
         "AddFreezeFrame" => description.push_str(
             " Freeze clips hold one source frame from a real video-capable asset for a project-frame duration. They are video-track clips and remain silent.",
+        ),
+        "SetClipSpeed" => description.push_str(
+            " speed_percent is an integer percentage in 10..=1000; 100 is real time. Speed scales the media clip's effective source rate, so 50 doubles its project duration and 200 halves it. The operation fails if the new duration would overlap a later clip - ripple-insert a gap first when slowing a clip down. Audio is muted at any speed other than 100. Titles and freeze frames have no speed.",
         ),
         _ => {}
     }
@@ -314,6 +318,7 @@ mod tests {
                 "remove_transition",
                 "set_marker_param",
                 "add_freeze_frame",
+                "set_clip_speed",
             ]
         );
         for definition in tools {
@@ -418,6 +423,7 @@ mod tests {
             ("add_title", false),
             ("set_title_param", false),
             ("add_freeze_frame", false),
+            ("set_clip_speed", false),
         ] {
             let tool = tools
                 .iter()
