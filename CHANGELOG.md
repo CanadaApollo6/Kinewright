@@ -83,5 +83,10 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   transition ramps by a single shared evaluator in both playback and export
   (parity held at 1e-6), inspector controls that route to the linked audio
   member, and a master stereo peak meter in the transport bar
+- Crop effect (per-edge percentages through the shared effect descriptor
+  table, composing crop-then-transform) and freeze-frame clips: one held
+  source frame as first-class timeline content, inserted at the playhead as
+  a single undoable split-gap-insert batch, painted with a repeated
+  thumbnail, rendered through the same path as everything else
 
 [Unreleased]: https://github.com/CanadaApollo6/OpenReel/commits/main

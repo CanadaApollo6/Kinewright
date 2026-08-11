@@ -818,6 +818,11 @@ fn operation_status(operation: &Operation) -> String {
         ),
         Operation::AddClip { asset, .. } => format!("Added asset {asset} to timeline"),
         Operation::AddTitle { title, .. } => format!("Added title {:?}", title.text),
+        Operation::AddFreezeFrame {
+            asset,
+            source_frame,
+            ..
+        } => format!("Added freeze frame {source_frame} from asset {asset}"),
         Operation::SplitClip { clip, at } => format!("Split clip {clip} at frame {at}"),
         Operation::TrimClip { clip, .. } => format!("Trimmed clip {clip}"),
         Operation::MoveClip { clip, to, .. } => format!("Moved clip {clip} to frame {to}"),

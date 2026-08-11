@@ -8,8 +8,8 @@ use openreel_core::{
 use crate::timeline::TransitionRenderParams;
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const UNIFORM_SIZE: u64 = 12 * 4;
-const UNIFORM_BYTES: usize = 12 * 4;
+const UNIFORM_SIZE: u64 = 16 * 4;
+const UNIFORM_BYTES: usize = 16 * 4;
 
 #[derive(Clone)]
 pub struct GpuContext {
@@ -81,6 +81,10 @@ struct LayerParams {
     offset_y: f32,
     fade_mix: f32,
     fade_white: f32,
+    crop_left: f32,
+    crop_right: f32,
+    crop_top: f32,
+    crop_bottom: f32,
 }
 
 impl Default for LayerParams {
@@ -95,6 +99,10 @@ impl Default for LayerParams {
             offset_y: 0.0,
             fade_mix: 0.0,
             fade_white: 0.0,
+            crop_left: 0.0,
+            crop_right: 0.0,
+            crop_top: 0.0,
+            crop_bottom: 0.0,
         }
     }
 }
@@ -429,6 +437,10 @@ impl LayerParams {
             self.offset_y,
             self.fade_mix,
             self.fade_white,
+            self.crop_left,
+            self.crop_right,
+            self.crop_top,
+            self.crop_bottom,
             0.0,
             0.0,
             0.0,
@@ -463,9 +475,17 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                 EffectUniform::Scale => params.scale *= value / 100.0,
                 EffectUniform::OffsetX => params.offset_x += value / 50.0,
                 EffectUniform::OffsetY => params.offset_y += value / 50.0,
+                EffectUniform::CropLeft => params.crop_left += value / 100.0,
+                EffectUniform::CropRight => params.crop_right += value / 100.0,
+                EffectUniform::CropTop => params.crop_top += value / 100.0,
+                EffectUniform::CropBottom => params.crop_bottom += value / 100.0,
             }
         }
     }
+    params.crop_left = params.crop_left.clamp(0.0, 0.45);
+    params.crop_right = params.crop_right.clamp(0.0, 0.45);
+    params.crop_top = params.crop_top.clamp(0.0, 0.45);
+    params.crop_bottom = params.crop_bottom.clamp(0.0, 0.45);
     params
 }
 
@@ -524,6 +544,24 @@ mod tests {
             name: name.to_owned(),
             parameters: BTreeMap::from([(parameter.to_owned(), ParamValue::Integer(value))]),
         }
+    }
+
+    fn crop(id: u64, left: i64, right: i64, top: i64, bottom: i64) -> Effect {
+        Effect {
+            id: EffectId(id),
+            name: "crop".to_owned(),
+            parameters: BTreeMap::from([
+                ("left_percent".to_owned(), ParamValue::Integer(left)),
+                ("right_percent".to_owned(), ParamValue::Integer(right)),
+                ("top_percent".to_owned(), ParamValue::Integer(top)),
+                ("bottom_percent".to_owned(), ParamValue::Integer(bottom)),
+            ]),
+        }
+    }
+
+    fn pixel(frame: &FrameTexture, x: u32, y: u32) -> &[u8] {
+        let index = usize::try_from((y * frame.width + x) * 4).unwrap();
+        &frame.rgba[index..index + 4]
     }
 
     #[test]
@@ -610,6 +648,134 @@ mod tests {
         assert_pixel_close(&output.rgba[0..4], [0, 0, 0, 255], 2);
         let center = (2 * 4 + 2) * 4;
         assert_pixel_close(&output.rgba[center..center + 4], [255, 0, 0, 255], 2);
+    }
+
+    #[test]
+    fn crop_top_uses_uv_zero_as_the_top_row() {
+        let Some(compositor) = fallback() else {
+            eprintln!("skipped: no usable wgpu adapter in this environment");
+            return;
+        };
+        let red = solid(8, 8, [255, 0, 0, 255]);
+        let output = compositor
+            .render(
+                (8, 8),
+                &[CompositorLayer {
+                    frame: &red,
+                    effects: &[crop(1, 0, 0, 25, 0)],
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .unwrap();
+
+        for y in 0..2 {
+            assert_pixel_close(pixel(&output, 4, y), [0, 0, 0, 255], 2);
+        }
+        for y in 2..8 {
+            assert_pixel_close(pixel(&output, 4, y), [255, 0, 0, 255], 2);
+        }
+    }
+
+    #[test]
+    fn crop_all_edges_keeps_only_the_center_rectangle() {
+        let Some(compositor) = fallback() else {
+            eprintln!("skipped: no usable wgpu adapter in this environment");
+            return;
+        };
+        let red = solid(8, 8, [255, 0, 0, 255]);
+        let output = compositor
+            .render(
+                (8, 8),
+                &[CompositorLayer {
+                    frame: &red,
+                    effects: &[crop(1, 25, 25, 25, 25)],
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .unwrap();
+
+        for y in 0..8 {
+            for x in 0..8 {
+                let expected = if (2..6).contains(&x) && (2..6).contains(&y) {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 0, 0, 255]
+                };
+                assert_pixel_close(pixel(&output, x, y), expected, 2);
+            }
+        }
+    }
+
+    #[test]
+    fn crop_transparency_wins_over_mid_fade_alpha_forcing() {
+        let Some(compositor) = fallback() else {
+            eprintln!("skipped: no usable wgpu adapter in this environment");
+            return;
+        };
+        let green = solid(8, 8, [0, 255, 0, 255]);
+        let blue = solid(8, 8, [0, 0, 255, 255]);
+        let crop = crop(1, 0, 0, 25, 0);
+        let output = compositor
+            .render(
+                (8, 8),
+                &[
+                    CompositorLayer {
+                        frame: &green,
+                        effects: &[],
+                        transition: TransitionRenderParams::default(),
+                    },
+                    CompositorLayer {
+                        frame: &blue,
+                        effects: &[crop],
+                        transition: TransitionRenderParams {
+                            alpha: 1.0,
+                            fade_mix: 0.5,
+                            fade_white: 0.0,
+                        },
+                    },
+                ],
+            )
+            .unwrap();
+
+        assert_pixel_close(pixel(&output, 4, 0), [0, 255, 0, 255], 2);
+        assert_pixel_close(pixel(&output, 4, 4), [0, 0, 128, 255], 2);
+    }
+
+    #[test]
+    fn crop_then_transform_composes_on_the_transformed_quad() {
+        let Some(compositor) = fallback() else {
+            eprintln!("skipped: no usable wgpu adapter in this environment");
+            return;
+        };
+        let red = solid(8, 8, [255, 0, 0, 255]);
+        let effects = [
+            crop(1, 25, 0, 0, 0),
+            effect(2, "transform", "scale_percent", 50),
+        ];
+        let output = compositor
+            .render(
+                (8, 8),
+                &[CompositorLayer {
+                    frame: &red,
+                    effects: &effects,
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .unwrap();
+
+        assert_pixel_close(pixel(&output, 1, 4), [0, 0, 0, 255], 2);
+        assert_pixel_close(pixel(&output, 2, 4), [0, 0, 0, 255], 2);
+        assert_pixel_close(pixel(&output, 3, 4), [255, 0, 0, 255], 2);
+        assert_pixel_close(pixel(&output, 5, 4), [255, 0, 0, 255], 2);
+        assert_pixel_close(pixel(&output, 6, 4), [0, 0, 0, 255], 2);
+    }
+
+    #[test]
+    fn duplicate_crop_effects_add_then_clamp_each_inset() {
+        let effects = [crop(1, 45, 0, 0, 0), crop(2, 45, 0, 0, 0)];
+        let params = params_for(&effects, TransitionRenderParams::default());
+        assert!((params.crop_left - 0.45).abs() < f32::EPSILON);
+        assert!(params.crop_right.abs() < f32::EPSILON);
     }
 
     #[test]

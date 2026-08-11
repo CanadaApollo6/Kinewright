@@ -51,6 +51,29 @@ pub fn render_timeline_state(document: &Document) -> String {
             track.clips.len()
         );
         for clip in &track.clips {
+            if let ClipContent::Freeze(freeze) = &clip.content {
+                let duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
+                let end = clip
+                    .timeline_start
+                    .checked_add(duration)
+                    .unwrap_or(clip.timeline_start);
+                let asset = document.asset(clip.asset);
+                let asset_name = asset.map_or("<missing>", |asset| asset.name.as_str());
+                let _ = writeln!(
+                    output,
+                    "  clip {} freeze asset={} {:?} source_frame={} timeline={}..{} duration={} effects={} transition_in={}",
+                    clip.id,
+                    clip.asset,
+                    asset_name,
+                    source_frame_and_seconds(freeze.source_frame, asset.map(|asset| asset.fps),),
+                    frame_and_seconds(clip.timeline_start, document.fps),
+                    frame_and_seconds(end, document.fps),
+                    frame_and_seconds(duration, document.fps),
+                    render_effects(&clip.effects),
+                    render_transition(clip.transition_in.as_ref()),
+                );
+                continue;
+            }
             if let ClipContent::Title(title) = &clip.content {
                 let duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
                 let end = clip
@@ -194,6 +217,34 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
             frame_and_seconds(end, document.fps),
             frame_and_seconds(duration, document.fps),
             render_title(title),
+            render_effects(&clip.effects),
+            render_transition(clip.transition_in.as_ref()),
+        ));
+    }
+    if let ClipContent::Freeze(freeze) = &clip.content {
+        let asset = document
+            .asset(clip.asset)
+            .ok_or_else(|| format!("asset {} does not exist", clip.asset))?;
+        let duration = document
+            .clip_duration(clip)
+            .map_err(|error| error.to_string())?;
+        let end = clip
+            .timeline_start
+            .checked_add(duration)
+            .ok_or_else(|| "time calculation overflowed".to_owned())?;
+        return Ok(format!(
+            "clip {}\ntrack={} kind={:?}\ncontent=freeze\nasset={} {:?}\nlink={}\ntimeline={}..{} duration={}\nsource_frame={}\neffects={}\ntransition_in={}",
+            clip.id,
+            track.id,
+            track.kind,
+            asset.id,
+            asset.name,
+            clip.link
+                .map_or_else(|| "none".to_owned(), |link| link.to_string()),
+            frame_and_seconds(clip.timeline_start, document.fps),
+            frame_and_seconds(end, document.fps),
+            frame_and_seconds(duration, document.fps),
+            frame_and_seconds(freeze.source_frame, asset.fps),
             render_effects(&clip.effects),
             render_transition(clip.transition_in.as_ref()),
         ));
@@ -783,6 +834,56 @@ assets:
         assert!(info.contains("content=title"));
         assert!(info.contains("timeline=30f/1.000s..90f/3.000s duration=60f/2.000s"));
         assert!(info.contains("position=lower_third"));
+    }
+
+    #[test]
+    fn timeline_state_and_clip_info_have_freeze_specific_golden_rendering() {
+        let mut document = fixture();
+        document.tracks.push(Track {
+            id: TrackId(8),
+            kind: TrackKind::Video,
+            sync_lock: false,
+            clips: vec![Clip {
+                id: ClipId(12),
+                asset: AssetId(4),
+                source_range: TimeCode(0)..TimeCode(60),
+                content: ClipContent::Freeze(openreel_core::FreezeFrame {
+                    source_frame: TimeCode(45),
+                }),
+                timeline_start: TimeCode(30),
+                effects: vec![Effect {
+                    id: EffectId(4),
+                    name: "crop".to_owned(),
+                    parameters: BTreeMap::from([(
+                        "top_percent".to_owned(),
+                        ParamValue::Integer(10),
+                    )]),
+                }],
+                transition_in: Some(Transition {
+                    name: "crossfade".to_owned(),
+                    duration: TimeCode(6),
+                }),
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+            }],
+        });
+
+        let timeline = render_timeline_state(&document);
+        let timeline_line = timeline
+            .lines()
+            .find(|line| line.contains("clip 12 freeze"))
+            .unwrap();
+        assert_eq!(
+            timeline_line,
+            "  clip 12 freeze asset=4 \"interview.mp4\" source_frame=45f/1.500s timeline=30f/1.000s..90f/3.000s duration=60f/2.000s effects=[4:crop(top_percent=10)] transition_in=crossfade:6f"
+        );
+
+        assert_eq!(
+            render_clip_info(&document, ClipId(12)).unwrap(),
+            "clip 12\ntrack=8 kind=Video\ncontent=freeze\nasset=4 \"interview.mp4\"\nlink=none\ntimeline=30f/1.000s..90f/3.000s duration=60f/2.000s\nsource_frame=45f/1.500s\neffects=[4:crop(top_percent=10)]\ntransition_in=crossfade:6f"
+        );
     }
 
     #[test]

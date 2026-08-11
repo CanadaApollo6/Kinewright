@@ -122,6 +122,7 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::AddTransition { .. } => "add_transition",
         Operation::RemoveTransition { .. } => "remove_transition",
         Operation::SetMarkerParam { .. } => "set_marker_param",
+        Operation::AddFreezeFrame { .. } => "add_freeze_frame",
     }
 }
 
@@ -203,6 +204,9 @@ fn operation_tool(
         ),
         "SetClipAudio" => description.push_str(
             " gain_tenth_db is an integer number of tenths of a decibel in -600..=120. Fade values are non-negative project frames whose sum cannot exceed the clip duration. Fade-out anchors to the clip's project end. Gain and clip fades compose multiplicatively with transition audio ramps.",
+        ),
+        "AddFreezeFrame" => description.push_str(
+            " Freeze clips hold one source frame from a real video-capable asset for a project-frame duration. They are video-track clips and remain silent.",
         ),
         _ => {}
     }
@@ -309,6 +313,7 @@ mod tests {
                 "add_transition",
                 "remove_transition",
                 "set_marker_param",
+                "add_freeze_frame",
             ]
         );
         for definition in tools {
@@ -412,6 +417,7 @@ mod tests {
             ("remove_marker", false),
             ("add_title", false),
             ("set_title_param", false),
+            ("add_freeze_frame", false),
         ] {
             let tool = tools
                 .iter()
@@ -424,6 +430,14 @@ mod tests {
                 "wrong destructive annotation for {name}"
             );
         }
+    }
+
+    #[test]
+    fn effect_documentation_includes_all_crop_parameters() {
+        let documentation = effect_documentation();
+        assert!(documentation.contains(
+            "crop(left_percent=0..=45, neutral 0, right_percent=0..=45, neutral 0, top_percent=0..=45, neutral 0, bottom_percent=0..=45, neutral 0)"
+        ));
     }
 
     #[test]

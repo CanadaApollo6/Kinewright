@@ -7,10 +7,10 @@ use std::{
 
 use crossbeam_channel::{Sender, unbounded};
 use openreel_core::{
-    AssetId, AssetSceneChanges, AssetSilences, ClipContent, Document, ExportCancellation,
-    FrameRounding, MediaAsset, MediaError, MediaKind, Rational, SceneChange, SceneStatus,
-    SilenceSpan, SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
-    map_frames_with_rounding, map_source_range_to_project,
+    AssetId, AssetSceneChanges, AssetSilences, Document, ExportCancellation, FrameRounding,
+    MediaAsset, MediaError, MediaKind, Rational, SceneChange, SceneStatus, SilenceSpan,
+    SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan, map_frames_with_rounding,
+    map_source_range_to_project,
 };
 use serde::{Deserialize, Serialize};
 
@@ -526,7 +526,7 @@ where
     let mut mapped = Vec::new();
     for track in &document.tracks {
         for clip in &track.clips {
-            if matches!(clip.content, ClipContent::Title(_)) {
+            if !clip.content.is_media() {
                 continue;
             }
             let Some(asset) = document.asset(clip.asset) else {
@@ -620,7 +620,7 @@ where
     let mut mapped = Vec::new();
     for track in &document.tracks {
         for clip in &track.clips {
-            if matches!(clip.content, ClipContent::Title(_)) {
+            if !clip.content.is_media() {
                 continue;
             }
             let Some(asset) = document.asset(clip.asset) else {
@@ -815,7 +815,7 @@ struct StoredScenes {
 mod tests {
     use std::{fs, path::PathBuf, process::Command};
 
-    use openreel_core::{Clip, ClipId, MediaAsset, Track, TrackId, TrackKind};
+    use openreel_core::{Clip, ClipContent, ClipId, MediaAsset, Track, TrackId, TrackKind};
 
     use super::*;
     use crate::test_support::{TempDirectory, ffmpeg_executable};

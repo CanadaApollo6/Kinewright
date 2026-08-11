@@ -47,6 +47,7 @@ impl OpenReelApp {
             match &clip.content {
                 ClipContent::Media => self.media_clip_inspector(ui, &clip),
                 ClipContent::Title(title) => self.title_inspector(ui, &clip, title),
+                ClipContent::Freeze(freeze) => self.freeze_clip_inspector(ui, &clip, freeze),
             }
         } else if let Some(marker) = self
             .selected_marker
@@ -156,138 +157,34 @@ impl OpenReelApp {
             }
         }
 
-        ui.add_space(space::TWO);
-        ui.strong("Effects");
-        for effect in &clip.effects {
-            ui.group(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(&effect.name);
-                    if ui.small_button("Remove").clicked() {
-                        pending.push(Operation::RemoveEffect {
-                            clip: clip.id,
-                            effect: effect.id,
-                        });
-                    }
-                });
-                if let Some(descriptor) = EFFECT_DESCRIPTORS
-                    .iter()
-                    .find(|descriptor| descriptor.name == effect.name)
-                {
-                    for parameter in descriptor.parameters {
-                        let mut value = effect
-                            .parameters
-                            .get(parameter.name)
-                            .and_then(|value| match value {
-                                ParamValue::Integer(value) => Some(*value),
-                                ParamValue::Boolean(_) | ParamValue::Text(_) => None,
-                            })
-                            .unwrap_or(parameter.neutral);
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut value, parameter.min..=parameter.max)
-                                    .text(parameter.name)
-                                    .integer(),
-                            )
-                            .changed()
-                        {
-                            pending.push(effect_param_operation(
-                                clip.id,
-                                effect.id,
-                                parameter.name,
-                                value,
-                            ));
-                        }
-                    }
-                }
-            });
-        }
-        ui.menu_button("+ Effect", |ui| {
-            for descriptor in EFFECT_DESCRIPTORS {
-                if clip
-                    .effects
-                    .iter()
-                    .any(|effect| effect.name == descriptor.name)
-                {
-                    continue;
-                }
-                if ui.button(descriptor.name).clicked() {
-                    pending.push(add_effect_operation(clip, descriptor));
-                    ui.close();
-                }
-            }
-        });
+        effects_section(ui, clip, &mut pending);
+        transition_section(ui, &self.document, clip, &mut pending);
+        self.send_operations(pending);
+    }
 
-        ui.add_space(space::TWO);
-        ui.strong("Transition in");
-        if let Some(transition) = &clip.transition_in {
-            let maximum = self
-                .document
-                .clip_duration(clip)
-                .map_or(1, |value| value.0.max(1));
-            let mut name = transition.name.clone();
-            let mut changed = false;
-            ui.horizontal(|ui| {
-                ui.label("Type");
-                egui::ComboBox::from_id_salt(("transition-type", clip.id.0))
-                    .selected_text(&name)
-                    .show_ui(ui, |ui| {
-                        for descriptor in TRANSITION_DESCRIPTORS {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut name,
-                                    descriptor.name.to_owned(),
-                                    descriptor.name,
-                                )
-                                .on_hover_text(descriptor.description)
-                                .changed();
-                        }
-                    });
-            });
-            let mut duration = transition.duration.0;
-            changed |= ui
-                .add(
-                    egui::Slider::new(&mut duration, 1..=maximum)
-                        .text("frames")
-                        .integer(),
-                )
-                .changed();
-            if changed {
-                pending.extend(transition_duration_operations(
-                    &self.document,
-                    clip.id,
-                    &name,
-                    duration,
-                ));
-            }
-            if ui.small_button("Remove transition").clicked() {
-                pending.extend(linked_transition_operations(&self.document, clip.id, None));
-            }
-        } else {
-            let duration = self
-                .document
-                .clip_duration(clip)
-                .map_or(1, |value| value.0.clamp(1, 15));
-            ui.menu_button("+ Transition", |ui| {
-                for descriptor in TRANSITION_DESCRIPTORS {
-                    if ui
-                        .button(descriptor.name)
-                        .on_hover_text(descriptor.description)
-                        .clicked()
-                    {
-                        let transition = Transition {
-                            name: descriptor.name.to_owned(),
-                            duration: TimeCode(duration),
-                        };
-                        pending.extend(linked_transition_operations(
-                            &self.document,
-                            clip.id,
-                            Some(&transition),
-                        ));
-                        ui.close();
-                    }
-                }
-            });
-        }
+    fn freeze_clip_inspector(
+        &mut self,
+        ui: &mut egui::Ui,
+        clip: &Clip,
+        freeze: &openreel_core::FreezeFrame,
+    ) {
+        let Some(asset) = self.document.asset(clip.asset).cloned() else {
+            ui.colored_label(color::STATUS_DANGER, "Freeze source asset is missing");
+            return;
+        };
+        ui.strong(&asset.name);
+        ui.colored_label(color::TEXT_MUTED, "Freeze frame");
+        ui.add_space(space::ONE);
+        data_row(
+            ui,
+            "Frozen source",
+            &frame_readout(freeze.source_frame, asset.fps),
+        );
+        let duration = self.document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
+        data_row(ui, "Duration", &frame_readout(duration, self.document.fps));
+        let mut pending = Vec::new();
+        effects_section(ui, clip, &mut pending);
+        transition_section(ui, &self.document, clip, &mut pending);
         self.send_operations(pending);
     }
 
@@ -482,6 +379,143 @@ impl OpenReelApp {
     }
 }
 
+fn effects_section(ui: &mut egui::Ui, clip: &Clip, pending: &mut Vec<Operation>) {
+    ui.add_space(space::TWO);
+    ui.strong("Effects");
+    for effect in &clip.effects {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(&effect.name);
+                if ui.small_button("Remove").clicked() {
+                    pending.push(Operation::RemoveEffect {
+                        clip: clip.id,
+                        effect: effect.id,
+                    });
+                }
+            });
+            if let Some(descriptor) = EFFECT_DESCRIPTORS
+                .iter()
+                .find(|descriptor| descriptor.name == effect.name)
+            {
+                for parameter in descriptor.parameters {
+                    let mut value = effect
+                        .parameters
+                        .get(parameter.name)
+                        .and_then(|value| match value {
+                            ParamValue::Integer(value) => Some(*value),
+                            ParamValue::Boolean(_) | ParamValue::Text(_) => None,
+                        })
+                        .unwrap_or(parameter.neutral);
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut value, parameter.min..=parameter.max)
+                                .text(parameter.name)
+                                .integer(),
+                        )
+                        .changed()
+                    {
+                        pending.push(effect_param_operation(
+                            clip.id,
+                            effect.id,
+                            parameter.name,
+                            value,
+                        ));
+                    }
+                }
+            }
+        });
+    }
+    ui.menu_button("+ Effect", |ui| {
+        for descriptor in EFFECT_DESCRIPTORS {
+            if clip
+                .effects
+                .iter()
+                .any(|effect| effect.name == descriptor.name)
+            {
+                continue;
+            }
+            if ui.button(descriptor.name).clicked() {
+                pending.push(add_effect_operation(clip, descriptor));
+                ui.close();
+            }
+        }
+    });
+}
+
+fn transition_section(
+    ui: &mut egui::Ui,
+    document: &openreel_core::Document,
+    clip: &Clip,
+    pending: &mut Vec<Operation>,
+) {
+    ui.add_space(space::TWO);
+    ui.strong("Transition in");
+    if let Some(transition) = &clip.transition_in {
+        let maximum = document
+            .clip_duration(clip)
+            .map_or(1, |value| value.0.max(1));
+        let mut name = transition.name.clone();
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label("Type");
+            egui::ComboBox::from_id_salt(("transition-type", clip.id.0))
+                .selected_text(&name)
+                .show_ui(ui, |ui| {
+                    for descriptor in TRANSITION_DESCRIPTORS {
+                        changed |= ui
+                            .selectable_value(
+                                &mut name,
+                                descriptor.name.to_owned(),
+                                descriptor.name,
+                            )
+                            .on_hover_text(descriptor.description)
+                            .changed();
+                    }
+                });
+        });
+        let mut duration = transition.duration.0;
+        changed |= ui
+            .add(
+                egui::Slider::new(&mut duration, 1..=maximum)
+                    .text("frames")
+                    .integer(),
+            )
+            .changed();
+        if changed {
+            pending.extend(transition_duration_operations(
+                document, clip.id, &name, duration,
+            ));
+        }
+        if ui.small_button("Remove transition").clicked() {
+            pending.extend(linked_transition_operations(document, clip.id, None));
+        }
+    } else {
+        let duration = document
+            .clip_duration(clip)
+            .map_or(1, |value| value.0.clamp(1, 15));
+        ui.menu_button("+ Transition", |ui| {
+            for descriptor in TRANSITION_DESCRIPTORS {
+                if ui
+                    .button(descriptor.name)
+                    .on_hover_text(descriptor.description)
+                    .clicked()
+                {
+                    let transition = Transition {
+                        name: descriptor.name.to_owned(),
+                        duration: TimeCode(duration),
+                    };
+                    pending.extend(linked_transition_operations(
+                        document,
+                        clip.id,
+                        Some(&transition),
+                    ));
+                    ui.close();
+                }
+            }
+        });
+    }
+}
+
 fn title_param_operation(clip: ClipId, name: &str, value: ParamValue) -> Operation {
     Operation::SetTitleParam {
         clip,
@@ -500,9 +534,10 @@ fn audio_target_clip(document: &openreel_core::Document, selected: ClipId) -> Op
 }
 
 fn clip_carries_audio(document: &openreel_core::Document, clip: &Clip) -> bool {
-    document
-        .asset(clip.asset)
-        .is_some_and(|asset| matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo))
+    clip.content.is_media()
+        && document
+            .asset(clip.asset)
+            .is_some_and(|asset| matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo))
 }
 
 const fn clip_audio_operation(
@@ -714,6 +749,67 @@ mod tests {
                     parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0),)]),
                 },
             }
+        );
+    }
+
+    #[test]
+    fn crop_neutral_add_and_shared_freeze_controls_emit_media_style_ops() {
+        let descriptor = EFFECT_DESCRIPTORS
+            .iter()
+            .find(|descriptor| descriptor.name == "crop")
+            .unwrap();
+        let media = Clip {
+            id: ClipId(1),
+            asset: AssetId(1),
+            source_range: TimeCode(0)..TimeCode(30),
+            content: ClipContent::Media,
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+        };
+        let mut freeze = media.clone();
+        freeze.content = ClipContent::Freeze(openreel_core::FreezeFrame {
+            source_frame: TimeCode(12),
+        });
+
+        let media_effect = add_effect_operation(&media, descriptor);
+        let freeze_effect = add_effect_operation(&freeze, descriptor);
+        assert_eq!(media_effect, freeze_effect);
+        let Operation::AddEffect { effect, .. } = freeze_effect else {
+            panic!("crop control must emit AddEffect");
+        };
+        assert_eq!(
+            effect.parameters,
+            BTreeMap::from([
+                ("bottom_percent".to_owned(), ParamValue::Integer(0)),
+                ("left_percent".to_owned(), ParamValue::Integer(0)),
+                ("right_percent".to_owned(), ParamValue::Integer(0)),
+                ("top_percent".to_owned(), ParamValue::Integer(0)),
+            ])
+        );
+
+        let document = Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![freeze],
+            }],
+            ..Document::default()
+        };
+        assert_eq!(
+            transition_duration_operations(&document, ClipId(1), "crossfade", 6),
+            vec![Operation::AddTransition {
+                clip: ClipId(1),
+                transition: Transition {
+                    name: "crossfade".to_owned(),
+                    duration: TimeCode(6),
+                },
+            }]
         );
     }
 

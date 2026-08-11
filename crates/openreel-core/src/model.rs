@@ -114,6 +114,14 @@ pub enum ClipContent {
     #[default]
     Media,
     Title(Title),
+    Freeze(FreezeFrame),
+}
+
+/// A project-local clip that repeatedly displays one frame from a real asset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FreezeFrame {
+    /// The held frame in the referenced asset's source-frame time base.
+    pub source_frame: TimeCode,
 }
 
 impl ClipContent {
@@ -125,7 +133,7 @@ impl ClipContent {
     #[must_use]
     pub const fn title(&self) -> Option<&Title> {
         match self {
-            Self::Media => None,
+            Self::Media | Self::Freeze(_) => None,
             Self::Title(title) => Some(title),
         }
     }
@@ -135,9 +143,11 @@ impl ClipContent {
 pub struct Clip {
     pub id: ClipId,
     /// Media asset id. Title clips use the default id and ignore this field;
-    /// keeping it preserves the pre-M14 serialized media-clip shape.
+    /// freeze clips reference the real asset whose frame is held. Keeping the
+    /// field on every clip preserves the pre-M14 serialized media-clip shape.
     pub asset: AssetId,
-    /// Media in/out in source frames, or a title-local span in project frames.
+    /// Media in/out in source frames, or a title/freeze-local duration span in
+    /// project frames.
     pub source_range: std::ops::Range<TimeCode>,
     /// Missing on pre-M14 clips, which are media by definition.
     #[serde(default, skip_serializing_if = "ClipContent::is_media")]
@@ -278,7 +288,7 @@ impl Document {
     ///
     /// Returns an error for a missing media asset or an unrepresentable frame-rate mapping.
     pub fn clip_duration(&self, clip: &Clip) -> Result<TimeCode, OpError> {
-        if matches!(clip.content, ClipContent::Title(_)) {
+        if matches!(clip.content, ClipContent::Title(_) | ClipContent::Freeze(_)) {
             return clip
                 .source_range
                 .end

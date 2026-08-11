@@ -8,6 +8,10 @@ pub enum EffectUniform {
     Scale,
     OffsetX,
     OffsetY,
+    CropLeft,
+    CropRight,
+    CropTop,
+    CropBottom,
 }
 
 /// The accepted integer domain and neutral value for one effect parameter.
@@ -101,6 +105,39 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
                 max: 100,
                 neutral: 0,
                 uniform: EffectUniform::OffsetY,
+            },
+        ],
+    },
+    EffectDescriptor {
+        name: "crop",
+        parameters: &[
+            EffectParameterDescriptor {
+                name: "left_percent",
+                min: 0,
+                max: 45,
+                neutral: 0,
+                uniform: EffectUniform::CropLeft,
+            },
+            EffectParameterDescriptor {
+                name: "right_percent",
+                min: 0,
+                max: 45,
+                neutral: 0,
+                uniform: EffectUniform::CropRight,
+            },
+            EffectParameterDescriptor {
+                name: "top_percent",
+                min: 0,
+                max: 45,
+                neutral: 0,
+                uniform: EffectUniform::CropTop,
+            },
+            EffectParameterDescriptor {
+                name: "bottom_percent",
+                min: 0,
+                max: 45,
+                neutral: 0,
+                uniform: EffectUniform::CropBottom,
             },
         ],
     },

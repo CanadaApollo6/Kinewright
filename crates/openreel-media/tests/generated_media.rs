@@ -7,8 +7,9 @@ use std::{
 
 use openreel_core::{
     Analysis, AssetId, Clip, ClipContent, ClipId, Document, Effect, EffectId, Export,
-    ExportCancellation, ExportSettings, MediaAsset, MediaError, MediaEvent, MediaKind, ParamValue,
-    Playback, PlaybackState, Rational, TimeCode, Title, Track, TrackId, TrackKind, Transition,
+    ExportCancellation, ExportSettings, FreezeFrame, MediaAsset, MediaError, MediaEvent, MediaKind,
+    ParamValue, Playback, PlaybackState, Rational, TimeCode, Title, Track, TrackId, TrackKind,
+    Transition,
 };
 use openreel_media::FfmpegMediaEngine;
 
@@ -389,6 +390,82 @@ fn title_export_pixels_match_preview_after_h264_redecode() {
     decode_engine.request_frame(TimeCode(5));
     let decoded = receive_frame(&exported_frames, TimeCode(5));
     assert_title_frame_close(&preview, &decoded);
+}
+
+#[test]
+fn freeze_export_pixels_match_preview_after_h264_redecode() {
+    let input = TestClip::generate();
+    let engine = FfmpegMediaEngine::new().unwrap();
+    let asset = engine.probe(&input.0).unwrap();
+    let document = Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![Clip {
+                id: ClipId(1),
+                asset: asset.id,
+                source_range: TimeCode(0)..TimeCode(30),
+                content: ClipContent::Freeze(FreezeFrame {
+                    source_frame: TimeCode(20),
+                }),
+                timeline_start: TimeCode::ZERO,
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+            }],
+        }],
+        media_pool: vec![asset],
+        markers: Vec::new(),
+        fps: Rational::new(30_000, 1_001).unwrap(),
+        resolution: (320, 180),
+        duration: TimeCode(30),
+    };
+    document.validate().unwrap();
+    let frames = engine.frames();
+    engine.set_document(std::sync::Arc::new(document.clone()));
+    engine.request_frame(TimeCode(2));
+    let preview_start = receive_frame(&frames, TimeCode(2));
+    engine.request_frame(TimeCode(24));
+    let preview_end = receive_frame(&frames, TimeCode(24));
+    assert_frame_sample_close(&preview_start, &preview_end, 0);
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let output = TemporaryFile(std::env::temp_dir().join(format!(
+        "openreel-freeze-export-{}-{nonce}.mp4",
+        std::process::id()
+    )));
+    let (progress, _) = crossbeam_channel::unbounded();
+    engine
+        .export(
+            &output.0,
+            ExportSettings {
+                fps: document.fps,
+                resolution: document.resolution,
+                video_codec: "libx264".to_owned(),
+                audio_codec: "aac".to_owned(),
+                video_bitrate: 1_000_000,
+                audio_bitrate: 128_000,
+                cancellation: ExportCancellation::default(),
+            },
+            progress,
+        )
+        .unwrap();
+
+    let decode_engine = FfmpegMediaEngine::new().unwrap();
+    let exported_asset = decode_engine.probe(&output.0).unwrap();
+    let exported_document = full_timeline(exported_asset);
+    let exported_frames = decode_engine.frames();
+    decode_engine.set_document(std::sync::Arc::new(exported_document));
+    decode_engine.request_frame(TimeCode(15));
+    let decoded = receive_frame(&exported_frames, TimeCode(15));
+    assert_frame_sample_close(&preview_start, &decoded, 28);
 }
 
 fn decode_stereo_audio(path: &Path) -> Vec<f32> {

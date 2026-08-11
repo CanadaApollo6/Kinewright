@@ -33,7 +33,7 @@ pub use media::{
     WaveformPeak,
 };
 pub use model::{
-    AssetId, Clip, ClipContent, ClipId, Document, Effect, EffectId, LinkId,
+    AssetId, Clip, ClipContent, ClipId, Document, Effect, EffectId, FreezeFrame, LinkId,
     MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaKind, ParamValue, Track, TrackId,
     TrackKind, Transition,
 };

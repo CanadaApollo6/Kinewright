@@ -176,6 +176,30 @@ pub fn visual_layers_at(
                     transition,
                 }));
             }
+            ClipContent::Freeze(freeze) => {
+                let duration = document
+                    .clip_duration(clip)
+                    .map_err(|error| MediaError::Backend(error.to_string()))?;
+                let timeline_end = clip.timeline_start.checked_add(duration).ok_or_else(|| {
+                    MediaError::Backend("timeline position overflowed".to_owned())
+                })?;
+                let source_end = freeze
+                    .source_frame
+                    .checked_add(TimeCode(1))
+                    .ok_or_else(|| MediaError::Backend("source position overflowed".to_owned()))?;
+                layers.push(TimelineVisualLayer::Video(TimelineVideoLayer {
+                    source: TimelineSource {
+                        track: track.id,
+                        clip: clip.id,
+                        asset: clip.asset,
+                        source_at: freeze.source_frame,
+                        source_end,
+                        timeline_end,
+                    },
+                    effects: clip.effects.clone(),
+                    transition: transition_render_params(clip, project_at),
+                }));
+            }
         }
     }
     Ok(layers)
@@ -208,7 +232,7 @@ pub fn timeline_audio_segments(
     let mut segments = Vec::new();
     for track in &document.tracks {
         for clip in &track.clips {
-            if matches!(clip.content, ClipContent::Title(_)) {
+            if !clip.content.is_media() {
                 continue;
             }
             let asset = document.asset(clip.asset).ok_or_else(|| {
@@ -279,7 +303,9 @@ fn source_on_track(
     let Some(clip) = active_clip_on_track(document, track, project_at)? else {
         return Ok(None);
     };
-    if matches!(clip.content, ClipContent::Title(_)) {
+    // Freeze clips deliberately stay invisible here: this media-only lookup is
+    // used by split-at-playhead and freeze creation to resolve moving footage.
+    if !clip.content.is_media() {
         return Ok(None);
     }
     media_source_for_clip(document, track.id, clip, project_at).map(Some)
@@ -408,8 +434,8 @@ mod tests {
     use std::path::PathBuf;
 
     use openreel_core::{
-        AssetId, Clip, ClipId, Document, MediaAsset, MediaKind, Rational, TimeCode, Track, TrackId,
-        TrackKind, Transition,
+        AssetId, Clip, ClipId, Document, Effect, EffectId, FreezeFrame, MediaAsset, MediaKind,
+        ParamValue, Rational, TimeCode, Track, TrackId, TrackKind, Transition,
     };
 
     use super::*;
@@ -649,6 +675,93 @@ mod tests {
             panic!("top track must resolve to a title layer");
         };
         assert!(title.transition.alpha.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn freeze_visual_layer_holds_one_source_window_and_carries_shading() {
+        let mut document = fixture();
+        document.tracks = vec![Track {
+            id: TrackId(8),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![Clip {
+                id: ClipId(3),
+                asset: AssetId(1),
+                source_range: TimeCode(0)..TimeCode(10),
+                content: ClipContent::Freeze(FreezeFrame {
+                    source_frame: TimeCode(17),
+                }),
+                timeline_start: TimeCode::ZERO,
+                effects: vec![Effect {
+                    id: EffectId(1),
+                    name: "brightness".to_owned(),
+                    parameters: std::collections::BTreeMap::from([(
+                        "percent".to_owned(),
+                        ParamValue::Integer(20),
+                    )]),
+                }],
+                transition_in: Some(Transition {
+                    name: "crossfade".to_owned(),
+                    duration: TimeCode(3),
+                }),
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+            }],
+        }];
+        document.duration = TimeCode(10);
+        document.validate().unwrap();
+
+        let layers = visual_layers_at(&document, TimeCode(1)).unwrap();
+        let TimelineVisualLayer::Video(layer) = &layers[0] else {
+            panic!("freeze must use the normal video render path");
+        };
+        assert_eq!(layer.source.track, TrackId(8));
+        assert_eq!(layer.source.clip, ClipId(3));
+        assert_eq!(layer.source.asset, AssetId(1));
+        assert_eq!(layer.source.source_at, TimeCode(17));
+        assert_eq!(layer.source.source_end, TimeCode(18));
+        assert_eq!(layer.source.timeline_end, TimeCode(10));
+        assert_eq!(layer.effects[0].name, "brightness");
+        assert!((layer.transition.alpha - 0.5).abs() < f32::EPSILON);
+        assert!(
+            timeline_source_at(&document, TimeCode(1))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn timeline_audio_segments_exclude_freeze_clips() {
+        let mut document = fixture();
+        document.tracks = vec![Track {
+            id: TrackId(7),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![Clip {
+                id: ClipId(3),
+                asset: AssetId(1),
+                source_range: TimeCode(0)..TimeCode(10),
+                content: ClipContent::Freeze(FreezeFrame {
+                    source_frame: TimeCode(12),
+                }),
+                timeline_start: TimeCode::ZERO,
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+            }],
+        }];
+        document.duration = TimeCode(10);
+        document.validate().unwrap();
+        assert!(
+            timeline_audio_segments(&document, TimeCode(0)..TimeCode(10))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

@@ -10,9 +10,9 @@ use std::{
 
 use crossbeam_channel::{Sender, unbounded};
 use openreel_core::{
-    AssetId, AssetTranscript, ClipContent, Document, ExportCancellation, FrameRounding, MediaAsset,
-    MediaError, MediaKind, Rational, TimeCode, TimelineTranscriptWord, TranscriptStatus,
-    TranscriptWord, map_frames_with_rounding, map_source_range_to_project,
+    AssetId, AssetTranscript, Document, ExportCancellation, FrameRounding, MediaAsset, MediaError,
+    MediaKind, Rational, TimeCode, TimelineTranscriptWord, TranscriptStatus, TranscriptWord,
+    map_frames_with_rounding, map_source_range_to_project,
 };
 use serde::{Deserialize, Serialize};
 use whisper_rs::{
@@ -442,7 +442,7 @@ where
     let mut words = Vec::new();
     for track in &document.tracks {
         for clip in &track.clips {
-            if matches!(clip.content, ClipContent::Title(_)) {
+            if !clip.content.is_media() {
                 continue;
             }
             let Some(asset) = document.asset(clip.asset) else {
@@ -669,7 +669,7 @@ pub fn default_data_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use openreel_core::{Clip, ClipId, Track, TrackId, TrackKind};
+    use openreel_core::{Clip, ClipContent, ClipId, Track, TrackId, TrackKind};
 
     use super::*;
     use crate::test_support::TempDirectory;

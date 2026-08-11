@@ -94,6 +94,13 @@ impl OpenReelApp {
         ]);
     }
 
+    pub(crate) fn freeze_frame_at_playhead(&mut self) {
+        match freeze_frame_operations(&self.document, self.position) {
+            Ok(operations) => self.send_operations(operations),
+            Err(error) => self.record_error("Operations", error),
+        }
+    }
+
     pub(crate) fn split_at_playhead(&mut self) {
         let clip = self.selected_clip.or_else(|| {
             timeline_source_at(&self.document, self.position)
@@ -201,6 +208,13 @@ impl OpenReelApp {
                     .clicked()
                 {
                     self.add_title_at_playhead();
+                }
+                if ui
+                    .button("Freeze")
+                    .on_hover_text("Freeze the current frame for two seconds")
+                    .clicked()
+                {
+                    self.freeze_frame_at_playhead();
                 }
                 let ripple = ui
                     .add(
@@ -366,15 +380,23 @@ impl OpenReelApp {
                                 continue;
                             };
                             let asset = match &clip.content {
-                                ClipContent::Media => document.asset(clip.asset),
+                                ClipContent::Media | ClipContent::Freeze(_) => {
+                                    document.asset(clip.asset)
+                                }
                                 ClipContent::Title(_) => None,
                             };
-                            if matches!(&clip.content, ClipContent::Media) && asset.is_none() {
+                            if !matches!(&clip.content, ClipContent::Title(_)) && asset.is_none() {
                                 continue;
                             }
-                            let source_fps = asset.map_or(document.fps, |asset| asset.fps);
-                            let maximum_source_end =
-                                asset.map_or(TimeCode(i64::MAX), |asset| asset.duration);
+                            let (source_fps, maximum_source_end) = match &clip.content {
+                                ClipContent::Media => asset
+                                    .map_or((document.fps, TimeCode(i64::MAX)), |asset| {
+                                        (asset.fps, asset.duration)
+                                    }),
+                                ClipContent::Title(_) | ClipContent::Freeze(_) => {
+                                    (document.fps, TimeCode(i64::MAX))
+                                }
+                            };
                             let x =
                                 rect.left() + clip.timeline_start.0 as f32 * self.pixels_per_frame;
                             let clip_width = (duration.0 as f32 * self.pixels_per_frame).max(24.0);
@@ -609,7 +631,23 @@ impl OpenReelApp {
                                         .map(|transition| transition.duration),
                                     self.pixels_per_frame,
                                 ),
-                                (ClipContent::Media, None) => {}
+                                (ClipContent::Freeze(freeze), Some(asset)) => paint_freeze_clip(
+                                    &painter,
+                                    ui.clip_rect(),
+                                    &mut self.visual_cache,
+                                    self.analysis.as_ref(),
+                                    asset,
+                                    freeze.source_frame,
+                                    draw_rect,
+                                    body.hovered() || left.hovered() || right.hovered(),
+                                    selected,
+                                    dragging,
+                                    clip.transition_in
+                                        .as_ref()
+                                        .map(|transition| transition.duration),
+                                    self.pixels_per_frame,
+                                ),
+                                (ClipContent::Media | ClipContent::Freeze(_), None) => {}
                             }
                         }
                     }
@@ -1162,6 +1200,102 @@ fn paint_clip(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn paint_freeze_clip(
+    painter: &egui::Painter,
+    clip_bounds: egui::Rect,
+    visual_cache: &mut VisualCache,
+    media: &dyn Analysis,
+    asset: &MediaAsset,
+    source_frame: TimeCode,
+    rect: egui::Rect,
+    hovered: bool,
+    selected: bool,
+    dragging: bool,
+    transition_duration: Option<TimeCode>,
+    pixels_per_frame: f32,
+) {
+    painter.rect_filled(rect, radius::SM, color::SURFACE);
+    let visible = rect.intersect(clip_bounds);
+    if visible.is_positive()
+        && let Some(texture) = visual_cache.thumbnail(media, asset, source_frame, THUMBNAIL_WIDTH)
+    {
+        let first = ((visible.left() - rect.left()) / FILMSTRIP_TILE_WIDTH)
+            .floor()
+            .max(0.0) as usize;
+        let last = ((visible.right() - rect.left()) / FILMSTRIP_TILE_WIDTH)
+            .ceil()
+            .max(1.0) as usize;
+        for tile in first..last {
+            let left = rect.left() + tile as f32 * FILMSTRIP_TILE_WIDTH;
+            let tile_rect = egui::Rect::from_min_max(
+                egui::pos2(left, rect.top()),
+                egui::pos2(
+                    (left + FILMSTRIP_TILE_WIDTH).min(rect.right()),
+                    rect.bottom(),
+                ),
+            );
+            painter.image(
+                texture.id(),
+                tile_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                color::MEDIA_TINT_78,
+            );
+        }
+    }
+    paint_transition_affordance(painter, rect, transition_duration, pixels_per_frame);
+    let label_strip = egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2(rect.right(), (rect.top() + 19.0).min(rect.bottom())),
+    );
+    painter.rect_filled(label_strip, radius::SM, color::MEDIA_SCRIM_78);
+    painter.text(
+        egui::pos2(rect.left() + space::TWO, rect.top() + space::ONE),
+        egui::Align2::LEFT_TOP,
+        &asset.name,
+        egui::FontId::new(type_size::CAPTION, egui::FontFamily::Proportional),
+        color::TEXT_PRIMARY,
+    );
+    painter.text(
+        egui::pos2(rect.right() - space::TWO, rect.top() + space::ONE),
+        egui::Align2::RIGHT_TOP,
+        "HOLD",
+        theme::code_font(),
+        color::ACCENT,
+    );
+    if hovered {
+        painter.rect_filled(rect, radius::SM, color::ACCENT_16);
+    }
+    if selected {
+        painter.rect_filled(rect, radius::SM, color::ACCENT_28);
+    }
+    if dragging {
+        painter.rect_filled(rect, radius::SM, color::SURFACE_ACTIVE);
+    }
+    painter.rect_stroke(
+        rect,
+        radius::SM,
+        egui::Stroke::new(
+            if dragging { 2.0 } else { 1.0 },
+            if dragging {
+                color::ACCENT
+            } else if selected {
+                color::ACCENT_72
+            } else if hovered {
+                color::BORDER_STRONG
+            } else {
+                color::BORDER_SUBTLE
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_title_clip(
     painter: &egui::Painter,
@@ -1536,7 +1670,7 @@ fn linked_trim_operations(
                 .ok_or_else(|| format!("Asset {} no longer exists", primary_clip.asset))?
                 .fps
         }
-        ClipContent::Title(_) => document.fps,
+        ClipContent::Title(_) | ClipContent::Freeze(_) => document.fps,
     };
     let (old_boundary, new_boundary) = match edge {
         TrimEdge::Left => (primary_clip.source_range.start, new_source.start),
@@ -1553,7 +1687,7 @@ fn linked_trim_operations(
                     .ok_or_else(|| format!("Asset {} no longer exists", clip.asset))?;
                 (asset.fps, asset.duration.0)
             }
-            ClipContent::Title(_) => (document.fps, i64::MAX),
+            ClipContent::Title(_) | ClipContent::Freeze(_) => (document.fps, i64::MAX),
         };
         let linked_source = if clip.id == primary {
             new_source.clone()
@@ -1589,6 +1723,38 @@ fn linked_trim_operations(
             });
         }
     }
+    Ok(operations)
+}
+
+fn freeze_frame_operations(document: &Document, at: TimeCode) -> Result<Vec<Operation>, String> {
+    let source = timeline_source_at(document, at)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "A media clip is required under the playhead".to_owned())?;
+    let clip = document
+        .clip(source.clip)
+        .ok_or_else(|| format!("Clip {} no longer exists", source.clip))?;
+    let duration = TimeCode(i64::from(nominal_fps(document.fps)).saturating_mul(2));
+    let mut operations = Vec::with_capacity(3);
+    if at > clip.timeline_start && at < source.timeline_end {
+        operations.push(Operation::SplitClip {
+            clip: source.clip,
+            at,
+        });
+    }
+    operations.extend([
+        Operation::RippleInsertGap {
+            track: source.track,
+            at,
+            duration,
+        },
+        Operation::AddFreezeFrame {
+            track: source.track,
+            at,
+            duration,
+            asset: source.asset,
+            source_frame: source.source_at,
+        },
+    ]);
     Ok(operations)
 }
 
@@ -1892,6 +2058,70 @@ mod tests {
         let fps = Rational::new(30, 1).unwrap();
         assert_eq!(format_timecode(TimeCode(0), fps), "00:00:00:00");
         assert_eq!(format_timecode(TimeCode(108_029), fps), "01:00:00:29");
+    }
+
+    #[test]
+    fn freeze_at_playhead_builds_one_split_gap_add_batch_and_one_undo_reverts_it() {
+        use openreel_core::{Command, Core, Event};
+
+        let mut document = linked_fixture();
+        document.tracks.truncate(1);
+        let operations = freeze_frame_operations(&document, TimeCode(10)).unwrap();
+        assert_eq!(
+            operations,
+            vec![
+                Operation::SplitClip {
+                    clip: ClipId(1),
+                    at: TimeCode(10),
+                },
+                Operation::RippleInsertGap {
+                    track: TrackId(1),
+                    at: TimeCode(10),
+                    duration: TimeCode(60),
+                },
+                Operation::AddFreezeFrame {
+                    track: TrackId(1),
+                    at: TimeCode(10),
+                    duration: TimeCode(60),
+                    asset: AssetId(1),
+                    source_frame: TimeCode(10),
+                },
+            ]
+        );
+
+        let core = Core::spawn(document.clone()).unwrap();
+        core.request(Command::DoBatch(operations)).unwrap();
+        let undone = match core.request(Command::Undo).unwrap() {
+            Event::DocumentChanged { doc, .. } => doc,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        assert_eq!(undone.as_ref(), &document);
+    }
+
+    #[test]
+    fn freeze_at_clip_start_skips_split_and_requires_media_under_playhead() {
+        let document = linked_fixture();
+        assert_eq!(
+            freeze_frame_operations(&document, TimeCode::ZERO).unwrap(),
+            vec![
+                Operation::RippleInsertGap {
+                    track: TrackId(1),
+                    at: TimeCode::ZERO,
+                    duration: TimeCode(60),
+                },
+                Operation::AddFreezeFrame {
+                    track: TrackId(1),
+                    at: TimeCode::ZERO,
+                    duration: TimeCode(60),
+                    asset: AssetId(1),
+                    source_frame: TimeCode::ZERO,
+                },
+            ]
+        );
+        assert_eq!(
+            freeze_frame_operations(&document, TimeCode(30)).unwrap_err(),
+            "A media clip is required under the playhead"
+        );
     }
 
     #[test]

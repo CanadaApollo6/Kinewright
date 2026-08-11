@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AssetId, Clip, ClipContent, ClipId, Document, Effect, EffectId, LinkId,
+    AssetId, Clip, ClipContent, ClipId, Document, Effect, EffectId, FreezeFrame, LinkId,
     MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, ParamValue, TimeCode, TimeMappingError,
     Title, TitleParameterKind, TitlePosition, Track, TrackId, TrackKind, Transition,
     map_source_range_to_project, title_parameter_descriptor,
@@ -142,6 +142,13 @@ pub enum Operation {
         name: String,
         value: ParamValue,
     },
+    AddFreezeFrame {
+        track: TrackId,
+        at: TimeCode,
+        duration: TimeCode,
+        asset: AssetId,
+        source_frame: TimeCode,
+    },
 }
 
 pub trait ApplyOp {
@@ -229,6 +236,8 @@ pub enum OpError {
     },
     #[error("title clips can only be placed on video track {0}")]
     TitleOnAudioTrack(TrackId),
+    #[error("freeze clips can only be placed on video track {0}")]
+    FreezeOnAudioTrack(TrackId),
     #[error("source range must be non-empty and non-negative: {start}..{end}")]
     InvalidSourceRange { start: i64, end: i64 },
     #[error("source range ends at {end}, beyond asset {asset}'s duration {duration}")]
@@ -292,6 +301,14 @@ pub enum OpError {
     InvalidRippleDuration(TimeCode),
     #[error("title duration must be positive: {0}")]
     InvalidTitleDuration(TimeCode),
+    #[error("freeze duration must be positive: {0}")]
+    InvalidFreezeDuration(TimeCode),
+    #[error("freeze source frame {source_frame} is outside asset {asset}'s range 0..{duration}")]
+    FreezeSourceFrameOutOfRange {
+        asset: AssetId,
+        source_frame: TimeCode,
+        duration: TimeCode,
+    },
     #[error("clip {0} is not a title")]
     NotTitleClip(ClipId),
     #[error("unknown title parameter {0:?}")]
@@ -374,6 +391,8 @@ pub enum OpError {
     },
     #[error("title clip {0} has no audio contribution; SetClipAudio accepts media clips only")]
     TitleClipHasNoAudio(ClipId),
+    #[error("freeze clip {0} has no audio contribution; SetClipAudio accepts media clips only")]
+    FreezeClipHasNoAudio(ClipId),
     #[error("time calculation overflowed")]
     TimeOverflow,
     #[error(transparent)]
@@ -411,6 +430,13 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
             duration,
             title,
         } => add_title(doc, *track, *at, *duration, title.clone()),
+        Operation::AddFreezeFrame {
+            track,
+            at,
+            duration,
+            asset,
+            source_frame,
+        } => add_freeze_frame(doc, *track, *at, *duration, *asset, *source_frame),
         Operation::SplitClip { clip, at } => split_clip(doc, *clip, *at),
         Operation::TrimClip { clip, new_source } => trim_clip(doc, *clip, new_source.clone()),
         Operation::MoveClip { clip, to_track, to } => move_clip(doc, *clip, *to_track, *to),
@@ -582,6 +608,51 @@ fn add_title(
     Ok(())
 }
 
+fn add_freeze_frame(
+    doc: &mut Document,
+    track_id: TrackId,
+    at: TimeCode,
+    duration: TimeCode,
+    asset_id: AssetId,
+    source_frame: TimeCode,
+) -> Result<(), OpError> {
+    if at < TimeCode::ZERO {
+        return Err(OpError::NegativeTimelinePosition(at));
+    }
+    if duration <= TimeCode::ZERO {
+        return Err(OpError::InvalidFreezeDuration(duration));
+    }
+    let track_index = doc
+        .tracks
+        .iter()
+        .position(|track| track.id == track_id)
+        .ok_or(OpError::MissingTrack(track_id))?;
+    if doc.tracks[track_index].kind != TrackKind::Video {
+        return Err(OpError::FreezeOnAudioTrack(track_id));
+    }
+    let asset = doc.asset(asset_id).ok_or(OpError::MissingAsset(asset_id))?;
+    validate_track_compatibility(asset, &doc.tracks[track_index])?;
+    validate_freeze_source_frame(asset, source_frame)?;
+    let clip_id = next_clip_id(doc)?;
+    doc.tracks[track_index].clips.push(Clip {
+        id: clip_id,
+        asset: asset_id,
+        source_range: TimeCode::ZERO..duration,
+        content: ClipContent::Freeze(FreezeFrame { source_frame }),
+        timeline_start: at,
+        effects: Vec::new(),
+        transition_in: None,
+        link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
+    });
+    doc.tracks[track_index]
+        .clips
+        .sort_by_key(|clip| (clip.timeline_start, clip.id));
+    Ok(())
+}
+
 fn split_clip(doc: &mut Document, clip_id: ClipId, at: TimeCode) -> Result<(), OpError> {
     let (track_index, clip_index) = find_clip(doc, clip_id)?;
     let original = doc.tracks[track_index].clips[clip_index].clone();
@@ -601,7 +672,7 @@ fn split_clip(doc: &mut Document, clip_id: ClipId, at: TimeCode) -> Result<(), O
             find_source_boundary(original.source_range.clone(), offset, asset.fps, doc.fps)
                 .ok_or(OpError::UnrepresentableSplit { clip: clip_id, at })?
         }
-        ClipContent::Title(_) => original
+        ClipContent::Title(_) | ClipContent::Freeze(_) => original
             .source_range
             .start
             .checked_add(offset)
@@ -646,7 +717,7 @@ fn trim_clip(
             validate_source_range(asset, &new_source)?;
             asset.fps
         }
-        ClipContent::Title(_) => {
+        ClipContent::Title(_) | ClipContent::Freeze(_) => {
             validate_title_range(&new_source)?;
             doc.fps
         }
@@ -716,6 +787,11 @@ fn move_clip(
         ClipContent::Title(_) => {
             if doc.tracks[target_track_index].kind != TrackKind::Video {
                 return Err(OpError::TitleOnAudioTrack(target_track_id));
+            }
+        }
+        ClipContent::Freeze(_) => {
+            if doc.tracks[target_track_index].kind != TrackKind::Video {
+                return Err(OpError::FreezeOnAudioTrack(target_track_id));
             }
         }
     }
@@ -1088,8 +1164,10 @@ fn set_clip_audio(
 ) -> Result<(), OpError> {
     let (track_index, clip_index) = find_clip(doc, clip_id)?;
     let clip = &doc.tracks[track_index].clips[clip_index];
-    if matches!(clip.content, ClipContent::Title(_)) {
-        return Err(OpError::TitleClipHasNoAudio(clip_id));
+    match clip.content {
+        ClipContent::Title(_) => return Err(OpError::TitleClipHasNoAudio(clip_id)),
+        ClipContent::Freeze(_) => return Err(OpError::FreezeClipHasNoAudio(clip_id)),
+        ClipContent::Media => {}
     }
     let clip_duration = doc.clip_duration(clip)?;
     validate_clip_audio_values(
@@ -1183,6 +1261,17 @@ fn validate_asset(asset: &MediaAsset) -> Result<(), OpError> {
     Ok(())
 }
 
+fn validate_freeze_source_frame(asset: &MediaAsset, source_frame: TimeCode) -> Result<(), OpError> {
+    if source_frame < TimeCode::ZERO || source_frame >= asset.duration {
+        return Err(OpError::FreezeSourceFrameOutOfRange {
+            asset: asset.id,
+            source_frame,
+            duration: asset.duration,
+        });
+    }
+    Ok(())
+}
+
 fn validate_effect(effect: &Effect) -> Result<(), OpError> {
     let Some(descriptor) = crate::effect_descriptor(&effect.name) else {
         return Err(OpError::UnknownEffect(effect.name.clone()));
@@ -1255,12 +1344,16 @@ fn validate_transition(
 }
 
 fn validate_clip_audio(doc: &Document, clip: &Clip) -> Result<(), OpError> {
-    if matches!(clip.content, ClipContent::Title(_))
+    if !clip.content.is_media()
         && (clip.audio_gain_tenth_db != 0
             || clip.audio_fade_in_frames != TimeCode::ZERO
             || clip.audio_fade_out_frames != TimeCode::ZERO)
     {
-        return Err(OpError::TitleClipHasNoAudio(clip.id));
+        return match clip.content {
+            ClipContent::Title(_) => Err(OpError::TitleClipHasNoAudio(clip.id)),
+            ClipContent::Freeze(_) => Err(OpError::FreezeClipHasNoAudio(clip.id)),
+            ClipContent::Media => Ok(()),
+        };
     }
     validate_clip_audio_values(
         clip.id,
@@ -1469,6 +1562,17 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                     validate_title_range(&clip.source_range)?;
                     let duration = doc.clip_duration(clip)?;
                     validate_title(clip.id, title, duration)?;
+                }
+                ClipContent::Freeze(freeze) => {
+                    if track.kind != TrackKind::Video {
+                        return Err(OpError::FreezeOnAudioTrack(track.id));
+                    }
+                    let asset = doc
+                        .asset(clip.asset)
+                        .ok_or(OpError::MissingAsset(clip.asset))?;
+                    validate_track_compatibility(asset, track)?;
+                    validate_freeze_source_frame(asset, freeze.source_frame)?;
+                    validate_title_range(&clip.source_range)?;
                 }
             }
             let clip_duration = doc.clip_duration(clip)?;

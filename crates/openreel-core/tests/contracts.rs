@@ -6,10 +6,10 @@ use std::{
 };
 
 use openreel_core::{
-    AssetId, Clip, ClipContent, ClipId, Command, Core, Document, Effect, EffectId, Event, LinkId,
-    Marker, MarkerId, MediaAsset, MediaKind, OpError, Operation, ParamValue, Rational,
-    TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition, Track, TrackId, TrackKind, Transition,
-    transition_descriptor,
+    AssetId, Clip, ClipContent, ClipId, Command, Core, Document, Effect, EffectId, Event,
+    FreezeFrame, LinkId, Marker, MarkerId, MediaAsset, MediaKind, OpError, Operation, ParamValue,
+    Rational, TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition, Track, TrackId, TrackKind,
+    Transition, transition_descriptor,
 };
 use proptest::prelude::*;
 
@@ -205,6 +205,13 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             name: "label".to_owned(),
             value: ParamValue::Text("Review this".to_owned()),
         },
+        Operation::AddFreezeFrame {
+            track: TrackId(1),
+            at: TimeCode(100),
+            duration: TimeCode(60),
+            asset: AssetId(1),
+            source_frame: TimeCode(24),
+        },
     ];
 
     for operation in operations {
@@ -368,6 +375,247 @@ fn title_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
         panic!("clip must remain a title");
     };
     assert_eq!(title.text, "Lower third");
+}
+
+#[test]
+fn add_freeze_frame_validates_track_asset_frame_and_duration() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    document.tracks.push(Track {
+        id: TrackId(2),
+        kind: TrackKind::Audio,
+        sync_lock: true,
+        clips: Vec::new(),
+    });
+    document.media_pool.extend([
+        asset(1, fps, 120),
+        MediaAsset {
+            id: AssetId(2),
+            path: PathBuf::from("audio.wav"),
+            name: "audio".to_owned(),
+            duration: TimeCode(120),
+            fps,
+            kind: MediaKind::Audio,
+            resolution: None,
+        },
+    ]);
+    document.validate().unwrap();
+
+    let operation = |track, asset, duration, source_frame| Operation::AddFreezeFrame {
+        track,
+        at: TimeCode(10),
+        duration,
+        asset,
+        source_frame,
+    };
+    for (operation, expected) in [
+        (
+            operation(TrackId(2), AssetId(1), TimeCode(30), TimeCode(10)),
+            OpError::FreezeOnAudioTrack(TrackId(2)),
+        ),
+        (
+            operation(TrackId(1), AssetId(99), TimeCode(30), TimeCode(10)),
+            OpError::MissingAsset(AssetId(99)),
+        ),
+        (
+            operation(TrackId(1), AssetId(2), TimeCode(30), TimeCode(10)),
+            OpError::IncompatibleTrack {
+                asset: AssetId(2),
+                track: "video",
+                track_id: TrackId(1),
+            },
+        ),
+        (
+            operation(TrackId(1), AssetId(1), TimeCode(30), TimeCode(-1)),
+            OpError::FreezeSourceFrameOutOfRange {
+                asset: AssetId(1),
+                source_frame: TimeCode(-1),
+                duration: TimeCode(120),
+            },
+        ),
+        (
+            operation(TrackId(1), AssetId(1), TimeCode(30), TimeCode(120)),
+            OpError::FreezeSourceFrameOutOfRange {
+                asset: AssetId(1),
+                source_frame: TimeCode(120),
+                duration: TimeCode(120),
+            },
+        ),
+        (
+            operation(TrackId(1), AssetId(1), TimeCode::ZERO, TimeCode(10)),
+            OpError::InvalidFreezeDuration(TimeCode::ZERO),
+        ),
+    ] {
+        let mut candidate = document.clone();
+        assert_eq!(operation.apply(&mut candidate).unwrap_err(), expected);
+        assert_eq!(candidate, document);
+    }
+    let mut candidate = document.clone();
+    assert_eq!(
+        Operation::AddFreezeFrame {
+            track: TrackId(1),
+            at: TimeCode(-1),
+            duration: TimeCode(30),
+            asset: AssetId(1),
+            source_frame: TimeCode(10),
+        }
+        .apply(&mut candidate)
+        .unwrap_err(),
+        OpError::NegativeTimelinePosition(TimeCode(-1))
+    );
+    assert_eq!(candidate, document);
+
+    Operation::AddFreezeFrame {
+        track: TrackId(1),
+        at: TimeCode(10),
+        duration: TimeCode(30),
+        asset: AssetId(1),
+        source_frame: TimeCode(119),
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(document.duration, TimeCode(40));
+}
+
+#[test]
+fn freeze_content_round_trips_with_freeze_tag_and_hand_edits_are_validated() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    document.media_pool.push(asset(1, fps, 120));
+    Operation::AddFreezeFrame {
+        track: TrackId(1),
+        at: TimeCode(5),
+        duration: TimeCode(30),
+        asset: AssetId(1),
+        source_frame: TimeCode(42),
+    }
+    .apply(&mut document)
+    .unwrap();
+
+    let encoded = serde_json::to_string(&document).unwrap();
+    assert!(encoded.contains("\"content\":{\"freeze\""));
+    let loaded: Document = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(loaded, document);
+
+    let mut hand_edited = serde_json::to_value(&document).unwrap();
+    hand_edited["tracks"][0]["clips"][0]["content"]["freeze"]["source_frame"] =
+        serde_json::json!(120);
+    let invalid: Document = serde_json::from_value(hand_edited).unwrap();
+    assert!(matches!(
+        invalid.validate(),
+        Err(OpError::FreezeSourceFrameOutOfRange { .. })
+    ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn freeze_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    document.media_pool.push(asset(1, fps, 300));
+    document.tracks.push(Track {
+        id: TrackId(2),
+        kind: TrackKind::Video,
+        sync_lock: true,
+        clips: Vec::new(),
+    });
+    Operation::AddFreezeFrame {
+        track: TrackId(1),
+        at: TimeCode(30),
+        duration: TimeCode(90),
+        asset: AssetId(1),
+        source_frame: TimeCode(77),
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::SplitClip {
+        clip: ClipId(1),
+        at: TimeCode(75),
+    }
+    .apply(&mut document)
+    .unwrap();
+    for id in [ClipId(1), ClipId(2)] {
+        let clip = document.clip(id).unwrap();
+        assert_eq!(document.clip_duration(clip).unwrap(), TimeCode(45));
+        assert!(matches!(
+            clip.content,
+            ClipContent::Freeze(FreezeFrame {
+                source_frame: TimeCode(77)
+            })
+        ));
+    }
+    Operation::MoveClip {
+        clip: ClipId(2),
+        to_track: TrackId(2),
+        to: TimeCode(90),
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::TrimClip {
+        clip: ClipId(2),
+        new_source: TimeCode(50)..TimeCode(80),
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(
+        document.clip(ClipId(2)).unwrap().timeline_start,
+        TimeCode(95)
+    );
+    Operation::LinkClips {
+        clips: vec![ClipId(1), ClipId(2)],
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::RippleInsertGap {
+        track: TrackId(1),
+        at: TimeCode(30),
+        duration: TimeCode(10),
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(
+        document.clip(ClipId(1)).unwrap().timeline_start,
+        TimeCode(40)
+    );
+    assert_eq!(
+        document.clip(ClipId(2)).unwrap().timeline_start,
+        TimeCode(105)
+    );
+
+    let core = Core::spawn(document.clone()).unwrap();
+    core.request(Command::Do(Operation::MoveClip {
+        clip: ClipId(2),
+        to_track: TrackId(2),
+        to: TimeCode(120),
+    }))
+    .unwrap();
+    let undone = match core.request(Command::Undo).unwrap() {
+        Event::DocumentChanged { doc, .. } => doc,
+        other => panic!("unexpected event: {other:?}"),
+    };
+    assert_eq!(undone.as_ref(), &document);
+
+    assert_eq!(
+        Operation::SetClipAudio {
+            clip: ClipId(1),
+            gain_tenth_db: 0,
+            fade_in_frames: TimeCode::ZERO,
+            fade_out_frames: TimeCode::ZERO,
+        }
+        .apply(&mut document)
+        .unwrap_err(),
+        OpError::FreezeClipHasNoAudio(ClipId(1))
+    );
+    assert_eq!(
+        Operation::SetTitleParam {
+            clip: ClipId(1),
+            name: "text".to_owned(),
+            value: ParamValue::Text("no".to_owned()),
+        }
+        .apply(&mut document)
+        .unwrap_err(),
+        OpError::NotTitleClip(ClipId(1))
+    );
 }
 
 #[test]

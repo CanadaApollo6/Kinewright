@@ -8,6 +8,10 @@ struct LayerParams {
     offset_y: f32,
     fade_mix: f32,
     fade_white: f32,
+    crop_left: f32,
+    crop_right: f32,
+    crop_top: f32,
+    crop_bottom: f32,
     _padding_0: f32,
     _padding_1: f32,
     _padding_2: f32,
@@ -57,6 +61,12 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var alpha = clamp(sampled.a * params.opacity, 0.0, 1.0);
     if params.fade_mix > 0.0 {
         alpha = 1.0;
+    }
+    if input.uv.x < params.crop_left
+        || input.uv.x > 1.0 - params.crop_right
+        || input.uv.y < params.crop_top
+        || input.uv.y > 1.0 - params.crop_bottom {
+        alpha = 0.0;
     }
     return vec4<f32>(rgb, alpha);
 }
