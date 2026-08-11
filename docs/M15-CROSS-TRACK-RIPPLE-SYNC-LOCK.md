@@ -40,12 +40,22 @@ Linked A/V ripple deletion produces exactly one `RippleDeleteClip`: companion
 link members use normal `DeleteClip` operations in the same atomic plan. This
 prevents one user edit from applying the cross-track shift more than once.
 
-## Marker exclusion and future work
+## Marker ripple semantics
 
-Project markers do not shift during either ripple operation in M15. Markers are
-project-level editorial notes rather than track members, and M15 does not infer
-whether a marker follows content, absolute program time, or a particular lane.
+The **marker-ripple semantics** future-work item is resolved. Project markers
+are timeline annotations, so leaving them behind during a ripple edit would
+orphan them from the content they annotate. They therefore participate in every
+ripple regardless of track sync locks. Partial marker shifting based on track
+participation would desynchronize project-level annotations from content on the
+other tracks they may describe.
 
-Future work is filed as **marker-ripple semantics**: define explicit marker
-affinity or a project-level ripple policy before any ripple operation moves a
-marker. Until that model exists, markers remain fixed by design.
+`RippleDeleteClip` shifts markers at or after the deleted clip's pre-edit end
+left by the removed duration. Markers strictly before that boundary stay fixed.
+A marker that would land at a negative project position is clamped to frame
+zero because marker positions are non-negative. `RippleInsertGap` shifts markers
+at or after `at` right by the inserted duration; earlier markers stay fixed.
+
+This is a semantics extension of the existing ripple operations. It adds no
+operations or model, serialization, or project-format changes. Snapshot undo
+restores marker positions, and journal replay reproduces their shifts through
+the existing operation spine.

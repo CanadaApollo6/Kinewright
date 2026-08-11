@@ -64,14 +64,15 @@ pub enum Operation {
     /// A clip that starts before the point is not shifted or trimmed, even
     /// when it straddles the point. Normal validation atomically rejects any
     /// overlap caused by shifting a later clip beside that unchanged clip.
-    /// Project markers are deliberately not shifted in M15.
+    /// Project markers at or after the ripple point shift left regardless of
+    /// track sync locks. A shifted marker is clamped to frame zero.
     RippleDeleteClip {
         clip: ClipId,
     },
     /// Insert empty time by shifting clips that start at or after `at` on the
     /// target track and every other sync-locked track. Clips that start before
-    /// `at` remain unchanged. Project markers are deliberately not shifted in
-    /// M15.
+    /// `at` remain unchanged. Project markers at or after `at` shift right
+    /// regardless of track sync locks.
     RippleInsertGap {
         track: TrackId,
         at: TimeCode,
@@ -709,6 +710,7 @@ fn ripple_delete_clip(doc: &mut Document, clip_id: ClipId) -> Result<(), OpError
                 .ok_or(OpError::TimeOverflow)?;
         }
     }
+    shift_markers_left(&mut doc.markers, ripple_point, duration)?;
     Ok(())
 }
 
@@ -742,6 +744,44 @@ fn ripple_insert_gap(
                 .ok_or(OpError::TimeOverflow)?;
         }
     }
+    shift_markers_right(&mut doc.markers, at, duration)?;
+    Ok(())
+}
+
+fn shift_markers_left(
+    markers: &mut [Marker],
+    boundary: TimeCode,
+    duration: TimeCode,
+) -> Result<(), OpError> {
+    for marker in markers
+        .iter_mut()
+        .filter(|marker| marker.position >= boundary)
+    {
+        marker.position = marker
+            .position
+            .checked_sub(duration)
+            .ok_or(OpError::TimeOverflow)?
+            .max(TimeCode::ZERO);
+    }
+    markers.sort_by_key(|marker| (marker.position, marker.id));
+    Ok(())
+}
+
+fn shift_markers_right(
+    markers: &mut [Marker],
+    boundary: TimeCode,
+    duration: TimeCode,
+) -> Result<(), OpError> {
+    for marker in markers
+        .iter_mut()
+        .filter(|marker| marker.position >= boundary)
+    {
+        marker.position = marker
+            .position
+            .checked_add(duration)
+            .ok_or(OpError::TimeOverflow)?;
+    }
+    markers.sort_by_key(|marker| (marker.position, marker.id));
     Ok(())
 }
 
@@ -1371,4 +1411,23 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marker_shift_left_clamps_negative_results_to_zero() {
+        let mut markers = [Marker {
+            id: MarkerId(1),
+            position: TimeCode(5),
+            label: String::new(),
+            color_token: 0,
+        }];
+
+        shift_markers_left(&mut markers, TimeCode(5), TimeCode(10)).unwrap();
+
+        assert_eq!(markers[0].position, TimeCode::ZERO);
+    }
 }

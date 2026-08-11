@@ -517,13 +517,12 @@ impl OpenReelMcp {
     /// much cuttable silence remains, so an agent asked to remove dead air
     /// cannot mistake a partial plan for a finished one.
     fn remaining_silence_footer(&self, document: &openreel_core::Document) -> String {
-        let spans = match self.analysis.timeline_silences(
+        let Ok(spans) = self.analysis.timeline_silences(
             document,
             None,
             TimeCode(DEFAULT_MINIMUM_SILENCE_FRAMES),
-        ) {
-            Ok(spans) => spans,
-            Err(_) => return String::new(),
+        ) else {
+            return String::new();
         };
         let mut cuttable = 0_usize;
         for span in &spans {
@@ -560,9 +559,7 @@ impl OpenReelMcp {
             format!("\ncuttable silence spans remaining on the timeline: {cuttable}")
         };
         if pending > 0 {
-            footer.push_str(&format!(
-                " (silence analysis pending for {pending} asset(s))"
-            ));
+            let _ = write!(footer, " (silence analysis pending for {pending} asset(s))");
         }
         footer
     }

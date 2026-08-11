@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use openreel_agent::McpServer;
 use openreel_core::{
-    Analysis, AssetId, Clip, ClipId, Command, Core, Document, Event, MarkerId, MediaAsset,
+    Analysis, AssetId, Clip, ClipId, Command, Core, Document, Event, Marker, MarkerId, MediaAsset,
     MediaKind, Query, QueryResult, Rational, TimeCode, Track, TrackId, TrackKind,
 };
 use openreel_media::{
@@ -191,6 +191,57 @@ async fn edit_plans_cross_the_real_mcp_server_atomically_with_one_confirmation()
     let refused = refused.unwrap();
     assert_eq!(refused.is_error, Some(true));
     assert_eq!(query_document(&core), original);
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ripple_marker_position_renders_through_the_real_mcp_server() {
+    let mut document = edit_plan_document();
+    document.markers.push(Marker {
+        id: MarkerId(1),
+        position: TimeCode(30),
+        label: "Review cut".to_owned(),
+        color_token: 0,
+    });
+    let core = Core::spawn(document).unwrap();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let ripple = client
+        .call_tool(
+            CallToolRequestParams::new("ripple_insert_gap").with_arguments(
+                json!({"track": 1, "at": 30, "duration": 15})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ripple.is_error, Some(false));
+    assert_eq!(
+        query_document(&core).marker(MarkerId(1)).unwrap().position,
+        TimeCode(45)
+    );
+
+    let state = client
+        .call_tool(CallToolRequestParams::new("get_timeline_state"))
+        .await
+        .unwrap();
+    assert_eq!(state.is_error, Some(false));
+    assert!(
+        state.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("marker 1 at=45f/1.500s color=0 label=\"Review cut\"")
+    );
 
     client.cancel().await.unwrap();
     server.shutdown();

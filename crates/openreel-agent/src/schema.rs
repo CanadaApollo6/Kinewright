@@ -183,7 +183,7 @@ fn operation_tool(
     }
     match variant.as_str() {
         "RippleDeleteClip" | "RippleInsertGap" => description.push_str(
-            " Ripple shifts the edited track and every other sync-locked track. Unlocked tracks and project markers remain fixed. The delete ripple point is the removed clip's pre-edit end; insert uses its explicit at frame. Only clips starting at or after that point shift, and a straddling clip remains unchanged.",
+            " Ripple shifts the edited track and every other sync-locked track. Unlocked tracks remain fixed. Project markers at or after the ripple point always shift regardless of track sync locks. The delete ripple point is the removed clip's pre-edit end; insert uses its explicit at frame. Only clips starting at or after that point shift, and a straddling clip remains unchanged.",
         ),
         "SetTrackSyncLock" => description.push_str(
             " Sync lock is enabled by default. Disable it only when a track should run free during ripple edits on other tracks.",

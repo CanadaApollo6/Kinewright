@@ -396,7 +396,7 @@ fn title_and_marker_parameter_validation_is_atomic() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn ripple_operations_follow_sync_locks_preserve_boundaries_and_leave_markers_fixed() {
+fn ripple_operations_shift_all_markers_independently_of_sync_locks() {
     let mut document = document_with_three_clips();
     Operation::AddTrack {
         track: Track {
@@ -456,16 +456,18 @@ fn ripple_operations_follow_sync_locks_preserve_boundaries_and_leave_markers_fix
     }
     .apply(&mut document)
     .unwrap();
-    Operation::AddMarker {
-        marker: Marker {
-            id: MarkerId(1),
-            position: TimeCode(70),
-            label: "Do not ripple".to_owned(),
-            color_token: 0,
-        },
+    for (id, position) in [(1, 30), (2, 39), (3, 40), (4, 70)] {
+        Operation::AddMarker {
+            marker: Marker {
+                id: MarkerId(id),
+                position: TimeCode(position),
+                label: format!("Marker {id}"),
+                color_token: 0,
+            },
+        }
+        .apply(&mut document)
+        .unwrap();
     }
-    .apply(&mut document)
-    .unwrap();
 
     Operation::RippleDeleteClip { clip: ClipId(2) }
         .apply(&mut document)
@@ -488,7 +490,10 @@ fn ripple_operations_follow_sync_locks_preserve_boundaries_and_leave_markers_fix
         document.clip(ClipId(7)).unwrap().timeline_start,
         TimeCode(70)
     );
-    assert_eq!(document.marker(MarkerId(1)).unwrap().position, TimeCode(70));
+    assert_eq!(document.marker(MarkerId(1)).unwrap().position, TimeCode(30));
+    assert_eq!(document.marker(MarkerId(2)).unwrap().position, TimeCode(39));
+    assert_eq!(document.marker(MarkerId(3)).unwrap().position, TimeCode(20));
+    assert_eq!(document.marker(MarkerId(4)).unwrap().position, TimeCode(50));
 
     Operation::SetTrackSyncLock {
         track: TrackId(1),
@@ -520,7 +525,10 @@ fn ripple_operations_follow_sync_locks_preserve_boundaries_and_leave_markers_fix
         document.clip(ClipId(7)).unwrap().timeline_start,
         TimeCode(70)
     );
-    assert_eq!(document.marker(MarkerId(1)).unwrap().position, TimeCode(70));
+    assert_eq!(document.marker(MarkerId(1)).unwrap().position, TimeCode(37));
+    assert_eq!(document.marker(MarkerId(2)).unwrap().position, TimeCode(46));
+    assert_eq!(document.marker(MarkerId(3)).unwrap().position, TimeCode(20));
+    assert_eq!(document.marker(MarkerId(4)).unwrap().position, TimeCode(57));
 
     for invalid in [
         Operation::RippleDeleteClip { clip: ClipId(99) },
@@ -684,16 +692,23 @@ proptest! {
         }
         .apply(&mut document)
         .unwrap();
-        Operation::AddMarker {
-            marker: Marker {
-                id: MarkerId(1),
-                position: TimeCode(third_start),
-                label: String::new(),
-                color_token: 0,
-            },
+        let ripple_point = second_start + removed_duration;
+        for (id, position) in [
+            (1, ripple_point - 1),
+            (2, ripple_point),
+            (3, third_start),
+        ] {
+            Operation::AddMarker {
+                marker: Marker {
+                    id: MarkerId(id),
+                    position: TimeCode(position),
+                    label: String::new(),
+                    color_token: 0,
+                },
+            }
+            .apply(&mut document)
+            .unwrap();
         }
-        .apply(&mut document)
-        .unwrap();
 
         Operation::RippleDeleteClip { clip: ClipId(2) }
             .apply(&mut document)
@@ -705,7 +720,9 @@ proptest! {
             third_start
         };
         prop_assert_eq!(document.clip(ClipId(4)).unwrap().timeline_start, TimeCode(expected_secondary));
-        prop_assert_eq!(document.marker(MarkerId(1)).unwrap().position, TimeCode(third_start));
+        prop_assert_eq!(document.marker(MarkerId(1)).unwrap().position, TimeCode(ripple_point - 1));
+        prop_assert_eq!(document.marker(MarkerId(2)).unwrap().position, TimeCode(second_start));
+        prop_assert_eq!(document.marker(MarkerId(3)).unwrap().position, TimeCode(third_start - removed_duration));
         prop_assert!(document.validate().is_ok());
     }
 
@@ -1140,6 +1157,54 @@ fn track_sync_lock_uses_snapshot_undo_and_redo() {
         panic!("sync-lock operation should be redoable");
     };
     assert!(!doc.tracks[0].sync_lock);
+}
+
+#[test]
+fn ripple_marker_shifts_restore_exact_positions_on_snapshot_undo() {
+    let mut initial = document_with_three_clips();
+    for (id, position) in [(1, 40), (2, 70)] {
+        Operation::AddMarker {
+            marker: Marker {
+                id: MarkerId(id),
+                position: TimeCode(position),
+                label: format!("Marker {id}"),
+                color_token: 0,
+            },
+        }
+        .apply(&mut initial)
+        .unwrap();
+    }
+    let core = Core::spawn(initial.clone()).unwrap();
+
+    let Event::DocumentChanged { doc, .. } = core
+        .request(Command::Do(Operation::RippleDeleteClip { clip: ClipId(2) }))
+        .unwrap()
+    else {
+        panic!("ripple delete should be accepted");
+    };
+    assert_eq!(doc.marker(MarkerId(1)).unwrap().position, TimeCode(20));
+    assert_eq!(doc.marker(MarkerId(2)).unwrap().position, TimeCode(50));
+    let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
+        panic!("ripple delete should be undoable");
+    };
+    assert_eq!(&*doc, &initial);
+
+    let Event::DocumentChanged { doc, .. } = core
+        .request(Command::Do(Operation::RippleInsertGap {
+            track: TrackId(1),
+            at: TimeCode(40),
+            duration: TimeCode(5),
+        }))
+        .unwrap()
+    else {
+        panic!("ripple insert should be accepted");
+    };
+    assert_eq!(doc.marker(MarkerId(1)).unwrap().position, TimeCode(45));
+    assert_eq!(doc.marker(MarkerId(2)).unwrap().position, TimeCode(75));
+    let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
+        panic!("ripple insert should be undoable");
+    };
+    assert_eq!(&*doc, &initial);
 }
 
 #[test]

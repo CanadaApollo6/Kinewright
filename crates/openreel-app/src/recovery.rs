@@ -1027,7 +1027,7 @@ mod tests {
                 marker: Marker {
                     id: MarkerId(1),
                     position: TimeCode(60),
-                    label: "Fixed marker".to_owned(),
+                    label: "Ripple marker".to_owned(),
                     color_token: 0,
                 },
             }),
@@ -1063,7 +1063,7 @@ mod tests {
         );
         assert_eq!(
             report.document.marker(MarkerId(1)).unwrap().position,
-            TimeCode(60)
+            TimeCode(40)
         );
         assert!(report.damage.is_none());
     }
