@@ -10,15 +10,15 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use openreel_core::{
-    Analysis, AssetId, ClipId, Document, Export, ExportSettings, FrameTexture, MediaAsset,
-    MediaError, MediaEvent, MediaKind, Playback, PlaybackState, ProgressSink, Rational, RgbaImage,
-    SceneStatus, SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, TranscriptStatus, VisualAssetResult,
+    Analysis, AssetId, Document, Export, ExportSettings, FrameTexture, MediaAsset, MediaError,
+    MediaEvent, Playback, PlaybackState, ProgressSink, Rational, RgbaImage, SceneStatus,
+    SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TranscriptStatus, VisualAssetResult,
 };
 
 use crate::{
     analysis::VisualAssetService,
-    audio::{AudioRuntime, AudioSourceSpec},
+    audio::AudioRuntime,
     clock::samples_to_frame,
     compositor::GpuContext,
     decode::{probe_path, thumbnail},
@@ -377,13 +377,9 @@ impl Export for FfmpegMediaEngine {
 
 #[derive(Clone)]
 struct ActiveMedia {
-    clip: ClipId,
     path: PathBuf,
     source_fps: Rational,
-    project_fps: Rational,
     source_at: TimeCode,
-    source_end: TimeCode,
-    kind: MediaKind,
 }
 
 struct Worker {
@@ -399,7 +395,6 @@ struct Worker {
     document: Arc<Document>,
     renderer: FrameRenderer,
     audio: Option<AudioRuntime>,
-    audio_clip: Option<ClipId>,
     playing: bool,
     last_position: Option<TimeCode>,
 }
@@ -432,7 +427,6 @@ impl Worker {
             document: Arc::new(Document::default()),
             renderer: FrameRenderer::new(gpu),
             audio: None,
-            audio_clip: None,
             playing: false,
             last_position: None,
         }
@@ -479,7 +473,6 @@ impl Worker {
         self.pause();
         self.document = Arc::new(doc.clone());
         self.renderer.clear();
-        self.audio_clip = None;
         self.clock.set_fps(doc.fps);
         self.clock.set_frame(TimeCode::ZERO);
         self.last_position = None;
@@ -572,26 +565,6 @@ impl Worker {
             self.emit(MediaEvent::Position(end));
             return;
         }
-        let clip = match active_media_at(&self.document, position) {
-            Ok(active) => active.map(|active| active.clip),
-            Err(error) => {
-                self.fail(error);
-                return;
-            }
-        };
-        if clip != self.audio_clip {
-            self.audio = None;
-            match self.audio_for_position(position).and_then(|runtime| {
-                runtime.play()?;
-                Ok(runtime)
-            }) {
-                Ok(runtime) => self.audio = Some(runtime),
-                Err(error) => {
-                    self.fail(error);
-                    return;
-                }
-            }
-        }
         if self.last_position != Some(position) {
             self.last_position = Some(position);
             self.emit(MediaEvent::Position(position));
@@ -623,32 +596,13 @@ impl Worker {
         send_latest(&self.frames_tx, &self.frames_drop_rx, (project_at, frame));
     }
 
-    fn audio_for_position(&mut self, project_at: TimeCode) -> Result<AudioRuntime, MediaError> {
-        let active = active_media_at(&self.document, project_at)?;
-        self.audio_clip = active.as_ref().map(|active| active.clip);
-        if let Some(active) =
-            active.filter(|active| matches!(active.kind, MediaKind::Audio | MediaKind::AudioVideo))
-        {
-            AudioRuntime::open(
-                AudioSourceSpec {
-                    path: &active.path,
-                    fps: active.source_fps,
-                    from: active.source_at,
-                    end: active.source_end,
-                },
-                active.project_fps,
-                project_at,
-                &self.clock.position_samples,
-                &self.clock.sample_rate,
-            )
-        } else {
-            AudioRuntime::open_silence(
-                self.document.fps,
-                project_at,
-                &self.clock.position_samples,
-                &self.clock.sample_rate,
-            )
-        }
+    fn audio_for_position(&self, project_at: TimeCode) -> Result<AudioRuntime, MediaError> {
+        AudioRuntime::open(
+            &self.document,
+            project_at,
+            &self.clock.position_samples,
+            &self.clock.sample_rate,
+        )
     }
 
     fn fail(&mut self, error: MediaError) {
@@ -672,13 +626,9 @@ fn active_media_at(
         MediaError::Backend(format!("timeline asset {} disappeared", source.asset))
     })?;
     Ok(Some(ActiveMedia {
-        clip: source.clip,
         path: asset.path.clone(),
         source_fps: asset.fps,
-        project_fps: document.fps,
         source_at: source.source_at,
-        source_end: source.source_end,
-        kind: asset.kind,
     }))
 }
 

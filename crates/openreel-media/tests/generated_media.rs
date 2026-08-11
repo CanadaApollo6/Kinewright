@@ -507,6 +507,77 @@ fn audio_device_play_pause_and_seek_smoke_test() {
 }
 
 #[test]
+fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
+    if std::env::var_os("OPENREEL_AUDIO_TEST").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        eprintln!("skipped: set OPENREEL_AUDIO_TEST=1 on a machine with an audio device");
+        return;
+    }
+
+    let voice = generate_solid("device-voice", "navy", "440");
+    let bed = generate_solid("device-bed", "black", "660");
+    let engine = FfmpegMediaEngine::new().unwrap();
+    let voice_asset = engine.probe(&voice.0).unwrap();
+    let bed_asset = engine.probe(&bed.0).unwrap();
+    let duration = voice_asset.duration.min(bed_asset.duration);
+    assert!(
+        duration >= TimeCode(8),
+        "device fixtures are unexpectedly short"
+    );
+    let document = Document {
+        tracks: vec![
+            Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                clips: vec![Clip {
+                    id: ClipId(1),
+                    asset: voice_asset.id,
+                    source_range: TimeCode::ZERO..duration,
+                    timeline_start: TimeCode::ZERO,
+                    effects: Vec::new(),
+                    transition_in: None,
+                }],
+            },
+            Track {
+                id: TrackId(2),
+                kind: TrackKind::Audio,
+                clips: vec![Clip {
+                    id: ClipId(2),
+                    asset: bed_asset.id,
+                    source_range: TimeCode(2)..duration,
+                    timeline_start: TimeCode::ZERO,
+                    effects: Vec::new(),
+                    transition_in: None,
+                }],
+            },
+        ],
+        media_pool: vec![voice_asset, bed_asset],
+        fps: Rational::new(10, 1).unwrap(),
+        resolution: (64, 64),
+        duration,
+    };
+    document.validate().unwrap();
+    let events = engine.events();
+    engine.set_document(std::sync::Arc::new(document));
+
+    engine.play(TimeCode::ZERO);
+    wait_for_state(&events, PlaybackState::Playing);
+    wait_for_position(&engine, TimeCode(4));
+
+    engine.seek(TimeCode(2));
+    wait_for_position(&engine, TimeCode(6));
+
+    engine.pause();
+    wait_for_state(&events, PlaybackState::Paused);
+    let paused = engine.position();
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        engine.position(),
+        paused,
+        "audio clock advanced while paused"
+    );
+}
+
+#[test]
 fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
     if std::env::var_os("OPENREEL_AUDIO_TEST").as_deref() != Some(std::ffi::OsStr::new("1")) {
         eprintln!("skipped: set OPENREEL_AUDIO_TEST=1 on a machine with an audio device");

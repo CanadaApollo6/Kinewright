@@ -86,6 +86,40 @@ frame because the next coalesced request may supersede it. The remaining
 headroom below 256 MiB is for the current decoder lookahead, compositor output,
 and channel-owned frame.
 
+## Playback audio mixdown
+
+Playback enumerates audio-bearing clips on every audio and video track for the
+remaining project range. The media worker mixes them in document order at
+unity gain, then applies the export mixdown's single hard clamp to `-1.0..=1.0`.
+Project-frame boundaries are converted directly to device sample boundaries;
+each source is trimmed to its source-sample range and padded with silence when
+that range cannot fill its mapped project duration. Stream PTS is normalized by
+the stream-start offset before trimming. A playback seek rebuilds the source
+set at one shared project-sample position, while paused scrubbing remains
+video-only.
+
+The worker mixes fixed 1,024-sample-frame chunks and lazily opens a decoder only
+when the feeder reaches its clip. Since the output ring holds two seconds, this
+normally opens an upcoming boundary nearly two seconds before it is heard.
+Completed sources are closed immediately after their final mixed sample. The
+audio callback is unchanged: it only pops interleaved samples (or zero on
+underflow) and atomically advances the sample-count master clock. A project with
+no audio therefore still advances on callback-generated silence.
+
+The two-second output ring is shared by the entire mix rather than duplicated
+per source. OpenReel-owned f32 sample storage is
+`2 * sample_rate * channels * 4` bytes for that ring, plus
+`1,024 * channels * 4` bytes for the feeder chunk, plus one unread resampled
+decoder chunk per simultaneously active source. At 48 kHz stereo the fixed
+portion is 750 KiB + 8 KiB. For a decoded frame of `F` sample frames, source
+staging is normally `F * channels * 4` bytes. Initial PTS-gap padding is capped
+at one second, making the explicit per-source ceiling
+`(sample_rate + F) * channels * 4` bytes, plus FFmpeg's codec and resampler
+state. At 48 kHz stereo with 1,024-frame AAC this is normally 8 KiB and at most
+383 KiB when the full gap allowance is used. Thus long timelines do not retain
+a two-second buffer or an open decoder per clip; only actual overlap increases
+live decoder memory.
+
 ## Derived audio and scene analysis
 
 Silence and scene data are reproducible derived assets. They never enter the
