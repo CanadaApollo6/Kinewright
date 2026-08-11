@@ -6,6 +6,7 @@ mod protocol;
 mod render;
 mod schema;
 mod server;
+mod silence;
 
 pub use drivers::{CODEX_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver};
 pub use render::{
@@ -13,3 +14,4 @@ pub use render::{
 };
 pub use schema::{all_tool_names, operation_tools};
 pub use server::{ConfirmationBroker, ConfirmationRequest, McpServer, McpServerError};
+pub use silence::{shrink_silence_span_for_cutting, silence_cut_margin_frames};

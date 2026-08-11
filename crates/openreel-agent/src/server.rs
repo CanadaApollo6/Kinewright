@@ -839,13 +839,13 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_silences",
-            "Return cached windowed-RMS silence spans for one asset in exact source frames and seconds, or background analysis status.",
+            "Return cached windowed-RMS silence spans for one asset in exact source frames and seconds, or background analysis status. Reported spans are pre-shrunk by a 100 ms speech-safety margin on each side for safe cutting; cached detector spans remain unchanged.",
             schema_object::<SilencesArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
             "get_timeline_silences",
-            "Return cached silence spans mapped through clips to exact project frames and seconds.",
+            "Return cached silence spans mapped through clips to exact project frames and seconds. Reported spans are pre-shrunk in source space by a 100 ms speech-safety margin on each side for safe cutting before project mapping; cached detector spans remain unchanged.",
             schema_object::<TimelineDerivedArgs>(),
         )
         .with_annotations(read_only()),

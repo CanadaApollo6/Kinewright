@@ -33,20 +33,19 @@ This is the latest complete live run. Assertion failures remain part of the meas
 - Harness version: `2.1.227 (Claude Code)`
 - Model: `harness-default`
 - Platform: `windows-x86_64`
-- Result artifact: `target/evals\openreel-eval-20260811-010523-claude-code.jsonl`
+- Result artifact: `target/evals\openreel-eval-20260811-020441-claude-code.jsonl`
 
 | Eval | Pass | Assertions | Turns | Tools | Tokens | USD | Wall | Ops |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| e1 split-and-delete | PASS | 13/13 | 1 | 3 | 404 | $0.1650 | 11.9s | 2 |
-| e2 silence-gap removal | FAIL | 14/15 | 1 | 6 | 1158 | $0.2390 | 23.1s | 3 |
-| e3 filler-word removal | PASS | 14/14 | 1 | 4 | 733 | $0.2182 | 22.6s | 4 |
-| e4 scene-cut | PASS | 13/13 | 1 | 5 | 641 | $0.2077 | 18.9s | 2 |
-| e5 effect-and-transition | PASS | 15/15 | 1 | 3 | 407 | $0.1598 | 13.3s | 2 |
-| e6 ordinal-resolution stress | PASS | 14/14 | 1 | 3 | 599 | $0.1799 | 17.9s | 4 |
-| e7 flagship rough cut | FAIL | 22/24 | 1 | 11 | 2865 | $0.3941 | 44.3s | 6 |
-| **TOTAL** | **FAIL** | **105/108** | **7** | **35** | **6807** | **$1.5636** | **152.5s** | **23** |
+| e1 split-and-delete | PASS | 13/13 | 1 | 3 | 434 | $0.6946 | 12.7s | 2 |
+| e2 silence-gap removal | PASS | 15/15 | 1 | 6 | 1855 | $0.2840 | 32.9s | 3 |
+| e3 filler-word removal | PASS | 14/14 | 1 | 4 | 836 | $0.2254 | 23.1s | 4 |
+| e4 scene-cut | PASS | 13/13 | 1 | 4 | 683 | $0.2088 | 16.8s | 2 |
+| e5 effect-and-transition | PASS | 15/15 | 1 | 3 | 406 | $0.1601 | 23.4s | 2 |
+| e6 ordinal-resolution stress | PASS | 14/14 | 1 | 3 | 614 | $0.1809 | 16.2s | 4 |
+| e7 flagship rough cut | FAIL | 22/24 | 1 | 11 | 4894 | $0.5263 | 73.3s | 7 |
+| **TOTAL** | **FAIL** | **106/108** | **7** | **34** | **9722** | **$2.2802** | **198.8s** | **24** |
 
 ### Failures
 
-- `e2 silence-gap removal`: duration bounds (expected 15..=38 frames, observed 39)
-- `e7 flagship rough cut`: words retained (pre-edit set="take-A-content" expected={"aurora", "copper", "crew", "guide", "lantern", "morning", "opens", "story", "the"}, present after edit={"aurora", "copper", "crew", "guide", "lantern", "morning", "opens", "the"}); words retained (pre-edit set="take-D-content" expected={"beacons", "closes", "crew", "delta", "home", "journey", "silver", "the", "welcome"}, present after edit={"beacons", "closes", "crew", "delta", "home", "silver", "the", "welcome"})
+- `e7 flagship rough cut`: long silence absent (observed 3 silence spans at least 20 source frames); duration bounds (expected 162..=405 frames, observed 437)

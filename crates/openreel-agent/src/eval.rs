@@ -9,14 +9,43 @@ use std::{
 };
 
 use openreel_core::{
-    AgentDriver, AgentEvent, Analysis, AssetId, Command, Core, Document, Event, HarnessInfo,
-    Operation, ParamValue, Playback, Query, QueryResult, SessionConfig, TimeCode,
+    AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, Command, Core, Document, Event,
+    HarnessInfo, Operation, ParamValue, Playback, Query, QueryResult, SessionConfig, TimeCode,
     TimelineSceneChange, TimelineSilenceSpan, map_source_range_to_project,
 };
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::{ConfirmationBroker, McpServer};
+use crate::{ConfirmationBroker, McpServer, shrink_silence_span_for_cutting};
+
+/// Compute the upper duration bound after cutting every qualifying reported
+/// silence. Each cut receives one project-frame boundary-rounding allowance.
+#[must_use]
+pub fn maximum_duration_after_expected_silence_cuts(
+    source_duration: TimeCode,
+    silences: &AssetSilences,
+    minimum_source_frames: TimeCode,
+) -> TimeCode {
+    let (removable_frames, cut_count) = silences
+        .spans
+        .iter()
+        .filter(|span| {
+            span.source_end.0.saturating_sub(span.source_start.0) >= minimum_source_frames.0
+        })
+        .filter_map(|span| shrink_silence_span_for_cutting(*span, silences.source_fps))
+        .fold((0_i64, 0_i64), |(frames, cuts), span| {
+            (
+                frames.saturating_add(span.source_end.0.saturating_sub(span.source_start.0)),
+                cuts.saturating_add(1),
+            )
+        });
+    TimeCode(
+        source_duration
+            .0
+            .saturating_sub(removable_frames)
+            .saturating_add(cut_count),
+    )
+}
 
 pub type FixtureBuilder = fn() -> Result<PreparedFixture, EvalError>;
 
@@ -1227,8 +1256,8 @@ mod tests {
 
     use crossbeam_channel::{Receiver, Sender, unbounded};
     use openreel_core::{
-        AgentError, AgentSession, AuthenticationStatus, Clip, ClipId, HarnessId, MediaAsset,
-        MediaKind, Rational, Track, TrackId, TrackKind,
+        AgentError, AgentSession, AssetSilences, AuthenticationStatus, Clip, ClipId, HarnessId,
+        MediaAsset, MediaKind, Rational, SilenceSpan, Track, TrackId, TrackKind,
     };
 
     use super::*;
@@ -1370,6 +1399,75 @@ mod tests {
         assert_eq!(metrics.total_tokens(), 150);
         assert_eq!(metrics.cost_usd, Some(0.04));
         assert!(metrics.errors.is_empty());
+    }
+
+    #[test]
+    fn fake_driver_eval_accepts_the_padded_silence_bound_and_rounding_allowance() {
+        let silences = AssetSilences {
+            asset: AssetId(1),
+            content_sha256: "fixture".to_owned(),
+            source_fps: Rational::new(30, 1).unwrap(),
+            source_frames: TimeCode(100),
+            threshold_dbfs_hundredths: -4_000,
+            window_milliseconds: 20,
+            spans: vec![
+                SilenceSpan {
+                    source_start: TimeCode(10),
+                    source_end: TimeCode(40),
+                },
+                SilenceSpan {
+                    source_start: TimeCode(50),
+                    source_end: TimeCode(80),
+                },
+            ],
+        };
+        let maximum =
+            maximum_duration_after_expected_silence_cuts(TimeCode(100), &silences, TimeCode(20));
+        assert_eq!(maximum, TimeCode(54));
+
+        let driver = FakeDriver {
+            events: vec![AgentEvent::Done],
+        };
+        let session = collect_session(
+            &driver,
+            SessionConfig::default(),
+            &["remove the silence"],
+            &budgets(),
+            None,
+            || Ok(0),
+        )
+        .unwrap();
+        let mut final_document = document();
+        final_document.media_pool[0].duration = TimeCode(100);
+        final_document.tracks[0].clips[0].source_range.end = maximum;
+        final_document.duration = maximum;
+        let mut context = FixtureContext::default();
+        context
+            .duration_bounds
+            .insert("padded-cut".to_owned(), (TimeCode(20), maximum));
+        let definition = EvalDefinition {
+            name: "fake-padded-bound",
+            rationale: "exercise padded silence bounds",
+            fixture_builder: unused_fixture,
+            prompts: &["remove the silence"],
+            assertions: vec![EvalAssertion::DurationBounds {
+                bounds: "padded-cut".to_owned(),
+            }],
+            budgets: budgets(),
+        };
+        let outcome = EvalOutcome {
+            final_document,
+            final_words: Vec::new(),
+            remaining_silences: Vec::new(),
+            remaining_scenes: Vec::new(),
+            context,
+            session,
+            operations: Vec::new(),
+            undo_steps_to_original: None,
+        };
+
+        let result = evaluate(&definition, &outcome);
+        assert!(result.passed, "{:#?}", result.assertions);
     }
 
     #[test]

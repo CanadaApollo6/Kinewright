@@ -14,8 +14,9 @@ use openreel_agent::{
     ClaudeCodeDriver, CodexDriver,
     eval::{
         EnvironmentStamp, EvalAssertion, EvalBudgets, EvalDefinition, EvalError, EvalResult,
-        ExpectedSourceClip, FixtureContext, PreparedFixture, render_jsonl, render_scoreboard,
-        result_path, run_eval,
+        ExpectedSourceClip, FixtureContext, PreparedFixture,
+        maximum_duration_after_expected_silence_cuts, render_jsonl, render_scoreboard, result_path,
+        run_eval,
     },
 };
 use openreel_core::{
@@ -30,6 +31,11 @@ use openreel_media::{
 
 const FPS: u32 = 30;
 const LONG_SILENCE_FRAMES: i64 = 20;
+/// Post-edit absence threshold. Cutting a padded span leaves up to
+/// 2 x margin (6 source frames at the 30 fps fixtures) of raw silence the
+/// agent's pre-shrunk tool view cannot see; the assertion must not fail on
+/// that invisible residue while still catching planted spans left uncut.
+const RESIDUAL_SILENCE_FRAMES: i64 = LONG_SILENCE_FRAMES + 6;
 const SCENE_CONFIDENCE_BASIS_POINTS: u16 = 1_000;
 const FILLER_WORDS: &[&str] = &["um", "uh", "erm", "er"];
 
@@ -213,7 +219,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
                     word_set: "spoken-content".to_owned(),
                 },
                 EvalAssertion::NoSilenceAtLeast {
-                    source_frames: TimeCode(LONG_SILENCE_FRAMES),
+                    source_frames: TimeCode(RESIDUAL_SILENCE_FRAMES),
                 },
                 EvalAssertion::DurationBounds {
                     bounds: "without-long-silence".to_owned(),
@@ -360,7 +366,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
                     word_set: "selected-fillers".to_owned(),
                 },
                 EvalAssertion::NoSilenceAtLeast {
-                    source_frames: TimeCode(LONG_SILENCE_FRAMES),
+                    source_frames: TimeCode(RESIDUAL_SILENCE_FRAMES),
                 },
                 EvalAssertion::DurationBounds {
                     bounds: "rough-cut".to_owned(),
@@ -470,7 +476,11 @@ fn fixture_e2() -> Result<PreparedFixture, EvalError> {
         "spoken-content".to_owned(),
         normalized_words(&joined_words(&transcript)),
     );
-    let maximum = TimeCode(asset.duration.0.saturating_sub(long_silence));
+    let maximum = maximum_duration_after_expected_silence_cuts(
+        asset.duration,
+        &silences,
+        TimeCode(LONG_SILENCE_FRAMES),
+    );
     let minimum = TimeCode(maximum.0.saturating_mul(2) / 5);
     context
         .duration_bounds
@@ -628,8 +638,7 @@ fn fixture_e7() -> Result<PreparedFixture, EvalError> {
     let selected = [0_usize, 2, 3];
     let mut selected_union = BTreeSet::new();
     let mut selected_fillers = BTreeSet::new();
-    let mut selected_duration = 0_i64;
-    let mut selected_long_silence = 0_i64;
+    let mut selected_maximum_duration = 0_i64;
     for index in selected {
         let asset = &assets[index];
         let words = normalized_words(&joined_words(&transcripts[&asset.id]));
@@ -645,9 +654,14 @@ fn fixture_e7() -> Result<PreparedFixture, EvalError> {
         context
             .word_sets
             .insert(format!("{}-content", takes[index].0), kept_words);
-        selected_duration = selected_duration.saturating_add(asset.duration.0);
-        selected_long_silence = selected_long_silence
-            .saturating_add(silence_frames(&silences[&asset.id], LONG_SILENCE_FRAMES));
+        selected_maximum_duration = selected_maximum_duration.saturating_add(
+            maximum_duration_after_expected_silence_cuts(
+                asset.duration,
+                &silences[&asset.id],
+                TimeCode(LONG_SILENCE_FRAMES),
+            )
+            .0,
+        );
     }
     if selected_fillers.is_empty() {
         return Err(EvalError::Fixture(
@@ -673,7 +687,7 @@ fn fixture_e7() -> Result<PreparedFixture, EvalError> {
     context
         .word_sets
         .insert("take-B-unique".to_owned(), take_b_unique);
-    let maximum = TimeCode(selected_duration.saturating_sub(selected_long_silence));
+    let maximum = TimeCode(selected_maximum_duration);
     let minimum = TimeCode(maximum.0.saturating_mul(2) / 5);
     context
         .duration_bounds
