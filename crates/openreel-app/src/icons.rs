@@ -6,7 +6,6 @@ use crate::theme::{radius, size};
 pub(crate) enum Icon {
     Add,
     Alert,
-    Chat,
     Delete,
     Export,
     Filmstrip,
@@ -31,7 +30,6 @@ impl Icon {
         match self {
             Self::Add => "bytes://openreel/icons/add.svg",
             Self::Alert => "bytes://openreel/icons/alert.svg",
-            Self::Chat => "bytes://openreel/icons/chat.svg",
             Self::Delete => "bytes://openreel/icons/delete.svg",
             Self::Export => "bytes://openreel/icons/export.svg",
             Self::Filmstrip => "bytes://openreel/icons/filmstrip.svg",
@@ -56,7 +54,6 @@ impl Icon {
         match self {
             Self::Add => include_bytes!("../assets/icons/add.svg"),
             Self::Alert => include_bytes!("../assets/icons/alert.svg"),
-            Self::Chat => include_bytes!("../assets/icons/chat.svg"),
             Self::Delete => include_bytes!("../assets/icons/delete.svg"),
             Self::Export => include_bytes!("../assets/icons/export.svg"),
             Self::Filmstrip => include_bytes!("../assets/icons/filmstrip.svg"),

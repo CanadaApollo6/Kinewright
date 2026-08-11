@@ -104,5 +104,12 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   than resident, with contextual self-raising: an empty project leads with
   the media rail, and a pending destructive confirmation raises the
   timeline with the affected spans
+- The watchable diff: while the agent edits, every applied change becomes
+  a card in the session stream with its changed timecode span, a Review
+  action that plays the seams with a two-second lead-in, and one-click
+  undo - and the monitor auto-cues to the first seam. Changed-range
+  computation understands ripples: a shifted-but-identical tail is not a
+  change. The composer anchors to the bottom of the session with the
+  harness picker, auth state, and session tokens in the composer row
 
 [Unreleased]: https://github.com/CanadaApollo6/OpenReel/commits/main

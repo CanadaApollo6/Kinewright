@@ -2,7 +2,9 @@ use std::{path::Path, time::Duration};
 
 use eframe::egui;
 use openreel_agent::{CODEX_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver};
-use openreel_core::{AgentDriver, AgentEvent, AuthenticationStatus, HarnessInfo, SessionConfig};
+use openreel_core::{
+    AgentDriver, AgentEvent, AuthenticationStatus, HarnessInfo, SessionConfig, TimeCode,
+};
 
 use crate::{
     app::OpenReelApp,
@@ -57,6 +59,20 @@ pub(crate) enum ChatEntry {
         input_tokens: u64,
         output_tokens: u64,
     },
+    /// A watchable diff: one applied agent edit with its changed span.
+    EditCard {
+        summary: String,
+        start: TimeCode,
+        end: TimeCode,
+        /// Pre-rolled review position (a couple of seconds before `start`).
+        cue: TimeCode,
+    },
+}
+
+/// A deferred action from an edit card in the session stream.
+enum EditCardAction {
+    Review(TimeCode),
+    Undo,
 }
 
 /// Session token usage. Dollar figures are deliberately not surfaced: the
@@ -245,112 +261,45 @@ impl OpenReelApp {
         }
         let any_harness = self.claude_info.is_some() || self.codex_info.is_some();
 
-        ui.horizontal(|ui| {
-            ui.add(Icon::Chat.image(size::ICON_MD).tint(color::TEXT_SECONDARY));
-            ui.label(
-                egui::RichText::new("AGENT")
-                    .strong()
-                    .size(type_size::HEADING),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // The pill tells the truth: no detected harness is not "ready".
-                let (state, state_color) = if self.agent_running {
-                    ("RUNNING", color::ACCENT)
-                } else if any_harness {
-                    ("READY", color::STATUS_SUCCESS)
-                } else {
-                    ("NO HARNESS", color::STATUS_WARNING)
-                };
-                ui.colored_label(
-                    state_color,
-                    egui::RichText::new(state).size(type_size::MICRO),
-                );
-            });
-        });
-        ui.add_space(space::ONE);
-
-        egui::CollapsingHeader::new("Harness detection")
-            .default_open(!any_harness)
-            .show(ui, |ui| {
-                // Absence is normal, not an emergency: a muted dot, not red.
-                // Red is reserved for the selected harness being unusable.
+        // No header chrome (M24): the stream is the surface, and the harness
+        // controls live in the composer row like T3 Code's model row. The one
+        // exception is the no-harness state, which explains itself up front.
+        if !any_harness {
+            chat_frame(color::SURFACE, color::BORDER_SUBTLE).show(ui, |ui| {
                 harness_row(ui, "Claude Code", self.claude_info.as_ref());
                 harness_row(ui, "Codex", self.codex_info.as_ref());
-                if !any_harness {
-                    ui.separator();
-                    ui.label("Install and authenticate a supported agent CLI to use chat.");
-                    ui.hyperlink_to(
-                        "Install Claude Code",
-                        "https://docs.anthropic.com/en/docs/claude-code/getting-started",
-                    );
-                    ui.hyperlink_to(
-                        "Install Codex CLI",
-                        "https://developers.openai.com/codex/cli",
-                    );
-                }
+                ui.separator();
+                ui.label("Install and authenticate a supported agent CLI to use chat.");
+                ui.hyperlink_to(
+                    "Install Claude Code",
+                    "https://docs.anthropic.com/en/docs/claude-code/getting-started",
+                );
+                ui.hyperlink_to(
+                    "Install Codex CLI",
+                    "https://developers.openai.com/codex/cli",
+                );
             });
-
-        if self.claude_info.is_some() && self.codex_info.is_some() {
-            let before = self.agent_harness;
-            ui.add_enabled_ui(!self.agent_running, |ui| {
-                egui::ComboBox::from_label("Harness")
-                    .selected_text(self.agent_harness.label())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.agent_harness,
-                            AgentHarnessChoice::ClaudeCode,
-                            "Claude Code",
-                        );
-                        ui.selectable_value(
-                            &mut self.agent_harness,
-                            AgentHarnessChoice::Codex,
-                            "Codex",
-                        );
-                    });
-            });
-            if before != self.agent_harness {
-                self.stop_agent();
-                ui.ctx().data_mut(|data| {
-                    data.insert_persisted(
-                        egui::Id::new(AGENT_HARNESS_MEMORY_ID),
-                        self.agent_harness.key().to_owned(),
-                    );
-                });
-            }
+            ui.add_space(space::ONE);
         }
 
         let selected_info = match self.agent_harness {
             AgentHarnessChoice::ClaudeCode => self.claude_info.as_ref(),
             AgentHarnessChoice::Codex => self.codex_info.as_ref(),
         };
-        match selected_info {
-            Some(info) => {
-                // CLI version strings often repeat the product name; keep the
-                // number only.
-                let version = info.version.as_deref().map_or("version unknown", |value| {
-                    value.split_whitespace().next().unwrap_or(value)
-                });
-                ui.label(format!(
-                    "Using {} {} · {}",
-                    self.agent_harness.label(),
-                    version,
-                    authentication_label(info.authentication)
-                ))
-            }
-            None => ui.colored_label(
-                color::STATUS_DANGER,
-                format!("{} not found on PATH", self.agent_harness.label()),
-            ),
-        };
         let selected_available = selected_info.is_some();
-        if self.agent_harness == AgentHarnessChoice::Codex {
-            ui.small(CODEX_SANDBOX_NOTICE);
-        }
-        ui.label(format!(
-            "Session: {} in / {} out tokens",
-            self.agent_usage.input_tokens, self.agent_usage.output_tokens
-        ));
-        ui.separator();
+        // Owned summary so the composer row can render it while self mutates.
+        let harness_summary = selected_info.map(|info| {
+            // CLI version strings often repeat the product name; keep the
+            // number only.
+            let version = info.version.as_deref().map_or("version unknown", |value| {
+                value.split_whitespace().next().unwrap_or(value)
+            });
+            format!(
+                "{} · {}",
+                version,
+                authentication_label(info.authentication)
+            )
+        });
 
         let mut confirmation_decision = None;
         for request in &self.pending_confirmations {
@@ -402,28 +351,17 @@ impl OpenReelApp {
         // uncapped scroll area consumes the whole dock and pushes the input
         // out of the clipped panel, leaving no visible way to talk to the
         // agent.
+        let mut card_action: Option<EditCardAction> = None;
         let composer_reserve = 132.0;
-        // Vertical auto-shrink keeps an empty or short history compact - the
-        // composer sits right below the last message instead of being pinned
-        // under a column of dead space - while long histories cap out and
-        // scroll with the composer held visible.
+        // The composer anchors to the bottom of the session column (T3-style):
+        // the stream owns everything above it and sticks to its latest entry.
+        let stream_height = (ui.available_height() - composer_reserve).max(96.0);
         egui::ScrollArea::vertical()
-            .auto_shrink([false, true])
+            .auto_shrink([false, false])
             .stick_to_bottom(true)
-            .max_height((ui.available_height() - composer_reserve).max(96.0))
+            .max_height(stream_height)
+            .min_scrolled_height(stream_height)
             .show(ui, |ui| {
-                if self.chat.is_empty() {
-                    ui.add_space(space::TWO);
-                    ui.label(
-                        egui::RichText::new(
-                            "Ask for an edit in plain language. The agent sees your timeline, \
-                             transcript, silences, and scene changes, and every change it makes \
-                             is one undo away.",
-                        )
-                        .color(color::TEXT_MUTED)
-                        .italics(),
-                    );
-                }
                 for (index, entry) in self.chat.iter().enumerate() {
                     match entry {
                         ChatEntry::User(text) => {
@@ -494,10 +432,80 @@ impl OpenReelApp {
                                 .size(type_size::MICRO),
                             );
                         }
+                        ChatEntry::EditCard {
+                            summary,
+                            start,
+                            end,
+                            cue,
+                        } => {
+                            chat_frame(color::SURFACE_RAISED, color::BORDER_STRONG).show(
+                                ui,
+                                |ui| {
+                                    ui.colored_label(
+                                        color::TEXT_SECONDARY,
+                                        egui::RichText::new("EDIT").strong().size(type_size::MICRO),
+                                    );
+                                    ui.label(summary);
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .small_button("Review")
+                                            .on_hover_text(
+                                                "Play the changed span with a two-second lead-in",
+                                            )
+                                            .clicked()
+                                        {
+                                            card_action = Some(EditCardAction::Review(*cue));
+                                        }
+                                        if ui
+                                            .small_button("Undo")
+                                            .on_hover_text("Revert this edit")
+                                            .clicked()
+                                        {
+                                            card_action = Some(EditCardAction::Undo);
+                                        }
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{} – {}",
+                                                crate::timeline_ui::format_timecode(
+                                                    *start,
+                                                    self.document.fps
+                                                ),
+                                                crate::timeline_ui::format_timecode(
+                                                    *end,
+                                                    self.document.fps
+                                                ),
+                                            ))
+                                            .font(theme::code_font())
+                                            .color(color::TEXT_MUTED),
+                                        );
+                                    });
+                                },
+                            );
+                        }
                     }
                     ui.add_space(space::ONE_HALF);
                 }
             });
+        match card_action {
+            Some(EditCardAction::Review(cue)) => {
+                self.seek_to(cue);
+                self.playback.play(self.position);
+            }
+            Some(EditCardAction::Undo) => self.undo(),
+            None => {}
+        }
+        if self.chat.is_empty() {
+            ui.label(
+                egui::RichText::new(
+                    "Ask for an edit in plain language. The agent sees your timeline, \
+                     transcript, silences, and scene changes, and every change it makes is \
+                     one undo away.",
+                )
+                .color(color::TEXT_MUTED)
+                .italics(),
+            );
+            ui.add_space(space::ONE);
+        }
         ui.add_space(space::ONE);
         egui::Frame::new()
             .fill(color::CANVAS)
@@ -514,32 +522,99 @@ impl OpenReelApp {
                         .hint_text("Describe an edit…"),
                 );
             });
+        // The composer row carries the session controls, T3-style: harness on
+        // the left, transport on the right, everything else is the stream.
         ui.horizontal(|ui| {
-            let can_send = !self.agent_running
-                && !self.agent_input.trim().is_empty()
-                && selected_available
-                && self.mcp_server.is_some();
-            if ui
-                .add_enabled(
-                    can_send,
-                    egui::Button::image_and_text(Icon::Send.image(size::ICON_MD), "Send")
-                        .fill(color::ACCENT_28)
-                        .stroke(egui::Stroke::new(1.0, color::ACCENT_72)),
-                )
-                .clicked()
-            {
-                self.start_agent_turn();
+            if self.claude_info.is_some() && self.codex_info.is_some() {
+                let before = self.agent_harness;
+                ui.add_enabled_ui(!self.agent_running, |ui| {
+                    egui::ComboBox::from_id_salt("composer-harness")
+                        .selected_text(self.agent_harness.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.agent_harness,
+                                AgentHarnessChoice::ClaudeCode,
+                                "Claude Code",
+                            );
+                            ui.selectable_value(
+                                &mut self.agent_harness,
+                                AgentHarnessChoice::Codex,
+                                "Codex",
+                            );
+                        });
+                });
+                if before != self.agent_harness {
+                    self.stop_agent();
+                    ui.ctx().data_mut(|data| {
+                        data.insert_persisted(
+                            egui::Id::new(AGENT_HARNESS_MEMORY_ID),
+                            self.agent_harness.key().to_owned(),
+                        );
+                    });
+                }
+            } else if any_harness {
+                ui.colored_label(color::TEXT_SECONDARY, self.agent_harness.label());
             }
-            if ui
-                .add_enabled(
-                    self.agent_running,
-                    egui::Button::image_and_text(Icon::Stop.image(size::ICON_MD), "Stop")
-                        .fill(color::SURFACE_RAISED),
-                )
-                .clicked()
-            {
-                self.stop_agent();
+            match &harness_summary {
+                Some(summary) => {
+                    let label = ui.colored_label(
+                        color::TEXT_MUTED,
+                        egui::RichText::new(summary).size(type_size::CAPTION),
+                    );
+                    if self.agent_harness == AgentHarnessChoice::Codex {
+                        label.on_hover_text(CODEX_SANDBOX_NOTICE);
+                    }
+                }
+                None => {
+                    ui.colored_label(
+                        color::STATUS_DANGER,
+                        format!("{} not found on PATH", self.agent_harness.label()),
+                    );
+                }
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let can_send = !self.agent_running
+                    && !self.agent_input.trim().is_empty()
+                    && selected_available
+                    && self.mcp_server.is_some();
+                if ui
+                    .add_enabled(
+                        can_send,
+                        egui::Button::image_and_text(Icon::Send.image(size::ICON_MD), "Send")
+                            .fill(color::ACCENT_28)
+                            .stroke(egui::Stroke::new(1.0, color::ACCENT_72)),
+                    )
+                    .clicked()
+                {
+                    self.start_agent_turn();
+                }
+                if ui
+                    .add_enabled(
+                        self.agent_running,
+                        egui::Button::image_and_text(Icon::Stop.image(size::ICON_MD), "Stop")
+                            .fill(color::SURFACE_RAISED),
+                    )
+                    .clicked()
+                {
+                    self.stop_agent();
+                }
+                if self.agent_running {
+                    ui.colored_label(
+                        color::ACCENT,
+                        egui::RichText::new("RUNNING").size(type_size::MICRO),
+                    );
+                }
+                if self.agent_usage.input_tokens > 0 || self.agent_usage.output_tokens > 0 {
+                    ui.colored_label(
+                        color::TEXT_MUTED,
+                        egui::RichText::new(format!(
+                            "{} in / {} out",
+                            self.agent_usage.input_tokens, self.agent_usage.output_tokens
+                        ))
+                        .size(type_size::MICRO),
+                    );
+                }
+            });
         });
     }
 }

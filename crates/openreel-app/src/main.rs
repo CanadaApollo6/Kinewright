@@ -1,6 +1,7 @@
 mod app;
 mod captions;
 mod chat_ui;
+mod edit_diff;
 mod error_ui;
 mod export_ui;
 mod icons;

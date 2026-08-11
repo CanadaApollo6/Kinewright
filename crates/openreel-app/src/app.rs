@@ -585,6 +585,33 @@ impl OpenReelApp {
                         .filter(|asset| self.document.asset(asset.id).is_none())
                         .cloned()
                         .collect::<Vec<_>>();
+                    // The watchable diff (M24): while the agent is editing,
+                    // every applied change becomes a reviewable card in the
+                    // session stream, and the monitor cues just before the
+                    // first seam so the picture answers "what changed".
+                    if self.agent_running
+                        && let Some(range) =
+                            crate::edit_diff::changed_project_range(&self.document, &doc)
+                    {
+                        let cue = TimeCode(
+                            range
+                                .start
+                                .0
+                                .saturating_sub(review_preroll_frames(doc.fps))
+                                .max(0),
+                        );
+                        self.chat.push(ChatEntry::EditCard {
+                            summary: last_op
+                                .as_ref()
+                                .map_or_else(|| "Edited the timeline".to_owned(), operation_status),
+                            start: range.start,
+                            end: range.end,
+                            cue,
+                        });
+                        self.position =
+                            TimeCode(cue.0.min(doc.duration.0.saturating_sub(1).max(0)));
+                        self.playback.request_frame(self.position);
+                    }
                     self.document = Arc::clone(&doc);
                     self.transcript_selection = None;
                     if self
@@ -885,6 +912,13 @@ impl OpenReelApp {
             )
             .show(ui, |ui| self.agent_panel(ui));
     }
+}
+
+/// Two seconds of lead-in so a reviewed change plays with context.
+fn review_preroll_frames(fps: openreel_core::Rational) -> i64 {
+    let nominal = i64::from(fps.numerator().saturating_add(fps.denominator() / 2))
+        / i64::from(fps.denominator().max(1));
+    nominal.max(1) * 2
 }
 
 fn operation_status(operation: &Operation) -> String {
