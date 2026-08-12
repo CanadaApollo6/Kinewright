@@ -116,5 +116,12 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   newline). Ships with instant local commands (/remove-fillers, /captions,
   /freeze, /export, /undo, /redo, /help) and agent prompt commands
   (/cut-silences, /tighten)
+- Import is one gesture: an imported file goes straight onto the timeline
+  and the monitor cues to its first frame, the media rail stays open once
+  media exists instead of vanishing the moment the import lands, and the
+  Add button cues the monitor to the added footage. The slash-command
+  suggestions now shrink the session stream instead of pushing the
+  composer out of view, and the empty media rail's icon sits centered
+  instead of on the panel boundary
 
 [Unreleased]: https://github.com/CanadaApollo6/OpenReel/commits/main

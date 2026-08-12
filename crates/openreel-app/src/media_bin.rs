@@ -35,8 +35,14 @@ impl OpenReelApp {
             self.record_error("Operations", format!("Asset {asset_id} no longer exists"));
             return;
         };
+        // The new clip lands at the end of the timeline; cueing the playhead
+        // there makes the monitor answer the add - the commit event that
+        // follows seeks and requests this frame.
+        let clip_start = self.document.duration;
         if asset.kind == MediaKind::AudioVideo {
-            self.add_audio_video_asset_to_timeline(&asset);
+            if self.add_audio_video_asset_to_timeline(&asset) {
+                self.position = clip_start;
+            }
             self.selected_asset = Some(asset_id);
             return;
         }
@@ -55,16 +61,23 @@ impl OpenReelApp {
         self.send_operation(Operation::AddClip {
             track: track.id,
             asset: asset.id,
-            at: self.document.duration,
+            at: clip_start,
             source: TimeCode::ZERO..asset.duration,
         });
+        self.position = clip_start;
         self.selected_asset = Some(asset_id);
     }
 
-    fn add_audio_video_asset_to_timeline(&mut self, asset: &openreel_core::MediaAsset) {
+    fn add_audio_video_asset_to_timeline(&mut self, asset: &openreel_core::MediaAsset) -> bool {
         match audio_video_placement_operations(&self.document, asset) {
-            Ok(operations) => self.send_operations(operations),
-            Err(error) => self.record_error("Operations", error),
+            Ok(operations) => {
+                self.send_operations(operations);
+                true
+            }
+            Err(error) => {
+                self.record_error("Operations", error);
+                false
+            }
         }
     }
 
@@ -89,18 +102,8 @@ impl OpenReelApp {
         if self.document.media_pool.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(space::EIGHT);
-                Icon::Filmstrip
-                    .image(32.0)
-                    .tint(color::TEXT_MUTED)
-                    .paint_at(
-                        ui,
-                        egui::Rect::from_center_size(
-                            ui.next_widget_position()
-                                + egui::vec2(ui.available_width() / 2.0, 16.0),
-                            egui::vec2(32.0, 32.0),
-                        ),
-                    );
-                ui.add_space(40.0);
+                ui.add(Icon::Filmstrip.image(32.0).tint(color::TEXT_MUTED));
+                ui.add_space(space::TWO);
                 ui.label("No media imported");
                 ui.colored_label(color::TEXT_MUTED, "Import a clip to begin editing.");
             });

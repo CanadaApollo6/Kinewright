@@ -67,6 +67,9 @@ pub(crate) struct OpenReelApp {
     pub(crate) pending_confirmations: Vec<ConfirmationRequest>,
     pub(crate) probe_tx: mpsc::Sender<(PathBuf, Result<MediaAsset, MediaError>)>,
     pub(crate) probe_rx: mpsc::Receiver<(PathBuf, Result<MediaAsset, MediaError>)>,
+    /// Assets imported by the user that should land on the timeline the
+    /// moment their `AddAsset` commits — importing is one gesture, not two.
+    pending_timeline_adds: Vec<AssetId>,
     pub(crate) document: Arc<Document>,
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) position: TimeCode,
@@ -166,6 +169,7 @@ impl OpenReelApp {
             pending_confirmations: Vec::new(),
             probe_tx,
             probe_rx,
+            pending_timeline_adds: Vec::new(),
             document: Arc::new(document),
             texture: None,
             position: TimeCode::ZERO,
@@ -563,6 +567,11 @@ impl OpenReelApp {
             match result {
                 Ok(asset) => {
                     self.status = format!("Importing {}…", path.display());
+                    // Keep the rail open once media exists - without this the
+                    // empty-pool self-raise collapses the instant the asset
+                    // lands and the import looks like it did nothing.
+                    self.show_media_rail = true;
+                    self.pending_timeline_adds.push(asset.id);
                     self.send_operation(Operation::AddAsset { asset });
                 }
                 Err(error) => self.record_error(
@@ -644,6 +653,20 @@ impl OpenReelApp {
                     self.playback.request_frame(self.position);
                     if let Some(Operation::AddAsset { asset }) = &last_op {
                         self.selected_asset = Some(asset.id);
+                        // A user import is one gesture: the probed asset goes
+                        // straight onto the timeline, and the playhead moves
+                        // to the new footage so the monitor answers "it
+                        // worked". The pending list keeps agent-driven asset
+                        // operations out of this path.
+                        if let Some(index) = self
+                            .pending_timeline_adds
+                            .iter()
+                            .position(|pending| *pending == asset.id)
+                        {
+                            self.pending_timeline_adds.remove(index);
+                            let asset_id = asset.id;
+                            self.add_asset_to_timeline(asset_id);
+                        }
                     }
                     for asset in new_assets {
                         self.request_asset_analysis(asset);

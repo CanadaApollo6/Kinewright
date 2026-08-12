@@ -264,7 +264,7 @@ impl OpenReelApp {
     }
 
     // The agent panel is one ordered immediate-mode UI pass over session and confirmation state.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     pub(crate) fn agent_panel(&mut self, ui: &mut egui::Ui) {
         if !self.agent_running && self.agent_session.is_none() {
             if self.claude_info.is_some() && self.codex_info.is_none() {
@@ -375,7 +375,16 @@ impl OpenReelApp {
         // out of the clipped panel, leaving no visible way to talk to the
         // agent.
         let mut card_action: Option<EditCardAction> = None;
-        let composer_reserve = 132.0;
+        // Slash suggestions render between the stream and the composer, so
+        // their height comes out of the stream's share - otherwise the popup
+        // pushes the composer clean out of the clipped panel.
+        let matches = crate::slash::matching_commands(&self.agent_input);
+        let suggestions_reserve = if matches.is_empty() {
+            0.0
+        } else {
+            24.0 * matches.len() as f32 + 24.0
+        };
+        let composer_reserve = 132.0 + suggestions_reserve;
         // The composer anchors to the bottom of the session column (T3-style):
         // the stream owns everything above it and sticks to its latest entry.
         let stream_height = (ui.available_height() - composer_reserve).max(96.0);
@@ -518,7 +527,6 @@ impl OpenReelApp {
             None => {}
         }
         // Slash suggestions float directly above the composer while typing.
-        let matches = crate::slash::matching_commands(&self.agent_input);
         let mut run_command: Option<&'static crate::slash::SlashCommand> = None;
         if !matches.is_empty() {
             chat_frame(color::SURFACE_RAISED, color::BORDER_SUBTLE).show(ui, |ui| {
