@@ -11,7 +11,7 @@
 
 OpenReel is a native Windows video editor written in Rust that is, at its core, an **agentic harness for video editing**. Type "cut the first three seconds and tighten the pauses" into the chat panel, and the agent CLI you already pay for — Claude Code or Codex — makes the edits on your timeline, using the exact same operations you'd use by hand. Every agent edit lands on the same undo stack as yours: **Ctrl+Z reverses the robot.**
 
-![OpenReel editing a two-track project](docs/assets/openreel.png)
+![OpenReel: agent session, program monitor, and timeline on a two-track project](docs/assets/openreel.png)
 
 > Early development. The editor works end to end — import, cut, composite, export, agent editing, transcript editing — but expect rough edges. The screenshot above uses generated test media; it looks better with your footage.
 
