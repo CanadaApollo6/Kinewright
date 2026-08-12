@@ -516,23 +516,21 @@ impl OpenReelApp {
                                         close_clicked = true;
                                     }
                                     if confirms {
-                                        ui.colored_label(
+                                        ui.label(theme::caps_label(
+                                            "CONFIRM",
                                             color::STATUS_WARNING,
-                                            egui::RichText::new("CONFIRM").size(type_size::MICRO),
-                                        );
+                                        ));
                                     }
                                     if running {
-                                        ui.colored_label(
-                                            color::ACCENT,
-                                            egui::RichText::new("RUNNING").size(type_size::MICRO),
-                                        );
+                                        ui.label(theme::caps_label("RUNNING", color::ACCENT));
                                     }
                                     ui.with_layout(
                                         egui::Layout::left_to_right(egui::Align::Center),
                                         |ui| {
                                             ui.add(
                                                 egui::Label::new(
-                                                    egui::RichText::new(display_name).strong(),
+                                                    egui::RichText::new(display_name)
+                                                        .font(theme::semibold(type_size::BODY)),
                                                 )
                                                 .truncate(),
                                             );
@@ -551,6 +549,13 @@ impl OpenReelApp {
                                 );
                             }
                         });
+                    if focused {
+                        theme::paint_raised_lighting(
+                            ui.painter(),
+                            frame.response.rect,
+                            radius::px(radius::SM),
+                        );
+                    }
                     let response = ui.interact(
                         frame.response.rect,
                         ui.make_persistent_id(("project-row", project_id)),
@@ -578,73 +583,24 @@ impl OpenReelApp {
     fn focused_thread_rows(&mut self, ui: &mut egui::Ui, project_index: usize) {
         let fps = self.projects[project_index].document.fps;
         let can_close = self.projects[project_index].threads.len() > 1;
+        let project_id = self.projects[project_index].id;
+        let active_thread = self.projects[project_index].active_thread;
         let mut focus_thread = None;
         let mut close_thread = None;
         ui.scope(|ui| {
             for (index, thread) in self.projects[project_index].threads.iter().enumerate() {
-                let mut close_clicked = false;
-                // Tree depth (M25): thread rows sit one indent step inside
-                // their project header, so the two raised surfaces read as
-                // parent and child rather than neighbors.
-                let frame = egui::Frame::new()
-                    .fill(if index == self.projects[project_index].active_thread {
-                        color::SURFACE_RAISED
-                    } else {
-                        color::PANEL
-                    })
-                    .corner_radius(radius::SM)
-                    .outer_margin(egui::Margin {
-                        left: theme::margin(space::THREE),
-                        ..egui::Margin::ZERO
-                    })
-                    .inner_margin(egui::Margin::same(theme::margin(space::ONE)))
-                    .show(ui, |ui| {
-                        // A bare with_layout claims the rail's full
-                        // height; the row must allocate exactly one
-                        // line. Trailing controls pack from the right,
-                        // the identity anchors left and truncates.
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width(), size::ICON_SM + space::ONE),
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if can_close
-                                    && ui.small_button("×").on_hover_text("Close thread").clicked()
-                                {
-                                    close_clicked = true;
-                                }
-                                if thread.running {
-                                    ui.colored_label(
-                                        color::ACCENT,
-                                        egui::RichText::new("RUNNING").size(type_size::MICRO),
-                                    );
-                                }
-                                ui.with_layout(
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        ui.add(thread.harness.brand_icon().image(size::ICON_SM));
-                                        ui.add(egui::Label::new(&thread.name).truncate());
-                                    },
-                                );
-                            },
-                        );
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(latest_activity_snippet(&thread.chat, fps))
-                                    .size(type_size::CAPTION)
-                                    .color(color::TEXT_MUTED),
-                            )
-                            .truncate(),
-                        );
-                    });
-                let row_response = ui.interact(
-                    frame.response.rect,
-                    ui.make_persistent_id(("thread-row", self.projects[project_index].id, index)),
-                    egui::Sense::click(),
-                );
-                if close_clicked {
-                    close_thread = Some(index);
-                } else if row_response.clicked() {
-                    focus_thread = Some(index);
+                match show_thread_row(
+                    ui,
+                    thread,
+                    project_id,
+                    index,
+                    index == active_thread,
+                    can_close,
+                    fps,
+                ) {
+                    ThreadRowAction::Close => close_thread = Some(index),
+                    ThreadRowAction::Focus => focus_thread = Some(index),
+                    ThreadRowAction::None => {}
                 }
                 ui.add_space(space::ONE_HALF);
             }
@@ -819,14 +775,20 @@ impl OpenReelApp {
 
         let mut confirmation_decision = None;
         for request in &self.projects[project_index].pending_confirmations {
-            egui::Frame::new()
+            let card = egui::Frame::new()
                 .fill(color::SURFACE_RAISED)
                 .stroke(egui::Stroke::new(1.0, color::STATUS_WARNING))
                 .corner_radius(radius::MD)
                 .inner_margin(egui::Margin::same(theme::margin(space::TWO)))
                 .show(ui, |ui| {
-                    ui.colored_label(color::STATUS_WARNING, "AGENT CONFIRMATION REQUIRED");
-                    ui.strong(&request.tool_name);
+                    ui.label(theme::caps_label(
+                        "AGENT CONFIRMATION REQUIRED",
+                        color::STATUS_WARNING,
+                    ));
+                    ui.label(
+                        egui::RichText::new(&request.tool_name)
+                            .font(theme::semibold(type_size::BODY)),
+                    );
                     ui.label(&request.description);
                     ui.horizontal(|ui| {
                         if ui
@@ -843,6 +805,7 @@ impl OpenReelApp {
                         }
                     });
                 });
+            theme::paint_raised_lighting(ui.painter(), card.response.rect, radius::px(radius::MD));
         }
         if let Some((id, approve)) = confirmation_decision
             && let Some(confirmations) = &self.projects[project_index].confirmations
@@ -957,7 +920,7 @@ impl OpenReelApp {
         if !matches.is_empty() {
             // The popup floats over the stream, so it earns one of the few
             // hairlines left in the app.
-            chat_frame(color::SURFACE_RAISED)
+            let slash = chat_frame(color::SURFACE_RAISED)
                 .stroke(egui::Stroke::new(1.0, color::BORDER_SUBTLE))
                 .show(ui, |ui| {
                     for command in &matches {
@@ -973,10 +936,11 @@ impl OpenReelApp {
                         });
                     }
                 });
+            theme::paint_raised_lighting(ui.painter(), slash.response.rect, radius::px(radius::MD));
         }
         ui.add_space(space::ONE);
         let composer_id = egui::Id::new(("agent-composer", project_id, active_thread));
-        let input_response = egui::Frame::new()
+        let input_frame = egui::Frame::new()
             .fill(color::CANVAS)
             .stroke(egui::Stroke::new(1.0, color::BORDER_SUBTLE))
             .corner_radius(radius::MD)
@@ -993,8 +957,13 @@ impl OpenReelApp {
                     .frame(egui::Frame::NONE)
                     .hint_text("Describe an edit, or / for commands"),
                 )
-            })
-            .inner;
+            });
+        theme::paint_inset_well(
+            ui.painter(),
+            input_frame.response.rect,
+            radius::px(radius::MD),
+        );
+        let input_response = input_frame.inner;
         // Enter sends (Shift+Enter for a newline); with a slash query active,
         // Enter runs the top match.
         if input_response.has_focus()
@@ -1268,10 +1237,7 @@ impl OpenReelApp {
                     {
                         self.stop_agent(active_thread);
                     }
-                    ui.colored_label(
-                        color::ACCENT,
-                        egui::RichText::new("RUNNING").size(type_size::MICRO),
-                    );
+                    ui.label(theme::caps_label("RUNNING", color::ACCENT));
                 } else {
                     let can_send = !self.projects[project_index].threads[active_thread]
                         .input
@@ -1424,33 +1390,27 @@ fn render_stream_entry(
 ) {
     match entry {
         ChatEntry::User(text) => {
-            chat_frame(color::ACCENT_16).show(ui, |ui| {
-                ui.colored_label(
-                    color::ACCENT,
-                    egui::RichText::new("YOU").strong().size(type_size::MICRO),
-                );
+            let card = chat_frame(color::ACCENT_16).show(ui, |ui| {
+                ui.label(theme::caps_label("YOU", color::ACCENT));
                 ui.label(text);
             });
+            theme::paint_raised_lighting(ui.painter(), card.response.rect, radius::px(radius::MD));
         }
         ChatEntry::Text(text) => {
             // The agent's words are the conversation itself: no container,
             // just the role label and prose (T3-style).
-            ui.colored_label(
-                color::TEXT_SECONDARY,
-                egui::RichText::new("AGENT").strong().size(type_size::MICRO),
-            );
+            ui.label(theme::caps_label("AGENT", color::TEXT_SECONDARY));
             ui.label(text);
         }
         ChatEntry::ToolCall { name, arguments } => {
-            chat_frame(color::SURFACE_RAISED).show(ui, |ui| {
+            let card = chat_frame(color::SURFACE_RAISED).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add(Icon::Waveform.image(size::ICON_SM).tint(color::TEXT_MUTED));
-                    ui.colored_label(
+                    ui.label(theme::caps_prefix(
+                        "TOOL",
+                        &format!(" · {name}"),
                         color::TEXT_SECONDARY,
-                        egui::RichText::new(format!("TOOL · {name}"))
-                            .strong()
-                            .size(type_size::MICRO),
-                    );
+                    ));
                 });
                 ui.label(
                     egui::RichText::new(summarize(arguments, 180))
@@ -1458,18 +1418,23 @@ fn render_stream_entry(
                         .color(color::TEXT_SECONDARY),
                 );
             });
+            theme::paint_raised_lighting(ui.painter(), card.response.rect, radius::px(radius::MD));
         }
         ChatEntry::ToolResult { name, result } => {
             chat_frame(color::SURFACE).show(ui, |ui| {
-                egui::CollapsingHeader::new(format!("RESULT · {name}"))
-                    .id_salt(("agent-result", salt))
-                    .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(summarize(result, 500))
-                                .font(theme::code_font())
-                                .color(color::TEXT_SECONDARY),
-                        );
-                    });
+                egui::CollapsingHeader::new(theme::caps_prefix(
+                    "RESULT",
+                    &format!(" · {name}"),
+                    color::TEXT_SECONDARY,
+                ))
+                .id_salt(("agent-result", salt))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(summarize(result, 500))
+                            .font(theme::code_font())
+                            .color(color::TEXT_SECONDARY),
+                    );
+                });
             });
         }
         ChatEntry::Cost {
@@ -1490,11 +1455,8 @@ fn render_stream_entry(
             end,
             cue,
         } => {
-            chat_frame(color::SURFACE_RAISED).show(ui, |ui| {
-                ui.colored_label(
-                    color::TEXT_SECONDARY,
-                    egui::RichText::new("EDIT").strong().size(type_size::MICRO),
-                );
+            let card = chat_frame(color::SURFACE_RAISED).show(ui, |ui| {
+                ui.label(theme::caps_label("EDIT", color::TEXT_SECONDARY));
                 ui.label(summary);
                 ui.horizontal(|ui| {
                     if ui
@@ -1522,7 +1484,92 @@ fn render_stream_entry(
                     );
                 });
             });
+            theme::paint_raised_lighting(ui.painter(), card.response.rect, radius::px(radius::MD));
         }
+    }
+}
+
+enum ThreadRowAction {
+    None,
+    Focus,
+    Close,
+}
+
+fn show_thread_row(
+    ui: &mut egui::Ui,
+    thread: &AgentThread,
+    project_id: u64,
+    index: usize,
+    active: bool,
+    can_close: bool,
+    fps: openreel_core::Rational,
+) -> ThreadRowAction {
+    let mut close_clicked = false;
+    // Tree depth (M25): thread rows sit one indent step inside
+    // their project header, so the two raised surfaces read as
+    // parent and child rather than neighbors.
+    let frame = egui::Frame::new()
+        .fill(if active {
+            color::SURFACE_RAISED
+        } else {
+            color::PANEL
+        })
+        .corner_radius(radius::SM)
+        .outer_margin(egui::Margin {
+            left: theme::margin(space::THREE),
+            ..egui::Margin::ZERO
+        })
+        .inner_margin(egui::Margin::same(theme::margin(space::ONE)))
+        .show(ui, |ui| {
+            // A bare with_layout claims the rail's full
+            // height; the row must allocate exactly one
+            // line. Trailing controls pack from the right,
+            // the identity anchors left and truncates.
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), size::ICON_SM + space::ONE),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if can_close && ui.small_button("×").on_hover_text("Close thread").clicked() {
+                        close_clicked = true;
+                    }
+                    if thread.running {
+                        ui.label(theme::caps_label("RUNNING", color::ACCENT));
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(thread.harness.brand_icon().image(size::ICON_SM));
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&thread.name)
+                                    .font(theme::semibold(type_size::BODY)),
+                            )
+                            .truncate(),
+                        );
+                    });
+                },
+            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(latest_activity_snippet(&thread.chat, fps))
+                        .size(type_size::CAPTION)
+                        .color(color::TEXT_MUTED),
+                )
+                .truncate(),
+            );
+        });
+    if active {
+        theme::paint_raised_lighting(ui.painter(), frame.response.rect, radius::px(radius::SM));
+    }
+    let row_response = ui.interact(
+        frame.response.rect,
+        ui.make_persistent_id(("thread-row", project_id, index)),
+        egui::Sense::click(),
+    );
+    if close_clicked {
+        ThreadRowAction::Close
+    } else if row_response.clicked() {
+        ThreadRowAction::Focus
+    } else {
+        ThreadRowAction::None
     }
 }
 

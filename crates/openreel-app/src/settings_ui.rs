@@ -48,11 +48,7 @@ impl OpenReelApp {
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.set_width(440.0);
-                ui.label(
-                    egui::RichText::new("PROVIDERS")
-                        .size(type_size::MICRO)
-                        .color(color::TEXT_MUTED),
-                );
+                ui.label(theme::caps_label("PROVIDERS", color::TEXT_MUTED));
                 ui.add_space(space::ONE);
                 provider_card(
                     ui,
@@ -79,14 +75,16 @@ fn provider_card(
     install_url: &str,
 ) {
     let ctx = ui.ctx().clone();
-    egui::Frame::new()
+    let card = egui::Frame::new()
         .fill(color::SURFACE)
         .corner_radius(radius::MD)
         .inner_margin(egui::Margin::same(theme::margin(space::TWO)))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.add(harness.brand_icon().image(size::ICON_MD));
-                ui.strong(harness.label());
+                ui.label(
+                    egui::RichText::new(harness.label()).font(theme::semibold(type_size::BODY)),
+                );
                 if let Some(info) = info {
                     ui.colored_label(
                         color::TEXT_SECONDARY,
@@ -122,4 +120,5 @@ fn provider_card(
                 });
             }
         });
+    theme::paint_raised_lighting(ui.painter(), card.response.rect, radius::px(radius::MD));
 }

@@ -237,7 +237,7 @@ impl OpenReelApp {
                     self.ripple_mode = !self.ripple_mode;
                 }
                 if self.ripple_mode {
-                    ui.colored_label(color::ACCENT, "RIPPLE");
+                    ui.label(theme::caps_label("RIPPLE", color::ACCENT));
                 }
                 ui.separator();
                 if icons::button(ui, Icon::Undo, "Undo (Ctrl+Z)").clicked() {
@@ -872,14 +872,14 @@ fn paint_track_labels(
     );
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, radius::NONE, color::PANEL);
-    painter.text(
+    theme::paint_caps(
+        &painter,
         egui::pos2(
             rect.left() + space::TWO,
             rect.top() + size::RULER_HEIGHT / 2.0,
         ),
         egui::Align2::LEFT_CENTER,
         "TRACKS",
-        egui::FontId::new(type_size::MICRO, egui::FontFamily::Proportional),
         color::TEXT_MUTED,
     );
     for (index, track) in document.tracks.iter().enumerate() {
@@ -975,11 +975,11 @@ fn paint_sync_lock_toggle(
         .tint(lock_color)
         .paint_at(ui, lock_rect);
     if !track.sync_lock {
-        painter.text(
+        theme::paint_caps(
+            painter,
             egui::pos2(toggle_rect.center().x, toggle_rect.top() + space::ONE_HALF),
             egui::Align2::CENTER_CENTER,
             "FREE",
-            egui::FontId::new(type_size::MICRO, egui::FontFamily::Proportional),
             color::STATUS_WARNING,
         );
     }
@@ -1285,11 +1285,11 @@ fn paint_freeze_clip(
         egui::FontId::new(type_size::CAPTION, egui::FontFamily::Proportional),
         color::TEXT_PRIMARY,
     );
-    painter.text(
+    theme::paint_caps(
+        painter,
         egui::pos2(rect.right() - space::TWO, rect.top() + space::ONE),
         egui::Align2::RIGHT_TOP,
         "HOLD",
-        theme::code_font(),
         color::ACCENT,
     );
     if hovered {

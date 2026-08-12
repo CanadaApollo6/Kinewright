@@ -22,7 +22,7 @@ use eframe::egui;
 use crate::{
     app::OpenReelApp,
     icons::Icon,
-    theme::{color, size, space, type_size},
+    theme::{self, color, size, space, type_size},
 };
 
 /// Capture devices `FFmpeg`'s `DirectShow` backend reports, plus the
@@ -784,11 +784,21 @@ impl OpenReelApp {
     /// with the elapsed clock (click to stop) while capturing.
     pub(crate) fn record_control(&mut self, ui: &mut egui::Ui) {
         if let Some(active) = &self.recording {
+            let mut rec = theme::caps_label("REC", color::TEXT_SECONDARY);
+            rec.append(
+                &format!(" {}", active.elapsed_label()),
+                0.0,
+                egui::TextFormat {
+                    font_id: theme::code_font(),
+                    color: color::TEXT_SECONDARY,
+                    ..Default::default()
+                },
+            );
             let stop = ui
                 .add(
                     egui::Button::image_and_text(
                         Icon::Record.image(size::ICON_MD).tint(color::STATUS_DANGER),
-                        format!("REC {}", active.elapsed_label()),
+                        rec,
                     )
                     .fill(color::SURFACE_RAISED),
                 )

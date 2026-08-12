@@ -57,7 +57,13 @@ pub(crate) mod radius {
     pub const XS: CornerRadius = CornerRadius::same(2);
     pub const SM: CornerRadius = CornerRadius::same(4);
     pub const MD: CornerRadius = CornerRadius::same(6);
-    pub const LG: CornerRadius = CornerRadius::same(8);
+    /// Windows, dialogs, and menus: a softer silhouette than cards (`MD`).
+    pub const LG: CornerRadius = CornerRadius::same(10);
+
+    #[must_use]
+    pub(crate) fn px(corner: CornerRadius) -> f32 {
+        f32::from(corner.nw)
+    }
 }
 
 pub(crate) mod size {
@@ -96,9 +102,8 @@ pub(crate) mod type_size {
     pub const CODE: f32 = 10.0;
 }
 
-pub(crate) fn title_font() -> FontId {
-    FontId::new(type_size::TITLE, FontFamily::Proportional)
-}
+const INTER_MEDIUM: &str = "InterMedium";
+const INTER_SEMIBOLD: &str = "InterSemiBold";
 
 pub(crate) fn timecode_font() -> FontId {
     FontId::new(type_size::TIMECODE, FontFamily::Monospace)
@@ -110,6 +115,138 @@ pub(crate) fn ruler_font() -> FontId {
 
 pub(crate) fn code_font() -> FontId {
     FontId::new(type_size::CODE, FontFamily::Monospace)
+}
+
+#[must_use]
+pub(crate) fn medium(size: f32) -> egui::FontId {
+    FontId::new(size, FontFamily::Name(INTER_MEDIUM.into()))
+}
+
+#[must_use]
+pub(crate) fn semibold(size: f32) -> egui::FontId {
+    FontId::new(size, FontFamily::Name(INTER_SEMIBOLD.into()))
+}
+
+/// Small-caps section label: micro size, letter-spaced, muted by default.
+#[must_use]
+pub(crate) fn caps_label(text: &str, color: egui::Color32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: medium(type_size::MICRO),
+            color,
+            extra_letter_spacing: 1.2,
+            ..Default::default()
+        },
+    );
+    job
+}
+
+/// Caps prefix plus an untracked remainder, for labels like `TOOL · name`.
+#[must_use]
+pub(crate) fn caps_prefix(prefix: &str, rest: &str, color: egui::Color32) -> egui::text::LayoutJob {
+    let mut job = caps_label(prefix, color);
+    if rest.is_empty() {
+        return job;
+    }
+    job.append(
+        rest,
+        0.0,
+        egui::TextFormat {
+            font_id: medium(type_size::MICRO),
+            color,
+            extra_letter_spacing: 0.0,
+            ..Default::default()
+        },
+    );
+    job
+}
+
+/// Product wordmark: semibold title with tracked caps.
+#[must_use]
+pub(crate) fn wordmark(text: &str, color: egui::Color32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: semibold(type_size::TITLE),
+            color,
+            extra_letter_spacing: 1.6,
+            ..Default::default()
+        },
+    );
+    job
+}
+
+/// Paint a tracked caps label with the same anchors as [`egui::Painter::text`].
+pub(crate) fn paint_caps(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    anchor: egui::Align2,
+    text: &str,
+    color: egui::Color32,
+) {
+    let galley = painter.layout_job(caps_label(text, color));
+    let rect = anchor.anchor_size(pos, galley.size());
+    painter.galley(rect.min, galley, color);
+}
+
+/// Paint the house lighting on a raised surface: a faint sheen falling
+/// from the top plus a 1px specular top edge. Call AFTER the frame's
+/// contents so it overlays the fill (alphas are single-digit; content
+/// remains fully legible).
+pub(crate) fn paint_raised_lighting(painter: &egui::Painter, rect: egui::Rect, corner: f32) {
+    if !rect.is_positive() {
+        return;
+    }
+    let painter = painter.with_clip_rect(rect);
+    let sheen_height = (rect.height() * 0.5).min(48.0);
+    let sheen = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), sheen_height));
+    let mut mesh = egui::Mesh::default();
+    // Alphas settled by screenshot review: the spec's 5/14 vanished in a
+    // real capture; these are the collaborating designer's counter-values.
+    let top = egui::Color32::from_white_alpha(8);
+    let bottom = egui::Color32::TRANSPARENT;
+    mesh.colored_vertex(sheen.left_top(), top);
+    mesh.colored_vertex(sheen.right_top(), top);
+    mesh.colored_vertex(sheen.right_bottom(), bottom);
+    mesh.colored_vertex(sheen.left_bottom(), bottom);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(mesh);
+    painter.hline(
+        egui::Rangef::new(rect.left() + corner, rect.right() - corner),
+        rect.top() + 0.5,
+        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(20)),
+    );
+}
+
+/// Darken the top of an inset well so it reads as recessed (light from above).
+pub(crate) fn paint_inset_well(painter: &egui::Painter, rect: egui::Rect, corner: f32) {
+    if !rect.is_positive() {
+        return;
+    }
+    let painter = painter.with_clip_rect(rect);
+    let shade_height = 6.0_f32.min(rect.height() * 0.25);
+    let shade = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), shade_height));
+    let mut mesh = egui::Mesh::default();
+    let top = egui::Color32::from_black_alpha(18);
+    let bottom = egui::Color32::TRANSPARENT;
+    mesh.colored_vertex(shade.left_top(), top);
+    mesh.colored_vertex(shade.right_top(), top);
+    mesh.colored_vertex(shade.right_bottom(), bottom);
+    mesh.colored_vertex(shade.left_bottom(), bottom);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(mesh);
+    painter.hline(
+        egui::Rangef::new(rect.left() + corner, rect.right() - corner),
+        rect.top() + 0.5,
+        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(40)),
+    );
 }
 
 // Design-system spacing tokens are small whole-point values accepted by egui as i8 margins.
@@ -148,10 +285,7 @@ pub(crate) fn install(ctx: &egui::Context) {
 
     let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
     style.text_styles = BTreeMap::from([
-        (
-            TextStyle::Heading,
-            FontId::new(type_size::HEADING, FontFamily::Proportional),
-        ),
+        (TextStyle::Heading, semibold(type_size::HEADING)),
         (
             TextStyle::Body,
             FontId::new(type_size::BODY, FontFamily::Proportional),
@@ -201,22 +335,54 @@ fn install_fonts(ctx: &egui::Context) {
         ))),
     );
     fonts.font_data.insert(
+        INTER_MEDIUM.to_owned(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/fonts/Inter-Medium.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        INTER_SEMIBOLD.to_owned(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/fonts/Inter-SemiBold.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
         "OpenReel JetBrains Mono".to_owned(),
         Arc::new(FontData::from_static(include_bytes!(
             "../assets/fonts/JetBrainsMono-Variable.ttf"
         ))),
     );
+    let proportional_fallbacks = fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .clone();
     fonts
         .families
         .entry(FontFamily::Proportional)
         .or_default()
         .insert(0, "OpenReel Inter".to_owned());
+    fonts.families.insert(
+        FontFamily::Name(INTER_MEDIUM.into()),
+        prepend_family(INTER_MEDIUM, &proportional_fallbacks),
+    );
+    fonts.families.insert(
+        FontFamily::Name(INTER_SEMIBOLD.into()),
+        prepend_family(INTER_SEMIBOLD, &proportional_fallbacks),
+    );
     fonts
         .families
         .entry(FontFamily::Monospace)
         .or_default()
         .insert(0, "OpenReel JetBrains Mono".to_owned());
     ctx.set_fonts(fonts);
+}
+
+fn prepend_family(primary: &str, fallbacks: &[String]) -> Vec<String> {
+    let mut family = Vec::with_capacity(fallbacks.len().saturating_add(1));
+    family.push(primary.to_owned());
+    family.extend(fallbacks.iter().cloned());
+    family
 }
 
 fn visuals() -> Visuals {
@@ -235,19 +401,19 @@ fn visuals() -> Visuals {
     visuals.window_corner_radius = radius::LG;
     visuals.window_shadow = Shadow {
         offset: [0, 10],
-        blur: 30,
+        blur: 32,
         spread: 0,
-        color: Color32::from_black_alpha(163),
+        color: Color32::from_black_alpha(128),
     };
     visuals.window_fill = color::SURFACE_RAISED;
     visuals.window_stroke = Stroke::new(1.0, color::BORDER_STRONG);
-    visuals.menu_corner_radius = radius::MD;
+    visuals.menu_corner_radius = radius::LG;
     visuals.panel_fill = color::PANEL;
     visuals.popup_shadow = Shadow {
-        offset: [0, 4],
-        blur: 14,
+        offset: [0, 3],
+        blur: 12,
         spread: 0,
-        color: Color32::from_black_alpha(122),
+        color: Color32::from_black_alpha(96),
     };
     visuals.button_frame = true;
     visuals.collapsing_header_frame = false;

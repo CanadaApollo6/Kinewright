@@ -2,7 +2,10 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::app::OpenReelApp;
+use crate::{
+    app::OpenReelApp,
+    theme::{self, type_size},
+};
 
 pub(crate) struct ErrorEntry {
     elapsed: Duration,
@@ -79,7 +82,10 @@ impl OpenReelApp {
                                     "+{minutes:02}:{seconds:02}.{:03}",
                                     entry.elapsed.subsec_millis()
                                 ));
-                                ui.strong(entry.source);
+                                ui.label(
+                                    egui::RichText::new(entry.source)
+                                        .font(theme::semibold(type_size::BODY)),
+                                );
                                 ui.label(&entry.message);
                             });
                         }

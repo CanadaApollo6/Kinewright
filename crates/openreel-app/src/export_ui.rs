@@ -14,7 +14,7 @@ use openreel_core::{
 use crate::{
     app::OpenReelApp,
     icons::Icon,
-    theme::{color, size, space, type_size},
+    theme::{self, color, size, space},
 };
 
 pub(crate) struct ExportDialog {
@@ -239,12 +239,7 @@ impl OpenReelApp {
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new("DELIVERABLE")
-                        .strong()
-                        .size(type_size::MICRO)
-                        .color(color::TEXT_MUTED),
-                );
+                ui.label(theme::caps_label("DELIVERABLE", color::TEXT_MUTED));
                 ui.label(
                     egui::RichText::new("H.264 video · AAC audio · MP4 container")
                         .color(color::TEXT_SECONDARY),

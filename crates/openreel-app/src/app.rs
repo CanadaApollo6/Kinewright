@@ -20,7 +20,7 @@ use crate::{
     export_ui::{ExportDialog, ExportJob},
     icons::Icon,
     project::{ProjectSession, index_after_close, project_name, session_index_by_id},
-    theme::{self, color, size, space, type_size},
+    theme::{self, color, size, space},
     transcript_ui::TranscriptScope,
 };
 
@@ -498,12 +498,10 @@ impl OpenReelApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.colored_label(
+                ui.label(theme::caps_label(
+                    "PROJECT HAS UNSAVED CHANGES",
                     color::STATUS_WARNING,
-                    egui::RichText::new("PROJECT HAS UNSAVED CHANGES")
-                        .strong()
-                        .size(type_size::MICRO),
-                );
+                ));
                 ui.label(format!("Save changes to {project_name} before continuing?"));
                 ui.add_space(space::TWO);
                 ui.horizontal(|ui| {
@@ -942,12 +940,7 @@ impl OpenReelApp {
                 ui.horizontal_centered(|ui| {
                     // The wordmark stays quiet: accent color is reserved for the
                     // playhead, selection, and live agent state.
-                    ui.colored_label(
-                        color::TEXT_SECONDARY,
-                        egui::RichText::new("OPENREEL")
-                            .strong()
-                            .font(theme::title_font()),
-                    );
+                    ui.label(theme::wordmark("OPENREEL", color::TEXT_SECONDARY));
                     ui.separator();
                     self.file_menu(ui);
                     if ui

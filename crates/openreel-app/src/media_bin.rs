@@ -219,7 +219,10 @@ impl OpenReelApp {
                         ui.add_space(space::ONE);
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
-                                ui.strong(&asset.name);
+                                ui.label(
+                                    egui::RichText::new(&asset.name)
+                                        .font(theme::semibold(type_size::BODY)),
+                                );
                                 ui.colored_label(color::TEXT_MUTED, asset_metadata(&asset));
                             });
                             ui.with_layout(
@@ -233,6 +236,11 @@ impl OpenReelApp {
                         });
                         thumbnail_response
                     });
+                    theme::paint_raised_lighting(
+                        ui.painter(),
+                        response.response.rect,
+                        radius::px(radius::MD),
+                    );
                     let card_response = ui.interact(
                         response.response.rect,
                         ui.make_persistent_id(("media-card", asset.id.0)),

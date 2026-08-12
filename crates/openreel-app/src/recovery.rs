@@ -37,6 +37,8 @@ use eframe::egui;
 use openreel_core::{Core, Document, Event, JournalCommand};
 use serde::{Deserialize, Serialize};
 
+use crate::theme::{self, type_size};
+
 const MAGIC: &[u8] = b"OPENREEL-JOURNAL 1\n";
 const FORMAT_VERSION: u32 = 1;
 const CORE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -629,7 +631,12 @@ impl Recovery {
                     ui.label("OpenReel closed unexpectedly with unsaved work.");
                     for (index, entry) in self.pending.iter().enumerate() {
                         ui.separator();
-                        ui.strong(pending_project_label(entry.project_path.as_deref()));
+                        ui.label(
+                            egui::RichText::new(pending_project_label(
+                                entry.project_path.as_deref(),
+                            ))
+                            .font(theme::semibold(type_size::BODY)),
+                        );
                         match &entry.state {
                             PendingState::Recoverable(report) => {
                                 ui.label(format!(

@@ -3,7 +3,7 @@ use eframe::egui;
 use crate::{
     app::OpenReelApp,
     icons::Icon,
-    theme::{color, radius, space, type_size},
+    theme::{self, color, radius, space, type_size},
 };
 
 impl OpenReelApp {
@@ -24,11 +24,12 @@ impl OpenReelApp {
         );
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, radius::SM, color::CANVAS);
-        painter.text(
+        theme::paint_inset_well(&painter, rect, radius::px(radius::SM));
+        theme::paint_caps(
+            &painter,
             rect.left_top() + egui::vec2(space::TWO, space::TWO),
             egui::Align2::LEFT_TOP,
             "PROGRAM",
-            egui::FontId::new(type_size::MICRO, egui::FontFamily::Proportional),
             color::TEXT_MUTED,
         );
         if let Some(texture) = &self.texture {

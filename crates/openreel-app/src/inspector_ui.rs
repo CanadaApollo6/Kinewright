@@ -9,7 +9,7 @@ use openreel_core::{
 
 use crate::{
     app::OpenReelApp,
-    theme::{color, space},
+    theme::{self, color, space, type_size},
     timeline_ui::{linked_members, linked_transition_operations},
 };
 
@@ -24,7 +24,9 @@ impl OpenReelApp {
             state.set_open(true);
         }
         state
-            .show_header(ui, |ui| ui.strong("Inspector"))
+            .show_header(ui, |ui| {
+                ui.label(egui::RichText::new("Inspector").font(theme::semibold(type_size::BODY)))
+            })
             .body(|ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("inspector-scroll")
@@ -66,7 +68,7 @@ impl OpenReelApp {
             ui.colored_label(color::STATUS_DANGER, "Media asset is missing");
             return;
         };
-        ui.strong(&asset.name);
+        ui.label(egui::RichText::new(&asset.name).font(theme::semibold(type_size::BODY)));
         ui.colored_label(color::TEXT_MUTED, format!("{:?}", asset.kind));
         ui.add_space(space::ONE);
         data_row(ui, "Path", &asset.path.display().to_string());
@@ -208,7 +210,7 @@ impl OpenReelApp {
             ui.colored_label(color::STATUS_DANGER, "Freeze source asset is missing");
             return;
         };
-        ui.strong(&asset.name);
+        ui.label(egui::RichText::new(&asset.name).font(theme::semibold(type_size::BODY)));
         ui.colored_label(color::TEXT_MUTED, "Freeze frame");
         ui.add_space(space::ONE);
         data_row(
