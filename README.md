@@ -9,7 +9,7 @@
 [![CI](https://github.com/CanadaApollo6/OpenReel/actions/workflows/ci.yml/badge.svg)](https://github.com/CanadaApollo6/OpenReel/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-OpenReel is a native Windows video editor written in Rust that is, at its core, an **agentic harness for video editing**. Type "cut the first three seconds and tighten the pauses" into the chat panel, and the agent CLI you already pay for — Claude Code or Codex — makes the edits on your timeline, using the exact same operations you'd use by hand. Every agent edit lands on the same undo stack as yours: **Ctrl+Z reverses the robot.**
+OpenReel is a native Windows video editor written in Rust that is, at its core, an **agentic harness for video editing**. Type "cut the first three seconds and tighten the pauses" into the chat panel, and the agent CLI you already pay for — Claude Code, Codex, or Cursor — makes the edits on your timeline, using the exact same operations you'd use by hand. Every agent edit lands on the same undo stack as yours: **Ctrl+Z reverses the robot.**
 
 ![OpenReel: agent session, program monitor, and timeline on a two-track project](docs/assets/openreel.png)
 
@@ -18,8 +18,8 @@ OpenReel is a native Windows video editor written in Rust that is, at its core, 
 ## What makes it different
 
 - **Not a video generator.** Models never create footage here. They edit footage *you shot*. The source of truth is your media plus an inspectable edit log — never model output.
-- **Bring your own subscription.** OpenReel drives the agent CLIs already installed on your machine (Claude Code, Codex CLI). No API keys to paste, no account, no server, no markup. The CLI handles auth; OpenReel never sees a credential.
-- **Human/agent parity by construction.** Every mutation — human or agent — is an `Operation` flowing through one core actor. The agent's tools are *generated from the operation set*, so the agent can do exactly what you can do, nothing more, and everything is undoable.
+- **Bring your own subscription.** OpenReel drives the agent CLIs already installed on your machine (Claude Code, Codex CLI, or Cursor Agent). No API keys to paste, no account, no server, no markup. The CLI handles auth; OpenReel never sees a credential.
+- **Human/agent parity by construction.** Every OpenReel mutation — human or agent — is an `Operation` flowing through one core actor. The agent's editing tools are *generated from the operation set*, so it receives the same validated, undoable editing vocabulary as the GUI.
 - **Edit by transcript.** Local Whisper transcription (on-device, one-time model download) gives the agent word-level timestamps. "Remove the filler words" becomes a set of precise, frame-accurate cuts.
 - **Free forever.** GPLv3. No paid tier, no telemetry, no plans to monetize.
 
@@ -46,6 +46,7 @@ OpenReel is a native Windows video editor written in Rust that is, at its core, 
 - At least one agent CLI installed and authenticated, if you want agent editing:
   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code/getting-started) (any Claude subscription)
   - [Codex CLI](https://developers.openai.com/codex/cli) 0.147.0+ (ChatGPT subscription)
+  - [Cursor Agent CLI](https://docs.cursor.com/en/cli/installation) (Cursor subscription)
 - Everything else (FFmpeg, Whisper) is bundled or downloaded automatically
 
 **Install**
@@ -71,9 +72,9 @@ OpenReel runs a local MCP (Model Context Protocol) server inside the app and spa
 1. **Mutators** — one tool per edit operation (`split_clip`, `trim_clip`, `add_effect`, …), auto-generated from the same operation definitions the GUI uses.
 2. **Inspectors** — read-only views: a compact timeline description, individual frames as images, and word-timestamped transcripts.
 
-Sessions are locked down: the agent CLI runs with its built-in shell/file/web tools disabled or sandboxed away — it can edit your timeline and nothing else. Destructive operations (deletes) pause for your approval in the chat panel. Costs are surfaced per turn and capped per session.
+Claude Code and Codex sessions run with their built-in shell/file/web tools disabled or sandboxed away. Cursor receives only the per-project OpenReel MCP endpoint and starts in an empty scratch directory, but its ACP server may still expose Cursor-owned tools; the settings panel states this weaker boundary explicitly. Destructive OpenReel operations pause for your approval in the chat panel. Costs are surfaced when the harness reports them, and turns are capped per session.
 
-Details: [docs/agent-harnesses.md](docs/agent-harnesses.md) · [docs/TRANSCRIPTION.md](docs/TRANSCRIPTION.md)
+Details: [docs/agent-harnesses.md](docs/agent-harnesses.md) · [docs/MODEL-FIRST-EDITOR.md](docs/MODEL-FIRST-EDITOR.md) · [docs/TRANSCRIPTION.md](docs/TRANSCRIPTION.md)
 
 ## Architecture
 

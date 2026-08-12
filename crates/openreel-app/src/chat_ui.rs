@@ -4,7 +4,9 @@ use std::{
 };
 
 use eframe::egui;
-use openreel_agent::{CODEX_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver};
+use openreel_agent::{
+    CODEX_SANDBOX_NOTICE, CURSOR_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver, CursorAcpDriver,
+};
 use openreel_core::{
     AgentDriver, AgentEvent, AgentSession, AuthenticationStatus, HarnessInfo, SessionConfig,
     TimeCode,
@@ -20,15 +22,19 @@ use crate::{
 const AGENT_HARNESS_MEMORY_ID: &str = "openreel-agent-harness";
 const CLAUDE_MODEL_MEMORY_ID: &str = "openreel-agent-model-claude-code";
 const CODEX_MODEL_MEMORY_ID: &str = "openreel-agent-model-codex";
+const CURSOR_MODEL_MEMORY_ID: &str = "openreel-agent-model-cursor";
 const CLAUDE_EFFORT_MEMORY_ID: &str = "openreel-agent-effort-claude-code";
 const CODEX_EFFORT_MEMORY_ID: &str = "openreel-agent-effort-codex";
+const CURSOR_EFFORT_MEMORY_ID: &str = "openreel-agent-effort-cursor";
 const CLAUDE_TIER_MEMORY_ID: &str = "openreel-agent-tier-claude-code";
 const CODEX_TIER_MEMORY_ID: &str = "openreel-agent-tier-codex";
+const CURSOR_TIER_MEMORY_ID: &str = "openreel-agent-tier-cursor";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentHarnessChoice {
     ClaudeCode,
     Codex,
+    Cursor,
 }
 
 impl AgentHarnessChoice {
@@ -36,6 +42,7 @@ impl AgentHarnessChoice {
         match self {
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
+            Self::Cursor => "cursor",
         }
     }
 
@@ -43,6 +50,7 @@ impl AgentHarnessChoice {
         match self {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
+            Self::Cursor => "Cursor",
         }
     }
 
@@ -50,6 +58,7 @@ impl AgentHarnessChoice {
         match key {
             "claude-code" => Some(Self::ClaudeCode),
             "codex" => Some(Self::Codex),
+            "cursor" => Some(Self::Cursor),
             _ => None,
         }
     }
@@ -59,6 +68,7 @@ impl AgentHarnessChoice {
         match self {
             Self::ClaudeCode => Icon::BrandClaude,
             Self::Codex => Icon::BrandOpenAi,
+            Self::Cursor => Icon::BrandCursor,
         }
     }
 }
@@ -192,6 +202,11 @@ impl OpenReelApp {
                 self.codex_effort.clone(),
                 self.codex_tier.clone(),
             ),
+            AgentHarnessChoice::Cursor => (
+                self.cursor_model.clone(),
+                self.cursor_effort.clone(),
+                self.cursor_tier.clone(),
+            ),
         }
     }
 
@@ -217,6 +232,7 @@ impl OpenReelApp {
         let harness_info = match harness {
             AgentHarnessChoice::ClaudeCode => self.claude_info.as_ref(),
             AgentHarnessChoice::Codex => self.codex_info.as_ref(),
+            AgentHarnessChoice::Cursor => self.cursor_info.as_ref(),
         };
         if harness_info.is_none() {
             self.record_error(
@@ -253,6 +269,7 @@ impl OpenReelApp {
             let session = match harness {
                 AgentHarnessChoice::ClaudeCode => ClaudeCodeDriver.start_session(config),
                 AgentHarnessChoice::Codex => CodexDriver.start_session(config),
+                AgentHarnessChoice::Cursor => CursorAcpDriver.start_session(config),
             };
             match session {
                 Ok(session) => {
@@ -671,23 +688,30 @@ impl OpenReelApp {
             && crate::settings_ui::provider_enabled(ui.ctx(), AgentHarnessChoice::ClaudeCode);
         let codex_ready = self.codex_info.is_some()
             && crate::settings_ui::provider_enabled(ui.ctx(), AgentHarnessChoice::Codex);
+        let cursor_ready = self.cursor_info.is_some()
+            && crate::settings_ui::provider_enabled(ui.ctx(), AgentHarnessChoice::Cursor);
+        let ready_harnesses = [
+            (AgentHarnessChoice::ClaudeCode, claude_ready),
+            (AgentHarnessChoice::Codex, codex_ready),
+            (AgentHarnessChoice::Cursor, cursor_ready),
+        ]
+        .into_iter()
+        .filter_map(|(harness, ready)| ready.then_some(harness))
+        .collect::<Vec<_>>();
         if !self.projects[project_index].threads[active_thread].running
             && self.projects[project_index].threads[active_thread]
                 .session
                 .is_none()
         {
-            if claude_ready && !codex_ready {
-                self.projects[project_index].threads[active_thread].harness =
-                    AgentHarnessChoice::ClaudeCode;
-            } else if codex_ready && !claude_ready {
-                self.projects[project_index].threads[active_thread].harness =
-                    AgentHarnessChoice::Codex;
-            } else if claude_ready && codex_ready {
+            if let [only] = ready_harnesses.as_slice() {
+                self.projects[project_index].threads[active_thread].harness = *only;
+            } else if ready_harnesses.len() > 1 {
                 let remembered = ui.ctx().data_mut(|data| {
                     data.get_persisted::<String>(egui::Id::new(AGENT_HARNESS_MEMORY_ID))
                 });
                 if let Some(remembered) =
                     remembered.and_then(|key| AgentHarnessChoice::from_key(&key))
+                    && ready_harnesses.contains(&remembered)
                 {
                     self.projects[project_index].threads[active_thread].harness = remembered;
                 }
@@ -702,31 +726,44 @@ impl OpenReelApp {
             self.codex_model = restore_choice(ui.ctx(), CODEX_MODEL_MEMORY_ID, |id| {
                 self.codex_models.iter().any(|model| model.id == id)
             });
+            self.cursor_model = restore_choice(ui.ctx(), CURSOR_MODEL_MEMORY_ID, |id| {
+                self.cursor_models.iter().any(|model| model.id == id)
+            });
             let claude_efforts = effort_options(&self.claude_models, self.claude_model.as_deref());
             let codex_efforts = effort_options(&self.codex_models, self.codex_model_or_default());
+            let cursor_efforts = effort_options(&self.cursor_models, self.cursor_model.as_deref());
             self.claude_effort = restore_choice(ui.ctx(), CLAUDE_EFFORT_MEMORY_ID, |effort| {
                 claude_efforts.iter().any(|level| level == effort)
             });
             self.codex_effort = restore_choice(ui.ctx(), CODEX_EFFORT_MEMORY_ID, |effort| {
                 codex_efforts.iter().any(|level| level == effort)
             });
+            self.cursor_effort = restore_choice(ui.ctx(), CURSOR_EFFORT_MEMORY_ID, |effort| {
+                cursor_efforts.iter().any(|level| level == effort)
+            });
             let claude_tiers = tier_options(&self.claude_models, self.claude_model.as_deref());
             let codex_tiers = tier_options(&self.codex_models, self.codex_model_or_default());
+            let cursor_tiers = tier_options(&self.cursor_models, self.cursor_model.as_deref());
             self.claude_tier = restore_choice(ui.ctx(), CLAUDE_TIER_MEMORY_ID, |id| {
                 claude_tiers.iter().any(|tier| tier.id == id)
             });
             self.codex_tier = restore_choice(ui.ctx(), CODEX_TIER_MEMORY_ID, |id| {
                 codex_tiers.iter().any(|tier| tier.id == id)
             });
+            self.cursor_tier = restore_choice(ui.ctx(), CURSOR_TIER_MEMORY_ID, |id| {
+                cursor_tiers.iter().any(|tier| tier.id == id)
+            });
         }
-        let any_harness = claude_ready || codex_ready;
+        let any_harness = !ready_harnesses.is_empty();
 
         // No header chrome (M24): the stream is the surface, and the harness
         // controls live in the composer row like T3 Code's model row. The one
         // exception is the no-harness state, which explains itself up front -
         // distinguishing "nothing installed" from "everything switched off".
         if !any_harness {
-            let any_installed = self.claude_info.is_some() || self.codex_info.is_some();
+            let any_installed = self.claude_info.is_some()
+                || self.codex_info.is_some()
+                || self.cursor_info.is_some();
             chat_frame(color::SURFACE).show(ui, |ui| {
                 if any_installed {
                     ui.label("Every provider is switched off.");
@@ -741,6 +778,7 @@ impl OpenReelApp {
                         self.claude_info.as_ref(),
                     );
                     harness_row(ui, Icon::BrandOpenAi, "Codex", self.codex_info.as_ref());
+                    harness_row(ui, Icon::BrandCursor, "Cursor", self.cursor_info.as_ref());
                     ui.separator();
                     ui.label("Install and authenticate a supported agent CLI to use chat.");
                     ui.hyperlink_to(
@@ -751,6 +789,10 @@ impl OpenReelApp {
                         "Install Codex CLI",
                         "https://developers.openai.com/codex/cli",
                     );
+                    ui.hyperlink_to(
+                        "Install Cursor Agent",
+                        "https://docs.cursor.com/en/cli/installation",
+                    );
                 }
             });
             ui.add_space(space::ONE);
@@ -760,10 +802,12 @@ impl OpenReelApp {
         let selected_info = match harness {
             AgentHarnessChoice::ClaudeCode => self.claude_info.as_ref(),
             AgentHarnessChoice::Codex => self.codex_info.as_ref(),
+            AgentHarnessChoice::Cursor => self.cursor_info.as_ref(),
         };
         let selected_available = match harness {
             AgentHarnessChoice::ClaudeCode => claude_ready,
             AgentHarnessChoice::Codex => codex_ready,
+            AgentHarnessChoice::Cursor => cursor_ready,
         };
         // Owned summary so the composer row can render it while self mutates.
         let harness_summary = selected_info.map(|info| {
@@ -772,8 +816,13 @@ impl OpenReelApp {
             let version = info.version.as_deref().map_or("version unknown", |value| {
                 value.split_whitespace().next().unwrap_or(value)
             });
+            let tier = info
+                .subscription_tier
+                .as_ref()
+                .map(|tier| format!(" · {tier}"))
+                .unwrap_or_default();
             format!(
-                "{} · {}",
+                "{} · {}{tier}",
                 version,
                 authentication_label(info.authentication)
             )
@@ -783,6 +832,8 @@ impl OpenReelApp {
         let harness_hover = harness_summary.map(|summary| {
             if harness == AgentHarnessChoice::Codex {
                 format!("{summary}\n{CODEX_SANDBOX_NOTICE}")
+            } else if harness == AgentHarnessChoice::Cursor {
+                format!("{summary}\n{CURSOR_SANDBOX_NOTICE}")
             } else {
                 summary
             }
@@ -1049,7 +1100,7 @@ impl OpenReelApp {
             // instead), and the leading space insets the brand mark.
             ui.set_max_width(ui.available_width() - f32::from(theme::margin(space::TWO)));
             ui.add_space(f32::from(theme::margin(space::TWO)));
-            if claude_ready && codex_ready {
+            if ready_harnesses.len() > 1 {
                 let before = self.projects[project_index].threads[active_thread].harness;
                 let mut choice = before;
                 let icon = ui.add(before.brand_icon().image(size::ICON_SM));
@@ -1066,22 +1117,36 @@ impl OpenReelApp {
                         ))
                         .selected_text(choice.label())
                         .show_ui(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.add(Icon::BrandClaude.image(size::ICON_SM));
-                                ui.selectable_value(
-                                    &mut choice,
-                                    AgentHarnessChoice::ClaudeCode,
-                                    "Claude Code",
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                ui.add(Icon::BrandOpenAi.image(size::ICON_SM));
-                                ui.selectable_value(
-                                    &mut choice,
-                                    AgentHarnessChoice::Codex,
-                                    "Codex",
-                                );
-                            });
+                            if claude_ready {
+                                ui.horizontal(|ui| {
+                                    ui.add(Icon::BrandClaude.image(size::ICON_SM));
+                                    ui.selectable_value(
+                                        &mut choice,
+                                        AgentHarnessChoice::ClaudeCode,
+                                        "Claude Code",
+                                    );
+                                });
+                            }
+                            if codex_ready {
+                                ui.horizontal(|ui| {
+                                    ui.add(Icon::BrandOpenAi.image(size::ICON_SM));
+                                    ui.selectable_value(
+                                        &mut choice,
+                                        AgentHarnessChoice::Codex,
+                                        "Codex",
+                                    );
+                                });
+                            }
+                            if cursor_ready {
+                                ui.horizontal(|ui| {
+                                    ui.add(Icon::BrandCursor.image(size::ICON_SM));
+                                    ui.selectable_value(
+                                        &mut choice,
+                                        AgentHarnessChoice::Cursor,
+                                        "Cursor",
+                                    );
+                                });
+                            }
                         });
                     },
                 );
@@ -1128,6 +1193,11 @@ impl OpenReelApp {
                         &self.codex_models,
                         &mut self.codex_model,
                         CODEX_MODEL_MEMORY_ID,
+                    ),
+                    AgentHarnessChoice::Cursor => (
+                        &self.cursor_models,
+                        &mut self.cursor_model,
+                        CURSOR_MODEL_MEMORY_ID,
                     ),
                 };
                 if !models.is_empty() {
@@ -1182,6 +1252,11 @@ impl OpenReelApp {
                         &mut self.codex_effort,
                         CODEX_EFFORT_MEMORY_ID,
                     ),
+                    AgentHarnessChoice::Cursor => (
+                        effort_options(&self.cursor_models, self.cursor_model.as_deref()),
+                        &mut self.cursor_effort,
+                        CURSOR_EFFORT_MEMORY_ID,
+                    ),
                 };
                 if !options.is_empty() {
                     let before = choice.clone();
@@ -1227,6 +1302,11 @@ impl OpenReelApp {
                         tier_options(&self.codex_models, self.codex_model_or_default()),
                         &mut self.codex_tier,
                         CODEX_TIER_MEMORY_ID,
+                    ),
+                    AgentHarnessChoice::Cursor => (
+                        tier_options(&self.cursor_models, self.cursor_model.as_deref()),
+                        &mut self.cursor_tier,
+                        CURSOR_TIER_MEMORY_ID,
                     ),
                 };
                 if !options.is_empty() {
@@ -1719,8 +1799,13 @@ fn harness_row(ui: &mut egui::Ui, icon: Icon, name: &str, info: Option<&HarnessI
         }
     });
     if let Some(info) = info {
+        let tier = info
+            .subscription_tier
+            .as_ref()
+            .map(|tier| format!(" · {tier}"))
+            .unwrap_or_default();
         ui.small(format!(
-            "{} · {}",
+            "{} · {}{tier}",
             info.executable.display(),
             authentication_label(info.authentication)
         ));

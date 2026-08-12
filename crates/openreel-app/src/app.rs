@@ -6,7 +6,7 @@ use std::{
 };
 
 use eframe::egui;
-use openreel_agent::{ClaudeCodeDriver, CodexDriver};
+use openreel_agent::{ClaudeCodeDriver, CodexDriver, CursorAcpDriver};
 use openreel_core::{
     AgentDriver, Analysis, Command, Document, Event, Export, HarnessInfo, JournalCommand,
     MediaAsset, MediaError, MediaEvent, Operation, Playback, PlaybackState, TimeCode, Track,
@@ -54,22 +54,27 @@ pub(crate) struct OpenReelApp {
     pub(crate) visual_cache: crate::visual_cache::VisualCache,
     pub(crate) claude_info: Option<HarnessInfo>,
     pub(crate) codex_info: Option<HarnessInfo>,
+    pub(crate) cursor_info: Option<HarnessInfo>,
     pub(crate) show_thread_rail: bool,
     pub(crate) settings_open: bool,
     /// Selectable models per harness; `None` chosen means the CLI's default.
     pub(crate) claude_models: Vec<openreel_agent::ModelChoice>,
     pub(crate) codex_models: Vec<openreel_agent::ModelChoice>,
+    pub(crate) cursor_models: Vec<openreel_agent::ModelChoice>,
     /// The model the Codex CLI's config actually runs as its default, so the
     /// picker's "Default" resolves to that model's real efforts and tiers.
     pub(crate) codex_default_model: Option<String>,
     pub(crate) claude_model: Option<String>,
     pub(crate) codex_model: Option<String>,
+    pub(crate) cursor_model: Option<String>,
     pub(crate) claude_effort: Option<String>,
     pub(crate) codex_effort: Option<String>,
+    pub(crate) cursor_effort: Option<String>,
     /// Service tier ids per harness; `None` means the provider's standard
     /// tier (only offered where the harness catalog advertises tiers).
     pub(crate) claude_tier: Option<String>,
     pub(crate) codex_tier: Option<String>,
+    pub(crate) cursor_tier: Option<String>,
     pub(crate) probe_tx: mpsc::Sender<(u64, PathBuf, Result<MediaAsset, MediaError>)>,
     pub(crate) probe_rx: mpsc::Receiver<(u64, PathBuf, Result<MediaAsset, MediaError>)>,
     pub(crate) texture: Option<egui::TextureHandle>,
@@ -114,6 +119,7 @@ impl OpenReelApp {
         let error_log = ErrorLog::default();
         let claude_info = ClaudeCodeDriver.detect();
         let codex_info = CodexDriver.detect();
+        let cursor_info = CursorAcpDriver.detect();
         let resolution = document.resolution;
         let fps = document.fps;
         let error_log_open = error_log.len() > 0;
@@ -129,6 +135,7 @@ impl OpenReelApp {
             visual_cache,
             claude_info,
             codex_info,
+            cursor_info,
             show_thread_rail: true,
             settings_open: matches!(
                 std::env::var("OPENREEL_SCREENSHOT_SHOW").as_deref(),
@@ -136,13 +143,17 @@ impl OpenReelApp {
             ),
             claude_models: openreel_agent::claude_models(),
             codex_models: openreel_agent::codex_models(),
+            cursor_models: openreel_agent::cursor_models(),
             codex_default_model: openreel_agent::codex_default_model(),
             claude_model: None,
             codex_model: None,
+            cursor_model: None,
             claude_effort: None,
             codex_effort: None,
+            cursor_effort: None,
             claude_tier: None,
             codex_tier: None,
+            cursor_tier: None,
             probe_tx,
             probe_rx,
             texture: None,

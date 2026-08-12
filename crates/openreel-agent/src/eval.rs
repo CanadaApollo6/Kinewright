@@ -1303,6 +1303,7 @@ mod tests {
                 executable: PathBuf::from("fake"),
                 version: Some("1.0".to_owned()),
                 authentication: AuthenticationStatus::Authenticated,
+                subscription_tier: None,
             })
         }
 

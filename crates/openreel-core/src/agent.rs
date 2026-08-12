@@ -28,6 +28,8 @@ pub struct HarnessInfo {
     pub executable: PathBuf,
     pub version: Option<String>,
     pub authentication: AuthenticationStatus,
+    /// Provider subscription reported by the harness, when it exposes one.
+    pub subscription_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

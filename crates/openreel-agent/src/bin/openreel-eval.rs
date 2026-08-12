@@ -11,7 +11,7 @@ use std::{
 };
 
 use openreel_agent::{
-    ClaudeCodeDriver, CodexDriver,
+    ClaudeCodeDriver, CodexDriver, CursorAcpDriver,
     eval::{
         EnvironmentStamp, EvalAssertion, EvalBudgets, EvalDefinition, EvalError, EvalResult,
         ExpectedSourceClip, FixtureContext, PreparedFixture,
@@ -55,9 +55,10 @@ fn run() -> Result<bool, EvalError> {
     let driver: Box<dyn AgentDriver> = match options.harness.as_str() {
         "claude" | "claude-code" => Box::new(ClaudeCodeDriver),
         "codex" => Box::new(CodexDriver),
+        "cursor" => Box::new(CursorAcpDriver),
         other => {
             return Err(EvalError::Agent(format!(
-                "unknown harness {other:?}; expected claude-code or codex"
+                "unknown harness {other:?}; expected claude-code, codex, or cursor"
             )));
         }
     };
@@ -187,7 +188,7 @@ impl Options {
                 }
                 "-h" | "--help" => {
                     println!(
-                        "Usage: OPENREEL_EVAL=1 cargo run -p openreel-agent --bin openreel-eval -- [--harness claude-code|codex] [--model MODEL] [--only EVAL] [--samples N]"
+                        "Usage: OPENREEL_EVAL=1 cargo run -p openreel-agent --bin openreel-eval -- [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]"
                     );
                     return Err(EvalError::Agent("help requested".to_owned()));
                 }

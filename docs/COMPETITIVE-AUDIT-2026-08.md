@@ -66,12 +66,13 @@ filler removal, captions (SRT/VTT export + burn-in), silence and scene
 detection with transcript-aware clamping (words are never clipped).
 
 **Agents (the differentiator).** Conversation-first layout; local Claude
-Code / Codex CLI subscriptions as subprocesses (no credentials, no cloud,
-no per-credit fees); full mutator/inspector MCP toolset; destructive-op
-confirmation broker; read-only Codex sandbox; per-project agent isolation
-by architecture; concurrent threads over one timeline; watchable diffs
-(EditCards with review/undo); models/effort/service-tier/Ultracode
-pickers; slash commands; scored eval harness with committed baselines.
+Code, Codex CLI, and Cursor Agent subscriptions as subprocesses (no
+credentials, no OpenReel cloud, no OpenReel per-credit fees); full
+mutator/inspector MCP toolset; destructive-op confirmation broker;
+provider-specific isolation; concurrent threads over one timeline;
+watchable diffs (EditCards with review/undo); live model, effort, speed,
+and subscription metadata where the harness exposes them; slash commands;
+scored eval harness with committed baselines.
 
 **Capture.** In-editor screen/camera/voice recording (CFR 30), monitor
 picker, straight into the import→transcribe→edit loop. Agent deliberately
@@ -248,7 +249,20 @@ The old items 7–10, unchanged in content, demoted in urgency: trim suite
 HEVC + render queue; keyframes; speed ramps; audio keyframes/ducking.
 Interleave one C item between A/B milestones rather than blocking on them.
 
-### Sequencing proposal
-M28 Feel → M29 Beat+Captions (B1+B2) → M30 Reframe+Presets (B3, C-export)
-→ M31 Trim suite (C) → M32 Media intelligence + speaker sense (B4+B5) →
-re-audit. The auto-edit eval (B6) runs continuously as the scoreboard.
+### Sequencing after M29
+M29 is now the multi-harness control plane: Cursor joins Claude Code and
+Codex through ACP, with live model discovery, effort/speed controls, tier
+reporting, cancellation, and a real timeline-edit acceptance test.
+
+The next constraint is not provider count. It is the quality of the editing
+contract every provider receives:
+
+M30 perception + timeline revisions + beat sense → M31 branches, verification,
+styled captions + auto-reframe → M32 editorial depth + media intelligence →
+M33 keyframes, compositing, color, and audio graphs → M34 deeper creator
+workflows + delivery → re-audit.
+
+The published auto-edit benchmark runs continuously as the scoreboard. Beat
+sense, styled captions, auto-reframe, and that benchmark remain the explicit
+Pillar B agent-lethality proofs, not deferred polish. The full rationale and
+acceptance metrics live in [The Model-First Editor](MODEL-FIRST-EDITOR.md).

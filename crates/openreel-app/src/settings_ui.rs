@@ -6,7 +6,7 @@
 //! they never interrupt a session that is already running.
 
 use eframe::egui;
-use openreel_agent::CODEX_SANDBOX_NOTICE;
+use openreel_agent::{CODEX_SANDBOX_NOTICE, CURSOR_SANDBOX_NOTICE};
 use openreel_core::HarnessInfo;
 
 use crate::{
@@ -19,6 +19,7 @@ const fn provider_memory_id(harness: AgentHarnessChoice) -> &'static str {
     match harness {
         AgentHarnessChoice::ClaudeCode => "openreel-provider-enabled-claude-code",
         AgentHarnessChoice::Codex => "openreel-provider-enabled-codex",
+        AgentHarnessChoice::Cursor => "openreel-provider-enabled-cursor",
     }
 }
 
@@ -62,6 +63,13 @@ impl OpenReelApp {
                     AgentHarnessChoice::Codex,
                     self.codex_info.as_ref(),
                     "https://developers.openai.com/codex/cli",
+                );
+                ui.add_space(space::ONE);
+                provider_card(
+                    ui,
+                    AgentHarnessChoice::Cursor,
+                    self.cursor_info.as_ref(),
+                    "https://docs.cursor.com/en/cli/installation",
                 );
             });
         self.settings_open = open;
@@ -132,11 +140,20 @@ fn provider_card(
             // executable path is deliberately not shown - filesystem details
             // are not something to display (or screenshot).
             if let Some(info) = info {
-                ui.colored_label(color::TEXT_MUTED, authentication_label(info.authentication));
+                let identity = info.subscription_tier.as_ref().map_or_else(
+                    || authentication_label(info.authentication).to_owned(),
+                    |tier| format!("{} · {tier}", authentication_label(info.authentication)),
+                );
+                ui.colored_label(color::TEXT_MUTED, identity);
                 if harness == AgentHarnessChoice::Codex {
                     ui.colored_label(
                         color::TEXT_MUTED,
                         egui::RichText::new(CODEX_SANDBOX_NOTICE).size(type_size::CAPTION),
+                    );
+                } else if harness == AgentHarnessChoice::Cursor {
+                    ui.colored_label(
+                        color::TEXT_MUTED,
+                        egui::RichText::new(CURSOR_SANDBOX_NOTICE).size(type_size::CAPTION),
                     );
                 }
             } else {

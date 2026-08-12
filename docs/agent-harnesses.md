@@ -74,11 +74,42 @@ enforces the configured number of user turns, and `interrupt` kills the active c
 usage. These map to `ToolCall`, `ToolResult`, `Text`/`Error`, `Cost`, and `Done`. Codex subscription
 JSONL reports tokens but not a dollar price, so `cost_usd` is normally absent.
 
+## Cursor
+
+Status: supported and shown in the app when `agent` or `cursor-agent` is found on `PATH`. Detection
+uses `agent status --format json`; `agent about --format json` supplies the installed CLI version
+and subscription tier without exposing account identity in the UI.
+
+Transport: one long-lived `agent acp` child over ACP v1 NDJSON. OpenReel advertises no client
+filesystem or terminal capability, creates the ACP session in a new empty scratch directory, and
+hands `session/new` the project-local Streamable HTTP MCP endpoint inline. The driver requires the
+agent's advertised HTTP MCP capability. It never writes Cursor's MCP configuration.
+
+Protocol: a dedicated stdout reader routes JSON-RPC replies through a pending-request map and sends
+`session/update` notifications plus agent-to-client requests through one channel. `session/prompt`
+streams message and tool updates into the existing `AgentEvent` UI. Permission requests receive
+ACP `allow_once`; destructive OpenReel operations still stop at the same `ConfirmationBroker` used
+by the other harnesses. `session/cancel` is sent before the child is killed on interrupt.
+
+Models: the picker comes from Cursor's live `cursor/list_available_models` extension. Its
+`effort`/`reasoning` options feed OpenReel's Effort picker, and its `fast` option feeds the existing
+Speed picker. Cursor currently persists `session/set_config_option` values as CLI-wide defaults,
+even when invoked through ACP. OpenReel therefore snapshots the complete Cursor configuration,
+leases configuration changes to one active Cursor turn, and restores the snapshot on completion,
+failure, interrupt, and drop. A machine-level crash during the active request can still strand the
+temporary choice; this is an upstream limitation until Cursor offers session-scoped config.
+
+Safety: the model sees the OpenReel MCP endpoint and runs from an empty scratch directory. ACP can
+still surface Cursor-owned tools, so this boundary is weaker than Codex's explicit feature-off
+configuration and Claude's exact tool allowlist. OpenReel's transactional operation validation,
+undo snapshots, edit-plan atomicity, and destructive confirmation remain the authoritative edit
+boundary.
+
 ## Test gate
 
-The live subscription tests are ignored by behavior unless `OPENREEL_AGENT_TEST=1` is set. There is
-one Claude variant and one Codex variant; a complete gated run therefore makes at most two short
-harness calls. Each creates a two-clip project, launches the real installed CLI once, asks it to
-split clip 1 at frame 30 and delete clip 2, verifies the live document, then sends two undo commands
-and asserts that the original document is restored. CLI-independent workspace tests never launch a
-subscription harness.
+The live Claude and Codex subscription tests are ignored by behavior unless
+`OPENREEL_AGENT_TEST=1` is set. The Cursor acceptance test has its own
+`OPENREEL_CURSOR_AGENT_TEST=1` gate so it can be run alone. Each creates a two-clip project,
+launches the real installed CLI once, asks it to split clip 1 at frame 30 and delete clip 2, verifies
+the live document, then sends two undo commands and asserts that the original document is restored.
+CLI-independent workspace tests never launch a subscription harness.

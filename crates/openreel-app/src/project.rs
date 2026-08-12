@@ -3,7 +3,9 @@ use std::{
     sync::Arc,
 };
 
-use openreel_agent::{ClaudeCodeDriver, ConfirmationBroker, ConfirmationRequest, McpServer};
+use openreel_agent::{
+    ClaudeCodeDriver, ConfirmationBroker, ConfirmationRequest, CursorAcpDriver, McpServer,
+};
 use openreel_core::{
     AgentDriver, Analysis, AssetId, ClipId, Core, Document, Event, MarkerId, Playback, TimeCode,
 };
@@ -72,6 +74,8 @@ impl ProjectSession {
         let confirmations = mcp_server.as_ref().map(McpServer::confirmations);
         let agent_harness = if ClaudeCodeDriver.detect().is_some() {
             AgentHarnessChoice::ClaudeCode
+        } else if CursorAcpDriver.detect().is_some() {
+            AgentHarnessChoice::Cursor
         } else {
             AgentHarnessChoice::Codex
         };

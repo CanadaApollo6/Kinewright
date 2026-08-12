@@ -9,6 +9,8 @@ pub(crate) enum Icon {
     /// Anthropic's Claude spark, in its brand terracotta (nominative use:
     /// it marks the session's harness, exactly as T3 Code does).
     BrandClaude,
+    /// Cursor's cube mark, used only to identify the Cursor harness.
+    BrandCursor,
     /// `OpenAI`'s blossom mark, white per its on-dark brand usage.
     BrandOpenAi,
     Delete,
@@ -38,6 +40,7 @@ impl Icon {
             Self::Add => "bytes://openreel/icons/add.svg",
             Self::Alert => "bytes://openreel/icons/alert.svg",
             Self::BrandClaude => "bytes://openreel/icons/brand-claude.svg",
+            Self::BrandCursor => "bytes://openreel/icons/brand-cursor.svg",
             Self::BrandOpenAi => "bytes://openreel/icons/brand-openai.svg",
             Self::Delete => "bytes://openreel/icons/delete.svg",
             Self::Export => "bytes://openreel/icons/export.svg",
@@ -66,6 +69,7 @@ impl Icon {
             Self::Add => include_bytes!("../assets/icons/add.svg"),
             Self::Alert => include_bytes!("../assets/icons/alert.svg"),
             Self::BrandClaude => include_bytes!("../assets/icons/brand-claude.svg"),
+            Self::BrandCursor => include_bytes!("../assets/icons/brand-cursor.svg"),
             Self::BrandOpenAi => include_bytes!("../assets/icons/brand-openai.svg"),
             Self::Delete => include_bytes!("../assets/icons/delete.svg"),
             Self::Export => include_bytes!("../assets/icons/export.svg"),
