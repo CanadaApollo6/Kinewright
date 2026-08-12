@@ -238,7 +238,7 @@ impl ClaudeSession {
             events_tx.clone(),
             Arc::clone(&done),
             Arc::clone(&assistant_turns),
-            cfg.max_turns.unwrap_or(8).max(1),
+            cfg.max_turns.map(|cap| cap.max(1)),
         )?;
 
         Ok(Self {
@@ -263,7 +263,8 @@ struct CodexSession {
     endpoint: String,
     model: Option<String>,
     effort: Option<String>,
-    max_turns: u32,
+    service_tier: Option<String>,
+    max_turns: Option<u32>,
     turns: u32,
     prior_requests: Vec<String>,
     tool_names: Vec<String>,
@@ -299,7 +300,8 @@ impl CodexSession {
             endpoint,
             model: cfg.model,
             effort: cfg.effort,
-            max_turns: cfg.max_turns.unwrap_or(8).max(1),
+            service_tier: cfg.service_tier,
+            max_turns: cfg.max_turns.map(|cap| cap.max(1)),
             turns: 0,
             prior_requests: Vec::new(),
             tool_names,
@@ -330,10 +332,11 @@ impl AgentSession for CodexSession {
         if text.trim().is_empty() {
             return Err(AgentError::Protocol("user message is empty".to_owned()));
         }
-        if self.turns >= self.max_turns {
+        if let Some(cap) = self.max_turns
+            && self.turns >= cap
+        {
             return Err(AgentError::Harness(format!(
-                "Turn cap reached ({}); start a new Codex session to continue.",
-                self.max_turns
+                "Turn cap reached ({cap}); start a new Codex session to continue."
             )));
         }
         {
@@ -359,6 +362,7 @@ impl AgentSession for CodexSession {
             &self.endpoint,
             self.model.as_deref(),
             self.effort.as_deref(),
+            self.service_tier.as_deref(),
             &self.scratch_directory,
             &self.model_catalog_path,
             &self.tool_names,
@@ -441,6 +445,7 @@ fn build_codex_command(
     endpoint: &str,
     model: Option<&str>,
     effort: Option<&str>,
+    service_tier: Option<&str>,
     scratch_directory: &Path,
     model_catalog_path: &Path,
     tool_names: &[String],
@@ -470,6 +475,10 @@ fn build_codex_command(
         command
             .arg("-c")
             .arg(format!("model_reasoning_effort={effort}"));
+    }
+    if let Some(tier) = service_tier {
+        let tier = serde_json::to_string(tier).expect("serializing a string cannot fail");
+        command.arg("-c").arg(format!("service_tier={tier}"));
     }
     let endpoint = serde_json::to_string(endpoint).expect("serializing a string cannot fail");
     let model_catalog_path = serde_json::to_string(model_catalog_path)
@@ -733,7 +742,7 @@ fn spawn_claude_reader(
     events: Sender<AgentEvent>,
     done: Arc<AtomicBool>,
     assistant_turns: Arc<AtomicU32>,
-    max_turns: u32,
+    max_turns: Option<u32>,
 ) -> Result<(), AgentError> {
     thread::Builder::new()
         .name("openreel-claude-events".to_owned())
@@ -748,14 +757,15 @@ fn spawn_claude_reader(
                         break;
                     }
                 };
-                if is_claude_assistant_message(&line)
-                    && assistant_turns.fetch_add(1, Ordering::AcqRel) + 1 > max_turns
+                if let Some(cap) = max_turns
+                    && is_claude_assistant_message(&line)
+                    && assistant_turns.fetch_add(1, Ordering::AcqRel) + 1 > cap
                 {
                     if let Ok(mut child) = child.lock() {
                         let _ = child.kill();
                     }
                     let _ = events.send(AgentEvent::Error(format!(
-                        "Turn cap reached ({max_turns}); Claude was stopped."
+                        "Turn cap reached ({cap}); Claude was stopped."
                     )));
                     send_done(&events, &done);
                     return;
@@ -1045,6 +1055,7 @@ mod tests {
             "http://127.0.0.1:43123/mcp",
             Some("gpt-test"),
             Some("xhigh"),
+            Some("priority"),
             scratch,
             model_catalog,
             &tools,
@@ -1069,6 +1080,7 @@ mod tests {
         assert!(joined.contains("project_doc_max_bytes=0"));
         assert!(joined.contains("--model gpt-test"));
         assert!(joined.contains("model_reasoning_effort=\"xhigh\""));
+        assert!(joined.contains("service_tier=\"priority\""));
         assert!(joined.contains("model_catalog_json=\"models-direct.json\""));
         assert!(joined.contains("mcp_servers.openreel.required=true"));
         assert!(joined.contains(

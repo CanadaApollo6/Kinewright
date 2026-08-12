@@ -244,6 +244,10 @@ fn ffmpeg_record_args(mode: &RecordingMode, output: &Path) -> Vec<std::ffi::OsSt
             push("yuv420p");
             push("-vf");
             push("crop=trunc(iw/2)*2:trunc(ih/2)*2");
+            push("-fps_mode");
+            push("cfr");
+            push("-r");
+            push("30");
             if microphone.is_some() {
                 push("-c:a");
                 push("aac");
@@ -269,6 +273,14 @@ fn ffmpeg_record_args(mode: &RecordingMode, output: &Path) -> Vec<std::ffi::OsSt
             push("yuv420p");
             push("-vf");
             push("crop=trunc(iw/2)*2:trunc(ih/2)*2");
+            // Device timestamps are wall-clock and drop frames under load, so
+            // without CFR the file's frame grid never aligns with the
+            // project's rational math and edit plans get rejected at
+            // non-integer source boundaries.
+            push("-fps_mode");
+            push("cfr");
+            push("-r");
+            push("30");
             if microphone.is_some() {
                 push("-c:a");
                 push("aac");
@@ -829,6 +841,7 @@ mod tests {
         assert!(with_mic.contains("-f gdigrab -framerate 30 -i desktop"));
         assert!(with_mic.contains("-f dshow -i audio=Mic Array"));
         assert!(with_mic.contains("-c:v libx264 -preset ultrafast -pix_fmt yuv420p"));
+        assert!(with_mic.contains("-fps_mode cfr -r 30"));
         assert!(with_mic.contains("-c:a aac"));
         assert!(with_mic.ends_with("-y out.mp4"));
 
@@ -879,6 +892,9 @@ mod tests {
             microphone: Some("Mic".to_owned()),
         });
         assert!(both.contains("-f dshow -i video=Integrated Camera:audio=Mic"));
+        // Webcams deliver VFR wall-clock timestamps; the output must be CFR
+        // or the editor's integer-frame math rejects cuts in the recording.
+        assert!(both.contains("-fps_mode cfr -r 30"));
         let video_only = joined(&RecordingMode::Camera {
             camera: "Integrated Camera".to_owned(),
             microphone: None,
@@ -895,6 +911,7 @@ mod tests {
         assert!(voice.contains("-f dshow -i audio=Mic"));
         assert!(voice.contains("-c:a aac"));
         assert!(!voice.contains("libx264"));
+        assert!(!voice.contains("-fps_mode"));
         assert_eq!(
             RecordingMode::Voice {
                 microphone: "Mic".to_owned()

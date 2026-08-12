@@ -62,6 +62,10 @@ pub(crate) struct OpenReelApp {
     pub(crate) codex_model: Option<String>,
     pub(crate) claude_effort: Option<String>,
     pub(crate) codex_effort: Option<String>,
+    /// Service tier ids per harness; `None` means the provider's standard
+    /// tier (only offered where the harness catalog advertises tiers).
+    pub(crate) claude_tier: Option<String>,
+    pub(crate) codex_tier: Option<String>,
     pub(crate) probe_tx: mpsc::Sender<(u64, PathBuf, Result<MediaAsset, MediaError>)>,
     pub(crate) probe_rx: mpsc::Receiver<(u64, PathBuf, Result<MediaAsset, MediaError>)>,
     pub(crate) texture: Option<egui::TextureHandle>,
@@ -128,6 +132,8 @@ impl OpenReelApp {
             codex_model: None,
             claude_effort: None,
             codex_effort: None,
+            claude_tier: None,
+            codex_tier: None,
             probe_tx,
             probe_rx,
             texture: None,
@@ -135,8 +141,16 @@ impl OpenReelApp {
             meter_levels: [0.0; 2],
             resume_after_scrub: false,
             transcript_scope: TranscriptScope::default(),
-            material_tab: MaterialTab::default(),
-            show_material_strip: false,
+            // The screenshot harness can pre-raise a summoned surface that no
+            // startup interaction could otherwise reach in a static capture.
+            material_tab: match std::env::var("OPENREEL_SCREENSHOT_SHOW").as_deref() {
+                Ok("transcript") => MaterialTab::Transcript,
+                _ => MaterialTab::default(),
+            },
+            show_material_strip: matches!(
+                std::env::var("OPENREEL_SCREENSHOT_SHOW").as_deref(),
+                Ok("timeline" | "transcript")
+            ),
             show_media_rail: false,
             pending_project_action: None,
             exit_discarded_projects: Vec::new(),

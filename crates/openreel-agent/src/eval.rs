@@ -354,6 +354,7 @@ pub fn run_eval(
         working_directory: working_directory.map(Path::to_path_buf),
         model: model.map(str::to_owned),
         effort: None,
+        service_tier: None,
         max_turns: Some(definition.budgets.max_tool_calls.saturating_add(2)),
         mcp_url: Some(server.endpoint().to_owned()),
     };

@@ -36,6 +36,9 @@ pub struct SessionConfig {
     pub model: Option<String>,
     /// Reasoning effort passed to the harness CLI; `None` uses its default.
     pub effort: Option<String>,
+    /// Service tier id passed to the harness CLI (e.g. Codex `priority` =
+    /// its Fast mode); `None` runs at the provider's standard tier.
+    pub service_tier: Option<String>,
     pub max_turns: Option<u32>,
     /// Streamable HTTP endpoint for the live `OpenReel` MCP server.
     pub mcp_url: Option<String>,

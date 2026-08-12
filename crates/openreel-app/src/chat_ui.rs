@@ -22,6 +22,8 @@ const CLAUDE_MODEL_MEMORY_ID: &str = "openreel-agent-model-claude-code";
 const CODEX_MODEL_MEMORY_ID: &str = "openreel-agent-model-codex";
 const CLAUDE_EFFORT_MEMORY_ID: &str = "openreel-agent-effort-claude-code";
 const CODEX_EFFORT_MEMORY_ID: &str = "openreel-agent-effort-codex";
+const CLAUDE_TIER_MEMORY_ID: &str = "openreel-agent-tier-claude-code";
+const CODEX_TIER_MEMORY_ID: &str = "openreel-agent-tier-codex";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentHarnessChoice {
@@ -165,6 +167,25 @@ impl OpenReelApp {
         &mut self.projects[project_index].threads[active_thread]
     }
 
+    /// The remembered model, effort, and service tier for one harness.
+    fn harness_choices(
+        &self,
+        harness: AgentHarnessChoice,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        match harness {
+            AgentHarnessChoice::ClaudeCode => (
+                self.claude_model.clone(),
+                self.claude_effort.clone(),
+                self.claude_tier.clone(),
+            ),
+            AgentHarnessChoice::Codex => (
+                self.codex_model.clone(),
+                self.codex_effort.clone(),
+                self.codex_tier.clone(),
+            ),
+        }
+    }
+
     pub(crate) fn start_agent_turn(&mut self) {
         let project_index = self.focused_project;
         let thread_index = self.projects[project_index].active_thread;
@@ -209,16 +230,12 @@ impl OpenReelApp {
                 .and_then(Path::parent)
                 .map(Path::to_path_buf)
                 .or_else(|| std::env::current_dir().ok());
+            let (model, effort, service_tier) = self.harness_choices(harness);
             let config = SessionConfig {
                 working_directory,
-                model: match harness {
-                    AgentHarnessChoice::ClaudeCode => self.claude_model.clone(),
-                    AgentHarnessChoice::Codex => self.codex_model.clone(),
-                },
-                effort: match harness {
-                    AgentHarnessChoice::ClaudeCode => self.claude_effort.clone(),
-                    AgentHarnessChoice::Codex => self.codex_effort.clone(),
-                },
+                model,
+                effort,
+                service_tier,
                 // Subscription harnesses are flat fee and the Stop button is
                 // always available, so sessions run without a turn ceiling.
                 max_turns: None,
@@ -674,6 +691,14 @@ impl OpenReelApp {
             self.codex_effort = restore_choice(ui.ctx(), CODEX_EFFORT_MEMORY_ID, |effort| {
                 codex_efforts.iter().any(|level| level == effort)
             });
+            let claude_tiers = tier_options(&self.claude_models, self.claude_model.as_deref());
+            let codex_tiers = tier_options(&self.codex_models, self.codex_model.as_deref());
+            self.claude_tier = restore_choice(ui.ctx(), CLAUDE_TIER_MEMORY_ID, |id| {
+                claude_tiers.iter().any(|tier| tier.id == id)
+            });
+            self.codex_tier = restore_choice(ui.ctx(), CODEX_TIER_MEMORY_ID, |id| {
+                codex_tiers.iter().any(|tier| tier.id == id)
+            });
         }
         let any_harness = self.claude_info.is_some() || self.codex_info.is_some();
 
@@ -1101,6 +1126,60 @@ impl OpenReelApp {
                     }
                 }
             }
+            // Speed picker: shown only when the harness catalog advertises
+            // faster-than-standard service tiers (Codex's "Fast" = 1.5x at
+            // increased usage). Standard is the reset entry, like Default.
+            if selected_available {
+                let running = self.projects[project_index].threads[active_thread].running;
+                let composer_harness = self.projects[project_index].threads[active_thread].harness;
+                let (options, choice, memory_id) = match composer_harness {
+                    AgentHarnessChoice::ClaudeCode => (
+                        tier_options(&self.claude_models, self.claude_model.as_deref()),
+                        &mut self.claude_tier,
+                        CLAUDE_TIER_MEMORY_ID,
+                    ),
+                    AgentHarnessChoice::Codex => (
+                        tier_options(&self.codex_models, self.codex_model.as_deref()),
+                        &mut self.codex_tier,
+                        CODEX_TIER_MEMORY_ID,
+                    ),
+                };
+                if !options.is_empty() {
+                    let before = choice.clone();
+                    let selected_text = choice
+                        .as_deref()
+                        .map_or("Speed", |id| {
+                            options
+                                .iter()
+                                .find(|tier| tier.id == id)
+                                .map_or(id, |tier| tier.name.as_str())
+                        })
+                        .to_owned();
+                    ui.add_enabled_ui(!running, |ui| {
+                        egui::ComboBox::from_id_salt((
+                            "composer-tier",
+                            project_id,
+                            active_thread,
+                            composer_harness.key(),
+                        ))
+                        .selected_text(selected_text)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(choice, None, "Standard");
+                            for tier in &options {
+                                ui.selectable_value(choice, Some(tier.id.clone()), &tier.name);
+                            }
+                        });
+                    });
+                    let changed = *choice != before;
+                    let persisted = choice.clone().unwrap_or_default();
+                    if changed {
+                        self.stop_agent(active_thread);
+                        ui.ctx().data_mut(|data| {
+                            data.insert_persisted(egui::Id::new(memory_id), persisted);
+                        });
+                    }
+                }
+            }
             if harness_hover.is_none() {
                 ui.colored_label(
                     color::STATUS_DANGER,
@@ -1407,6 +1486,22 @@ fn effort_options(models: &[openreel_agent::ModelChoice], model: Option<&str>) -
             .map(|model| model.efforts.clone())
             .unwrap_or_default(),
         None => openreel_agent::common_efforts(models),
+    }
+}
+
+/// The service tiers valid for the chosen model, same default-model rule as
+/// `effort_options`. Empty for providers without tiers, hiding the picker.
+fn tier_options(
+    models: &[openreel_agent::ModelChoice],
+    model: Option<&str>,
+) -> Vec<openreel_agent::ServiceTier> {
+    match model {
+        Some(id) => models
+            .iter()
+            .find(|model| model.id == id)
+            .map(|model| model.tiers.clone())
+            .unwrap_or_default(),
+        None => openreel_agent::common_tiers(models),
     }
 }
 

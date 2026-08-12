@@ -116,6 +116,29 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   newline). Ships with instant local commands (/remove-fillers, /captions,
   /freeze, /export, /undo, /redo, /help) and agent prompt commands
   (/cut-silences, /tighten)
+- Service tier picker (Speed): where a provider offers faster-than-standard
+  tiers - Codex's Fast mode (1.5x speed at increased usage) - a Speed
+  picker joins the composer row. Tiers come per model from the CLI's own
+  catalog, Standard is the default, and the choice is remembered per
+  harness
+- The Claude model list is now versioned - Fable 5, Opus 5, Opus 4.8,
+  Sonnet 5, Sonnet 4.6, Haiku 4.5 - so a model can be pinned exactly
+  instead of riding a tier alias
+- Recordings are now constant-frame-rate (30fps): webcams deliver
+  variable wall-clock timestamps, which made recorded footage resist
+  exact frame edits; every capture now lands on a clean frame grid the
+  editor and agents can cut anywhere
+- Chat sessions genuinely run without a turn ceiling: the drivers
+  enforced a hidden 8-turn cap even though the app asked for none.
+  Stop is the only limit, as intended
+- /remove-fillers now says the transcript is still being generated when
+  it is, instead of claiming there are no filler words
+- The hard UI pass, rounds 1-2 (border discipline): hierarchy comes from
+  surface fills and type, not outlines - widget strokes dropped for a
+  stepped surface ladder, the chat stream de-boxed so agent prose reads
+  as conversation, ghost buttons in a stroke-free top bar, thin
+  scrollbars, one transport slot (Send idle / Stop running), and
+  hairlines rationed to true containers like the slash popup
 - Projects (M27): work on several videos at once, T3-style. Each open
   project is its own timeline, media pool, undo history, agent server,
   and crash journal; switching is instant and tears nothing down, and

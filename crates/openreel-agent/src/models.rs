@@ -1,7 +1,7 @@
 //! Model and effort choices for the supported harnesses.
 //!
-//! Claude Code exposes its standard tier aliases, which the CLI resolves to
-//! the current model of each tier. Codex choices come from the CLI's own
+//! Claude Code choices are a curated list of the current versioned model
+//! names, since its CLI keeps no on-disk catalog. Codex choices come from its
 //! model cache, so the list always matches what the installed CLI can run;
 //! no cache means no named choices, and the picker degrades to the CLI's
 //! configured default. Every model carries the reasoning-effort levels it
@@ -17,13 +17,23 @@ use crate::drivers::codex_model_cache_path;
 /// The `claude` CLI's session effort levels (`--effort`).
 const CLAUDE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
-/// One selectable model: the id passed to the CLI, a display label, and the
-/// reasoning-effort levels the model supports.
+/// One service tier a model can run under: the id passed to the CLI and the
+/// name shown in the picker (e.g. Codex's `priority` tier displays as "Fast").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceTier {
+    pub id: String,
+    pub name: String,
+}
+
+/// One selectable model: the id passed to the CLI, a display label, the
+/// reasoning-effort levels the model supports, and any faster-than-standard
+/// service tiers it offers (empty for providers without tiers).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelChoice {
     pub id: String,
     pub label: String,
     pub efforts: Vec<String>,
+    pub tiers: Vec<ServiceTier>,
 }
 
 impl ModelChoice {
@@ -32,17 +42,26 @@ impl ModelChoice {
             id: id.to_owned(),
             label: label.to_owned(),
             efforts: efforts.iter().map(|&effort| effort.to_owned()).collect(),
+            tiers: Vec::new(),
         }
     }
 }
 
-/// The Claude Code tier aliases, resolved by the CLI to its current models.
+/// The current Claude models by full versioned name, newest tier first.
+///
+/// The `claude` CLI has no on-disk model catalog to read the way Codex does,
+/// so this list is curated from the models the installed CLI accepts; ids are
+/// full names (`claude-opus-5`) rather than tier aliases so users can pin a
+/// version, e.g. Opus 4.8 versus Opus 5.
 #[must_use]
 pub fn claude_models() -> Vec<ModelChoice> {
     vec![
-        ModelChoice::new("opus", "Opus", &CLAUDE_EFFORTS),
-        ModelChoice::new("sonnet", "Sonnet", &CLAUDE_EFFORTS),
-        ModelChoice::new("haiku", "Haiku", &CLAUDE_EFFORTS),
+        ModelChoice::new("claude-fable-5", "Fable 5", &CLAUDE_EFFORTS),
+        ModelChoice::new("claude-opus-5", "Opus 5", &CLAUDE_EFFORTS),
+        ModelChoice::new("claude-opus-4-8", "Opus 4.8", &CLAUDE_EFFORTS),
+        ModelChoice::new("claude-sonnet-5", "Sonnet 5", &CLAUDE_EFFORTS),
+        ModelChoice::new("claude-sonnet-4-6", "Sonnet 4.6", &CLAUDE_EFFORTS),
+        ModelChoice::new("claude-haiku-4-5", "Haiku 4.5", &CLAUDE_EFFORTS),
     ]
 }
 
@@ -72,9 +91,29 @@ pub fn common_efforts(models: &[ModelChoice]) -> Vec<String> {
         .collect()
 }
 
+/// Service tiers every model in the catalog supports, in the first model's
+/// order - the safe set when the model is the CLI's default and unknown.
+#[must_use]
+pub fn common_tiers(models: &[ModelChoice]) -> Vec<ServiceTier> {
+    let Some((first, rest)) = models.split_first() else {
+        return Vec::new();
+    };
+    first
+        .tiers
+        .iter()
+        .filter(|tier| {
+            rest.iter()
+                .all(|model| model.tiers.iter().any(|other| other.id == tier.id))
+        })
+        .cloned()
+        .collect()
+}
+
 /// The cache is either a bare model array or an object with a `models` array;
-/// entries carry a `slug` (the `-m` argument), usually a `display_name`, and
-/// a `supported_reasoning_levels` array of `{effort, description}` objects.
+/// entries carry a `slug` (the `-m` argument), usually a `display_name`, a
+/// `supported_reasoning_levels` array of `{effort, description}` objects, and
+/// optionally a `service_tiers` array of `{id, name, description}` objects
+/// for faster-than-standard tiers (the `service_tier` config value).
 fn parse_codex_models(source: &str) -> Vec<ModelChoice> {
     let Ok(catalog) = serde_json::from_str::<Value>(source) else {
         return Vec::new();
@@ -104,10 +143,28 @@ fn parse_codex_models(source: &str) -> Vec<ModelChoice> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let tiers = model
+                .get("service_tiers")
+                .and_then(Value::as_array)
+                .map(|tiers| {
+                    tiers
+                        .iter()
+                        .filter_map(|tier| {
+                            let id = tier.get("id").and_then(Value::as_str)?;
+                            let name = tier.get("name").and_then(Value::as_str).unwrap_or(id);
+                            Some(ServiceTier {
+                                id: id.to_owned(),
+                                name: name.to_owned(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             Some(ModelChoice {
                 id: slug.to_owned(),
                 label: label.to_owned(),
                 efforts,
+                tiers,
             })
         })
         .collect()
@@ -118,17 +175,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_tiers_are_the_cli_aliases_with_its_session_efforts() {
+    fn claude_models_are_versioned_full_names_with_the_session_efforts() {
         let models = claude_models();
         let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
-        assert_eq!(ids, ["opus", "sonnet", "haiku"]);
+        assert_eq!(
+            ids,
+            [
+                "claude-fable-5",
+                "claude-opus-5",
+                "claude-opus-4-8",
+                "claude-sonnet-5",
+                "claude-sonnet-4-6",
+                "claude-haiku-4-5",
+            ]
+        );
         for model in &models {
             assert_eq!(model.efforts, CLAUDE_EFFORTS);
         }
     }
 
     #[test]
-    fn codex_catalog_parses_both_shapes_efforts_and_slug_fallback() {
+    fn codex_catalog_parses_both_shapes_efforts_tiers_and_slug_fallback() {
         let object_form = r#"{"models": [
             {
                 "slug": "gpt-5.6-sol",
@@ -136,16 +203,21 @@ mod tests {
                 "supported_reasoning_levels": [
                     {"effort": "low", "description": "fast"},
                     {"effort": "xhigh", "description": "deep"}
+                ],
+                "service_tiers": [
+                    {"id": "priority", "name": "Fast", "description": "1.5x speed"}
                 ]
             },
             {"slug": "gpt-5.5"}
         ]}"#;
+        let mut sol = ModelChoice::new("gpt-5.6-sol", "GPT-5.6-Sol", &["low", "xhigh"]);
+        sol.tiers = vec![ServiceTier {
+            id: "priority".to_owned(),
+            name: "Fast".to_owned(),
+        }];
         assert_eq!(
             parse_codex_models(object_form),
-            vec![
-                ModelChoice::new("gpt-5.6-sol", "GPT-5.6-Sol", &["low", "xhigh"]),
-                ModelChoice::new("gpt-5.5", "gpt-5.5", &[]),
-            ]
+            vec![sol, ModelChoice::new("gpt-5.5", "gpt-5.5", &[])]
         );
         let array_form = r#"[{"slug": "gpt-5.4-mini", "display_name": "GPT-5.4-Mini"}]"#;
         assert_eq!(
@@ -169,5 +241,22 @@ mod tests {
         ];
         assert_eq!(common_efforts(&models), ["low", "medium", "high"]);
         assert!(common_efforts(&[]).is_empty());
+    }
+
+    #[test]
+    fn common_tiers_is_the_ordered_intersection_by_id() {
+        let tier = |id: &str, name: &str| ServiceTier {
+            id: id.to_owned(),
+            name: name.to_owned(),
+        };
+        let mut a = ModelChoice::new("a", "A", &[]);
+        a.tiers = vec![tier("priority", "Fast"), tier("flex", "Flex")];
+        let mut b = ModelChoice::new("b", "B", &[]);
+        b.tiers = vec![tier("priority", "Fast")];
+        let models = vec![a, b];
+        assert_eq!(common_tiers(&models), vec![tier("priority", "Fast")]);
+        assert!(common_tiers(&[]).is_empty());
+        let untiered = vec![ModelChoice::new("c", "C", &[])];
+        assert!(common_tiers(&untiered).is_empty());
     }
 }

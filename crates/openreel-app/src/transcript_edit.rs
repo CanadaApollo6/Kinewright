@@ -1,7 +1,7 @@
 use openreel_core::{
     Clip, ClipId, Document, FrameRounding, Operation, TimeCode, TimelineTranscriptWord, TrackId,
-    TranscriptCutRange, is_filler_word, map_frames_with_rounding, transcript_cut_ranges,
-    transcript_cut_ranges_for_indices,
+    TranscriptCutRange, TranscriptStatus, is_filler_word, map_frames_with_rounding,
+    transcript_cut_ranges, transcript_cut_ranges_for_indices,
 };
 
 use crate::{app::OpenReelApp, transcript_ui::TranscriptSelection};
@@ -71,6 +71,20 @@ impl OpenReelApp {
         }
     }
 
+    /// True while any asset in the focused project still has a transcript on
+    /// the way (queued, hashing, downloading the model, or transcribing).
+    fn transcription_in_progress(&self) -> bool {
+        self.focused().document.media_pool.iter().any(|asset| {
+            matches!(
+                self.analysis.transcript_status(asset),
+                TranscriptStatus::Queued
+                    | TranscriptStatus::Hashing
+                    | TranscriptStatus::DownloadingModel { .. }
+                    | TranscriptStatus::Transcribing { .. }
+            )
+        })
+    }
+
     pub(crate) fn remove_filler_words(&mut self) {
         let words = match self
             .analysis
@@ -84,10 +98,17 @@ impl OpenReelApp {
         };
         let selected_indices = filler_word_indices(&words);
         if selected_indices.is_empty() {
-            self.record_error(
-                "Transcript edit",
-                "There are no filler words available to remove",
-            );
+            // An empty result right after an import usually means the
+            // transcript is still being generated, not that the speech is
+            // filler-free - say which one it is.
+            let message = if words.is_empty() && self.transcription_in_progress() {
+                "The transcript is still being generated - try removing fillers again in a moment"
+            } else if words.is_empty() {
+                "There is no transcript to scan; add footage with speech first"
+            } else {
+                "There are no filler words available to remove"
+            };
+            self.record_error("Transcript edit", message);
             return;
         }
         let cuts =
