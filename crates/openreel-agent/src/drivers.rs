@@ -196,7 +196,13 @@ impl ClaudeSession {
             command.args(["--model", model]);
         }
         if let Some(effort) = &cfg.effort {
-            command.args(["--effort", effort]);
+            if effort == crate::models::CLAUDE_ULTRACODE {
+                // Ultracode is a session setting, not an --effort value:
+                // xhigh effort plus standing dynamic-workflow orchestration.
+                command.args(["--settings", r#"{"ultracode": true}"#]);
+            } else {
+                command.args(["--effort", effort]);
+            }
         }
         if let Some(directory) = &cfg.working_directory {
             command.current_dir(directory);

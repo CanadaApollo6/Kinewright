@@ -14,12 +14,20 @@ use serde_json::Value;
 
 use crate::drivers::{codex_config_path, codex_model_cache_path};
 
-/// The `claude` CLI's full session effort ladder (`--effort`). Which rungs a
-/// model supports varies: the CLI's own capability checks deny `xhigh` to
-/// everything before the Opus/Sonnet 4.7 generation and deny `max` to
-/// everything before 4.6, so each curated model carries its true subset.
-const CLAUDE_EFFORTS_FULL: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
-/// The 4.6 generation: `max` exists, `xhigh` does not.
+/// Not an `--effort` value: Ultracode is the `claude` CLI's session setting
+/// for xhigh effort plus standing dynamic-workflow (multi-agent)
+/// orchestration, passed as `--settings {"ultracode": true}`. It sits in the
+/// effort list because users reach for it as the tier above max, and it is
+/// only offered on xhigh-capable models, which the CLI requires.
+pub const CLAUDE_ULTRACODE: &str = "ultracode";
+
+/// The `claude` CLI's full session effort ladder (`--effort` plus the
+/// Ultracode session setting). Which rungs a model supports varies: the
+/// CLI's own capability checks deny `xhigh` to everything before the
+/// Opus/Sonnet 4.7 generation and deny `max` to everything before 4.6, so
+/// each curated model carries its true subset.
+const CLAUDE_EFFORTS_FULL: [&str; 6] = ["low", "medium", "high", "xhigh", "max", CLAUDE_ULTRACODE];
+/// The 4.6 generation: `max` exists, `xhigh` (and so Ultracode) does not.
 const CLAUDE_EFFORTS_NO_XHIGH: [&str; 4] = ["low", "medium", "high", "max"];
 /// Older models (Haiku 4.5 era): the base three levels only.
 const CLAUDE_EFFORTS_BASE: [&str; 3] = ["low", "medium", "high"];

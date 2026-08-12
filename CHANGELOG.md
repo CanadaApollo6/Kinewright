@@ -116,6 +116,13 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   newline). Ships with instant local commands (/remove-fillers, /captions,
   /freeze, /export, /undo, /redo, /help) and agent prompt commands
   (/cut-silences, /tighten)
+- Ultracode joins the effort picker on xhigh-capable Claude models: it
+  enables the CLI's session mode of xhigh reasoning plus standing
+  multi-agent workflow orchestration (passed as a session setting, since
+  it is not an --effort value). The ultrathink and ultracode prompt
+  keywords also pass straight through the composer - typing them in a
+  message triggers the CLI's per-turn deeper-reasoning and workflow
+  opt-ins, same as in a terminal
 - Effort levels are now correct per model: each Claude model carries the
   levels its generation actually supports (the 4.7+/5 models take the
   full low-max ladder, Sonnet 4.6 has max but not xhigh, Haiku 4.5 stops
