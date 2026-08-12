@@ -910,9 +910,10 @@ impl OpenReelApp {
         egui::Panel::top("app-top-bar")
             .exact_size(size::TOP_BAR_HEIGHT)
             .frame(
+                // Separation by fill contrast, not outline (M25): the bar
+                // sits one surface step above the panels beneath it.
                 egui::Frame::new()
                     .fill(color::SURFACE)
-                    .stroke(egui::Stroke::new(1.0, color::BORDER_SUBTLE))
                     .inner_margin(egui::Margin::symmetric(
                         theme::margin(space::THREE),
                         theme::margin(space::ONE),

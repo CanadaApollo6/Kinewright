@@ -555,6 +555,9 @@ impl OpenReelApp {
         ui.scope(|ui| {
             for (index, thread) in self.projects[project_index].threads.iter().enumerate() {
                 let mut close_clicked = false;
+                // Tree depth (M25): thread rows sit one indent step inside
+                // their project header, so the two raised surfaces read as
+                // parent and child rather than neighbors.
                 let frame = egui::Frame::new()
                     .fill(if index == self.projects[project_index].active_thread {
                         color::SURFACE_RAISED
@@ -562,6 +565,10 @@ impl OpenReelApp {
                         color::PANEL
                     })
                     .corner_radius(radius::SM)
+                    .outer_margin(egui::Margin {
+                        left: theme::margin(space::THREE),
+                        ..egui::Margin::ZERO
+                    })
                     .inner_margin(egui::Margin::same(theme::margin(space::ONE)))
                     .show(ui, |ui| {
                         // A bare with_layout claims the rail's full
@@ -674,7 +681,7 @@ impl OpenReelApp {
         // controls live in the composer row like T3 Code's model row. The one
         // exception is the no-harness state, which explains itself up front.
         if !any_harness {
-            chat_frame(color::SURFACE, color::BORDER_SUBTLE).show(ui, |ui| {
+            chat_frame(color::SURFACE).show(ui, |ui| {
                 harness_row(
                     ui,
                     Icon::BrandClaude,
@@ -863,26 +870,30 @@ impl OpenReelApp {
         // Slash suggestions float directly above the composer while typing.
         let mut run_command: Option<&'static crate::slash::SlashCommand> = None;
         if !matches.is_empty() {
-            chat_frame(color::SURFACE_RAISED, color::BORDER_SUBTLE).show(ui, |ui| {
-                for command in &matches {
-                    let label = format!("/{}", command.name);
-                    ui.horizontal(|ui| {
-                        if ui.small_button(&label).clicked() {
-                            run_command = Some(*command);
-                        }
-                        ui.colored_label(
-                            color::TEXT_MUTED,
-                            egui::RichText::new(command.description).size(type_size::CAPTION),
-                        );
-                    });
-                }
-            });
+            // The popup floats over the stream, so it earns one of the few
+            // hairlines left in the app.
+            chat_frame(color::SURFACE_RAISED)
+                .stroke(egui::Stroke::new(1.0, color::BORDER_SUBTLE))
+                .show(ui, |ui| {
+                    for command in &matches {
+                        let label = format!("/{}", command.name);
+                        ui.horizontal(|ui| {
+                            if ui.small_button(&label).clicked() {
+                                run_command = Some(*command);
+                            }
+                            ui.colored_label(
+                                color::TEXT_MUTED,
+                                egui::RichText::new(command.description).size(type_size::CAPTION),
+                            );
+                        });
+                    }
+                });
         }
         ui.add_space(space::ONE);
         let composer_id = egui::Id::new(("agent-composer", project_id, active_thread));
         let input_response = egui::Frame::new()
             .fill(color::CANVAS)
-            .stroke(egui::Stroke::new(1.0, color::BORDER_STRONG))
+            .stroke(egui::Stroke::new(1.0, color::BORDER_SUBTLE))
             .corner_radius(radius::MD)
             .inner_margin(egui::Margin::same(theme::margin(space::ONE)))
             .show(ui, |ui| {
@@ -1102,45 +1113,45 @@ impl OpenReelApp {
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let can_send = !self.projects[project_index].threads[active_thread].running
-                    && !self.projects[project_index].threads[active_thread]
-                        .input
-                        .trim()
-                        .is_empty()
-                    && selected_available
-                    && self.projects[project_index].mcp_server.is_some();
-                // Icon-only transport (T3-style): the row shares its width
-                // with three pickers and must survive a narrow center column.
-                if ui
-                    .add_enabled(
-                        can_send,
-                        egui::Button::image(Icon::Send.image(size::ICON_MD))
-                            .image_tint_follows_text_color(true)
-                            .fill(color::ACCENT_28)
-                            .stroke(egui::Stroke::new(1.0, color::ACCENT_72)),
-                    )
-                    .on_hover_text("Send (Enter)")
-                    .clicked()
-                {
-                    self.start_agent_turn();
-                }
-                if ui
-                    .add_enabled(
-                        self.projects[project_index].threads[active_thread].running,
-                        egui::Button::image(Icon::Stop.image(size::ICON_MD))
-                            .image_tint_follows_text_color(true)
-                            .fill(color::SURFACE_RAISED),
-                    )
-                    .on_hover_text("Stop this thread")
-                    .clicked()
-                {
-                    self.stop_agent(active_thread);
-                }
-                if self.projects[project_index].threads[active_thread].running {
+                // One transport slot (M25): Send while idle, Stop while
+                // running. A permanently visible disabled twin is noise and
+                // the row shares its width with three pickers.
+                let running = self.projects[project_index].threads[active_thread].running;
+                if running {
+                    if ui
+                        .add(
+                            egui::Button::image(Icon::Stop.image(size::ICON_MD))
+                                .image_tint_follows_text_color(true)
+                                .fill(color::SURFACE_RAISED),
+                        )
+                        .on_hover_text("Stop this thread")
+                        .clicked()
+                    {
+                        self.stop_agent(active_thread);
+                    }
                     ui.colored_label(
                         color::ACCENT,
                         egui::RichText::new("RUNNING").size(type_size::MICRO),
                     );
+                } else {
+                    let can_send = !self.projects[project_index].threads[active_thread]
+                        .input
+                        .trim()
+                        .is_empty()
+                        && selected_available
+                        && self.projects[project_index].mcp_server.is_some();
+                    if ui
+                        .add_enabled(
+                            can_send,
+                            egui::Button::image(Icon::Send.image(size::ICON_MD))
+                                .image_tint_follows_text_color(true)
+                                .fill(color::ACCENT_28),
+                        )
+                        .on_hover_text("Send (Enter)")
+                        .clicked()
+                    {
+                        self.start_agent_turn();
+                    }
                 }
                 let usage = &self.projects[project_index].threads[active_thread].usage;
                 if usage.input_tokens > 0 || usage.output_tokens > 0 {
@@ -1274,7 +1285,7 @@ fn render_stream_entry(
 ) {
     match entry {
         ChatEntry::User(text) => {
-            chat_frame(color::ACCENT_16, color::ACCENT_72).show(ui, |ui| {
+            chat_frame(color::ACCENT_16).show(ui, |ui| {
                 ui.colored_label(
                     color::ACCENT,
                     egui::RichText::new("YOU").strong().size(type_size::MICRO),
@@ -1283,16 +1294,16 @@ fn render_stream_entry(
             });
         }
         ChatEntry::Text(text) => {
-            chat_frame(color::SURFACE, color::BORDER_SUBTLE).show(ui, |ui| {
-                ui.colored_label(
-                    color::TEXT_SECONDARY,
-                    egui::RichText::new("AGENT").strong().size(type_size::MICRO),
-                );
-                ui.label(text);
-            });
+            // The agent's words are the conversation itself: no container,
+            // just the role label and prose (T3-style).
+            ui.colored_label(
+                color::TEXT_SECONDARY,
+                egui::RichText::new("AGENT").strong().size(type_size::MICRO),
+            );
+            ui.label(text);
         }
         ChatEntry::ToolCall { name, arguments } => {
-            chat_frame(color::SURFACE_RAISED, color::BORDER_STRONG).show(ui, |ui| {
+            chat_frame(color::SURFACE_RAISED).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add(Icon::Waveform.image(size::ICON_SM).tint(color::TEXT_MUTED));
                     ui.colored_label(
@@ -1310,7 +1321,7 @@ fn render_stream_entry(
             });
         }
         ChatEntry::ToolResult { name, result } => {
-            chat_frame(color::SURFACE, color::BORDER_SUBTLE).show(ui, |ui| {
+            chat_frame(color::SURFACE).show(ui, |ui| {
                 egui::CollapsingHeader::new(format!("RESULT · {name}"))
                     .id_salt(("agent-result", salt))
                     .show(ui, |ui| {
@@ -1340,7 +1351,7 @@ fn render_stream_entry(
             end,
             cue,
         } => {
-            chat_frame(color::SURFACE_RAISED, color::BORDER_STRONG).show(ui, |ui| {
+            chat_frame(color::SURFACE_RAISED).show(ui, |ui| {
                 ui.colored_label(
                     color::TEXT_SECONDARY,
                     egui::RichText::new("EDIT").strong().size(type_size::MICRO),
@@ -1399,10 +1410,11 @@ fn effort_options(models: &[openreel_agent::ModelChoice], model: Option<&str>) -
     }
 }
 
-fn chat_frame(fill: egui::Color32, stroke: egui::Color32) -> egui::Frame {
+/// Stream containers are borderless fills (M25): the surface ladder carries
+/// hierarchy, and outlines are reserved for floating popups and alerts.
+fn chat_frame(fill: egui::Color32) -> egui::Frame {
     egui::Frame::new()
         .fill(fill)
-        .stroke(egui::Stroke::new(1.0, stroke))
         .corner_radius(radius::MD)
         .inner_margin(egui::Margin::same(theme::margin(space::TWO)))
 }

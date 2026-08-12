@@ -172,7 +172,10 @@ pub(crate) fn install(ctx: &egui::Context) {
     style.spacing.item_spacing = egui::vec2(space::TWO, space::ONE_HALF);
     style.spacing.window_margin = egui::Margin::same(margin(space::THREE));
     style.spacing.menu_margin = egui::Margin::same(margin(space::TWO));
-    style.spacing.button_padding = egui::vec2(space::ONE_HALF, space::ONE);
+    // Wider horizontal padding gives borderless buttons their pill
+    // proportions; hierarchy comes from fills, not outlines (M25).
+    style.spacing.button_padding = egui::vec2(space::TWO, space::ONE);
+    style.spacing.scroll = egui::style::ScrollStyle::thin();
     style.spacing.indent = space::FOUR;
     style.spacing.interact_size = egui::vec2(size::CONTROL_HEIGHT, size::CONTROL_HEIGHT);
     style.spacing.slider_width = 112.0;
@@ -221,7 +224,7 @@ fn visuals() -> Visuals {
     visuals.override_text_color = Some(color::TEXT_PRIMARY);
     visuals.weak_text_color = Some(color::TEXT_SECONDARY);
     visuals.selection.bg_fill = color::ACCENT_28;
-    visuals.selection.stroke = Stroke::new(1.0, color::TEXT_PRIMARY);
+    visuals.selection.stroke = Stroke::new(1.0, color::ACCENT_72);
     visuals.hyperlink_color = color::ACCENT;
     visuals.faint_bg_color = color::SURFACE;
     visuals.extreme_bg_color = color::CANVAS;
@@ -254,6 +257,10 @@ fn visuals() -> Visuals {
     visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     visuals.image_loading_spinners = false;
     visuals.disabled_alpha = 0.55;
+    // Border discipline (M25, Zed as the bar): widget hierarchy is carried
+    // by the surface ladder and text weight, never by outlines. Hairlines
+    // stay on noninteractive chrome (separators) and true containers;
+    // interaction states step up the fill ladder instead of growing rings.
     visuals.widgets.noninteractive = widget(
         color::PANEL,
         Color32::TRANSPARENT,
@@ -264,21 +271,21 @@ fn visuals() -> Visuals {
     visuals.widgets.inactive = widget(
         color::SURFACE,
         color::SURFACE,
-        color::BORDER_STRONG,
+        Color32::TRANSPARENT,
         color::TEXT_SECONDARY,
         radius::SM,
     );
     visuals.widgets.hovered = widget(
         color::SURFACE_RAISED,
         color::SURFACE_RAISED,
-        color::ACCENT_72,
+        Color32::TRANSPARENT,
         color::TEXT_PRIMARY,
         radius::SM,
     );
     visuals.widgets.active = widget(
         color::SURFACE_ACTIVE,
         color::SURFACE_ACTIVE,
-        color::ACCENT,
+        Color32::TRANSPARENT,
         color::TEXT_PRIMARY,
         radius::SM,
     );
