@@ -91,15 +91,17 @@ pub(crate) mod motion {
     pub const NAVIGATION: f32 = 0.180;
 }
 
+// One step larger across the scale (Riel: everything read a bit small);
+// body lands between Zed's small (12) and default (14).
 pub(crate) mod type_size {
-    pub const TITLE: f32 = 18.0;
-    pub const HEADING: f32 = 14.0;
-    pub const BODY: f32 = 12.0;
-    pub const CAPTION: f32 = 10.0;
-    pub const MICRO: f32 = 9.0;
-    pub const TIMECODE: f32 = 13.0;
-    pub const RULER: f32 = 9.0;
-    pub const CODE: f32 = 10.0;
+    pub const TITLE: f32 = 19.0;
+    pub const HEADING: f32 = 15.0;
+    pub const BODY: f32 = 13.0;
+    pub const CAPTION: f32 = 11.0;
+    pub const MICRO: f32 = 10.0;
+    pub const TIMECODE: f32 = 14.0;
+    pub const RULER: f32 = 10.0;
+    pub const CODE: f32 = 11.0;
 }
 
 const INTER_MEDIUM: &str = "InterMedium";

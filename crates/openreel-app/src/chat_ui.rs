@@ -969,7 +969,12 @@ impl OpenReelApp {
                 sw: 0,
                 se: 0,
             })
-            .inner_margin(egui::Margin::same(theme::margin(space::ONE)))
+            .inner_margin(egui::Margin {
+                left: theme::margin(space::TWO),
+                right: theme::margin(space::TWO),
+                top: theme::margin(space::TWO),
+                bottom: theme::margin(space::ONE),
+            })
             .show(ui, |ui| {
                 ui.add_enabled(
                     !self.projects[project_index].threads[active_thread].running,
@@ -1018,6 +1023,9 @@ impl OpenReelApp {
         ui.add_space(-ui.spacing().item_spacing.y);
         let controls_bg = ui.painter().add(egui::Shape::Noop);
         let controls_row = ui.horizontal(|ui| {
+            // The row shares the card's inner margins: without this inset the
+            // brand mark sits directly on the card's edge.
+            ui.add_space(f32::from(theme::margin(space::TWO)));
             if claude_ready && codex_ready {
                 let before = self.projects[project_index].threads[active_thread].harness;
                 let mut choice = before;
@@ -1300,7 +1308,7 @@ impl OpenReelApp {
         let controls_rect = controls_row
             .response
             .rect
-            .expand2(egui::vec2(0.0, theme::margin(space::ONE).into()));
+            .expand2(egui::vec2(0.0, f32::from(theme::margin(space::ONE_HALF))));
         ui.painter().set(
             controls_bg,
             egui::Shape::rect_filled(
