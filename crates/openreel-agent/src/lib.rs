@@ -11,7 +11,8 @@ mod silence;
 
 pub use drivers::{CODEX_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver};
 pub use models::{
-    ModelChoice, ServiceTier, claude_models, codex_models, common_efforts, common_tiers,
+    ModelChoice, ServiceTier, claude_models, codex_default_model, codex_models, common_efforts,
+    common_tiers,
 };
 pub use render::{
     render_asset_transcript, render_clip_info, render_timeline_state, render_timeline_transcript,

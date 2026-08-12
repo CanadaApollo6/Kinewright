@@ -12,10 +12,17 @@ use std::fs;
 
 use serde_json::Value;
 
-use crate::drivers::codex_model_cache_path;
+use crate::drivers::{codex_config_path, codex_model_cache_path};
 
-/// The `claude` CLI's session effort levels (`--effort`).
-const CLAUDE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+/// The `claude` CLI's full session effort ladder (`--effort`). Which rungs a
+/// model supports varies: the CLI's own capability checks deny `xhigh` to
+/// everything before the Opus/Sonnet 4.7 generation and deny `max` to
+/// everything before 4.6, so each curated model carries its true subset.
+const CLAUDE_EFFORTS_FULL: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+/// The 4.6 generation: `max` exists, `xhigh` does not.
+const CLAUDE_EFFORTS_NO_XHIGH: [&str; 4] = ["low", "medium", "high", "max"];
+/// Older models (Haiku 4.5 era): the base three levels only.
+const CLAUDE_EFFORTS_BASE: [&str; 3] = ["low", "medium", "high"];
 
 /// One service tier a model can run under: the id passed to the CLI and the
 /// name shown in the picker (e.g. Codex's `priority` tier displays as "Fast").
@@ -56,12 +63,12 @@ impl ModelChoice {
 #[must_use]
 pub fn claude_models() -> Vec<ModelChoice> {
     vec![
-        ModelChoice::new("claude-fable-5", "Fable 5", &CLAUDE_EFFORTS),
-        ModelChoice::new("claude-opus-5", "Opus 5", &CLAUDE_EFFORTS),
-        ModelChoice::new("claude-opus-4-8", "Opus 4.8", &CLAUDE_EFFORTS),
-        ModelChoice::new("claude-sonnet-5", "Sonnet 5", &CLAUDE_EFFORTS),
-        ModelChoice::new("claude-sonnet-4-6", "Sonnet 4.6", &CLAUDE_EFFORTS),
-        ModelChoice::new("claude-haiku-4-5", "Haiku 4.5", &CLAUDE_EFFORTS),
+        ModelChoice::new("claude-fable-5", "Fable 5", &CLAUDE_EFFORTS_FULL),
+        ModelChoice::new("claude-opus-5", "Opus 5", &CLAUDE_EFFORTS_FULL),
+        ModelChoice::new("claude-opus-4-8", "Opus 4.8", &CLAUDE_EFFORTS_FULL),
+        ModelChoice::new("claude-sonnet-5", "Sonnet 5", &CLAUDE_EFFORTS_FULL),
+        ModelChoice::new("claude-sonnet-4-6", "Sonnet 4.6", &CLAUDE_EFFORTS_NO_XHIGH),
+        ModelChoice::new("claude-haiku-4-5", "Haiku 4.5", &CLAUDE_EFFORTS_BASE),
     ]
 }
 
@@ -73,6 +80,41 @@ pub fn codex_models() -> Vec<ModelChoice> {
         .and_then(|path| fs::read_to_string(path).ok())
         .map(|source| parse_codex_models(&source))
         .unwrap_or_default()
+}
+
+/// The model slug the installed Codex CLI runs when none is passed, from the
+/// top-level `model = "..."` entry in its `config.toml`. This is what the
+/// picker's "Default" really means, so effort and speed options for Default
+/// can be the default model's own instead of a lowest-common-denominator set.
+#[must_use]
+pub fn codex_default_model() -> Option<String> {
+    codex_config_path()
+        .filter(|path| path.is_file())
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|source| parse_codex_default_model(&source))
+}
+
+/// Only the top-level `model` key counts: table sections (`[section]`) can
+/// carry their own `model` keys with different meanings.
+fn parse_codex_default_model(source: &str) -> Option<String> {
+    for line in source.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            return None;
+        }
+        if let Some(value) = line.strip_prefix("model") {
+            let value = value.trim_start();
+            if let Some(value) = value.strip_prefix('=') {
+                let value = value.trim();
+                let value = value.strip_prefix('"').unwrap_or(value);
+                let value = value.strip_suffix('"').unwrap_or(value);
+                if !value.is_empty() {
+                    return Some(value.to_owned());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Effort levels every model in the catalog supports, in the first model's
@@ -175,7 +217,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_models_are_versioned_full_names_with_the_session_efforts() {
+    fn claude_models_are_versioned_full_names_with_per_model_efforts() {
         let models = claude_models();
         let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
         assert_eq!(
@@ -189,9 +231,19 @@ mod tests {
                 "claude-haiku-4-5",
             ]
         );
-        for model in &models {
-            assert_eq!(model.efforts, CLAUDE_EFFORTS);
-        }
+        let efforts_of = |id: &str| {
+            models
+                .iter()
+                .find(|model| model.id == id)
+                .map(|model| model.efforts.clone())
+                .unwrap()
+        };
+        // Per the CLI's own capability checks: the 4.7+ generation takes the
+        // full ladder, 4.6 lacks xhigh, Haiku 4.5 stops at high.
+        assert_eq!(efforts_of("claude-fable-5"), CLAUDE_EFFORTS_FULL);
+        assert_eq!(efforts_of("claude-opus-4-8"), CLAUDE_EFFORTS_FULL);
+        assert_eq!(efforts_of("claude-sonnet-4-6"), CLAUDE_EFFORTS_NO_XHIGH);
+        assert_eq!(efforts_of("claude-haiku-4-5"), CLAUDE_EFFORTS_BASE);
     }
 
     #[test]
@@ -241,6 +293,20 @@ mod tests {
         ];
         assert_eq!(common_efforts(&models), ["low", "medium", "high"]);
         assert!(common_efforts(&[]).is_empty());
+    }
+
+    #[test]
+    fn codex_default_model_reads_only_the_top_level_key() {
+        let config = "model = \"gpt-5.6-sol\"\nmodel_reasoning_effort = \"xhigh\"\n";
+        assert_eq!(
+            parse_codex_default_model(config),
+            Some("gpt-5.6-sol".to_owned())
+        );
+        // `model` keys inside sections do not count, and prefixed keys like
+        // model_reasoning_effort never match.
+        let sectioned = "model_reasoning_effort = \"xhigh\"\n[profile]\nmodel = \"gpt-5.5\"\n";
+        assert_eq!(parse_codex_default_model(sectioned), None);
+        assert_eq!(parse_codex_default_model(""), None);
     }
 
     #[test]

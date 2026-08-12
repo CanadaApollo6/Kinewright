@@ -651,12 +651,19 @@ fn create_codex_direct_model_catalog(
     Ok((directory, path))
 }
 
-pub(crate) fn codex_model_cache_path() -> Option<PathBuf> {
+fn codex_home() -> Option<PathBuf> {
     env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".codex")))
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
-        .map(|home| home.join("models_cache.json"))
+}
+
+pub(crate) fn codex_model_cache_path() -> Option<PathBuf> {
+    codex_home().map(|home| home.join("models_cache.json"))
+}
+
+pub(crate) fn codex_config_path() -> Option<PathBuf> {
+    codex_home().map(|home| home.join("config.toml"))
 }
 
 fn force_direct_tool_mode(catalog: &mut Value) -> Result<(), AgentError> {

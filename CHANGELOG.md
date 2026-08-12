@@ -116,6 +116,14 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   newline). Ships with instant local commands (/remove-fillers, /captions,
   /freeze, /export, /undo, /redo, /help) and agent prompt commands
   (/cut-silences, /tighten)
+- Effort levels are now correct per model: each Claude model carries the
+  levels its generation actually supports (the 4.7+/5 models take the
+  full low-max ladder, Sonnet 4.6 has max but not xhigh, Haiku 4.5 stops
+  at high), matching the CLI's own capability rules. And the picker's
+  "Default" model now resolves to what the Codex CLI's config really
+  runs, so Default offers that model's true efforts and speed tiers -
+  previously the Speed picker could hide entirely because two catalog
+  models offer no fast tier
 - Three columns by default: thread rail, session, monitor. The media
   column no longer self-raises on empty projects or pins itself open on
   import - it is summoned from the top bar only. Media enters through

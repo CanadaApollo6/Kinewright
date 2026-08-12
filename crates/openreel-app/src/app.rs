@@ -58,6 +58,9 @@ pub(crate) struct OpenReelApp {
     /// Selectable models per harness; `None` chosen means the CLI's default.
     pub(crate) claude_models: Vec<openreel_agent::ModelChoice>,
     pub(crate) codex_models: Vec<openreel_agent::ModelChoice>,
+    /// The model the Codex CLI's config actually runs as its default, so the
+    /// picker's "Default" resolves to that model's real efforts and tiers.
+    pub(crate) codex_default_model: Option<String>,
     pub(crate) claude_model: Option<String>,
     pub(crate) codex_model: Option<String>,
     pub(crate) claude_effort: Option<String>,
@@ -128,6 +131,7 @@ impl OpenReelApp {
             show_thread_rail: true,
             claude_models: openreel_agent::claude_models(),
             codex_models: openreel_agent::codex_models(),
+            codex_default_model: openreel_agent::codex_default_model(),
             claude_model: None,
             codex_model: None,
             claude_effort: None,

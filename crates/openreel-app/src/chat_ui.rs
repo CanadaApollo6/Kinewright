@@ -167,6 +167,15 @@ impl OpenReelApp {
         &mut self.projects[project_index].threads[active_thread]
     }
 
+    /// The model the Codex side of the picker effectively runs: the chosen
+    /// one, else the CLI config's default - so "Default" offers that model's
+    /// real efforts and tiers instead of a lowest-common-denominator set.
+    fn codex_model_or_default(&self) -> Option<&str> {
+        self.codex_model
+            .as_deref()
+            .or(self.codex_default_model.as_deref())
+    }
+
     /// The remembered model, effort, and service tier for one harness.
     fn harness_choices(
         &self,
@@ -715,7 +724,7 @@ impl OpenReelApp {
                 self.codex_models.iter().any(|model| model.id == id)
             });
             let claude_efforts = effort_options(&self.claude_models, self.claude_model.as_deref());
-            let codex_efforts = effort_options(&self.codex_models, self.codex_model.as_deref());
+            let codex_efforts = effort_options(&self.codex_models, self.codex_model_or_default());
             self.claude_effort = restore_choice(ui.ctx(), CLAUDE_EFFORT_MEMORY_ID, |effort| {
                 claude_efforts.iter().any(|level| level == effort)
             });
@@ -723,7 +732,7 @@ impl OpenReelApp {
                 codex_efforts.iter().any(|level| level == effort)
             });
             let claude_tiers = tier_options(&self.claude_models, self.claude_model.as_deref());
-            let codex_tiers = tier_options(&self.codex_models, self.codex_model.as_deref());
+            let codex_tiers = tier_options(&self.codex_models, self.codex_model_or_default());
             self.claude_tier = restore_choice(ui.ctx(), CLAUDE_TIER_MEMORY_ID, |id| {
                 claude_tiers.iter().any(|tier| tier.id == id)
             });
@@ -1124,7 +1133,7 @@ impl OpenReelApp {
                         CLAUDE_EFFORT_MEMORY_ID,
                     ),
                     AgentHarnessChoice::Codex => (
-                        effort_options(&self.codex_models, self.codex_model.as_deref()),
+                        effort_options(&self.codex_models, self.codex_model_or_default()),
                         &mut self.codex_effort,
                         CODEX_EFFORT_MEMORY_ID,
                     ),
@@ -1170,7 +1179,7 @@ impl OpenReelApp {
                         CLAUDE_TIER_MEMORY_ID,
                     ),
                     AgentHarnessChoice::Codex => (
-                        tier_options(&self.codex_models, self.codex_model.as_deref()),
+                        tier_options(&self.codex_models, self.codex_model_or_default()),
                         &mut self.codex_tier,
                         CODEX_TIER_MEMORY_ID,
                     ),
