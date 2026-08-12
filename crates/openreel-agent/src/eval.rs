@@ -353,6 +353,7 @@ pub fn run_eval(
     let config = SessionConfig {
         working_directory: working_directory.map(Path::to_path_buf),
         model: model.map(str::to_owned),
+        effort: None,
         max_turns: Some(definition.budgets.max_tool_calls.saturating_add(2)),
         mcp_url: Some(server.endpoint().to_owned()),
     };

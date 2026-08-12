@@ -44,6 +44,7 @@ fn one_agent_message_removes_the_transcribed_filler_word() {
         .start_session(SessionConfig {
             working_directory: std::env::current_dir().ok(),
             model: None,
+            effort: None,
             max_turns: Some(10),
             mcp_url: Some(server.endpoint().to_owned()),
         })

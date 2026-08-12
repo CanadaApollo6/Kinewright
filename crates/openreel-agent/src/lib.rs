@@ -10,7 +10,7 @@ mod server;
 mod silence;
 
 pub use drivers::{CODEX_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver};
-pub use models::{ModelChoice, claude_models, codex_models};
+pub use models::{ModelChoice, claude_models, codex_models, common_efforts};
 pub use render::{
     render_asset_transcript, render_clip_info, render_timeline_state, render_timeline_transcript,
 };

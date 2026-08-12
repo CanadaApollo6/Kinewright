@@ -54,6 +54,7 @@ fn claude_removes_long_silences_with_one_atomic_plan() {
         .start_session(SessionConfig {
             working_directory: std::env::current_dir().ok(),
             model: None,
+            effort: None,
             max_turns: Some(8),
             mcp_url: Some(server.endpoint().to_owned()),
         })

@@ -15,6 +15,8 @@ use crate::{
 const AGENT_HARNESS_MEMORY_ID: &str = "openreel-agent-harness";
 const CLAUDE_MODEL_MEMORY_ID: &str = "openreel-agent-model-claude-code";
 const CODEX_MODEL_MEMORY_ID: &str = "openreel-agent-model-codex";
+const CLAUDE_EFFORT_MEMORY_ID: &str = "openreel-agent-effort-claude-code";
+const CODEX_EFFORT_MEMORY_ID: &str = "openreel-agent-effort-codex";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentHarnessChoice {
@@ -144,6 +146,10 @@ impl OpenReelApp {
                 model: match self.agent_harness {
                     AgentHarnessChoice::ClaudeCode => self.claude_model.clone(),
                     AgentHarnessChoice::Codex => self.codex_model.clone(),
+                },
+                effort: match self.agent_harness {
+                    AgentHarnessChoice::ClaudeCode => self.claude_effort.clone(),
+                    AgentHarnessChoice::Codex => self.codex_effort.clone(),
                 },
                 // Subscription harnesses are flat fee and the Stop button is
                 // always available, so sessions run without a turn ceiling.
@@ -286,12 +292,24 @@ impl OpenReelApp {
                     self.agent_harness = remembered;
                 }
             }
-            // Model choices follow the same idle-restore pattern; ids that no
-            // longer exist in the harness's catalog fall back to Default.
-            self.claude_model =
-                restore_model_choice(ui.ctx(), CLAUDE_MODEL_MEMORY_ID, &self.claude_models);
-            self.codex_model =
-                restore_model_choice(ui.ctx(), CODEX_MODEL_MEMORY_ID, &self.codex_models);
+            // Model and effort choices follow the same idle-restore pattern;
+            // ids no longer valid for the current catalog (or the currently
+            // chosen model) fall back to Default. An effort remembered for a
+            // model that stops offering it resurfaces if the model returns.
+            self.claude_model = restore_choice(ui.ctx(), CLAUDE_MODEL_MEMORY_ID, |id| {
+                self.claude_models.iter().any(|model| model.id == id)
+            });
+            self.codex_model = restore_choice(ui.ctx(), CODEX_MODEL_MEMORY_ID, |id| {
+                self.codex_models.iter().any(|model| model.id == id)
+            });
+            let claude_efforts = effort_options(&self.claude_models, self.claude_model.as_deref());
+            let codex_efforts = effort_options(&self.codex_models, self.codex_model.as_deref());
+            self.claude_effort = restore_choice(ui.ctx(), CLAUDE_EFFORT_MEMORY_ID, |effort| {
+                claude_efforts.iter().any(|level| level == effort)
+            });
+            self.codex_effort = restore_choice(ui.ctx(), CODEX_EFFORT_MEMORY_ID, |effort| {
+                codex_efforts.iter().any(|level| level == effort)
+            });
         }
         let any_harness = self.claude_info.is_some() || self.codex_info.is_some();
 
@@ -386,16 +404,25 @@ impl OpenReelApp {
         // out of the clipped panel, leaving no visible way to talk to the
         // agent.
         let mut card_action: Option<EditCardAction> = None;
-        // Slash suggestions render between the stream and the composer, so
-        // their height comes out of the stream's share - otherwise the popup
-        // pushes the composer clean out of the clipped panel.
+        // Everything below the stream (suggestion rows, input, controls) must
+        // come out of the stream's share or it gets pushed out of the clipped
+        // panel. Estimating those heights proved fragile, so the block is
+        // MEASURED: reserve what it actually used last time at this
+        // suggestion count, with a generous estimate covering only the first
+        // frame a given count appears.
         let matches = crate::slash::matching_commands(&self.agent_input);
-        let suggestions_reserve = if matches.is_empty() {
-            0.0
-        } else {
-            24.0 * matches.len() as f32 + 24.0
-        };
-        let composer_reserve = 132.0 + suggestions_reserve;
+        let reserve_id = egui::Id::new(("composer-reserve", matches.len()));
+        let composer_reserve = ui
+            .ctx()
+            .data(|data| data.get_temp::<f32>(reserve_id))
+            .unwrap_or_else(|| {
+                let suggestions = if matches.is_empty() {
+                    0.0
+                } else {
+                    32.0 * matches.len() as f32 + 32.0
+                };
+                148.0 + suggestions
+            });
         // The composer anchors to the bottom of the session column (T3-style):
         // the stream owns everything above it and sticks to its latest entry.
         let stream_height = (ui.available_height() - composer_reserve).max(96.0);
@@ -405,126 +432,42 @@ impl OpenReelApp {
             .max_height(stream_height)
             .min_scrolled_height(stream_height)
             .show(ui, |ui| {
-                for (index, entry) in self.chat.iter().enumerate() {
-                    match entry {
-                        ChatEntry::User(text) => {
-                            chat_frame(color::ACCENT_16, color::ACCENT_72).show(ui, |ui| {
-                                ui.colored_label(
-                                    color::ACCENT,
-                                    egui::RichText::new("YOU").strong().size(type_size::MICRO),
+                // Machine activity collapses into one compact dropdown per
+                // run (T3-style): the header keeps updating with the latest
+                // step while the agent works, and expanding it reveals the
+                // full cards, review actions included. Messages stay
+                // first-class.
+                let fps = self.document.fps;
+                let mut index = 0;
+                while index < self.chat.len() {
+                    if is_activity(&self.chat[index]) {
+                        let group_start = index;
+                        while index < self.chat.len() && is_activity(&self.chat[index]) {
+                            index += 1;
+                        }
+                        let entries = &self.chat[group_start..index];
+                        egui::CollapsingHeader::new(
+                            egui::RichText::new(activity_summary(entries, fps))
+                                .size(type_size::CAPTION)
+                                .color(color::TEXT_SECONDARY),
+                        )
+                        .id_salt(("activity", group_start))
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            for (offset, entry) in entries.iter().enumerate() {
+                                render_stream_entry(
+                                    ui,
+                                    entry,
+                                    group_start + offset,
+                                    fps,
+                                    &mut card_action,
                                 );
-                                ui.label(text);
-                            });
-                        }
-                        ChatEntry::Text(text) => {
-                            chat_frame(color::SURFACE, color::BORDER_SUBTLE).show(ui, |ui| {
-                                ui.colored_label(
-                                    color::TEXT_SECONDARY,
-                                    egui::RichText::new("AGENT").strong().size(type_size::MICRO),
-                                );
-                                ui.label(text);
-                            });
-                        }
-                        ChatEntry::ToolCall { name, arguments } => {
-                            chat_frame(color::SURFACE_RAISED, color::BORDER_STRONG).show(
-                                ui,
-                                |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.add(
-                                            Icon::Waveform
-                                                .image(size::ICON_SM)
-                                                .tint(color::TEXT_MUTED),
-                                        );
-                                        ui.colored_label(
-                                            color::TEXT_SECONDARY,
-                                            egui::RichText::new(format!("TOOL · {name}"))
-                                                .strong()
-                                                .size(type_size::MICRO),
-                                        );
-                                    });
-                                    ui.label(
-                                        egui::RichText::new(summarize(arguments, 180))
-                                            .font(theme::code_font())
-                                            .color(color::TEXT_SECONDARY),
-                                    );
-                                },
-                            );
-                        }
-                        ChatEntry::ToolResult { name, result } => {
-                            chat_frame(color::SURFACE, color::BORDER_SUBTLE).show(ui, |ui| {
-                                egui::CollapsingHeader::new(format!("RESULT · {name}"))
-                                    .id_salt(("agent-result", index))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            egui::RichText::new(summarize(result, 500))
-                                                .font(theme::code_font())
-                                                .color(color::TEXT_SECONDARY),
-                                        );
-                                    });
-                            });
-                        }
-                        ChatEntry::Cost {
-                            input_tokens,
-                            output_tokens,
-                        } => {
-                            ui.colored_label(
-                                color::TEXT_MUTED,
-                                egui::RichText::new(format!(
-                                    "{input_tokens} input / {output_tokens} output tokens"
-                                ))
-                                .size(type_size::MICRO),
-                            );
-                        }
-                        ChatEntry::EditCard {
-                            summary,
-                            start,
-                            end,
-                            cue,
-                        } => {
-                            chat_frame(color::SURFACE_RAISED, color::BORDER_STRONG).show(
-                                ui,
-                                |ui| {
-                                    ui.colored_label(
-                                        color::TEXT_SECONDARY,
-                                        egui::RichText::new("EDIT").strong().size(type_size::MICRO),
-                                    );
-                                    ui.label(summary);
-                                    ui.horizontal(|ui| {
-                                        if ui
-                                            .small_button("Review")
-                                            .on_hover_text(
-                                                "Play the changed span with a two-second lead-in",
-                                            )
-                                            .clicked()
-                                        {
-                                            card_action = Some(EditCardAction::Review(*cue));
-                                        }
-                                        if ui
-                                            .small_button("Undo")
-                                            .on_hover_text("Revert this edit")
-                                            .clicked()
-                                        {
-                                            card_action = Some(EditCardAction::Undo);
-                                        }
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "{} – {}",
-                                                crate::timeline_ui::format_timecode(
-                                                    *start,
-                                                    self.document.fps
-                                                ),
-                                                crate::timeline_ui::format_timecode(
-                                                    *end,
-                                                    self.document.fps
-                                                ),
-                                            ))
-                                            .font(theme::code_font())
-                                            .color(color::TEXT_MUTED),
-                                        );
-                                    });
-                                },
-                            );
-                        }
+                                ui.add_space(space::ONE_HALF);
+                            }
+                        });
+                    } else {
+                        render_stream_entry(ui, &self.chat[index], index, fps, &mut card_action);
+                        index += 1;
                     }
                     ui.add_space(space::ONE_HALF);
                 }
@@ -537,6 +480,7 @@ impl OpenReelApp {
             Some(EditCardAction::Undo) => self.undo(),
             None => {}
         }
+        let composer_block_top = ui.cursor().top();
         // Slash suggestions float directly above the composer while typing.
         let mut run_command: Option<&'static crate::slash::SlashCommand> = None;
         if !matches.is_empty() {
@@ -642,7 +586,7 @@ impl OpenReelApp {
                     let before = choice.clone();
                     let selected_text = choice
                         .as_deref()
-                        .map_or("Default", |id| {
+                        .map_or("Model", |id| {
                             models
                                 .iter()
                                 .find(|model| model.id == id)
@@ -660,6 +604,45 @@ impl OpenReelApp {
                                         Some(model.id.clone()),
                                         &model.label,
                                     );
+                                }
+                            });
+                    });
+                    let changed = *choice != before;
+                    let persisted = choice.clone().unwrap_or_default();
+                    if changed {
+                        self.stop_agent();
+                        ui.ctx().data_mut(|data| {
+                            data.insert_persisted(egui::Id::new(memory_id), persisted);
+                        });
+                    }
+                }
+            }
+            // Effort picker: only levels the chosen model supports (or that
+            // every catalog model supports when the model is Default).
+            if selected_available {
+                let running = self.agent_running;
+                let (options, choice, memory_id) = match self.agent_harness {
+                    AgentHarnessChoice::ClaudeCode => (
+                        effort_options(&self.claude_models, self.claude_model.as_deref()),
+                        &mut self.claude_effort,
+                        CLAUDE_EFFORT_MEMORY_ID,
+                    ),
+                    AgentHarnessChoice::Codex => (
+                        effort_options(&self.codex_models, self.codex_model.as_deref()),
+                        &mut self.codex_effort,
+                        CODEX_EFFORT_MEMORY_ID,
+                    ),
+                };
+                if !options.is_empty() {
+                    let before = choice.clone();
+                    let selected_text = choice.as_deref().unwrap_or("Effort").to_owned();
+                    ui.add_enabled_ui(!running, |ui| {
+                        egui::ComboBox::from_id_salt("composer-effort")
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(choice, None, "Default");
+                                for effort in &options {
+                                    ui.selectable_value(choice, Some(effort.clone()), effort);
                                 }
                             });
                     });
@@ -734,17 +717,194 @@ impl OpenReelApp {
                 }
             });
         });
+        // Record what the block below the stream actually used so the next
+        // frame at this suggestion count reserves exactly that.
+        let composer_block_height = ui.cursor().top() - composer_block_top;
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(reserve_id, composer_block_height));
     }
 }
 
-/// A remembered model id survives only while the harness still offers it.
-fn restore_model_choice(
+/// Whether a stream entry is machine activity (collapsed into a dropdown)
+/// rather than a first-class message.
+fn is_activity(entry: &ChatEntry) -> bool {
+    matches!(
+        entry,
+        ChatEntry::ToolCall { .. }
+            | ChatEntry::ToolResult { .. }
+            | ChatEntry::Cost { .. }
+            | ChatEntry::EditCard { .. }
+    )
+}
+
+/// The collapsed group's header: the latest step, updating as work lands,
+/// with a step count once the run grows.
+fn activity_summary(entries: &[ChatEntry], fps: openreel_core::Rational) -> String {
+    let steps = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                ChatEntry::ToolCall { .. } | ChatEntry::EditCard { .. }
+            )
+        })
+        .count();
+    let latest = entries
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            ChatEntry::EditCard { start, end, .. } => Some(format!(
+                "Edited {} – {}",
+                crate::timeline_ui::format_timecode(*start, fps),
+                crate::timeline_ui::format_timecode(*end, fps),
+            )),
+            ChatEntry::ToolResult { name, .. } => Some(format!("Ran {name}")),
+            ChatEntry::ToolCall { name, .. } => Some(format!("Running {name}")),
+            _ => None,
+        })
+        .unwrap_or_else(|| "Working".to_owned());
+    if steps > 1 {
+        format!("{latest} · {steps} steps")
+    } else {
+        latest
+    }
+}
+
+/// One stream entry, rendered the same whether it stands alone or sits
+/// inside a collapsed activity group.
+#[allow(clippy::too_many_lines)]
+fn render_stream_entry(
+    ui: &mut egui::Ui,
+    entry: &ChatEntry,
+    salt: usize,
+    fps: openreel_core::Rational,
+    card_action: &mut Option<EditCardAction>,
+) {
+    match entry {
+        ChatEntry::User(text) => {
+            chat_frame(color::ACCENT_16, color::ACCENT_72).show(ui, |ui| {
+                ui.colored_label(
+                    color::ACCENT,
+                    egui::RichText::new("YOU").strong().size(type_size::MICRO),
+                );
+                ui.label(text);
+            });
+        }
+        ChatEntry::Text(text) => {
+            chat_frame(color::SURFACE, color::BORDER_SUBTLE).show(ui, |ui| {
+                ui.colored_label(
+                    color::TEXT_SECONDARY,
+                    egui::RichText::new("AGENT").strong().size(type_size::MICRO),
+                );
+                ui.label(text);
+            });
+        }
+        ChatEntry::ToolCall { name, arguments } => {
+            chat_frame(color::SURFACE_RAISED, color::BORDER_STRONG).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(Icon::Waveform.image(size::ICON_SM).tint(color::TEXT_MUTED));
+                    ui.colored_label(
+                        color::TEXT_SECONDARY,
+                        egui::RichText::new(format!("TOOL · {name}"))
+                            .strong()
+                            .size(type_size::MICRO),
+                    );
+                });
+                ui.label(
+                    egui::RichText::new(summarize(arguments, 180))
+                        .font(theme::code_font())
+                        .color(color::TEXT_SECONDARY),
+                );
+            });
+        }
+        ChatEntry::ToolResult { name, result } => {
+            chat_frame(color::SURFACE, color::BORDER_SUBTLE).show(ui, |ui| {
+                egui::CollapsingHeader::new(format!("RESULT · {name}"))
+                    .id_salt(("agent-result", salt))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(summarize(result, 500))
+                                .font(theme::code_font())
+                                .color(color::TEXT_SECONDARY),
+                        );
+                    });
+            });
+        }
+        ChatEntry::Cost {
+            input_tokens,
+            output_tokens,
+        } => {
+            ui.colored_label(
+                color::TEXT_MUTED,
+                egui::RichText::new(format!(
+                    "{input_tokens} input / {output_tokens} output tokens"
+                ))
+                .size(type_size::MICRO),
+            );
+        }
+        ChatEntry::EditCard {
+            summary,
+            start,
+            end,
+            cue,
+        } => {
+            chat_frame(color::SURFACE_RAISED, color::BORDER_STRONG).show(ui, |ui| {
+                ui.colored_label(
+                    color::TEXT_SECONDARY,
+                    egui::RichText::new("EDIT").strong().size(type_size::MICRO),
+                );
+                ui.label(summary);
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("Review")
+                        .on_hover_text("Play the changed span with a two-second lead-in")
+                        .clicked()
+                    {
+                        *card_action = Some(EditCardAction::Review(*cue));
+                    }
+                    if ui
+                        .small_button("Undo")
+                        .on_hover_text("Revert this edit")
+                        .clicked()
+                    {
+                        *card_action = Some(EditCardAction::Undo);
+                    }
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} – {}",
+                            crate::timeline_ui::format_timecode(*start, fps),
+                            crate::timeline_ui::format_timecode(*end, fps),
+                        ))
+                        .font(theme::code_font())
+                        .color(color::TEXT_MUTED),
+                    );
+                });
+            });
+        }
+    }
+}
+
+/// A remembered choice survives only while it is still on offer.
+fn restore_choice(
     ctx: &egui::Context,
     memory_id: &str,
-    models: &[openreel_agent::ModelChoice],
+    is_valid: impl Fn(&str) -> bool,
 ) -> Option<String> {
     ctx.data_mut(|data| data.get_persisted::<String>(egui::Id::new(memory_id)))
-        .filter(|id| models.iter().any(|model| model.id == *id))
+        .filter(|id| is_valid(id))
+}
+
+/// The effort levels valid for the chosen model - or, when the model is the
+/// CLI's (unknown) default, the levels every model in the catalog supports.
+fn effort_options(models: &[openreel_agent::ModelChoice], model: Option<&str>) -> Vec<String> {
+    match model {
+        Some(id) => models
+            .iter()
+            .find(|model| model.id == id)
+            .map(|model| model.efforts.clone())
+            .unwrap_or_default(),
+        None => openreel_agent::common_efforts(models),
+    }
 }
 
 fn chat_frame(fill: egui::Color32, stroke: egui::Color32) -> egui::Frame {
@@ -826,5 +986,61 @@ mod tests {
         usage.reset_usage();
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn messages_are_not_activity_but_tool_traffic_and_edits_are() {
+        assert!(!is_activity(&ChatEntry::User("cut it".to_owned())));
+        assert!(!is_activity(&ChatEntry::Text("done".to_owned())));
+        assert!(is_activity(&ChatEntry::ToolCall {
+            name: "split_clip".to_owned(),
+            arguments: "{}".to_owned(),
+        }));
+        assert!(is_activity(&ChatEntry::EditCard {
+            summary: "Split clip".to_owned(),
+            start: TimeCode(0),
+            end: TimeCode(10),
+            cue: TimeCode(0),
+        }));
+    }
+
+    #[test]
+    fn activity_headers_show_the_latest_step_and_count() {
+        let fps = openreel_core::Rational::new(30, 1).unwrap();
+        let call = |name: &str| ChatEntry::ToolCall {
+            name: name.to_owned(),
+            arguments: "{}".to_owned(),
+        };
+        let result = |name: &str| ChatEntry::ToolResult {
+            name: name.to_owned(),
+            result: "ok".to_owned(),
+        };
+        // An in-flight call reads as running; a finished one as ran.
+        assert_eq!(
+            activity_summary(&[call("get_timeline_state")], fps),
+            "Running get_timeline_state"
+        );
+        assert_eq!(
+            activity_summary(
+                &[call("get_timeline_state"), result("get_timeline_state")],
+                fps
+            ),
+            "Ran get_timeline_state"
+        );
+        // The newest edit wins the header, and steps count calls plus edits.
+        let entries = [
+            call("split_clip"),
+            result("split_clip"),
+            ChatEntry::EditCard {
+                summary: "Split clip".to_owned(),
+                start: TimeCode(60),
+                end: TimeCode(120),
+                cue: TimeCode(0),
+            },
+        ];
+        assert_eq!(
+            activity_summary(&entries, fps),
+            "Edited 00:00:02:00 – 00:00:04:00 · 2 steps"
+        );
     }
 }

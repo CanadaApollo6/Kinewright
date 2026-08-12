@@ -116,6 +116,17 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   newline). Ships with instant local commands (/remove-fillers, /captions,
   /freeze, /export, /undo, /redo, /help) and agent prompt commands
   (/cut-silences, /tighten)
+- The session stream collapses machine activity: consecutive tool calls,
+  results, and edit events fold into one compact dropdown whose header
+  updates live with the latest step ("Edited 00:00:12:00 - 00:00:31:10 ·
+  6 steps", "Ran split_clip") - expand it for the full cards, review
+  actions included. Conversation stays first-class; machinery is one line
+- Reasoning-effort selector beside the model picker: Claude Code offers
+  its session levels (low through max), and Codex levels come per model
+  from the CLI's catalog - an effort is only ever offered where the
+  chosen model supports it, with Default deferring to the CLI. The
+  composer now reserves its measured height, so slash suggestions and
+  multi-line input shrink the stream instead of pushing the composer out
 - Model selector in the composer row: pick the model each harness runs -
   Claude Code offers its Opus/Sonnet/Haiku tiers, and the Codex list comes
   from the installed CLI's own model catalog, so it always matches what

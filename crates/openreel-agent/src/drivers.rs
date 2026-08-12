@@ -195,6 +195,9 @@ impl ClaudeSession {
         if let Some(model) = &cfg.model {
             command.args(["--model", model]);
         }
+        if let Some(effort) = &cfg.effort {
+            command.args(["--effort", effort]);
+        }
         if let Some(directory) = &cfg.working_directory {
             command.current_dir(directory);
         }
@@ -259,6 +262,7 @@ struct CodexSession {
     target: CodexSpawnTarget,
     endpoint: String,
     model: Option<String>,
+    effort: Option<String>,
     max_turns: u32,
     turns: u32,
     prior_requests: Vec<String>,
@@ -294,6 +298,7 @@ impl CodexSession {
             target,
             endpoint,
             model: cfg.model,
+            effort: cfg.effort,
             max_turns: cfg.max_turns.unwrap_or(8).max(1),
             turns: 0,
             prior_requests: Vec::new(),
@@ -353,6 +358,7 @@ impl AgentSession for CodexSession {
             &self.target,
             &self.endpoint,
             self.model.as_deref(),
+            self.effort.as_deref(),
             &self.scratch_directory,
             &self.model_catalog_path,
             &self.tool_names,
@@ -427,10 +433,14 @@ impl Drop for CodexSession {
     }
 }
 
+// One argument per independent launch input; a grouping struct would only
+// exist for this call and its test.
+#[allow(clippy::too_many_arguments)]
 fn build_codex_command(
     target: &CodexSpawnTarget,
     endpoint: &str,
     model: Option<&str>,
+    effort: Option<&str>,
     scratch_directory: &Path,
     model_catalog_path: &Path,
     tool_names: &[String],
@@ -454,6 +464,12 @@ fn build_codex_command(
     }
     if let Some(model) = model {
         command.arg("--model").arg(model);
+    }
+    if let Some(effort) = effort {
+        let effort = serde_json::to_string(effort).expect("serializing a string cannot fail");
+        command
+            .arg("-c")
+            .arg(format!("model_reasoning_effort={effort}"));
     }
     let endpoint = serde_json::to_string(endpoint).expect("serializing a string cannot fail");
     let model_catalog_path = serde_json::to_string(model_catalog_path)
@@ -1028,6 +1044,7 @@ mod tests {
             &target,
             "http://127.0.0.1:43123/mcp",
             Some("gpt-test"),
+            Some("xhigh"),
             scratch,
             model_catalog,
             &tools,
@@ -1050,6 +1067,8 @@ mod tests {
         assert!(joined.contains("web_search='disabled'"));
         assert!(joined.contains("tools.update_plan.enabled=false"));
         assert!(joined.contains("project_doc_max_bytes=0"));
+        assert!(joined.contains("--model gpt-test"));
+        assert!(joined.contains("model_reasoning_effort=\"xhigh\""));
         assert!(joined.contains("model_catalog_json=\"models-direct.json\""));
         assert!(joined.contains("mcp_servers.openreel.required=true"));
         assert!(joined.contains(

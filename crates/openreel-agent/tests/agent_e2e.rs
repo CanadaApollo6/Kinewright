@@ -27,6 +27,7 @@ fn claude_splits_then_deletes_via_the_live_mcp_server() {
         .start_session(SessionConfig {
             working_directory: std::env::current_dir().ok(),
             model: None,
+            effort: None,
             max_turns: Some(8),
             mcp_url: Some(server.endpoint().to_owned()),
         })
@@ -96,6 +97,7 @@ fn codex_splits_then_deletes_via_the_live_mcp_server() {
         .start_session(SessionConfig {
             working_directory: std::env::current_dir().ok(),
             model: None,
+            effort: None,
             max_turns: Some(2),
             mcp_url: Some(server.endpoint().to_owned()),
         })
