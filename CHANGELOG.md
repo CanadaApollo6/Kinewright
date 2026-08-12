@@ -116,6 +116,12 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   newline). Ships with instant local commands (/remove-fillers, /captions,
   /freeze, /export, /undo, /redo, /help) and agent prompt commands
   (/cut-silences, /tighten)
+- Model selector in the composer row: pick the model each harness runs -
+  Claude Code offers its Opus/Sonnet/Haiku tiers, and the Codex list comes
+  from the installed CLI's own model catalog, so it always matches what
+  the CLI can actually run. Default defers to the CLI's configured model,
+  choices are remembered per harness, and changing models restarts the
+  session just like switching harnesses
 - Import is one gesture: an imported file goes straight onto the timeline
   and the monitor cues to its first frame, the media rail stays open once
   media exists instead of vanishing the moment the import lands, and the

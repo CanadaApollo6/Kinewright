@@ -626,7 +626,7 @@ fn create_codex_direct_model_catalog(
     Ok((directory, path))
 }
 
-fn codex_model_cache_path() -> Option<PathBuf> {
+pub(crate) fn codex_model_cache_path() -> Option<PathBuf> {
     env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".codex")))

@@ -13,6 +13,8 @@ use crate::{
 };
 
 const AGENT_HARNESS_MEMORY_ID: &str = "openreel-agent-harness";
+const CLAUDE_MODEL_MEMORY_ID: &str = "openreel-agent-model-claude-code";
+const CODEX_MODEL_MEMORY_ID: &str = "openreel-agent-model-codex";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentHarnessChoice {
@@ -139,7 +141,10 @@ impl OpenReelApp {
                 .or_else(|| std::env::current_dir().ok());
             let config = SessionConfig {
                 working_directory,
-                model: None,
+                model: match self.agent_harness {
+                    AgentHarnessChoice::ClaudeCode => self.claude_model.clone(),
+                    AgentHarnessChoice::Codex => self.codex_model.clone(),
+                },
                 // Subscription harnesses are flat fee and the Stop button is
                 // always available, so sessions run without a turn ceiling.
                 max_turns: None,
@@ -281,6 +286,12 @@ impl OpenReelApp {
                     self.agent_harness = remembered;
                 }
             }
+            // Model choices follow the same idle-restore pattern; ids that no
+            // longer exist in the harness's catalog fall back to Default.
+            self.claude_model =
+                restore_model_choice(ui.ctx(), CLAUDE_MODEL_MEMORY_ID, &self.claude_models);
+            self.codex_model =
+                restore_model_choice(ui.ctx(), CODEX_MODEL_MEMORY_ID, &self.codex_models);
         }
         let any_harness = self.claude_info.is_some() || self.codex_info.is_some();
 
@@ -610,6 +621,58 @@ impl OpenReelApp {
             } else if any_harness {
                 ui.colored_label(color::TEXT_SECONDARY, self.agent_harness.label());
             }
+            // Model picker for the selected harness. Default defers to the
+            // CLI's configured model; a change restarts the session, same as
+            // switching harnesses.
+            if selected_available {
+                let running = self.agent_running;
+                let (models, choice, memory_id) = match self.agent_harness {
+                    AgentHarnessChoice::ClaudeCode => (
+                        &self.claude_models,
+                        &mut self.claude_model,
+                        CLAUDE_MODEL_MEMORY_ID,
+                    ),
+                    AgentHarnessChoice::Codex => (
+                        &self.codex_models,
+                        &mut self.codex_model,
+                        CODEX_MODEL_MEMORY_ID,
+                    ),
+                };
+                if !models.is_empty() {
+                    let before = choice.clone();
+                    let selected_text = choice
+                        .as_deref()
+                        .map_or("Default", |id| {
+                            models
+                                .iter()
+                                .find(|model| model.id == id)
+                                .map_or(id, |model| model.label.as_str())
+                        })
+                        .to_owned();
+                    ui.add_enabled_ui(!running, |ui| {
+                        egui::ComboBox::from_id_salt("composer-model")
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(choice, None, "Default");
+                                for model in models {
+                                    ui.selectable_value(
+                                        choice,
+                                        Some(model.id.clone()),
+                                        &model.label,
+                                    );
+                                }
+                            });
+                    });
+                    let changed = *choice != before;
+                    let persisted = choice.clone().unwrap_or_default();
+                    if changed {
+                        self.stop_agent();
+                        ui.ctx().data_mut(|data| {
+                            data.insert_persisted(egui::Id::new(memory_id), persisted);
+                        });
+                    }
+                }
+            }
             match &harness_summary {
                 Some(summary) => {
                     let label = ui.colored_label(
@@ -672,6 +735,16 @@ impl OpenReelApp {
             });
         });
     }
+}
+
+/// A remembered model id survives only while the harness still offers it.
+fn restore_model_choice(
+    ctx: &egui::Context,
+    memory_id: &str,
+    models: &[openreel_agent::ModelChoice],
+) -> Option<String> {
+    ctx.data_mut(|data| data.get_persisted::<String>(egui::Id::new(memory_id)))
+        .filter(|id| models.iter().any(|model| model.id == *id))
 }
 
 fn chat_frame(fill: egui::Color32, stroke: egui::Color32) -> egui::Frame {
