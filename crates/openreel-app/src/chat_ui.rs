@@ -46,6 +46,14 @@ impl AgentHarnessChoice {
             _ => None,
         }
     }
+
+    /// The harness's brand mark (already in its brand color - not tinted).
+    fn brand_icon(self) -> Icon {
+        match self {
+            Self::ClaudeCode => Icon::BrandClaude,
+            Self::Codex => Icon::BrandOpenAi,
+        }
+    }
 }
 
 pub(crate) enum ChatEntry {
@@ -318,8 +326,13 @@ impl OpenReelApp {
         // exception is the no-harness state, which explains itself up front.
         if !any_harness {
             chat_frame(color::SURFACE, color::BORDER_SUBTLE).show(ui, |ui| {
-                harness_row(ui, "Claude Code", self.claude_info.as_ref());
-                harness_row(ui, "Codex", self.codex_info.as_ref());
+                harness_row(
+                    ui,
+                    Icon::BrandClaude,
+                    "Claude Code",
+                    self.claude_info.as_ref(),
+                );
+                harness_row(ui, Icon::BrandOpenAi, "Codex", self.codex_info.as_ref());
                 ui.separator();
                 ui.label("Install and authenticate a supported agent CLI to use chat.");
                 ui.hyperlink_to(
@@ -537,20 +550,27 @@ impl OpenReelApp {
         ui.horizontal(|ui| {
             if self.claude_info.is_some() && self.codex_info.is_some() {
                 let before = self.agent_harness;
+                ui.add(self.agent_harness.brand_icon().image(size::ICON_SM));
                 ui.add_enabled_ui(!self.agent_running, |ui| {
                     egui::ComboBox::from_id_salt("composer-harness")
                         .selected_text(self.agent_harness.label())
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.agent_harness,
-                                AgentHarnessChoice::ClaudeCode,
-                                "Claude Code",
-                            );
-                            ui.selectable_value(
-                                &mut self.agent_harness,
-                                AgentHarnessChoice::Codex,
-                                "Codex",
-                            );
+                            ui.horizontal(|ui| {
+                                ui.add(Icon::BrandClaude.image(size::ICON_SM));
+                                ui.selectable_value(
+                                    &mut self.agent_harness,
+                                    AgentHarnessChoice::ClaudeCode,
+                                    "Claude Code",
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add(Icon::BrandOpenAi.image(size::ICON_SM));
+                                ui.selectable_value(
+                                    &mut self.agent_harness,
+                                    AgentHarnessChoice::Codex,
+                                    "Codex",
+                                );
+                            });
                         });
                 });
                 if before != self.agent_harness {
@@ -563,6 +583,7 @@ impl OpenReelApp {
                     });
                 }
             } else if any_harness {
+                ui.add(self.agent_harness.brand_icon().image(size::ICON_SM));
                 ui.colored_label(color::TEXT_SECONDARY, self.agent_harness.label());
             }
             // Model picker for the selected harness. Default defers to the
@@ -915,8 +936,9 @@ fn chat_frame(fill: egui::Color32, stroke: egui::Color32) -> egui::Frame {
         .inner_margin(egui::Margin::same(theme::margin(space::TWO)))
 }
 
-fn harness_row(ui: &mut egui::Ui, name: &str, info: Option<&HarnessInfo>) {
+fn harness_row(ui: &mut egui::Ui, icon: Icon, name: &str, info: Option<&HarnessInfo>) {
     ui.horizontal(|ui| {
+        ui.add(icon.image(size::ICON_SM));
         if let Some(info) = info {
             ui.colored_label(color::STATUS_SUCCESS, "●");
             ui.label(format!(

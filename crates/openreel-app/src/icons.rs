@@ -6,6 +6,11 @@ use crate::theme::{radius, size};
 pub(crate) enum Icon {
     Add,
     Alert,
+    /// Anthropic's Claude spark, in its brand terracotta (nominative use:
+    /// it marks the session's harness, exactly as T3 Code does).
+    BrandClaude,
+    /// `OpenAI`'s blossom mark, white per its on-dark brand usage.
+    BrandOpenAi,
     Delete,
     Export,
     Filmstrip,
@@ -30,6 +35,8 @@ impl Icon {
         match self {
             Self::Add => "bytes://openreel/icons/add.svg",
             Self::Alert => "bytes://openreel/icons/alert.svg",
+            Self::BrandClaude => "bytes://openreel/icons/brand-claude.svg",
+            Self::BrandOpenAi => "bytes://openreel/icons/brand-openai.svg",
             Self::Delete => "bytes://openreel/icons/delete.svg",
             Self::Export => "bytes://openreel/icons/export.svg",
             Self::Filmstrip => "bytes://openreel/icons/filmstrip.svg",
@@ -54,6 +61,8 @@ impl Icon {
         match self {
             Self::Add => include_bytes!("../assets/icons/add.svg"),
             Self::Alert => include_bytes!("../assets/icons/alert.svg"),
+            Self::BrandClaude => include_bytes!("../assets/icons/brand-claude.svg"),
+            Self::BrandOpenAi => include_bytes!("../assets/icons/brand-openai.svg"),
             Self::Delete => include_bytes!("../assets/icons/delete.svg"),
             Self::Export => include_bytes!("../assets/icons/export.svg"),
             Self::Filmstrip => include_bytes!("../assets/icons/filmstrip.svg"),

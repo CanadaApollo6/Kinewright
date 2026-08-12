@@ -116,6 +116,10 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   newline). Ships with instant local commands (/remove-fillers, /captions,
   /freeze, /export, /undo, /redo, /help) and agent prompt commands
   (/cut-silences, /tighten)
+- Brand marks in the harness picker: the Claude spark (brand terracotta)
+  and the OpenAI blossom (white, per on-dark usage) identify the session's
+  harness in the composer row, the picker dropdown, and the install card -
+  nominative marks, T3-style
 - The session stream collapses machine activity: consecutive tool calls,
   results, and edit events fold into one compact dropdown whose header
   updates live with the latest step ("Edited 00:00:12:00 - 00:00:31:10 ·
