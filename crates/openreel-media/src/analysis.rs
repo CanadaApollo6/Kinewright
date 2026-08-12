@@ -98,7 +98,7 @@ impl VisualAssetService {
         let inserted = self
             .in_flight
             .lock()
-            .is_ok_and(|mut in_flight| in_flight.insert(key));
+            .is_ok_and(|mut in_flight| in_flight.insert(key.clone()));
         if !inserted {
             return true;
         }
@@ -125,24 +125,33 @@ enum Job {
 impl Job {
     fn key(&self) -> JobKey {
         match self {
-            Self::Waveform(asset) => JobKey::Waveform(asset.id),
+            Self::Waveform(asset) => JobKey::Waveform {
+                asset: asset.id,
+                path: asset.path.clone(),
+            },
             Self::Thumbnail {
                 asset,
                 source_at,
                 max_width,
-            } => JobKey::Thumbnail(ThumbnailKey {
-                asset: asset.id,
-                source_at: *source_at,
-                max_width: *max_width,
-            }),
+            } => JobKey::Thumbnail {
+                key: ThumbnailKey {
+                    asset: asset.id,
+                    source_at: *source_at,
+                    max_width: *max_width,
+                },
+                path: asset.path.clone(),
+            },
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Dedup keys carry the asset's PATH as well as its id: ids are per-document,
+/// so with several projects open the same id can name different files, and an
+/// id-only key would hand one project's pixels to another's request.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum JobKey {
-    Waveform(AssetId),
-    Thumbnail(ThumbnailKey),
+    Waveform { asset: AssetId, path: PathBuf },
+    Thumbnail { key: ThumbnailKey, path: PathBuf },
 }
 
 struct VisualAssetWorker {
@@ -181,6 +190,7 @@ impl VisualAssetWorker {
                 self.waveform(&asset)
                     .unwrap_or_else(|error| VisualAssetResult::Failed {
                         asset: asset.id,
+                        path: asset.path.clone(),
                         request: VisualRequestKind::Waveform,
                         message: error.to_string(),
                     })
@@ -198,6 +208,7 @@ impl VisualAssetWorker {
                 self.thumbnail(&asset, key)
                     .unwrap_or_else(|error| VisualAssetResult::Failed {
                         asset: asset.id,
+                        path: asset.path.clone(),
                         request: VisualRequestKind::Thumbnail(key),
                         message: error.to_string(),
                     })
@@ -210,6 +221,7 @@ impl VisualAssetWorker {
         let store = WaveformStore::new(self.root.join("waveforms"));
         if let Some(mut cached) = store.load(&hash, asset.fps, asset.duration)? {
             cached.asset = asset.id;
+            cached.path.clone_from(&asset.path);
             return Ok(VisualAssetResult::Waveform(Arc::new(cached)));
         }
         let peaks = decode_audio_peaks(
@@ -224,6 +236,7 @@ impl VisualAssetWorker {
         .collect();
         let waveform = WaveformData {
             asset: asset.id,
+            path: asset.path.clone(),
             content_sha256: hash,
             source_fps: asset.fps,
             source_frames: asset.duration,
@@ -249,6 +262,7 @@ impl VisualAssetWorker {
         };
         Ok(VisualAssetResult::Thumbnail(ThumbnailFrame {
             key,
+            path: asset.path.clone(),
             image: Arc::new(image),
         }))
     }
@@ -404,6 +418,7 @@ mod tests {
     fn waveform(hash: &str) -> WaveformData {
         WaveformData {
             asset: AssetId(1),
+            path: PathBuf::from("visual-1.wav"),
             content_sha256: hash.to_owned(),
             source_fps: Rational::new(30, 1).unwrap(),
             source_frames: TimeCode(300),
@@ -446,12 +461,19 @@ mod tests {
         assert!(service.request(Job::Waveform(asset(1))));
         assert!(!service.request(Job::Waveform(asset(2))));
         assert_eq!(in_flight.lock().unwrap().len(), 1);
-        assert!(
-            in_flight
-                .lock()
-                .unwrap()
-                .contains(&JobKey::Waveform(AssetId(1)))
-        );
+        assert!(in_flight.lock().unwrap().contains(&JobKey::Waveform {
+            asset: AssetId(1),
+            path: asset(1).path,
+        }));
+    }
+
+    #[test]
+    fn same_id_different_files_are_distinct_jobs() {
+        // Two open projects can both name AssetId(1); the dedup key must
+        // treat different files as different work.
+        let mut second = asset(1);
+        second.path = PathBuf::from("other-project.wav");
+        assert_ne!(Job::Waveform(asset(1)).key(), Job::Waveform(second).key());
     }
 
     #[test]

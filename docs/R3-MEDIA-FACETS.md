@@ -24,14 +24,14 @@ pub trait Analysis: Send + Sync {
     fn probe(&self, path: &Path) -> Result<MediaAsset, MediaError>;
     fn thumbnail_at(&self, t: TimeCode, max_w: u32) -> Result<RgbaImage, MediaError>;
     fn request_transcription(&self, asset: MediaAsset);
-    fn transcript_status(&self, asset: AssetId) -> TranscriptStatus;
+    fn transcript_status(&self, asset: &MediaAsset) -> TranscriptStatus;
     fn timeline_transcript(
         &self,
         document: &Document,
         range: Option<std::ops::Range<TimeCode>>,
     ) -> Result<Vec<TimelineTranscriptWord>, MediaError>;
     fn request_silence_detection(&self, asset: MediaAsset);
-    fn silence_status(&self, asset: AssetId) -> SilenceStatus;
+    fn silence_status(&self, asset: &MediaAsset) -> SilenceStatus;
     fn timeline_silences(
         &self,
         document: &Document,
@@ -39,7 +39,7 @@ pub trait Analysis: Send + Sync {
         minimum_source_frames: TimeCode,
     ) -> Result<Vec<TimelineSilenceSpan>, MediaError>;
     fn request_scene_detection(&self, asset: MediaAsset);
-    fn scene_status(&self, asset: AssetId) -> SceneStatus;
+    fn scene_status(&self, asset: &MediaAsset) -> SceneStatus;
     fn timeline_scene_changes(
         &self,
         document: &Document,

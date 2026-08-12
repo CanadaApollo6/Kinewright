@@ -294,8 +294,8 @@ impl Analysis for FfmpegMediaEngine {
         self.transcripts.request(asset);
     }
 
-    fn transcript_status(&self, asset: AssetId) -> TranscriptStatus {
-        self.transcripts.status(asset)
+    fn transcript_status(&self, asset: &MediaAsset) -> TranscriptStatus {
+        self.transcripts.status(&asset.path)
     }
 
     fn timeline_transcript(
@@ -310,8 +310,8 @@ impl Analysis for FfmpegMediaEngine {
         self.derived_analysis.request_silences(asset);
     }
 
-    fn silence_status(&self, asset: AssetId) -> SilenceStatus {
-        self.derived_analysis.silence_status(asset)
+    fn silence_status(&self, asset: &MediaAsset) -> SilenceStatus {
+        self.derived_analysis.silence_status(&asset.path)
     }
 
     fn timeline_silences(
@@ -328,8 +328,8 @@ impl Analysis for FfmpegMediaEngine {
         self.derived_analysis.request_scenes(asset);
     }
 
-    fn scene_status(&self, asset: AssetId) -> SceneStatus {
-        self.derived_analysis.scene_status(asset)
+    fn scene_status(&self, asset: &MediaAsset) -> SceneStatus {
+        self.derived_analysis.scene_status(&asset.path)
     }
 
     fn timeline_scene_changes(

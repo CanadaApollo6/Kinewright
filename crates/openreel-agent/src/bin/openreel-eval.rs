@@ -20,9 +20,9 @@ use openreel_agent::{
     },
 };
 use openreel_core::{
-    AgentDriver, Analysis, AssetId, AssetSceneChanges, AssetSilences, AssetTranscript,
-    AuthenticationStatus, Clip, ClipId, Document, MediaAsset, Rational, SceneStatus, SilenceStatus,
-    TimeCode, Track, TrackId, TrackKind, TranscriptStatus, map_source_range_to_project,
+    AgentDriver, Analysis, AssetSceneChanges, AssetSilences, AssetTranscript, AuthenticationStatus,
+    Clip, ClipId, Document, MediaAsset, Rational, SceneStatus, SilenceStatus, TimeCode, Track,
+    TrackId, TrackKind, TranscriptStatus, map_source_range_to_project,
 };
 use openreel_media::{
     FfmpegMediaEngine,
@@ -535,8 +535,8 @@ fn fixture_e2() -> Result<PreparedFixture, EvalError> {
     let asset = probe_named(&media, &generated.mp4, "silence-take")?;
     media.request_transcription(asset.clone());
     media.request_silence_detection(asset.clone());
-    let transcript = wait_for_transcript_result(media.as_ref(), asset.id)?;
-    let silences = wait_for_silences(media.as_ref(), asset.id)?;
+    let transcript = wait_for_transcript_result(media.as_ref(), &asset)?;
+    let silences = wait_for_silences(media.as_ref(), &asset)?;
     let long_silence = silence_frames(&silences, LONG_SILENCE_FRAMES);
     if long_silence == 0 {
         return Err(EvalError::Fixture(format!(
@@ -572,7 +572,7 @@ fn fixture_e3() -> Result<PreparedFixture, EvalError> {
     let generated = SpeechClip::plain("eval-e3-filler", SPEECH, "OPENREEL_EVAL_E3_AUDIO");
     let asset = probe_named(&media, &generated.mp4, "filler-take")?;
     media.request_transcription(asset.clone());
-    let transcript = wait_for_transcript_result(media.as_ref(), asset.id)?;
+    let transcript = wait_for_transcript_result(media.as_ref(), &asset)?;
     let words = normalized_words(&joined_words(&transcript));
     let (fillers, kept_words) = partition_fillers(&words);
     if fillers.is_empty() || kept_words.is_empty() {
@@ -624,7 +624,7 @@ fn fixture_e4() -> Result<PreparedFixture, EvalError> {
     );
     let asset = probe_named(&media, generated.path(), "scene-take")?;
     media.request_scene_detection(asset.clone());
-    let scenes = wait_for_scenes(media.as_ref(), asset.id)?;
+    let scenes = wait_for_scenes(media.as_ref(), &asset)?;
     let scene_set = scenes
         .changes
         .iter()
@@ -703,11 +703,8 @@ fn fixture_e7() -> Result<PreparedFixture, EvalError> {
     let mut transcripts = BTreeMap::new();
     let mut silences = BTreeMap::new();
     for asset in &assets {
-        transcripts.insert(
-            asset.id,
-            wait_for_transcript_result(media.as_ref(), asset.id)?,
-        );
-        silences.insert(asset.id, wait_for_silences(media.as_ref(), asset.id)?);
+        transcripts.insert(asset.id, wait_for_transcript_result(media.as_ref(), asset)?);
+        silences.insert(asset.id, wait_for_silences(media.as_ref(), asset)?);
     }
     let mut context = FixtureContext::default();
     for ((name, _, _), asset) in takes.iter().zip(&assets) {
@@ -967,22 +964,23 @@ fn timeline_document(
 
 fn wait_for_transcript_result(
     media: &dyn Analysis,
-    asset: AssetId,
+    asset: &MediaAsset,
 ) -> Result<Arc<AssetTranscript>, EvalError> {
     let deadline = Instant::now() + Duration::from_mins(20);
     let mut previous = String::new();
+    let label = asset.id;
     loop {
         let status = media.transcript_status(asset);
         let summary = format!("{status:?}");
         if summary != previous {
-            println!("  ASR {asset}: {summary}");
+            println!("  ASR {label}: {summary}");
             previous = summary;
         }
         match status {
             TranscriptStatus::Ready(transcript) => return Ok(transcript),
             TranscriptStatus::NoSpeech => {
                 return Err(EvalError::Fixture(format!(
-                    "asset {asset} produced no ASR speech"
+                    "asset {label} produced no ASR speech"
                 )));
             }
             TranscriptStatus::Failed(error) => return Err(EvalError::Fixture(error)),
@@ -990,7 +988,7 @@ fn wait_for_transcript_result(
         }
         if Instant::now() >= deadline {
             return Err(EvalError::Fixture(format!(
-                "asset {asset} transcription timed out"
+                "asset {label} transcription timed out"
             )));
         }
         thread::sleep(Duration::from_millis(100));
@@ -999,15 +997,16 @@ fn wait_for_transcript_result(
 
 fn wait_for_silences(
     media: &dyn Analysis,
-    asset: AssetId,
+    asset: &MediaAsset,
 ) -> Result<Arc<AssetSilences>, EvalError> {
     let deadline = Instant::now() + Duration::from_mins(3);
+    let label = asset.id;
     loop {
         match media.silence_status(asset) {
             SilenceStatus::Ready(silences) => return Ok(silences),
             SilenceStatus::NoAudio => {
                 return Err(EvalError::Fixture(format!(
-                    "asset {asset} has no audio for silence analysis"
+                    "asset {label} has no audio for silence analysis"
                 )));
             }
             SilenceStatus::Failed(error) => return Err(EvalError::Fixture(error)),
@@ -1015,7 +1014,7 @@ fn wait_for_silences(
         }
         if Instant::now() >= deadline {
             return Err(EvalError::Fixture(format!(
-                "asset {asset} silence analysis timed out"
+                "asset {label} silence analysis timed out"
             )));
         }
         thread::sleep(Duration::from_millis(50));
@@ -1024,15 +1023,16 @@ fn wait_for_silences(
 
 fn wait_for_scenes(
     media: &dyn Analysis,
-    asset: AssetId,
+    asset: &MediaAsset,
 ) -> Result<Arc<AssetSceneChanges>, EvalError> {
     let deadline = Instant::now() + Duration::from_mins(3);
+    let label = asset.id;
     loop {
         match media.scene_status(asset) {
             SceneStatus::Ready(scenes) => return Ok(scenes),
             SceneStatus::NoVideo => {
                 return Err(EvalError::Fixture(format!(
-                    "asset {asset} has no video for scene analysis"
+                    "asset {label} has no video for scene analysis"
                 )));
             }
             SceneStatus::Failed(error) => return Err(EvalError::Fixture(error)),
@@ -1040,7 +1040,7 @@ fn wait_for_scenes(
         }
         if Instant::now() >= deadline {
             return Err(EvalError::Fixture(format!(
-                "asset {asset} scene analysis timed out"
+                "asset {label} scene analysis timed out"
             )));
         }
         thread::sleep(Duration::from_millis(50));

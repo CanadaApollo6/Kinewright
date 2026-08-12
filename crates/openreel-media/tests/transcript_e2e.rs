@@ -20,7 +20,7 @@ fn windows_sapi_speech_is_transcribed_by_the_real_model() {
         .probe(&clip.mp4)
         .expect("generated clip should probe");
     engine.request_transcription(asset.clone());
-    let transcript = wait_for_transcript(&engine, asset.id, true);
+    let transcript = wait_for_transcript(&engine, &asset, true);
     let output = transcript
         .words
         .iter()

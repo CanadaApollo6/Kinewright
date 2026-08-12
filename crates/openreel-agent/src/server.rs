@@ -529,7 +529,7 @@ impl OpenReelMcp {
             let Some(asset) = document.asset(span.asset) else {
                 continue;
             };
-            let words = match self.analysis.transcript_status(span.asset) {
+            let words = match self.analysis.transcript_status(asset) {
                 TranscriptStatus::Ready(transcript) => Some(transcript),
                 _ => None,
             };
@@ -548,7 +548,7 @@ impl OpenReelMcp {
             .iter()
             .filter(|asset| {
                 !matches!(
-                    self.analysis.silence_status(asset.id),
+                    self.analysis.silence_status(asset),
                     SilenceStatus::Ready(_) | SilenceStatus::NoAudio
                 )
             })
@@ -600,10 +600,10 @@ impl OpenReelMcp {
         let Some(asset) = document.asset(asset_id) else {
             return Ok(error_text(format!("asset {asset_id} does not exist")));
         };
-        let mut status = self.analysis.transcript_status(asset_id);
+        let mut status = self.analysis.transcript_status(asset);
         if status == TranscriptStatus::NotRequested {
             self.analysis.request_transcription(asset.clone());
-            status = self.analysis.transcript_status(asset_id);
+            status = self.analysis.transcript_status(asset);
         }
         Ok(success_text(render_asset_transcript(asset_id, &status)))
     }
@@ -621,12 +621,12 @@ impl OpenReelMcp {
         if minimum <= TimeCode::ZERO {
             return Ok(error_text("min_duration_frames must be positive"));
         }
-        let mut status = self.analysis.silence_status(asset_id);
+        let mut status = self.analysis.silence_status(asset);
         if status == SilenceStatus::NotRequested {
             self.analysis.request_silence_detection(asset.clone());
-            status = self.analysis.silence_status(asset_id);
+            status = self.analysis.silence_status(asset);
         }
-        let transcript = match self.analysis.transcript_status(asset_id) {
+        let transcript = match self.analysis.transcript_status(asset) {
             TranscriptStatus::Ready(transcript) => Some(transcript),
             _ => None,
         };
@@ -654,10 +654,10 @@ impl OpenReelMcp {
             },
             None => DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS,
         };
-        let mut status = self.analysis.scene_status(asset_id);
+        let mut status = self.analysis.scene_status(asset);
         if status == SceneStatus::NotRequested {
             self.analysis.request_scene_detection(asset.clone());
-            status = self.analysis.scene_status(asset_id);
+            status = self.analysis.scene_status(asset);
         }
         Ok(success_text(render_asset_scene_changes(
             asset_id, &status, minimum,
@@ -680,7 +680,7 @@ impl OpenReelMcp {
             )));
         }
         for asset in &document.media_pool {
-            if self.analysis.transcript_status(asset.id) == TranscriptStatus::NotRequested {
+            if self.analysis.transcript_status(asset) == TranscriptStatus::NotRequested {
                 self.analysis.request_transcription(asset.clone());
             }
         }
@@ -693,7 +693,7 @@ impl OpenReelMcp {
         };
         let mut rendered = render_timeline_transcript(&document, range, &words);
         for asset in &document.media_pool {
-            let status = self.analysis.transcript_status(asset.id);
+            let status = self.analysis.transcript_status(asset);
             if !matches!(
                 status,
                 TranscriptStatus::Ready(_) | TranscriptStatus::NoSpeech
@@ -712,14 +712,14 @@ impl OpenReelMcp {
         let document = self.document()?;
         let range = validated_timeline_range(&document, requested, "timeline silence")?;
         for asset in &document.media_pool {
-            if self.analysis.silence_status(asset.id) == SilenceStatus::NotRequested {
+            if self.analysis.silence_status(asset) == SilenceStatus::NotRequested {
                 self.analysis.request_silence_detection(asset.clone());
             }
         }
         let transcripts = document
             .media_pool
             .iter()
-            .filter_map(|asset| match self.analysis.transcript_status(asset.id) {
+            .filter_map(|asset| match self.analysis.transcript_status(asset) {
                 TranscriptStatus::Ready(transcript) => Some((asset.id, transcript)),
                 _ => None,
             })
@@ -734,7 +734,7 @@ impl OpenReelMcp {
         };
         let mut rendered = render_timeline_silences(&document, range, &spans, &transcripts);
         for asset in &document.media_pool {
-            let status = self.analysis.silence_status(asset.id);
+            let status = self.analysis.silence_status(asset);
             if !matches!(status, SilenceStatus::Ready(_) | SilenceStatus::NoAudio) {
                 rendered.push('\n');
                 rendered.push_str(&render_asset_silences(
@@ -755,7 +755,7 @@ impl OpenReelMcp {
         let document = self.document()?;
         let range = validated_timeline_range(&document, requested, "timeline scene")?;
         for asset in &document.media_pool {
-            if self.analysis.scene_status(asset.id) == SceneStatus::NotRequested {
+            if self.analysis.scene_status(asset) == SceneStatus::NotRequested {
                 self.analysis.request_scene_detection(asset.clone());
             }
         }
@@ -769,7 +769,7 @@ impl OpenReelMcp {
         };
         let mut rendered = render_timeline_scene_changes(&document, range, &changes);
         for asset in &document.media_pool {
-            let status = self.analysis.scene_status(asset.id);
+            let status = self.analysis.scene_status(asset);
             if !matches!(status, SceneStatus::Ready(_) | SceneStatus::NoVideo) {
                 rendered.push('\n');
                 rendered.push_str(&render_asset_scene_changes(
@@ -1189,7 +1189,7 @@ mod tests {
 
         fn request_transcription(&self, _asset: MediaAsset) {}
 
-        fn transcript_status(&self, _asset: AssetId) -> TranscriptStatus {
+        fn transcript_status(&self, _asset: &MediaAsset) -> TranscriptStatus {
             TranscriptStatus::NotRequested
         }
 
@@ -1203,7 +1203,7 @@ mod tests {
 
         fn request_silence_detection(&self, _asset: MediaAsset) {}
 
-        fn silence_status(&self, _asset: AssetId) -> SilenceStatus {
+        fn silence_status(&self, _asset: &MediaAsset) -> SilenceStatus {
             SilenceStatus::NotRequested
         }
 
@@ -1218,7 +1218,7 @@ mod tests {
 
         fn request_scene_detection(&self, _asset: MediaAsset) {}
 
-        fn scene_status(&self, _asset: AssetId) -> SceneStatus {
+        fn scene_status(&self, _asset: &MediaAsset) -> SceneStatus {
             SceneStatus::NotRequested
         }
 

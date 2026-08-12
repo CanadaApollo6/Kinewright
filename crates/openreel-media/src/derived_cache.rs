@@ -8,7 +8,7 @@ use std::{
 };
 
 use crossbeam_channel::Receiver;
-use openreel_core::{AssetId, MediaError};
+use openreel_core::MediaError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::sha256::sha256_file;
@@ -42,8 +42,11 @@ where
         })
 }
 
+/// Derived-data state keyed by the asset's PATH, never its id: asset ids are
+/// per-document, so with several projects open the same id can name
+/// different files. Content identity is what derived data belongs to.
 pub(crate) struct StatusReporter<S> {
-    states: Arc<RwLock<HashMap<AssetId, S>>>,
+    states: Arc<RwLock<HashMap<PathBuf, S>>>,
 }
 
 impl<S> Clone for StatusReporter<S> {
@@ -61,31 +64,25 @@ impl<S> StatusReporter<S> {
         }
     }
 
-    pub(crate) fn update(&self, asset: AssetId, status: S) {
+    pub(crate) fn update(&self, path: &Path, status: S) {
         if let Ok(mut states) = self.states.write() {
-            states.insert(asset, status);
+            states.insert(path.to_path_buf(), status);
         }
     }
 
-    pub(crate) fn should_queue(
-        &self,
-        asset: AssetId,
-        blocks_queue: impl FnOnce(&S) -> bool,
-    ) -> bool {
+    pub(crate) fn should_queue(&self, path: &Path, blocks_queue: impl FnOnce(&S) -> bool) -> bool {
         self.states.read().map_or(true, |states| {
-            states
-                .get(&asset)
-                .is_none_or(|status| !blocks_queue(status))
+            states.get(path).is_none_or(|status| !blocks_queue(status))
         })
     }
 }
 
 impl<S: Clone> StatusReporter<S> {
-    pub(crate) fn get_or(&self, asset: AssetId, default: S) -> S {
+    pub(crate) fn get_or(&self, path: &Path, default: S) -> S {
         self.states
             .read()
             .ok()
-            .and_then(|states| states.get(&asset).cloned())
+            .and_then(|states| states.get(path).cloned())
             .unwrap_or(default)
     }
 }

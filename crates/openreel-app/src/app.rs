@@ -711,8 +711,8 @@ impl OpenReelApp {
         }
 
         if self.document.media_pool.iter().any(|asset| {
-            self.analysis.silence_status(asset.id).is_running()
-                || self.analysis.scene_status(asset.id).is_running()
+            self.analysis.silence_status(asset).is_running()
+                || self.analysis.scene_status(asset).is_running()
         }) {
             ctx.request_repaint_after(Duration::from_millis(100));
         }

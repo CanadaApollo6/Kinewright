@@ -7,9 +7,9 @@ use std::{
 
 use crossbeam_channel::{Sender, unbounded};
 use openreel_core::{
-    AssetId, AssetSceneChanges, AssetSilences, Document, ExportCancellation, FrameRounding,
-    MediaAsset, MediaError, MediaKind, Rational, SceneChange, SceneStatus, SilenceSpan,
-    SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan, map_frames_with_rounding,
+    AssetSceneChanges, AssetSilences, Document, ExportCancellation, FrameRounding, MediaAsset,
+    MediaError, MediaKind, Rational, SceneChange, SceneStatus, SilenceSpan, SilenceStatus,
+    TimeCode, TimelineSceneChange, TimelineSilenceSpan, map_frames_with_rounding,
     map_source_range_to_project,
 };
 use serde::{Deserialize, Serialize};
@@ -96,12 +96,12 @@ impl DerivedAnalysisService {
     }
 
     pub(crate) fn request_silences(&self, asset: MediaAsset) {
-        let asset_id = asset.id;
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
-            self.silence_states.update(asset.id, SilenceStatus::NoAudio);
+            self.silence_states
+                .update(&asset.path, SilenceStatus::NoAudio);
             return;
         }
-        let should_queue = self.silence_states.should_queue(asset.id, |status| {
+        let should_queue = self.silence_states.should_queue(&asset.path, |status| {
             matches!(
                 status,
                 SilenceStatus::Queued
@@ -114,26 +114,27 @@ impl DerivedAnalysisService {
         if !should_queue {
             return;
         }
-        self.silence_states.update(asset.id, SilenceStatus::Queued);
+        self.silence_states
+            .update(&asset.path, SilenceStatus::Queued);
+        let path = asset.path.clone();
         if self
             .jobs
             .send(Job::Silences(asset, self.config.silence))
             .is_err()
         {
             self.silence_states.update(
-                asset_id,
+                &path,
                 SilenceStatus::Failed("derived analysis worker stopped".to_owned()),
             );
         }
     }
 
     pub(crate) fn request_scenes(&self, asset: MediaAsset) {
-        let asset_id = asset.id;
         if !matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo) {
-            self.scene_states.update(asset.id, SceneStatus::NoVideo);
+            self.scene_states.update(&asset.path, SceneStatus::NoVideo);
             return;
         }
-        let should_queue = self.scene_states.should_queue(asset.id, |status| {
+        let should_queue = self.scene_states.should_queue(&asset.path, |status| {
             matches!(
                 status,
                 SceneStatus::Queued
@@ -146,26 +147,27 @@ impl DerivedAnalysisService {
         if !should_queue {
             return;
         }
-        self.scene_states.update(asset.id, SceneStatus::Queued);
+        self.scene_states.update(&asset.path, SceneStatus::Queued);
+        let path = asset.path.clone();
         if self
             .jobs
             .send(Job::Scenes(asset, self.config.scenes))
             .is_err()
         {
             self.scene_states.update(
-                asset_id,
+                &path,
                 SceneStatus::Failed("derived analysis worker stopped".to_owned()),
             );
         }
     }
 
-    pub(crate) fn silence_status(&self, asset: AssetId) -> SilenceStatus {
+    pub(crate) fn silence_status(&self, path: &Path) -> SilenceStatus {
         self.silence_states
-            .get_or(asset, SilenceStatus::NotRequested)
+            .get_or(path, SilenceStatus::NotRequested)
     }
 
-    pub(crate) fn scene_status(&self, asset: AssetId) -> SceneStatus {
-        self.scene_states.get_or(asset, SceneStatus::NotRequested)
+    pub(crate) fn scene_status(&self, path: &Path) -> SceneStatus {
+        self.scene_states.get_or(path, SceneStatus::NotRequested)
     }
 
     pub(crate) fn timeline_silences(
@@ -175,7 +177,7 @@ impl DerivedAnalysisService {
         minimum_source_frames: TimeCode,
     ) -> Result<Vec<TimelineSilenceSpan>, MediaError> {
         map_timeline_silences(document, range, minimum_source_frames, |asset| {
-            match self.silence_status(asset) {
+            match self.silence_status(&asset.path) {
                 SilenceStatus::Ready(silences) => Some(silences),
                 _ => None,
             }
@@ -189,7 +191,7 @@ impl DerivedAnalysisService {
         minimum_confidence_basis_points: u16,
     ) -> Result<Vec<TimelineSceneChange>, MediaError> {
         map_timeline_scene_changes(document, range, minimum_confidence_basis_points, |asset| {
-            match self.scene_status(asset) {
+            match self.scene_status(&asset.path) {
                 SceneStatus::Ready(scenes) => Some(scenes),
                 _ => None,
             }
@@ -228,13 +230,13 @@ impl DerivedAnalysisWorker {
             Job::Silences(asset, config) => {
                 if let Err(error) = self.analyze_silences(&asset, config) {
                     self.silence_states
-                        .update(asset.id, SilenceStatus::Failed(error.to_string()));
+                        .update(&asset.path, SilenceStatus::Failed(error.to_string()));
                 }
             }
             Job::Scenes(asset, config) => {
                 if let Err(error) = self.analyze_scenes(&asset, config) {
                     self.scene_states
-                        .update(asset.id, SceneStatus::Failed(error.to_string()));
+                        .update(&asset.path, SceneStatus::Failed(error.to_string()));
                 }
             }
         }
@@ -246,17 +248,18 @@ impl DerivedAnalysisWorker {
         asset: &MediaAsset,
         config: SilenceDetectionConfig,
     ) -> Result<(), MediaError> {
-        self.silence_states.update(asset.id, SilenceStatus::Hashing);
+        self.silence_states
+            .update(&asset.path, SilenceStatus::Hashing);
         let hash = self.content_hash(&asset.path)?;
         let store = SilenceStore::new(self.root.join("silences"), config);
         if let Some(mut cached) = store.load(&hash, asset.fps, asset.duration)? {
             cached.asset = asset.id;
             self.silence_states
-                .update(asset.id, SilenceStatus::Ready(Arc::new(cached)));
+                .update(&asset.path, SilenceStatus::Ready(Arc::new(cached)));
             return Ok(());
         }
         self.silence_states
-            .update(asset.id, SilenceStatus::Analyzing);
+            .update(&asset.path, SilenceStatus::Analyzing);
         let samples = decode_audio_range(
             &asset.path,
             asset.fps,
@@ -285,7 +288,7 @@ impl DerivedAnalysisWorker {
         };
         store.save(&result)?;
         self.silence_states
-            .update(asset.id, SilenceStatus::Ready(Arc::new(result)));
+            .update(&asset.path, SilenceStatus::Ready(Arc::new(result)));
         Ok(())
     }
 
@@ -294,16 +297,17 @@ impl DerivedAnalysisWorker {
         asset: &MediaAsset,
         config: SceneDetectionConfig,
     ) -> Result<(), MediaError> {
-        self.scene_states.update(asset.id, SceneStatus::Hashing);
+        self.scene_states.update(&asset.path, SceneStatus::Hashing);
         let hash = self.content_hash(&asset.path)?;
         let store = SceneStore::new(self.root.join("scenes"), config);
         if let Some(mut cached) = store.load(&hash, asset.fps, asset.duration)? {
             cached.asset = asset.id;
             self.scene_states
-                .update(asset.id, SceneStatus::Ready(Arc::new(cached)));
+                .update(&asset.path, SceneStatus::Ready(Arc::new(cached)));
             return Ok(());
         }
-        self.scene_states.update(asset.id, SceneStatus::Analyzing);
+        self.scene_states
+            .update(&asset.path, SceneStatus::Analyzing);
         let changes = detect_scene_changes(&asset.path, asset.fps, asset.duration, config)?;
         let result = AssetSceneChanges {
             asset: asset.id,
@@ -315,7 +319,7 @@ impl DerivedAnalysisWorker {
         };
         store.save(&result)?;
         self.scene_states
-            .update(asset.id, SceneStatus::Ready(Arc::new(result)));
+            .update(&asset.path, SceneStatus::Ready(Arc::new(result)));
         Ok(())
     }
 
@@ -518,7 +522,7 @@ pub(crate) fn map_timeline_silences<F>(
     mut silences_for: F,
 ) -> Result<Vec<TimelineSilenceSpan>, MediaError>
 where
-    F: FnMut(AssetId) -> Option<Arc<AssetSilences>>,
+    F: FnMut(&MediaAsset) -> Option<Arc<AssetSilences>>,
 {
     let requested = validated_range(document, range, "timeline silence")?;
     let minimum = minimum_source_frames.0.max(1);
@@ -539,7 +543,7 @@ where
             };
             let cached_silences = analyses
                 .entry(asset.id)
-                .or_insert_with(|| silences_for(asset.id));
+                .or_insert_with(|| silences_for(asset));
             let Some(silences) = cached_silences else {
                 continue;
             };
@@ -618,7 +622,7 @@ pub(crate) fn map_timeline_scene_changes<F>(
     mut scenes_for: F,
 ) -> Result<Vec<TimelineSceneChange>, MediaError>
 where
-    F: FnMut(AssetId) -> Option<Arc<AssetSceneChanges>>,
+    F: FnMut(&MediaAsset) -> Option<Arc<AssetSceneChanges>>,
 {
     let requested = validated_range(document, range, "timeline scene")?;
     let mut analyses = BTreeMap::new();
@@ -638,7 +642,7 @@ where
             };
             let cached_scenes = analyses
                 .entry(asset.id)
-                .or_insert_with(|| scenes_for(asset.id));
+                .or_insert_with(|| scenes_for(asset));
             let Some(scenes) = cached_scenes else {
                 continue;
             };
@@ -825,7 +829,9 @@ struct StoredScenes {
 mod tests {
     use std::{fs, path::PathBuf, process::Command};
 
-    use openreel_core::{Clip, ClipContent, ClipId, MediaAsset, Track, TrackId, TrackKind};
+    use openreel_core::{
+        AssetId, Clip, ClipContent, ClipId, MediaAsset, Track, TrackId, TrackKind,
+    };
 
     use super::*;
     use crate::test_support::{TempDirectory, ffmpeg_executable};

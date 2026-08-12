@@ -54,12 +54,11 @@ impl TranscriptService {
     }
 
     pub(crate) fn request(&self, asset: MediaAsset) {
-        let asset_id = asset.id;
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
-            self.update(asset.id, TranscriptStatus::NoSpeech);
+            self.update(&asset.path, TranscriptStatus::NoSpeech);
             return;
         }
-        let should_queue = self.states.should_queue(asset.id, |status| {
+        let should_queue = self.states.should_queue(&asset.path, |status| {
             matches!(
                 status,
                 TranscriptStatus::Queued
@@ -73,17 +72,18 @@ impl TranscriptService {
         if !should_queue {
             return;
         }
-        self.update(asset.id, TranscriptStatus::Queued);
+        self.update(&asset.path, TranscriptStatus::Queued);
+        let path = asset.path.clone();
         if self.jobs.send(asset).is_err() {
             self.update(
-                asset_id,
+                &path,
                 TranscriptStatus::Failed("transcript worker stopped".to_owned()),
             );
         }
     }
 
-    pub(crate) fn status(&self, asset: AssetId) -> TranscriptStatus {
-        self.states.get_or(asset, TranscriptStatus::NotRequested)
+    pub(crate) fn status(&self, path: &Path) -> TranscriptStatus {
+        self.states.get_or(path, TranscriptStatus::NotRequested)
     }
 
     pub(crate) fn timeline_words(
@@ -91,14 +91,14 @@ impl TranscriptService {
         document: &Document,
         range: Option<Range<TimeCode>>,
     ) -> Result<Vec<TimelineTranscriptWord>, MediaError> {
-        map_timeline_words(document, range, |asset| match self.status(asset) {
+        map_timeline_words(document, range, |asset| match self.status(&asset.path) {
             TranscriptStatus::Ready(transcript) => Some(transcript),
             _ => None,
         })
     }
 
-    fn update(&self, asset: AssetId, status: TranscriptStatus) {
-        self.states.update(asset, status);
+    fn update(&self, path: &Path, status: TranscriptStatus) {
+        self.states.update(path, status);
     }
 }
 
@@ -121,21 +121,21 @@ impl TranscriptWorker {
 
     fn handle(&mut self, asset: &MediaAsset) -> bool {
         if let Err(error) = self.transcribe_asset(asset) {
-            self.update(asset.id, TranscriptStatus::Failed(error.to_string()));
+            self.update(&asset.path, TranscriptStatus::Failed(error.to_string()));
         }
         true
     }
 
     fn transcribe_asset(&mut self, asset: &MediaAsset) -> Result<(), MediaError> {
-        self.update(asset.id, TranscriptStatus::Hashing);
+        self.update(&asset.path, TranscriptStatus::Hashing);
         let content_sha256 = sha256_file(&asset.path)?;
         if let Some(cached) = self.store.load(&content_sha256, asset.id)? {
-            self.finish(asset.id, cached);
+            self.finish(&asset.path, cached);
             return Ok(());
         }
 
         if self.model.is_none() {
-            let model_path = ensure_model(&self.data_dir, asset.id, &self.states)?;
+            let model_path = ensure_model(&self.data_dir, &asset.path, &self.states)?;
             let model_path = model_path.to_string_lossy();
             self.model = Some(
                 WhisperContext::new_with_params(
@@ -149,7 +149,7 @@ impl TranscriptWorker {
         }
 
         self.update(
-            asset.id,
+            &asset.path,
             TranscriptStatus::Transcribing {
                 progress_percent: 0,
             },
@@ -175,20 +175,20 @@ impl TranscriptWorker {
             self.states.clone(),
         )?;
         self.store.save(&transcript)?;
-        self.finish(asset.id, transcript);
+        self.finish(&asset.path, transcript);
         Ok(())
     }
 
-    fn finish(&self, asset: AssetId, transcript: AssetTranscript) {
+    fn finish(&self, path: &Path, transcript: AssetTranscript) {
         if transcript.words.is_empty() {
-            self.update(asset, TranscriptStatus::NoSpeech);
+            self.update(path, TranscriptStatus::NoSpeech);
         } else {
-            self.update(asset, TranscriptStatus::Ready(Arc::new(transcript)));
+            self.update(path, TranscriptStatus::Ready(Arc::new(transcript)));
         }
     }
 
-    fn update(&self, asset: AssetId, status: TranscriptStatus) {
-        self.states.update(asset, status);
+    fn update(&self, path: &Path, status: TranscriptStatus) {
+        self.states.update(path, status);
     }
 }
 
@@ -219,11 +219,11 @@ fn run_whisper(
     params.set_token_timestamps(true);
     params.set_split_on_word(true);
     params.set_max_len(1);
-    let progress_asset = asset.id;
+    let progress_path = asset.path.clone();
     params.set_progress_callback_safe(move |progress: i32| {
         let clamped = progress.clamp(0, 100);
         states.update(
-            progress_asset,
+            &progress_path,
             TranscriptStatus::Transcribing {
                 progress_percent: u8::try_from(clamped).unwrap_or(100),
             },
@@ -429,7 +429,7 @@ pub(crate) fn map_timeline_words<F>(
     mut transcript_for: F,
 ) -> Result<Vec<TimelineTranscriptWord>, MediaError>
 where
-    F: FnMut(AssetId) -> Option<Arc<AssetTranscript>>,
+    F: FnMut(&MediaAsset) -> Option<Arc<AssetTranscript>>,
 {
     let requested = range.unwrap_or(TimeCode::ZERO..document.duration);
     if requested.start < TimeCode::ZERO || requested.end <= requested.start {
@@ -455,7 +455,7 @@ where
             };
             let transcript = transcripts
                 .entry(asset.id)
-                .or_insert_with(|| transcript_for(asset.id));
+                .or_insert_with(|| transcript_for(asset));
             let Some(transcript) = transcript else {
                 continue;
             };
@@ -588,7 +588,7 @@ impl TranscriptStore {
 
 fn ensure_model(
     data_dir: &Path,
-    asset: AssetId,
+    asset_path: &Path,
     states: &StatusReporter<TranscriptStatus>,
 ) -> Result<PathBuf, MediaError> {
     let model_dir = data_dir.join("models").join("whisper");
@@ -614,7 +614,7 @@ fn ensure_model(
     }
     let total = response.content_length();
     states.update(
-        asset,
+        asset_path,
         TranscriptStatus::DownloadingModel {
             downloaded_bytes: 0,
             total_bytes: total,
@@ -637,7 +637,7 @@ fn ensure_model(
         })?;
         downloaded = downloaded.saturating_add(u64::try_from(count).unwrap_or_default());
         states.update(
-            asset,
+            asset_path,
             TranscriptStatus::DownloadingModel {
                 downloaded_bytes: downloaded,
                 total_bytes: total,

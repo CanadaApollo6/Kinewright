@@ -23,11 +23,11 @@ impl OpenReelApp {
         }
 
         for asset_id in timeline_assets {
-            let asset_name = self
-                .document
-                .asset(asset_id)
-                .map_or_else(|| asset_id.to_string(), |asset| asset.name.clone());
-            match self.analysis.transcript_status(asset_id) {
+            let Some(asset) = self.document.asset(asset_id) else {
+                continue;
+            };
+            let asset_name = asset.name.clone();
+            match self.analysis.transcript_status(asset) {
                 TranscriptStatus::Ready(_) | TranscriptStatus::NoSpeech => {}
                 TranscriptStatus::Failed(error) => {
                     return Err(format!("Transcript failed for {asset_name}: {error}"));

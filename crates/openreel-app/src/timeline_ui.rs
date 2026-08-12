@@ -1426,7 +1426,7 @@ fn paint_derived_markers(
                 * rect.width()
     };
 
-    if let SilenceStatus::Ready(silences) = media.silence_status(asset.id) {
+    if let SilenceStatus::Ready(silences) = media.silence_status(asset) {
         for span in &silences.spans {
             let start = span.source_start.max(source_range.start);
             let end = span.source_end.min(source_range.end);
@@ -1443,7 +1443,7 @@ fn paint_derived_markers(
         }
     }
 
-    if let SceneStatus::Ready(scenes) = media.scene_status(asset.id) {
+    if let SceneStatus::Ready(scenes) = media.scene_status(asset) {
         for change in &scenes.changes {
             if change.confidence_basis_points < 1_000
                 || change.source_frame < source_range.start

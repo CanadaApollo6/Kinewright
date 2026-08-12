@@ -108,7 +108,7 @@ impl OpenReelApp {
             asset.fps.numerator(),
             asset.fps.denominator()
         ));
-        let status = self.analysis.transcript_status(asset.id);
+        let status = self.analysis.transcript_status(&asset);
         match status {
             TranscriptStatus::NotRequested => {
                 self.analysis.request_transcription(asset);
@@ -219,7 +219,7 @@ impl OpenReelApp {
             .document
             .media_pool
             .iter()
-            .map(|asset| (asset, self.analysis.transcript_status(asset.id)))
+            .map(|asset| (asset, self.analysis.transcript_status(asset)))
             .collect::<Vec<_>>();
         if words.is_empty() {
             self.transcript_selection = None;

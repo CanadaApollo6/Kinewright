@@ -26,7 +26,7 @@ fn one_agent_message_removes_the_transcribed_filler_word() {
     let media = Arc::new(test_engine("OPENREEL_TRANSCRIPT_TEST_DATA_DIR"));
     let asset = media.probe(&clip.mp4).expect("generated clip should probe");
     media.request_transcription(asset.clone());
-    let transcript = wait_for_transcript(media.as_ref(), asset.id, false);
+    let transcript = wait_for_transcript(media.as_ref(), &asset, false);
     let whisper_output = joined_words(&transcript);
     let whisper_words = normalized_words(&whisper_output);
     assert!(

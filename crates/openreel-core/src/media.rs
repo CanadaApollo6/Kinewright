@@ -34,6 +34,12 @@ pub struct WaveformPeak {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WaveformData {
     pub asset: AssetId,
+    /// The requesting asset's media path. Asset ids are per-document, so
+    /// with several projects open the path is the identity consumers key
+    /// by. Not persisted: the disk cache is content-addressed, and the
+    /// serving worker rebinds the path per request.
+    #[serde(skip)]
+    pub path: std::path::PathBuf,
     pub content_sha256: String,
     pub source_fps: Rational,
     pub source_frames: TimeCode,
@@ -50,6 +56,8 @@ pub struct ThumbnailKey {
 #[derive(Debug, Clone)]
 pub struct ThumbnailFrame {
     pub key: ThumbnailKey,
+    /// See [`WaveformData::path`]: the content identity behind the id.
+    pub path: std::path::PathBuf,
     pub image: Arc<RgbaImage>,
 }
 
@@ -65,6 +73,8 @@ pub enum VisualAssetResult {
     Thumbnail(ThumbnailFrame),
     Failed {
         asset: AssetId,
+        /// See [`WaveformData::path`]: the content identity behind the id.
+        path: std::path::PathBuf,
         request: VisualRequestKind,
         message: String,
     },
@@ -327,7 +337,11 @@ pub trait Analysis: Send + Sync {
     /// requests for the same asset are coalesced by the implementation.
     fn request_transcription(&self, asset: MediaAsset);
     /// Return the latest state for an asset's derived transcript.
-    fn transcript_status(&self, asset: AssetId) -> TranscriptStatus;
+    ///
+    /// Takes the full asset, not just its id: asset ids are per-document, so
+    /// with several projects open the same id can name different files. The
+    /// asset's path is the identity derived data is keyed by.
+    fn transcript_status(&self, asset: &MediaAsset) -> TranscriptStatus;
     /// Return words currently audible on the timeline, optionally restricted
     /// to a half-open range of project frames.
     ///
@@ -341,7 +355,8 @@ pub trait Analysis: Send + Sync {
     ) -> Result<Vec<TimelineTranscriptWord>, MediaError>;
     /// Queue windowed-RMS silence analysis without blocking the caller.
     fn request_silence_detection(&self, asset: MediaAsset);
-    fn silence_status(&self, asset: AssetId) -> SilenceStatus;
+    /// See [`Analysis::transcript_status`] for why this takes the full asset.
+    fn silence_status(&self, asset: &MediaAsset) -> SilenceStatus;
     /// Return detected silence spans mapped into project time.
     ///
     /// # Errors
@@ -355,7 +370,8 @@ pub trait Analysis: Send + Sync {
     ) -> Result<Vec<TimelineSilenceSpan>, MediaError>;
     /// Queue proxy-resolution scene analysis without blocking the caller.
     fn request_scene_detection(&self, asset: MediaAsset);
-    fn scene_status(&self, asset: AssetId) -> SceneStatus;
+    /// See [`Analysis::transcript_status`] for why this takes the full asset.
+    fn scene_status(&self, asset: &MediaAsset) -> SceneStatus;
     /// Return scene changes mapped into project time.
     ///
     /// # Errors

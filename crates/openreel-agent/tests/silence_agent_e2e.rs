@@ -8,8 +8,8 @@ use openreel_agent::{
     ClaudeCodeDriver, McpServer, shrink_silence_span_for_cutting_with_transcript,
 };
 use openreel_core::{
-    AgentDriver, AgentEvent, Analysis, AssetId, Command as CoreCommand, Core, Document, Event,
-    Playback, Query, QueryResult, SessionConfig, SilenceSpan, SilenceStatus, TimeCode,
+    AgentDriver, AgentEvent, Analysis, Command as CoreCommand, Core, Document, Event, Playback,
+    Query, QueryResult, SessionConfig, SilenceSpan, SilenceStatus, TimeCode,
     map_source_range_to_project,
 };
 use openreel_media::test_support::{
@@ -34,8 +34,8 @@ fn claude_removes_long_silences_with_one_atomic_plan() {
     media.request_transcription(asset.clone());
     media.request_silence_detection(asset.clone());
     media.request_scene_detection(asset.clone());
-    let transcript = wait_for_transcript(media.as_ref(), asset.id, false);
-    let silences = wait_for_silences(media.as_ref(), asset.id);
+    let transcript = wait_for_transcript(media.as_ref(), &asset, false);
+    let silences = wait_for_silences(media.as_ref(), &asset);
     let transcript_text = joined_words(&transcript);
     let long_silences = silences
         .spans
@@ -193,7 +193,10 @@ fn claude_removes_long_silences_with_one_atomic_plan() {
     server.shutdown();
 }
 
-fn wait_for_silences(engine: &dyn Analysis, asset: AssetId) -> Arc<openreel_core::AssetSilences> {
+fn wait_for_silences(
+    engine: &dyn Analysis,
+    asset: &openreel_core::MediaAsset,
+) -> Arc<openreel_core::AssetSilences> {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         match engine.silence_status(asset) {
