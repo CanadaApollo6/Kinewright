@@ -1,11 +1,21 @@
 //! Crash recovery for the operation spine.
 //!
-//! The active journal lives at
-//! `%LOCALAPPDATA%/OpenReel/recovery/active.journal` (with the system temporary
-//! directory as a fallback when `LOCALAPPDATA` is unavailable). The file is a
-//! versioned preamble, a complete initial `Document` JSON line, then one
+//! Journals live under `%LOCALAPPDATA%/OpenReel/recovery/` (with the system
+//! temporary directory as a fallback when `LOCALAPPDATA` is unavailable),
+//! ONE FILE PER PROJECT: saved projects journal to a name derived from their
+//! path (`<stem>-<fnv64>.journal`, stable across builds so a crashed project
+//! finds its journal again), unsaved projects to `unsaved-N.journal`. Each
+//! file is a versioned preamble, a complete initial `Document` JSON line
+//! (whose header also records the owning project's path), then one
 //! `JournalCommand` JSON line per accepted Core change. A trailing newline is
 //! the commit marker for each line.
+//!
+//! Startup scans the whole directory and offers every found journal for
+//! restore or discard individually - a crash with several projects open
+//! loses none of them, and a journal can never replay into the wrong
+//! project because its identity travels in its own header. A journal that
+//! would collide with an undecided pending file allocates a suffixed name
+//! instead: pending crash data is never truncated by a new session.
 //!
 //! Every committed command is flushed and synced before the recorder accepts
 //! another event. A process crash can therefore lose one or more of the newest
@@ -34,6 +44,10 @@ const CORE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Debug, Serialize, Deserialize)]
 struct JournalHeader {
     format_version: u32,
+    /// The owning project's save path; `None` for unsaved projects. Optional
+    /// with a default so journals from before multi-project still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project_path: Option<PathBuf>,
     initial_document: Document,
 }
 
@@ -43,12 +57,17 @@ struct JournalWriter {
 }
 
 impl JournalWriter {
-    fn create(path: &Path, initial_document: &Document) -> Result<Self, String> {
-        Self::create_with_sync(path, initial_document, true)
+    fn create(
+        path: &Path,
+        project_path: Option<&Path>,
+        initial_document: &Document,
+    ) -> Result<Self, String> {
+        Self::create_with_sync(path, project_path, initial_document, true)
     }
 
     fn create_with_sync(
         path: &Path,
+        project_path: Option<&Path>,
         initial_document: &Document,
         sync_each_record: bool,
     ) -> Result<Self, String> {
@@ -73,6 +92,7 @@ impl JournalWriter {
             })?;
         let header = serde_json::to_vec(&JournalHeader {
             format_version: FORMAT_VERSION,
+            project_path: project_path.map(Path::to_path_buf),
             initial_document: initial_document.clone(),
         })
         .map_err(|error| format!("could not serialize recovery snapshot: {error}"))?;
@@ -123,6 +143,7 @@ struct ParsedCommand {
 
 #[derive(Debug)]
 struct ParsedJournal {
+    project_path: Option<PathBuf>,
     initial_document: Document,
     commands: Vec<ParsedCommand>,
     #[cfg(test)]
@@ -133,6 +154,7 @@ struct ParsedJournal {
 
 #[derive(Debug, Clone)]
 struct RecoveryReport {
+    project_path: Option<PathBuf>,
     document: Document,
     recovered_commands: usize,
     damage: Option<Damage>,
@@ -222,6 +244,7 @@ fn parse_journal(bytes: &[u8]) -> Result<ParsedJournal, Damage> {
     }
 
     Ok(ParsedJournal {
+        project_path: header.project_path,
         initial_document: header.initial_document,
         commands,
         #[cfg(test)]
@@ -271,6 +294,7 @@ fn replay(parsed: ParsedJournal) -> Inspection {
             });
         }
     };
+    let project_path = parsed.project_path;
     let mut document = parsed.initial_document;
     let mut recovered_commands = 0;
     let mut damage = parsed.damage;
@@ -323,6 +347,7 @@ fn replay(parsed: ParsedJournal) -> Inspection {
         }
     }
     Inspection::Recoverable(RecoveryReport {
+        project_path,
         document,
         recovered_commands,
         damage,
@@ -344,6 +369,7 @@ impl Recorder {
     fn start(
         core: &Core,
         path: &Path,
+        project_path: Option<&Path>,
         runtime_error: Arc<Mutex<Option<String>>>,
     ) -> Result<Self, String> {
         let events = core
@@ -362,7 +388,7 @@ impl Recorder {
                 ));
             }
         };
-        let writer = JournalWriter::create(path, &initial_document)?;
+        let writer = JournalWriter::create(path, project_path, &initial_document)?;
         let (control, controls) = unbounded();
         let worker = thread::Builder::new()
             .name("openreel-recovery".to_owned())
@@ -481,59 +507,78 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-enum PendingRecovery {
+enum PendingState {
     Recoverable(RecoveryReport),
     Unusable(Damage),
 }
 
+/// One journal found on disk at startup, awaiting a restore/discard decision.
+struct PendingJournal {
+    journal_path: PathBuf,
+    project_path: Option<PathBuf>,
+    state: PendingState,
+}
+
+/// A restore the user chose from the recovery dialog. The pending file
+/// survives until `consume_pending` confirms the restore actually landed.
+pub(crate) struct RestoreRequest {
+    pub(crate) document: Document,
+    pub(crate) project_path: Option<PathBuf>,
+    pub(crate) journal_path: PathBuf,
+}
+
 /// App-owned recovery lifecycle. All filesystem and UI behavior stays here.
 pub(crate) struct Recovery {
+    directory: PathBuf,
     path: PathBuf,
     recorder: Option<Recorder>,
-    pending: Option<PendingRecovery>,
-    retained_stale_journal: bool,
+    pending: Vec<PendingJournal>,
     runtime_error: Arc<Mutex<Option<String>>>,
 }
 
 impl Recovery {
-    pub(crate) fn start(core: &Core) -> Self {
-        Self::start_at(core, default_journal_path())
+    pub(crate) fn start(core: &Core, project_path: Option<&Path>) -> Self {
+        Self::start_in(default_recovery_directory(), core, project_path)
     }
 
-    fn start_at(core: &Core, path: PathBuf) -> Self {
-        let inspection = inspect_path(&path);
+    fn start_in(directory: PathBuf, core: &Core, project_path: Option<&Path>) -> Self {
+        let pending = scan_directory(&directory);
         let runtime_error = Arc::new(Mutex::new(None));
         let mut recovery = Self {
-            path,
+            path: directory.join("uninitialized.journal"),
+            directory,
             recorder: None,
-            pending: None,
-            retained_stale_journal: false,
+            pending,
             runtime_error,
         };
-        match inspection {
-            Inspection::Missing => recovery.attach(core),
-            Inspection::Recoverable(report) => {
-                recovery.pending = Some(PendingRecovery::Recoverable(report));
-            }
-            Inspection::Unusable(damage) => {
-                recovery.pending = Some(PendingRecovery::Unusable(damage));
-            }
-        }
+        // Per-project files never collide with pending ones, so journaling
+        // starts immediately even while restores await a decision.
+        recovery.attach(core, project_path);
         recovery
     }
 
     /// Finish the previous project's journal and begin from Core's authoritative
     /// current snapshot. Core's initial subscription event makes this race-free
     /// with edits from the agent server.
-    pub(crate) fn attach(&mut self, core: &Core) {
-        if self.pending.is_some() {
-            return;
-        }
+    pub(crate) fn attach(&mut self, core: &Core, project_path: Option<&Path>) {
         self.stop_active();
-        self.remove_journal();
-        self.retained_stale_journal = false;
+        let reserved: Vec<&Path> = self
+            .pending
+            .iter()
+            .map(|entry| entry.journal_path.as_path())
+            .collect();
+        let target = allocate_journal_path(&self.directory, project_path, &self.path, &reserved);
+        if target != self.path {
+            self.remove_journal();
+            self.path = target;
+        }
         *lock_unpoisoned(&self.runtime_error) = None;
-        match Recorder::start(core, &self.path, Arc::clone(&self.runtime_error)) {
+        match Recorder::start(
+            core,
+            &self.path,
+            project_path,
+            Arc::clone(&self.runtime_error),
+        ) {
             Ok(recorder) => {
                 self.recorder = Some(recorder);
             }
@@ -543,70 +588,70 @@ impl Recovery {
         }
     }
 
-    /// Saving establishes a new baseline, so a later crash only offers edits
-    /// made after the successful save.
-    pub(crate) fn checkpoint(&mut self, core: &Core) {
-        self.attach(core);
+    /// Saving establishes a new baseline (and, on first save or save-as,
+    /// migrates the journal to the project's name), so a later crash only
+    /// offers edits made after the successful save.
+    pub(crate) fn checkpoint(&mut self, core: &Core, project_path: Option<&Path>) {
+        self.attach(core, project_path);
     }
 
-    /// Render the startup decision and return the recovered document only when
-    /// the user explicitly chooses restore. Discard starts journaling the
-    /// already-running default project immediately.
-    pub(crate) fn show_dialog(
-        &mut self,
-        ctx: &egui::Context,
-        current_core: &Core,
-    ) -> Option<Document> {
-        let mut restore = false;
-        let mut discard = false;
-        if let Some(pending) = &self.pending {
+    /// Render the startup decisions - one row per found journal - and return
+    /// a restore request when the user picks one. The pending file survives
+    /// until `consume_pending` confirms the restore landed, so a failed
+    /// restore can still be recovered at the next launch.
+    pub(crate) fn show_dialog(&mut self, ctx: &egui::Context) -> Option<RestoreRequest> {
+        let mut restore: Option<usize> = None;
+        let mut discard: Option<usize> = None;
+        if !self.pending.is_empty() {
             egui::Window::new("Recover unsaved work?")
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    match pending {
-                        PendingRecovery::Recoverable(report) => {
-                            if report.recovered_commands == 0 {
-                                ui.label(
-                                    "OpenReel closed unexpectedly. The journal's initial project snapshot can be restored.",
-                                );
-                            } else {
+                    ui.label("OpenReel closed unexpectedly with unsaved work.");
+                    for (index, entry) in self.pending.iter().enumerate() {
+                        ui.separator();
+                        ui.strong(pending_project_label(entry.project_path.as_deref()));
+                        match &entry.state {
+                            PendingState::Recoverable(report) => {
                                 ui.label(format!(
-                                    "OpenReel closed before this session was saved. {} journaled command{} can be restored.",
+                                    "{} journaled command{} can be restored.",
                                     report.recovered_commands,
-                                    if report.recovered_commands == 1 { "" } else { "s" }
+                                    if report.recovered_commands == 1 {
+                                        ""
+                                    } else {
+                                        "s"
+                                    }
                                 ));
+                                if let Some(damage) = &report.damage {
+                                    ui.colored_label(
+                                        egui::Color32::YELLOW,
+                                        damage_description(damage),
+                                    );
+                                }
                             }
-                            if let Some(damage) = &report.damage {
+                            PendingState::Unusable(damage) => {
                                 ui.colored_label(
                                     egui::Color32::YELLOW,
-                                    damage_description(damage),
+                                    "This journal's initial snapshot is unavailable.",
                                 );
+                                ui.label(damage_description(damage));
                             }
                         }
-                        PendingRecovery::Unusable(damage) => {
-                            ui.colored_label(
-                                egui::Color32::YELLOW,
-                                "A stale recovery journal was found, but its initial snapshot is unavailable.",
-                            );
-                            ui.label(damage_description(damage));
-                        }
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    matches!(entry.state, PendingState::Recoverable(_)),
+                                    egui::Button::new("Restore"),
+                                )
+                                .clicked()
+                            {
+                                restore = Some(index);
+                            }
+                            if ui.button("Discard").clicked() {
+                                discard = Some(index);
+                            }
+                        });
                     }
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                matches!(pending, PendingRecovery::Recoverable(_)),
-                                egui::Button::new("Restore unsaved work"),
-                            )
-                            .clicked()
-                        {
-                            restore = true;
-                        }
-                        if ui.button("Discard recovery").clicked() {
-                            discard = true;
-                        }
-                    });
                 });
         }
 
@@ -628,21 +673,30 @@ impl Recovery {
             *lock_unpoisoned(&self.runtime_error) = None;
         }
 
-        if restore {
-            let Some(PendingRecovery::Recoverable(report)) = self.pending.take() else {
+        if let Some(index) = discard {
+            let entry = self.pending.remove(index);
+            remove_file_best_effort(&entry.journal_path, &self.runtime_error);
+            return None;
+        }
+        if let Some(index) = restore {
+            let entry = &self.pending[index];
+            let PendingState::Recoverable(report) = &entry.state else {
                 return None;
             };
-            // Keep the stale file until `attach` succeeds during Core replacement.
-            // If replacement fails, the next launch can still recover it.
-            self.retained_stale_journal = true;
-            return Some(report.document);
-        }
-        if discard {
-            self.pending = None;
-            self.remove_journal();
-            self.attach(current_core);
+            return Some(RestoreRequest {
+                document: report.document.clone(),
+                project_path: report.project_path.clone(),
+                journal_path: entry.journal_path.clone(),
+            });
         }
         None
+    }
+
+    /// A chosen restore landed: the crash journal has served its purpose.
+    pub(crate) fn consume_pending(&mut self, journal_path: &Path) {
+        self.pending
+            .retain(|entry| entry.journal_path != journal_path);
+        remove_file_best_effort(journal_path, &self.runtime_error);
     }
 
     fn stop_active(&mut self) {
@@ -652,32 +706,146 @@ impl Recovery {
     }
 
     fn remove_journal(&self) {
-        if let Err(error) = fs::remove_file(&self.path)
-            && error.kind() != io::ErrorKind::NotFound
-        {
-            *lock_unpoisoned(&self.runtime_error) = Some(format!(
-                "could not remove recovery journal {}: {error}",
-                self.path.display()
-            ));
-        }
+        remove_file_best_effort(&self.path, &self.runtime_error);
     }
 }
 
 impl Drop for Recovery {
     fn drop(&mut self) {
         self.stop_active();
-        if !self.retained_stale_journal && self.pending.is_none() {
-            self.remove_journal();
-        }
+        // A clean exit owes nothing to recovery; undecided pending journals
+        // from other crashed sessions stay for the next launch.
+        self.remove_journal();
     }
 }
 
-fn default_journal_path() -> PathBuf {
+fn remove_file_best_effort(path: &Path, runtime_error: &Arc<Mutex<Option<String>>>) {
+    if let Err(error) = fs::remove_file(path)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        *lock_unpoisoned(runtime_error) = Some(format!(
+            "could not remove recovery journal {}: {error}",
+            path.display()
+        ));
+    }
+}
+
+fn default_recovery_directory() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map_or_else(std::env::temp_dir, PathBuf::from)
         .join("OpenReel")
         .join("recovery")
-        .join("active.journal")
+}
+
+/// Every journal found on disk, in deterministic name order.
+fn scan_directory(directory: &Path) -> Vec<PendingJournal> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "journal")
+        })
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|journal_path| match inspect_path(&journal_path) {
+            Inspection::Missing => None,
+            Inspection::Recoverable(report) => Some(PendingJournal {
+                project_path: report.project_path.clone(),
+                journal_path,
+                state: PendingState::Recoverable(report),
+            }),
+            Inspection::Unusable(damage) => Some(PendingJournal {
+                journal_path,
+                project_path: None,
+                state: PendingState::Unusable(damage),
+            }),
+        })
+        .collect()
+}
+
+/// FNV-1a, chosen over the standard hasher because journal names must stay
+/// stable across builds and Rust versions to find their project again.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// `MyVideo-1a2b3c4d5e6f7081.journal` - readable stem, collision-proof hash.
+fn journal_file_name(project_path: &Path) -> String {
+    let stem: String = project_path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        .take(24)
+        .collect();
+    let stem = if stem.is_empty() {
+        "project".to_owned()
+    } else {
+        stem
+    };
+    let hash = fnv1a_64(project_path.to_string_lossy().as_bytes());
+    format!("{stem}-{hash:016x}.journal")
+}
+
+/// The journal path for a project, never colliding with a reserved (pending)
+/// file: undecided crash data must not be truncated by a new session. An
+/// unsaved project keeps its current `unsaved-N` file across baselines.
+fn allocate_journal_path(
+    directory: &Path,
+    project_path: Option<&Path>,
+    current: &Path,
+    reserved: &[&Path],
+) -> PathBuf {
+    let is_reserved = |candidate: &Path| reserved.contains(&candidate);
+    if let Some(project_path) = project_path {
+        let base = journal_file_name(project_path);
+        let first = directory.join(&base);
+        if !is_reserved(&first) {
+            return first;
+        }
+        let stem = base.trim_end_matches(".journal");
+        for suffix in 2.. {
+            let candidate = directory.join(format!("{stem}-{suffix}.journal"));
+            if !is_reserved(&candidate) {
+                return candidate;
+            }
+        }
+        unreachable!("an unreserved journal suffix always exists");
+    }
+    let keeps_current = current
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("unsaved-"))
+        && !is_reserved(current);
+    if keeps_current {
+        return current.to_path_buf();
+    }
+    for number in 1.. {
+        let candidate = directory.join(format!("unsaved-{number}.journal"));
+        if !is_reserved(&candidate) && !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("an unreserved unsaved journal name always exists");
+}
+
+fn pending_project_label(project_path: Option<&Path>) -> String {
+    project_path.and_then(Path::file_name).map_or_else(
+        || "Unsaved project".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 fn damage_description(damage: &Damage) -> String {
@@ -804,11 +972,16 @@ mod tests {
         document
     }
 
-    fn encoded_journal(initial: &Document, commands: &[JournalCommand]) -> Vec<u8> {
+    fn encoded_journal_for(
+        project_path: Option<&Path>,
+        initial: &Document,
+        commands: &[JournalCommand],
+    ) -> Vec<u8> {
         let mut bytes = MAGIC.to_vec();
         bytes.extend(
             serde_json::to_vec(&JournalHeader {
                 format_version: FORMAT_VERSION,
+                project_path: project_path.map(Path::to_path_buf),
                 initial_document: initial.clone(),
             })
             .unwrap(),
@@ -821,12 +994,19 @@ mod tests {
         bytes
     }
 
+    /// `None` also serializes exactly like a pre-multi-project header (the
+    /// identity field is skipped), so every test through here doubles as a
+    /// legacy-format compatibility check.
+    fn encoded_journal(initial: &Document, commands: &[JournalCommand]) -> Vec<u8> {
+        encoded_journal_for(None, initial, commands)
+    }
+
     #[test]
     fn journal_round_trip_preserves_agent_ops_and_undo_redo_history() {
         let directory = TestDirectory::new("round-trip");
         let initial = Document::default();
         let commands = representative_commands();
-        let mut writer = JournalWriter::create(&directory.journal(), &initial).unwrap();
+        let mut writer = JournalWriter::create(&directory.journal(), None, &initial).unwrap();
         for command in &commands {
             writer.append(command).unwrap();
         }
@@ -1132,8 +1312,13 @@ mod tests {
         let directory = TestDirectory::new("events");
         let core = Core::spawn(Document::default()).unwrap();
         let runtime_error = Arc::new(Mutex::new(None));
-        let mut recorder =
-            Recorder::start(&core, &directory.journal(), Arc::clone(&runtime_error)).unwrap();
+        let mut recorder = Recorder::start(
+            &core,
+            &directory.journal(),
+            None,
+            Arc::clone(&runtime_error),
+        )
+        .unwrap();
         let commands = representative_commands();
         for command in &commands {
             let event = core.request(command.clone().into()).unwrap();
@@ -1158,7 +1343,7 @@ mod tests {
         };
         let core = Core::spawn(Document::default()).unwrap();
         let runtime_error = Arc::new(Mutex::new(None));
-        let recorder = Recorder::start(&core, &path, runtime_error).unwrap();
+        let recorder = Recorder::start(&core, &path, None, runtime_error).unwrap();
         for command in representative_commands() {
             let Event::DocumentChanged { .. } = core.request(command.into()).unwrap() else {
                 panic!("child command was rejected");
@@ -1241,12 +1426,13 @@ mod tests {
     }
 
     #[test]
-    fn clean_drop_removes_the_active_journal() {
+    fn clean_drop_removes_only_this_sessions_journal() {
         let directory = TestDirectory::new("clean-drop");
-        let path = directory.journal();
         let core = Core::spawn(Document::default()).unwrap();
+        let path;
         {
-            let recovery = Recovery::start_at(&core, path.clone());
+            let recovery = Recovery::start_in(directory.0.clone(), &core, None);
+            path = recovery.path.clone();
             assert!(path.is_file());
             drop(recovery);
         }
@@ -1254,44 +1440,148 @@ mod tests {
     }
 
     #[test]
-    fn even_a_header_only_stale_journal_requires_a_user_decision() {
+    fn a_stale_journal_goes_pending_while_the_new_session_journals_elsewhere() {
         let directory = TestDirectory::new("header-only");
-        let path = directory.journal();
-        drop(JournalWriter::create(&path, &Document::default()).unwrap());
+        let stale = directory.0.join("unsaved-1.journal");
+        drop(JournalWriter::create(&stale, None, &Document::default()).unwrap());
         let core = Core::spawn(Document::default()).unwrap();
 
-        let recovery = Recovery::start_at(&core, path.clone());
+        let recovery = Recovery::start_in(directory.0.clone(), &core, None);
+        assert_eq!(recovery.pending.len(), 1);
         assert!(matches!(
-            &recovery.pending,
-            Some(PendingRecovery::Recoverable(RecoveryReport {
+            &recovery.pending[0].state,
+            PendingState::Recoverable(RecoveryReport {
                 recovered_commands: 0,
                 ..
-            }))
+            })
         ));
-        assert!(recovery.recorder.is_none());
+        // Journaling starts immediately at a non-colliding name; the stale
+        // file is untouched and survives an undecided shutdown.
+        assert!(recovery.recorder.is_some());
+        assert_ne!(recovery.path, stale);
+        assert!(stale.is_file());
         drop(recovery);
-        assert!(path.is_file(), "unresolved recovery must survive shutdown");
+        assert!(stale.is_file(), "unresolved recovery must survive shutdown");
     }
 
     #[test]
-    fn successful_save_checkpoint_discards_pre_save_commands() {
+    fn successful_save_checkpoint_discards_pre_save_commands_and_adopts_the_name() {
         let directory = TestDirectory::new("checkpoint");
-        let path = directory.journal();
         let core = Core::spawn(Document::default()).unwrap();
-        let mut recovery = Recovery::start_at(&core, path.clone());
+        let mut recovery = Recovery::start_in(directory.0.clone(), &core, None);
+        let unsaved_path = recovery.path.clone();
         let first = JournalCommand::Do(Operation::AddAsset { asset: asset(1) });
         let _ = core.request(Command::from(first)).unwrap();
         recovery.recorder.as_ref().unwrap().flush().unwrap();
-        recovery.checkpoint(&core);
+        let project = directory.0.join("My Video.openreel");
+        recovery.checkpoint(&core, Some(&project));
 
+        // The journal migrated to the project's name and the unsaved file
+        // is gone; a later crash only offers post-save commands, attributed
+        // to the right project.
+        assert_ne!(recovery.path, unsaved_path);
+        assert!(!unsaved_path.exists());
         let second = JournalCommand::Do(Operation::AddAsset { asset: asset(2) });
         let _ = core.request(Command::from(second)).unwrap();
         recovery.recorder.as_ref().unwrap().flush().unwrap();
-        let Inspection::Recoverable(report) = inspect_path(&path) else {
+        let Inspection::Recoverable(report) = inspect_path(&recovery.path) else {
             panic!("expected checkpoint journal");
         };
         assert_eq!(report.recovered_commands, 1);
+        assert_eq!(report.project_path.as_deref(), Some(project.as_path()));
         assert!(report.document.asset(AssetId(1)).is_some());
         assert!(report.document.asset(AssetId(2)).is_some());
+    }
+
+    #[test]
+    fn journal_names_are_stable_readable_and_collision_proof() {
+        let first = journal_file_name(Path::new("C:/videos/My Video (final).openreel"));
+        let again = journal_file_name(Path::new("C:/videos/My Video (final).openreel"));
+        assert_eq!(first, again, "names must be deterministic across runs");
+        assert!(first.starts_with("MyVideofinal-"));
+        assert!(first.ends_with(".journal"));
+        let elsewhere = journal_file_name(Path::new("D:/other/My Video (final).openreel"));
+        assert_ne!(
+            first, elsewhere,
+            "same stem, different path, different hash"
+        );
+    }
+
+    #[test]
+    fn allocation_never_truncates_pending_data_and_keeps_unsaved_names() {
+        let directory = Path::new("recovery");
+        let project = Path::new("C:/videos/cut.openreel");
+        let base = directory.join(journal_file_name(project));
+        let placeholder = directory.join("uninitialized.journal");
+
+        // Free name: taken directly.
+        assert_eq!(
+            allocate_journal_path(directory, Some(project), &placeholder, &[]),
+            base
+        );
+        // The project's own crash journal is pending: allocate a suffix so
+        // the undecided data is never truncated by the new session.
+        let reserved = [base.as_path()];
+        let suffixed = allocate_journal_path(directory, Some(project), &placeholder, &reserved);
+        assert_ne!(suffixed, base);
+        assert!(suffixed.to_string_lossy().ends_with("-2.journal"));
+
+        // An unsaved project keeps its current journal across baselines...
+        let current = directory.join("unsaved-3.journal");
+        assert_eq!(
+            allocate_journal_path(directory, None, &current, &[]),
+            current
+        );
+        // ...unless that name now belongs to pending crash data.
+        let reserved = [current.as_path()];
+        let moved = allocate_journal_path(directory, None, &current, &reserved);
+        assert_ne!(moved, current);
+        assert!(
+            moved
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("unsaved-")
+        );
+    }
+
+    #[test]
+    fn scan_reads_identity_from_every_journal_and_restores_consume_them() {
+        let directory = TestDirectory::new("scan");
+        let project = directory.0.join("Interview.openreel");
+        let commands = representative_commands();
+        fs::write(
+            directory.0.join("Interview-abc.journal"),
+            encoded_journal_for(Some(&project), &Document::default(), &commands),
+        )
+        .unwrap();
+        drop(
+            JournalWriter::create(
+                &directory.0.join("unsaved-1.journal"),
+                None,
+                &Document::default(),
+            )
+            .unwrap(),
+        );
+        fs::write(directory.0.join("notes.txt"), b"not a journal").unwrap();
+
+        let core = Core::spawn(Document::default()).unwrap();
+        let mut recovery = Recovery::start_in(directory.0.clone(), &core, None);
+        assert_eq!(recovery.pending.len(), 2);
+        let saved = recovery
+            .pending
+            .iter()
+            .find(|entry| entry.project_path.is_some())
+            .expect("the saved project's journal carries its identity");
+        assert_eq!(saved.project_path.as_deref(), Some(project.as_path()));
+        let PendingState::Recoverable(report) = &saved.state else {
+            panic!("the saved project's journal must be recoverable");
+        };
+        assert_eq!(report.recovered_commands, commands.len());
+
+        let journal_path = saved.journal_path.clone();
+        recovery.consume_pending(&journal_path);
+        assert_eq!(recovery.pending.len(), 1);
+        assert!(!journal_path.exists());
     }
 }

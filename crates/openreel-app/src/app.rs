@@ -153,7 +153,7 @@ impl OpenReelApp {
         let resolution = document.resolution;
         let fps = document.fps;
         let error_log_open = error_log.len() > 0;
-        let recovery = crate::recovery::Recovery::start(&core);
+        let recovery = crate::recovery::Recovery::start(&core, None);
         let mut app = Self {
             core,
             core_events,
@@ -270,7 +270,8 @@ impl OpenReelApp {
             Ok(()) => {
                 self.project_path = Some(path.clone());
                 self.saved_document = Some(Arc::clone(&self.document));
-                self.recovery.checkpoint(&self.core);
+                self.recovery
+                    .checkpoint(&self.core, self.project_path.as_deref());
                 self.status = format!("Saved {}", path.display());
                 true
             }
@@ -295,14 +296,13 @@ impl OpenReelApp {
     }
 
     fn new_project(&mut self) {
-        if let Err(error) = self.replace_core(Document::default()) {
+        if let Err(error) = self.replace_core(Document::default(), None) {
             self.record_error(
                 "Project",
                 format!("Could not create a new project: {error}"),
             );
             return;
         }
-        self.project_path = None;
         self.saved_document = None;
         "Creating default video track…".clone_into(&mut self.status);
         self.send_operation(Operation::AddTrack {
@@ -343,14 +343,13 @@ impl OpenReelApp {
             .filter(|asset| !asset.path.is_file())
             .map(|asset| format!("{} ({})", asset.name, asset.path.display()))
             .collect();
-        if let Err(error) = self.replace_core(document) {
+        if let Err(error) = self.replace_core(document, Some(path.to_path_buf())) {
             self.record_error(
                 "Project",
                 format!("Could not open {}: {error}", path.display()),
             );
             return;
         }
-        self.project_path = Some(path.to_path_buf());
         self.saved_document = Some(Arc::clone(&self.document));
         self.status = if missing.is_empty() {
             format!("Opened {}", path.display())
@@ -471,7 +470,11 @@ impl OpenReelApp {
         }
     }
 
-    fn replace_core(&mut self, document: Document) -> Result<(), String> {
+    fn replace_core(
+        &mut self,
+        document: Document,
+        project_path: Option<PathBuf>,
+    ) -> Result<(), String> {
         let core = Core::spawn(document.clone()).map_err(|error| error.to_string())?;
         let events = core.subscribe().map_err(|error| error.to_string())?;
         let mcp_server = McpServer::start(
@@ -493,7 +496,8 @@ impl OpenReelApp {
             confirmations.reject_all("the project changed during confirmation");
         }
         self.playback.pause();
-        self.recovery.attach(&core);
+        self.recovery.attach(&core, project_path.as_deref());
+        self.project_path = project_path;
         self.core = core;
         self.core_events = events;
         self.mcp_server = Some(mcp_server);
@@ -795,8 +799,13 @@ impl eframe::App for OpenReelApp {
         self.handle_close_request(ui.ctx());
         self.poll_background(ui.ctx());
         self.keyboard_shortcuts(ui.ctx());
-        if let Some(document) = self.recovery.show_dialog(ui.ctx(), &self.core) {
-            self.status = crate::recovery::restore_status(self.replace_core(document));
+        if let Some(request) = self.recovery.show_dialog(ui.ctx()) {
+            let journal_path = request.journal_path;
+            let result = self.replace_core(request.document, request.project_path);
+            if result.is_ok() {
+                self.recovery.consume_pending(&journal_path);
+            }
+            self.status = crate::recovery::restore_status(result);
         }
 
         self.app_top_bar(ui);
