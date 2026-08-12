@@ -124,15 +124,22 @@ impl OpenReelApp {
             ui.ctx().request_repaint();
         }
 
-        ui.horizontal(|ui| {
-            ui.colored_label(color::TEXT_MUTED, "L/R");
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                for level in self.meter_levels {
-                    draw_meter_bar(ui, level);
-                }
-            });
-        });
+        // A left-to-right horizontal nested bare in the transport's
+        // right-to-left layout overlaps its own children (the thread-row
+        // lesson); the meter block allocates its exact size instead.
+        ui.allocate_ui_with_layout(
+            egui::vec2(124.0, 14.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for level in self.meter_levels {
+                        draw_meter_bar(ui, level);
+                    }
+                });
+                ui.colored_label(color::TEXT_MUTED, "L/R");
+            },
+        );
     }
 }
 
