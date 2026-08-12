@@ -26,6 +26,15 @@ Sources (v1):
 | Camera | one dshow input binding `video=…:audio=…` | `Recording N.mp4` |
 | Voice | dshow microphone only | `Recording N.m4a` |
 
+On multi-display machines a **Display** picker chooses one monitor (or all
+of them). Displays are enumerated through a hidden PowerShell call to
+`System.Windows.Forms.Screen` — display geometry without unsafe Win32 —
+and the chosen bounds become a `gdigrab` region (`-offset_x/-offset_y/`
+`-video_size`, in raw virtual-desktop coordinates: a display left of the
+primary really does pass a negative offset, verified live). The default is
+the primary display; recording every screen at once is the surprise, not
+the expectation.
+
 Video encodes with `libx264 -preset ultrafast` (capture must never contend
 with the machine being recorded) plus an even-dimension crop guard for
 `yuv420p`. Device names come from FFmpeg's own `-list_devices` output,
@@ -59,8 +68,7 @@ executable (dev checkouts) → PATH.
 
 ## Deferred
 
-- Single-monitor / window / region capture — `gdigrab desktop` grabs the
-  whole desktop, which spans all monitors on multi-display setups.
+- Window / freeform-region capture (single-monitor selection shipped).
 - System-audio (loopback) capture — Windows needs a WASAPI loopback route
   that dshow alone does not offer cleanly.
 - Simultaneous screen + camera (picture-in-picture) capture.

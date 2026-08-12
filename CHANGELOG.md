@@ -116,6 +116,10 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   newline). Ships with instant local commands (/remove-fillers, /captions,
   /freeze, /export, /undo, /redo, /help) and agent prompt commands
   (/cut-silences, /tighten)
+- Screen recording gained a Display picker on multi-monitor machines:
+  record one display (default: the primary) or all of them. Display
+  bounds come from Windows itself and become an exact gdigrab region,
+  negative virtual-desktop offsets included
 - In-editor recording: capture the screen (with optional microphone), a
   camera, or a voice-only take from the Record button or /record, driven
   by the bundled FFmpeg CLI as a crash-isolated subprocess with a graceful

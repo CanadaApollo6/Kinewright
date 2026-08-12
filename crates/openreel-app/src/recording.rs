@@ -25,18 +25,35 @@ use crate::{
     theme::{color, size, space, type_size},
 };
 
-/// Capture devices `FFmpeg`'s `DirectShow` backend reports.
+/// Capture devices `FFmpeg`'s `DirectShow` backend reports, plus the
+/// displays Windows reports for screen capture.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CaptureDevices {
     pub(crate) video: Vec<String>,
     pub(crate) audio: Vec<String>,
+    pub(crate) monitors: Vec<MonitorInfo>,
 }
 
-/// What one recording captures. Microphones are `DirectShow` device names.
+/// One display in virtual-desktop coordinates, exactly as Windows reports
+/// them - `gdigrab` takes these raw (negative offsets included, for
+/// displays left of or above the primary).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MonitorInfo {
+    pub(crate) label: String,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) primary: bool,
+}
+
+/// What one recording captures. Microphones are `DirectShow` device names;
+/// a screen capture with no monitor grabs the whole virtual desktop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RecordingMode {
     Screen {
         microphone: Option<String>,
+        monitor: Option<MonitorInfo>,
     },
     Camera {
         camera: String,
@@ -82,6 +99,8 @@ pub(crate) struct RecordDialog {
     pub(crate) source: RecordSource,
     pub(crate) camera: Option<String>,
     pub(crate) microphone: Option<String>,
+    /// `None` records the whole virtual desktop (every display).
+    pub(crate) monitor: Option<MonitorInfo>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -183,13 +202,24 @@ fn ffmpeg_record_args(mode: &RecordingMode, output: &Path) -> Vec<std::ffi::OsSt
     push("-loglevel");
     push("error");
     match mode {
-        RecordingMode::Screen { microphone } => {
+        RecordingMode::Screen {
+            microphone,
+            monitor,
+        } => {
             push("-thread_queue_size");
             push("1024");
             push("-f");
             push("gdigrab");
             push("-framerate");
             push("30");
+            if let Some(monitor) = monitor {
+                push("-offset_x");
+                push(&monitor.x.to_string());
+                push("-offset_y");
+                push(&monitor.y.to_string());
+                push("-video_size");
+                push(&format!("{}x{}", monitor.width, monitor.height));
+            }
             push("-i");
             push("desktop");
             if let Some(microphone) = microphone {
@@ -256,6 +286,65 @@ fn ffmpeg_record_args(mode: &RecordingMode, output: &Path) -> Vec<std::ffi::OsSt
     args
 }
 
+/// Enumerate displays by asking Windows through a hidden `PowerShell` -
+/// the same subprocess pattern as everything else here, and it keeps
+/// display geometry out of unsafe Win32 calls.
+fn list_monitors() -> Vec<MonitorInfo> {
+    let mut command = Command::new("powershell");
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Add-Type -AssemblyName System.Windows.Forms; \
+             [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { \
+             '{0}|{1}|{2}|{3}|{4}|{5}' -f $_.DeviceName, $_.Bounds.X, \
+             $_.Bounds.Y, $_.Bounds.Width, $_.Bounds.Height, $_.Primary }",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    hide_console_window(&mut command);
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    parse_monitor_lines(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Lines look like `\\.\DISPLAY1|0|0|2560|1440|True`.
+fn parse_monitor_lines(stdout: &str) -> Vec<MonitorInfo> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.trim().split('|');
+            let device = fields.next()?;
+            let x = fields.next()?.parse().ok()?;
+            let y = fields.next()?.parse().ok()?;
+            let width = fields.next()?.parse().ok()?;
+            let height = fields.next()?.parse().ok()?;
+            let primary = fields.next()?.eq_ignore_ascii_case("true");
+            let number = device
+                .rsplit("DISPLAY")
+                .next()
+                .and_then(|digits| digits.parse::<u32>().ok());
+            let label = match (number, primary) {
+                (Some(number), true) => format!("Display {number} (primary) · {width}×{height}"),
+                (Some(number), false) => format!("Display {number} · {width}×{height}"),
+                (None, true) => format!("Display (primary) · {width}×{height}"),
+                (None, false) => format!("Display · {width}×{height}"),
+            };
+            Some(MonitorInfo {
+                label,
+                x,
+                y,
+                width,
+                height,
+                primary,
+            })
+        })
+        .collect()
+}
+
 /// Enumerate `DirectShow` devices by parsing `FFmpeg`'s listing (it reports the
 /// list on stderr and exits nonzero by design).
 pub(crate) fn list_capture_devices() -> CaptureDevices {
@@ -277,10 +366,12 @@ pub(crate) fn list_capture_devices() -> CaptureDevices {
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     hide_console_window(&mut command);
-    let Ok(output) = command.output() else {
-        return CaptureDevices::default();
+    let mut devices = match command.output() {
+        Ok(output) => parse_dshow_devices(&String::from_utf8_lossy(&output.stderr)),
+        Err(_) => CaptureDevices::default(),
     };
-    parse_dshow_devices(&String::from_utf8_lossy(&output.stderr))
+    devices.monitors = list_monitors();
+    devices
 }
 
 /// Device lines look like `[dshow @ ...] "Name" (video)`; alternative-name
@@ -396,6 +487,16 @@ impl OpenReelApp {
             if self.record_dialog.microphone.is_none() {
                 self.record_dialog.microphone = devices.audio.first().cloned();
             }
+            // With several displays, default to the primary - recording
+            // every screen at once is the surprise, not the expectation.
+            if self.record_dialog.monitor.is_none() && devices.monitors.len() > 1 {
+                self.record_dialog.monitor = devices
+                    .monitors
+                    .iter()
+                    .find(|monitor| monitor.primary)
+                    .or_else(|| devices.monitors.first())
+                    .cloned();
+            }
             self.record_dialog.devices = Some(devices);
             self.record_dialog.devices_rx = None;
         }
@@ -440,6 +541,33 @@ impl OpenReelApp {
                     .num_columns(2)
                     .spacing(egui::vec2(space::THREE, space::TWO))
                     .show(ui, |ui| {
+                        if self.record_dialog.source == RecordSource::Screen
+                            && devices.monitors.len() > 1
+                        {
+                            ui.label("Display");
+                            egui::ComboBox::from_id_salt("record-display")
+                                .selected_text(
+                                    self.record_dialog
+                                        .monitor
+                                        .as_ref()
+                                        .map_or("All displays", |monitor| monitor.label.as_str()),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for monitor in &devices.monitors {
+                                        ui.selectable_value(
+                                            &mut self.record_dialog.monitor,
+                                            Some(monitor.clone()),
+                                            &monitor.label,
+                                        );
+                                    }
+                                    ui.selectable_value(
+                                        &mut self.record_dialog.monitor,
+                                        None,
+                                        "All displays",
+                                    );
+                                });
+                            ui.end_row();
+                        }
                         if self.record_dialog.source == RecordSource::Camera {
                             ui.label("Camera");
                             egui::ComboBox::from_id_salt("record-camera")
@@ -517,7 +645,10 @@ impl OpenReelApp {
     fn start_recording_from_dialog(&mut self) {
         let microphone = self.record_dialog.microphone.clone();
         let mode = match self.record_dialog.source {
-            RecordSource::Screen => RecordingMode::Screen { microphone },
+            RecordSource::Screen => RecordingMode::Screen {
+                microphone,
+                monitor: self.record_dialog.monitor.clone(),
+            },
             RecordSource::Camera => {
                 let Some(camera) = self.record_dialog.camera.clone() else {
                     self.record_error("Recording", "No camera is selected");
@@ -648,6 +779,7 @@ mod tests {
     fn screen_capture_grabs_the_desktop_and_mixes_the_chosen_microphone() {
         let with_mic = joined(&RecordingMode::Screen {
             microphone: Some("Mic Array".to_owned()),
+            monitor: None,
         });
         assert!(with_mic.contains("-f gdigrab -framerate 30 -i desktop"));
         assert!(with_mic.contains("-f dshow -i audio=Mic Array"));
@@ -655,9 +787,44 @@ mod tests {
         assert!(with_mic.contains("-c:a aac"));
         assert!(with_mic.ends_with("-y out.mp4"));
 
-        let silent = joined(&RecordingMode::Screen { microphone: None });
+        let silent = joined(&RecordingMode::Screen {
+            microphone: None,
+            monitor: None,
+        });
         assert!(!silent.contains("dshow"));
         assert!(!silent.contains("-c:a"));
+    }
+
+    #[test]
+    fn a_chosen_monitor_becomes_a_gdigrab_region_negative_offsets_included() {
+        // Real geometry: a display left of the primary sits at x = -2560,
+        // and gdigrab takes virtual-desktop coordinates raw (live-verified).
+        let monitor = MonitorInfo {
+            label: "Display 2 · 2560×1440".to_owned(),
+            x: -2560,
+            y: 0,
+            width: 2560,
+            height: 1440,
+            primary: false,
+        };
+        let args = joined(&RecordingMode::Screen {
+            microphone: None,
+            monitor: Some(monitor),
+        });
+        assert!(args.contains("-offset_x -2560 -offset_y 0 -video_size 2560x1440 -i desktop"));
+    }
+
+    #[test]
+    fn monitor_lines_parse_bounds_primary_and_display_numbers() {
+        let stdout = "\\\\.\\DISPLAY1|0|0|2560|1440|True\r\n\\\\.\\DISPLAY2|-2560|0|2560|1440|False\r\nnot a monitor line\r\n";
+        let monitors = parse_monitor_lines(stdout);
+        assert_eq!(monitors.len(), 2);
+        assert_eq!(monitors[0].label, "Display 1 (primary) · 2560×1440");
+        assert!(monitors[0].primary);
+        assert_eq!(monitors[1].label, "Display 2 · 2560×1440");
+        assert_eq!(monitors[1].x, -2560);
+        assert_eq!((monitors[1].width, monitors[1].height), (2560, 1440));
+        assert!(!monitors[1].primary);
     }
 
     #[test]
