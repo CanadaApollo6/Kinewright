@@ -10,14 +10,14 @@ use openreel_agent::{
     ClaudeCodeDriver, CodexDriver, ConfirmationBroker, ConfirmationRequest, McpServer,
 };
 use openreel_core::{
-    AgentDriver, AgentEvent, AgentSession, Analysis, AssetId, ClipId, Command, Core, Document,
-    Event, Export, HarnessInfo, JournalCommand, MarkerId, MediaAsset, MediaError, MediaEvent,
-    Operation, Playback, PlaybackState, TimeCode, Track, TrackId, TrackKind,
+    AgentDriver, Analysis, AssetId, ClipId, Command, Core, Document, Event, Export, HarnessInfo,
+    JournalCommand, MarkerId, MediaAsset, MediaError, MediaEvent, Operation, Playback,
+    PlaybackState, TimeCode, Track, TrackId, TrackKind,
 };
 use openreel_media::{FfmpegMediaEngine, GpuContext};
 
 use crate::{
-    chat_ui::{AgentHarnessChoice, ChatEntry, UsageAccumulator},
+    chat_ui::{AgentHarnessChoice, AgentThread, ChatEntry},
     error_ui::ErrorLog,
     export_ui::{ExportDialog, ExportJob},
     icons::Icon,
@@ -56,7 +56,10 @@ pub(crate) struct OpenReelApp {
     pub(crate) mcp_server: Option<McpServer>,
     pub(crate) claude_info: Option<HarnessInfo>,
     pub(crate) codex_info: Option<HarnessInfo>,
-    pub(crate) agent_harness: AgentHarnessChoice,
+    pub(crate) threads: Vec<AgentThread>,
+    pub(crate) active_thread: usize,
+    pub(crate) show_thread_rail: bool,
+    pub(crate) next_thread_number: usize,
     /// Selectable models per harness; `None` chosen means the CLI's default.
     pub(crate) claude_models: Vec<openreel_agent::ModelChoice>,
     pub(crate) codex_models: Vec<openreel_agent::ModelChoice>,
@@ -64,12 +67,6 @@ pub(crate) struct OpenReelApp {
     pub(crate) codex_model: Option<String>,
     pub(crate) claude_effort: Option<String>,
     pub(crate) codex_effort: Option<String>,
-    pub(crate) agent_session: Option<Box<dyn AgentSession>>,
-    pub(crate) agent_events: Option<crossbeam_channel::Receiver<AgentEvent>>,
-    pub(crate) agent_running: bool,
-    pub(crate) agent_input: String,
-    pub(crate) agent_usage: UsageAccumulator,
-    pub(crate) chat: Vec<ChatEntry>,
     pub(crate) confirmations: Option<ConfirmationBroker>,
     pub(crate) pending_confirmations: Vec<ConfirmationRequest>,
     pub(crate) probe_tx: mpsc::Sender<(PathBuf, Result<MediaAsset, MediaError>)>,
@@ -131,7 +128,9 @@ impl OpenReelApp {
         let playback: Arc<dyn Playback> = media.clone();
         let analysis: Arc<dyn Analysis> = media.clone();
         let exporter: Arc<dyn Export> = media;
-        let mut chat = Vec::new();
+        let mut chat = vec![ChatEntry::Text(
+            "Import footage and describe your edit.".to_owned(),
+        )];
         let mut error_log = ErrorLog::default();
         let mcp_server =
             match McpServer::start(core.clone(), Arc::clone(&playback), Arc::clone(&analysis)) {
@@ -167,19 +166,16 @@ impl OpenReelApp {
             mcp_server,
             claude_info,
             codex_info,
-            agent_harness,
+            threads: vec![AgentThread::new("Thread 1", agent_harness, chat)],
+            active_thread: 0,
+            show_thread_rail: true,
+            next_thread_number: 2,
             claude_models: openreel_agent::claude_models(),
             codex_models: openreel_agent::codex_models(),
             claude_model: None,
             codex_model: None,
             claude_effort: None,
             codex_effort: None,
-            agent_session: None,
-            agent_events: None,
-            agent_running: false,
-            agent_input: String::new(),
-            agent_usage: UsageAccumulator::default(),
-            chat,
             confirmations,
             pending_confirmations: Vec::new(),
             probe_tx,
@@ -485,8 +481,13 @@ impl OpenReelApp {
         )
         .map_err(|error| format!("agent server: {error}"))?;
         let confirmations = mcp_server.confirmations();
-        if let Some(session) = &mut self.agent_session {
-            session.interrupt();
+        for thread in &mut self.threads {
+            if let Some(session) = &mut thread.session {
+                session.interrupt();
+            }
+            thread.session = None;
+            thread.events = None;
+            thread.running = false;
         }
         if let Some(confirmations) = &self.confirmations {
             confirmations.reject_all("the project changed during confirmation");
@@ -498,9 +499,6 @@ impl OpenReelApp {
         self.mcp_server = Some(mcp_server);
         self.confirmations = Some(confirmations);
         self.pending_confirmations.clear();
-        self.agent_session = None;
-        self.agent_events = None;
-        self.agent_running = false;
         self.document = Arc::new(document);
         self.position = TimeCode::ZERO;
         self.timeline_scroll_target = 0.0;
@@ -612,11 +610,11 @@ impl OpenReelApp {
                         .filter(|asset| self.document.asset(asset.id).is_none())
                         .cloned()
                         .collect::<Vec<_>>();
-                    // The watchable diff (M24): while the agent is editing,
-                    // every applied change becomes a reviewable card in the
-                    // session stream, and the monitor cues just before the
-                    // first seam so the picture answers "what changed".
-                    if self.agent_running
+                    // Timeline attribution is ambiguous with concurrent
+                    // writers, so every running thread receives the same
+                    // review card while the monitor cues only once.
+                    let any_agent_running = self.threads.iter().any(|thread| thread.running);
+                    if any_agent_running
                         && let Some(range) =
                             crate::edit_diff::changed_project_range(&self.document, &doc)
                     {
@@ -627,14 +625,17 @@ impl OpenReelApp {
                                 .saturating_sub(review_preroll_frames(doc.fps))
                                 .max(0),
                         );
-                        self.chat.push(ChatEntry::EditCard {
+                        let edit_card = ChatEntry::EditCard {
                             summary: last_op
                                 .as_ref()
                                 .map_or_else(|| "Edited the timeline".to_owned(), operation_status),
                             start: range.start,
                             end: range.end,
                             cue,
-                        });
+                        };
+                        for thread in self.threads.iter_mut().filter(|thread| thread.running) {
+                            thread.chat.push(edit_card.clone());
+                        }
                         self.position =
                             TimeCode(cue.0.min(doc.duration.0.saturating_sub(1).max(0)));
                         self.playback.request_frame(self.position);
@@ -876,6 +877,13 @@ impl OpenReelApp {
                         {
                             self.show_media_rail = !self.show_media_rail;
                         }
+                        if ui
+                            .selectable_label(self.show_thread_rail, "Threads")
+                            .on_hover_text("Show the thread rail")
+                            .clicked()
+                        {
+                            self.show_thread_rail = !self.show_thread_rail;
+                        }
                         ui.separator();
                         ui.colored_label(color::TEXT_MUTED, &self.status);
                     });
@@ -921,6 +929,14 @@ impl OpenReelApp {
                         MaterialTab::Transcript => self.transcript_panel(ui),
                     }
                 });
+        }
+        if self.show_thread_rail {
+            egui::Panel::left("thread-rail")
+                .default_size(200.0)
+                .min_size(160.0)
+                .resizable(true)
+                .frame(theme::panel_frame())
+                .show(ui, |ui| self.thread_rail(ui));
         }
         if rail_visible {
             egui::Panel::left("media-rail")

@@ -116,6 +116,15 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   newline). Ships with instant local commands (/remove-fillers, /captions,
   /freeze, /export, /undo, /redo, /help) and agent prompt commands
   (/cut-silences, /tighten)
+- Agent threads (T3-style): a left rail lists every session - brand mark,
+  auto-title from the first message, a live latest-activity line, RUNNING
+  state - and several threads can run concurrently against the same
+  timeline, each streaming into its own conversation while you watch
+  another. New thread / close thread / click to switch; per-thread
+  composer, model, effort, and token counts; applied edits become review
+  cards in every running thread. The composer transport went icon-only
+  and the harness version moved into the brand mark's tooltip so the row
+  survives the narrower center column
 - Screen recording gained a Display picker on multi-monitor machines:
   record one display (default: the primary) or all of them. Display
   bounds come from Windows itself and become an exact gdigrab region,
