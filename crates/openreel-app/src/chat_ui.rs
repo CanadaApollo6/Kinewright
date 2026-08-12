@@ -1025,8 +1025,11 @@ impl OpenReelApp {
         // Wrapped, not rigid: on narrow columns the pickers flow onto a
         // second line instead of clipping at the card's edge.
         let controls_row = ui.horizontal_wrapped(|ui| {
-            // The row shares the card's inner margins: without this inset the
-            // brand mark sits directly on the card's edge.
+            // The row shares the card's inner margins on both sides: the max
+            // width shrinks so the right-anchored Send keeps its inset (a
+            // leading add_space in the RTL section pushes past the clip edge
+            // instead), and the leading space insets the brand mark.
+            ui.set_max_width(ui.available_width() - f32::from(theme::margin(space::TWO)));
             ui.add_space(f32::from(theme::margin(space::TWO)));
             if claude_ready && codex_ready {
                 let before = self.projects[project_index].threads[active_thread].harness;
@@ -1307,10 +1310,14 @@ impl OpenReelApp {
                 }
             });
         });
-        let controls_rect = controls_row
+        // The painted foot spans the input face's exact width regardless of
+        // how the row's content laid out inside it.
+        let mut controls_rect = controls_row
             .response
             .rect
             .expand2(egui::vec2(0.0, f32::from(theme::margin(space::ONE_HALF))));
+        controls_rect.min.x = input_frame.response.rect.min.x;
+        controls_rect.max.x = input_frame.response.rect.max.x;
         ui.painter().set(
             controls_bg,
             egui::Shape::rect_filled(

@@ -124,6 +124,11 @@ impl OpenReelApp {
             ui.ctx().request_repaint();
         }
 
+        // On narrow transports the meter yields entirely: overflowing onto
+        // the timecode would trade real information for a decoration.
+        if ui.available_width() < 132.0 {
+            return;
+        }
         // A left-to-right horizontal nested bare in the transport's
         // right-to-left layout overlaps its own children (the thread-row
         // lesson); the meter block allocates its exact size instead.
