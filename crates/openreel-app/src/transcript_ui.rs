@@ -428,14 +428,14 @@ fn transcript_word_button(
             ui.spacing_mut().button_padding = egui::vec2(space::HALF, space::HALF);
             ui.spacing_mut().interact_size = egui::Vec2::ZERO;
             let idle_fill = if selected {
-                color::ACCENT_28
+                color::ACCENT_WASH
             } else {
                 color::PANEL
             };
             let hover_fill = if selected {
-                color::ACCENT_28
+                color::ACCENT_WASH
             } else {
-                color::SURFACE_ACTIVE
+                color::SURFACE
             };
             ui.style_mut().visuals.widgets.inactive.bg_fill = idle_fill;
             ui.style_mut().visuals.widgets.inactive.weak_bg_fill = idle_fill;

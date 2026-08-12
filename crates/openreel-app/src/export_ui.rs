@@ -251,10 +251,13 @@ impl OpenReelApp {
                     .show(ui, |ui| {
                         ui.label("Output");
                         ui.horizontal(|ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.export_dialog.output)
-                                    .desired_width(320.0),
-                            );
+                            ui.scope(|ui| {
+                                theme::apply_input_visuals(ui);
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.export_dialog.output)
+                                        .desired_width(320.0),
+                                );
+                            });
                             if ui
                                 .add(
                                     egui::Button::image_and_text(
@@ -350,8 +353,8 @@ impl OpenReelApp {
                                     Icon::Export.image(size::ICON_MD),
                                     "Export MP4",
                                 )
-                                .fill(color::ACCENT_28)
-                                .stroke(egui::Stroke::new(1.0, color::ACCENT_72)),
+                                .fill(color::ACCENT_WASH)
+                                .stroke(egui::Stroke::new(1.0, color::ACCENT_DIM_BORDER)),
                             )
                             .clicked()
                         {

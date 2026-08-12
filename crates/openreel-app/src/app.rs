@@ -508,8 +508,8 @@ impl OpenReelApp {
                     if ui
                         .add(
                             egui::Button::new("Save")
-                                .fill(color::ACCENT_28)
-                                .stroke(egui::Stroke::new(1.0, color::ACCENT_72)),
+                                .fill(color::ACCENT_WASH)
+                                .stroke(egui::Stroke::new(1.0, color::ACCENT_DIM_BORDER)),
                         )
                         .clicked()
                     {
@@ -926,6 +926,7 @@ impl OpenReelApp {
     fn app_top_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("app-top-bar")
             .exact_size(size::TOP_BAR_HEIGHT)
+            .show_separator_line(false)
             .frame(
                 // Separation by fill contrast, not outline (M25): the bar
                 // sits one surface step above the panels beneath it.
@@ -1027,7 +1028,7 @@ impl OpenReelApp {
                 .resizable(true)
                 .frame(
                     egui::Frame::new()
-                        .fill(color::CANVAS)
+                        .fill(color::PANEL)
                         .inner_margin(egui::Margin::same(theme::margin(space::TWO))),
                 )
                 .show(ui, |ui| {
@@ -1072,7 +1073,7 @@ impl OpenReelApp {
             .resizable(true)
             .frame(
                 egui::Frame::new()
-                    .fill(color::CANVAS)
+                    .fill(color::PANEL)
                     .inner_margin(egui::Margin::same(theme::margin(space::TWO))),
             )
             .show(ui, |ui| {

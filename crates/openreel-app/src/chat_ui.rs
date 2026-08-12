@@ -792,7 +792,11 @@ impl OpenReelApp {
                     ui.label(&request.description);
                     ui.horizontal(|ui| {
                         if ui
-                            .add(egui::Button::new("Approve").fill(color::ACCENT_28))
+                            .add(
+                                egui::Button::new("Approve")
+                                    .fill(color::ACCENT_WASH)
+                                    .stroke(egui::Stroke::new(1.0, color::ACCENT_DIM_BORDER)),
+                            )
                             .clicked()
                         {
                             confirmation_decision = Some((request.id, true));
@@ -918,31 +922,30 @@ impl OpenReelApp {
         // Slash suggestions float directly above the composer while typing.
         let mut run_command: Option<&'static crate::slash::SlashCommand> = None;
         if !matches.is_empty() {
-            // The popup floats over the stream, so it earns one of the few
-            // hairlines left in the app.
-            let slash = chat_frame(color::SURFACE_RAISED)
-                .stroke(egui::Stroke::new(1.0, color::BORDER_SUBTLE))
-                .show(ui, |ui| {
-                    for command in &matches {
-                        let label = format!("/{}", command.name);
-                        ui.horizontal(|ui| {
-                            if ui.small_button(&label).clicked() {
-                                run_command = Some(*command);
-                            }
-                            ui.colored_label(
-                                color::TEXT_MUTED,
-                                egui::RichText::new(command.description).size(type_size::CAPTION),
-                            );
-                        });
-                    }
-                });
+            // Slash suggestions sit on SURFACE_RAISED over PANEL; the fill
+            // step is the edge (M28).
+            let slash = chat_frame(color::SURFACE_RAISED).show(ui, |ui| {
+                for command in &matches {
+                    let label = format!("/{}", command.name);
+                    ui.horizontal(|ui| {
+                        if ui.small_button(&label).clicked() {
+                            run_command = Some(*command);
+                        }
+                        ui.colored_label(
+                            color::TEXT_MUTED,
+                            egui::RichText::new(command.description).size(type_size::CAPTION),
+                        );
+                    });
+                }
+            });
             theme::paint_raised_lighting(ui.painter(), slash.response.rect, radius::px(radius::MD));
         }
         ui.add_space(space::ONE);
         let composer_id = egui::Id::new(("agent-composer", project_id, active_thread));
+        let composer_focused = ui.ctx().memory(|memory| memory.has_focus(composer_id));
         let input_frame = egui::Frame::new()
             .fill(color::CANVAS)
-            .stroke(egui::Stroke::new(1.0, color::BORDER_SUBTLE))
+            .stroke(theme::input_stroke(composer_focused))
             .corner_radius(radius::MD)
             .inner_margin(egui::Margin::same(theme::margin(space::ONE)))
             .show(ui, |ui| {
@@ -1250,7 +1253,8 @@ impl OpenReelApp {
                             can_send,
                             egui::Button::image(Icon::Send.image(size::ICON_MD))
                                 .image_tint_follows_text_color(true)
-                                .fill(color::ACCENT_28),
+                                .fill(color::ACCENT_WASH)
+                                .stroke(egui::Stroke::new(1.0, color::ACCENT_DIM_BORDER)),
                         )
                         .on_hover_text("Send (Enter)")
                         .clicked()
@@ -1390,8 +1394,8 @@ fn render_stream_entry(
 ) {
     match entry {
         ChatEntry::User(text) => {
-            let card = chat_frame(color::ACCENT_16).show(ui, |ui| {
-                ui.label(theme::caps_label("YOU", color::ACCENT));
+            let card = chat_frame(color::SURFACE_RAISED).show(ui, |ui| {
+                ui.label(theme::caps_label("YOU", color::TEXT_SECONDARY));
                 ui.label(text);
             });
             theme::paint_raised_lighting(ui.painter(), card.response.rect, radius::px(radius::MD));

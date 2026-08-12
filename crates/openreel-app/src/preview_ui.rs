@@ -23,7 +23,7 @@ impl OpenReelApp {
             egui::Sense::hover(),
         );
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, radius::SM, color::CANVAS);
+        painter.rect_filled(rect, radius::SM, color::LETTERBOX);
         theme::paint_inset_well(&painter, rect, radius::px(radius::SM));
         theme::paint_caps(
             &painter,
@@ -43,12 +43,6 @@ impl OpenReelApp {
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
-            painter.rect_stroke(
-                image_rect,
-                radius::XS,
-                egui::Stroke::new(1.0, color::BORDER_STRONG),
-                egui::StrokeKind::Inside,
-            );
         } else {
             // Empty state: a letterboxed screen at the project aspect, so the
             // monitor reads as a waiting display instead of a void.
@@ -57,7 +51,7 @@ impl OpenReelApp {
             let inset = rect.shrink2(egui::vec2(space::FOUR, space::FOUR));
             let scale = (inset.width() / aspect.x).min(inset.height() / aspect.y);
             let screen_rect = egui::Rect::from_center_size(inset.center(), aspect * scale);
-            painter.rect_filled(screen_rect, radius::XS, color::MEDIA_SHADOW);
+            painter.rect_filled(screen_rect, radius::XS, color::LETTERBOX);
             painter.rect_stroke(
                 screen_rect,
                 radius::XS,

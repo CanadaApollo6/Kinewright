@@ -142,7 +142,7 @@ fn draw_meter_bar(ui: &mut egui::Ui, level: f32) {
     const WARNING_START: f32 = 0.8;
     const DANGER_START: f32 = 0.95;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(WIDTH, HEIGHT), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 1.0, color::BORDER_SUBTLE);
+    ui.painter().rect_filled(rect, 1.0, color::SURFACE_ACTIVE);
 
     let level = level.clamp(0.0, 1.0);
     draw_meter_segment(

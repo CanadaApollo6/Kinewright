@@ -263,11 +263,16 @@ impl OpenReelApp {
         if draft.0 != clip.id {
             *draft = (clip.id, title.text.clone());
         }
-        let response = ui.add(
-            egui::TextEdit::multiline(&mut draft.1)
-                .desired_rows(2)
-                .hint_text("Title text"),
-        );
+        let response = ui
+            .scope(|ui| {
+                theme::apply_input_visuals(ui);
+                ui.add(
+                    egui::TextEdit::multiline(&mut draft.1)
+                        .desired_rows(2)
+                        .hint_text("Title text"),
+                )
+            })
+            .inner;
         if focus_title {
             response.request_focus();
         }
@@ -392,7 +397,12 @@ impl OpenReelApp {
         if draft.0 != marker.id {
             *draft = (marker.id, marker.label.clone());
         }
-        let response = ui.text_edit_singleline(&mut draft.1);
+        let response = ui
+            .scope(|ui| {
+                theme::apply_input_visuals(ui);
+                ui.text_edit_singleline(&mut draft.1)
+            })
+            .inner;
         let mut pending = Vec::new();
         if response.lost_focus() && draft.1 != marker.label {
             pending.push(marker_param_operation(

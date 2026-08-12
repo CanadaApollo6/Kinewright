@@ -9,32 +9,32 @@ use eframe::egui::{
 pub(crate) mod color {
     use eframe::egui::Color32;
 
-    pub const CANVAS: Color32 = Color32::from_rgb(0x0A, 0x0D, 0x11);
-    pub const PANEL: Color32 = Color32::from_rgb(0x10, 0x14, 0x1A);
-    pub const SURFACE: Color32 = Color32::from_rgb(0x16, 0x1B, 0x22);
-    pub const SURFACE_RAISED: Color32 = Color32::from_rgb(0x1C, 0x22, 0x2B);
-    pub const SURFACE_ACTIVE: Color32 = Color32::from_rgb(0x22, 0x2A, 0x34);
-    pub const BORDER_SUBTLE: Color32 = Color32::from_rgb(0x25, 0x2C, 0x36);
-    pub const BORDER_STRONG: Color32 = Color32::from_rgb(0x3A, 0x45, 0x53);
+    pub const CANVAS: Color32 = Color32::from_rgb(0x13, 0x15, 0x19);
+    pub const PANEL: Color32 = Color32::from_rgb(0x1A, 0x1D, 0x23);
+    pub const SURFACE: Color32 = Color32::from_rgb(0x21, 0x25, 0x2C);
+    pub const SURFACE_RAISED: Color32 = Color32::from_rgb(0x27, 0x2C, 0x34);
+    pub const SURFACE_ACTIVE: Color32 = Color32::from_rgb(0x2E, 0x34, 0x3D);
+    pub const BORDER_SUBTLE: Color32 = Color32::from_rgb(0x35, 0x3C, 0x46);
+    pub const BORDER_STRONG: Color32 = Color32::from_rgb(0x46, 0x50, 0x5C);
     pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xE6, 0xEC, 0xF2);
-    pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(0xA5, 0xAF, 0xBB);
-    pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x70, 0x7B, 0x88);
-    pub const MEDIA_SHADOW: Color32 = Color32::from_rgb(0x05, 0x07, 0x0A);
+    pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(0xA8, 0xB0, 0xBA);
+    pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x78, 0x81, 0x8C);
+    /// Viewer letterbox and timeline track well: darker than chrome CANVAS.
+    pub const LETTERBOX: Color32 = Color32::from_rgb(0x0B, 0x0C, 0x0E);
+    pub const MEDIA_SHADOW: Color32 = LETTERBOX;
     pub const ACCENT: Color32 = Color32::from_rgb(0x42, 0xC7, 0xC9);
+    pub const ACCENT_DIM_BORDER: Color32 = Color32::from_rgb(0x1E, 0x4E, 0x50);
     pub const STATUS_SUCCESS: Color32 = Color32::from_rgb(0x70, 0xC3, 0x91);
     pub const STATUS_WARNING: Color32 = Color32::from_rgb(0xD7, 0xB2, 0x6D);
     pub const STATUS_DANGER: Color32 = Color32::from_rgb(0xF0, 0x6C, 0x75);
 
-    pub const ACCENT_72: Color32 = Color32::from_rgba_unmultiplied_const(0x42, 0xC7, 0xC9, 184);
-    pub const ACCENT_28: Color32 = Color32::from_rgba_unmultiplied_const(0x42, 0xC7, 0xC9, 71);
-    pub const ACCENT_16: Color32 = Color32::from_rgba_unmultiplied_const(0x42, 0xC7, 0xC9, 41);
-    #[allow(dead_code)]
-    pub const ACCENT_10: Color32 = Color32::from_rgba_unmultiplied_const(0x42, 0xC7, 0xC9, 26);
+    /// Accent at 14% alpha: persistent selection and demoted accent fills.
+    pub const ACCENT_WASH: Color32 = Color32::from_rgba_unmultiplied_const(0x42, 0xC7, 0xC9, 36);
     pub const MEDIA_TINT_78: Color32 = Color32::from_rgba_unmultiplied_const(0xFF, 0xFF, 0xFF, 199);
     #[allow(dead_code)]
-    pub const MEDIA_VEIL_24: Color32 = Color32::from_rgba_unmultiplied_const(0x05, 0x07, 0x0A, 61);
+    pub const MEDIA_VEIL_24: Color32 = Color32::from_rgba_unmultiplied_const(0x0B, 0x0C, 0x0E, 61);
     pub const MEDIA_SCRIM_78: Color32 =
-        Color32::from_rgba_unmultiplied_const(0x05, 0x07, 0x0A, 199);
+        Color32::from_rgba_unmultiplied_const(0x0B, 0x0C, 0x0E, 199);
     pub const TEXT_PRIMARY_64: Color32 =
         Color32::from_rgba_unmultiplied_const(0xE6, 0xEC, 0xF2, 163);
 }
@@ -57,8 +57,8 @@ pub(crate) mod radius {
     pub const XS: CornerRadius = CornerRadius::same(2);
     pub const SM: CornerRadius = CornerRadius::same(4);
     pub const MD: CornerRadius = CornerRadius::same(6);
-    /// Windows, dialogs, and menus: a softer silhouette than cards (`MD`).
-    pub const LG: CornerRadius = CornerRadius::same(10);
+    /// Modals and windows. Menus use [`MD`].
+    pub const LG: CornerRadius = CornerRadius::same(8);
 
     #[must_use]
     pub(crate) fn px(corner: CornerRadius) -> f32 {
@@ -264,20 +264,40 @@ pub(crate) fn panel_frame() -> egui::Frame {
 pub(crate) fn card_frame(selected: bool) -> egui::Frame {
     egui::Frame::new()
         .fill(if selected {
-            color::ACCENT_28
+            color::ACCENT_WASH
         } else {
             color::SURFACE
         })
         .stroke(Stroke::new(
-            1.0,
-            if selected {
-                color::ACCENT_72
-            } else {
-                color::BORDER_SUBTLE
-            },
+            if selected { 1.0 } else { 0.0 },
+            color::ACCENT_DIM_BORDER,
         ))
         .corner_radius(radius::MD)
         .inner_margin(egui::Margin::same(margin(space::TWO)))
+}
+
+/// Input outline: strong rest edge, full accent only while focused.
+#[must_use]
+pub(crate) fn input_stroke(focused: bool) -> Stroke {
+    Stroke::new(
+        1.0,
+        if focused {
+            color::ACCENT
+        } else {
+            color::BORDER_STRONG
+        },
+    )
+}
+
+/// Scope TextEdit/Drag-adjacent fields so they pick up input outlines
+/// without giving every button a ring.
+pub(crate) fn apply_input_visuals(ui: &mut egui::Ui) {
+    let rest = input_stroke(false);
+    let focus = input_stroke(true);
+    let visuals = ui.visuals_mut();
+    visuals.widgets.inactive.bg_stroke = rest;
+    visuals.widgets.hovered.bg_stroke = focus;
+    visuals.widgets.active.bg_stroke = focus;
 }
 
 pub(crate) fn install(ctx: &egui::Context) {
@@ -389,8 +409,8 @@ fn visuals() -> Visuals {
     let mut visuals = Visuals::dark();
     visuals.override_text_color = Some(color::TEXT_PRIMARY);
     visuals.weak_text_color = Some(color::TEXT_SECONDARY);
-    visuals.selection.bg_fill = color::ACCENT_28;
-    visuals.selection.stroke = Stroke::new(1.0, color::ACCENT_72);
+    visuals.selection.bg_fill = color::ACCENT_WASH;
+    visuals.selection.stroke = Stroke::new(1.0, color::ACCENT);
     visuals.hyperlink_color = color::ACCENT;
     visuals.faint_bg_color = color::SURFACE;
     visuals.extreme_bg_color = color::CANVAS;
@@ -400,20 +420,20 @@ fn visuals() -> Visuals {
     visuals.error_fg_color = color::STATUS_DANGER;
     visuals.window_corner_radius = radius::LG;
     visuals.window_shadow = Shadow {
-        offset: [0, 10],
-        blur: 32,
+        offset: [0, 6],
+        blur: 16,
         spread: 0,
-        color: Color32::from_black_alpha(128),
+        color: Color32::from_black_alpha(102),
     };
-    visuals.window_fill = color::SURFACE_RAISED;
+    visuals.window_fill = color::SURFACE_ACTIVE;
     visuals.window_stroke = Stroke::new(1.0, color::BORDER_STRONG);
-    visuals.menu_corner_radius = radius::LG;
+    visuals.menu_corner_radius = radius::MD;
     visuals.panel_fill = color::PANEL;
     visuals.popup_shadow = Shadow {
         offset: [0, 3],
-        blur: 12,
+        blur: 8,
         spread: 0,
-        color: Color32::from_black_alpha(96),
+        color: Color32::from_black_alpha(82),
     };
     visuals.button_frame = true;
     visuals.collapsing_header_frame = false;

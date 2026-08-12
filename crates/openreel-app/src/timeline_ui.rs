@@ -359,7 +359,7 @@ impl OpenReelApp {
                         egui::Sense::click(),
                     );
                     let painter = ui.painter_at(rect);
-                    painter.rect_filled(rect, radius::NONE, color::CANVAS);
+                    painter.rect_filled(rect, radius::NONE, color::LETTERBOX);
                     paint_ruler(
                         &painter,
                         rect,
@@ -380,7 +380,7 @@ impl OpenReelApp {
                             egui::pos2(rect.left(), lane_top),
                             egui::vec2(rect.width(), track_height),
                         );
-                        painter.rect_filled(lane, radius::NONE, color::SURFACE);
+                        painter.rect_filled(lane, radius::NONE, color::LETTERBOX);
                         painter.line_segment(
                             [lane.left_bottom(), lane.right_bottom()],
                             egui::Stroke::new(1.0, color::BORDER_SUBTLE),
@@ -916,10 +916,6 @@ fn paint_track_labels(
             pending_operation = Some(operation);
         }
     }
-    painter.line_segment(
-        [rect.right_top(), rect.right_bottom()],
-        egui::Stroke::new(1.0, color::BORDER_SUBTLE),
-    );
     pending_operation
 }
 
@@ -1067,7 +1063,7 @@ fn paint_project_marker(
         3 => color::STATUS_DANGER,
         _ => color::ACCENT,
     };
-    let marker_color = if selected { color::ACCENT } else { token_color };
+    let marker_color = token_color;
     let top = timeline_rect.top() + space::ONE;
     painter.line_segment(
         [
@@ -1087,7 +1083,7 @@ fn paint_project_marker(
         } else {
             marker_color
         },
-        egui::Stroke::new(if selected { 1.0 } else { 0.0 }, color::ACCENT),
+        egui::Stroke::new(if selected { 1.0 } else { 0.0 }, color::ACCENT_DIM_BORDER),
     ));
 }
 
@@ -1170,11 +1166,8 @@ fn paint_clip(
             color::TEXT_SECONDARY,
         );
     }
-    if hovered {
-        painter.rect_filled(rect, radius::SM, color::ACCENT_16);
-    }
     if selected {
-        painter.rect_filled(rect, radius::SM, color::ACCENT_28);
+        painter.rect_filled(rect, radius::SM, color::ACCENT_WASH);
     }
     if dragging {
         painter.rect_filled(rect, radius::SM, color::SURFACE_ACTIVE);
@@ -1187,23 +1180,7 @@ fn paint_clip(
         source_range.clone(),
         rect,
     );
-    painter.rect_stroke(
-        rect,
-        radius::SM,
-        egui::Stroke::new(
-            if dragging { 2.0 } else { 1.0 },
-            if dragging {
-                color::ACCENT
-            } else if selected {
-                color::ACCENT_72
-            } else if hovered {
-                color::BORDER_STRONG
-            } else {
-                color::BORDER_SUBTLE
-            },
-        ),
-        egui::StrokeKind::Inside,
-    );
+    paint_clip_chrome(painter, rect, hovered, selected, dragging);
     if hovered || selected || dragging {
         painter.rect_filled(
             egui::Rect::from_min_max(
@@ -1211,7 +1188,7 @@ fn paint_clip(
                 egui::pos2(rect.left() + EDGE_HANDLE_WIDTH, rect.bottom()),
             ),
             radius::XS,
-            color::ACCENT_72,
+            color::ACCENT_DIM_BORDER,
         );
         painter.rect_filled(
             egui::Rect::from_min_max(
@@ -1219,7 +1196,7 @@ fn paint_clip(
                 rect.max,
             ),
             radius::XS,
-            color::ACCENT_72,
+            color::ACCENT_DIM_BORDER,
         );
     }
 }
@@ -1290,34 +1267,15 @@ fn paint_freeze_clip(
         egui::pos2(rect.right() - space::TWO, rect.top() + space::ONE),
         egui::Align2::RIGHT_TOP,
         "HOLD",
-        color::ACCENT,
+        color::TEXT_SECONDARY,
     );
-    if hovered {
-        painter.rect_filled(rect, radius::SM, color::ACCENT_16);
-    }
     if selected {
-        painter.rect_filled(rect, radius::SM, color::ACCENT_28);
+        painter.rect_filled(rect, radius::SM, color::ACCENT_WASH);
     }
     if dragging {
         painter.rect_filled(rect, radius::SM, color::SURFACE_ACTIVE);
     }
-    painter.rect_stroke(
-        rect,
-        radius::SM,
-        egui::Stroke::new(
-            if dragging { 2.0 } else { 1.0 },
-            if dragging {
-                color::ACCENT
-            } else if selected {
-                color::ACCENT_72
-            } else if hovered {
-                color::BORDER_STRONG
-            } else {
-                color::BORDER_SUBTLE
-            },
-        ),
-        egui::StrokeKind::Inside,
-    );
+    paint_clip_chrome(painter, rect, hovered, selected, dragging);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1331,13 +1289,10 @@ fn paint_title_clip(
     transition_duration: Option<TimeCode>,
     pixels_per_frame: f32,
 ) {
-    // Accent discipline: an unselected title is a neutral raised surface with
-    // a small accent badge - the accent field/border is earned by selection,
-    // never outranking the playhead at rest.
-    let fill = if dragging {
+    // Unselected titles are a raised surface with a wash badge; selection
+    // adds ACCENT_WASH + dim border and never outranks the playhead.
+    let fill = if dragging || hovered {
         color::SURFACE_ACTIVE
-    } else if selected {
-        color::ACCENT_28
     } else {
         color::SURFACE_RAISED
     };
@@ -1349,18 +1304,14 @@ fn paint_title_clip(
             egui::pos2((rect.left() + 28.0).min(rect.right()), rect.bottom()),
         ),
         radius::SM,
-        if selected || dragging {
-            color::ACCENT_28
-        } else {
-            color::ACCENT_16
-        },
+        color::ACCENT_WASH,
     );
     painter.text(
         egui::pos2(rect.left() + space::TWO, rect.center().y),
         egui::Align2::LEFT_CENTER,
         "T",
         egui::FontId::new(type_size::HEADING, egui::FontFamily::Proportional),
-        color::ACCENT,
+        color::TEXT_PRIMARY,
     );
     let label = title.text.lines().next().unwrap_or("Title");
     painter.text(
@@ -1370,22 +1321,31 @@ fn paint_title_clip(
         egui::FontId::new(type_size::CAPTION, egui::FontFamily::Proportional),
         color::TEXT_PRIMARY,
     );
-    if hovered {
-        painter.rect_filled(rect, radius::SM, color::ACCENT_10);
+    if selected {
+        painter.rect_filled(rect, radius::SM, color::ACCENT_WASH);
     }
-    painter.rect_stroke(
-        rect,
-        radius::SM,
-        egui::Stroke::new(
-            if dragging { 2.0 } else { 1.0 },
-            if selected || dragging {
-                color::ACCENT
-            } else {
-                color::BORDER_STRONG
-            },
-        ),
-        egui::StrokeKind::Inside,
-    );
+    paint_clip_chrome(painter, rect, hovered, selected, dragging);
+}
+
+fn paint_clip_chrome(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    hovered: bool,
+    selected: bool,
+    dragging: bool,
+) {
+    let stroke = if dragging {
+        egui::Stroke::new(2.0, color::ACCENT_DIM_BORDER)
+    } else if selected {
+        egui::Stroke::new(1.0, color::ACCENT_DIM_BORDER)
+    } else if hovered {
+        egui::Stroke::new(1.0, color::BORDER_SUBTLE)
+    } else {
+        egui::Stroke::NONE
+    };
+    if stroke.width > 0.0 {
+        painter.rect_stroke(rect, radius::SM, stroke, egui::StrokeKind::Inside);
+    }
 }
 
 // Transition frame widths are intentionally projected into f32 timeline pixels.
@@ -1414,7 +1374,7 @@ fn paint_transition_affordance(
             egui::pos2(right, bottom),
         ],
         color::MEDIA_SCRIM_78,
-        egui::Stroke::new(1.0, color::ACCENT_16),
+        egui::Stroke::new(1.0, color::ACCENT_DIM_BORDER),
     ));
 }
 
@@ -1585,7 +1545,7 @@ fn paint_waveform(
             egui::Stroke::new(
                 1.0,
                 if selected {
-                    color::ACCENT_72
+                    color::TEXT_PRIMARY
                 } else {
                     color::TEXT_PRIMARY_64
                 },
