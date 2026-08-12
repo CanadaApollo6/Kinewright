@@ -48,18 +48,6 @@ impl VisualCache {
         }
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.waveforms.clear();
-        self.requested_waveforms.clear();
-        self.failed_waveforms.clear();
-        self.thumbnails.clear();
-        self.requested_thumbnails.clear();
-        self.failed_thumbnails.clear();
-        self.thumbnail_order.clear();
-        self.thumbnail_bytes = 0;
-        while self.results.try_recv().is_ok() {}
-    }
-
     pub(crate) fn waveform(
         &mut self,
         media: &dyn Analysis,

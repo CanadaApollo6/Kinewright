@@ -46,17 +46,20 @@ pub(crate) fn filler_word_indices(words: &[TimelineTranscriptWord]) -> Vec<usize
 
 impl OpenReelApp {
     pub(crate) fn cut_selected_transcript_words(&mut self) {
-        let Some(selection) = self.transcript_selection else {
+        let Some(selection) = self.focused().transcript_selection else {
             return;
         };
-        let words = match self.analysis.timeline_transcript(&self.document, None) {
+        let words = match self
+            .analysis
+            .timeline_transcript(&self.focused().document, None)
+        {
             Ok(words) => dedup_linked_timeline_words(words),
             Err(error) => {
                 self.record_error("Transcript edit", error.to_string());
                 return;
             }
         };
-        match selected_transcript_word_cut_operations(&self.document, &words, selection) {
+        match selected_transcript_word_cut_operations(&self.focused().document, &words, selection) {
             Ok(operations) if operations.is_empty() => {
                 self.record_error(
                     "Transcript edit",
@@ -69,7 +72,10 @@ impl OpenReelApp {
     }
 
     pub(crate) fn remove_filler_words(&mut self) {
-        let words = match self.analysis.timeline_transcript(&self.document, None) {
+        let words = match self
+            .analysis
+            .timeline_transcript(&self.focused().document, None)
+        {
             Ok(words) => dedup_linked_timeline_words(words),
             Err(error) => {
                 self.record_error("Transcript edit", error.to_string());
@@ -84,8 +90,9 @@ impl OpenReelApp {
             );
             return;
         }
-        let cuts = transcript_cut_ranges_for_indices(&self.document, &words, &selected_indices);
-        match transcript_word_cut_operations(&self.document, &cuts) {
+        let cuts =
+            transcript_cut_ranges_for_indices(&self.focused().document, &words, &selected_indices);
+        match transcript_word_cut_operations(&self.focused().document, &cuts) {
             Ok(operations) if operations.is_empty() => {
                 self.record_error(
                     "Transcript edit",

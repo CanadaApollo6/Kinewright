@@ -86,7 +86,7 @@ impl OpenReelApp {
                     );
                 });
                 if self.transcript_scope != previous_scope {
-                    self.transcript_selection = None;
+                    self.focused_mut().transcript_selection = None;
                 }
                 match self.transcript_scope {
                     TranscriptScope::Asset => self.asset_transcript_ui(ui),
@@ -165,9 +165,9 @@ impl OpenReelApp {
             TranscriptStatus::Ready(transcript) => {
                 let mapped = self
                     .analysis
-                    .timeline_transcript(&self.document, None)
+                    .timeline_transcript(&self.focused().document, None)
                     .unwrap_or_default();
-                let selected_clip = self.selected_clip;
+                let selected_clip = self.focused().selected_clip;
                 let mut seek = None;
                 egui::ScrollArea::vertical()
                     .max_height(130.0)
@@ -207,22 +207,23 @@ impl OpenReelApp {
     #[allow(clippy::too_many_lines)]
     fn timeline_transcript_ui(&mut self, ui: &mut egui::Ui) {
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-            self.transcript_selection = None;
+            self.focused_mut().transcript_selection = None;
         }
         let words = crate::transcript_edit::dedup_linked_timeline_words(
             self.analysis
-                .timeline_transcript(&self.document, None)
+                .timeline_transcript(&self.focused().document, None)
                 .unwrap_or_default(),
         );
         let caption_cues = self.timeline_caption_cues();
         let statuses = self
+            .focused()
             .document
             .media_pool
             .iter()
-            .map(|asset| (asset, self.analysis.transcript_status(asset)))
+            .map(|asset| (asset.clone(), self.analysis.transcript_status(asset)))
             .collect::<Vec<_>>();
         if words.is_empty() {
-            self.transcript_selection = None;
+            self.focused_mut().transcript_selection = None;
             ui.horizontal(|ui| {
                 add_captions_button(ui, &caption_cues);
             });
@@ -235,7 +236,7 @@ impl OpenReelApp {
                 && !statuses.is_empty()
             {
                 ui.label("No speech found.");
-            } else if self.document.media_pool.is_empty() {
+            } else if self.focused().document.media_pool.is_empty() {
                 ui.label("Add media to the timeline to see its transcript.");
             } else {
                 for (asset, status) in statuses {
@@ -250,10 +251,11 @@ impl OpenReelApp {
         }
 
         let mut selected = self
+            .focused()
             .transcript_selection
             .and_then(|selection| selection.indices(&words));
-        if self.transcript_selection.is_some() && selected.is_none() {
-            self.transcript_selection = None;
+        if self.focused().transcript_selection.is_some() && selected.is_none() {
+            self.focused_mut().transcript_selection = None;
         }
 
         let selection_summary = selected.as_ref().map(|range| {
@@ -288,8 +290,8 @@ impl OpenReelApp {
                 ui.label(
                     egui::RichText::new(format!(
                         "{} – {}",
-                        format_timecode(start, self.document.fps),
-                        format_timecode(end, self.document.fps)
+                        format_timecode(start, self.focused().document.fps),
+                        format_timecode(end, self.focused().document.fps)
                     ))
                     .monospace()
                     .color(color::TEXT_MUTED),
@@ -327,8 +329,8 @@ impl OpenReelApp {
                         let is_selected = selected
                             .as_ref()
                             .is_some_and(|range| range.contains(&index));
-                        let is_playhead =
-                            self.position >= word.project_start && self.position < word.project_end;
+                        let is_playhead = self.focused().position >= word.project_start
+                            && self.focused().position < word.project_end;
                         let response = transcript_word_button(
                             ui,
                             word,
@@ -350,19 +352,21 @@ impl OpenReelApp {
         if let Some((index, extend)) = clicked_word {
             let word = &words[index];
             self.seek_to(word.project_start);
-            self.transcript_selection = Some(if extend {
-                self.transcript_selection.map_or_else(
+            let selection = if extend {
+                self.focused().transcript_selection.map_or_else(
                     || TranscriptSelection::single(word),
                     |selection| selection.extend_to(word),
                 )
             } else {
                 TranscriptSelection::single(word)
-            });
+            };
+            self.focused_mut().transcript_selection = Some(selection);
             selected = self
+                .focused()
                 .transcript_selection
                 .and_then(|selection| selection.indices(&words));
         } else if empty_clicked {
-            self.transcript_selection = None;
+            self.focused_mut().transcript_selection = None;
             selected = None;
         }
 
@@ -378,14 +382,16 @@ impl OpenReelApp {
     }
 
     fn selected_transcript_asset(&self) -> Option<&MediaAsset> {
-        self.selected_clip
-            .and_then(|clip| self.document.clip(clip))
-            .and_then(|clip| self.document.asset(clip.asset))
+        self.focused()
+            .selected_clip
+            .and_then(|clip| self.focused().document.clip(clip))
+            .and_then(|clip| self.focused().document.asset(clip.asset))
             .or_else(|| {
-                self.selected_asset
-                    .and_then(|asset| self.document.asset(asset))
+                self.focused()
+                    .selected_asset
+                    .and_then(|asset| self.focused().document.asset(asset))
             })
-            .or_else(|| self.document.media_pool.first())
+            .or_else(|| self.focused().document.media_pool.first())
     }
 
     fn running_transcript_label(ui: &mut egui::Ui, label: &str, progress: Option<f32>) {

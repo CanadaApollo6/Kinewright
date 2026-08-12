@@ -11,6 +11,7 @@ use crate::{app::OpenReelApp, transcript_edit::dedup_linked_timeline_words};
 impl OpenReelApp {
     pub(crate) fn timeline_caption_cues(&self) -> Result<Vec<CaptionCue>, String> {
         let timeline_assets = self
+            .focused()
             .document
             .tracks
             .iter()
@@ -23,7 +24,7 @@ impl OpenReelApp {
         }
 
         for asset_id in timeline_assets {
-            let Some(asset) = self.document.asset(asset_id) else {
+            let Some(asset) = self.focused().document.asset(asset_id) else {
                 continue;
             };
             let asset_name = asset.name.clone();
@@ -38,9 +39,9 @@ impl OpenReelApp {
 
         let words = self
             .analysis
-            .timeline_transcript(&self.document, None)
+            .timeline_transcript(&self.focused().document, None)
             .map_err(|error| error.to_string())?;
-        let cues = caption_cues_from_words(words, self.document.fps);
+        let cues = caption_cues_from_words(words, self.focused().document.fps);
         if cues.is_empty() {
             Err("The timeline transcript contains no captionable words".to_owned())
         } else {
@@ -56,7 +57,7 @@ impl OpenReelApp {
                 return;
             }
         };
-        match caption_title_operations(&self.document, &cues) {
+        match caption_title_operations(&self.focused().document, &cues) {
             Ok(operations) => self.send_operations(operations),
             Err(error) => self.record_error("Captions", error),
         }

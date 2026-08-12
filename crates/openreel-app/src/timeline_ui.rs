@@ -37,10 +37,12 @@ enum TrimEdge {
 
 impl OpenReelApp {
     pub(crate) fn add_title_at_playhead(&mut self) {
-        let at = self.position;
-        let duration = TimeCode(i64::from(nominal_fps(self.document.fps)).saturating_mul(3));
+        let document = Arc::clone(&self.focused().document);
+        let at = self.focused().position;
+        let duration = TimeCode(i64::from(nominal_fps(document.fps)).saturating_mul(3));
         let end = TimeCode(at.0.saturating_add(duration.0));
         let available_track = self
+            .focused()
             .document
             .tracks
             .iter()
@@ -48,7 +50,7 @@ impl OpenReelApp {
             .filter(|track| track.kind == TrackKind::Video)
             .find(|track| {
                 track.clips.iter().all(|clip| {
-                    let clip_end = self.document.clip_duration(clip).map_or(
+                    let clip_end = self.focused().document.clip_duration(clip).map_or(
                         clip.timeline_start,
                         |clip_duration| {
                             TimeCode(clip.timeline_start.0.saturating_add(clip_duration.0))
@@ -69,6 +71,7 @@ impl OpenReelApp {
             return;
         }
         let Some(next_track) = self
+            .focused()
             .document
             .tracks
             .iter()
@@ -95,15 +98,17 @@ impl OpenReelApp {
     }
 
     pub(crate) fn freeze_frame_at_playhead(&mut self) {
-        match freeze_frame_operations(&self.document, self.position) {
+        let position = self.focused().position;
+        match freeze_frame_operations(&self.focused().document, position) {
             Ok(operations) => self.send_operations(operations),
             Err(error) => self.record_error("Operations", error),
         }
     }
 
     pub(crate) fn split_at_playhead(&mut self) {
-        let clip = self.selected_clip.or_else(|| {
-            timeline_source_at(&self.document, self.position)
+        let position = self.focused().position;
+        let clip = self.focused().selected_clip.or_else(|| {
+            timeline_source_at(&self.focused().document, position)
                 .ok()
                 .flatten()
                 .map(|source| source.clip)
@@ -115,18 +120,15 @@ impl OpenReelApp {
             );
             return;
         };
-        self.send_operation(Operation::SplitClip {
-            clip,
-            at: self.position,
-        });
+        self.send_operation(Operation::SplitClip { clip, at: position });
     }
 
     pub(crate) fn delete_selected(&mut self) {
-        if self.transcript_selection.is_some() {
+        if self.focused().transcript_selection.is_some() {
             self.cut_selected_transcript_words();
             return;
         }
-        if let Some(marker) = self.selected_marker {
+        if let Some(marker) = self.focused().selected_marker {
             self.send_operation(Operation::RemoveMarker { marker });
             return;
         }
@@ -138,27 +140,31 @@ impl OpenReelApp {
     }
 
     fn delete_selected_clips(&mut self, ripple: bool) {
-        let Some(clip) = self.selected_clip else {
+        let Some(clip) = self.focused().selected_clip else {
             self.record_error("Operations", "Select a clip to delete");
             return;
         };
-        self.send_operations(linked_delete_operations(&self.document, clip, ripple));
+        self.send_operations(linked_delete_operations(
+            &self.focused().document,
+            clip,
+            ripple,
+        ));
     }
 
     pub(crate) fn add_marker_at_playhead(&mut self) {
-        let Some(id) = next_marker_id(&self.document) else {
+        let Some(id) = next_marker_id(&self.focused().document) else {
             self.record_error("Operations", "Marker id space is exhausted");
             return;
         };
         let marker = Marker {
             id,
-            position: self.position,
+            position: self.focused().position,
             label: format!("Marker {id}"),
             color_token: u8::try_from(id.0.saturating_sub(1) % u64::from(MARKER_COLOR_TOKEN_COUNT))
                 .expect("marker color token is bounded by a u8 constant"),
         };
-        self.selected_marker = Some(id);
-        self.selected_clip = None;
+        self.focused_mut().selected_marker = Some(id);
+        self.focused_mut().selected_clip = None;
         self.send_operation(Operation::AddMarker { marker });
     }
 
@@ -167,7 +173,7 @@ impl OpenReelApp {
         clip: ClipId,
         new_source: std::ops::Range<TimeCode>,
     ) {
-        let Some(original) = self.document.clip(clip) else {
+        let Some(original) = self.focused().document.clip(clip) else {
             self.record_error("Operations", format!("Clip {clip} no longer exists"));
             return;
         };
@@ -176,7 +182,7 @@ impl OpenReelApp {
         } else {
             TrimEdge::Left
         };
-        match linked_trim_operations(&self.document, clip, new_source, edge) {
+        match linked_trim_operations(&self.focused().document, clip, new_source, edge) {
             Ok(operations) => self.send_operations(operations),
             Err(error) => self.record_error("Operations", error),
         }
@@ -189,7 +195,11 @@ impl OpenReelApp {
         clippy::cast_possible_truncation
     )]
     pub(crate) fn timeline(&mut self, ui: &mut egui::Ui) {
-        let old_zoom_target = self.timeline_zoom_target;
+        let project_index = self.focused_project;
+        let old_zoom_target = self.focused().timeline_zoom_target;
+        let mut zoom_target = old_zoom_target;
+        let mut scroll_target = self.focused().timeline_scroll_target;
+        let project_duration = self.focused().document.duration;
         ui.allocate_ui_with_layout(
             egui::vec2(ui.available_width(), size::TIMELINE_TOOLBAR_HEIGHT),
             egui::Layout::left_to_right(egui::Align::Center),
@@ -242,55 +252,59 @@ impl OpenReelApp {
                     .on_hover_text("Zoom out")
                     .clicked()
                 {
-                    self.timeline_zoom_target = (self.timeline_zoom_target / 1.25).max(0.25);
+                    zoom_target = (zoom_target / 1.25).max(0.25);
                 }
                 ui.add(
-                    egui::Slider::new(&mut self.timeline_zoom_target, 0.25..=20.0)
+                    egui::Slider::new(&mut zoom_target, 0.25..=20.0)
                         .logarithmic(true)
                         .show_value(false),
                 )
-                .on_hover_text(format!(
-                    "Timeline zoom · {:.2} px per frame",
-                    self.timeline_zoom_target
-                ));
+                .on_hover_text(format!("Timeline zoom · {zoom_target:.2} px per frame"));
                 if ui
                     .add(egui::Button::new("+").min_size(egui::vec2(22.0, 22.0)))
                     .on_hover_text("Zoom in")
                     .clicked()
                 {
-                    self.timeline_zoom_target = (self.timeline_zoom_target * 1.25).min(20.0);
+                    zoom_target = (zoom_target * 1.25).min(20.0);
                 }
                 if ui
                     .button("Fit")
                     .on_hover_text("Fit the whole project in view")
                     .clicked()
                 {
-                    let frames = self.document.duration.0.max(1) as f32;
+                    let frames = project_duration.0.max(1) as f32;
                     let width = (ui.available_width() - 120.0).max(240.0);
-                    self.timeline_zoom_target = (width / frames).clamp(0.25, 20.0);
-                    self.timeline_scroll_target = 0.0;
+                    zoom_target = (width / frames).clamp(0.25, 20.0);
+                    scroll_target = 0.0;
                 }
             },
         );
 
-        if (old_zoom_target - self.timeline_zoom_target).abs() > f32::EPSILON {
-            let playhead_before = self.position.0 as f32 * old_zoom_target;
-            let playhead_after = self.position.0 as f32 * self.timeline_zoom_target;
-            self.timeline_scroll_target =
-                (self.timeline_scroll_target + playhead_after - playhead_before).max(0.0);
+        let mut playhead_position = self.focused().position;
+        if (old_zoom_target - zoom_target).abs() > f32::EPSILON {
+            let playhead_before = playhead_position.0 as f32 * old_zoom_target;
+            let playhead_after = playhead_position.0 as f32 * zoom_target;
+            scroll_target = (scroll_target + playhead_after - playhead_before).max(0.0);
         }
-        self.pixels_per_frame = ui.ctx().animate_value_with_time(
+        let pixels_per_frame = ui.ctx().animate_value_with_time(
             egui::Id::new("timeline-zoom-animation"),
-            self.timeline_zoom_target,
+            zoom_target,
             theme::motion::NAVIGATION,
         );
         let animated_scroll = ui.ctx().animate_value_with_time(
             egui::Id::new("timeline-scroll-animation"),
-            self.timeline_scroll_target,
+            scroll_target,
             theme::motion::NAVIGATION,
         );
+        self.projects[project_index].timeline_zoom_target = zoom_target;
+        self.projects[project_index].timeline_scroll_target = scroll_target;
+        self.projects[project_index].pixels_per_frame = pixels_per_frame;
 
-        let document = Arc::clone(&self.document);
+        let document = Arc::clone(&self.focused().document);
+        let mut selected_clip = self.focused().selected_clip;
+        let mut selected_marker = self.focused().selected_marker;
+        let mut selected_asset = self.focused().selected_asset;
+        let mut title_text_focus = self.focused().title_text_focus;
         if document.tracks.is_empty() {
             ui.colored_label(color::TEXT_MUTED, "No tracks in this project");
             return;
@@ -316,12 +330,12 @@ impl OpenReelApp {
             .duration
             .0
             .max(marker_end)
-            .max(self.position.0.saturating_add(1))
+            .max(playhead_position.0.saturating_add(1))
             .max(i64::from(nominal_fps(document.fps)).saturating_mul(10));
         let viewport_width = (ui.available_width() - TRACK_LABEL_WIDTH - space::TWO).max(100.0);
         let content_width =
-            ((content_frames as f32) * self.pixels_per_frame + space::SIX).max(viewport_width);
-        let (major_tick, minor_tick) = tick_density(self.pixels_per_frame, document.fps);
+            ((content_frames as f32) * pixels_per_frame + space::SIX).max(viewport_width);
+        let (major_tick, minor_tick) = tick_density(pixels_per_frame, document.fps);
         let clip_bounds = collect_clip_bounds(&document);
         let mut pending_operations = None;
         let mut seek = None;
@@ -350,7 +364,7 @@ impl OpenReelApp {
                         &painter,
                         rect,
                         ui.clip_rect(),
-                        self.pixels_per_frame,
+                        pixels_per_frame,
                         document.fps,
                         content_frames,
                         major_tick,
@@ -399,9 +413,8 @@ impl OpenReelApp {
                                     (document.fps, TimeCode(i64::MAX))
                                 }
                             };
-                            let x =
-                                rect.left() + clip.timeline_start.0 as f32 * self.pixels_per_frame;
-                            let clip_width = (duration.0 as f32 * self.pixels_per_frame).max(24.0);
+                            let x = rect.left() + clip.timeline_start.0 as f32 * pixels_per_frame;
+                            let clip_width = (duration.0 as f32 * pixels_per_frame).max(24.0);
                             let clip_rect = egui::Rect::from_min_size(
                                 egui::pos2(x, lane.top() + space::ONE),
                                 egui::vec2(clip_width, lane.height() - space::TWO),
@@ -457,14 +470,14 @@ impl OpenReelApp {
                                 || right.hovered()
                                 || right.dragged();
                             if body.clicked() {
-                                self.selected_clip = Some(clip.id);
-                                self.selected_marker = None;
-                                self.selected_asset = asset.map(|asset| asset.id);
+                                selected_clip = Some(clip.id);
+                                selected_marker = None;
+                                selected_asset = asset.map(|asset| asset.id);
                             }
                             if body.double_clicked()
                                 && matches!(&clip.content, ClipContent::Title(_))
                             {
-                                self.title_text_focus = Some(clip.id);
+                                title_text_focus = Some(clip.id);
                             }
 
                             let interacting = body.dragged()
@@ -478,13 +491,13 @@ impl OpenReelApp {
                                     &clip_bounds,
                                     &document.markers,
                                     clip.id,
-                                    self.position.0,
+                                    playhead_position.0,
                                 )
                             } else {
                                 Vec::new()
                             };
                             let project_delta =
-                                (body.drag_delta().x / self.pixels_per_frame).round() as i64;
+                                (body.drag_delta().x / pixels_per_frame).round() as i64;
                             let minimum_start = linked_minimum_primary_start(&document, clip.id);
                             let raw_start = clip
                                 .timeline_start
@@ -499,7 +512,7 @@ impl OpenReelApp {
                                     duration.0,
                                     &candidates,
                                     minor_tick,
-                                    self.pixels_per_frame,
+                                    pixels_per_frame,
                                 )
                             };
                             if body.dragged() {
@@ -519,8 +532,7 @@ impl OpenReelApp {
                                     .timeline_start
                                     .0
                                     .saturating_add(
-                                        (left.drag_delta().x / self.pixels_per_frame).round()
-                                            as i64,
+                                        (left.drag_delta().x / pixels_per_frame).round() as i64,
                                     )
                                     .max(0);
                                 let (edge, _) = if snapping_disabled {
@@ -530,7 +542,7 @@ impl OpenReelApp {
                                         raw_edge,
                                         &candidates,
                                         minor_tick,
-                                        self.pixels_per_frame,
+                                        pixels_per_frame,
                                     )
                                 };
                                 let source_delta = project_delta_to_source(
@@ -558,7 +570,7 @@ impl OpenReelApp {
                             if right.drag_stopped() {
                                 let clip_end = clip.timeline_start.0.saturating_add(duration.0);
                                 let raw_edge = clip_end.saturating_add(
-                                    (right.drag_delta().x / self.pixels_per_frame).round() as i64,
+                                    (right.drag_delta().x / pixels_per_frame).round() as i64,
                                 );
                                 let (edge, _) = if snapping_disabled {
                                     (raw_edge, None)
@@ -567,7 +579,7 @@ impl OpenReelApp {
                                         raw_edge,
                                         &candidates,
                                         minor_tick,
-                                        self.pixels_per_frame,
+                                        pixels_per_frame,
                                     )
                                 };
                                 let source_delta = project_delta_to_source(
@@ -595,14 +607,14 @@ impl OpenReelApp {
                             let draw_delta = if body.dragged() || body.drag_stopped() {
                                 egui::vec2(
                                     (snapped_start - clip.timeline_start.0) as f32
-                                        * self.pixels_per_frame,
+                                        * pixels_per_frame,
                                     0.0,
                                 )
                             } else {
                                 egui::Vec2::ZERO
                             };
                             let draw_rect = clip_rect.translate(draw_delta);
-                            let selected = self.selected_clip == Some(clip.id);
+                            let selected = selected_clip == Some(clip.id);
                             let dragging = body.dragged() || left.dragged() || right.dragged();
                             match (&clip.content, asset) {
                                 (ClipContent::Media, Some(asset)) => paint_clip(
@@ -619,7 +631,7 @@ impl OpenReelApp {
                                     clip.transition_in
                                         .as_ref()
                                         .map(|transition| transition.duration),
-                                    self.pixels_per_frame,
+                                    pixels_per_frame,
                                     duration,
                                     document.fps,
                                 ),
@@ -633,7 +645,7 @@ impl OpenReelApp {
                                     clip.transition_in
                                         .as_ref()
                                         .map(|transition| transition.duration),
-                                    self.pixels_per_frame,
+                                    pixels_per_frame,
                                 ),
                                 (ClipContent::Freeze(freeze), Some(asset)) => paint_freeze_clip(
                                     &painter,
@@ -649,7 +661,7 @@ impl OpenReelApp {
                                     clip.transition_in
                                         .as_ref()
                                         .map(|transition| transition.duration),
-                                    self.pixels_per_frame,
+                                    pixels_per_frame,
                                 ),
                                 (ClipContent::Media | ClipContent::Freeze(_), None) => {}
                             }
@@ -660,7 +672,7 @@ impl OpenReelApp {
                     }
 
                     for marker in &document.markers {
-                        let x = rect.left() + marker.position.0 as f32 * self.pixels_per_frame;
+                        let x = rect.left() + marker.position.0 as f32 * pixels_per_frame;
                         let marker_rect = egui::Rect::from_center_size(
                             egui::pos2(x + 3.0, rect.top() + size::RULER_HEIGHT / 2.0),
                             egui::vec2(14.0, size::RULER_HEIGHT),
@@ -676,28 +688,28 @@ impl OpenReelApp {
                         marker_pointer_interaction |=
                             response.hovered() || response.dragged() || response.drag_stopped();
                         if response.clicked() || response.drag_started() {
-                            self.selected_marker = Some(marker.id);
-                            self.selected_clip = None;
+                            selected_marker = Some(marker.id);
+                            selected_clip = None;
                         }
                         if response.secondary_clicked() {
-                            self.selected_marker = Some(marker.id);
-                            self.selected_clip = None;
+                            selected_marker = Some(marker.id);
+                            selected_clip = None;
                             pending_operations =
                                 Some(vec![Operation::RemoveMarker { marker: marker.id }]);
                         }
                         let raw = marker.position.0.saturating_add(
-                            (response.drag_delta().x / self.pixels_per_frame).round() as i64,
+                            (response.drag_delta().x / pixels_per_frame).round() as i64,
                         );
                         let candidates = marker_snap_candidates(
                             &clip_bounds,
                             &document.markers,
                             marker.id,
-                            self.position.0,
+                            playhead_position.0,
                         );
                         let (snapped, guide) = if snapping_disabled {
                             (raw.max(0), None)
                         } else {
-                            nearest_snap(raw.max(0), &candidates, minor_tick, self.pixels_per_frame)
+                            nearest_snap(raw.max(0), &candidates, minor_tick, pixels_per_frame)
                         };
                         if response.dragged() {
                             snap_guide = guide.or(snap_guide);
@@ -718,13 +730,13 @@ impl OpenReelApp {
                             rect,
                             draw_position,
                             marker.color_token,
-                            self.selected_marker == Some(marker.id),
+                            selected_marker == Some(marker.id),
                             response.dragged(),
-                            self.pixels_per_frame,
+                            pixels_per_frame,
                         );
                     }
 
-                    let playhead_x = rect.left() + self.position.0 as f32 * self.pixels_per_frame;
+                    let playhead_x = rect.left() + playhead_position.0 as f32 * pixels_per_frame;
                     painter.line_segment(
                         [
                             egui::pos2(playhead_x, rect.top()),
@@ -761,8 +773,7 @@ impl OpenReelApp {
                     if (playhead_response.dragged() || playhead_response.drag_stopped())
                         && let Some(pointer) = playhead_response.interact_pointer_pos()
                     {
-                        let raw =
-                            ((pointer.x - rect.left()) / self.pixels_per_frame).round() as i64;
+                        let raw = ((pointer.x - rect.left()) / pixels_per_frame).round() as i64;
                         let candidates = clip_bounds
                             .iter()
                             .flat_map(|bounds| [bounds.start, bounds.end])
@@ -771,7 +782,7 @@ impl OpenReelApp {
                         let (snapped, guide) = if snapping_disabled {
                             (raw.max(0), None)
                         } else {
-                            nearest_snap(raw.max(0), &candidates, minor_tick, self.pixels_per_frame)
+                            nearest_snap(raw.max(0), &candidates, minor_tick, pixels_per_frame)
                         };
                         seek = Some(TimeCode(snapped));
                         snap_guide = guide.or(snap_guide);
@@ -785,14 +796,13 @@ impl OpenReelApp {
                         && !playhead_response.hovered()
                         && let Some(pointer) = canvas_response.interact_pointer_pos()
                     {
-                        let frame =
-                            ((pointer.x - rect.left()) / self.pixels_per_frame).round() as i64;
+                        let frame = ((pointer.x - rect.left()) / pixels_per_frame).round() as i64;
                         seek = Some(TimeCode(frame.max(0)));
                         scrub_stopped = true;
                     }
 
                     if let Some(guide) = snap_guide {
-                        let x = rect.left() + guide as f32 * self.pixels_per_frame;
+                        let x = rect.left() + guide as f32 * pixels_per_frame;
                         painter.line_segment(
                             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
                             egui::Stroke::new(1.0, color::ACCENT),
@@ -810,7 +820,7 @@ impl OpenReelApp {
                     }
                 });
             if (output.state.offset.x - animated_scroll).abs() > 0.5 {
-                self.timeline_scroll_target = output.state.offset.x;
+                scroll_target = output.state.offset.x;
             }
         });
 
@@ -824,19 +834,26 @@ impl OpenReelApp {
             }
         }
         if let Some(position) = seek {
-            let maximum = self.document.duration.0.saturating_sub(1).max(0);
-            self.position = TimeCode(position.0.clamp(0, maximum));
-            self.playback.request_frame(self.position);
+            let maximum = self.focused().document.duration.0.saturating_sub(1).max(0);
+            playhead_position = TimeCode(position.0.clamp(0, maximum));
+            self.playback.request_frame(playhead_position);
             if scrub_stopped {
-                self.playback.seek(self.position);
+                self.playback.seek(playhead_position);
             }
         }
         if scrub_stopped {
             if self.resume_after_scrub {
-                self.playback.play(self.position);
+                self.playback.play(playhead_position);
             }
             self.resume_after_scrub = false;
         }
+        let session = &mut self.projects[project_index];
+        session.position = playhead_position;
+        session.selected_clip = selected_clip;
+        session.selected_marker = selected_marker;
+        session.selected_asset = selected_asset;
+        session.title_text_focus = title_text_focus;
+        session.timeline_scroll_target = scroll_target;
     }
 }
 

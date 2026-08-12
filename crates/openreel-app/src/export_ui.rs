@@ -57,11 +57,11 @@ impl CaptionFormat {
 
 impl OpenReelApp {
     pub(crate) fn open_export_dialog(&mut self) {
-        self.export_dialog.width = self.document.resolution.0;
-        self.export_dialog.height = self.document.resolution.1;
-        self.export_dialog.fps_numerator = self.document.fps.numerator();
-        self.export_dialog.fps_denominator = self.document.fps.denominator();
-        if let Some(project_path) = &self.project_path {
+        self.export_dialog.width = self.focused().document.resolution.0;
+        self.export_dialog.height = self.focused().document.resolution.1;
+        self.export_dialog.fps_numerator = self.focused().document.fps.numerator();
+        self.export_dialog.fps_denominator = self.focused().document.fps.denominator();
+        if let Some(project_path) = &self.focused().project_path {
             self.export_dialog.output = project_path.with_extension("mp4").display().to_string();
         }
         self.export_dialog.open = true;
@@ -82,7 +82,7 @@ impl OpenReelApp {
         if self.export_job.is_some() {
             return;
         }
-        if self.document.duration <= TimeCode::ZERO {
+        if self.focused().document.duration <= TimeCode::ZERO {
             self.record_error("Export", "Add a clip to the timeline before exporting");
             return;
         }
@@ -161,8 +161,8 @@ impl OpenReelApp {
             path.set_extension(extension);
         }
         let contents = match format {
-            CaptionFormat::Srt => srt(cues, self.document.fps),
-            CaptionFormat::Vtt => vtt(cues, self.document.fps),
+            CaptionFormat::Srt => srt(cues, self.focused().document.fps),
+            CaptionFormat::Vtt => vtt(cues, self.focused().document.fps),
         };
         match std::fs::write(&path, contents) {
             Ok(()) => self.status = format!("Saved captions to {}", path.display()),
@@ -180,7 +180,7 @@ impl OpenReelApp {
             .filter(|stem| !stem.is_empty())
             .map(|stem| stem.to_string_lossy().into_owned())
             .or_else(|| {
-                self.document.media_pool.first().map(|asset| {
+                self.focused().document.media_pool.first().map(|asset| {
                     std::path::Path::new(&asset.name)
                         .file_stem()
                         .unwrap_or(asset.name.as_ref())

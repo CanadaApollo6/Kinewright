@@ -165,14 +165,16 @@ impl ActiveRecording {
 
 /// Start a capture. The child's stderr goes to a log file beside the
 /// recording so failures are diagnosable after the fact.
-pub(crate) fn start_recording(mode: &RecordingMode) -> Result<ActiveRecording, String> {
+pub(crate) fn start_recording(
+    mode: &RecordingMode,
+    directory: &Path,
+) -> Result<ActiveRecording, String> {
     let ffmpeg = find_ffmpeg().ok_or_else(|| {
         "FFmpeg was not found (bundled beside OpenReel.exe, or on PATH)".to_owned()
     })?;
-    let directory = recordings_directory();
-    std::fs::create_dir_all(&directory)
+    std::fs::create_dir_all(directory)
         .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
-    let path = next_recording_path(&directory, mode.extension());
+    let path = next_recording_path(directory, mode.extension());
     let log = std::fs::File::create(path.with_extension("log"))
         .map_err(|error| format!("could not create the recording log: {error}"))?;
 
@@ -427,13 +429,53 @@ fn find_ffmpeg() -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// Recordings are user-visible files: `Videos\OpenReel` when the profile
-/// exists, the system temporary directory otherwise.
-fn recordings_directory() -> PathBuf {
-    std::env::var_os("USERPROFILE").map_or_else(
+/// Recordings are user-visible files, grouped by a filesystem-safe project name.
+fn recordings_directory(project_name: &str) -> PathBuf {
+    let root = std::env::var_os("USERPROFILE").map_or_else(
         || std::env::temp_dir().join("OpenReel"),
         |home| PathBuf::from(home).join("Videos").join("OpenReel"),
-    )
+    );
+    root.join(sanitize_recordings_folder(project_name))
+}
+
+fn sanitize_recordings_folder(project_name: &str) -> String {
+    let mut sanitized = project_name
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+            {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    while matches!(sanitized.chars().last(), Some(' ' | '.')) {
+        sanitized.pop();
+    }
+    let leading_bytes = sanitized
+        .char_indices()
+        .find(|(_, character)| !matches!(character, ' ' | '.'))
+        .map_or(sanitized.len(), |(index, _)| index);
+    sanitized.drain(..leading_bytes);
+    let reserved = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if sanitized.is_empty() {
+        "Project".to_owned()
+    } else if reserved
+        .iter()
+        .any(|reserved| sanitized.eq_ignore_ascii_case(reserved))
+    {
+        format!("_{sanitized}")
+    } else {
+        sanitized
+    }
 }
 
 /// `Recording 1.mp4`, `Recording 2.mp4`, ... - human names, no timestamps.
@@ -506,6 +548,7 @@ impl OpenReelApp {
         let mut open = self.record_dialog.open;
         let mut start = false;
         let devices = self.record_dialog.devices.clone();
+        let recording_directory = recordings_directory(&self.project_name());
         egui::Window::new("Record")
             .open(&mut open)
             .resizable(false)
@@ -613,7 +656,7 @@ impl OpenReelApp {
                     color::TEXT_MUTED,
                     egui::RichText::new(format!(
                         "Saves to {} and lands on the timeline when you stop.",
-                        recordings_directory().display()
+                        recording_directory.display()
                     ))
                     .size(type_size::CAPTION),
                 );
@@ -664,7 +707,8 @@ impl OpenReelApp {
                 RecordingMode::Voice { microphone }
             }
         };
-        match start_recording(&mode) {
+        let directory = recordings_directory(&self.project_name());
+        match start_recording(&mode, &directory) {
             Ok(active) => {
                 self.status = format!("Recording {}…", active.label.to_lowercase());
                 self.recording = Some(active);
@@ -687,13 +731,14 @@ impl OpenReelApp {
 
     fn import_recorded_file(&mut self, path: PathBuf) {
         self.status = format!("Importing {}…", path.display());
+        let session_id = self.focused().id;
         let media = Arc::clone(&self.analysis);
         let result_tx = self.probe_tx.clone();
         std::thread::Builder::new()
             .name("openreel-recording-probe".to_owned())
             .spawn(move || {
                 let result = media.probe(&path);
-                let _ = result_tx.send((path, result));
+                let _ = result_tx.send((session_id, path, result));
             })
             .expect("failed to spawn the recording probe worker");
     }
@@ -891,5 +936,20 @@ dummy: Immediate exit requested"#;
             directory.join("Recording 6.mp4")
         );
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn recording_directories_use_filesystem_safe_project_names() {
+        assert_eq!(sanitize_recordings_folder("Project 1"), "Project 1");
+        assert_eq!(
+            sanitize_recordings_folder("  Interview: final?  "),
+            "Interview_ final_"
+        );
+        assert_eq!(sanitize_recordings_folder("..."), "Project");
+        assert_eq!(sanitize_recordings_folder("con"), "_con");
+        assert_eq!(
+            recordings_directory("Project: 2").file_name(),
+            Some(std::ffi::OsStr::new("Project_ 2"))
+        );
     }
 }

@@ -9,6 +9,7 @@ mod inspector_ui;
 mod keys;
 mod media_bin;
 mod preview_ui;
+mod project;
 mod recording;
 mod recovery;
 mod screenshot;

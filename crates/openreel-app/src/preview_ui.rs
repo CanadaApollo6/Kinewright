@@ -14,7 +14,7 @@ impl OpenReelApp {
         // at the project aspect, capped so the transport and inspector below
         // always keep room.
         let available = ui.available_size();
-        let (width_px, height_px) = self.document.resolution;
+        let (width_px, height_px) = self.focused().document.resolution;
         let aspect = height_px.max(1) as f32 / width_px.max(1) as f32;
         let preview_height =
             (available.x * aspect + space::FOUR * 2.0).clamp(160.0, (available.y * 0.6).max(160.0));
@@ -51,7 +51,7 @@ impl OpenReelApp {
         } else {
             // Empty state: a letterboxed screen at the project aspect, so the
             // monitor reads as a waiting display instead of a void.
-            let (width, height) = self.document.resolution;
+            let (width, height) = self.focused().document.resolution;
             let aspect = egui::vec2(width.max(1) as f32, height.max(1) as f32);
             let inset = rect.shrink2(egui::vec2(space::FOUR, space::FOUR));
             let scale = (inset.width() / aspect.x).min(inset.height() / aspect.y);

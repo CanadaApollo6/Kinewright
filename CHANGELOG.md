@@ -116,6 +116,23 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   newline). Ships with instant local commands (/remove-fillers, /captions,
   /freeze, /export, /undo, /redo, /help) and agent prompt commands
   (/cut-silences, /tighten)
+- Projects (M27): work on several videos at once, T3-style. Each open
+  project is its own timeline, media pool, undo history, agent server,
+  and crash journal; switching is instant and tears nothing down, and
+  agents in background projects keep editing their own timelines while
+  you watch another - an agent in one project can never touch a
+  different project's cut. The rail is two-level: project headers with
+  running/confirmation/dirty markers and close, the focused project
+  expanded to its threads, background projects collapsed to one quiet
+  activity line. Open and New create projects instead of replacing;
+  closing and exit guard every project's unsaved changes individually;
+  crash recovery offers every crashed project's journal by name and
+  restores each into its own session. Recordings save per project under
+  Videos\OpenReel\<project>, and export naming follows the focused
+  project. The derived-data layer (transcripts, silence, scenes,
+  thumbnails, waveforms) now keys by media content, so identical asset
+  ids in different projects can never cross-contaminate - and projects
+  sharing footage share cached analysis
 - Agent threads (T3-style): a left rail lists every session - brand mark,
   auto-title from the first message, a live latest-activity line, RUNNING
   state - and several threads can run concurrently against the same

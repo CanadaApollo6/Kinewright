@@ -224,7 +224,7 @@ impl OpenReelApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
-        if self.transcript_selection.is_some()
+        if self.focused().transcript_selection.is_some()
             && ctx.input(|input| {
                 !input.modifiers.ctrl
                     && !input.modifiers.shift
@@ -266,7 +266,9 @@ impl OpenReelApp {
             KeyAction::StepForward => self.step_frames(1),
             KeyAction::JumpStart => self.pause_and_seek(TimeCode::ZERO),
             KeyAction::JumpEnd => {
-                self.pause_and_seek(TimeCode(self.document.duration.0.saturating_sub(1).max(0)));
+                self.pause_and_seek(TimeCode(
+                    self.focused().document.duration.0.saturating_sub(1).max(0),
+                ));
             }
             KeyAction::SetIn => self.trim_selected_at_playhead(true),
             KeyAction::SetOut => self.trim_selected_at_playhead(false),
@@ -289,7 +291,7 @@ impl OpenReelApp {
     }
 
     fn step_frames(&mut self, delta: i64) {
-        self.pause_and_seek(TimeCode(self.position.0.saturating_add(delta)));
+        self.pause_and_seek(TimeCode(self.focused().position.0.saturating_add(delta)));
     }
 
     fn pause_and_seek(&mut self, position: TimeCode) {
@@ -298,42 +300,45 @@ impl OpenReelApp {
     }
 
     fn trim_selected_at_playhead(&mut self, set_in: bool) {
-        let Some(clip_id) = self.selected_clip else {
+        let Some(clip_id) = self.focused().selected_clip else {
             self.record_error(
                 "Operations",
                 "Select a clip before setting an in or out point",
             );
             return;
         };
-        let Some(clip) = self.document.clip(clip_id).cloned() else {
+        let Some(clip) = self.focused().document.clip(clip_id).cloned() else {
             self.record_error("Operations", format!("Clip {clip_id} no longer exists"));
             return;
         };
-        let Some(asset) = self.document.asset(clip.asset) else {
+        let Some(asset) = self.focused().document.asset(clip.asset).cloned() else {
             self.record_error(
                 "Operations",
                 format!("Asset {} no longer exists", clip.asset),
             );
             return;
         };
-        let Ok(project_duration) =
-            map_source_range_to_project(clip.source_range.clone(), asset.fps, self.document.fps)
-        else {
+        let Ok(project_duration) = map_source_range_to_project(
+            clip.source_range.clone(),
+            asset.fps,
+            self.focused().document.fps,
+        ) else {
             self.record_error("Operations", "Could not map the selected clip time base");
             return;
         };
         let project_end = clip.timeline_start.0.saturating_add(project_duration.0);
-        if self.position < clip.timeline_start || self.position.0 > project_end {
+        let position = self.focused().position;
+        if position < clip.timeline_start || position.0 > project_end {
             self.record_error(
                 "Operations",
                 "Move the playhead onto the selected clip first",
             );
             return;
         }
-        let project_offset = TimeCode(self.position.0.saturating_sub(clip.timeline_start.0));
+        let project_offset = TimeCode(position.0.saturating_sub(clip.timeline_start.0));
         let Ok(source_offset) = map_frames_with_rounding(
             project_offset,
-            self.document.fps,
+            self.focused().document.fps,
             asset.fps,
             FrameRounding::Nearest,
         ) else {

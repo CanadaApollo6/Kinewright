@@ -6,32 +6,30 @@ use std::{
 };
 
 use eframe::egui;
-use openreel_agent::{
-    ClaudeCodeDriver, CodexDriver, ConfirmationBroker, ConfirmationRequest, McpServer,
-};
+use openreel_agent::{ClaudeCodeDriver, CodexDriver};
 use openreel_core::{
-    AgentDriver, Analysis, AssetId, ClipId, Command, Core, Document, Event, Export, HarnessInfo,
-    JournalCommand, MarkerId, MediaAsset, MediaError, MediaEvent, Operation, Playback,
-    PlaybackState, TimeCode, Track, TrackId, TrackKind,
+    AgentDriver, Analysis, Command, Document, Event, Export, HarnessInfo, JournalCommand,
+    MediaAsset, MediaError, MediaEvent, Operation, Playback, PlaybackState, TimeCode, Track,
+    TrackId, TrackKind,
 };
 use openreel_media::{FfmpegMediaEngine, GpuContext};
 
 use crate::{
-    chat_ui::{AgentHarnessChoice, AgentThread, ChatEntry},
+    chat_ui::ChatEntry,
     error_ui::ErrorLog,
     export_ui::{ExportDialog, ExportJob},
     icons::Icon,
+    project::{ProjectSession, index_after_close, project_name, session_index_by_id},
     theme::{self, color, size, space, type_size},
-    transcript_ui::{TranscriptScope, TranscriptSelection},
+    transcript_ui::TranscriptScope,
 };
 
 const DEFAULT_TRACK_ID: TrackId = TrackId(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectAction {
-    New,
-    Open,
-    Close,
+    CloseProject(u64),
+    Exit(u64),
 }
 
 /// Which view the bottom material strip shows (M24 conversation-first layout).
@@ -45,21 +43,18 @@ pub(crate) enum MaterialTab {
 // Independent transport, agent, dialog, and window flags model separate UI state machines.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct OpenReelApp {
-    pub(crate) core: Core,
-    pub(crate) core_events: crossbeam_channel::Receiver<Event>,
+    pub(crate) projects: Vec<ProjectSession>,
+    pub(crate) focused_project: usize,
+    next_project_id: u64,
     pub(crate) playback: Arc<dyn Playback>,
     pub(crate) analysis: Arc<dyn Analysis>,
     pub(crate) exporter: Arc<dyn Export>,
     pub(crate) frames: crossbeam_channel::Receiver<(TimeCode, openreel_core::FrameTexture)>,
     pub(crate) media_events: crossbeam_channel::Receiver<MediaEvent>,
     pub(crate) visual_cache: crate::visual_cache::VisualCache,
-    pub(crate) mcp_server: Option<McpServer>,
     pub(crate) claude_info: Option<HarnessInfo>,
     pub(crate) codex_info: Option<HarnessInfo>,
-    pub(crate) threads: Vec<AgentThread>,
-    pub(crate) active_thread: usize,
     pub(crate) show_thread_rail: bool,
-    pub(crate) next_thread_number: usize,
     /// Selectable models per harness; `None` chosen means the CLI's default.
     pub(crate) claude_models: Vec<openreel_agent::ModelChoice>,
     pub(crate) codex_models: Vec<openreel_agent::ModelChoice>,
@@ -67,36 +62,18 @@ pub(crate) struct OpenReelApp {
     pub(crate) codex_model: Option<String>,
     pub(crate) claude_effort: Option<String>,
     pub(crate) codex_effort: Option<String>,
-    pub(crate) confirmations: Option<ConfirmationBroker>,
-    pub(crate) pending_confirmations: Vec<ConfirmationRequest>,
-    pub(crate) probe_tx: mpsc::Sender<(PathBuf, Result<MediaAsset, MediaError>)>,
-    pub(crate) probe_rx: mpsc::Receiver<(PathBuf, Result<MediaAsset, MediaError>)>,
-    /// Assets imported by the user that should land on the timeline the
-    /// moment their `AddAsset` commits — importing is one gesture, not two.
-    pending_timeline_adds: Vec<AssetId>,
-    pub(crate) document: Arc<Document>,
+    pub(crate) probe_tx: mpsc::Sender<(u64, PathBuf, Result<MediaAsset, MediaError>)>,
+    pub(crate) probe_rx: mpsc::Receiver<(u64, PathBuf, Result<MediaAsset, MediaError>)>,
     pub(crate) texture: Option<egui::TextureHandle>,
-    pub(crate) position: TimeCode,
     pub(crate) playing: bool,
     pub(crate) meter_levels: [f32; 2],
     pub(crate) resume_after_scrub: bool,
-    pub(crate) selected_clip: Option<ClipId>,
-    pub(crate) selected_marker: Option<MarkerId>,
-    pub(crate) selected_asset: Option<AssetId>,
-    pub(crate) title_text_draft: Option<(ClipId, String)>,
-    pub(crate) marker_label_draft: Option<(MarkerId, String)>,
-    pub(crate) title_text_focus: Option<ClipId>,
     pub(crate) transcript_scope: TranscriptScope,
-    pub(crate) transcript_selection: Option<TranscriptSelection>,
     pub(crate) material_tab: MaterialTab,
     pub(crate) show_material_strip: bool,
     pub(crate) show_media_rail: bool,
-    pub(crate) pixels_per_frame: f32,
-    pub(crate) timeline_zoom_target: f32,
-    pub(crate) timeline_scroll_target: f32,
-    pub(crate) project_path: Option<PathBuf>,
-    saved_document: Option<Arc<Document>>,
     pending_project_action: Option<ProjectAction>,
+    exit_discarded_projects: Vec<u64>,
     allow_close: bool,
     last_window_title: String,
     pub(crate) status: String,
@@ -106,7 +83,6 @@ pub(crate) struct OpenReelApp {
     pub(crate) ripple_mode: bool,
     pub(crate) error_log: ErrorLog,
     pub(crate) error_log_open: bool,
-    recovery: crate::recovery::Recovery,
     screenshot: crate::screenshot::ScreenshotCapture,
     pub(crate) recording: Option<crate::recording::ActiveRecording>,
     pub(crate) record_dialog: crate::recording::RecordDialog,
@@ -117,10 +93,6 @@ impl OpenReelApp {
     #[allow(clippy::too_many_lines)]
     fn new(media: Arc<FfmpegMediaEngine>) -> Self {
         let document = Document::default();
-        let core = Core::spawn(document.clone()).expect("default document must be valid");
-        let core_events = core
-            .subscribe()
-            .expect("Core actor must accept subscribers");
         let frames = media.frames();
         let media_events = media.events();
         let visual_cache = crate::visual_cache::VisualCache::new(media.visual_asset_results());
@@ -128,82 +100,46 @@ impl OpenReelApp {
         let playback: Arc<dyn Playback> = media.clone();
         let analysis: Arc<dyn Analysis> = media.clone();
         let exporter: Arc<dyn Export> = media;
-        let mut chat = vec![ChatEntry::Text(
-            "Import footage and describe your edit.".to_owned(),
-        )];
-        let mut error_log = ErrorLog::default();
-        let mcp_server =
-            match McpServer::start(core.clone(), Arc::clone(&playback), Arc::clone(&analysis)) {
-                Ok(server) => Some(server),
-                Err(error) => {
-                    let message = format!("Could not start the OpenReel agent server: {error}");
-                    error_log.push("Agent", message.clone());
-                    chat.push(ChatEntry::Text(message));
-                    None
-                }
-            };
-        let confirmations = mcp_server.as_ref().map(McpServer::confirmations);
+        let project =
+            ProjectSession::create(1, "Project 1", document.clone(), None, &playback, &analysis)
+                .expect("default project session must be valid");
+        let error_log = ErrorLog::default();
         let claude_info = ClaudeCodeDriver.detect();
         let codex_info = CodexDriver.detect();
-        let agent_harness = if claude_info.is_some() {
-            AgentHarnessChoice::ClaudeCode
-        } else {
-            AgentHarnessChoice::Codex
-        };
         let resolution = document.resolution;
         let fps = document.fps;
         let error_log_open = error_log.len() > 0;
-        let recovery = crate::recovery::Recovery::start(&core, None);
         let mut app = Self {
-            core,
-            core_events,
+            projects: vec![project],
+            focused_project: 0,
+            next_project_id: 2,
             playback,
             analysis,
             exporter,
             frames,
             media_events,
             visual_cache,
-            mcp_server,
             claude_info,
             codex_info,
-            threads: vec![AgentThread::new("Thread 1", agent_harness, chat)],
-            active_thread: 0,
             show_thread_rail: true,
-            next_thread_number: 2,
             claude_models: openreel_agent::claude_models(),
             codex_models: openreel_agent::codex_models(),
             claude_model: None,
             codex_model: None,
             claude_effort: None,
             codex_effort: None,
-            confirmations,
-            pending_confirmations: Vec::new(),
             probe_tx,
             probe_rx,
-            pending_timeline_adds: Vec::new(),
-            document: Arc::new(document),
             texture: None,
-            position: TimeCode::ZERO,
             playing: false,
             meter_levels: [0.0; 2],
             resume_after_scrub: false,
-            selected_clip: None,
-            selected_marker: None,
-            selected_asset: None,
-            title_text_draft: None,
-            marker_label_draft: None,
-            title_text_focus: None,
             transcript_scope: TranscriptScope::default(),
-            transcript_selection: None,
             material_tab: MaterialTab::default(),
             show_material_strip: false,
             show_media_rail: false,
-            pixels_per_frame: 6.0,
-            timeline_zoom_target: 6.0,
-            timeline_scroll_target: 0.0,
-            project_path: None,
-            saved_document: None,
             pending_project_action: None,
+            exit_discarded_projects: Vec::new(),
             allow_close: false,
             last_window_title: String::new(),
             status: "Creating default video track…".to_owned(),
@@ -220,12 +156,12 @@ impl OpenReelApp {
             ripple_mode: false,
             error_log,
             error_log_open,
-            recovery,
             screenshot: crate::screenshot::ScreenshotCapture::from_environment(),
             recording: None,
             record_dialog: crate::recording::RecordDialog::default(),
         };
         if app
+            .focused()
             .core
             .send(Command::Do(Operation::AddTrack {
                 track: Track {
@@ -242,14 +178,67 @@ impl OpenReelApp {
                 "Core actor stopped while creating the default track",
             );
         }
+        app.playback
+            .set_document(Arc::clone(&app.focused().document));
+        app.playback.request_frame(TimeCode::ZERO);
         app
+    }
+
+    pub(crate) fn focused(&self) -> &ProjectSession {
+        &self.projects[self.focused_project]
+    }
+
+    pub(crate) fn focused_mut(&mut self) -> &mut ProjectSession {
+        &mut self.projects[self.focused_project]
+    }
+
+    fn create_project_session(
+        &mut self,
+        name: String,
+        document: Document,
+        project_path: Option<PathBuf>,
+    ) -> Result<ProjectSession, String> {
+        let id = self.next_project_id;
+        self.next_project_id = self
+            .next_project_id
+            .checked_add(1)
+            .ok_or_else(|| "project session identity space is exhausted".to_owned())?;
+        ProjectSession::create(
+            id,
+            name,
+            document,
+            project_path,
+            &self.playback,
+            &self.analysis,
+        )
+    }
+
+    pub(crate) fn focus_project(&mut self, index: usize) {
+        self.focus_project_with_rebind(index, false);
+    }
+
+    fn focus_project_with_rebind(&mut self, index: usize, force_rebind: bool) {
+        if index >= self.projects.len() || (!force_rebind && index == self.focused_project) {
+            return;
+        }
+        self.playback.pause();
+        self.playing = false;
+        self.resume_after_scrub = false;
+        self.meter_levels = [0.0; 2];
+        self.texture = None;
+        self.focused_project = index;
+        let document = Arc::clone(&self.focused().document);
+        let position = self.focused().position;
+        self.playback.set_document(document);
+        self.playback.seek(position);
+        self.playback.request_frame(position);
     }
 
     pub(crate) fn save_project(&mut self, save_as: bool) -> bool {
         let path = if save_as {
             None
         } else {
-            self.project_path.clone()
+            self.focused().project_path.clone()
         };
         let path = path.or_else(|| {
             rfd::FileDialog::new()
@@ -263,15 +252,21 @@ impl OpenReelApp {
         if path.extension().is_none() {
             path.set_extension("openreel");
         }
-        let result = serde_json::to_string_pretty(&*self.document)
+        let document = Arc::clone(&self.focused().document);
+        let result = serde_json::to_string_pretty(&*document)
             .map_err(|error| error.to_string())
             .and_then(|json| fs::write(&path, json).map_err(|error| error.to_string()));
         match result {
             Ok(()) => {
-                self.project_path = Some(path.clone());
-                self.saved_document = Some(Arc::clone(&self.document));
-                self.recovery
-                    .checkpoint(&self.core, self.project_path.as_deref());
+                let name = project_name(Some(&path), &self.focused().name);
+                let session = self.focused_mut();
+                session.name = name;
+                session.project_path = Some(path.clone());
+                session.saved_document = Some(Arc::clone(&session.document));
+                let core = session.core.clone();
+                session
+                    .recovery
+                    .checkpoint(&core, session.project_path.as_deref());
                 self.status = format!("Saved {}", path.display());
                 true
             }
@@ -295,15 +290,20 @@ impl OpenReelApp {
         self.open_project(&path);
     }
 
-    fn new_project(&mut self) {
-        if let Err(error) = self.replace_core(Document::default(), None) {
-            self.record_error(
-                "Project",
-                format!("Could not create a new project: {error}"),
-            );
-            return;
-        }
-        self.saved_document = None;
+    pub(crate) fn new_project(&mut self) {
+        let name = format!("Project {}", self.next_project_id);
+        let session = match self.create_project_session(name, Document::default(), None) {
+            Ok(session) => session,
+            Err(error) => {
+                self.record_error(
+                    "Project",
+                    format!("Could not create a new project: {error}"),
+                );
+                return;
+            }
+        };
+        self.projects.push(session);
+        self.focus_project(self.projects.len() - 1);
         "Creating default video track…".clone_into(&mut self.status);
         self.send_operation(Operation::AddTrack {
             track: Track {
@@ -343,14 +343,26 @@ impl OpenReelApp {
             .filter(|asset| !asset.path.is_file())
             .map(|asset| format!("{} ({})", asset.name, asset.path.display()))
             .collect();
-        if let Err(error) = self.replace_core(document, Some(path.to_path_buf())) {
-            self.record_error(
-                "Project",
-                format!("Could not open {}: {error}", path.display()),
-            );
-            return;
+        let fallback = format!("Project {}", self.next_project_id);
+        let name = project_name(Some(path), &fallback);
+        let mut session =
+            match self.create_project_session(name, document, Some(path.to_path_buf())) {
+                Ok(session) => session,
+                Err(error) => {
+                    self.record_error(
+                        "Project",
+                        format!("Could not open {}: {error}", path.display()),
+                    );
+                    return;
+                }
+            };
+        session.saved_document = Some(Arc::clone(&session.document));
+        let assets = session.document.media_pool.clone();
+        self.projects.push(session);
+        self.focus_project(self.projects.len() - 1);
+        for asset in assets {
+            self.request_asset_analysis(asset);
         }
-        self.saved_document = Some(Arc::clone(&self.document));
         self.status = if missing.is_empty() {
             format!("Opened {}", path.display())
         } else {
@@ -367,18 +379,11 @@ impl OpenReelApp {
     }
 
     fn is_dirty(&self) -> bool {
-        self.saved_document
-            .as_deref()
-            .is_none_or(|saved| saved != self.document.as_ref())
+        self.focused().is_dirty()
     }
 
-    fn project_name(&self) -> String {
-        self.project_path
-            .as_deref()
-            .and_then(Path::file_stem)
-            .and_then(|name| name.to_str())
-            .unwrap_or("Untitled")
-            .to_owned()
+    pub(crate) fn project_name(&self) -> String {
+        project_name(self.focused().project_path.as_deref(), &self.focused().name)
     }
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
@@ -390,30 +395,63 @@ impl OpenReelApp {
         }
     }
 
-    fn request_project_action(&mut self, action: ProjectAction, ctx: &egui::Context) {
-        if self.is_dirty() {
-            self.pending_project_action = Some(action);
+    pub(crate) fn request_close_project(&mut self, index: usize) {
+        if self.projects.len() <= 1 || index >= self.projects.len() {
+            return;
+        }
+        let id = self.projects[index].id;
+        if self.projects[index].is_dirty() {
+            self.focus_project(index);
+            self.pending_project_action = Some(ProjectAction::CloseProject(id));
         } else {
-            self.perform_project_action(action, ctx);
+            self.close_project(id);
         }
     }
 
-    fn perform_project_action(&mut self, action: ProjectAction, ctx: &egui::Context) {
-        match action {
-            ProjectAction::New => self.new_project(),
-            ProjectAction::Open => self.choose_project(),
-            ProjectAction::Close => {
-                self.allow_close = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+    fn close_project(&mut self, id: u64) {
+        let Some(index) = session_index_by_id(id, &self.projects) else {
+            return;
+        };
+        if self.projects.len() <= 1 {
+            return;
         }
+        let closing_focused = index == self.focused_project;
+        let next_focus = index_after_close(self.focused_project, index, self.projects.len());
+        self.projects[index].stop_threads("the project was closed");
+        let name = self.projects[index].name.clone();
+        if index == 0 {
+            let (first, remaining) = self.projects.split_at_mut(1);
+            first[0]
+                .recovery
+                .move_pending_to(&mut remaining[0].recovery);
+        }
+        self.projects.remove(index);
+        self.focus_project_with_rebind(next_focus, closing_focused);
+        self.status = format!("Closed {name}");
+    }
+
+    fn request_exit(&mut self, ctx: &egui::Context) {
+        if let Some(index) = self.projects.iter().position(|project| {
+            project.is_dirty() && !self.exit_discarded_projects.contains(&project.id)
+        }) {
+            self.focus_project(index);
+            self.pending_project_action = Some(ProjectAction::Exit(self.projects[index].id));
+            return;
+        }
+        for project in &mut self.projects {
+            project.stop_threads("OpenReel is closing");
+        }
+        self.allow_close = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     fn handle_close_request(&mut self, ctx: &egui::Context) {
         let close_requested = ctx.input(|input| input.viewport().close_requested());
-        if close_requested && !self.allow_close && self.is_dirty() {
+        if close_requested && !self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.pending_project_action = Some(ProjectAction::Close);
+            if self.pending_project_action.is_none() {
+                self.request_exit(ctx);
+            }
         }
     }
 
@@ -421,6 +459,14 @@ impl OpenReelApp {
         let Some(action) = self.pending_project_action else {
             return;
         };
+        let project_id = match action {
+            ProjectAction::CloseProject(id) | ProjectAction::Exit(id) => id,
+        };
+        let Some(project_index) = session_index_by_id(project_id, &self.projects) else {
+            self.pending_project_action = None;
+            return;
+        };
+        let project_name = self.projects[project_index].name.clone();
         let mut save = false;
         let mut discard = false;
         let mut cancel = false;
@@ -435,10 +481,7 @@ impl OpenReelApp {
                         .strong()
                         .size(type_size::MICRO),
                 );
-                ui.label(format!(
-                    "Save changes to {} before continuing?",
-                    self.project_name()
-                ));
+                ui.label(format!("Save changes to {project_name} before continuing?"));
                 ui.add_space(space::TWO);
                 ui.horizontal(|ui| {
                     if ui
@@ -462,69 +505,30 @@ impl OpenReelApp {
                     }
                 });
             });
+        if save && self.focused_project != project_index {
+            self.focus_project(project_index);
+        }
         if (save && self.save_project(false)) || discard {
             self.pending_project_action = None;
-            self.perform_project_action(action, ctx);
+            match action {
+                ProjectAction::CloseProject(id) => self.close_project(id),
+                ProjectAction::Exit(id) => {
+                    if discard && !self.exit_discarded_projects.contains(&id) {
+                        self.exit_discarded_projects.push(id);
+                    }
+                    self.request_exit(ctx);
+                }
+            }
         } else if cancel {
             self.pending_project_action = None;
-        }
-    }
-
-    fn replace_core(
-        &mut self,
-        document: Document,
-        project_path: Option<PathBuf>,
-    ) -> Result<(), String> {
-        let core = Core::spawn(document.clone()).map_err(|error| error.to_string())?;
-        let events = core.subscribe().map_err(|error| error.to_string())?;
-        let mcp_server = McpServer::start(
-            core.clone(),
-            Arc::clone(&self.playback),
-            Arc::clone(&self.analysis),
-        )
-        .map_err(|error| format!("agent server: {error}"))?;
-        let confirmations = mcp_server.confirmations();
-        for thread in &mut self.threads {
-            if let Some(session) = &mut thread.session {
-                session.interrupt();
+            if matches!(action, ProjectAction::Exit(_)) {
+                self.exit_discarded_projects.clear();
             }
-            thread.session = None;
-            thread.events = None;
-            thread.running = false;
         }
-        if let Some(confirmations) = &self.confirmations {
-            confirmations.reject_all("the project changed during confirmation");
-        }
-        self.playback.pause();
-        self.recovery.attach(&core, project_path.as_deref());
-        self.project_path = project_path;
-        self.core = core;
-        self.core_events = events;
-        self.mcp_server = Some(mcp_server);
-        self.confirmations = Some(confirmations);
-        self.pending_confirmations.clear();
-        self.document = Arc::new(document);
-        self.position = TimeCode::ZERO;
-        self.timeline_scroll_target = 0.0;
-        self.playing = false;
-        self.meter_levels = [0.0; 2];
-        self.resume_after_scrub = false;
-        self.selected_clip = None;
-        self.selected_marker = None;
-        self.selected_asset = None;
-        self.transcript_selection = None;
-        self.texture = None;
-        self.visual_cache.clear();
-        self.playback.set_document(Arc::clone(&self.document));
-        for asset in &self.document.media_pool {
-            self.request_asset_analysis(asset.clone());
-        }
-        self.playback.request_frame(TimeCode::ZERO);
-        Ok(())
     }
 
     pub(crate) fn send_operation(&mut self, operation: Operation) {
-        if self.core.send(Command::Do(operation)).is_err() {
+        if self.focused().core.send(Command::Do(operation)).is_err() {
             self.record_error("Operations", "Core actor stopped while applying the edit");
         } else {
             "Applying edit…".clone_into(&mut self.status);
@@ -536,7 +540,12 @@ impl OpenReelApp {
         if count == 0 {
             return;
         }
-        if self.core.send(Command::DoBatch(operations)).is_err() {
+        if self
+            .focused()
+            .core
+            .send(Command::DoBatch(operations))
+            .is_err()
+        {
             self.record_error(
                 "Operations",
                 "Core actor stopped while applying the edit batch",
@@ -553,7 +562,7 @@ impl OpenReelApp {
     }
 
     pub(crate) fn undo(&mut self) {
-        if self.core.send(Command::Undo).is_err() {
+        if self.focused().core.send(Command::Undo).is_err() {
             self.record_error("Operations", "Core actor stopped while undoing");
         } else {
             "Undo".clone_into(&mut self.status);
@@ -561,7 +570,7 @@ impl OpenReelApp {
     }
 
     pub(crate) fn redo(&mut self) {
-        if self.core.send(Command::Redo).is_err() {
+        if self.focused().core.send(Command::Redo).is_err() {
             self.record_error("Operations", "Core actor stopped while redoing");
         } else {
             "Redo".clone_into(&mut self.status);
@@ -583,16 +592,29 @@ impl OpenReelApp {
         if self.visual_cache.has_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
-        while let Ok((path, result)) = self.probe_rx.try_recv() {
+        while let Ok((session_id, path, result)) = self.probe_rx.try_recv() {
+            let Some(project_index) = session_index_by_id(session_id, &self.projects) else {
+                continue;
+            };
             match result {
                 Ok(asset) => {
                     self.status = format!("Importing {}…", path.display());
                     // Keep the rail open once media exists - without this the
                     // empty-pool self-raise collapses the instant the asset
                     // lands and the import looks like it did nothing.
-                    self.show_media_rail = true;
-                    self.pending_timeline_adds.push(asset.id);
-                    self.send_operation(Operation::AddAsset { asset });
+                    if project_index == self.focused_project {
+                        self.show_media_rail = true;
+                    }
+                    self.projects[project_index]
+                        .pending_timeline_adds
+                        .push(asset.id);
+                    if self.projects[project_index]
+                        .core
+                        .send(Command::Do(Operation::AddAsset { asset }))
+                        .is_err()
+                    {
+                        self.record_error("Operations", "Core actor stopped while importing media");
+                    }
                 }
                 Err(error) => self.record_error(
                     "Media",
@@ -601,7 +623,18 @@ impl OpenReelApp {
             }
         }
 
-        while let Ok(event) = self.core_events.try_recv() {
+        let core_events = self
+            .projects
+            .iter()
+            .enumerate()
+            .flat_map(|(project_index, project)| {
+                project
+                    .core_events
+                    .try_iter()
+                    .map(move |event| (project_index, event))
+            })
+            .collect::<Vec<_>>();
+        for (project_index, event) in core_events {
             match event {
                 Event::DocumentChanged {
                     doc,
@@ -611,16 +644,26 @@ impl OpenReelApp {
                     let new_assets = doc
                         .media_pool
                         .iter()
-                        .filter(|asset| self.document.asset(asset.id).is_none())
+                        .filter(|asset| {
+                            self.projects[project_index]
+                                .document
+                                .asset(asset.id)
+                                .is_none()
+                        })
                         .cloned()
                         .collect::<Vec<_>>();
                     // Timeline attribution is ambiguous with concurrent
                     // writers, so every running thread receives the same
                     // review card while the monitor cues only once.
-                    let any_agent_running = self.threads.iter().any(|thread| thread.running);
+                    let any_agent_running = self.projects[project_index]
+                        .threads
+                        .iter()
+                        .any(|thread| thread.running);
                     if any_agent_running
-                        && let Some(range) =
-                            crate::edit_diff::changed_project_range(&self.document, &doc)
+                        && let Some(range) = crate::edit_diff::changed_project_range(
+                            &self.projects[project_index].document,
+                            &doc,
+                        )
                     {
                         let cue = TimeCode(
                             range
@@ -637,82 +680,105 @@ impl OpenReelApp {
                             end: range.end,
                             cue,
                         };
-                        for thread in self.threads.iter_mut().filter(|thread| thread.running) {
+                        for thread in self.projects[project_index]
+                            .threads
+                            .iter_mut()
+                            .filter(|thread| thread.running)
+                        {
                             thread.chat.push(edit_card.clone());
                         }
-                        self.position =
-                            TimeCode(cue.0.min(doc.duration.0.saturating_sub(1).max(0)));
-                        self.playback.request_frame(self.position);
+                        if project_index == self.focused_project {
+                            self.projects[project_index].position =
+                                TimeCode(cue.0.min(doc.duration.0.saturating_sub(1).max(0)));
+                        }
                     }
-                    self.document = Arc::clone(&doc);
-                    self.transcript_selection = None;
-                    if self
+                    self.projects[project_index].document = Arc::clone(&doc);
+                    self.projects[project_index].transcript_selection = None;
+                    if self.projects[project_index]
                         .selected_clip
                         .is_some_and(|clip| doc.clip(clip).is_none())
                     {
-                        self.selected_clip = None;
+                        self.projects[project_index].selected_clip = None;
                     }
-                    if self
+                    if self.projects[project_index]
                         .selected_marker
                         .is_some_and(|marker| doc.marker(marker).is_none())
                     {
-                        self.selected_marker = None;
+                        self.projects[project_index].selected_marker = None;
                     }
-                    if self
+                    if self.projects[project_index]
                         .selected_asset
                         .is_some_and(|asset| doc.asset(asset).is_none())
                     {
-                        self.selected_asset = None;
+                        self.projects[project_index].selected_asset = None;
                     }
                     if doc.duration <= TimeCode::ZERO {
-                        self.position = TimeCode::ZERO;
+                        self.projects[project_index].position = TimeCode::ZERO;
                     } else {
-                        self.position =
-                            TimeCode(self.position.0.clamp(0, doc.duration.0.saturating_sub(1)));
+                        self.projects[project_index].position = TimeCode(
+                            self.projects[project_index]
+                                .position
+                                .0
+                                .clamp(0, doc.duration.0.saturating_sub(1)),
+                        );
                     }
-                    self.playing = false;
-                    self.playback.set_document(Arc::clone(&doc));
-                    self.playback.seek(self.position);
-                    self.playback.request_frame(self.position);
+                    if project_index == self.focused_project {
+                        self.playing = false;
+                        let position = self.projects[project_index].position;
+                        self.playback.set_document(Arc::clone(&doc));
+                        self.playback.seek(position);
+                        self.playback.request_frame(position);
+                    }
                     if let Some(Operation::AddAsset { asset }) = &last_op {
-                        self.selected_asset = Some(asset.id);
+                        self.projects[project_index].selected_asset = Some(asset.id);
                         // A user import is one gesture: the probed asset goes
                         // straight onto the timeline, and the playhead moves
                         // to the new footage so the monitor answers "it
                         // worked". The pending list keeps agent-driven asset
                         // operations out of this path.
-                        if let Some(index) = self
+                        if let Some(index) = self.projects[project_index]
                             .pending_timeline_adds
                             .iter()
                             .position(|pending| *pending == asset.id)
                         {
-                            self.pending_timeline_adds.remove(index);
+                            self.projects[project_index]
+                                .pending_timeline_adds
+                                .remove(index);
                             let asset_id = asset.id;
-                            self.add_asset_to_timeline(asset_id);
+                            self.add_asset_to_timeline_for(project_index, asset_id);
                         }
                     }
                     for asset in new_assets {
                         self.request_asset_analysis(asset);
                     }
-                    if let Some(operation) = last_op {
-                        self.status = operation_status(&operation);
-                    } else if let Some(JournalCommand::DoBatch(operations)) = journal_command {
-                        self.status = format!("Applied {} linked edits", operations.len());
+                    if project_index == self.focused_project {
+                        if let Some(operation) = last_op {
+                            self.status = operation_status(&operation);
+                        } else if let Some(JournalCommand::DoBatch(operations)) = journal_command {
+                            self.status = format!("Applied {} linked edits", operations.len());
+                        }
                     }
                 }
                 Event::OpRejected { error, .. } => {
-                    self.record_error("Operations", format!("Edit rejected: {error}"));
+                    let name = &self.projects[project_index].name;
+                    self.record_error("Operations", format!("Edit rejected in {name}: {error}"));
                 }
                 Event::BatchRejected { error, .. } => {
-                    self.record_error("Operations", format!("Edit plan rejected: {error}"));
+                    let name = &self.projects[project_index].name;
+                    self.record_error(
+                        "Operations",
+                        format!("Edit plan rejected in {name}: {error}"),
+                    );
                 }
                 Event::QueryResult(_) => {}
             }
         }
 
-        if self.document.media_pool.iter().any(|asset| {
-            self.analysis.silence_status(asset).is_running()
-                || self.analysis.scene_status(asset).is_running()
+        if self.projects.iter().any(|project| {
+            project.document.media_pool.iter().any(|asset| {
+                self.analysis.silence_status(asset).is_running()
+                    || self.analysis.scene_status(asset).is_running()
+            })
         }) {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -721,7 +787,7 @@ impl OpenReelApp {
             match event {
                 MediaEvent::Position(position) => {
                     if !self.resume_after_scrub {
-                        self.position = position;
+                        self.focused_mut().position = position;
                     }
                 }
                 MediaEvent::PlaybackStateChanged(state) => {
@@ -753,12 +819,13 @@ impl OpenReelApp {
                     Some(ctx.load_texture("openreel-preview", image, egui::TextureOptions::LINEAR));
             }
             if !self.resume_after_scrub {
-                self.position = at;
+                self.focused_mut().position = at;
             }
         }
 
         if self.playing {
-            self.position = self.playback.position();
+            let position = self.playback.position();
+            self.focused_mut().position = position;
             ctx.request_repaint_after(Duration::from_millis(10));
         }
     }
@@ -767,11 +834,11 @@ impl OpenReelApp {
         ui.menu_button("File", |ui| {
             if ui.button("New").clicked() {
                 ui.close();
-                self.request_project_action(ProjectAction::New, ui.ctx());
+                self.new_project();
             }
             if ui.button("Open…").clicked() {
                 ui.close();
-                self.request_project_action(ProjectAction::Open, ui.ctx());
+                self.choose_project();
             }
             if ui.button("Save").clicked() {
                 ui.close();
@@ -780,6 +847,13 @@ impl OpenReelApp {
             if ui.button("Save As…").clicked() {
                 ui.close();
                 self.save_project(true);
+            }
+            if ui
+                .add_enabled(self.projects.len() > 1, egui::Button::new("Close Project"))
+                .clicked()
+            {
+                ui.close();
+                self.request_close_project(self.focused_project);
             }
             ui.separator();
             if ui
@@ -799,12 +873,24 @@ impl eframe::App for OpenReelApp {
         self.handle_close_request(ui.ctx());
         self.poll_background(ui.ctx());
         self.keyboard_shortcuts(ui.ctx());
-        if let Some(request) = self.recovery.show_dialog(ui.ctx()) {
+        let restore = self
+            .projects
+            .first_mut()
+            .and_then(|project| project.recovery.show_dialog(ui.ctx()));
+        if let Some(request) = restore {
             let journal_path = request.journal_path;
-            let result = self.replace_core(request.document, request.project_path);
-            if result.is_ok() {
-                self.recovery.consume_pending(&journal_path);
-            }
+            let name = project_name(request.project_path.as_deref(), "Recovered project");
+            let result = self
+                .create_project_session(name, request.document, request.project_path)
+                .map(|session| {
+                    let assets = session.document.media_pool.clone();
+                    self.projects.push(session);
+                    self.focus_project(self.projects.len() - 1);
+                    for asset in assets {
+                        self.request_asset_analysis(asset);
+                    }
+                    self.projects[0].recovery.consume_pending(&journal_path);
+                });
             self.status = crate::recovery::restore_status(result);
         }
 
@@ -907,8 +993,9 @@ impl OpenReelApp {
         // at the right moment: an empty project leads with the media rail
         // (import is the first act), and a pending destructive confirmation
         // raises the timeline (span-level truth beats watching for approvals).
-        let strip_visible = self.show_material_strip || !self.pending_confirmations.is_empty();
-        let rail_visible = self.show_media_rail || self.document.media_pool.is_empty();
+        let strip_visible =
+            self.show_material_strip || !self.focused().pending_confirmations.is_empty();
+        let rail_visible = self.show_media_rail || self.focused().document.media_pool.is_empty();
         if strip_visible {
             egui::Panel::bottom("timeline-dock")
                 .default_size(240.0)

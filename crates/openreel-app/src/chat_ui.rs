@@ -1,4 +1,7 @@
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use eframe::egui;
 use openreel_agent::{CODEX_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver};
@@ -10,6 +13,7 @@ use openreel_core::{
 use crate::{
     app::OpenReelApp,
     icons::Icon,
+    project::{ProjectSession, index_after_close},
     theme::{self, color, radius, size, space, type_size},
 };
 
@@ -126,6 +130,7 @@ pub(crate) struct AgentThread {
     pub(crate) input: String,
     pub(crate) usage: UsageAccumulator,
     pub(crate) chat: Vec<ChatEntry>,
+    last_activity: Instant,
 }
 
 impl AgentThread {
@@ -143,26 +148,34 @@ impl AgentThread {
             input: String::new(),
             usage: UsageAccumulator::default(),
             chat,
+            last_activity: Instant::now(),
         }
     }
 }
 
 impl OpenReelApp {
     pub(crate) fn active_thread(&self) -> &AgentThread {
-        &self.threads[self.active_thread]
+        let project_index = self.focused_project;
+        &self.projects[project_index].threads[self.projects[project_index].active_thread]
     }
 
     pub(crate) fn active_thread_mut(&mut self) -> &mut AgentThread {
-        &mut self.threads[self.active_thread]
+        let project_index = self.focused_project;
+        let active_thread = self.projects[project_index].active_thread;
+        &mut self.projects[project_index].threads[active_thread]
     }
 
     pub(crate) fn start_agent_turn(&mut self) {
-        let thread_index = self.active_thread;
-        let message = self.threads[thread_index].input.trim().to_owned();
-        if message.is_empty() || self.threads[thread_index].running {
+        let project_index = self.focused_project;
+        let thread_index = self.projects[project_index].active_thread;
+        let message = self.projects[project_index].threads[thread_index]
+            .input
+            .trim()
+            .to_owned();
+        if message.is_empty() || self.projects[project_index].threads[thread_index].running {
             return;
         }
-        let Some(endpoint) = self
+        let Some(endpoint) = self.projects[project_index]
             .mcp_server
             .as_ref()
             .map(|server| server.endpoint().to_owned())
@@ -170,7 +183,7 @@ impl OpenReelApp {
             self.record_error("Agent", "The OpenReel agent server is unavailable");
             return;
         };
-        let harness = self.threads[thread_index].harness;
+        let harness = self.projects[project_index].threads[thread_index].harness;
         let harness_info = match harness {
             AgentHarnessChoice::ClaudeCode => self.claude_info.as_ref(),
             AgentHarnessChoice::Codex => self.codex_info.as_ref(),
@@ -183,9 +196,14 @@ impl OpenReelApp {
             return;
         }
 
-        if self.threads[thread_index].session.is_none() {
-            self.threads[thread_index].usage.reset_usage();
-            let working_directory = self
+        if self.projects[project_index].threads[thread_index]
+            .session
+            .is_none()
+        {
+            self.projects[project_index].threads[thread_index]
+                .usage
+                .reset_usage();
+            let working_directory = self.projects[project_index]
                 .project_path
                 .as_deref()
                 .and_then(Path::parent)
@@ -212,8 +230,9 @@ impl OpenReelApp {
             };
             match session {
                 Ok(session) => {
-                    self.threads[thread_index].events = Some(session.events());
-                    self.threads[thread_index].session = Some(session);
+                    self.projects[project_index].threads[thread_index].events =
+                        Some(session.events());
+                    self.projects[project_index].threads[thread_index].session = Some(session);
                 }
                 Err(error) => {
                     self.record_error(
@@ -225,14 +244,14 @@ impl OpenReelApp {
             }
         }
 
-        let result = self.threads[thread_index]
+        let result = self.projects[project_index].threads[thread_index]
             .session
             .as_mut()
             .expect("agent session was initialized")
             .send_user_message(message.clone());
         match result {
             Ok(()) => {
-                let thread = &mut self.threads[thread_index];
+                let thread = &mut self.projects[project_index].threads[thread_index];
                 let first_user_message = !thread
                     .chat
                     .iter()
@@ -243,6 +262,7 @@ impl OpenReelApp {
                 thread.chat.push(ChatEntry::User(message));
                 thread.input.clear();
                 thread.running = true;
+                thread.last_activity = Instant::now();
                 self.status = format!("{} is editing the timeline", harness.label());
             }
             Err(error) => {
@@ -280,7 +300,8 @@ impl OpenReelApp {
     }
 
     pub(crate) fn stop_agent(&mut self, thread_index: usize) {
-        let Some(thread) = self.threads.get_mut(thread_index) else {
+        let project_index = self.focused_project;
+        let Some(thread) = self.projects[project_index].threads.get_mut(thread_index) else {
             return;
         };
         let had_session = thread.session.is_some();
@@ -290,55 +311,66 @@ impl OpenReelApp {
         thread.session = None;
         thread.events = None;
         thread.running = false;
-        if had_session && let Some(confirmations) = &self.confirmations {
+        if had_session && let Some(confirmations) = &self.projects[project_index].confirmations {
             confirmations.reject_all("the agent session was interrupted");
         }
         "Agent stopped".clone_into(&mut self.status);
     }
 
     pub(crate) fn poll_agent(&mut self, ctx: &egui::Context) {
-        if let Some(confirmations) = &self.confirmations {
-            self.pending_confirmations
-                .retain(|request| confirmations.is_pending(request.id));
-            self.pending_confirmations
-                .extend(confirmations.pending_requests());
+        for project in &mut self.projects {
+            if let Some(confirmations) = &project.confirmations {
+                project
+                    .pending_confirmations
+                    .retain(|request| confirmations.is_pending(request.id));
+                project
+                    .pending_confirmations
+                    .extend(confirmations.pending_requests());
+            }
         }
         let events = self
-            .threads
+            .projects
             .iter()
             .enumerate()
-            .flat_map(|(index, thread)| {
-                thread
-                    .events
-                    .as_ref()
-                    .map(|receiver| {
-                        receiver
-                            .try_iter()
-                            .map(move |event| (index, event))
-                            .collect::<Vec<_>>()
+            .flat_map(|(project_index, project)| {
+                project
+                    .threads
+                    .iter()
+                    .enumerate()
+                    .flat_map(move |(thread_index, thread)| {
+                        thread.events.as_ref().map_or_else(Vec::new, |receiver| {
+                            receiver
+                                .try_iter()
+                                .map(move |event| (project_index, thread_index, event))
+                                .collect::<Vec<_>>()
+                        })
                     })
-                    .unwrap_or_default()
             })
             .collect::<Vec<_>>();
-        for (thread_index, event) in events {
-            self.threads[thread_index].usage.record(&event);
+        for (project_index, thread_index, event) in events {
+            let thread = &mut self.projects[project_index].threads[thread_index];
+            thread.usage.record(&event);
+            thread.last_activity = Instant::now();
             match event {
                 AgentEvent::Text(text) => {
-                    self.threads[thread_index].chat.push(ChatEntry::Text(text));
+                    self.projects[project_index].threads[thread_index]
+                        .chat
+                        .push(ChatEntry::Text(text));
                 }
                 AgentEvent::Error(error) => {
-                    self.threads[thread_index]
+                    self.projects[project_index].threads[thread_index]
                         .chat
                         .push(ChatEntry::Text(error.clone()));
-                    self.record_error("Agent", error);
+                    let project_name = self.projects[project_index].name.clone();
+                    self.record_error("Agent", format!("{project_name}: {error}"));
                 }
                 AgentEvent::ToolCall { name, arguments } => {
-                    self.threads[thread_index]
+                    self.projects[project_index].threads[thread_index]
                         .chat
                         .push(ChatEntry::ToolCall { name, arguments });
                 }
                 AgentEvent::ToolResult { name, result } => {
-                    self.threads[thread_index]
+                    self.projects[project_index].threads[thread_index]
                         .chat
                         .push(ChatEntry::ToolResult { name, result });
                 }
@@ -346,64 +378,96 @@ impl OpenReelApp {
                     input_tokens,
                     output_tokens,
                     ..
-                } => self.threads[thread_index].chat.push(ChatEntry::Cost {
-                    input_tokens,
-                    output_tokens,
-                }),
+                } => self.projects[project_index].threads[thread_index]
+                    .chat
+                    .push(ChatEntry::Cost {
+                        input_tokens,
+                        output_tokens,
+                    }),
                 AgentEvent::Done => {
-                    self.threads[thread_index].running = false;
-                    "Agent turn finished".clone_into(&mut self.status);
+                    self.projects[project_index].threads[thread_index].running = false;
+                    if project_index == self.focused_project {
+                        "Agent turn finished".clone_into(&mut self.status);
+                    }
                 }
             }
         }
-        if self.threads.iter().any(|thread| thread.running) {
+        if self
+            .projects
+            .iter()
+            .any(|project| project.threads.iter().any(|thread| thread.running))
+        {
             ctx.request_repaint_after(Duration::from_millis(30));
         }
     }
 
     fn add_agent_thread(&mut self) {
+        let project_index = self.focused_project;
         let harness = self.active_thread().harness;
-        let next_number = self.next_thread_number;
-        self.next_thread_number = self.next_thread_number.saturating_add(1);
-        self.threads.push(AgentThread::new(
+        let next_number = self.projects[project_index].next_thread_number;
+        self.projects[project_index].next_thread_number = self.projects[project_index]
+            .next_thread_number
+            .saturating_add(1);
+        self.projects[project_index].threads.push(AgentThread::new(
             format!("Thread {next_number}"),
             harness,
             Vec::new(),
         ));
-        self.active_thread = self.threads.len() - 1;
+        self.projects[project_index].active_thread = self.projects[project_index].threads.len() - 1;
     }
 
     fn close_agent_thread(&mut self, thread_index: usize) {
-        if self.threads.len() <= 1 || thread_index >= self.threads.len() {
+        let project_index = self.focused_project;
+        if self.projects[project_index].threads.len() <= 1
+            || thread_index >= self.projects[project_index].threads.len()
+        {
             return;
         }
-        let next_active =
-            active_thread_after_close(self.active_thread, thread_index, self.threads.len());
+        let next_active = index_after_close(
+            self.projects[project_index].active_thread,
+            thread_index,
+            self.projects[project_index].threads.len(),
+        );
         self.stop_agent(thread_index);
-        self.threads.remove(thread_index);
-        self.active_thread = next_active;
+        self.projects[project_index].threads.remove(thread_index);
+        self.projects[project_index].active_thread = next_active;
     }
 
+    // The two-level rail is one immediate-mode render pass with deferred click actions.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn thread_rail(&mut self, ui: &mut egui::Ui) {
-        if ui.button("+ New thread").clicked() {
-            self.add_agent_thread();
-            let composer_id = egui::Id::new(("agent-composer", self.active_thread));
-            ui.ctx()
-                .memory_mut(|memory| memory.request_focus(composer_id));
-        }
+        ui.horizontal(|ui| {
+            if ui.small_button("+ New project").clicked() {
+                self.new_project();
+            }
+            if ui.small_button("+ New thread").clicked() {
+                self.add_agent_thread();
+                let project = self.focused();
+                let composer_id =
+                    egui::Id::new(("agent-composer", project.id, project.active_thread));
+                ui.ctx()
+                    .memory_mut(|memory| memory.request_focus(composer_id));
+            }
+        });
         ui.add_space(space::ONE);
 
-        let fps = self.document.fps;
-        let can_close = self.threads.len() > 1;
-        let mut focus_thread = None;
-        let mut close_thread = None;
+        let mut focus_project = None;
+        let mut close_project = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for (index, thread) in self.threads.iter().enumerate() {
+                for project_index in 0..self.projects.len() {
+                    let project = &self.projects[project_index];
+                    let project_id = project.id;
+                    let focused = project_index == self.focused_project;
+                    let display_name = project.display_name();
+                    let running = project.threads.iter().any(|thread| thread.running);
+                    let confirms = !project.pending_confirmations.is_empty();
+                    let can_close_project = self.projects.len() > 1;
+                    let collapsed_caption = background_project_caption(project);
                     let mut close_clicked = false;
                     let frame = egui::Frame::new()
-                        .fill(if index == self.active_thread {
+                        .fill(if focused {
                             color::SURFACE_RAISED
                         } else {
                             color::PANEL
@@ -411,23 +475,25 @@ impl OpenReelApp {
                         .corner_radius(radius::SM)
                         .inner_margin(egui::Margin::same(theme::margin(space::ONE)))
                         .show(ui, |ui| {
-                            // A bare with_layout claims the rail's full
-                            // height; the row must allocate exactly one
-                            // line. Trailing controls pack from the right,
-                            // the identity anchors left and truncates.
                             ui.allocate_ui_with_layout(
                                 egui::vec2(ui.available_width(), size::ICON_SM + space::ONE),
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if can_close
+                                    if can_close_project
                                         && ui
                                             .small_button("×")
-                                            .on_hover_text("Close thread")
+                                            .on_hover_text("Close project")
                                             .clicked()
                                     {
                                         close_clicked = true;
                                     }
-                                    if thread.running {
+                                    if confirms {
+                                        ui.colored_label(
+                                            color::STATUS_WARNING,
+                                            egui::RichText::new("CONFIRM").size(type_size::MICRO),
+                                        );
+                                    }
+                                    if running {
                                         ui.colored_label(
                                             color::ACCENT,
                                             egui::RichText::new("RUNNING").size(type_size::MICRO),
@@ -437,52 +503,142 @@ impl OpenReelApp {
                                         egui::Layout::left_to_right(egui::Align::Center),
                                         |ui| {
                                             ui.add(
-                                                thread.harness.brand_icon().image(size::ICON_SM),
+                                                egui::Label::new(
+                                                    egui::RichText::new(display_name).strong(),
+                                                )
+                                                .truncate(),
                                             );
-                                            ui.add(egui::Label::new(&thread.name).truncate());
                                         },
                                     );
                                 },
                             );
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(latest_activity_snippet(&thread.chat, fps))
-                                        .size(type_size::CAPTION)
-                                        .color(color::TEXT_MUTED),
-                                )
-                                .truncate(),
-                            );
+                            if !focused {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(collapsed_caption)
+                                            .size(type_size::CAPTION)
+                                            .color(color::TEXT_MUTED),
+                                    )
+                                    .truncate(),
+                                );
+                            }
                         });
-                    let row_response = ui.interact(
+                    let response = ui.interact(
                         frame.response.rect,
-                        ui.make_persistent_id(("thread-row", index)),
+                        ui.make_persistent_id(("project-row", project_id)),
                         egui::Sense::click(),
                     );
                     if close_clicked {
-                        close_thread = Some(index);
-                    } else if row_response.clicked() {
-                        focus_thread = Some(index);
+                        close_project = Some(project_index);
+                    } else if response.clicked() {
+                        focus_project = Some(project_index);
                     }
-                    ui.add_space(space::ONE_HALF);
+                    if focused {
+                        self.focused_thread_rows(ui, project_index);
+                    }
+                    ui.add_space(space::ONE);
                 }
             });
+
+        if let Some(index) = close_project {
+            self.request_close_project(index);
+        } else if let Some(index) = focus_project {
+            self.focus_project(index);
+        }
+    }
+
+    fn focused_thread_rows(&mut self, ui: &mut egui::Ui, project_index: usize) {
+        let fps = self.projects[project_index].document.fps;
+        let can_close = self.projects[project_index].threads.len() > 1;
+        let mut focus_thread = None;
+        let mut close_thread = None;
+        ui.scope(|ui| {
+            for (index, thread) in self.projects[project_index].threads.iter().enumerate() {
+                let mut close_clicked = false;
+                let frame = egui::Frame::new()
+                    .fill(if index == self.projects[project_index].active_thread {
+                        color::SURFACE_RAISED
+                    } else {
+                        color::PANEL
+                    })
+                    .corner_radius(radius::SM)
+                    .inner_margin(egui::Margin::same(theme::margin(space::ONE)))
+                    .show(ui, |ui| {
+                        // A bare with_layout claims the rail's full
+                        // height; the row must allocate exactly one
+                        // line. Trailing controls pack from the right,
+                        // the identity anchors left and truncates.
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), size::ICON_SM + space::ONE),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if can_close
+                                    && ui.small_button("×").on_hover_text("Close thread").clicked()
+                                {
+                                    close_clicked = true;
+                                }
+                                if thread.running {
+                                    ui.colored_label(
+                                        color::ACCENT,
+                                        egui::RichText::new("RUNNING").size(type_size::MICRO),
+                                    );
+                                }
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.add(thread.harness.brand_icon().image(size::ICON_SM));
+                                        ui.add(egui::Label::new(&thread.name).truncate());
+                                    },
+                                );
+                            },
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(latest_activity_snippet(&thread.chat, fps))
+                                    .size(type_size::CAPTION)
+                                    .color(color::TEXT_MUTED),
+                            )
+                            .truncate(),
+                        );
+                    });
+                let row_response = ui.interact(
+                    frame.response.rect,
+                    ui.make_persistent_id(("thread-row", self.projects[project_index].id, index)),
+                    egui::Sense::click(),
+                );
+                if close_clicked {
+                    close_thread = Some(index);
+                } else if row_response.clicked() {
+                    focus_thread = Some(index);
+                }
+                ui.add_space(space::ONE_HALF);
+            }
+        });
 
         if let Some(index) = close_thread {
             self.close_agent_thread(index);
         } else if let Some(index) = focus_thread {
-            self.active_thread = index;
+            self.projects[project_index].active_thread = index;
         }
     }
 
     // The agent panel is one ordered immediate-mode UI pass over session and confirmation state.
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     pub(crate) fn agent_panel(&mut self, ui: &mut egui::Ui) {
-        let active_thread = self.active_thread;
-        if !self.threads[active_thread].running && self.threads[active_thread].session.is_none() {
+        let project_index = self.focused_project;
+        let project_id = self.projects[project_index].id;
+        let active_thread = self.projects[project_index].active_thread;
+        if !self.projects[project_index].threads[active_thread].running
+            && self.projects[project_index].threads[active_thread]
+                .session
+                .is_none()
+        {
             if self.claude_info.is_some() && self.codex_info.is_none() {
-                self.threads[active_thread].harness = AgentHarnessChoice::ClaudeCode;
+                self.projects[project_index].threads[active_thread].harness =
+                    AgentHarnessChoice::ClaudeCode;
             } else if self.codex_info.is_some() && self.claude_info.is_none() {
-                self.threads[active_thread].harness = AgentHarnessChoice::Codex;
+                self.projects[project_index].threads[active_thread].harness =
+                    AgentHarnessChoice::Codex;
             } else if self.claude_info.is_some() && self.codex_info.is_some() {
                 let remembered = ui.ctx().data_mut(|data| {
                     data.get_persisted::<String>(egui::Id::new(AGENT_HARNESS_MEMORY_ID))
@@ -490,7 +646,7 @@ impl OpenReelApp {
                 if let Some(remembered) =
                     remembered.and_then(|key| AgentHarnessChoice::from_key(&key))
                 {
-                    self.threads[active_thread].harness = remembered;
+                    self.projects[project_index].threads[active_thread].harness = remembered;
                 }
             }
             // Model and effort choices follow the same idle-restore pattern;
@@ -540,7 +696,7 @@ impl OpenReelApp {
             ui.add_space(space::ONE);
         }
 
-        let harness = self.threads[active_thread].harness;
+        let harness = self.projects[project_index].threads[active_thread].harness;
         let selected_info = match harness {
             AgentHarnessChoice::ClaudeCode => self.claude_info.as_ref(),
             AgentHarnessChoice::Codex => self.codex_info.as_ref(),
@@ -570,7 +726,7 @@ impl OpenReelApp {
         });
 
         let mut confirmation_decision = None;
-        for request in &self.pending_confirmations {
+        for request in &self.projects[project_index].pending_confirmations {
             egui::Frame::new()
                 .fill(color::SURFACE_RAISED)
                 .stroke(egui::Stroke::new(1.0, color::STATUS_WARNING))
@@ -597,7 +753,7 @@ impl OpenReelApp {
                 });
         }
         if let Some((id, approve)) = confirmation_decision
-            && let Some(confirmations) = &self.confirmations
+            && let Some(confirmations) = &self.projects[project_index].confirmations
         {
             let resolved = if approve {
                 confirmations.approve(id)
@@ -605,9 +761,10 @@ impl OpenReelApp {
                 confirmations.reject(id, "rejected by user")
             };
             if resolved {
-                self.pending_confirmations
+                self.projects[project_index]
+                    .pending_confirmations
                     .retain(|request| request.id != id);
-                self.threads[active_thread]
+                self.projects[project_index].threads[active_thread]
                     .chat
                     .push(ChatEntry::Text(if approve {
                         "Approved destructive edit.".to_owned()
@@ -628,8 +785,11 @@ impl OpenReelApp {
         // MEASURED: reserve what it actually used last time at this
         // suggestion count, with a generous estimate covering only the first
         // frame a given count appears.
-        let matches = crate::slash::matching_commands(&self.threads[active_thread].input);
-        let reserve_id = egui::Id::new(("composer-reserve", active_thread, matches.len()));
+        let matches = crate::slash::matching_commands(
+            &self.projects[project_index].threads[active_thread].input,
+        );
+        let reserve_id =
+            egui::Id::new(("composer-reserve", project_id, active_thread, matches.len()));
         let composer_reserve = ui
             .ctx()
             .data(|data| data.get_temp::<f32>(reserve_id))
@@ -655,8 +815,8 @@ impl OpenReelApp {
                 // step while the agent works, and expanding it reveals the
                 // full cards, review actions included. Messages stay
                 // first-class.
-                let fps = self.document.fps;
-                let chat = &self.threads[active_thread].chat;
+                let fps = self.projects[project_index].document.fps;
+                let chat = &self.projects[project_index].threads[active_thread].chat;
                 let mut index = 0;
                 while index < chat.len() {
                     if is_activity(&chat[index]) {
@@ -670,7 +830,7 @@ impl OpenReelApp {
                                 .size(type_size::CAPTION)
                                 .color(color::TEXT_SECONDARY),
                         )
-                        .id_salt(("activity", active_thread, group_start))
+                        .id_salt(("activity", project_id, active_thread, group_start))
                         .default_open(false)
                         .show(ui, |ui| {
                             for (offset, entry) in entries.iter().enumerate() {
@@ -694,7 +854,7 @@ impl OpenReelApp {
         match card_action {
             Some(EditCardAction::Review(cue)) => {
                 self.seek_to(cue);
-                self.playback.play(self.position);
+                self.playback.play(self.projects[project_index].position);
             }
             Some(EditCardAction::Undo) => self.undo(),
             None => {}
@@ -719,7 +879,7 @@ impl OpenReelApp {
             });
         }
         ui.add_space(space::ONE);
-        let composer_id = egui::Id::new(("agent-composer", active_thread));
+        let composer_id = egui::Id::new(("agent-composer", project_id, active_thread));
         let input_response = egui::Frame::new()
             .fill(color::CANVAS)
             .stroke(egui::Stroke::new(1.0, color::BORDER_STRONG))
@@ -727,13 +887,15 @@ impl OpenReelApp {
             .inner_margin(egui::Margin::same(theme::margin(space::ONE)))
             .show(ui, |ui| {
                 ui.add_enabled(
-                    !self.threads[active_thread].running,
-                    egui::TextEdit::multiline(&mut self.threads[active_thread].input)
-                        .id(composer_id)
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY)
-                        .frame(egui::Frame::NONE)
-                        .hint_text("Describe an edit, or / for commands"),
+                    !self.projects[project_index].threads[active_thread].running,
+                    egui::TextEdit::multiline(
+                        &mut self.projects[project_index].threads[active_thread].input,
+                    )
+                    .id(composer_id)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .frame(egui::Frame::NONE)
+                    .hint_text("Describe an edit, or / for commands"),
                 )
             })
             .inner;
@@ -744,30 +906,43 @@ impl OpenReelApp {
         {
             if let Some(first) = matches.first() {
                 run_command = Some(first);
-            } else if !self.threads[active_thread].input.trim().is_empty() {
-                let input = std::mem::take(&mut self.threads[active_thread].input);
+            } else if !self.projects[project_index].threads[active_thread]
+                .input
+                .trim()
+                .is_empty()
+            {
+                let input =
+                    std::mem::take(&mut self.projects[project_index].threads[active_thread].input);
                 input
                     .trim()
-                    .clone_into(&mut self.threads[active_thread].input);
+                    .clone_into(&mut self.projects[project_index].threads[active_thread].input);
                 self.start_agent_turn();
             }
         }
         if let Some(command) = run_command {
-            self.threads[active_thread].input.clear();
+            self.projects[project_index].threads[active_thread]
+                .input
+                .clear();
             self.run_slash_command(command);
         }
         // The composer row carries the session controls, T3-style: harness on
         // the left, transport on the right, everything else is the stream.
         ui.horizontal(|ui| {
             if self.claude_info.is_some() && self.codex_info.is_some() {
-                let before = self.threads[active_thread].harness;
+                let before = self.projects[project_index].threads[active_thread].harness;
                 let mut choice = before;
                 let icon = ui.add(before.brand_icon().image(size::ICON_SM));
                 if let Some(hover) = &harness_hover {
                     icon.on_hover_text(hover);
                 }
-                ui.add_enabled_ui(!self.threads[active_thread].running, |ui| {
-                    egui::ComboBox::from_id_salt(("composer-harness", active_thread))
+                ui.add_enabled_ui(
+                    !self.projects[project_index].threads[active_thread].running,
+                    |ui| {
+                        egui::ComboBox::from_id_salt((
+                            "composer-harness",
+                            project_id,
+                            active_thread,
+                        ))
                         .selected_text(choice.label())
                         .show_ui(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -787,10 +962,11 @@ impl OpenReelApp {
                                 );
                             });
                         });
-                });
+                    },
+                );
                 if before != choice {
                     self.stop_agent(active_thread);
-                    self.threads[active_thread].harness = choice;
+                    self.projects[project_index].threads[active_thread].harness = choice;
                     ui.ctx().data_mut(|data| {
                         data.insert_persisted(
                             egui::Id::new(AGENT_HARNESS_MEMORY_ID),
@@ -800,7 +976,7 @@ impl OpenReelApp {
                 }
             } else if any_harness {
                 let icon = ui.add(
-                    self.threads[active_thread]
+                    self.projects[project_index].threads[active_thread]
                         .harness
                         .brand_icon()
                         .image(size::ICON_SM),
@@ -810,15 +986,17 @@ impl OpenReelApp {
                 }
                 ui.colored_label(
                     color::TEXT_SECONDARY,
-                    self.threads[active_thread].harness.label(),
+                    self.projects[project_index].threads[active_thread]
+                        .harness
+                        .label(),
                 );
             }
             // Model picker for the selected harness. Default defers to the
             // CLI's configured model; a change restarts the session, same as
             // switching harnesses.
             if selected_available {
-                let running = self.threads[active_thread].running;
-                let composer_harness = self.threads[active_thread].harness;
+                let running = self.projects[project_index].threads[active_thread].running;
+                let composer_harness = self.projects[project_index].threads[active_thread].harness;
                 let (models, choice, memory_id) = match composer_harness {
                     AgentHarnessChoice::ClaudeCode => (
                         &self.claude_models,
@@ -845,6 +1023,7 @@ impl OpenReelApp {
                     ui.add_enabled_ui(!running, |ui| {
                         egui::ComboBox::from_id_salt((
                             "composer-model",
+                            project_id,
                             active_thread,
                             composer_harness.key(),
                         ))
@@ -869,8 +1048,8 @@ impl OpenReelApp {
             // Effort picker: only levels the chosen model supports (or that
             // every catalog model supports when the model is Default).
             if selected_available {
-                let running = self.threads[active_thread].running;
-                let composer_harness = self.threads[active_thread].harness;
+                let running = self.projects[project_index].threads[active_thread].running;
+                let composer_harness = self.projects[project_index].threads[active_thread].harness;
                 let (options, choice, memory_id) = match composer_harness {
                     AgentHarnessChoice::ClaudeCode => (
                         effort_options(&self.claude_models, self.claude_model.as_deref()),
@@ -889,6 +1068,7 @@ impl OpenReelApp {
                     ui.add_enabled_ui(!running, |ui| {
                         egui::ComboBox::from_id_salt((
                             "composer-effort",
+                            project_id,
                             active_thread,
                             composer_harness.key(),
                         ))
@@ -915,15 +1095,20 @@ impl OpenReelApp {
                     color::STATUS_DANGER,
                     format!(
                         "{} not found on PATH",
-                        self.threads[active_thread].harness.label()
+                        self.projects[project_index].threads[active_thread]
+                            .harness
+                            .label()
                     ),
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let can_send = !self.threads[active_thread].running
-                    && !self.threads[active_thread].input.trim().is_empty()
+                let can_send = !self.projects[project_index].threads[active_thread].running
+                    && !self.projects[project_index].threads[active_thread]
+                        .input
+                        .trim()
+                        .is_empty()
                     && selected_available
-                    && self.mcp_server.is_some();
+                    && self.projects[project_index].mcp_server.is_some();
                 // Icon-only transport (T3-style): the row shares its width
                 // with three pickers and must survive a narrow center column.
                 if ui
@@ -941,7 +1126,7 @@ impl OpenReelApp {
                 }
                 if ui
                     .add_enabled(
-                        self.threads[active_thread].running,
+                        self.projects[project_index].threads[active_thread].running,
                         egui::Button::image(Icon::Stop.image(size::ICON_MD))
                             .image_tint_follows_text_color(true)
                             .fill(color::SURFACE_RAISED),
@@ -951,13 +1136,13 @@ impl OpenReelApp {
                 {
                     self.stop_agent(active_thread);
                 }
-                if self.threads[active_thread].running {
+                if self.projects[project_index].threads[active_thread].running {
                     ui.colored_label(
                         color::ACCENT,
                         egui::RichText::new("RUNNING").size(type_size::MICRO),
                     );
                 }
-                let usage = &self.threads[active_thread].usage;
+                let usage = &self.projects[project_index].threads[active_thread].usage;
                 if usage.input_tokens > 0 || usage.output_tokens > 0 {
                     ui.colored_label(
                         color::TEXT_MUTED,
@@ -982,17 +1167,6 @@ fn thread_title(message: &str) -> String {
     truncate_text(message.trim(), 32)
 }
 
-fn active_thread_after_close(active: usize, closing: usize, thread_count: usize) -> usize {
-    debug_assert!(thread_count > 1);
-    debug_assert!(active < thread_count);
-    debug_assert!(closing < thread_count);
-    match closing.cmp(&active) {
-        std::cmp::Ordering::Less => active - 1,
-        std::cmp::Ordering::Equal => active.min(thread_count - 2),
-        std::cmp::Ordering::Greater => active,
-    }
-}
-
 fn latest_activity_snippet(chat: &[ChatEntry], fps: openreel_core::Rational) -> String {
     let Some(latest) = chat.last() else {
         return "New session".to_owned();
@@ -1009,6 +1183,23 @@ fn latest_activity_snippet(chat: &[ChatEntry], fps: openreel_core::Rational) -> 
     };
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate_text(&one_line, 40)
+}
+
+fn background_project_caption(project: &ProjectSession) -> String {
+    let activity = project
+        .threads
+        .iter()
+        .filter(|thread| thread.running)
+        .max_by_key(|thread| thread.last_activity)
+        .map_or_else(
+            || "idle".to_owned(),
+            |thread| latest_activity_snippet(&thread.chat, project.document.fps),
+        );
+    let count = project.threads.len();
+    format!(
+        "{count} thread{} · {activity}",
+        if count == 1 { "" } else { "s" }
+    )
 }
 
 fn truncate_text(value: &str, maximum_chars: usize) -> String {
@@ -1357,10 +1548,10 @@ mod tests {
 
     #[test]
     fn closing_a_thread_keeps_or_moves_focus_predictably() {
-        assert_eq!(active_thread_after_close(2, 0, 4), 1);
-        assert_eq!(active_thread_after_close(1, 1, 4), 1);
-        assert_eq!(active_thread_after_close(3, 3, 4), 2);
-        assert_eq!(active_thread_after_close(0, 2, 4), 0);
+        assert_eq!(index_after_close(2, 0, 4), 1);
+        assert_eq!(index_after_close(1, 1, 4), 1);
+        assert_eq!(index_after_close(3, 3, 4), 2);
+        assert_eq!(index_after_close(0, 2, 4), 0);
     }
 
     #[test]

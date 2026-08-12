@@ -10,25 +10,27 @@ use crate::{
 
 impl OpenReelApp {
     pub(crate) fn toggle_playback(&mut self) {
-        if self.document.duration <= TimeCode::ZERO {
+        if self.focused().document.duration <= TimeCode::ZERO {
             self.record_error("Media", "Add a clip to the timeline before playing");
             return;
         }
         if self.playing {
             self.playback.pause();
         } else {
-            if self.position >= self.document.duration {
-                self.position = TimeCode::ZERO;
+            if self.focused().position >= self.focused().document.duration {
+                self.focused_mut().position = TimeCode::ZERO;
             }
-            self.playback.play(self.position);
+            let position = self.focused().position;
+            self.playback.play(position);
         }
     }
 
     pub(crate) fn seek_to(&mut self, position: TimeCode) {
-        let maximum = self.document.duration.0.saturating_sub(1).max(0);
-        self.position = TimeCode(position.0.clamp(0, maximum));
-        self.playback.seek(self.position);
-        self.playback.request_frame(self.position);
+        let maximum = self.focused().document.duration.0.saturating_sub(1).max(0);
+        let position = TimeCode(position.0.clamp(0, maximum));
+        self.focused_mut().position = position;
+        self.playback.seek(position);
+        self.playback.request_frame(position);
     }
 
     pub(crate) fn transport(&mut self, ui: &mut egui::Ui) {
@@ -39,7 +41,8 @@ impl OpenReelApp {
                 let leading_space = ((ui.available_width() - 430.0) / 2.0).max(0.0);
                 ui.add_space(leading_space);
                 if icons::transport_button(ui, Icon::StepBack, "Previous frame", false).clicked() {
-                    self.seek_to(TimeCode(self.position.0.saturating_sub(1)));
+                    let position = self.focused().position;
+                    self.seek_to(TimeCode(position.0.saturating_sub(1)));
                 }
                 let playback_icon = if self.playing {
                     Icon::Pause
@@ -53,11 +56,12 @@ impl OpenReelApp {
                     self.toggle_playback();
                 }
                 if icons::transport_button(ui, Icon::StepForward, "Next frame", false).clicked() {
-                    self.seek_to(TimeCode(self.position.0.saturating_add(1)));
+                    let position = self.focused().position;
+                    self.seek_to(TimeCode(position.0.saturating_add(1)));
                 }
                 ui.add_space(space::TWO);
-                let maximum = self.document.duration.0.saturating_sub(1).max(0);
-                let mut slider_position = self.position.0.clamp(0, maximum);
+                let maximum = self.focused().document.duration.0.saturating_sub(1).max(0);
+                let mut slider_position = self.focused().position.0.clamp(0, maximum);
                 let response = ui.add_sized(
                     [150.0, size::CONTROL_HEIGHT],
                     egui::Slider::new(&mut slider_position, 0..=maximum)
@@ -72,29 +76,30 @@ impl OpenReelApp {
                     }
                 }
                 if response.changed() {
-                    self.position = TimeCode(slider_position);
-                    self.playback.request_frame(self.position);
+                    let position = TimeCode(slider_position);
+                    self.focused_mut().position = position;
+                    self.playback.request_frame(position);
                 }
                 if response.drag_stopped() || (response.changed() && !response.dragged()) {
-                    self.playback.seek(self.position);
+                    let position = self.focused().position;
+                    self.playback.seek(position);
                     if self.resume_after_scrub {
-                        self.playback.play(self.position);
+                        self.playback.play(position);
                     }
                     self.resume_after_scrub = false;
                 }
                 ui.add_space(space::TWO);
+                let position = self.focused().position;
+                let fps = self.focused().document.fps;
                 ui.label(
-                    egui::RichText::new(format_timecode(self.position, self.document.fps))
+                    egui::RichText::new(format_timecode(position, fps))
                         .font(theme::timecode_font())
                         .color(color::TEXT_PRIMARY),
                 );
                 ui.colored_label(
                     color::TEXT_MUTED,
-                    egui::RichText::new(format!(
-                        "/ {}",
-                        format_timecode(TimeCode(maximum), self.document.fps)
-                    ))
-                    .font(theme::code_font()),
+                    egui::RichText::new(format!("/ {}", format_timecode(TimeCode(maximum), fps)))
+                        .font(theme::code_font()),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.master_output_meter(ui);

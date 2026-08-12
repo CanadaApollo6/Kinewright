@@ -541,8 +541,27 @@ impl Recovery {
         Self::start_in(default_recovery_directory(), core, project_path)
     }
 
+    /// Start a per-project recorder without repeating the process-startup
+    /// recovery scan. Only the startup session owns restore decisions.
+    pub(crate) fn start_attached(core: &Core, project_path: Option<&Path>) -> Self {
+        Self::start_attached_in(default_recovery_directory(), core, project_path)
+    }
+
     fn start_in(directory: PathBuf, core: &Core, project_path: Option<&Path>) -> Self {
         let pending = scan_directory(&directory);
+        Self::start_with_pending(directory, core, project_path, pending)
+    }
+
+    fn start_attached_in(directory: PathBuf, core: &Core, project_path: Option<&Path>) -> Self {
+        Self::start_with_pending(directory, core, project_path, Vec::new())
+    }
+
+    fn start_with_pending(
+        directory: PathBuf,
+        core: &Core,
+        project_path: Option<&Path>,
+        pending: Vec<PendingJournal>,
+    ) -> Self {
         let runtime_error = Arc::new(Mutex::new(None));
         let mut recovery = Self {
             path: directory.join("uninitialized.journal"),
@@ -699,6 +718,11 @@ impl Recovery {
         remove_file_best_effort(journal_path, &self.runtime_error);
     }
 
+    /// Preserve process-startup restore decisions when their owning project closes.
+    pub(crate) fn move_pending_to(&mut self, target: &mut Self) {
+        target.pending.append(&mut self.pending);
+    }
+
     fn stop_active(&mut self) {
         if let Some(mut recorder) = self.recorder.take() {
             recorder.shutdown();
@@ -812,13 +836,13 @@ fn allocate_journal_path(
     if let Some(project_path) = project_path {
         let base = journal_file_name(project_path);
         let first = directory.join(&base);
-        if !is_reserved(&first) {
+        if !is_reserved(&first) && (first == current || !first.exists()) {
             return first;
         }
         let stem = base.trim_end_matches(".journal");
         for suffix in 2.. {
             let candidate = directory.join(format!("{stem}-{suffix}.journal"));
-            if !is_reserved(&candidate) {
+            if !is_reserved(&candidate) && (candidate == current || !candidate.exists()) {
                 return candidate;
             }
         }
@@ -1465,6 +1489,36 @@ mod tests {
     }
 
     #[test]
+    fn attached_session_does_not_duplicate_startup_restore_decisions() {
+        let directory = TestDirectory::new("attached-no-scan");
+        let stale = directory.0.join("unsaved-1.journal");
+        drop(JournalWriter::create(&stale, None, &Document::default()).unwrap());
+        let core = Core::spawn(Document::default()).unwrap();
+
+        let recovery = Recovery::start_attached_in(directory.0.clone(), &core, None);
+        assert!(recovery.pending.is_empty());
+        assert_ne!(recovery.path, stale);
+        assert!(stale.is_file());
+    }
+
+    #[test]
+    fn startup_restore_decisions_can_move_to_the_next_session() {
+        let directory = TestDirectory::new("pending-transfer");
+        let stale = directory.0.join("unsaved-1.journal");
+        drop(JournalWriter::create(&stale, None, &Document::default()).unwrap());
+        let first_core = Core::spawn(Document::default()).unwrap();
+        let next_core = Core::spawn(Document::default()).unwrap();
+        let mut first = Recovery::start_in(directory.0.clone(), &first_core, None);
+        let mut next = Recovery::start_attached_in(directory.0.clone(), &next_core, None);
+
+        first.move_pending_to(&mut next);
+
+        assert!(first.pending.is_empty());
+        assert_eq!(next.pending.len(), 1);
+        assert_eq!(next.pending[0].journal_path, stale);
+    }
+
+    #[test]
     fn successful_save_checkpoint_discards_pre_save_commands_and_adopts_the_name() {
         let directory = TestDirectory::new("checkpoint");
         let core = Core::spawn(Document::default()).unwrap();
@@ -1543,6 +1597,19 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("unsaved-")
         );
+    }
+
+    #[test]
+    fn saved_project_allocation_avoids_an_active_existing_journal() {
+        let directory = TestDirectory::new("active-saved-collision");
+        let project = directory.0.join("cut.openreel");
+        let base = directory.0.join(journal_file_name(&project));
+        fs::write(&base, b"active").unwrap();
+        let placeholder = directory.0.join("uninitialized.journal");
+
+        let allocated = allocate_journal_path(&directory.0, Some(&project), &placeholder, &[]);
+        assert_ne!(allocated, base);
+        assert!(allocated.to_string_lossy().ends_with("-2.journal"));
     }
 
     #[test]

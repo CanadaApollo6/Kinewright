@@ -20,7 +20,7 @@ impl OpenReelApp {
         let id = ui.make_persistent_id("inspector-panel");
         let mut state =
             egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
-        if self.title_text_focus.is_some() {
+        if self.focused().title_text_focus.is_some() {
             state.set_open(true);
         }
         state
@@ -36,8 +36,9 @@ impl OpenReelApp {
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
         if let Some(clip) = self
+            .focused()
             .selected_clip
-            .and_then(|id| self.document.clip(id))
+            .and_then(|id| self.focused().document.clip(id))
             .cloned()
         {
             match &clip.content {
@@ -46,8 +47,9 @@ impl OpenReelApp {
                 ClipContent::Freeze(freeze) => self.freeze_clip_inspector(ui, &clip, freeze),
             }
         } else if let Some(marker) = self
+            .focused()
             .selected_marker
-            .and_then(|id| self.document.marker(id))
+            .and_then(|id| self.focused().document.marker(id))
             .cloned()
         {
             self.marker_inspector(ui, &marker);
@@ -60,7 +62,7 @@ impl OpenReelApp {
 
     #[allow(clippy::too_many_lines)]
     fn media_clip_inspector(&mut self, ui: &mut egui::Ui, clip: &Clip) {
-        let Some(asset) = self.document.asset(clip.asset).cloned() else {
+        let Some(asset) = self.focused().document.asset(clip.asset).cloned() else {
             ui.colored_label(color::STATUS_DANGER, "Media asset is missing");
             return;
         };
@@ -70,6 +72,7 @@ impl OpenReelApp {
         data_row(ui, "Path", &asset.path.display().to_string());
         data_row(ui, "Source", &range_readout(&clip.source_range, asset.fps));
         let timeline_end = self
+            .focused()
             .document
             .clip_duration(clip)
             .map_or(clip.timeline_start, |duration| {
@@ -78,7 +81,10 @@ impl OpenReelApp {
         data_row(
             ui,
             "Timeline",
-            &range_readout(&(clip.timeline_start..timeline_end), self.document.fps),
+            &range_readout(
+                &(clip.timeline_start..timeline_end),
+                self.focused().document.fps,
+            ),
         );
         if let Some((width, height)) = asset.resolution {
             data_row(ui, "Raster", &format!("{width} × {height}"));
@@ -109,16 +115,20 @@ impl OpenReelApp {
             );
         }
         if speed_changed {
-            match crate::timeline_ui::clip_speed_operations(&self.document, clip.id, speed_percent)
-            {
+            match crate::timeline_ui::clip_speed_operations(
+                &self.focused().document,
+                clip.id,
+                speed_percent,
+            ) {
                 Ok(operations) => pending.extend(operations),
                 Err(error) => self.record_error("Operations", error),
             }
         }
-        if let Some(audio_clip) = audio_target_clip(&self.document, clip.id) {
+        if let Some(audio_clip) = audio_target_clip(&self.focused().document, clip.id) {
             ui.add_space(space::TWO);
             ui.strong("Audio");
             let duration = self
+                .focused()
                 .document
                 .clip_duration(&audio_clip)
                 .map_or(0, |duration| duration.0.max(0));
@@ -184,7 +194,7 @@ impl OpenReelApp {
         }
 
         effects_section(ui, clip, &mut pending);
-        transition_section(ui, &self.document, clip, &mut pending);
+        transition_section(ui, &self.focused().document, clip, &mut pending);
         self.send_operations(pending);
     }
 
@@ -194,7 +204,7 @@ impl OpenReelApp {
         clip: &Clip,
         freeze: &openreel_core::FreezeFrame,
     ) {
-        let Some(asset) = self.document.asset(clip.asset).cloned() else {
+        let Some(asset) = self.focused().document.asset(clip.asset).cloned() else {
             ui.colored_label(color::STATUS_DANGER, "Freeze source asset is missing");
             return;
         };
@@ -206,11 +216,19 @@ impl OpenReelApp {
             "Frozen source",
             &frame_readout(freeze.source_frame, asset.fps),
         );
-        let duration = self.document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
-        data_row(ui, "Duration", &frame_readout(duration, self.document.fps));
+        let duration = self
+            .focused()
+            .document
+            .clip_duration(clip)
+            .unwrap_or(TimeCode::ZERO);
+        data_row(
+            ui,
+            "Duration",
+            &frame_readout(duration, self.focused().document.fps),
+        );
         let mut pending = Vec::new();
         effects_section(ui, clip, &mut pending);
-        transition_section(ui, &self.document, clip, &mut pending);
+        transition_section(ui, &self.focused().document, clip, &mut pending);
         self.send_operations(pending);
     }
 
@@ -218,6 +236,7 @@ impl OpenReelApp {
     fn title_inspector(&mut self, ui: &mut egui::Ui, clip: &Clip, title: &Title) {
         ui.strong("Title");
         let timeline_end = self
+            .focused()
             .document
             .clip_duration(clip)
             .map_or(clip.timeline_start, |duration| {
@@ -226,9 +245,17 @@ impl OpenReelApp {
         data_row(
             ui,
             "Timeline",
-            &range_readout(&(clip.timeline_start..timeline_end), self.document.fps),
+            &range_readout(
+                &(clip.timeline_start..timeline_end),
+                self.focused().document.fps,
+            ),
         );
+        let focus_title = self.focused().title_text_focus == Some(clip.id);
+        if focus_title {
+            self.focused_mut().title_text_focus = None;
+        }
         let draft = self
+            .focused_mut()
             .title_text_draft
             .get_or_insert_with(|| (clip.id, title.text.clone()));
         if draft.0 != clip.id {
@@ -239,9 +266,8 @@ impl OpenReelApp {
                 .desired_rows(2)
                 .hint_text("Title text"),
         );
-        if self.title_text_focus == Some(clip.id) {
+        if focus_title {
             response.request_focus();
-            self.title_text_focus = None;
         }
         let submit_text = response.lost_focus()
             || (response.has_focus()
@@ -323,6 +349,7 @@ impl OpenReelApp {
             ));
         }
         let maximum = self
+            .focused()
             .document
             .clip_duration(clip)
             .map_or(0, |value| value.0.max(0));
@@ -354,9 +381,10 @@ impl OpenReelApp {
         data_row(
             ui,
             "Position",
-            &frame_readout(marker.position, self.document.fps),
+            &frame_readout(marker.position, self.focused().document.fps),
         );
         let draft = self
+            .focused_mut()
             .marker_label_draft
             .get_or_insert_with(|| (marker.id, marker.label.clone()));
         if draft.0 != marker.id {

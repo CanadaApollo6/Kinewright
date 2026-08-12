@@ -19,38 +19,44 @@ impl OpenReelApp {
             return;
         };
         self.status = format!("Probing {}…", path.display());
+        let session_id = self.focused().id;
         let media = Arc::clone(&self.analysis);
         let result_tx = self.probe_tx.clone();
         thread::Builder::new()
             .name("openreel-probe".to_owned())
             .spawn(move || {
                 let result = media.probe(&path);
-                let _ = result_tx.send((path, result));
+                let _ = result_tx.send((session_id, path, result));
             })
             .expect("failed to spawn media probe worker");
     }
 
     pub(crate) fn add_asset_to_timeline(&mut self, asset_id: AssetId) {
-        let Some(asset) = self.document.asset(asset_id).cloned() else {
+        self.add_asset_to_timeline_for(self.focused_project, asset_id);
+    }
+
+    pub(crate) fn add_asset_to_timeline_for(&mut self, project_index: usize, asset_id: AssetId) {
+        let Some(project) = self.projects.get(project_index) else {
+            return;
+        };
+        let Some(asset) = project.document.asset(asset_id).cloned() else {
             self.record_error("Operations", format!("Asset {asset_id} no longer exists"));
             return;
         };
-        // The new clip lands at the end of the timeline; cueing the playhead
-        // there makes the monitor answer the add - the commit event that
-        // follows seeks and requests this frame.
-        let clip_start = self.document.duration;
+        let clip_start = project.document.duration;
         if asset.kind == MediaKind::AudioVideo {
-            if self.add_audio_video_asset_to_timeline(&asset) {
-                self.position = clip_start;
+            if self.add_audio_video_asset_to_timeline(project_index, &asset) {
+                self.projects[project_index].position = clip_start;
             }
-            self.selected_asset = Some(asset_id);
+            self.projects[project_index].selected_asset = Some(asset_id);
             return;
         }
-        let Some(track) = self
+        let Some(track_id) = self.projects[project_index]
             .document
             .tracks
             .iter()
             .find(|track| asset.kind.supports(track.kind))
+            .map(|track| track.id)
         else {
             self.record_error(
                 "Operations",
@@ -58,21 +64,40 @@ impl OpenReelApp {
             );
             return;
         };
-        self.send_operation(Operation::AddClip {
-            track: track.id,
+        let operation = Operation::AddClip {
+            track: track_id,
             asset: asset.id,
             at: clip_start,
             source: TimeCode::ZERO..asset.duration,
-        });
-        self.position = clip_start;
-        self.selected_asset = Some(asset_id);
+        };
+        if self.projects[project_index]
+            .core
+            .send(openreel_core::Command::Do(operation))
+            .is_err()
+        {
+            self.record_error("Operations", "Core actor stopped while adding media");
+        }
+        self.projects[project_index].position = clip_start;
+        self.projects[project_index].selected_asset = Some(asset_id);
     }
 
-    fn add_audio_video_asset_to_timeline(&mut self, asset: &openreel_core::MediaAsset) -> bool {
-        match audio_video_placement_operations(&self.document, asset) {
+    fn add_audio_video_asset_to_timeline(
+        &mut self,
+        project_index: usize,
+        asset: &openreel_core::MediaAsset,
+    ) -> bool {
+        match audio_video_placement_operations(&self.projects[project_index].document, asset) {
             Ok(operations) => {
-                self.send_operations(operations);
-                true
+                if self.projects[project_index]
+                    .core
+                    .send(openreel_core::Command::DoBatch(operations))
+                    .is_err()
+                {
+                    self.record_error("Operations", "Core actor stopped while adding A/V media");
+                    false
+                } else {
+                    true
+                }
             }
             Err(error) => {
                 self.record_error("Operations", error);
@@ -99,7 +124,7 @@ impl OpenReelApp {
         ui.add_space(space::ONE);
         ui.separator();
         ui.add_space(space::ONE);
-        if self.document.media_pool.is_empty() {
+        if self.focused().document.media_pool.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(space::EIGHT);
                 ui.add(Icon::Filmstrip.image(32.0).tint(color::TEXT_MUTED));
@@ -109,13 +134,13 @@ impl OpenReelApp {
             });
             return;
         }
-        let assets = self.document.media_pool.clone();
+        let assets = self.focused().document.media_pool.clone();
         let media = Arc::clone(&self.analysis);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for asset in assets {
-                    let selected = self.selected_asset == Some(asset.id);
+                    let selected = self.focused_mut().selected_asset == Some(asset.id);
                     let response = theme::card_frame(selected).show(ui, |ui| {
                         let width = ui.available_width().max(120.0);
                         let height = (width * 9.0 / 16.0).clamp(72.0, 126.0);
@@ -191,7 +216,7 @@ impl OpenReelApp {
                         egui::Sense::click(),
                     );
                     if card_response.clicked() || response.inner.clicked() {
-                        self.selected_asset = Some(asset.id);
+                        self.focused_mut().selected_asset = Some(asset.id);
                     }
                     ui.add_space(space::ONE);
                 }
