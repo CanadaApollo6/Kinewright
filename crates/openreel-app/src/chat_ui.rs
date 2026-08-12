@@ -891,6 +891,24 @@ impl OpenReelApp {
                 // first-class.
                 let fps = self.projects[project_index].document.fps;
                 let chat = &self.projects[project_index].threads[active_thread].chat;
+                // An untouched session gets an art-directed empty state
+                // instead of one hint line above a void: quiet glyph, one
+                // invitation, centered in the column (M28).
+                if chat.len() <= 1 {
+                    ui.add_space((stream_height * 0.5 - 64.0).max(0.0));
+                    ui.vertical_centered(|ui| {
+                        ui.add(Icon::Filmstrip.image(36.0).tint(color::TEXT_MUTED));
+                        ui.add_space(space::TWO);
+                        ui.label(
+                            egui::RichText::new("Drop a clip anywhere")
+                                .font(theme::semibold(type_size::HEADING))
+                                .color(color::TEXT_SECONDARY),
+                        );
+                        ui.add_space(space::HALF);
+                        ui.colored_label(color::TEXT_MUTED, "or /import - then describe your edit");
+                    });
+                    return;
+                }
                 let mut index = 0;
                 while index < chat.len() {
                     if is_activity(&chat[index]) {

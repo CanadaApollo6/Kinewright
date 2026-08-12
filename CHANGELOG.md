@@ -138,6 +138,22 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   runs, so Default offers that model's true efforts and speed tiers -
   previously the Speed picker could hide entirely because two catalog
   models offer no fast tier
+- The hard UI pass (M28): the app's material grew up, measured against
+  Zed's actual theme source and Radix dark scales. Real Inter
+  Medium/SemiBold weights (the variable font had rendered every "bold"
+  as Regular), letter-spaced caps labels, a shadow/elevation scale, a
+  re-anchored surface ladder out of the near-black dead zone with
+  borders lifted strictly above fills, desaturated neutrals, content
+  wells darkest with chrome lighter, accent starved to its four earned
+  places, one type step larger everywhere, a one-card composer (input
+  and controls on one continuous surface, wrapping on narrow columns),
+  a flat rail list with Settings at its foot, slimmed settings cards
+  with pill toggles, summoned panels that slide instead of pop, an
+  art-directed empty session state, and review builds switched to
+  release (the debug build's diagnostic overlays read as flashing red
+  boxes). Two-designer collaboration: Claude specified and reviewed;
+  Cursor's Grok 4.6 implemented the token rounds and contributed
+  reviewable design proposals of its own
 - Three columns by default: thread rail, session, monitor. The media
   column no longer self-raises on empty projects or pins itself open on
   import - it is summoned from the top bar only. Media enters through

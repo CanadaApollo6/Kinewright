@@ -1008,55 +1008,56 @@ impl OpenReelApp {
         // timeline (span-level truth beats watching for approvals). Import
         // does not need a column: drop a file anywhere, use /import, or the
         // rail's import row - media lands on the timeline either way.
-        let strip_visible =
+        // Summoned surfaces slide rather than pop (M28 motion): the animated
+        // panel variants ease presence over the house animation_time.
+        let mut strip_open =
             self.show_material_strip || !self.focused().pending_confirmations.is_empty();
-        let rail_visible = self.show_media_rail;
-        if strip_visible {
-            egui::Panel::bottom("timeline-dock")
-                .default_size(240.0)
-                .min_size(160.0)
-                .resizable(true)
-                .frame(
-                    egui::Frame::new()
-                        .fill(color::PANEL)
-                        .inner_margin(egui::Margin::same(theme::margin(space::TWO))),
-                )
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(
-                            &mut self.material_tab,
-                            MaterialTab::Timeline,
-                            "Timeline",
-                        );
-                        ui.selectable_value(
-                            &mut self.material_tab,
-                            MaterialTab::Transcript,
-                            "Transcript",
-                        );
-                    });
-                    ui.separator();
-                    match self.material_tab {
-                        MaterialTab::Timeline => self.timeline(ui),
-                        MaterialTab::Transcript => self.transcript_panel(ui),
-                    }
+        let mut thread_rail_open = self.show_thread_rail;
+        let mut media_rail_open = self.show_media_rail;
+        egui::Panel::bottom("timeline-dock")
+            .default_size(240.0)
+            .min_size(160.0)
+            .resizable(true)
+            .frame(
+                egui::Frame::new()
+                    .fill(color::PANEL)
+                    .inner_margin(egui::Margin::same(theme::margin(space::TWO))),
+            )
+            .show_collapsible(ui, &mut strip_open, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.material_tab, MaterialTab::Timeline, "Timeline");
+                    ui.selectable_value(
+                        &mut self.material_tab,
+                        MaterialTab::Transcript,
+                        "Transcript",
+                    );
                 });
+                ui.separator();
+                match self.material_tab {
+                    MaterialTab::Timeline => self.timeline(ui),
+                    MaterialTab::Transcript => self.transcript_panel(ui),
+                }
+            });
+        egui::Panel::left("thread-rail")
+            .default_size(200.0)
+            .min_size(160.0)
+            .resizable(true)
+            .frame(theme::panel_frame())
+            .show_collapsible(ui, &mut thread_rail_open, |ui| self.thread_rail(ui));
+        egui::Panel::left("media-rail")
+            .default_size(220.0)
+            .min_size(64.0)
+            .resizable(true)
+            .frame(theme::panel_frame())
+            .show_collapsible(ui, &mut media_rail_open, |ui| self.media_bin(ui));
+        // show_collapsible flips its flag when the user drags a panel shut;
+        // write the results back so the top-bar toggles stay truthful. A
+        // confirmation-forced strip reopens next frame by design.
+        if self.show_material_strip && !strip_open {
+            self.show_material_strip = false;
         }
-        if self.show_thread_rail {
-            egui::Panel::left("thread-rail")
-                .default_size(200.0)
-                .min_size(160.0)
-                .resizable(true)
-                .frame(theme::panel_frame())
-                .show(ui, |ui| self.thread_rail(ui));
-        }
-        if rail_visible {
-            egui::Panel::left("media-rail")
-                .default_size(220.0)
-                .min_size(64.0)
-                .resizable(true)
-                .frame(theme::panel_frame())
-                .show(ui, |ui| self.media_bin(ui));
-        }
+        self.show_thread_rail = thread_rail_open;
+        self.show_media_rail = media_rail_open;
         egui::Panel::right("monitor-dock")
             .default_size(460.0)
             .min_size(340.0)
