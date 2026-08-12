@@ -68,6 +68,36 @@ impl OpenReelApp {
     }
 }
 
+/// A small pill toggle - reads as a switch, not a form checkbox. Toggles are
+/// one of the accent's four earned places.
+fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let size = egui::vec2(30.0, 16.0);
+    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let progress = ui
+        .ctx()
+        .animate_bool_responsive(response.id.with("toggle"), *on);
+    let track = if *on {
+        color::ACCENT_DIM_BORDER
+    } else {
+        color::SURFACE_ACTIVE
+    };
+    let radius = rect.height() / 2.0;
+    ui.painter().rect_filled(rect, radius, track);
+    let knob_x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), progress);
+    let knob = if *on {
+        color::ACCENT
+    } else {
+        color::TEXT_MUTED
+    };
+    ui.painter()
+        .circle_filled(egui::pos2(knob_x, rect.center().y), radius - 3.0, knob);
+    response.on_hover_text(if *on { "Enabled" } else { "Disabled" })
+}
+
 fn provider_card(
     ui: &mut egui::Ui,
     harness: AgentHarnessChoice,
@@ -93,20 +123,16 @@ fn provider_card(
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let mut enabled = provider_enabled(&ctx, harness);
-                    if ui.checkbox(&mut enabled, "Enabled").changed() {
+                    if toggle_switch(ui, &mut enabled).changed() {
                         set_provider_enabled(&ctx, harness, enabled);
                     }
                 });
             });
+            // Identity facts only: version above, authentication here. The
+            // executable path is deliberately not shown - filesystem details
+            // are not something to display (or screenshot).
             if let Some(info) = info {
-                ui.colored_label(
-                    color::TEXT_MUTED,
-                    format!(
-                        "{} · {}",
-                        authentication_label(info.authentication),
-                        info.executable.display()
-                    ),
-                );
+                ui.colored_label(color::TEXT_MUTED, authentication_label(info.authentication));
                 if harness == AgentHarnessChoice::Codex {
                     ui.colored_label(
                         color::TEXT_MUTED,

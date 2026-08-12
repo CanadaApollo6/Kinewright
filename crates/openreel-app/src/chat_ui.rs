@@ -958,16 +958,17 @@ impl OpenReelApp {
         ui.add_space(space::ONE);
         let composer_id = egui::Id::new(("agent-composer", project_id, active_thread));
         let composer_focused = ui.ctx().memory(|memory| memory.has_focus(composer_id));
-        // The composer reads as one quiet surface: no resting outline (the
-        // inset well is the affordance), a focus ring only when writing.
+        // The composer is ONE card (Riel's review): the input is the card's
+        // top face and the controls row its foot, sharing a fill with no seam
+        // between them; a focus ring wraps the whole card while writing.
         let input_frame = egui::Frame::new()
-            .fill(color::PANEL)
-            .stroke(if composer_focused {
-                theme::input_stroke(true)
-            } else {
-                egui::Stroke::NONE
+            .fill(color::SURFACE)
+            .corner_radius(egui::CornerRadius {
+                nw: 6,
+                ne: 6,
+                sw: 0,
+                se: 0,
             })
-            .corner_radius(radius::MD)
             .inner_margin(egui::Margin::same(theme::margin(space::ONE)))
             .show(ui, |ui| {
                 ui.add_enabled(
@@ -982,11 +983,6 @@ impl OpenReelApp {
                     .hint_text("Describe an edit, or / for commands"),
                 )
             });
-        theme::paint_inset_well(
-            ui.painter(),
-            input_frame.response.rect,
-            radius::px(radius::MD),
-        );
         let input_response = input_frame.inner;
         // Enter sends (Shift+Enter for a newline); with a slash query active,
         // Enter runs the top match.
@@ -1016,7 +1012,12 @@ impl OpenReelApp {
         }
         // The composer row carries the session controls, T3-style: harness on
         // the left, transport on the right, everything else is the stream.
-        ui.horizontal(|ui| {
+        // Its card fill is painted after layout (rect known then) into a
+        // placeholder shape reserved before the row draws, so the row and the
+        // input above read as one continuous surface.
+        ui.add_space(-ui.spacing().item_spacing.y);
+        let controls_bg = ui.painter().add(egui::Shape::Noop);
+        let controls_row = ui.horizontal(|ui| {
             if claude_ready && codex_ready {
                 let before = self.projects[project_index].threads[active_thread].harness;
                 let mut choice = before;
@@ -1296,6 +1297,31 @@ impl OpenReelApp {
                 }
             });
         });
+        let controls_rect = controls_row
+            .response
+            .rect
+            .expand2(egui::vec2(0.0, theme::margin(space::ONE).into()));
+        ui.painter().set(
+            controls_bg,
+            egui::Shape::rect_filled(
+                controls_rect,
+                egui::CornerRadius {
+                    nw: 0,
+                    ne: 0,
+                    sw: 6,
+                    se: 6,
+                },
+                color::SURFACE,
+            ),
+        );
+        if composer_focused {
+            ui.painter().rect_stroke(
+                input_frame.response.rect.union(controls_rect),
+                radius::MD,
+                theme::input_stroke(true),
+                egui::StrokeKind::Outside,
+            );
+        }
         // Record what the block below the stream actually used so the next
         // frame at this suggestion count reserves exactly that.
         let composer_block_height = ui.cursor().top() - composer_block_top;
