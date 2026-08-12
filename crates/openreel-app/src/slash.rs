@@ -13,6 +13,7 @@ pub(crate) enum SlashAction {
     FreezeFrame,
     Record,
     Export,
+    Settings,
     Undo,
     Redo,
     Help,
@@ -74,6 +75,11 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "export",
         description: "Open the export dialog",
         action: SlashAction::Export,
+    },
+    SlashCommand {
+        name: "settings",
+        description: "Open Settings (providers, versions)",
+        action: SlashAction::Settings,
     },
     SlashCommand {
         name: "undo",

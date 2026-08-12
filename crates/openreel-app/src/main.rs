@@ -13,6 +13,7 @@ mod project;
 mod recording;
 mod recovery;
 mod screenshot;
+mod settings_ui;
 mod slash;
 mod theme;
 mod timeline_ui;

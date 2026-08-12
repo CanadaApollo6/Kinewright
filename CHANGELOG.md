@@ -116,6 +116,13 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   newline). Ships with instant local commands (/remove-fillers, /captions,
   /freeze, /export, /undo, /redo, /help) and agent prompt commands
   (/cut-silences, /tighten)
+- Settings window (T3-style), from the top-bar gear or /settings: a
+  Providers page shows each harness with its brand mark, detected CLI
+  version, authentication state, executable path (and Codex's sandbox
+  notice), plus an enable toggle per provider. Disabled providers vanish
+  from the harness picker for new turns without interrupting running
+  sessions; if every provider is off, the session panel says so and
+  offers Settings instead of the install card
 - Ultracode joins the effort picker on xhigh-capable Claude models: it
   enables the CLI's session mode of xhigh reasoning plus standing
   multi-agent workflow orchestration (passed as a session setting, since

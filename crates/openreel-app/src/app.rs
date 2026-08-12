@@ -55,6 +55,7 @@ pub(crate) struct OpenReelApp {
     pub(crate) claude_info: Option<HarnessInfo>,
     pub(crate) codex_info: Option<HarnessInfo>,
     pub(crate) show_thread_rail: bool,
+    pub(crate) settings_open: bool,
     /// Selectable models per harness; `None` chosen means the CLI's default.
     pub(crate) claude_models: Vec<openreel_agent::ModelChoice>,
     pub(crate) codex_models: Vec<openreel_agent::ModelChoice>,
@@ -129,6 +130,10 @@ impl OpenReelApp {
             claude_info,
             codex_info,
             show_thread_rail: true,
+            settings_open: matches!(
+                std::env::var("OPENREEL_SCREENSHOT_SHOW").as_deref(),
+                Ok("settings")
+            ),
             claude_models: openreel_agent::claude_models(),
             codex_models: openreel_agent::codex_models(),
             codex_default_model: openreel_agent::codex_default_model(),
@@ -911,6 +916,7 @@ impl eframe::App for OpenReelApp {
         self.panel_layout(ui);
         self.show_export_dialog(ui.ctx());
         self.show_record_dialog(ui.ctx());
+        self.show_settings_dialog(ui.ctx());
         self.show_help(ui.ctx());
         self.show_error_log(ui.ctx());
         self.show_unsaved_confirmation(ui.ctx());
@@ -958,6 +964,16 @@ impl OpenReelApp {
                     }
                     self.record_control(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::image(Icon::Settings.image(size::ICON_SM))
+                                    .image_tint_follows_text_color(true),
+                            )
+                            .on_hover_text("Settings")
+                            .clicked()
+                        {
+                            self.settings_open = true;
+                        }
                         // A zero-count alert chip is permanent noise; show it
                         // only when there is something to look at.
                         if self.error_log.len() > 0

@@ -39,7 +39,7 @@ impl AgentHarnessChoice {
         }
     }
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
@@ -55,7 +55,7 @@ impl AgentHarnessChoice {
     }
 
     /// The harness's brand mark (already in its brand color - not tinted).
-    fn brand_icon(self) -> Icon {
+    pub(crate) fn brand_icon(self) -> Icon {
         match self {
             Self::ClaudeCode => Icon::BrandClaude,
             Self::Codex => Icon::BrandOpenAi,
@@ -316,6 +316,7 @@ impl OpenReelApp {
             SlashAction::FreezeFrame => self.freeze_frame_at_playhead(),
             SlashAction::Record => self.open_record_dialog(),
             SlashAction::Export => self.open_export_dialog(),
+            SlashAction::Settings => self.settings_open = true,
             SlashAction::Undo => self.undo(),
             SlashAction::Redo => self.redo(),
             SlashAction::Help => self
@@ -692,18 +693,25 @@ impl OpenReelApp {
         let project_index = self.focused_project;
         let project_id = self.projects[project_index].id;
         let active_thread = self.projects[project_index].active_thread;
+        // A provider is offered only when it is both detected and enabled in
+        // Settings; a disabled provider vanishes from the picker but running
+        // sessions on it are never interrupted.
+        let claude_ready = self.claude_info.is_some()
+            && crate::settings_ui::provider_enabled(ui.ctx(), AgentHarnessChoice::ClaudeCode);
+        let codex_ready = self.codex_info.is_some()
+            && crate::settings_ui::provider_enabled(ui.ctx(), AgentHarnessChoice::Codex);
         if !self.projects[project_index].threads[active_thread].running
             && self.projects[project_index].threads[active_thread]
                 .session
                 .is_none()
         {
-            if self.claude_info.is_some() && self.codex_info.is_none() {
+            if claude_ready && !codex_ready {
                 self.projects[project_index].threads[active_thread].harness =
                     AgentHarnessChoice::ClaudeCode;
-            } else if self.codex_info.is_some() && self.claude_info.is_none() {
+            } else if codex_ready && !claude_ready {
                 self.projects[project_index].threads[active_thread].harness =
                     AgentHarnessChoice::Codex;
-            } else if self.claude_info.is_some() && self.codex_info.is_some() {
+            } else if claude_ready && codex_ready {
                 let remembered = ui.ctx().data_mut(|data| {
                     data.get_persisted::<String>(egui::Id::new(AGENT_HARNESS_MEMORY_ID))
                 });
@@ -740,30 +748,39 @@ impl OpenReelApp {
                 codex_tiers.iter().any(|tier| tier.id == id)
             });
         }
-        let any_harness = self.claude_info.is_some() || self.codex_info.is_some();
+        let any_harness = claude_ready || codex_ready;
 
         // No header chrome (M24): the stream is the surface, and the harness
         // controls live in the composer row like T3 Code's model row. The one
-        // exception is the no-harness state, which explains itself up front.
+        // exception is the no-harness state, which explains itself up front -
+        // distinguishing "nothing installed" from "everything switched off".
         if !any_harness {
+            let any_installed = self.claude_info.is_some() || self.codex_info.is_some();
             chat_frame(color::SURFACE).show(ui, |ui| {
-                harness_row(
-                    ui,
-                    Icon::BrandClaude,
-                    "Claude Code",
-                    self.claude_info.as_ref(),
-                );
-                harness_row(ui, Icon::BrandOpenAi, "Codex", self.codex_info.as_ref());
-                ui.separator();
-                ui.label("Install and authenticate a supported agent CLI to use chat.");
-                ui.hyperlink_to(
-                    "Install Claude Code",
-                    "https://docs.anthropic.com/en/docs/claude-code/getting-started",
-                );
-                ui.hyperlink_to(
-                    "Install Codex CLI",
-                    "https://developers.openai.com/codex/cli",
-                );
+                if any_installed {
+                    ui.label("Every provider is switched off.");
+                    if ui.button("Open Settings").clicked() {
+                        self.settings_open = true;
+                    }
+                } else {
+                    harness_row(
+                        ui,
+                        Icon::BrandClaude,
+                        "Claude Code",
+                        self.claude_info.as_ref(),
+                    );
+                    harness_row(ui, Icon::BrandOpenAi, "Codex", self.codex_info.as_ref());
+                    ui.separator();
+                    ui.label("Install and authenticate a supported agent CLI to use chat.");
+                    ui.hyperlink_to(
+                        "Install Claude Code",
+                        "https://docs.anthropic.com/en/docs/claude-code/getting-started",
+                    );
+                    ui.hyperlink_to(
+                        "Install Codex CLI",
+                        "https://developers.openai.com/codex/cli",
+                    );
+                }
             });
             ui.add_space(space::ONE);
         }
@@ -773,7 +790,10 @@ impl OpenReelApp {
             AgentHarnessChoice::ClaudeCode => self.claude_info.as_ref(),
             AgentHarnessChoice::Codex => self.codex_info.as_ref(),
         };
-        let selected_available = selected_info.is_some();
+        let selected_available = match harness {
+            AgentHarnessChoice::ClaudeCode => claude_ready,
+            AgentHarnessChoice::Codex => codex_ready,
+        };
         // Owned summary so the composer row can render it while self mutates.
         let harness_summary = selected_info.map(|info| {
             // CLI version strings often repeat the product name; keep the
@@ -1004,7 +1024,7 @@ impl OpenReelApp {
         // The composer row carries the session controls, T3-style: harness on
         // the left, transport on the right, everything else is the stream.
         ui.horizontal(|ui| {
-            if self.claude_info.is_some() && self.codex_info.is_some() {
+            if claude_ready && codex_ready {
                 let before = self.projects[project_index].threads[active_thread].harness;
                 let mut choice = before;
                 let icon = ui.add(before.brand_icon().image(size::ICON_SM));
@@ -1577,7 +1597,7 @@ fn harness_row(ui: &mut egui::Ui, icon: Icon, name: &str, info: Option<&HarnessI
     }
 }
 
-fn authentication_label(authentication: AuthenticationStatus) -> &'static str {
+pub(crate) fn authentication_label(authentication: AuthenticationStatus) -> &'static str {
     match authentication {
         AuthenticationStatus::Authenticated => "authenticated",
         AuthenticationStatus::Unauthenticated => "not authenticated",
