@@ -613,12 +613,6 @@ impl OpenReelApp {
             match result {
                 Ok(asset) => {
                     self.status = format!("Importing {}…", path.display());
-                    // Keep the rail open once media exists - without this the
-                    // empty-pool self-raise collapses the instant the asset
-                    // lands and the import looks like it did nothing.
-                    if project_index == self.focused_project {
-                        self.show_media_rail = true;
-                    }
                     self.projects[project_index]
                         .pending_timeline_adds
                         .push(asset.id);
@@ -887,6 +881,7 @@ impl eframe::App for OpenReelApp {
         self.handle_close_request(ui.ctx());
         self.poll_background(ui.ctx());
         self.keyboard_shortcuts(ui.ctx());
+        self.import_dropped_files(ui.ctx());
         let restore = self
             .projects
             .first_mut()
@@ -1002,15 +997,16 @@ impl OpenReelApp {
     }
 
     fn panel_layout(&mut self, ui: &mut egui::Ui) {
-        // Conversation-first geometry (M24): the session owns the center; the
-        // monitor shows the cut; the material surfaces are summoned, not
-        // resident. Two contextual self-raises keep the right surface present
-        // at the right moment: an empty project leads with the media rail
-        // (import is the first act), and a pending destructive confirmation
-        // raises the timeline (span-level truth beats watching for approvals).
+        // Conversation-first geometry (M24, slimmed in M25): three columns by
+        // default - thread rail, session, monitor. The media browser and the
+        // material strip are summoned, never resident; the one contextual
+        // self-raise left is a pending destructive confirmation raising the
+        // timeline (span-level truth beats watching for approvals). Import
+        // does not need a column: drop a file anywhere, use /import, or the
+        // rail's import row - media lands on the timeline either way.
         let strip_visible =
             self.show_material_strip || !self.focused().pending_confirmations.is_empty();
-        let rail_visible = self.show_media_rail || self.focused().document.media_pool.is_empty();
+        let rail_visible = self.show_media_rail;
         if strip_visible {
             egui::Panel::bottom("timeline-dock")
                 .default_size(240.0)

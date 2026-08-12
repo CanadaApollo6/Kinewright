@@ -57,7 +57,7 @@ impl ProjectSession {
         let core = Core::spawn(document.clone()).map_err(|error| error.to_string())?;
         let core_events = core.subscribe().map_err(|error| error.to_string())?;
         let mut chat = vec![ChatEntry::Text(
-            "Import footage and describe your edit.".to_owned(),
+            "Drop a clip anywhere (or /import), then describe your edit.".to_owned(),
         )];
         let mcp_server =
             match McpServer::start(core.clone(), Arc::clone(playback), Arc::clone(analysis)) {

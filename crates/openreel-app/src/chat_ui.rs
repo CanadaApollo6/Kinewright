@@ -301,6 +301,7 @@ impl OpenReelApp {
             .chat
             .push(ChatEntry::User(format!("/{}", command.name)));
         match command.action {
+            SlashAction::Import => self.choose_media(),
             SlashAction::RemoveFillers => self.remove_filler_words(),
             SlashAction::AddCaptions => self.add_captions(),
             SlashAction::FreezeFrame => self.freeze_frame_at_playhead(),
@@ -638,6 +639,36 @@ impl OpenReelApp {
                 ui.add_space(space::ONE_HALF);
             }
         });
+
+        // Media enters through the project hub, T3-style: the focused
+        // project's expanded section ends with a quiet import row, so the
+        // media column never has to exist to get footage in.
+        let mut import_media = false;
+        egui::Frame::new()
+            .outer_margin(egui::Margin {
+                left: theme::margin(space::THREE),
+                ..egui::Margin::ZERO
+            })
+            .show(ui, |ui| {
+                let button = egui::Button::image_and_text(
+                    Icon::Import.image(size::ICON_SM),
+                    egui::RichText::new("Import media")
+                        .size(type_size::CAPTION)
+                        .color(color::TEXT_MUTED),
+                )
+                .image_tint_follows_text_color(true)
+                .fill(egui::Color32::TRANSPARENT);
+                if ui
+                    .add(button)
+                    .on_hover_text("Import a clip into this project (or drop a file anywhere)")
+                    .clicked()
+                {
+                    import_media = true;
+                }
+            });
+        if import_media {
+            self.choose_media();
+        }
 
         if let Some(index) = close_thread {
             self.close_agent_thread(index);

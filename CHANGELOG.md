@@ -116,6 +116,13 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   newline). Ships with instant local commands (/remove-fillers, /captions,
   /freeze, /export, /undo, /redo, /help) and agent prompt commands
   (/cut-silences, /tighten)
+- Three columns by default: thread rail, session, monitor. The media
+  column no longer self-raises on empty projects or pins itself open on
+  import - it is summoned from the top bar only. Media enters through
+  the project hub instead, T3-style: drop a file anywhere on the window,
+  type /import, or use the focused project's quiet "Import media" row in
+  the rail - every path lands footage on the timeline with the monitor
+  cued
 - Service tier picker (Speed): where a provider offers faster-than-standard
   tiers - Codex's Fast mode (1.5x speed at increased usage) - a Speed
   picker joins the composer row. Tiers come per model from the CLI's own

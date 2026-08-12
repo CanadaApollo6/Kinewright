@@ -7,6 +7,7 @@
 /// What a slash command does when run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SlashAction {
+    Import,
     RemoveFillers,
     AddCaptions,
     FreezeFrame,
@@ -58,6 +59,11 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "freeze",
         description: "Instant: freeze the current frame for two seconds",
         action: SlashAction::FreezeFrame,
+    },
+    SlashCommand {
+        name: "import",
+        description: "Import media into this project (or just drop a file)",
+        action: SlashAction::Import,
     },
     SlashCommand {
         name: "record",

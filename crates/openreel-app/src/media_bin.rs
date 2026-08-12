@@ -18,6 +18,13 @@ impl OpenReelApp {
         else {
             return;
         };
+        self.import_media_path(path);
+    }
+
+    /// Probe a file into the focused project; on success it flows down the
+    /// one-gesture import pipeline (asset, timeline, monitor cue). Shared by
+    /// the file dialog, drag-and-drop, and /import.
+    pub(crate) fn import_media_path(&mut self, path: std::path::PathBuf) {
         self.status = format!("Probing {}…", path.display());
         let session_id = self.focused().id;
         let media = Arc::clone(&self.analysis);
@@ -29,6 +36,22 @@ impl OpenReelApp {
                 let _ = result_tx.send((session_id, path, result));
             })
             .expect("failed to spawn media probe worker");
+    }
+
+    /// Files dropped anywhere on the window import into the focused project -
+    /// the media column is optional, not a prerequisite for getting footage in.
+    pub(crate) fn import_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<std::path::PathBuf> = ctx.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect()
+        });
+        for path in dropped {
+            self.import_media_path(path);
+        }
     }
 
     pub(crate) fn add_asset_to_timeline(&mut self, asset_id: AssetId) {
