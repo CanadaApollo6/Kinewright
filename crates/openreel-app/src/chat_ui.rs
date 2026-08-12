@@ -1022,7 +1022,9 @@ impl OpenReelApp {
         // input above read as one continuous surface.
         ui.add_space(-ui.spacing().item_spacing.y);
         let controls_bg = ui.painter().add(egui::Shape::Noop);
-        let controls_row = ui.horizontal(|ui| {
+        // Wrapped, not rigid: on narrow columns the pickers flow onto a
+        // second line instead of clipping at the card's edge.
+        let controls_row = ui.horizontal_wrapped(|ui| {
             // The row shares the card's inner margins: without this inset the
             // brand mark sits directly on the card's edge.
             ui.add_space(f32::from(theme::margin(space::TWO)));

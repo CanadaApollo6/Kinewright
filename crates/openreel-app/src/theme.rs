@@ -336,7 +336,9 @@ pub(crate) fn install(ctx: &egui::Context) {
     style.spacing.interact_size = egui::vec2(size::CONTROL_HEIGHT, size::CONTROL_HEIGHT);
     style.spacing.slider_width = 112.0;
     style.spacing.slider_rail_height = 3.0;
-    style.spacing.combo_width = 120.0;
+    // Combos size to their content; a wide floor mostly buys dead air and
+    // overflows narrow columns (the composer row wraps, but later).
+    style.spacing.combo_width = 76.0;
     style.spacing.text_edit_width = 180.0;
     style.spacing.icon_width = size::ICON_MD;
     style.spacing.icon_width_inner = size::ICON_SM;
