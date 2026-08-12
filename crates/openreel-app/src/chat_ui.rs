@@ -479,6 +479,25 @@ impl OpenReelApp {
         });
         ui.add_space(space::ONE);
 
+        // Settings lives in the rail's bottom corner, T3/Discord-style: the
+        // rail is the app's hub, and identity/configuration anchors its foot.
+        egui::Panel::bottom("rail-settings")
+            .frame(egui::Frame::new().inner_margin(egui::Margin::same(theme::margin(space::ONE))))
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                let button = egui::Button::image_and_text(
+                    Icon::Settings.image(size::ICON_SM),
+                    egui::RichText::new("Settings")
+                        .size(type_size::CAPTION)
+                        .color(color::TEXT_MUTED),
+                )
+                .image_tint_follows_text_color(true)
+                .fill(egui::Color32::TRANSPARENT);
+                if ui.add(button).clicked() {
+                    self.settings_open = true;
+                }
+            });
+
         let mut focus_project = None;
         let mut close_project = None;
         egui::ScrollArea::vertical()
@@ -494,13 +513,16 @@ impl OpenReelApp {
                     let can_close_project = self.projects.len() > 1;
                     let collapsed_caption = background_project_caption(project);
                     let mut close_clicked = false;
+                    // Rail rows are a flat list, not cards (Riel's review):
+                    // the focused row steps up one ladder fill and nothing
+                    // pops, floats, or catches the light.
                     let frame = egui::Frame::new()
                         .fill(if focused {
-                            color::SURFACE_RAISED
+                            color::SURFACE
                         } else {
-                            color::PANEL
+                            egui::Color32::TRANSPARENT
                         })
-                        .corner_radius(radius::SM)
+                        .corner_radius(radius::XS)
                         .inner_margin(egui::Margin::same(theme::margin(space::ONE)))
                         .show(ui, |ui| {
                             ui.allocate_ui_with_layout(
@@ -549,13 +571,6 @@ impl OpenReelApp {
                                 );
                             }
                         });
-                    if focused {
-                        theme::paint_raised_lighting(
-                            ui.painter(),
-                            frame.response.rect,
-                            radius::px(radius::SM),
-                        );
-                    }
                     let response = ui.interact(
                         frame.response.rect,
                         ui.make_persistent_id(("project-row", project_id)),
@@ -943,9 +958,15 @@ impl OpenReelApp {
         ui.add_space(space::ONE);
         let composer_id = egui::Id::new(("agent-composer", project_id, active_thread));
         let composer_focused = ui.ctx().memory(|memory| memory.has_focus(composer_id));
+        // The composer reads as one quiet surface: no resting outline (the
+        // inset well is the affordance), a focus ring only when writing.
         let input_frame = egui::Frame::new()
-            .fill(color::CANVAS)
-            .stroke(theme::input_stroke(composer_focused))
+            .fill(color::PANEL)
+            .stroke(if composer_focused {
+                theme::input_stroke(true)
+            } else {
+                egui::Stroke::NONE
+            })
             .corner_radius(radius::MD)
             .inner_margin(egui::Margin::same(theme::margin(space::ONE)))
             .show(ui, |ui| {
@@ -1514,11 +1535,11 @@ fn show_thread_row(
     // parent and child rather than neighbors.
     let frame = egui::Frame::new()
         .fill(if active {
-            color::SURFACE_RAISED
+            color::SURFACE
         } else {
-            color::PANEL
+            egui::Color32::TRANSPARENT
         })
-        .corner_radius(radius::SM)
+        .corner_radius(radius::XS)
         .outer_margin(egui::Margin {
             left: theme::margin(space::THREE),
             ..egui::Margin::ZERO
@@ -1560,9 +1581,6 @@ fn show_thread_row(
                 .truncate(),
             );
         });
-    if active {
-        theme::paint_raised_lighting(ui.painter(), frame.response.rect, radius::px(radius::SM));
-    }
     let row_response = ui.interact(
         frame.response.rect,
         ui.make_persistent_id(("thread-row", project_id, index)),

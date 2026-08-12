@@ -958,16 +958,6 @@ impl OpenReelApp {
                     }
                     self.record_control(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::image(Icon::Settings.image(size::ICON_SM))
-                                    .image_tint_follows_text_color(true),
-                            )
-                            .on_hover_text("Settings")
-                            .clicked()
-                        {
-                            self.settings_open = true;
-                        }
                         // A zero-count alert chip is permanent noise; show it
                         // only when there is something to look at.
                         if self.error_log.len() > 0
