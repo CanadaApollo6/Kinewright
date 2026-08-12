@@ -111,6 +111,8 @@ pub(crate) struct OpenReelApp {
     pub(crate) error_log_open: bool,
     recovery: crate::recovery::Recovery,
     screenshot: crate::screenshot::ScreenshotCapture,
+    pub(crate) recording: Option<crate::recording::ActiveRecording>,
+    pub(crate) record_dialog: crate::recording::RecordDialog,
 }
 
 impl OpenReelApp {
@@ -224,6 +226,8 @@ impl OpenReelApp {
             error_log_open,
             recovery,
             screenshot: crate::screenshot::ScreenshotCapture::from_environment(),
+            recording: None,
+            record_dialog: crate::recording::RecordDialog::default(),
         };
         if app
             .core
@@ -567,6 +571,7 @@ impl OpenReelApp {
     fn poll_background(&mut self, ctx: &egui::Context) {
         self.poll_agent(ctx);
         self.poll_export(ctx);
+        self.poll_recording(ctx);
         for (asset, error) in self.visual_cache.poll(ctx) {
             self.error_log.push(
                 "Media",
@@ -796,6 +801,7 @@ impl eframe::App for OpenReelApp {
         self.app_top_bar(ui);
         self.panel_layout(ui);
         self.show_export_dialog(ui.ctx());
+        self.show_record_dialog(ui.ctx());
         self.show_help(ui.ctx());
         self.show_error_log(ui.ctx());
         self.show_unsaved_confirmation(ui.ctx());
@@ -840,6 +846,7 @@ impl OpenReelApp {
                     {
                         self.open_export_dialog();
                     }
+                    self.record_control(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // A zero-count alert chip is permanent noise; show it
                         // only when there is something to look at.

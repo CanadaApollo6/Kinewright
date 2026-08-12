@@ -116,6 +116,14 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   newline). Ships with instant local commands (/remove-fillers, /captions,
   /freeze, /export, /undo, /redo, /help) and agent prompt commands
   (/cut-silences, /tighten)
+- In-editor recording: capture the screen (with optional microphone), a
+  camera, or a voice-only take from the Record button or /record, driven
+  by the bundled FFmpeg CLI as a crash-isolated subprocess with a graceful
+  stop. Stopping lands the file in Videos\OpenReel and sends it straight
+  down the import pipeline - onto the timeline, monitor cued,
+  transcription started - so a take is text-editable the moment it stops.
+  The agent deliberately has no capture tool. ffmpeg.exe now ships in the
+  installer beside the app
 - Brand marks in the harness picker: the Claude spark (brand terracotta)
   and the OpenAI blossom (white, per on-dark usage) identify the session's
   harness in the composer row, the picker dropdown, and the install card -

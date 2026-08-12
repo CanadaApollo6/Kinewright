@@ -216,6 +216,7 @@ impl OpenReelApp {
             SlashAction::RemoveFillers => self.remove_filler_words(),
             SlashAction::AddCaptions => self.add_captions(),
             SlashAction::FreezeFrame => self.freeze_frame_at_playhead(),
+            SlashAction::Record => self.open_record_dialog(),
             SlashAction::Export => self.open_export_dialog(),
             SlashAction::Undo => self.undo(),
             SlashAction::Redo => self.redo(),

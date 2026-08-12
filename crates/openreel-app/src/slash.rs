@@ -10,6 +10,7 @@ pub(crate) enum SlashAction {
     RemoveFillers,
     AddCaptions,
     FreezeFrame,
+    Record,
     Export,
     Undo,
     Redo,
@@ -57,6 +58,11 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "freeze",
         description: "Instant: freeze the current frame for two seconds",
         action: SlashAction::FreezeFrame,
+    },
+    SlashCommand {
+        name: "record",
+        description: "Record the screen, a camera, or a voiceover",
+        action: SlashAction::Record,
     },
     SlashCommand {
         name: "export",

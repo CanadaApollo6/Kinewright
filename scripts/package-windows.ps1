@@ -82,6 +82,13 @@ foreach ($dll in $dlls) {
     Copy-Item -LiteralPath $dll.FullName -Destination $stageDir
 }
 
+# The FFmpeg CLI powers in-editor recording (screen/camera/mic capture).
+$ffmpegCli = Join-Path $ffmpegBin 'ffmpeg.exe'
+if (-not (Test-Path -LiteralPath $ffmpegCli -PathType Leaf)) {
+    throw "Pinned FFmpeg build is missing ffmpeg.exe (required for in-editor recording)"
+}
+Copy-Item -LiteralPath $ffmpegCli -Destination $stageDir
+
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $licensesDir 'OpenReel-GPL-3.0.txt')
 Copy-Item -LiteralPath $ffmpegLicense -Destination (Join-Path $licensesDir 'FFmpeg-GPL.txt')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\openreel-app\assets\licenses\Inter-OFL.txt') -Destination $licensesDir
