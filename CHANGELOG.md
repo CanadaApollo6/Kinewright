@@ -24,7 +24,9 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   callback was removed after it intermittently aborted healthy Windows
   inference. The published Codex machine baseline passes 3/3 samples and 93/93
   assertions with 16-17 tool calls and 236,336-251,345 tokens per sample. Human
-  acceptance remains pending.
+  review accepts the deterministic output at 4.08/5 with no dimension below
+  3.5, no audible filler, and no material caption error, completing M38's exit
+  contract. Sentence-boundary pause refinement remains the next pacing target.
 - M37 finished-cut preparation: titles and captions now use one exact Inter-
   measured layout across preview, export, delivery conformance, and QA. Type
   scales from the short edge, wraps inside an 8% safe area, adapts only when it

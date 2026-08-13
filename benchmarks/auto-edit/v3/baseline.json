@@ -98,12 +98,33 @@
     "proof_sample_frames": [0, 75, 150, 225, 300, 375, 450, 525, 601]
   },
   "human_review": {
-    "status": "pending",
+    "status": "complete",
+    "review_source_sha256": "6a1b299285cd5353c8954226e2ff764584cc898f45c8b935b76c5b8977b96e28",
+    "score_source_sha256": "f0de9705c6ce5b7a14fe98100787ebc49e8b58da8dee731b9f4fddad35d9cb66",
+    "reviewer": "Riel St Amand",
     "unique_artifacts": 1,
+    "samples_reviewed": 3,
+    "samples_accepted": 3,
+    "acceptance_rate": 1.0,
+    "overall_mean_rating": 4.083333333333333,
+    "mean_ratings": {
+      "story": 4.0,
+      "pacing": 4.0,
+      "visual_finish": 3.5,
+      "audio_finish": 4.0,
+      "captions": 5.0,
+      "delivery_readiness": 4.0
+    },
     "required_sample_acceptances": 2,
     "required_mean_rating": 3.5,
     "minimum_dimension_rating": 3.0,
     "maximum_material_caption_errors": 0,
-    "maximum_audible_fillers": 0
-  }
+    "maximum_audible_fillers": 0,
+    "observed_material_caption_errors": 0,
+    "observed_audible_fillers": 0,
+    "milestone_passed": true,
+    "review_note": "A massive improvement from the last run. All filler words removed. Simple, coherent narrative with appropriate visuals. Accurate captions throughout. Stable and clear audio. Just needs a bit of tightening on pacing (occasionally some strange gaps or lack of them between sentences) but overall this is far better.",
+    "interpretation": "All three machine samples produced the same SHA-256, so one viewing was applied to the three SHA-bound review rows without representing them as distinct human observations."
+  },
+  "benchmark_passed": true
 }

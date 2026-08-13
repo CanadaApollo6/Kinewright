@@ -65,8 +65,10 @@ assertions. Samples used 16-17 tool calls and 236,336-251,345 reported tokens,
 and all three produced the same 602-frame 1080x1920 MP4 at 2.39% independently
 measured word error rate. The exact record lives in
 [`benchmarks/auto-edit/v3/baseline.json`](../benchmarks/auto-edit/v3/baseline.json).
-Human review remains pending: a person must accept at least two SHA-bound
-outputs with an overall mean of at least 3.5 and no review dimension below 3.0.
+Human review accepted the byte-identical output at a 4.08/5 mean with no
+dimension below 3.5, no audible filler, and no material caption error. One
+viewing was applied to all three SHA-bound rows because their artifact hashes
+were identical. M38 passes its full machine-and-human exit contract.
 
 ## Seed suite
 

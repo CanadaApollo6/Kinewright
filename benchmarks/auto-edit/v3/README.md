@@ -41,7 +41,10 @@ The published Codex baseline on revision `f232e35` passed all three samples and
 all 93 assertions. It used 16-17 tool calls and 236,336-251,345 reported tokens
 per sample. Every trial produced the same 602-frame MP4 at 2.39% independently
 measured word error rate. The exact machine record is in
-[`baseline.json`](baseline.json); human review remains pending.
+[`baseline.json`](baseline.json). Human review accepted the artifact at a
+4.08/5 mean with every dimension at least 3.5, so M38 passes its published exit
+contract. Because all three trials had the same SHA-256, one viewing was
+applied transparently to the three SHA-bound review rows.
 
 Each output is SHA-bound to a separate human review. The milestone passes only
 when all three samples pass the machine contract, at least two are accepted by

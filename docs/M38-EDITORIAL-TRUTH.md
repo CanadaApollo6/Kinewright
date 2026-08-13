@@ -118,7 +118,7 @@ cargo run -p openreel-agent --bin openreel-eval -- `
 Machine green still does not mean accepted. The exact MP4s must be watched with
 audio and scored through their generated human-review file.
 
-## Published machine baseline
+## Published baseline
 
 The 2026-08-13 Codex run on revision `f232e35` passed all three independent
 samples and all 93 assertions. The samples used 17, 17, and 16 tool calls and
@@ -127,6 +127,15 @@ samples and all 93 assertions. The samples used 17, 17, and 16 tool calls and
 `650ff8df011890db87a1a1b759e6fdb3b678b8cb7bff19acfcabffde91a3a1a8` and
 2.39% rendered-dialogue word error rate.
 
-The repeated output is useful evidence of deterministic execution, not human
-acceptance. The SHA-bound human review is still pending. See the exact record in
+The repeated output is useful evidence of deterministic execution. Human review
+then accepted the artifact with a 4.08/5 mean: story 4.0, pacing 4.0, visual
+finish 3.5, audio finish 4.0, captions 5.0, and delivery readiness 4.0. The
+review found no audible filler or material caption error. Because every sample
+had the same SHA-256, one viewing was applied transparently to all three
+SHA-bound rows.
+
+M38 therefore passes its full exit contract. The remaining pacing feedback is
+specific: occasionally strange gaps, or insufficient gaps, between sentences.
+That is a diagnostic target for the next iteration rather than a reason to
+rewrite this successful baseline. See the exact record in
 [`benchmarks/auto-edit/v3/baseline.json`](../benchmarks/auto-edit/v3/baseline.json).
