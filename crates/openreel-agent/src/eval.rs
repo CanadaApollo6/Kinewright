@@ -1931,14 +1931,16 @@ fn evaluate_dialogue_pause_bounds(
         .filter(|(_, _, pause)| *pause < minimum || *pause > maximum)
         .map(|(previous, next, pause)| format!("{previous:?}->{next:?}={}", pause.0))
         .collect::<Vec<_>>();
+    let observed = boundaries
+        .iter()
+        .map(|(previous, next, pause)| format!("{previous:?}->{next:?}={}", pause.0))
+        .collect::<Vec<_>>();
     assertion_result(
         "dialogue sentence pacing",
         !boundaries.is_empty() && violations.is_empty(),
         format!(
-            "expected every detected boundary in {}..={} project frames; observed {} boundary gap(s), violations={violations:?}",
-            minimum.0,
-            maximum.0,
-            boundaries.len(),
+            "expected every detected boundary in {}..={} project frames; observed={observed:?}, violations={violations:?}",
+            minimum.0, maximum.0,
         ),
     )
 }
