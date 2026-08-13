@@ -136,6 +136,7 @@ mod tests {
             .collect();
         Document {
             catalog: openreel_core::MediaCatalog::default(),
+            audio_mix: openreel_core::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -195,6 +196,7 @@ mod tests {
                 parameters: [("percent".to_owned(), openreel_core::ParamValue::Integer(25))]
                     .into_iter()
                     .collect(),
+                keyframes: BTreeMap::default(),
             },
         }
         .apply(&mut new)

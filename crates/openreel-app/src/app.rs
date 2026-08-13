@@ -1056,6 +1056,7 @@ pub(crate) fn review_preroll_frames(fps: openreel_core::Rational) -> i64 {
     nominal.max(1) * 2
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn operation_status(operation: &Operation) -> String {
     match operation {
         Operation::AddAsset { asset } => format!("Imported {}", asset.name),
@@ -1077,6 +1078,10 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
         Operation::RemoveSyncGroup { sync_group } => {
             format!("Removed sync group {sync_group}")
         }
+        Operation::UpsertAudioBus { bus } => {
+            format!("Updated audio bus {} ({})", bus.id, bus.name)
+        }
+        Operation::RemoveAudioBus { bus } => format!("Removed audio bus {bus}"),
         Operation::AddTrack { track } => format!("Added {:?} track {}", track.kind, track.id),
         Operation::RemoveTrack { track } => format!("Removed track {track}"),
         Operation::SetTrackSyncLock { track, locked } => format!(
@@ -1130,6 +1135,18 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
         Operation::SetEffectParam {
             clip, effect, name, ..
         } => format!("Set {name} on effect {effect} for clip {clip}"),
+        Operation::SetEffectKeyframes {
+            clip,
+            effect,
+            name,
+            curve,
+        } => format!(
+            "Set {} keyframes for {name} on effect {effect} for clip {clip}",
+            curve.keyframes.len()
+        ),
+        Operation::ClearEffectKeyframes {
+            clip, effect, name, ..
+        } => format!("Cleared {name} keyframes on effect {effect} for clip {clip}"),
         Operation::SetTitleParam { clip, name, .. } => {
             format!("Set {name} on title clip {clip}")
         }

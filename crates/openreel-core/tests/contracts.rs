@@ -6,11 +6,12 @@ use std::{
 };
 
 use openreel_core::{
-    AssetId, BinId, Clip, ClipContent, ClipId, Command, Core, Document, Effect, EffectId, Event,
-    FreezeFrame, LinkId, Marker, MarkerId, MediaAsset, MediaBin, MediaKind, OpError, Operation,
-    ParamValue, Rational, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId,
-    SyncGroupMember, TRANSITION_DESCRIPTORS, ThreePointMode, TimeCode, Title, TitlePosition, Track,
-    TrackId, TrackKind, Transition, transition_descriptor,
+    AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, Clip, ClipContent, ClipId, Command,
+    Core, Document, Effect, EffectId, Event, FreezeFrame, Keyframe, KeyframeInterpolation, LinkId,
+    Marker, MarkerId, MediaAsset, MediaBin, MediaKind, OpError, Operation, ParamValue, Rational,
+    SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember,
+    TRANSITION_DESCRIPTORS, ThreePointMode, TimeCode, Title, TitlePosition, Track, TrackId,
+    TrackKind, Transition, transition_descriptor,
 };
 use proptest::prelude::*;
 
@@ -29,6 +30,7 @@ fn asset(id: u64, fps: Rational, duration: i64) -> MediaAsset {
 fn empty_timeline(fps: Rational) -> Document {
     Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -172,6 +174,24 @@ fn document_and_every_operation_variant_round_trip_through_json() {
         Operation::RemoveSyncGroup {
             sync_group: SyncGroupId(1),
         },
+        Operation::UpsertAudioBus {
+            bus: AudioBus {
+                id: AudioBusId(1),
+                name: "Dialogue".to_owned(),
+                tracks: vec![TrackId(1)],
+                effects: vec![Effect {
+                    id: EffectId(1),
+                    name: "audio_gain".to_owned(),
+                    parameters: BTreeMap::from([(
+                        "gain_tenth_db".to_owned(),
+                        ParamValue::Integer(-30),
+                    )]),
+                    keyframes: BTreeMap::new(),
+                }],
+                ducking_sidechain_tracks: Vec::new(),
+            },
+        },
+        Operation::RemoveAudioBus { bus: AudioBusId(1) },
         Operation::AddTrack {
             track: Track {
                 id: TrackId(2),
@@ -276,6 +296,7 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                 id: EffectId(1),
                 name: "brightness".to_owned(),
                 parameters: BTreeMap::new(),
+                keyframes: BTreeMap::new(),
             },
         },
         Operation::RemoveEffect {
@@ -287,6 +308,23 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             effect: EffectId(1),
             name: "percent".to_owned(),
             value: ParamValue::Integer(25),
+        },
+        Operation::SetEffectKeyframes {
+            clip: ClipId(1),
+            effect: EffectId(1),
+            name: "percent".to_owned(),
+            curve: AutomationCurve {
+                keyframes: vec![Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 25,
+                    interpolation: KeyframeInterpolation::Linear,
+                }],
+            },
+        },
+        Operation::ClearEffectKeyframes {
+            clip: ClipId(1),
+            effect: EffectId(1),
+            name: "percent".to_owned(),
         },
         Operation::SetTitleParam {
             clip: ClipId(1),
@@ -1279,6 +1317,7 @@ fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
         id: EffectId(7),
         name: "brightness".to_owned(),
         parameters: BTreeMap::new(),
+        keyframes: BTreeMap::new(),
     };
     Operation::AddEffect {
         clip: ClipId(1),
@@ -1296,6 +1335,7 @@ fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
                 id: EffectId(7),
                 name: "opacity".to_owned(),
                 parameters: BTreeMap::new(),
+                keyframes: BTreeMap::new(),
             },
         }
         .apply(&mut doc),
@@ -1354,11 +1394,230 @@ fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
                 id: EffectId(8),
                 name: "blur".to_owned(),
                 parameters: BTreeMap::new(),
+                keyframes: BTreeMap::new(),
             },
         }
         .apply(&mut doc),
         Err(OpError::UnknownEffect("blur".to_owned()))
     );
+}
+
+#[test]
+fn effect_keyframes_are_exact_validated_and_atomically_clearable() {
+    let mut doc = document_with_one_clip();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            id: EffectId(7),
+            name: "brightness".to_owned(),
+            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(25))]),
+            keyframes: BTreeMap::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let curve = AutomationCurve {
+        keyframes: vec![
+            Keyframe {
+                at: TimeCode::ZERO,
+                value: -100,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            Keyframe {
+                at: TimeCode(10),
+                value: 100,
+                interpolation: KeyframeInterpolation::EaseInOut,
+            },
+        ],
+    };
+    Operation::SetEffectKeyframes {
+        clip: ClipId(1),
+        effect: EffectId(7),
+        name: "percent".to_owned(),
+        curve: curve.clone(),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let effect = &doc.clip(ClipId(1)).unwrap().effects[0];
+    assert_eq!(effect.integer_parameter_at("percent", TimeCode(5)), Some(0));
+    assert_eq!(effect.keyframes.get("percent"), Some(&curve));
+
+    for invalid in [
+        AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode(30),
+                value: 0,
+                interpolation: KeyframeInterpolation::Linear,
+            }],
+        },
+        AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode(5),
+                value: 101,
+                interpolation: KeyframeInterpolation::Linear,
+            }],
+        },
+        AutomationCurve { keyframes: vec![] },
+    ] {
+        let before = doc.clone();
+        assert!(
+            Operation::SetEffectKeyframes {
+                clip: ClipId(1),
+                effect: EffectId(7),
+                name: "percent".to_owned(),
+                curve: invalid,
+            }
+            .apply(&mut doc)
+            .is_err()
+        );
+        assert_eq!(doc, before);
+    }
+
+    Operation::ClearEffectKeyframes {
+        clip: ClipId(1),
+        effect: EffectId(7),
+        name: "percent".to_owned(),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let effect = &doc.clip(ClipId(1)).unwrap().effects[0];
+    assert!(effect.keyframes.is_empty());
+    assert_eq!(
+        effect.integer_parameter_at("percent", TimeCode(5)),
+        Some(25)
+    );
+}
+
+#[test]
+fn cube_lut_requires_a_non_empty_text_path_and_preserves_it() {
+    let mut doc = document_with_one_clip();
+    let before = doc.clone();
+    assert_eq!(
+        Operation::AddEffect {
+            clip: ClipId(1),
+            effect: Effect {
+                id: EffectId(8),
+                name: "cube_lut".to_owned(),
+                parameters: BTreeMap::from([(
+                    "intensity_percent".to_owned(),
+                    ParamValue::Integer(80),
+                )]),
+                keyframes: BTreeMap::new(),
+            },
+        }
+        .apply(&mut doc),
+        Err(OpError::MissingCubeLutPath)
+    );
+    assert_eq!(doc, before);
+
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            id: EffectId(8),
+            name: "cube_lut".to_owned(),
+            parameters: BTreeMap::from([
+                (
+                    "path".to_owned(),
+                    ParamValue::Text("looks/ceremony.cube".to_owned()),
+                ),
+                ("intensity_percent".to_owned(), ParamValue::Integer(80)),
+            ]),
+            keyframes: BTreeMap::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        doc.clip(ClipId(1)).unwrap().effects[0]
+            .parameters
+            .get("path"),
+        Some(&ParamValue::Text("looks/ceremony.cube".to_owned()))
+    );
+}
+
+#[test]
+fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically() {
+    let mut doc = document_with_one_clip();
+    let gain = Effect {
+        id: EffectId(1),
+        name: "audio_gain".to_owned(),
+        parameters: BTreeMap::from([("gain_tenth_db".to_owned(), ParamValue::Integer(-30))]),
+        keyframes: BTreeMap::from([(
+            "gain_tenth_db".to_owned(),
+            AutomationCurve {
+                keyframes: vec![Keyframe {
+                    at: TimeCode(20),
+                    value: -60,
+                    interpolation: KeyframeInterpolation::Linear,
+                }],
+            },
+        )]),
+    };
+    Operation::UpsertAudioBus {
+        bus: AudioBus {
+            id: AudioBusId(1),
+            name: "Dialogue".to_owned(),
+            tracks: vec![TrackId(1)],
+            effects: vec![gain],
+            ducking_sidechain_tracks: Vec::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(doc.audio_mix.buses[0].name, "Dialogue");
+
+    let before = doc.clone();
+    let invalid_buses = [
+        AudioBus {
+            id: AudioBusId(2),
+            name: "Duplicate route".to_owned(),
+            tracks: vec![TrackId(1)],
+            effects: Vec::new(),
+            ducking_sidechain_tracks: Vec::new(),
+        },
+        AudioBus {
+            id: AudioBusId(1),
+            name: "Visual effect".to_owned(),
+            tracks: vec![TrackId(1)],
+            effects: vec![Effect {
+                id: EffectId(1),
+                name: "brightness".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::new(),
+            }],
+            ducking_sidechain_tracks: Vec::new(),
+        },
+        AudioBus {
+            id: AudioBusId(1),
+            name: "Outside project".to_owned(),
+            tracks: vec![TrackId(1)],
+            effects: vec![Effect {
+                id: EffectId(1),
+                name: "audio_gain".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::from([(
+                    "gain_tenth_db".to_owned(),
+                    AutomationCurve {
+                        keyframes: vec![Keyframe {
+                            at: doc.duration,
+                            value: 0,
+                            interpolation: KeyframeInterpolation::Linear,
+                        }],
+                    },
+                )]),
+            }],
+            ducking_sidechain_tracks: Vec::new(),
+        },
+    ];
+    for bus in invalid_buses {
+        assert!(Operation::UpsertAudioBus { bus }.apply(&mut doc).is_err());
+        assert_eq!(doc, before);
+    }
+
+    Operation::RemoveAudioBus { bus: AudioBusId(1) }
+        .apply(&mut doc)
+        .unwrap();
+    assert!(doc.audio_mix.is_empty());
 }
 
 #[test]
@@ -1973,6 +2232,7 @@ fn unsorted_input_document_is_rejected() {
     };
     let doc = Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,

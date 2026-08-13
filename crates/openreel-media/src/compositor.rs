@@ -1,15 +1,26 @@
-use std::{num::NonZeroU64, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs,
+    num::NonZeroU64,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
 
 use openreel_core::{
     Effect, EffectParameterDescriptor, EffectUniform, FrameTexture, MediaError, ParamValue,
     effect_descriptor,
 };
 
-use crate::timeline::TransitionRenderParams;
+use crate::{
+    lut::{CubeLut, parse_cube_lut},
+    timeline::TransitionRenderParams,
+};
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const UNIFORM_SIZE: u64 = 16 * 4;
-const UNIFORM_BYTES: usize = 16 * 4;
+const UNIFORM_FLOATS: usize = 44;
+const UNIFORM_SIZE: u64 = UNIFORM_FLOATS as u64 * 4;
+const UNIFORM_BYTES: usize = UNIFORM_FLOATS * 4;
 
 #[derive(Clone)]
 pub struct GpuContext {
@@ -62,12 +73,20 @@ pub struct Compositor {
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     pipeline: wgpu::RenderPipeline,
+    lut_cache: Mutex<HashMap<PathBuf, CachedCubeLut>>,
 }
 
 struct LayerResources {
     _texture: wgpu::Texture,
+    _lut_texture: wgpu::Texture,
     _uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+}
+
+struct CachedCubeLut {
+    modified: Option<SystemTime>,
+    len: u64,
+    lut: Arc<CubeLut>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +107,32 @@ struct LayerParams {
     reframe_aspect: f32,
     reframe_focus_x: f32,
     reframe_focus_y: f32,
+    exposure: f32,
+    temperature: f32,
+    tint: f32,
+    lut_preset: f32,
+    lut_intensity: f32,
+    mask_shape: f32,
+    mask_center_x: f32,
+    mask_center_y: f32,
+    mask_width: f32,
+    mask_height: f32,
+    mask_feather: f32,
+    mask_invert: f32,
+    key_red: f32,
+    key_green: f32,
+    key_blue: f32,
+    key_threshold: f32,
+    key_softness: f32,
+    key_spill: f32,
+    external_lut_enabled: f32,
+    external_lut_intensity: f32,
+    external_domain_min_r: f32,
+    external_domain_min_g: f32,
+    external_domain_min_b: f32,
+    external_domain_max_r: f32,
+    external_domain_max_g: f32,
+    external_domain_max_b: f32,
 }
 
 impl Default for LayerParams {
@@ -109,12 +154,39 @@ impl Default for LayerParams {
             reframe_aspect: 0.0,
             reframe_focus_x: 0.5,
             reframe_focus_y: 0.5,
+            exposure: 0.0,
+            temperature: 0.0,
+            tint: 0.0,
+            lut_preset: 0.0,
+            lut_intensity: 1.0,
+            mask_shape: 0.0,
+            mask_center_x: 0.5,
+            mask_center_y: 0.5,
+            mask_width: 1.0,
+            mask_height: 1.0,
+            mask_feather: 0.0,
+            mask_invert: 0.0,
+            key_red: 0.0,
+            key_green: 1.0,
+            key_blue: 0.0,
+            key_threshold: -1.0,
+            key_softness: 0.0,
+            key_spill: 0.0,
+            external_lut_enabled: 0.0,
+            external_lut_intensity: 1.0,
+            external_domain_min_r: 0.0,
+            external_domain_min_g: 0.0,
+            external_domain_min_b: 0.0,
+            external_domain_max_r: 1.0,
+            external_domain_max_g: 1.0,
+            external_domain_max_b: 1.0,
         }
     }
 }
 
 impl Compositor {
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn new(gpu: GpuContext) -> Self {
         let device = &gpu.device;
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -143,6 +215,16 @@ impl Compositor {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: NonZeroU64::new(UNIFORM_SIZE),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
                     },
                     count: None,
                 },
@@ -208,6 +290,7 @@ impl Compositor {
             bind_group_layout,
             sampler,
             pipeline,
+            lut_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -278,6 +361,7 @@ impl Compositor {
         self.readback(width, height, &output, encoder)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn layer_resources(&self, layer: &CompositorLayer<'_>) -> Result<LayerResources, MediaError> {
         let expected_len = usize::try_from(layer.frame.width)
             .unwrap_or_default()
@@ -321,7 +405,53 @@ impl Compositor {
                 depth_or_array_layers: 1,
             },
         );
-        let params = params_for(layer.effects, layer.transition);
+        let (cube_lut, external_lut_enabled) = self.cube_lut(layer.effects)?;
+        let lut_texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("OpenReel external 3D LUT"),
+            size: wgpu::Extent3d {
+                width: cube_lut.size,
+                height: cube_lut.size,
+                depth_or_array_layers: cube_lut.size,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let lut_bytes = cube_lut
+            .rgba
+            .iter()
+            .flat_map(|value| value.to_ne_bytes())
+            .collect::<Vec<_>>();
+        self.gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &lut_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &lut_bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(cube_lut.size.saturating_mul(16)),
+                rows_per_image: Some(cube_lut.size),
+            },
+            wgpu::Extent3d {
+                width: cube_lut.size,
+                height: cube_lut.size,
+                depth_or_array_layers: cube_lut.size,
+            },
+        );
+        let mut params = params_for(layer.effects, layer.transition);
+        params.external_lut_enabled = if external_lut_enabled { 1.0 } else { 0.0 };
+        params.external_domain_min_r = cube_lut.domain_min[0];
+        params.external_domain_min_g = cube_lut.domain_min[1];
+        params.external_domain_min_b = cube_lut.domain_min[2];
+        params.external_domain_max_r = cube_lut.domain_max[0];
+        params.external_domain_max_g = cube_lut.domain_max[1];
+        params.external_domain_max_b = cube_lut.domain_max[2];
         let uniform = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("OpenReel compositor layer parameters"),
             size: UNIFORM_SIZE,
@@ -330,6 +460,7 @@ impl Compositor {
         });
         self.gpu.queue.write_buffer(&uniform, 0, &params.as_bytes());
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let lut_view = lut_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self
             .gpu
             .device
@@ -349,13 +480,86 @@ impl Compositor {
                         binding: 2,
                         resource: uniform.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&lut_view),
+                    },
                 ],
             });
         Ok(LayerResources {
             _texture: texture,
+            _lut_texture: lut_texture,
             _uniform: uniform,
             bind_group,
         })
+    }
+
+    fn cube_lut(&self, effects: &[Effect]) -> Result<(Arc<CubeLut>, bool), MediaError> {
+        let Some(effect) = effects
+            .iter()
+            .rev()
+            .find(|effect| effect.name == "cube_lut")
+        else {
+            return Ok((Arc::new(CubeLut::identity()), false));
+        };
+        let Some(ParamValue::Text(path)) = effect.parameters.get("path") else {
+            return Err(MediaError::Backend(
+                "cube_lut requires a non-empty text path parameter".to_owned(),
+            ));
+        };
+        if path.trim().is_empty() {
+            return Err(MediaError::Backend(
+                "cube_lut requires a non-empty text path parameter".to_owned(),
+            ));
+        }
+        self.load_cube_lut(Path::new(path)).map(|lut| (lut, true))
+    }
+
+    fn load_cube_lut(&self, path: &Path) -> Result<Arc<CubeLut>, MediaError> {
+        let canonical = fs::canonicalize(path).map_err(|error| {
+            MediaError::Backend(format!(
+                "could not resolve .cube LUT {}: {error}",
+                path.display()
+            ))
+        })?;
+        let metadata = fs::metadata(&canonical).map_err(|error| {
+            MediaError::Backend(format!(
+                "could not inspect .cube LUT {}: {error}",
+                canonical.display()
+            ))
+        })?;
+        let modified = metadata.modified().ok();
+        {
+            let cache = self
+                .lut_cache
+                .lock()
+                .map_err(|_| MediaError::Backend("3D LUT cache lock was poisoned".to_owned()))?;
+            if let Some(cached) = cache.get(&canonical)
+                && cached.modified == modified
+                && cached.len == metadata.len()
+            {
+                return Ok(Arc::clone(&cached.lut));
+            }
+        }
+        let source = fs::read_to_string(&canonical).map_err(|error| {
+            MediaError::Backend(format!(
+                "could not read .cube LUT {}: {error}",
+                canonical.display()
+            ))
+        })?;
+        let lut = Arc::new(parse_cube_lut(&source)?);
+        self.lut_cache
+            .lock()
+            .map_err(|_| MediaError::Backend("3D LUT cache lock was poisoned".to_owned()))?
+            .insert(
+                canonical,
+                CachedCubeLut {
+                    modified,
+                    len: metadata.len(),
+                    lut: Arc::clone(&lut),
+                },
+            );
+        Ok(lut)
     }
 
     fn readback(
@@ -450,6 +654,32 @@ impl LayerParams {
             self.reframe_aspect,
             self.reframe_focus_x,
             self.reframe_focus_y,
+            self.exposure,
+            self.temperature,
+            self.tint,
+            self.lut_preset,
+            self.lut_intensity,
+            self.mask_shape,
+            self.mask_center_x,
+            self.mask_center_y,
+            self.mask_width,
+            self.mask_height,
+            self.mask_feather,
+            self.mask_invert,
+            self.key_red,
+            self.key_green,
+            self.key_blue,
+            self.key_threshold,
+            self.key_softness,
+            self.key_spill,
+            self.external_lut_enabled,
+            self.external_lut_intensity,
+            self.external_domain_min_r,
+            self.external_domain_min_g,
+            self.external_domain_min_b,
+            self.external_domain_max_r,
+            self.external_domain_max_g,
+            self.external_domain_max_b,
         ];
         let mut bytes = [0_u8; UNIFORM_BYTES];
         for (index, value) in values.into_iter().enumerate() {
@@ -488,6 +718,40 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                 EffectUniform::ReframeAspect => params.reframe_aspect = value / 10_000.0,
                 EffectUniform::ReframeFocusX => params.reframe_focus_x = value / 100.0,
                 EffectUniform::ReframeFocusY => params.reframe_focus_y = value / 100.0,
+                EffectUniform::Exposure => params.exposure += value / 1_000.0,
+                EffectUniform::Temperature => params.temperature += value / 100.0,
+                EffectUniform::Tint => params.tint += value / 100.0,
+                EffectUniform::LutPreset => params.lut_preset = value,
+                EffectUniform::LutIntensity => params.lut_intensity = value / 100.0,
+                EffectUniform::ExternalLutIntensity => {
+                    params.external_lut_intensity = value / 100.0;
+                }
+                EffectUniform::MaskShape => params.mask_shape = value,
+                EffectUniform::MaskCenterX => params.mask_center_x = value / 100.0,
+                EffectUniform::MaskCenterY => params.mask_center_y = value / 100.0,
+                EffectUniform::MaskWidth => params.mask_width = value / 100.0,
+                EffectUniform::MaskHeight => params.mask_height = value / 100.0,
+                EffectUniform::MaskFeather => params.mask_feather = value / 100.0,
+                EffectUniform::MaskInvert => params.mask_invert = value,
+                EffectUniform::KeyRed => params.key_red = value / 255.0,
+                EffectUniform::KeyGreen => params.key_green = value / 255.0,
+                EffectUniform::KeyBlue => params.key_blue = value / 255.0,
+                EffectUniform::KeyThreshold => params.key_threshold = value / 100.0,
+                EffectUniform::KeySoftness => params.key_softness = value / 200.0,
+                EffectUniform::KeySpill => params.key_spill = value / 100.0,
+                EffectUniform::AudioGain
+                | EffectUniform::EqLowGain
+                | EffectUniform::EqMidGain
+                | EffectUniform::EqHighGain
+                | EffectUniform::CompressorThreshold
+                | EffectUniform::CompressorRatio
+                | EffectUniform::CompressorAttack
+                | EffectUniform::CompressorRelease
+                | EffectUniform::CompressorMakeup
+                | EffectUniform::DuckThreshold
+                | EffectUniform::DuckReduction
+                | EffectUniform::DuckAttack
+                | EffectUniform::DuckRelease => {}
             }
         }
     }
@@ -497,6 +761,16 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
     params.crop_bottom = params.crop_bottom.clamp(0.0, 0.45);
     params.reframe_focus_x = params.reframe_focus_x.clamp(0.0, 1.0);
     params.reframe_focus_y = params.reframe_focus_y.clamp(0.0, 1.0);
+    params.exposure = params.exposure.clamp(-5.0, 5.0);
+    params.temperature = params.temperature.clamp(-1.0, 1.0);
+    params.tint = params.tint.clamp(-1.0, 1.0);
+    params.lut_intensity = params.lut_intensity.clamp(0.0, 1.0);
+    params.external_lut_intensity = params.external_lut_intensity.clamp(0.0, 1.0);
+    params.mask_center_x = params.mask_center_x.clamp(0.0, 1.0);
+    params.mask_center_y = params.mask_center_y.clamp(0.0, 1.0);
+    params.mask_width = params.mask_width.clamp(0.01, 2.0);
+    params.mask_height = params.mask_height.clamp(0.01, 2.0);
+    params.mask_feather = params.mask_feather.clamp(0.0, 1.0);
     params
 }
 
@@ -554,6 +828,19 @@ mod tests {
             id: EffectId(id),
             name: name.to_owned(),
             parameters: BTreeMap::from([(parameter.to_owned(), ParamValue::Integer(value))]),
+            keyframes: BTreeMap::new(),
+        }
+    }
+
+    fn effect_with(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
+        Effect {
+            id: EffectId(id),
+            name: name.to_owned(),
+            parameters: parameters
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), ParamValue::Integer(*value)))
+                .collect(),
+            keyframes: BTreeMap::new(),
         }
     }
 
@@ -567,6 +854,7 @@ mod tests {
                 ("top_percent".to_owned(), ParamValue::Integer(top)),
                 ("bottom_percent".to_owned(), ParamValue::Integer(bottom)),
             ]),
+            keyframes: BTreeMap::new(),
         }
     }
 
@@ -582,6 +870,7 @@ mod tests {
                 ("focus_x_percent".to_owned(), ParamValue::Integer(focus_x)),
                 ("focus_y_percent".to_owned(), ParamValue::Integer(focus_y)),
             ]),
+            keyframes: BTreeMap::new(),
         }
     }
 
@@ -844,6 +1133,159 @@ mod tests {
         let params = params_for(&effects, TransitionRenderParams::default());
         assert!((params.crop_left - 0.45).abs() < f32::EPSILON);
         assert!(params.crop_right.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn color_grade_and_look_lut_execute_in_the_shared_compositor() {
+        let Some(compositor) = fallback() else {
+            eprintln!("skipped: no usable wgpu adapter in this environment");
+            return;
+        };
+        let gray = solid(4, 4, [64, 64, 64, 255]);
+        let exposure = effect_with(1, "color_grade", &[("exposure_milli_stops", 1_000)]);
+        let output = compositor
+            .render(
+                (4, 4),
+                &[CompositorLayer {
+                    frame: &gray,
+                    effects: &[exposure],
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .unwrap();
+        assert_pixel_close(pixel(&output, 0, 0), [128, 128, 128, 255], 3);
+
+        let red = solid(4, 4, [255, 0, 0, 255]);
+        let monochrome = effect_with(
+            2,
+            "look_lut",
+            &[("preset_token", 3), ("intensity_percent", 100)],
+        );
+        let output = compositor
+            .render(
+                (4, 4),
+                &[CompositorLayer {
+                    frame: &red,
+                    effects: &[monochrome],
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .unwrap();
+        assert_pixel_close(pixel(&output, 0, 0), [54, 54, 54, 255], 3);
+    }
+
+    #[test]
+    fn external_cube_lut_is_sampled_in_red_fastest_order() {
+        let Some(compositor) = fallback() else {
+            eprintln!("skipped: no usable wgpu adapter in this environment");
+            return;
+        };
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "openreel-swap-red-blue-{}-{unique}.cube",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "LUT_3D_SIZE 2\n\
+             0 0 0\n\
+             0 0 1\n\
+             0 1 0\n\
+             0 1 1\n\
+             1 0 0\n\
+             1 0 1\n\
+             1 1 0\n\
+             1 1 1\n",
+        )
+        .unwrap();
+        let cube_lut = Effect {
+            id: EffectId(9),
+            name: "cube_lut".to_owned(),
+            parameters: BTreeMap::from([
+                (
+                    "path".to_owned(),
+                    ParamValue::Text(path.to_string_lossy().into_owned()),
+                ),
+                ("intensity_percent".to_owned(), ParamValue::Integer(100)),
+            ]),
+            keyframes: BTreeMap::new(),
+        };
+        let red = solid(4, 4, [255, 0, 0, 255]);
+        let output = compositor
+            .render(
+                (4, 4),
+                &[CompositorLayer {
+                    frame: &red,
+                    effects: &[cube_lut],
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .unwrap();
+        let _ = fs::remove_file(path);
+
+        assert_pixel_close(pixel(&output, 0, 0), [0, 0, 255, 255], 3);
+    }
+
+    #[test]
+    fn masks_and_chroma_key_create_real_alpha_for_lower_layers() {
+        let Some(compositor) = fallback() else {
+            eprintln!("skipped: no usable wgpu adapter in this environment");
+            return;
+        };
+        let blue = solid(8, 8, [0, 0, 255, 255]);
+        let red = solid(8, 8, [255, 0, 0, 255]);
+        let mask = effect_with(
+            1,
+            "mask",
+            &[
+                ("shape_token", 2),
+                ("width_percent", 50),
+                ("height_percent", 50),
+            ],
+        );
+        let output = compositor
+            .render(
+                (8, 8),
+                &[
+                    CompositorLayer {
+                        frame: &blue,
+                        effects: &[],
+                        transition: TransitionRenderParams::default(),
+                    },
+                    CompositorLayer {
+                        frame: &red,
+                        effects: &[mask],
+                        transition: TransitionRenderParams::default(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_pixel_close(pixel(&output, 4, 4), [255, 0, 0, 255], 3);
+        assert_pixel_close(pixel(&output, 0, 0), [0, 0, 255, 255], 3);
+
+        let green = solid(8, 8, [0, 255, 0, 255]);
+        let key = effect_with(2, "chroma_key", &[("threshold_percent", 15)]);
+        let output = compositor
+            .render(
+                (8, 8),
+                &[
+                    CompositorLayer {
+                        frame: &blue,
+                        effects: &[],
+                        transition: TransitionRenderParams::default(),
+                    },
+                    CompositorLayer {
+                        frame: &green,
+                        effects: &[key],
+                        transition: TransitionRenderParams::default(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_pixel_close(pixel(&output, 4, 4), [0, 0, 255, 255], 3);
     }
 
     #[test]

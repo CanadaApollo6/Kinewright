@@ -135,6 +135,7 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
     std::mem::forget(blue);
     let document = Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![
             Track {
                 id: TrackId(1),
@@ -172,6 +173,7 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
                             "percent".to_owned(),
                             ParamValue::Integer(50),
                         )]),
+                        keyframes: BTreeMap::new(),
                     }],
                     transition_in: Some(Transition {
                         name: "crossfade".to_owned(),
@@ -319,6 +321,7 @@ fn title_export_pixels_match_preview_after_h264_redecode() {
     let engine = FfmpegMediaEngine::new().unwrap();
     let document = Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -404,6 +407,7 @@ fn freeze_export_pixels_match_preview_after_h264_redecode() {
     let asset = engine.probe(&input.0).unwrap();
     let document = Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -669,6 +673,7 @@ fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
     let asset = engine.probe(&clip.0).unwrap();
     let document = Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -796,6 +801,7 @@ fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
     );
     let document = Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![
             Track {
                 id: TrackId(1),
@@ -876,6 +882,7 @@ fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
     let asset = engine.probe(&clip.0).unwrap();
     let document = Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -940,6 +947,7 @@ fn full_timeline(asset: MediaAsset) -> Document {
     let resolution = asset.resolution.unwrap();
     let document = Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,

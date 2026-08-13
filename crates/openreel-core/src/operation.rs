@@ -5,11 +5,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AssetId, BinId, CaptionPreset, Clip, ClipContent, ClipId, Document, Effect, EffectId,
-    FreezeFrame, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin,
-    ParamValue, StringOut, StringOutId, SyncGroup, SyncGroupId, ThreePointMode, TimeCode,
-    TimeMappingError, Title, TitleParameterKind, TitlePosition, Track, TrackId, TrackKind,
-    Transition, map_source_range_to_project, title_parameter_descriptor,
+    AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, CaptionPreset, Clip, ClipContent,
+    ClipId, Document, Effect, EffectId, FreezeFrame, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker,
+    MarkerId, MediaAsset, MediaBin, ParamValue, StringOut, StringOutId, SyncGroup, SyncGroupId,
+    ThreePointMode, TimeCode, TimeMappingError, Title, TitleParameterKind, TitlePosition, Track,
+    TrackId, TrackKind, Transition, is_audio_effect, map_source_range_to_project,
+    title_parameter_descriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -39,6 +40,12 @@ pub enum Operation {
     },
     RemoveSyncGroup {
         sync_group: SyncGroupId,
+    },
+    UpsertAudioBus {
+        bus: AudioBus,
+    },
+    RemoveAudioBus {
+        bus: AudioBusId,
     },
     AddTrack {
         track: Track,
@@ -178,6 +185,18 @@ pub enum Operation {
         effect: EffectId,
         name: String,
         value: ParamValue,
+    },
+    /// Replace one effect parameter's complete clip-local automation curve.
+    SetEffectKeyframes {
+        clip: ClipId,
+        effect: EffectId,
+        name: String,
+        curve: AutomationCurve,
+    },
+    ClearEffectKeyframes {
+        clip: ClipId,
+        effect: EffectId,
+        name: String,
     },
     SetTitleParam {
         clip: ClipId,
@@ -325,6 +344,38 @@ pub enum OpError {
     DuplicateSyncGroupAsset { group: SyncGroupId, asset: AssetId },
     #[error("sync group {group} has an empty angle name for asset {asset}")]
     EmptySyncAngle { group: SyncGroupId, asset: AssetId },
+    #[error("audio bus {0} occurs more than once")]
+    DuplicateAudioBus(AudioBusId),
+    #[error("audio bus {0} does not exist")]
+    MissingAudioBus(AudioBusId),
+    #[error("audio bus {0} must have a non-empty name and at least one routed track")]
+    InvalidAudioBus(AudioBusId),
+    #[error("track {track} is routed to both audio bus {first} and {second}")]
+    TrackInMultipleAudioBuses {
+        track: TrackId,
+        first: AudioBusId,
+        second: AudioBusId,
+    },
+    #[error("audio bus {bus} references missing track {track}")]
+    AudioBusMissingTrack { bus: AudioBusId, track: TrackId },
+    #[error("audio bus {bus} cannot use visual effect {effect:?}")]
+    VisualEffectOnAudioBus { bus: AudioBusId, effect: String },
+    #[error("audio effect {effect:?} must be placed on an audio bus, not clip {clip}")]
+    AudioEffectOnClip { clip: ClipId, effect: String },
+    #[error("audio bus {bus} has duplicate effect id {effect}")]
+    DuplicateAudioBusEffect { bus: AudioBusId, effect: EffectId },
+    #[error("audio bus {0} uses audio_ducking without any sidechain tracks")]
+    AudioBusDuckingWithoutSidechain(AudioBusId),
+    #[error(
+        "automation keyframe {at} for audio bus {bus} effect {effect} parameter {name:?} is outside project range 0..{duration}"
+    )]
+    AudioBusKeyframeOutsideProject {
+        bus: AudioBusId,
+        effect: EffectId,
+        name: String,
+        at: TimeCode,
+        duration: TimeCode,
+    },
     #[error("track {0} occurs more than once")]
     DuplicateTrack(TrackId),
     #[error("new track {0} must be empty")]
@@ -482,6 +533,8 @@ pub enum OpError {
     UnknownEffectParam { effect: String, name: String },
     #[error("effect {effect:?} parameter {name:?} requires an integer")]
     InvalidEffectParamType { effect: String, name: String },
+    #[error("cube_lut requires a non-empty text path parameter")]
+    MissingCubeLutPath,
     #[error(
         "effect {effect:?} parameter {name:?} is {actual}, outside the inclusive range {min}..={max}"
     )]
@@ -491,6 +544,22 @@ pub enum OpError {
         min: i64,
         max: i64,
         actual: i64,
+    },
+    #[error("effect {effect:?} parameter {name:?} has an invalid automation curve: {reason}")]
+    InvalidEffectAutomation {
+        effect: String,
+        name: String,
+        reason: String,
+    },
+    #[error(
+        "automation keyframe {at} for effect {effect} parameter {name:?} is outside clip {clip}'s local range 0..{duration}"
+    )]
+    EffectKeyframeOutsideClip {
+        clip: ClipId,
+        effect: EffectId,
+        name: String,
+        at: TimeCode,
+        duration: TimeCode,
     },
     #[error("clip {0} already has a transition_in")]
     DuplicateTransition(ClipId),
@@ -573,6 +642,8 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
             Ok(())
         }
         Operation::RemoveSyncGroup { sync_group } => remove_sync_group(doc, *sync_group),
+        Operation::UpsertAudioBus { bus } => upsert_audio_bus(doc, bus.clone()),
+        Operation::RemoveAudioBus { bus } => remove_audio_bus(doc, *bus),
         Operation::AddTrack { track } => add_track(doc, track.clone()),
         Operation::RemoveTrack { track } => remove_track(doc, *track),
         Operation::SetTrackSyncLock { track, locked } => set_track_sync_lock(doc, *track, *locked),
@@ -656,6 +727,15 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
             name,
             value,
         } => set_effect_param(doc, *clip, *effect, name, value.clone()),
+        Operation::SetEffectKeyframes {
+            clip,
+            effect,
+            name,
+            curve,
+        } => set_effect_keyframes(doc, *clip, *effect, name, curve.clone()),
+        Operation::ClearEffectKeyframes { clip, effect, name } => {
+            clear_effect_keyframes(doc, *clip, *effect, name)
+        }
         Operation::SetTitleParam { clip, name, value } => {
             set_title_param(doc, *clip, name, value.clone())
         }
@@ -705,6 +785,12 @@ fn remove_track(doc: &mut Document, track_id: TrackId) -> Result<(), OpError> {
         .position(|track| track.id == track_id)
         .ok_or(OpError::MissingTrack(track_id))?;
     doc.tracks.remove(index);
+    for bus in &mut doc.audio_mix.buses {
+        bus.tracks.retain(|track| *track != track_id);
+        bus.ducking_sidechain_tracks
+            .retain(|track| *track != track_id);
+    }
+    doc.audio_mix.buses.retain(|bus| !bus.tracks.is_empty());
     Ok(())
 }
 
@@ -830,6 +916,33 @@ fn remove_sync_group(doc: &mut Document, id: SyncGroupId) -> Result<(), OpError>
         .position(|group| group.id == id)
         .ok_or(OpError::MissingSyncGroup(id))?;
     doc.catalog.sync_groups.remove(index);
+    Ok(())
+}
+
+fn upsert_audio_bus(doc: &mut Document, bus: AudioBus) -> Result<(), OpError> {
+    validate_audio_bus(doc, &bus)?;
+    if let Some(index) = doc
+        .audio_mix
+        .buses
+        .iter()
+        .position(|existing| existing.id == bus.id)
+    {
+        doc.audio_mix.buses[index] = bus;
+    } else {
+        doc.audio_mix.buses.push(bus);
+    }
+    doc.audio_mix.buses.sort_by_key(|bus| bus.id);
+    Ok(())
+}
+
+fn remove_audio_bus(doc: &mut Document, id: AudioBusId) -> Result<(), OpError> {
+    let index = doc
+        .audio_mix
+        .buses
+        .iter()
+        .position(|bus| bus.id == id)
+        .ok_or(OpError::MissingAudioBus(id))?;
+    doc.audio_mix.buses.remove(index);
     Ok(())
 }
 
@@ -1788,7 +1901,15 @@ fn set_marker_param(
 
 fn add_effect(doc: &mut Document, clip_id: ClipId, effect: Effect) -> Result<(), OpError> {
     validate_effect(&effect)?;
+    if is_audio_effect(&effect.name) {
+        return Err(OpError::AudioEffectOnClip {
+            clip: clip_id,
+            effect: effect.name,
+        });
+    }
     let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let clip_duration = doc.clip_duration(&doc.tracks[track_index].clips[clip_index])?;
+    validate_effect_automation(clip_id, clip_duration, &effect)?;
     let clip = &mut doc.tracks[track_index].clips[clip_index];
     if clip.effects.iter().any(|existing| existing.id == effect.id) {
         return Err(OpError::DuplicateEffect {
@@ -1833,6 +1954,70 @@ fn set_effect_param(
         })?;
     validate_effect_parameter(&effect.name, name, &value)?;
     effect.parameters.insert(name.to_owned(), value);
+    Ok(())
+}
+
+fn set_effect_keyframes(
+    doc: &mut Document,
+    clip_id: ClipId,
+    effect_id: EffectId,
+    name: &str,
+    curve: AutomationCurve,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let clip_duration = doc.clip_duration(&doc.tracks[track_index].clips[clip_index])?;
+    let effect = doc.tracks[track_index].clips[clip_index]
+        .effects
+        .iter_mut()
+        .find(|effect| effect.id == effect_id)
+        .ok_or(OpError::MissingEffect {
+            clip: clip_id,
+            effect: effect_id,
+        })?;
+    let descriptor = crate::effect_descriptor(&effect.name)
+        .and_then(|descriptor| descriptor.parameter(name))
+        .ok_or_else(|| OpError::UnknownEffectParam {
+            effect: effect.name.clone(),
+            name: name.to_owned(),
+        })?;
+    validate_curve(
+        clip_id,
+        clip_duration,
+        effect_id,
+        &effect.name,
+        descriptor,
+        name,
+        &curve,
+    )?;
+    effect.keyframes.insert(name.to_owned(), curve);
+    Ok(())
+}
+
+fn clear_effect_keyframes(
+    doc: &mut Document,
+    clip_id: ClipId,
+    effect_id: EffectId,
+    name: &str,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let effect = doc.tracks[track_index].clips[clip_index]
+        .effects
+        .iter_mut()
+        .find(|effect| effect.id == effect_id)
+        .ok_or(OpError::MissingEffect {
+            clip: clip_id,
+            effect: effect_id,
+        })?;
+    if crate::effect_descriptor(&effect.name)
+        .and_then(|descriptor| descriptor.parameter(name))
+        .is_none()
+    {
+        return Err(OpError::UnknownEffectParam {
+            effect: effect.name.clone(),
+            name: name.to_owned(),
+        });
+    }
+    effect.keyframes.remove(name);
     Ok(())
 }
 
@@ -2079,13 +2264,101 @@ fn validate_effect(effect: &Effect) -> Result<(), OpError> {
     let Some(descriptor) = crate::effect_descriptor(&effect.name) else {
         return Err(OpError::UnknownEffect(effect.name.clone()));
     };
+    if effect.name == "cube_lut"
+        && !matches!(effect.parameters.get("path"), Some(ParamValue::Text(path)) if !path.trim().is_empty())
+    {
+        return Err(OpError::MissingCubeLutPath);
+    }
     for (name, value) in &effect.parameters {
+        if effect.name == "cube_lut" && name == "path" {
+            continue;
+        }
         validate_described_effect_parameter(descriptor, name, value)?;
+    }
+    for name in effect.keyframes.keys() {
+        if descriptor.parameter(name).is_none() {
+            return Err(OpError::UnknownEffectParam {
+                effect: effect.name.clone(),
+                name: name.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_effect_automation(
+    clip: ClipId,
+    clip_duration: TimeCode,
+    effect: &Effect,
+) -> Result<(), OpError> {
+    let descriptor = crate::effect_descriptor(&effect.name)
+        .ok_or_else(|| OpError::UnknownEffect(effect.name.clone()))?;
+    for (name, curve) in &effect.keyframes {
+        let parameter = descriptor
+            .parameter(name)
+            .ok_or_else(|| OpError::UnknownEffectParam {
+                effect: effect.name.clone(),
+                name: name.clone(),
+            })?;
+        validate_curve(
+            clip,
+            clip_duration,
+            effect.id,
+            &effect.name,
+            parameter,
+            name,
+            curve,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_curve(
+    clip: ClipId,
+    clip_duration: TimeCode,
+    effect_id: EffectId,
+    effect_name: &str,
+    descriptor: &crate::EffectParameterDescriptor,
+    name: &str,
+    curve: &AutomationCurve,
+) -> Result<(), OpError> {
+    curve
+        .validate()
+        .map_err(|error| OpError::InvalidEffectAutomation {
+            effect: effect_name.to_owned(),
+            name: name.to_owned(),
+            reason: error.to_string(),
+        })?;
+    for keyframe in &curve.keyframes {
+        if keyframe.at >= clip_duration {
+            return Err(OpError::EffectKeyframeOutsideClip {
+                clip,
+                effect: effect_id,
+                name: name.to_owned(),
+                at: keyframe.at,
+                duration: clip_duration,
+            });
+        }
+        validate_described_effect_parameter(
+            crate::effect_descriptor(effect_name).expect("registered effect"),
+            name,
+            &ParamValue::Integer(keyframe.value),
+        )?;
+        debug_assert!((descriptor.min..=descriptor.max).contains(&keyframe.value));
     }
     Ok(())
 }
 
 fn validate_effect_parameter(effect: &str, name: &str, value: &ParamValue) -> Result<(), OpError> {
+    if effect == "cube_lut" && name == "path" {
+        return match value {
+            ParamValue::Text(path) if !path.trim().is_empty() => Ok(()),
+            ParamValue::Text(_) | ParamValue::Integer(_) | ParamValue::Boolean(_) => {
+                Err(OpError::MissingCubeLutPath)
+            }
+        };
+    }
     let Some(descriptor) = crate::effect_descriptor(effect) else {
         return Err(OpError::UnknownEffect(effect.to_owned()));
     };
@@ -2417,7 +2690,14 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                         effect: effect.id,
                     });
                 }
+                if is_audio_effect(&effect.name) {
+                    return Err(OpError::AudioEffectOnClip {
+                        clip: clip.id,
+                        effect: effect.name.clone(),
+                    });
+                }
                 validate_effect(effect)?;
+                validate_effect_automation(clip.id, clip_duration, effect)?;
             }
             if let Some(transition) = &clip.transition_in {
                 validate_transition(doc, clip, transition)?;
@@ -2467,6 +2747,106 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
             expected: expected_duration,
             actual: doc.duration,
         });
+    }
+    validate_audio_mix(doc)?;
+    Ok(())
+}
+
+fn validate_audio_mix(doc: &Document) -> Result<(), OpError> {
+    let mut bus_ids = HashSet::new();
+    let mut routed_tracks = std::collections::HashMap::new();
+    for bus in &doc.audio_mix.buses {
+        if !bus_ids.insert(bus.id) {
+            return Err(OpError::DuplicateAudioBus(bus.id));
+        }
+        validate_audio_bus(doc, bus)?;
+        for track in &bus.tracks {
+            if let Some(first) = routed_tracks.insert(*track, bus.id) {
+                return Err(OpError::TrackInMultipleAudioBuses {
+                    track: *track,
+                    first,
+                    second: bus.id,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_audio_bus(doc: &Document, bus: &AudioBus) -> Result<(), OpError> {
+    if bus.name.trim().is_empty() || bus.tracks.is_empty() {
+        return Err(OpError::InvalidAudioBus(bus.id));
+    }
+    let mut tracks = HashSet::new();
+    for track in &bus.tracks {
+        if !tracks.insert(*track) {
+            return Err(OpError::TrackInMultipleAudioBuses {
+                track: *track,
+                first: bus.id,
+                second: bus.id,
+            });
+        }
+        if !doc.tracks.iter().any(|candidate| candidate.id == *track) {
+            return Err(OpError::AudioBusMissingTrack {
+                bus: bus.id,
+                track: *track,
+            });
+        }
+    }
+    let mut sidechains = HashSet::new();
+    for track in &bus.ducking_sidechain_tracks {
+        if !sidechains.insert(*track) || !doc.tracks.iter().any(|candidate| candidate.id == *track)
+        {
+            return Err(OpError::AudioBusMissingTrack {
+                bus: bus.id,
+                track: *track,
+            });
+        }
+    }
+    let mut effect_ids = HashSet::new();
+    for effect in &bus.effects {
+        if !effect_ids.insert(effect.id) {
+            return Err(OpError::DuplicateAudioBusEffect {
+                bus: bus.id,
+                effect: effect.id,
+            });
+        }
+        if !is_audio_effect(&effect.name) {
+            return Err(OpError::VisualEffectOnAudioBus {
+                bus: bus.id,
+                effect: effect.name.clone(),
+            });
+        }
+        validate_effect(effect)?;
+        if effect.name == "audio_ducking" && bus.ducking_sidechain_tracks.is_empty() {
+            return Err(OpError::AudioBusDuckingWithoutSidechain(bus.id));
+        }
+        let descriptor = crate::effect_descriptor(&effect.name).expect("registered effect");
+        for (name, curve) in &effect.keyframes {
+            curve
+                .validate()
+                .map_err(|error| OpError::InvalidEffectAutomation {
+                    effect: effect.name.clone(),
+                    name: name.clone(),
+                    reason: error.to_string(),
+                })?;
+            for keyframe in &curve.keyframes {
+                if keyframe.at >= doc.duration {
+                    return Err(OpError::AudioBusKeyframeOutsideProject {
+                        bus: bus.id,
+                        effect: effect.id,
+                        name: name.clone(),
+                        at: keyframe.at,
+                        duration: doc.duration,
+                    });
+                }
+                validate_described_effect_parameter(
+                    descriptor,
+                    name,
+                    &ParamValue::Integer(keyframe.value),
+                )?;
+            }
+        }
     }
     Ok(())
 }

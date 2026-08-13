@@ -954,6 +954,7 @@ mod tests {
         .unwrap();
         Document {
             catalog: openreel_core::MediaCatalog::default(),
+            audio_mix: openreel_core::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,

@@ -8,12 +8,14 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 24] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 26] = [
     "get_timeline_state",
     "get_clip_info",
     "get_source_info",
     "search_media",
     "get_frame_at",
+    "get_video_scopes",
+    "track_mask_region",
     "get_timeline_storyboard",
     "get_transcript",
     "get_timeline_transcript",
@@ -146,6 +148,8 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::RemoveStringOut { .. } => "remove_string_out",
         Operation::UpsertSyncGroup { .. } => "upsert_sync_group",
         Operation::RemoveSyncGroup { .. } => "remove_sync_group",
+        Operation::UpsertAudioBus { .. } => "upsert_audio_bus",
+        Operation::RemoveAudioBus { .. } => "remove_audio_bus",
         Operation::AddTrack { .. } => "add_track",
         Operation::RemoveTrack { .. } => "remove_track",
         Operation::SetTrackSyncLock { .. } => "set_track_sync_lock",
@@ -171,6 +175,8 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::AddEffect { .. } => "add_effect",
         Operation::RemoveEffect { .. } => "remove_effect",
         Operation::SetEffectParam { .. } => "set_effect_param",
+        Operation::SetEffectKeyframes { .. } => "set_effect_keyframes",
+        Operation::ClearEffectKeyframes { .. } => "clear_effect_keyframes",
         Operation::SetTitleParam { .. } => "set_title_param",
         Operation::SetClipAudio { .. } => "set_clip_audio",
         Operation::AddTransition { .. } => "add_transition",
@@ -248,7 +254,10 @@ fn operation_tool(
     let mut description = format!(
         "Apply Operation::{variant} to the live timeline only at expected_revision from get_timeline_state. All frame values are exact integers."
     );
-    if matches!(variant.as_str(), "AddEffect" | "SetEffectParam") {
+    if matches!(
+        variant.as_str(),
+        "AddEffect" | "SetEffectParam" | "SetEffectKeyframes" | "ClearEffectKeyframes"
+    ) {
         write!(description, " {}", effect_documentation())
             .expect("writing effect documentation to a String cannot fail");
     }
@@ -309,6 +318,15 @@ fn operation_tool(
         "SetClipAudio" => description.push_str(
             " gain_tenth_db is an integer number of tenths of a decibel in -600..=120. Fade values are non-negative project frames whose sum cannot exceed the clip duration. Fade-out anchors to the clip's project end. Gain and clip fades compose multiplicatively with transition audio ramps.",
         ),
+        "UpsertAudioBus" | "RemoveAudioBus" => description.push_str(
+            " Audio buses route each track to at most one bus. Bus effects must use audio_gain, audio_eq, audio_compressor, or audio_ducking; their numeric controls support the same fixed-point keyframe curves as clip effects. Ducking reads the listed sidechain tracks before bus processing. Unrouted tracks feed the master directly.",
+        ),
+        "SetEffectKeyframes" => description.push_str(
+            " The curve uses clip-local integer frame offsets and fixed-point parameter values. Keyframes must be non-negative, strictly ordered, inside the clip, and inside the parameter's documented range. Interpolation is hold, linear, ease_in, ease_out, or ease_in_out and applies from each keyframe to the next.",
+        ),
+        "ClearEffectKeyframes" => description.push_str(
+            " Removes automation from one registered parameter and restores its static parameter value.",
+        ),
         "AddFreezeFrame" => description.push_str(
             " Freeze clips hold one source frame from a real video-capable asset for a project-frame duration. They are video-track clips and remain silent.",
         ),
@@ -346,7 +364,9 @@ fn effect_documentation() -> String {
         }
         documentation.push(')');
     }
-    documentation.push('.');
+    documentation.push_str(
+        ". cube_lut additionally requires parameters.path as a non-empty text path to a 3D .cube file; intensity_percent remains integer-automatable.",
+    );
     documentation
 }
 
@@ -403,6 +423,8 @@ mod tests {
                 "remove_string_out",
                 "upsert_sync_group",
                 "remove_sync_group",
+                "upsert_audio_bus",
+                "remove_audio_bus",
                 "add_track",
                 "remove_track",
                 "set_track_sync_lock",
@@ -428,6 +450,8 @@ mod tests {
                 "add_effect",
                 "remove_effect",
                 "set_effect_param",
+                "set_effect_keyframes",
+                "clear_effect_keyframes",
                 "set_title_param",
                 "set_clip_audio",
                 "add_transition",

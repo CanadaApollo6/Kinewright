@@ -2,6 +2,7 @@
 
 mod actor;
 mod agent;
+mod automation;
 mod captions;
 mod delivery;
 mod editorial;
@@ -21,6 +22,7 @@ pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,
 };
+pub use automation::{AutomationCurve, AutomationCurveError, Keyframe, KeyframeInterpolation};
 pub use captions::{
     CaptionCue, CaptionPlanError, caption_cues, caption_title_operations, dedup_timeline_words,
     srt, vtt,
@@ -31,7 +33,7 @@ pub use delivery::{
 pub use editorial::ThreePointMode;
 pub use effect::{
     EFFECT_DESCRIPTORS, EffectDescriptor, EffectParameterDescriptor, EffectUniform,
-    effect_descriptor,
+    effect_descriptor, is_audio_effect,
 };
 pub use journal::JournalCommand;
 pub use media::{
@@ -44,10 +46,10 @@ pub use media::{
     WaveformPeak,
 };
 pub use model::{
-    AssetId, BinId, Clip, ClipContent, ClipId, Document, Effect, EffectId, FreezeFrame, LinkId,
-    MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin, MediaCatalog, MediaKind,
-    ParamValue, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember,
-    Track, TrackId, TrackKind, Transition, clip_effective_fps,
+    AssetId, AudioBus, AudioBusId, AudioMix, BinId, Clip, ClipContent, ClipId, Document, Effect,
+    EffectId, FreezeFrame, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset,
+    MediaBin, MediaCatalog, MediaKind, ParamValue, SourceSelect, StringOut, StringOutId, SyncGroup,
+    SyncGroupId, SyncGroupMember, Track, TrackId, TrackKind, Transition, clip_effective_fps,
 };
 pub use operation::{ApplyOp, BatchError, OpError, Operation, apply_batch};
 pub use qa::{QaIssue, QaReport, QaSeverity, qa_document};

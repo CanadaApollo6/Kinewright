@@ -15,12 +15,12 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use openreel_core::{
-    Analysis, AnalysisKind, AssetId, BeatStatus, CaptionPreset, ClipId, Command, Core,
-    DeliveryAspect, DeliveryVariant, Document, Event, MediaKind, Operation, Playback, Query,
-    QueryResult, SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineRevision,
-    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus,
-    caption_cues, caption_title_operations, dedup_timeline_words, document_for_delivery_variant,
-    qa_document,
+    Analysis, AnalysisKind, AssetId, AutomationCurve, BeatStatus, CaptionPreset, ClipContent,
+    ClipId, Command, Core, DeliveryAspect, DeliveryVariant, Document, EffectId, Event, Keyframe,
+    KeyframeInterpolation, MediaKind, Operation, Playback, Query, QueryResult, SceneStatus,
+    SilenceStatus, TimeCode, TimelineBeat, TimelineRevision, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, caption_cues,
+    caption_title_operations, dedup_timeline_words, document_for_delivery_variant, qa_document,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -58,6 +58,10 @@ const DEFAULT_CONFIRMATION_TIMEOUT: Duration = Duration::from_mins(1);
 const DEFAULT_MINIMUM_SILENCE_FRAMES: i64 = 6;
 const DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS: u16 = 1_000;
 const DEFAULT_BEAT_STRENGTH_BASIS_POINTS: u16 = 1_000;
+const DEFAULT_TRACKING_STEP_FRAMES: i64 = 5;
+const DEFAULT_TRACKING_SEARCH_RADIUS_PERCENT: u8 = 10;
+const DEFAULT_TRACKING_WIDTH: u32 = 256;
+const MAX_TRACKING_SAMPLES: usize = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmationRequest {
@@ -413,6 +417,14 @@ impl OpenReelMcp {
             "get_frame_at" => {
                 let args: FrameAtArgs = decode_args("get_frame_at", arguments)?;
                 self.frame_at(args.timecode)
+            }
+            "get_video_scopes" => {
+                let args: VideoScopesArgs = decode_args("get_video_scopes", arguments)?;
+                self.video_scopes(&args)
+            }
+            "track_mask_region" => {
+                let args: TrackMaskArgs = decode_args("track_mask_region", arguments)?;
+                self.track_mask_region(&args)
             }
             "get_timeline_storyboard" => {
                 let args: StoryboardArgs = decode_args("get_timeline_storyboard", arguments)?;
@@ -836,6 +848,237 @@ impl OpenReelMcp {
             )),
             ContentBlock::image(BASE64.encode(png), "image/png"),
         ]))
+    }
+
+    fn video_scopes(&self, args: &VideoScopesArgs) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        if args.timecode < TimeCode::ZERO || args.timecode >= document.duration {
+            return Ok(error_text(format!(
+                "frame {} is outside project range 0..{}",
+                args.timecode.0, document.duration.0
+            )));
+        }
+        let max_width = args.max_width.unwrap_or(512).clamp(32, 1_024);
+        let bins = usize::from(args.bins.unwrap_or(64).clamp(16, 128));
+        let image = match self
+            .analysis
+            .thumbnail_for_document(document, args.timecode, max_width)
+        {
+            Ok(image) => image,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let scopes = scope_data(&image, bins);
+        Ok(success_structured(
+            format!(
+                "video scopes at project frame {} from {}x{} compositor output\n{}",
+                args.timecode.0, image.width, image.height, scopes
+            ),
+            scopes,
+        ))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn track_mask_region(&self, args: &TrackMaskArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let Some(clip) = document.clip(args.clip_id) else {
+            return Ok(error_text(format!("clip {} does not exist", args.clip_id)));
+        };
+        if !matches!(clip.content, ClipContent::Media) {
+            return Ok(error_text("mask tracking requires a media clip"));
+        }
+        let Some(effect) = clip
+            .effects
+            .iter()
+            .find(|effect| effect.id == args.effect_id)
+        else {
+            return Ok(error_text(format!(
+                "effect {} does not exist on clip {}",
+                args.effect_id, args.clip_id
+            )));
+        };
+        if effect.name != "mask" {
+            return Ok(error_text(format!(
+                "effect {} is {}; mask tracking requires a mask effect",
+                args.effect_id, effect.name
+            )));
+        }
+        let duration = match document.clip_duration(clip) {
+            Ok(duration) => duration,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let start = args.start_local_frame.unwrap_or(TimeCode::ZERO);
+        let end = args.end_local_frame.unwrap_or(duration);
+        if start < TimeCode::ZERO || end > duration || end <= start {
+            return Ok(error_text(format!(
+                "tracking range {start}..{end} is outside clip-local range 0..{duration}"
+            )));
+        }
+        let step = args.step_frames.unwrap_or(DEFAULT_TRACKING_STEP_FRAMES);
+        if !(1..=120).contains(&step) {
+            return Ok(error_text("step_frames must be in 1..=120"));
+        }
+        let sample_frames = tracking_sample_frames(start..end, step);
+        if sample_frames.len() > MAX_TRACKING_SAMPLES {
+            return Ok(error_text(format!(
+                "tracking would render {} samples; increase step_frames to stay at or below {MAX_TRACKING_SAMPLES}",
+                sample_frames.len()
+            )));
+        }
+        let parameter =
+            |name: &str, neutral: i64| effect.integer_parameter_at(name, start).unwrap_or(neutral);
+        let center_percent = [
+            u8::try_from(parameter("center_x_percent", 50).clamp(0, 100)).unwrap_or(50),
+            u8::try_from(parameter("center_y_percent", 50).clamp(0, 100)).unwrap_or(50),
+        ];
+        let box_percent = [
+            parameter("width_percent", 100),
+            parameter("height_percent", 100),
+        ];
+        if box_percent.iter().any(|value| !(1..=75).contains(value)) {
+            return Ok(error_text(
+                "mask width_percent and height_percent must each be in 1..=75 for tracking; set a bounded subject region first",
+            ));
+        }
+        let search_radius = args
+            .search_radius_percent
+            .unwrap_or(DEFAULT_TRACKING_SEARCH_RADIUS_PERCENT);
+        if !(1..=25).contains(&search_radius) {
+            return Ok(error_text("search_radius_percent must be in 1..=25"));
+        }
+        let max_width = args.max_width.unwrap_or(DEFAULT_TRACKING_WIDTH);
+        if !(64..=512).contains(&max_width) {
+            return Ok(error_text("max_width must be in 64..=512"));
+        }
+
+        let mut isolated = (*document).clone();
+        for track in &mut isolated.tracks {
+            track.clips.retain(|candidate| candidate.id == args.clip_id);
+            for candidate in &mut track.clips {
+                candidate.effects.retain(|effect| effect.name != "mask");
+            }
+        }
+        isolated.tracks.retain(|track| !track.clips.is_empty());
+        let isolated = Arc::new(isolated);
+        let project_frame = |local: TimeCode| {
+            clip.timeline_start
+                .checked_add(local)
+                .ok_or_else(|| McpError::internal_error("tracking frame overflowed", None))
+        };
+
+        let first_local = sample_frames[0];
+        let first_project = project_frame(first_local)?;
+        let mut previous = match self.analysis.thumbnail_for_document(
+            Arc::clone(&isolated),
+            first_project,
+            max_width,
+        ) {
+            Ok(image) => image,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let half_size = tracking_half_size(&previous, box_percent);
+        let mut center = clamp_tracking_center(
+            &previous,
+            [
+                percent_to_pixel(center_percent[0], previous.width),
+                percent_to_pixel(center_percent[1], previous.height),
+            ],
+            half_size,
+        );
+        let mut observations = vec![TrackingObservation {
+            local_frame: first_local,
+            project_frame: first_project,
+            center,
+            confidence_basis_points: 10_000,
+        }];
+
+        for local_frame in sample_frames.iter().copied().skip(1) {
+            let project_frame = project_frame(local_frame)?;
+            let current = match self.analysis.thumbnail_for_document(
+                Arc::clone(&isolated),
+                project_frame,
+                max_width,
+            ) {
+                Ok(image) => image,
+                Err(error) => return Ok(error_text(error.to_string())),
+            };
+            if current.width != previous.width || current.height != previous.height {
+                return Ok(error_text(
+                    "tracking compositor resolution changed between samples",
+                ));
+            }
+            let tracked = track_region(&previous, &current, center, half_size, search_radius);
+            center = tracked.center;
+            observations.push(TrackingObservation {
+                local_frame,
+                project_frame,
+                center,
+                confidence_basis_points: tracked.confidence_basis_points,
+            });
+            previous = current;
+        }
+
+        let curve_for = |axis: usize, extent: u32| AutomationCurve {
+            keyframes: observations
+                .iter()
+                .map(|observation| Keyframe {
+                    at: observation.local_frame,
+                    value: i64::from(pixel_to_percent(observation.center[axis], extent)),
+                    interpolation: KeyframeInterpolation::Linear,
+                })
+                .collect(),
+        };
+        let x_curve = curve_for(0, previous.width);
+        let y_curve = curve_for(1, previous.height);
+        let operations = vec![
+            Operation::SetEffectKeyframes {
+                clip: args.clip_id,
+                effect: args.effect_id,
+                name: "center_x_percent".to_owned(),
+                curve: x_curve.clone(),
+            },
+            Operation::SetEffectKeyframes {
+                clip: args.clip_id,
+                effect: args.effect_id,
+                name: "center_y_percent".to_owned(),
+                curve: y_curve.clone(),
+            },
+        ];
+        let observations_json = observations
+            .iter()
+            .map(|observation| {
+                serde_json::json!({
+                    "local_frame": observation.local_frame.0,
+                    "project_frame": observation.project_frame.0,
+                    "center_x_percent": pixel_to_percent(observation.center[0], previous.width),
+                    "center_y_percent": pixel_to_percent(observation.center[1], previous.height),
+                    "confidence_basis_points": observation.confidence_basis_points,
+                })
+            })
+            .collect::<Vec<_>>();
+        let structured = serde_json::json!({
+            "timeline_revision": revision.0,
+            "clip_id": args.clip_id.0,
+            "effect_id": args.effect_id.0,
+            "range": {"start": start.0, "end": end.0, "step_frames": step},
+            "observations": observations_json,
+            "curves": {
+                "center_x_percent": x_curve,
+                "center_y_percent": y_curve,
+            },
+            "apply_edit_plan": {
+                "expected_revision": revision.0,
+                "operations": operations,
+            },
+        });
+        Ok(success_structured(
+            format!(
+                "tracked mask effect {} on clip {} across {} samples; apply the returned revision-gated operations to accept the editable keyframes",
+                args.effect_id,
+                args.clip_id,
+                observations.len()
+            ),
+            structured,
+        ))
     }
 
     fn timeline_storyboard(&self, args: StoryboardArgs) -> Result<CallToolResult, McpError> {
@@ -1590,6 +1833,41 @@ struct FrameAtArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct VideoScopesArgs {
+    /// Exact project frame to measure after all compositing and effects.
+    timecode: TimeCode,
+    /// Histogram bin count. Defaults to 64 and is clamped to 16..=128.
+    #[serde(default)]
+    bins: Option<u8>,
+    /// Maximum compositor width. Defaults to 512 and is clamped to 32..=1024.
+    #[serde(default)]
+    max_width: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TrackMaskArgs {
+    /// Stable media clip id containing the mask effect.
+    clip_id: ClipId,
+    /// Stable mask effect id on the clip.
+    effect_id: EffectId,
+    /// First clip-local frame to track. Defaults to zero.
+    #[serde(default)]
+    start_local_frame: Option<TimeCode>,
+    /// Exclusive clip-local end frame. Defaults to the clip duration.
+    #[serde(default)]
+    end_local_frame: Option<TimeCode>,
+    /// Distance between tracked keyframes. Defaults to 5; valid range 1..=120.
+    #[serde(default)]
+    step_frames: Option<i64>,
+    /// Search radius around the previous center as a frame percentage. Defaults to 10.
+    #[serde(default)]
+    search_radius_percent: Option<u8>,
+    /// Analysis render width. Defaults to 256; valid range 64..=512.
+    #[serde(default)]
+    max_width: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct StoryboardArgs {
     /// Optional half-open range in exact project frames. Omit for the full timeline.
     #[serde(default)]
@@ -1983,6 +2261,18 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "get_video_scopes",
+            "Measure RGB and luma histograms, clipping, channel means, and a 64-column luma waveform from the real post-effect compositor output at an exact project frame. Use this before and after color or exposure edits instead of guessing from effect values.",
+            schema_object::<VideoScopesArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "track_mask_region",
+            "Track an existing bounded mask region through one media clip using deterministic sequential template matching on isolated compositor frames. Returns confidence observations plus revision-gated SetEffectKeyframes operations for the mask center; it never silently mutates the timeline. Set mask width and height to 75 percent or less before tracking.",
+            schema_object::<TrackMaskArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "get_timeline_storyboard",
             "Render a bounded PNG contact sheet from the real timeline compositor with a cell-to-frame manifest and timeline revision. Use it to survey footage and as visual proof after editing.",
             schema_object::<StoryboardArgs>(),
@@ -2051,6 +2341,428 @@ fn encode_png(image: &openreel_core::RgbaImage) -> Result<Vec<u8>, McpError> {
         )
         .map_err(|error| McpError::internal_error(error.to_string(), None))?;
     Ok(png)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrackingObservation {
+    local_frame: TimeCode,
+    project_frame: TimeCode,
+    center: [u32; 2],
+    confidence_basis_points: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrackingMatch {
+    center: [u32; 2],
+    confidence_basis_points: u16,
+}
+
+fn tracking_sample_frames(range: std::ops::Range<TimeCode>, step: i64) -> Vec<TimeCode> {
+    let mut frames = Vec::new();
+    let mut at = range.start.0;
+    while at < range.end.0 {
+        frames.push(TimeCode(at));
+        let Some(next) = at.checked_add(step) else {
+            break;
+        };
+        at = next;
+    }
+    let last = TimeCode(range.end.0.saturating_sub(1));
+    if frames.last() != Some(&last) {
+        frames.push(last);
+    }
+    frames
+}
+
+fn tracking_half_size(image: &openreel_core::RgbaImage, box_percent: [i64; 2]) -> [u32; 2] {
+    let half = |extent: u32, percent: i64| {
+        let percent = u32::try_from(percent).unwrap_or_default();
+        extent
+            .saturating_mul(percent)
+            .div_ceil(200)
+            .max(1)
+            .min(extent.saturating_sub(1) / 2)
+    };
+    [
+        half(image.width, box_percent[0]),
+        half(image.height, box_percent[1]),
+    ]
+}
+
+fn percent_to_pixel(percent: u8, extent: u32) -> u32 {
+    u32::from(percent)
+        .saturating_mul(extent.saturating_sub(1))
+        .saturating_add(50)
+        / 100
+}
+
+fn pixel_to_percent(pixel: u32, extent: u32) -> u8 {
+    let denominator = extent.saturating_sub(1).max(1);
+    let rounded = pixel.saturating_mul(100).saturating_add(denominator / 2) / denominator;
+    u8::try_from(rounded.min(100)).unwrap_or(100)
+}
+
+fn clamp_tracking_center(
+    image: &openreel_core::RgbaImage,
+    center: [u32; 2],
+    half_size: [u32; 2],
+) -> [u32; 2] {
+    let clamp = |value: u32, extent: u32, half: u32| {
+        value.clamp(half, extent.saturating_sub(half).saturating_sub(1))
+    };
+    [
+        clamp(center[0], image.width, half_size[0]),
+        clamp(center[1], image.height, half_size[1]),
+    ]
+}
+
+fn track_region(
+    previous: &openreel_core::RgbaImage,
+    current: &openreel_core::RgbaImage,
+    previous_center: [u32; 2],
+    half_size: [u32; 2],
+    search_radius_percent: u8,
+) -> TrackingMatch {
+    let radius = [
+        previous
+            .width
+            .saturating_mul(u32::from(search_radius_percent))
+            .div_ceil(100)
+            .max(1),
+        previous
+            .height
+            .saturating_mul(u32::from(search_radius_percent))
+            .div_ceil(100)
+            .max(1),
+    ];
+    let minimum = [
+        previous_center[0]
+            .saturating_sub(radius[0])
+            .max(half_size[0]),
+        previous_center[1]
+            .saturating_sub(radius[1])
+            .max(half_size[1]),
+    ];
+    let maximum = [
+        previous_center[0]
+            .saturating_add(radius[0])
+            .min(current.width.saturating_sub(half_size[0]).saturating_sub(1)),
+        previous_center[1].saturating_add(radius[1]).min(
+            current
+                .height
+                .saturating_sub(half_size[1])
+                .saturating_sub(1),
+        ),
+    ];
+    let coarse_step = radius[0].max(radius[1]).div_ceil(8).max(1);
+    let sample_step = half_size[0]
+        .saturating_mul(2)
+        .saturating_add(1)
+        .max(half_size[1].saturating_mul(2).saturating_add(1))
+        .div_ceil(24)
+        .max(1);
+    let mut best = (
+        u64::MAX,
+        u32::MAX,
+        previous_center[1],
+        previous_center[0],
+        1_u64,
+    );
+    for y in candidate_axis(minimum[1], maximum[1], coarse_step) {
+        for x in candidate_axis(minimum[0], maximum[0], coarse_step) {
+            best = best.min(tracking_candidate(
+                previous,
+                current,
+                previous_center,
+                [x, y],
+                half_size,
+                sample_step,
+            ));
+        }
+    }
+    let coarse_center = [best.3, best.2];
+    let refine_minimum = [
+        coarse_center[0].saturating_sub(coarse_step).max(minimum[0]),
+        coarse_center[1].saturating_sub(coarse_step).max(minimum[1]),
+    ];
+    let refine_maximum = [
+        coarse_center[0].saturating_add(coarse_step).min(maximum[0]),
+        coarse_center[1].saturating_add(coarse_step).min(maximum[1]),
+    ];
+    for y in refine_minimum[1]..=refine_maximum[1] {
+        for x in refine_minimum[0]..=refine_maximum[0] {
+            best = best.min(tracking_candidate(
+                previous,
+                current,
+                previous_center,
+                [x, y],
+                half_size,
+                sample_step,
+            ));
+        }
+    }
+    let maximum_sad = best.4.saturating_mul(3 * u64::from(u8::MAX)).max(1);
+    let error_basis_points = best.0.saturating_mul(10_000) / maximum_sad;
+    TrackingMatch {
+        center: [best.3, best.2],
+        confidence_basis_points: u16::try_from(
+            10_000_u64.saturating_sub(error_basis_points.min(10_000)),
+        )
+        .unwrap_or_default(),
+    }
+}
+
+fn tracking_candidate(
+    previous: &openreel_core::RgbaImage,
+    current: &openreel_core::RgbaImage,
+    previous_center: [u32; 2],
+    candidate_center: [u32; 2],
+    half_size: [u32; 2],
+    sample_step: u32,
+) -> (u64, u32, u32, u32, u64) {
+    let (score, samples) = region_sad(
+        previous,
+        current,
+        previous_center,
+        candidate_center,
+        half_size,
+        sample_step,
+    );
+    let distance = candidate_center[0]
+        .abs_diff(previous_center[0])
+        .saturating_add(candidate_center[1].abs_diff(previous_center[1]));
+    (
+        score,
+        distance,
+        candidate_center[1],
+        candidate_center[0],
+        samples,
+    )
+}
+
+fn candidate_axis(minimum: u32, maximum: u32, step: u32) -> Vec<u32> {
+    let mut values = (minimum..=maximum)
+        .step_by(usize::try_from(step).unwrap_or(1).max(1))
+        .collect::<Vec<_>>();
+    if values.last() != Some(&maximum) {
+        values.push(maximum);
+    }
+    values
+}
+
+fn region_sad(
+    previous: &openreel_core::RgbaImage,
+    current: &openreel_core::RgbaImage,
+    previous_center: [u32; 2],
+    candidate_center: [u32; 2],
+    half_size: [u32; 2],
+    sample_step: u32,
+) -> (u64, u64) {
+    let step = usize::try_from(sample_step).unwrap_or(1).max(1);
+    let mut sad = 0_u64;
+    let mut samples = 0_u64;
+    for offset_y in (0..=half_size[1].saturating_mul(2)).step_by(step) {
+        for offset_x in (0..=half_size[0].saturating_mul(2)).step_by(step) {
+            let previous_x = previous_center[0]
+                .saturating_sub(half_size[0])
+                .saturating_add(offset_x);
+            let previous_y = previous_center[1]
+                .saturating_sub(half_size[1])
+                .saturating_add(offset_y);
+            let current_x = candidate_center[0]
+                .saturating_sub(half_size[0])
+                .saturating_add(offset_x);
+            let current_y = candidate_center[1]
+                .saturating_sub(half_size[1])
+                .saturating_add(offset_y);
+            let previous_index = usize::try_from(
+                previous_y
+                    .saturating_mul(previous.width)
+                    .saturating_add(previous_x)
+                    .saturating_mul(4),
+            )
+            .unwrap_or_default();
+            let current_index = usize::try_from(
+                current_y
+                    .saturating_mul(current.width)
+                    .saturating_add(current_x)
+                    .saturating_mul(4),
+            )
+            .unwrap_or_default();
+            for channel in 0..3 {
+                sad = sad.saturating_add(u64::from(
+                    previous.pixels[previous_index + channel]
+                        .abs_diff(current.pixels[current_index + channel]),
+                ));
+            }
+            samples = samples.saturating_add(1);
+        }
+    }
+    (sad, samples)
+}
+
+fn scope_data(image: &openreel_core::RgbaImage, bins: usize) -> serde_json::Value {
+    const WAVEFORM_COLUMNS: usize = 64;
+    let bins = bins.clamp(1, 256);
+    let mut red = vec![0_u64; bins];
+    let mut green = vec![0_u64; bins];
+    let mut blue = vec![0_u64; bins];
+    let mut luma = vec![0_u64; bins];
+    let mut channel_sums = [0_u64; 4];
+    let mut clipped_black = 0_u64;
+    let mut clipped_white = 0_u64;
+    let mut waveform_min = [u8::MAX; WAVEFORM_COLUMNS];
+    let mut waveform_max = [0_u8; WAVEFORM_COLUMNS];
+    let mut waveform_sum = [0_u64; WAVEFORM_COLUMNS];
+    let mut waveform_count = [0_u64; WAVEFORM_COLUMNS];
+    let width = usize::try_from(image.width).unwrap_or(1).max(1);
+    let mut pixel_count = 0_u64;
+
+    for (pixel_index, pixel) in image.pixels.chunks_exact(4).enumerate() {
+        let [red_value, green_value, blue_value, alpha] = [pixel[0], pixel[1], pixel[2], pixel[3]];
+        if alpha == 0 {
+            continue;
+        }
+        let luma_value = u8::try_from(
+            (54_u32 * u32::from(red_value)
+                + 183_u32 * u32::from(green_value)
+                + 19_u32 * u32::from(blue_value))
+                / 256,
+        )
+        .unwrap_or(u8::MAX);
+        let bucket = |value: u8| usize::from(value) * bins / 256;
+        red[bucket(red_value)] += 1;
+        green[bucket(green_value)] += 1;
+        blue[bucket(blue_value)] += 1;
+        luma[bucket(luma_value)] += 1;
+        channel_sums[0] += u64::from(red_value);
+        channel_sums[1] += u64::from(green_value);
+        channel_sums[2] += u64::from(blue_value);
+        channel_sums[3] += u64::from(luma_value);
+        clipped_black += u64::from(luma_value <= 1);
+        clipped_white += u64::from(luma_value >= 254);
+        pixel_count += 1;
+
+        let pixel_x = pixel_index % width;
+        let column = (pixel_x * WAVEFORM_COLUMNS / width).min(WAVEFORM_COLUMNS - 1);
+        waveform_min[column] = waveform_min[column].min(luma_value);
+        waveform_max[column] = waveform_max[column].max(luma_value);
+        waveform_sum[column] += u64::from(luma_value);
+        waveform_count[column] += 1;
+    }
+
+    let mean_milli = channel_sums.map(|sum| {
+        sum.saturating_mul(1_000)
+            .checked_div(pixel_count)
+            .unwrap_or(0)
+    });
+    let basis_points = |count: u64| {
+        count
+            .saturating_mul(10_000)
+            .checked_div(pixel_count)
+            .unwrap_or(0)
+    };
+    let waveform = (0..WAVEFORM_COLUMNS)
+        .map(|column| {
+            let count = waveform_count[column];
+            serde_json::json!({
+                "column": column,
+                "minimum": if count == 0 { 0 } else { waveform_min[column] },
+                "maximum": if count == 0 { 0 } else { waveform_max[column] },
+                "mean_milli": waveform_sum[column].saturating_mul(1_000).checked_div(count).unwrap_or(0),
+                "samples": count,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "resolution": [image.width, image.height],
+        "visible_pixel_count": pixel_count,
+        "histogram_bins": bins,
+        "histograms": {
+            "red": red,
+            "green": green,
+            "blue": blue,
+            "luma": luma,
+        },
+        "mean_milli": {
+            "red": mean_milli[0],
+            "green": mean_milli[1],
+            "blue": mean_milli[2],
+            "luma": mean_milli[3],
+        },
+        "clipping_basis_points": {
+            "black": basis_points(clipped_black),
+            "white": basis_points(clipped_white),
+        },
+        "waveform_luma": waveform,
+    })
+}
+
+#[cfg(test)]
+mod tracking_tests {
+    use super::*;
+
+    fn box_frame(center: [u32; 2]) -> openreel_core::RgbaImage {
+        let width = 32;
+        let height = 20;
+        let mut pixels = vec![0_u8; usize::try_from(width * height * 4).unwrap()];
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        for y in center[1] - 2..=center[1] + 2 {
+            for x in center[0] - 2..=center[0] + 2 {
+                let index = usize::try_from((y * width + x) * 4).unwrap();
+                pixels[index..index + 4].copy_from_slice(&[220, 40, 10, 255]);
+            }
+        }
+        openreel_core::RgbaImage {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    #[test]
+    fn deterministic_tracker_follows_a_translated_region_exactly() {
+        let previous = box_frame([8, 8]);
+        let current = box_frame([13, 11]);
+        let tracked = track_region(&previous, &current, [8, 8], [2, 2], 25);
+
+        assert_eq!(tracked.center, [13, 11]);
+        assert_eq!(tracked.confidence_basis_points, 10_000);
+    }
+
+    #[test]
+    fn tracking_samples_include_the_exact_last_visible_frame() {
+        assert_eq!(
+            tracking_sample_frames(TimeCode(3)..TimeCode(15), 5),
+            vec![TimeCode(3), TimeCode(8), TimeCode(13), TimeCode(14)]
+        );
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn scopes_are_exact_and_ignore_fully_transparent_pixels() {
+        let scopes = scope_data(
+            &openreel_core::RgbaImage {
+                width: 3,
+                height: 1,
+                pixels: vec![0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0, 0],
+            },
+            16,
+        );
+        assert_eq!(scopes["visible_pixel_count"], 2);
+        assert_eq!(scopes["clipping_basis_points"]["black"], 5_000);
+        assert_eq!(scopes["clipping_basis_points"]["white"], 5_000);
+        assert_eq!(scopes["mean_milli"]["luma"], 127_500);
+        assert_eq!(scopes["histograms"]["luma"][0], 1);
+        assert_eq!(scopes["histograms"]["luma"][15], 1);
+    }
 }
 
 fn storyboard_sample_frames(range: &std::ops::Range<TimeCode>, frame_count: u8) -> Vec<TimeCode> {
@@ -2545,6 +3257,7 @@ mod tests {
         };
         let document = Document {
             catalog: openreel_core::MediaCatalog::default(),
+            audio_mix: openreel_core::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,

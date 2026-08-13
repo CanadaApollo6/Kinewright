@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{OpError, Rational, TimeCode, Title, map_source_range_to_project};
+use crate::{AutomationCurve, OpError, Rational, TimeCode, Title, map_source_range_to_project};
 
 macro_rules! id_type {
     ($name:ident) => {
@@ -41,6 +41,7 @@ id_type!(MarkerId);
 id_type!(BinId);
 id_type!(StringOutId);
 id_type!(SyncGroupId);
+id_type!(AudioBusId);
 
 /// Number of presentation-token choices available to project markers.
 ///
@@ -100,6 +101,39 @@ pub struct Effect {
     /// Integer-only fixed-point parameters. Their ranges and neutral defaults
     /// are defined by `EFFECT_DESCRIPTORS`.
     pub parameters: BTreeMap<String, ParamValue>,
+    /// Clip-local automation keyed by registered parameter name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(default)]
+    pub keyframes: BTreeMap<String, AutomationCurve>,
+}
+
+impl Effect {
+    /// Resolve a parameter at one clip-local frame, falling back to its static value.
+    #[must_use]
+    pub fn integer_parameter_at(&self, name: &str, at: TimeCode) -> Option<i64> {
+        self.keyframes
+            .get(name)
+            .and_then(|curve| curve.value_at(at))
+            .or_else(|| match self.parameters.get(name) {
+                Some(ParamValue::Integer(value)) => Some(*value),
+                Some(ParamValue::Boolean(_) | ParamValue::Text(_)) | None => None,
+            })
+    }
+
+    /// Produce an ephemeral static effect for one rendered frame.
+    #[must_use]
+    pub fn evaluated_at(&self, at: TimeCode) -> Self {
+        let mut evaluated = self.clone();
+        for (name, curve) in &self.keyframes {
+            if let Some(value) = curve.value_at(at) {
+                evaluated
+                    .parameters
+                    .insert(name.clone(), ParamValue::Integer(value));
+            }
+        }
+        evaluated.keyframes.clear();
+        evaluated
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -325,6 +359,36 @@ pub struct MediaCatalog {
     pub sync_groups: Vec<SyncGroup>,
 }
 
+/// One deterministic mix bus. Tracks may route to at most one bus. Bus effects
+/// use the registered `audio_*` descriptors, and ducking sidechains reference
+/// the pre-bus signal from the listed tracks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AudioBus {
+    pub id: AudioBusId,
+    pub name: String,
+    pub tracks: Vec<TrackId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub effects: Vec<Effect>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub ducking_sidechain_tracks: Vec<TrackId>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AudioMix {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub buses: Vec<AudioBus>,
+}
+
+impl AudioMix {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.buses.is_empty()
+    }
+}
+
 impl MediaCatalog {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
@@ -346,6 +410,10 @@ pub struct Document {
     #[serde(default, skip_serializing_if = "MediaCatalog::is_empty")]
     #[schemars(default)]
     pub catalog: MediaCatalog,
+    /// Branchable, undoable audio routing and processing graph.
+    #[serde(default, skip_serializing_if = "AudioMix::is_empty")]
+    #[schemars(default)]
+    pub audio_mix: AudioMix,
     pub fps: Rational,
     pub resolution: (u32, u32),
     pub duration: TimeCode,
@@ -358,6 +426,7 @@ impl Default for Document {
             media_pool: Vec::new(),
             markers: Vec::new(),
             catalog: MediaCatalog::default(),
+            audio_mix: AudioMix::default(),
             fps: Rational::default(),
             resolution: (1_920, 1_080),
             duration: TimeCode::ZERO,

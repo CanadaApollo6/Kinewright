@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -6,11 +7,11 @@ use std::{
 use ffmpeg_next as ffmpeg;
 use openreel_core::{
     Document, ExportProgress, ExportSettings, FrameRounding, MediaError, ProgressSink, TimeCode,
-    map_frames_with_rounding,
+    TrackId, map_frames_with_rounding,
 };
 
 use crate::{
-    audio::{ClipAudioShaping, decode_audio_range, limit_audio_mix},
+    audio::{AudioMixProcessor, ClipAudioShaping, decode_audio_range, limit_audio_mix},
     clock::frame_to_samples,
     compositor::GpuContext,
     decode::backend,
@@ -353,7 +354,7 @@ pub(crate) fn mix_audio(
         .map_err(|_| MediaError::Backend("audio mix is too large".to_owned()))?
         .checked_mul(usize::from(AUDIO_CHANNELS))
         .ok_or_else(|| MediaError::Backend("audio mix is too large".to_owned()))?;
-    let mut mix = vec![0.0_f32; total_samples];
+    let mut track_mixes = HashMap::<TrackId, Vec<f32>>::new();
     let segments = timeline_audio_segments(document, TimeCode::ZERO..document.duration)?;
     for segment in segments {
         check_cancelled(settings)?;
@@ -390,14 +391,40 @@ pub(crate) fn mix_audio(
             .map_err(|error| MediaError::Backend(error.to_string()))?;
         let shaping = ClipAudioShaping::new(clip, clip_duration, AUDIO_RATE, document.fps);
         let channel_count = usize::from(AUDIO_CHANNELS);
+        let track_mix = track_mixes
+            .entry(segment.track)
+            .or_insert_with(|| vec![0.0; total_samples]);
         for (sample_index, (destination, sample)) in
-            mix.iter_mut().skip(start).zip(decoded).enumerate()
+            track_mix.iter_mut().skip(start).zip(decoded).enumerate()
         {
             let frame_offset = u64::try_from(sample_index / channel_count).unwrap_or(u64::MAX);
             let project_sample = start_frame.saturating_add(frame_offset);
             let gain = shaping.gain_at(project_sample);
             *destination += sample * gain;
         }
+    }
+    let channel_count = usize::from(AUDIO_CHANNELS);
+    let mut processor = AudioMixProcessor::new(document, AUDIO_RATE, channel_count);
+    let mut mix = Vec::with_capacity(total_samples);
+    let mut start_frame = 0_u64;
+    while start_frame < total_sample_frames {
+        check_cancelled(settings)?;
+        let frame_count = usize::try_from(total_sample_frames - start_frame)
+            .unwrap_or(usize::MAX)
+            .min(1_024);
+        let start = usize::try_from(start_frame)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(channel_count);
+        let sample_count = frame_count.saturating_mul(channel_count);
+        let chunk_tracks = track_mixes
+            .iter()
+            .map(|(track, samples)| {
+                let end = start.saturating_add(sample_count).min(samples.len());
+                (*track, samples[start..end].to_vec())
+            })
+            .collect::<HashMap<_, _>>();
+        mix.extend(processor.mix_chunk(&chunk_tracks, start_frame, frame_count)?);
+        start_frame = start_frame.saturating_add(u64::try_from(frame_count).unwrap_or(u64::MAX));
     }
     limit_audio_mix(&mut mix);
     Ok(mix)

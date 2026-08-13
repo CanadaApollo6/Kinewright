@@ -904,6 +904,7 @@ fn single_asset_document(asset: MediaAsset) -> Document {
 fn empty_timeline_document(assets: Vec<MediaAsset>) -> Document {
     Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -951,6 +952,7 @@ fn timeline_document(
     }
     Ok(Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,

@@ -735,6 +735,7 @@ mod tests {
             .collect();
         Document {
             catalog: crate::MediaCatalog::default(),
+            audio_mix: crate::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -883,6 +884,7 @@ mod tests {
                                 id: EffectId(next_effect_id),
                                 name: "brightness".to_owned(),
                                 parameters: BTreeMap::new(),
+                                keyframes: BTreeMap::new(),
                             },
                         };
                         next_effect_id += 1;

@@ -976,6 +976,7 @@ mod tests {
                     id: EffectId(1),
                     name: "brightness".to_owned(),
                     parameters: std::collections::BTreeMap::default(),
+                    keyframes: std::collections::BTreeMap::default(),
                 },
             }),
             JournalCommand::Undo,

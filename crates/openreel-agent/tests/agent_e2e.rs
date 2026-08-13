@@ -329,6 +329,107 @@ fn codex_uses_m32_source_and_catalog_primitives_on_an_isolated_branch() {
 }
 
 #[test]
+fn codex_builds_m33_visual_automation_and_an_audio_bus_on_an_isolated_branch() {
+    if std::env::var("OPENREEL_M33_AGENT_TEST").as_deref() != Ok("1") {
+        eprintln!("skipped: set OPENREEL_M33_AGENT_TEST=1 to run the Codex M33 smoke");
+        return;
+    }
+
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let original = fixture_document();
+    let live = Core::spawn(original.clone()).unwrap();
+    let Event::QueryResult(QueryResult::Snapshot { revision, document }) =
+        live.request(Command::Query(Query::Snapshot)).unwrap()
+    else {
+        panic!("expected live snapshot");
+    };
+    let branch = TimelineBranch::new("Codex M33 smoke", revision, document).unwrap();
+    let server = McpServer::start_isolated(branch.core(), media.clone(), media).unwrap();
+    let mut session = openreel_agent::CodexDriver
+        .start_session(SessionConfig {
+            working_directory: std::env::current_dir().ok(),
+            model: None,
+            effort: None,
+            service_tier: None,
+            max_turns: Some(2),
+            mcp_url: Some(server.endpoint().to_owned()),
+        })
+        .expect("the gated test requires Codex CLI 0.147.0+ with a subscription login");
+    let events = session.events();
+    let prompt = "Inspect the timeline. Apply exactly one atomic edit plan with exactly three operations. First add color_grade effect 1 to clip 1 with exposure_milli_stops -1000, temperature_percent 0, and tint_percent 0. Second set effect 1 exposure_milli_stops keyframes at clip-local frame 0 value -1000 linear, frame 45 value 1000 ease_in_out, and frame 89 value 0 linear. Third upsert audio bus 1 named Dialogue routing track 1, with no sidechain tracks and three effects: audio_gain effect 2 at gain_tenth_db -30 with gain keyframes at project frames 0 value -60 linear, 75 value 0 ease_in_out, and 149 value -30 linear; audio_eq effect 3 with low 20, mid -30, and high 10 tenths dB; audio_compressor effect 4 with threshold -180 tenths dB, ratio 400 hundredths, attack 10 ms, release 250 ms, and makeup 20 tenths dB. Then inspect the final timeline.";
+    println!("USER: {prompt}");
+    session.send_user_message(prompt.to_owned()).unwrap();
+
+    let deadline = Instant::now() + Duration::from_mins(3);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "Codex M33 turn timed out");
+        let event = events
+            .recv_timeout(remaining.min(Duration::from_millis(100)))
+            .unwrap_or_else(|error| match error {
+                crossbeam_channel::RecvTimeoutError::Timeout => AgentEvent::Text(String::new()),
+                crossbeam_channel::RecvTimeoutError::Disconnected => {
+                    panic!("Codex M33 event stream ended")
+                }
+            });
+        if event == AgentEvent::Text(String::new()) {
+            continue;
+        }
+        println!("AGENT: {event:?}");
+        if let AgentEvent::Error(error) = &event {
+            panic!("Codex driver error: {error}");
+        }
+        if event == AgentEvent::Done {
+            break;
+        }
+    }
+
+    assert_eq!(
+        &*query_document(&live),
+        &original,
+        "branch leaked into live"
+    );
+    let comparison = branch.compare().unwrap();
+    assert_eq!(comparison.operations.len(), 3);
+    let clip_effect = &comparison.document.clip(ClipId(1)).unwrap().effects[0];
+    assert_eq!(clip_effect.name, "color_grade");
+    assert_eq!(
+        clip_effect
+            .keyframes
+            .get("exposure_milli_stops")
+            .unwrap()
+            .value_at(TimeCode(45)),
+        Some(1_000)
+    );
+    let bus = &comparison.document.audio_mix.buses[0];
+    assert_eq!(bus.name, "Dialogue");
+    assert_eq!(bus.tracks, vec![TrackId(1)]);
+    assert_eq!(bus.effects.len(), 3);
+    assert_eq!(
+        bus.effects[0]
+            .keyframes
+            .get("gain_tenth_db")
+            .unwrap()
+            .value_at(TimeCode(75)),
+        Some(0)
+    );
+    let outcome = branch.merge_into(&live).unwrap();
+    assert!(matches!(
+        outcome,
+        BranchApplyOutcome::Applied {
+            operation_count: 3,
+            ..
+        }
+    ));
+    live.request(Command::Undo).unwrap();
+    assert_eq!(&*query_document(&live), &original);
+    println!("ASSERT: Codex built M33 visual and mix graphs; merge and one undo are exact");
+
+    session.interrupt();
+    server.shutdown();
+}
+
+#[test]
 fn cursor_splits_then_deletes_via_the_live_mcp_server() {
     if std::env::var("OPENREEL_CURSOR_AGENT_TEST").as_deref() != Ok("1") {
         eprintln!(
@@ -430,6 +531,7 @@ fn fixture_document() -> Document {
     };
     Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,

@@ -220,6 +220,7 @@ mod tests {
         }
         Document {
             catalog: crate::MediaCatalog::default(),
+            audio_mix: crate::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Audio,

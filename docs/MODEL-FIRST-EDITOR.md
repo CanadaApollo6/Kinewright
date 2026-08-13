@@ -202,6 +202,9 @@ The Pillar B features make that infrastructure visible and valuable to users.
 - color controls, scopes, and LUTs;
 - audio buses, EQ, dynamics, automation, and ducking.
 
+The implemented contract, proof gates, and deliberate limits are recorded in
+[M33 - Parametric depth](M33-PARAMETRIC-DEPTH-VERIFICATION.md).
+
 ### M34 - Creator leverage and delivery
 
 - animated caption behaviors built on the automation graph;

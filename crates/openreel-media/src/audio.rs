@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -8,11 +9,13 @@ use std::{
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ffmpeg_next as ffmpeg;
-use openreel_core::{Clip, Document, ExportCancellation, MediaError, Rational, TimeCode};
+use openreel_core::{
+    AudioBus, Clip, Document, Effect, ExportCancellation, MediaError, Rational, TimeCode, TrackId,
+};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::{
-    clock::frame_to_samples,
+    clock::{frame_to_samples, samples_to_frame},
     decode::{backend, ensure_decoder, media_error, media_input, stream_timestamp_to_global},
     timeline::timeline_audio_segments,
 };
@@ -292,7 +295,312 @@ impl ClipAudioShaping {
     }
 }
 
+#[derive(Debug)]
+enum AudioEffectState {
+    Stateless,
+    Eq {
+        low: Vec<f32>,
+        high_pass_source: Vec<f32>,
+    },
+    GainEnvelope(f32),
+}
+
+#[derive(Debug)]
+struct AudioEffectRuntime {
+    effect: Effect,
+    state: AudioEffectState,
+}
+
+impl AudioEffectRuntime {
+    fn new(effect: &Effect, channels: usize) -> Self {
+        let state = match effect.name.as_str() {
+            "audio_eq" => AudioEffectState::Eq {
+                low: vec![0.0; channels],
+                high_pass_source: vec![0.0; channels],
+            },
+            "audio_compressor" | "audio_ducking" => AudioEffectState::GainEnvelope(1.0),
+            _ => AudioEffectState::Stateless,
+        };
+        Self {
+            effect: effect.clone(),
+            state,
+        }
+    }
+
+    // Descriptor bounds keep every integer conversion exactly representable at
+    // audio-control precision; keeping the ordered DSP chain together makes
+    // its execution order auditable.
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+    fn process_frame(
+        &mut self,
+        samples: &mut [f32],
+        sidechain: &[f32],
+        project_at: TimeCode,
+        sample_rate: u32,
+    ) {
+        match (&*self.effect.name, &mut self.state) {
+            ("audio_gain", AudioEffectState::Stateless) => {
+                let gain = db_gain(audio_value(&self.effect, "gain_tenth_db", project_at, 0));
+                for sample in samples {
+                    *sample *= gain;
+                }
+            }
+            (
+                "audio_eq",
+                AudioEffectState::Eq {
+                    low,
+                    high_pass_source,
+                },
+            ) => {
+                let low_gain = db_gain(audio_value(
+                    &self.effect,
+                    "low_gain_tenth_db",
+                    project_at,
+                    0,
+                ));
+                let mid_gain = db_gain(audio_value(
+                    &self.effect,
+                    "mid_gain_tenth_db",
+                    project_at,
+                    0,
+                ));
+                let high_gain = db_gain(audio_value(
+                    &self.effect,
+                    "high_gain_tenth_db",
+                    project_at,
+                    0,
+                ));
+                let low_coefficient = low_pass_coefficient(200.0, sample_rate);
+                let high_coefficient = low_pass_coefficient(4_000.0, sample_rate);
+                for (channel, sample) in samples.iter_mut().enumerate() {
+                    let input = *sample;
+                    low[channel] += low_coefficient * (input - low[channel]);
+                    high_pass_source[channel] +=
+                        high_coefficient * (input - high_pass_source[channel]);
+                    let low_band = low[channel];
+                    let high_band = input - high_pass_source[channel];
+                    let mid_band = high_pass_source[channel] - low_band;
+                    *sample = low_band * low_gain + mid_band * mid_gain + high_band * high_gain;
+                }
+            }
+            ("audio_compressor", AudioEffectState::GainEnvelope(envelope)) => {
+                let threshold_tenth_db =
+                    audio_value(&self.effect, "threshold_tenth_db", project_at, 0);
+                let ratio =
+                    audio_value(&self.effect, "ratio_hundredths", project_at, 100) as f32 / 100.0;
+                let level = samples
+                    .iter()
+                    .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+                let level_db = amplitude_db(level);
+                let threshold_db = threshold_tenth_db as f32 / 10.0;
+                let target = if level_db > threshold_db && ratio > 1.0 {
+                    10.0_f32.powf(
+                        ((threshold_db + (level_db - threshold_db) / ratio) - level_db) / 20.0,
+                    )
+                } else {
+                    1.0
+                };
+                smooth_gain(
+                    envelope,
+                    target,
+                    audio_value(&self.effect, "attack_milliseconds", project_at, 10),
+                    audio_value(&self.effect, "release_milliseconds", project_at, 250),
+                    sample_rate,
+                );
+                let makeup = db_gain(audio_value(
+                    &self.effect,
+                    "makeup_gain_tenth_db",
+                    project_at,
+                    0,
+                ));
+                for sample in samples {
+                    *sample *= *envelope * makeup;
+                }
+            }
+            ("audio_ducking", AudioEffectState::GainEnvelope(envelope)) => {
+                let sidechain_level = sidechain
+                    .iter()
+                    .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+                let threshold = db_gain(audio_value(
+                    &self.effect,
+                    "threshold_tenth_db",
+                    project_at,
+                    -300,
+                ));
+                let target = if sidechain_level >= threshold {
+                    db_gain(-audio_value(
+                        &self.effect,
+                        "reduction_tenth_db",
+                        project_at,
+                        120,
+                    ))
+                } else {
+                    1.0
+                };
+                smooth_gain(
+                    envelope,
+                    target,
+                    audio_value(&self.effect, "attack_milliseconds", project_at, 20),
+                    audio_value(&self.effect, "release_milliseconds", project_at, 300),
+                    sample_rate,
+                );
+                for sample in samples {
+                    *sample *= *envelope;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AudioBusRuntime {
+    tracks: Vec<TrackId>,
+    sidechain_tracks: Vec<TrackId>,
+    effects: Vec<AudioEffectRuntime>,
+}
+
+impl AudioBusRuntime {
+    fn new(bus: &AudioBus, channels: usize) -> Self {
+        Self {
+            tracks: bus.tracks.clone(),
+            sidechain_tracks: bus.ducking_sidechain_tracks.clone(),
+            effects: bus
+                .effects
+                .iter()
+                .map(|effect| AudioEffectRuntime::new(effect, channels))
+                .collect(),
+        }
+    }
+}
+
+/// Stateful processor shared by real-time playback and export mixing.
+pub(crate) struct AudioMixProcessor {
+    buses: Vec<AudioBusRuntime>,
+    routed_tracks: HashSet<TrackId>,
+    sample_rate: u32,
+    channels: usize,
+    project_fps: Rational,
+}
+
+impl AudioMixProcessor {
+    pub(crate) fn new(document: &Document, sample_rate: u32, channels: usize) -> Self {
+        let routed_tracks = document
+            .audio_mix
+            .buses
+            .iter()
+            .flat_map(|bus| bus.tracks.iter().copied())
+            .collect();
+        Self {
+            buses: document
+                .audio_mix
+                .buses
+                .iter()
+                .map(|bus| AudioBusRuntime::new(bus, channels))
+                .collect(),
+            routed_tracks,
+            sample_rate,
+            channels,
+            project_fps: document.fps,
+        }
+    }
+
+    pub(crate) fn mix_chunk(
+        &mut self,
+        track_buffers: &HashMap<TrackId, Vec<f32>>,
+        start_sample: u64,
+        sample_frames: usize,
+    ) -> Result<Vec<f32>, MediaError> {
+        let sample_count = sample_frames
+            .checked_mul(self.channels)
+            .ok_or_else(|| MediaError::Backend("audio mix chunk is too large".to_owned()))?;
+        let mut master = vec![0.0_f32; sample_count];
+        for (track, samples) in track_buffers {
+            if !self.routed_tracks.contains(track) {
+                add_signal(&mut master, samples);
+            }
+        }
+        for bus in &mut self.buses {
+            let mut signal = vec![0.0_f32; sample_count];
+            for track in &bus.tracks {
+                if let Some(samples) = track_buffers.get(track) {
+                    add_signal(&mut signal, samples);
+                }
+            }
+            let mut sidechain = vec![0.0_f32; sample_count];
+            for track in &bus.sidechain_tracks {
+                if let Some(samples) = track_buffers.get(track) {
+                    add_signal(&mut sidechain, samples);
+                }
+            }
+            for frame in 0..sample_frames {
+                let start = frame * self.channels;
+                let end = start + self.channels;
+                let project_at = samples_to_frame(
+                    start_sample.saturating_add(u64::try_from(frame).unwrap_or(u64::MAX)),
+                    self.sample_rate,
+                    self.project_fps,
+                );
+                for effect in &mut bus.effects {
+                    effect.process_frame(
+                        &mut signal[start..end],
+                        &sidechain[start..end],
+                        project_at,
+                        self.sample_rate,
+                    );
+                }
+            }
+            add_signal(&mut master, &signal);
+        }
+        Ok(master)
+    }
+}
+
+fn add_signal(destination: &mut [f32], source: &[f32]) {
+    for (destination, source) in destination.iter_mut().zip(source) {
+        *destination += source;
+    }
+}
+
+fn audio_value(effect: &Effect, name: &str, at: TimeCode, neutral: i64) -> i64 {
+    effect.integer_parameter_at(name, at).unwrap_or(neutral)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn db_gain(tenth_db: i64) -> f32 {
+    10.0_f32.powf(tenth_db as f32 / 200.0)
+}
+
+fn amplitude_db(amplitude: f32) -> f32 {
+    20.0 * amplitude.max(0.000_001).log10()
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn low_pass_coefficient(frequency: f32, sample_rate: u32) -> f32 {
+    1.0 - (-2.0 * std::f32::consts::PI * frequency / sample_rate.max(1) as f32).exp()
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn smooth_gain(
+    current: &mut f32,
+    target: f32,
+    attack_milliseconds: i64,
+    release_milliseconds: i64,
+    sample_rate: u32,
+) {
+    let milliseconds = if target < *current {
+        attack_milliseconds
+    } else {
+        release_milliseconds
+    }
+    .max(1) as f32;
+    let samples = milliseconds * sample_rate.max(1) as f32 / 1_000.0;
+    let coefficient = (-1.0 / samples.max(1.0)).exp();
+    *current = coefficient * *current + (1.0 - coefficient) * target;
+}
+
 struct AudioMixSource {
+    track: TrackId,
     path: PathBuf,
     output_rate: u32,
     output_channels: u16,
@@ -381,6 +689,7 @@ struct AudioMixer {
     cursor_sample: u64,
     end_sample: u64,
     meter: Option<Arc<MeterState>>,
+    processor: AudioMixProcessor,
 }
 
 impl AudioMixer {
@@ -392,7 +701,13 @@ impl AudioMixer {
         meter: Option<Arc<MeterState>>,
     ) -> Result<Self, MediaError> {
         let project_end = document.duration;
-        let segments = timeline_audio_segments(document, project_from..project_end)?;
+        let needs_preroll = !document.audio_mix.is_empty() && project_from > TimeCode::ZERO;
+        let decode_from = if needs_preroll {
+            TimeCode::ZERO
+        } else {
+            project_from
+        };
+        let segments = timeline_audio_segments(document, decode_from..project_end)?;
         let mut sources = Vec::with_capacity(segments.len());
         for segment in segments {
             let clip = document.clip(segment.clip).ok_or_else(|| {
@@ -416,6 +731,7 @@ impl AudioMixer {
                 .clip_duration(clip)
                 .map_err(|error| MediaError::Backend(error.to_string()))?;
             sources.push(AudioMixSource {
+                track: segment.track,
                 path: asset.path.clone(),
                 output_rate,
                 output_channels,
@@ -433,34 +749,50 @@ impl AudioMixer {
                 finished: false,
             });
         }
-        Ok(Self {
+        let target_sample = frame_to_samples(project_from, output_rate, document.fps);
+        let mut mixer = Self {
+            processor: AudioMixProcessor::new(document, output_rate, usize::from(output_channels)),
             sources,
             output_channels: usize::from(output_channels),
-            cursor_sample: frame_to_samples(project_from, output_rate, document.fps),
+            cursor_sample: frame_to_samples(decode_from, output_rate, document.fps),
             end_sample: frame_to_samples(project_end, output_rate, document.fps),
-            meter,
-        })
+            meter: None,
+        };
+        while mixer.cursor_sample < target_sample {
+            let remaining = target_sample - mixer.cursor_sample;
+            let limit = usize::try_from(remaining)
+                .unwrap_or(usize::MAX)
+                .min(MIX_CHUNK_SAMPLE_FRAMES);
+            if mixer.next_chunk_limited(limit)?.is_none() {
+                break;
+            }
+        }
+        mixer.meter = meter;
+        Ok(mixer)
     }
 
     fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
+        self.next_chunk_limited(MIX_CHUNK_SAMPLE_FRAMES)
+    }
+
+    fn next_chunk_limited(
+        &mut self,
+        maximum_sample_frames: usize,
+    ) -> Result<Option<Vec<f32>>, MediaError> {
         if self.cursor_sample >= self.end_sample {
             return Ok(None);
         }
         let remaining = self.end_sample.saturating_sub(self.cursor_sample);
         let sample_frames = usize::try_from(remaining)
             .unwrap_or(usize::MAX)
-            .min(MIX_CHUNK_SAMPLE_FRAMES);
+            .min(maximum_sample_frames.max(1));
         let chunk_end = self
             .cursor_sample
             .saturating_add(u64::try_from(sample_frames).unwrap_or(u64::MAX));
-        let mut mixed = vec![
-            0.0;
-            sample_frames
-                .checked_mul(self.output_channels)
-                .ok_or_else(|| MediaError::Backend(
-                    "audio mix chunk is too large".to_owned()
-                ))?
-        ];
+        let sample_count = sample_frames
+            .checked_mul(self.output_channels)
+            .ok_or_else(|| MediaError::Backend("audio mix chunk is too large".to_owned()))?;
+        let mut track_buffers = HashMap::<TrackId, Vec<f32>>::new();
         for source in &mut self.sources {
             let overlap_start = self.cursor_sample.max(source.project_sample_start);
             let overlap_end = chunk_end.min(source.project_sample_end);
@@ -473,12 +805,18 @@ impl AudioMixer {
             let end = usize::try_from(overlap_end.saturating_sub(self.cursor_sample))
                 .unwrap_or(usize::MAX)
                 .saturating_mul(self.output_channels)
-                .min(mixed.len());
-            source.add_samples(&mut mixed[start..end])?;
+                .min(sample_count);
+            let track = track_buffers
+                .entry(source.track)
+                .or_insert_with(|| vec![0.0; sample_count]);
+            source.add_samples(&mut track[start..end])?;
             if overlap_end >= source.project_sample_end {
                 source.retire();
             }
         }
+        let mut mixed =
+            self.processor
+                .mix_chunk(&track_buffers, self.cursor_sample, sample_frames)?;
         if let Some(meter) = &self.meter {
             limit_and_meter_audio_mix(&mut mixed, self.output_channels, meter);
         } else {
@@ -891,14 +1229,151 @@ fn normalized_start(start: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use openreel_core::{
-        AssetId, Clip, ClipId, ExportSettings, MediaAsset, MediaKind, Track, TrackId, TrackKind,
-        Transition,
+        AssetId, AudioBus, AudioBusId, AudioMix, AutomationCurve, Clip, ClipId, Effect, EffectId,
+        ExportSettings, Keyframe, KeyframeInterpolation, MediaAsset, MediaKind, ParamValue, Track,
+        TrackId, TrackKind, Transition,
     };
 
     use crate::test_support::GeneratedMedia;
 
     use super::*;
+
+    fn audio_effect(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
+        Effect {
+            id: EffectId(id),
+            name: name.to_owned(),
+            parameters: parameters
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), ParamValue::Integer(*value)))
+                .collect(),
+            keyframes: BTreeMap::new(),
+        }
+    }
+
+    fn processor_document(fps: Rational, duration: i64, buses: Vec<AudioBus>) -> Document {
+        Document {
+            fps,
+            duration: TimeCode(duration),
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: Vec::new(),
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: Vec::new(),
+                },
+            ],
+            audio_mix: AudioMix { buses },
+            ..Document::default()
+        }
+    }
+
+    #[test]
+    fn bus_gain_automation_uses_exact_project_frames() {
+        let mut gain = audio_effect(1, "audio_gain", &[("gain_tenth_db", -600)]);
+        gain.keyframes.insert(
+            "gain_tenth_db".to_owned(),
+            AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode::ZERO,
+                        value: -600,
+                        interpolation: KeyframeInterpolation::Linear,
+                    },
+                    Keyframe {
+                        at: TimeCode(10),
+                        value: 0,
+                        interpolation: KeyframeInterpolation::Linear,
+                    },
+                ],
+            },
+        );
+        let document = processor_document(
+            Rational::new(10, 1).unwrap(),
+            11,
+            vec![AudioBus {
+                id: AudioBusId(1),
+                name: "Music".to_owned(),
+                tracks: vec![TrackId(1)],
+                effects: vec![gain],
+                ducking_sidechain_tracks: Vec::new(),
+            }],
+        );
+        let tracks = HashMap::from([(TrackId(1), vec![1.0; 11])]);
+        let output = AudioMixProcessor::new(&document, 10, 1)
+            .mix_chunk(&tracks, 0, 11)
+            .unwrap();
+
+        assert_close(output[0], 0.001);
+        assert_close(output[5], 10.0_f32.powf(-30.0 / 20.0));
+        assert_close(output[10], 1.0);
+    }
+
+    #[test]
+    fn eq_compressor_and_ducking_execute_in_order_on_real_samples() {
+        let document = processor_document(
+            Rational::new(1_000, 1).unwrap(),
+            2_000,
+            vec![
+                AudioBus {
+                    id: AudioBusId(1),
+                    name: "Bed".to_owned(),
+                    tracks: vec![TrackId(1)],
+                    effects: vec![
+                        audio_effect(1, "audio_eq", &[("low_gain_tenth_db", -240)]),
+                        audio_effect(
+                            2,
+                            "audio_compressor",
+                            &[
+                                ("threshold_tenth_db", -200),
+                                ("ratio_hundredths", 1_000),
+                                ("attack_milliseconds", 1),
+                            ],
+                        ),
+                        audio_effect(
+                            3,
+                            "audio_ducking",
+                            &[
+                                ("threshold_tenth_db", -300),
+                                ("reduction_tenth_db", 200),
+                                ("attack_milliseconds", 1),
+                            ],
+                        ),
+                    ],
+                    ducking_sidechain_tracks: vec![TrackId(2)],
+                },
+                AudioBus {
+                    id: AudioBusId(2),
+                    name: "Sidechain monitor".to_owned(),
+                    tracks: vec![TrackId(2)],
+                    effects: vec![audio_effect(4, "audio_gain", &[("gain_tenth_db", -600)])],
+                    ducking_sidechain_tracks: Vec::new(),
+                },
+            ],
+        );
+        let tracks = HashMap::from([
+            (TrackId(1), vec![1.0; 2_000]),
+            (TrackId(2), vec![1.0; 2_000]),
+        ]);
+        let output = AudioMixProcessor::new(&document, 1_000, 1)
+            .mix_chunk(&tracks, 0, 2_000)
+            .unwrap();
+
+        assert!(output[1_999] > 0.001, "processed bed must remain audible");
+        assert!(
+            output[1_999] < 0.03,
+            "EQ, compression, and ducking should reduce steady full-scale input: {}",
+            output[1_999]
+        );
+    }
 
     #[test]
     // These values are exact binary fractions and zeros, so exact equality is the contract.
@@ -1082,12 +1557,16 @@ mod tests {
                 .any(|sample| sample.abs() >= 1.0 - f32::EPSILON),
             "fixture did not exercise the hard-clamp limiter"
         );
-        let silence = interleaved_sample_range(14..16, fps, 48_000, 2);
+        // Stateful EQ is allowed to ring briefly after the cut at frame 14;
+        // the second half of the gap must settle below -80 dBFS.
+        let silence = interleaved_sample_range(15..16, fps, 48_000, 2);
+        let silence_peak = exported[silence]
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0_f32, f32::max);
         assert!(
-            exported[silence]
-                .iter()
-                .all(|sample| sample.abs() <= 1.0e-7),
-            "fixture gap was not silent"
+            silence_peak <= 1.0e-4,
+            "processed filter tail {silence_peak} exceeded -80 dBFS in the fixture gap"
         );
         let transition_start = interleaved_sample_range(16..17, fps, 48_000, 2);
         let steady_state = interleaved_sample_range(18..20, fps, 48_000, 2);
@@ -1145,6 +1624,7 @@ mod tests {
         let fps = Rational::new(10, 1).unwrap();
         let document = Document {
             catalog: openreel_core::MediaCatalog::default(),
+            audio_mix: openreel_core::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -1207,6 +1687,28 @@ mod tests {
     fn parity_document(voice: &Path, bed: &Path, fps: Rational) -> Document {
         Document {
             catalog: openreel_core::MediaCatalog::default(),
+            audio_mix: AudioMix {
+                buses: vec![AudioBus {
+                    id: AudioBusId(1),
+                    name: "Bed duck".to_owned(),
+                    tracks: vec![TrackId(2)],
+                    effects: vec![
+                        audio_effect(10, "audio_eq", &[("high_gain_tenth_db", -30)]),
+                        audio_effect(
+                            11,
+                            "audio_compressor",
+                            &[("threshold_tenth_db", -120), ("ratio_hundredths", 400)],
+                        ),
+                        audio_effect(
+                            12,
+                            "audio_ducking",
+                            &[("threshold_tenth_db", -300), ("reduction_tenth_db", 60)],
+                        ),
+                        audio_effect(13, "audio_gain", &[("gain_tenth_db", 120)]),
+                    ],
+                    ducking_sidechain_tracks: vec![TrackId(1)],
+                }],
+            },
             tracks: vec![
                 Track {
                     id: TrackId(1),

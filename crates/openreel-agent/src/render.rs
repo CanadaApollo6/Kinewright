@@ -153,6 +153,7 @@ pub fn render_timeline_state(document: &Document) -> String {
         );
     }
     render_catalog(&mut output, document);
+    render_audio_mix(&mut output, document);
     if output.ends_with('\n') {
         output.pop();
     }
@@ -486,6 +487,40 @@ fn render_catalog(output: &mut String, document: &Document) {
     }
 }
 
+fn render_audio_mix(output: &mut String, document: &Document) {
+    if document.audio_mix.buses.is_empty() {
+        return;
+    }
+    output.push_str("audio_buses:\n");
+    for bus in &document.audio_mix.buses {
+        let tracks = bus
+            .tracks
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let sidechain = bus
+            .ducking_sidechain_tracks
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = writeln!(
+            output,
+            "  audio_bus {} {:?} tracks={} sidechain={} effects={}",
+            bus.id,
+            bus.name,
+            tracks,
+            if sidechain.is_empty() {
+                "none"
+            } else {
+                &sidechain
+            },
+            render_effects(&bus.effects),
+        );
+    }
+}
+
 fn render_speaker(speaker: Option<&str>) -> String {
     speaker.map_or_else(String::new, |speaker| format!(" speaker={speaker:?}"))
 }
@@ -724,6 +759,26 @@ fn render_effects(effects: &[Effect]) -> String {
             }
             let _ = write!(rendered, "{name}={}", render_param(value));
         }
+        if !effect.keyframes.is_empty() {
+            rendered.push_str("; keyframes=");
+            for (curve_index, (name, curve)) in effect.keyframes.iter().enumerate() {
+                if curve_index != 0 {
+                    rendered.push('|');
+                }
+                let _ = write!(rendered, "{name}[");
+                for (keyframe_index, keyframe) in curve.keyframes.iter().enumerate() {
+                    if keyframe_index != 0 {
+                        rendered.push(',');
+                    }
+                    let _ = write!(
+                        rendered,
+                        "{}:{}:{:?}",
+                        keyframe.at.0, keyframe.value, keyframe.interpolation
+                    );
+                }
+                rendered.push(']');
+            }
+        }
         rendered.push(')');
     }
     rendered.push(']');
@@ -774,6 +829,7 @@ mod tests {
     fn fixture() -> Document {
         Document {
             catalog: openreel_core::MediaCatalog::default(),
+            audio_mix: openreel_core::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,
@@ -792,6 +848,7 @@ mod tests {
                                 "percent".to_owned(),
                                 ParamValue::Integer(25),
                             )]),
+                            keyframes: BTreeMap::new(),
                         }],
                         transition_in: Some(Transition {
                             name: "crossfade".to_owned(),
@@ -974,6 +1031,7 @@ assets:
                         "top_percent".to_owned(),
                         ParamValue::Integer(10),
                     )]),
+                    keyframes: BTreeMap::new(),
                 }],
                 transition_in: Some(Transition {
                     name: "crossfade".to_owned(),

@@ -4,7 +4,7 @@ use eframe::egui;
 use openreel_core::{
     Clip, ClipContent, ClipId, EFFECT_DESCRIPTORS, Effect, EffectId, MARKER_COLOR_TOKEN_COUNT,
     Marker, MarkerId, MediaKind, Operation, ParamValue, TITLE_COLORS, TITLE_FONT_SIZES,
-    TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition, Transition,
+    TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition, Transition, is_audio_effect,
 };
 
 use crate::{
@@ -493,6 +493,9 @@ fn effects_section(ui: &mut egui::Ui, clip: &Clip, pending: &mut Vec<Operation>)
     }
     ui.menu_button("+ Effect", |ui| {
         for descriptor in EFFECT_DESCRIPTORS {
+            if is_audio_effect(descriptor.name) || descriptor.name == "cube_lut" {
+                continue;
+            }
             if clip
                 .effects
                 .iter()
@@ -671,6 +674,7 @@ fn add_effect_operation(clip: &Clip, descriptor: &openreel_core::EffectDescripto
             id: EffectId(id),
             name: descriptor.name.to_owned(),
             parameters,
+            keyframes: BTreeMap::new(),
         },
     }
 }
@@ -799,6 +803,7 @@ mod tests {
                 id: EffectId(8),
                 name: "contrast".to_owned(),
                 parameters: BTreeMap::new(),
+                keyframes: BTreeMap::new(),
             }],
             transition_in: None,
             link: None,
@@ -815,6 +820,7 @@ mod tests {
                     id: EffectId(9),
                     name: "brightness".to_owned(),
                     parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0),)]),
+                    keyframes: BTreeMap::new(),
                 },
             }
         );

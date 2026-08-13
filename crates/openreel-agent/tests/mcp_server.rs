@@ -295,6 +295,18 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
             "percent".to_owned(),
             ParamValue::Integer(0),
         )]),
+        keyframes: std::collections::BTreeMap::new(),
+    });
+    document.tracks[0].clips[0].effects.push(Effect {
+        id: EffectId(2),
+        name: "mask".to_owned(),
+        parameters: std::collections::BTreeMap::from([
+            ("center_x_percent".to_owned(), ParamValue::Integer(50)),
+            ("center_y_percent".to_owned(), ParamValue::Integer(50)),
+            ("width_percent".to_owned(), ParamValue::Integer(40)),
+            ("height_percent".to_owned(), ParamValue::Integer(40)),
+        ]),
+        keyframes: std::collections::BTreeMap::new(),
     });
     let core = Core::spawn(document).unwrap();
     let server = McpServer::start(core, media.clone(), media).unwrap();
@@ -358,6 +370,39 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
     let png = BASE64.decode(&storyboard_image.data).unwrap();
     let decoded = image::load_from_memory(&png).unwrap();
     assert_eq!((decoded.width(), decoded.height()), (652, 90));
+
+    let tracking = client
+        .call_tool(
+            CallToolRequestParams::new("track_mask_region").with_arguments(
+                json!({
+                    "clip_id": 1,
+                    "effect_id": 2,
+                    "start_local_frame": 0,
+                    "end_local_frame": 11,
+                    "step_frames": 5,
+                    "max_width": 64
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tracking.is_error, Some(false));
+    let tracking = tracking
+        .structured_content
+        .as_ref()
+        .expect("tracking must return machine-readable keyframe operations");
+    assert_eq!(tracking["timeline_revision"], 0);
+    assert_eq!(tracking["observations"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        tracking["apply_edit_plan"]["operations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 
     let requested = client
         .call_tool(
@@ -424,6 +469,7 @@ fn edit_plan_document() -> Document {
     };
     Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,

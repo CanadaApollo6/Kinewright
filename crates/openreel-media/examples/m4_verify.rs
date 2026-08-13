@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let blue = engine.probe(&blue_path)?;
     let mut document = Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![
             Track {
                 id: TrackId(1),
@@ -85,6 +86,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             id: EffectId(1),
             name: "opacity".to_owned(),
             parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(65))]),
+            keyframes: BTreeMap::new(),
         },
     }
     .apply(&mut document)?;

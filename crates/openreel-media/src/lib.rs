@@ -10,6 +10,7 @@ mod derived;
 mod derived_cache;
 mod engine;
 mod export;
+mod lut;
 mod render;
 mod sha256;
 mod timeline;

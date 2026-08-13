@@ -147,6 +147,7 @@ pub fn document_for_delivery_variant(
             id: EffectId(next_effect_id),
             name: "reframe".to_owned(),
             parameters,
+            keyframes: BTreeMap::default(),
         });
         next_effect_id = next_effect_id
             .checked_add(1)

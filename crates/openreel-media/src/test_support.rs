@@ -208,6 +208,7 @@ pub fn single_clip_document(asset: MediaAsset) -> Document {
     let resolution = asset.resolution.unwrap_or((320, 180));
     Document {
         catalog: openreel_core::MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,

@@ -127,7 +127,7 @@ pub fn video_layers_at(
                 })?;
             layers.push(TimelineVideoLayer {
                 source,
-                effects: clip.effects.clone(),
+                effects: evaluated_effects(clip, project_at),
                 transition: transition_render_params(clip, project_at),
             });
         }
@@ -161,7 +161,7 @@ pub fn visual_layers_at(
                 let source = media_source_for_clip(document, track.id, clip, project_at)?;
                 layers.push(TimelineVisualLayer::Video(TimelineVideoLayer {
                     source,
-                    effects: clip.effects.clone(),
+                    effects: evaluated_effects(clip, project_at),
                     transition: transition_render_params(clip, project_at),
                 }));
             }
@@ -172,7 +172,7 @@ pub fn visual_layers_at(
                     track: track.id,
                     clip: clip.id,
                     title: title.clone(),
-                    effects: clip.effects.clone(),
+                    effects: evaluated_effects(clip, project_at),
                     transition,
                 }));
             }
@@ -196,13 +196,23 @@ pub fn visual_layers_at(
                         source_end,
                         timeline_end,
                     },
-                    effects: clip.effects.clone(),
+                    effects: evaluated_effects(clip, project_at),
                     transition: transition_render_params(clip, project_at),
                 }));
             }
         }
     }
     Ok(layers)
+}
+
+fn evaluated_effects(clip: &Clip, project_at: TimeCode) -> Vec<Effect> {
+    let local_at = project_at
+        .checked_sub(clip.timeline_start)
+        .unwrap_or(TimeCode::ZERO);
+    clip.effects
+        .iter()
+        .map(|effect| effect.evaluated_at(local_at))
+        .collect()
 }
 
 /// Enumerate every audio-bearing clip portion intersecting a project range.
@@ -444,8 +454,9 @@ mod tests {
     use std::path::PathBuf;
 
     use openreel_core::{
-        AssetId, Clip, ClipId, Document, Effect, EffectId, FreezeFrame, MediaAsset, MediaKind,
-        ParamValue, Rational, TimeCode, Track, TrackId, TrackKind, Transition,
+        AssetId, AutomationCurve, Clip, ClipId, Document, Effect, EffectId, FreezeFrame, Keyframe,
+        KeyframeInterpolation, MediaAsset, MediaKind, ParamValue, Rational, TimeCode, Track,
+        TrackId, TrackKind, Transition,
     };
 
     use super::*;
@@ -453,6 +464,7 @@ mod tests {
     fn fixture() -> Document {
         Document {
             catalog: openreel_core::MediaCatalog::default(),
+            audio_mix: openreel_core::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,
@@ -513,6 +525,47 @@ mod tests {
             resolution: (320, 180),
             duration: TimeCode(25),
         }
+    }
+
+    #[test]
+    fn visual_layers_resolve_effect_automation_at_clip_local_frames() {
+        let mut document = fixture();
+        document.tracks[0].clips[0].effects.push(Effect {
+            id: EffectId(1),
+            name: "brightness".to_owned(),
+            parameters: std::collections::BTreeMap::from([(
+                "percent".to_owned(),
+                ParamValue::Integer(-10),
+            )]),
+            keyframes: std::collections::BTreeMap::from([(
+                "percent".to_owned(),
+                AutomationCurve {
+                    keyframes: vec![
+                        Keyframe {
+                            at: TimeCode::ZERO,
+                            value: 0,
+                            interpolation: KeyframeInterpolation::Linear,
+                        },
+                        Keyframe {
+                            at: TimeCode(9),
+                            value: 90,
+                            interpolation: KeyframeInterpolation::Linear,
+                        },
+                    ],
+                },
+            )]),
+        });
+        document.validate().unwrap();
+
+        let layers = visual_layers_at(&document, TimeCode(3)).unwrap();
+        let TimelineVisualLayer::Video(layer) = &layers[0] else {
+            panic!("media clip must resolve to a video layer");
+        };
+        assert_eq!(
+            layer.effects[0].parameters.get("percent"),
+            Some(&ParamValue::Integer(30))
+        );
+        assert!(layer.effects[0].keyframes.is_empty());
     }
 
     #[test]
@@ -714,6 +767,7 @@ mod tests {
                         "percent".to_owned(),
                         ParamValue::Integer(20),
                     )]),
+                    keyframes: std::collections::BTreeMap::new(),
                 }],
                 transition_in: Some(Transition {
                     name: "crossfade".to_owned(),
