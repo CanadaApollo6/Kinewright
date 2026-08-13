@@ -117,3 +117,16 @@ cargo run -p openreel-agent --bin openreel-eval -- `
 
 Machine green still does not mean accepted. The exact MP4s must be watched with
 audio and scored through their generated human-review file.
+
+## Published machine baseline
+
+The 2026-08-13 Codex run on revision `f232e35` passed all three independent
+samples and all 93 assertions. The samples used 17, 17, and 16 tool calls and
+251,345, 250,215, and 236,336 reported tokens. All three produced the same
+602-frame 1080x1920 MP4 with SHA-256
+`650ff8df011890db87a1a1b759e6fdb3b678b8cb7bff19acfcabffde91a3a1a8` and
+2.39% rendered-dialogue word error rate.
+
+The repeated output is useful evidence of deterministic execution, not human
+acceptance. The SHA-bound human review is still pending. See the exact record in
+[`benchmarks/auto-edit/v3/baseline.json`](../benchmarks/auto-edit/v3/baseline.json).

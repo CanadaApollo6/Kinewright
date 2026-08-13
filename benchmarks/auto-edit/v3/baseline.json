@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "openreel-editorial-cut-v3",
+  "suite_manifest": "benchmarks/auto-edit/v3/manifest.json",
+  "source_trace": {
+    "filename": "openreel-eval-20260813-172433-codex/results.jsonl",
+    "sha256": "207ad6df211d23609a9f77264cba4ba891128d92669cc7d2fdefb497c282323b",
+    "note": "The raw trace and media package are generated local artifacts under target/evals and are intentionally not committed."
+  },
+  "environment": {
+    "timestamp_utc": "2026-08-13T17:24:33Z",
+    "harness": "codex",
+    "harness_version": "codex-cli 0.147.0",
+    "model": "harness-default",
+    "os": "windows",
+    "architecture": "x86_64",
+    "openreel_version": "0.1.0",
+    "openreel_revision": "f232e3575c683dd9d1b716b81209bf692606140a"
+  },
+  "machine_summary": {
+    "samples_passed": 3,
+    "samples_total": 3,
+    "assertions_passed": 93,
+    "assertions_total": 93,
+    "turns": 3,
+    "tool_calls": 50,
+    "input_tokens": 729804,
+    "cached_input_tokens": 633600,
+    "output_tokens": 8092,
+    "reasoning_output_tokens": 1639,
+    "total_tokens": 737896,
+    "mean_total_tokens": 245965.3333,
+    "cost_usd": null,
+    "wall_time_ms": 275225,
+    "mean_wall_time_ms": 91741.6667,
+    "operations_applied": 108
+  },
+  "samples": [
+    {
+      "id": "f2-sample-1",
+      "passed": true,
+      "assertions_passed": 31,
+      "assertions_total": 31,
+      "turns": 1,
+      "tool_calls": 17,
+      "input_tokens": 248614,
+      "cached_input_tokens": 206848,
+      "output_tokens": 2731,
+      "reasoning_output_tokens": 417,
+      "total_tokens": 251345,
+      "wall_time_ms": 94317,
+      "operations_applied": 35,
+      "rendered_word_error_rate_basis_points": 239,
+      "output_sha256": "650ff8df011890db87a1a1b759e6fdb3b678b8cb7bff19acfcabffde91a3a1a8"
+    },
+    {
+      "id": "f2-sample-2",
+      "passed": true,
+      "assertions_passed": 31,
+      "assertions_total": 31,
+      "turns": 1,
+      "tool_calls": 17,
+      "input_tokens": 247660,
+      "cached_input_tokens": 219904,
+      "output_tokens": 2555,
+      "reasoning_output_tokens": 348,
+      "total_tokens": 250215,
+      "wall_time_ms": 88236,
+      "operations_applied": 38,
+      "rendered_word_error_rate_basis_points": 239,
+      "output_sha256": "650ff8df011890db87a1a1b759e6fdb3b678b8cb7bff19acfcabffde91a3a1a8"
+    },
+    {
+      "id": "f2-sample-3",
+      "passed": true,
+      "assertions_passed": 31,
+      "assertions_total": 31,
+      "turns": 1,
+      "tool_calls": 16,
+      "input_tokens": 233530,
+      "cached_input_tokens": 206848,
+      "output_tokens": 2806,
+      "reasoning_output_tokens": 874,
+      "total_tokens": 236336,
+      "wall_time_ms": 92672,
+      "operations_applied": 35,
+      "rendered_word_error_rate_basis_points": 239,
+      "output_sha256": "650ff8df011890db87a1a1b759e6fdb3b678b8cb7bff19acfcabffde91a3a1a8"
+    }
+  ],
+  "deliverable": {
+    "profile": "vertical_short",
+    "resolution": [1080, 1920],
+    "duration_frames": 602,
+    "output_bytes": 3924541,
+    "output_sha256": "650ff8df011890db87a1a1b759e6fdb3b678b8cb7bff19acfcabffde91a3a1a8",
+    "rendered_word_error_rate_basis_points": 239,
+    "proof_sample_frames": [0, 75, 150, 225, 300, 375, 450, 525, 601]
+  },
+  "human_review": {
+    "status": "pending",
+    "unique_artifacts": 1,
+    "required_sample_acceptances": 2,
+    "required_mean_rating": 3.5,
+    "minimum_dimension_rating": 3.0,
+    "maximum_material_caption_errors": 0,
+    "maximum_audible_fillers": 0
+  }
+}

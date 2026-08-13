@@ -22,7 +22,9 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   thresholds apply after transcript protection and cut margins. English eval
   transcription is hinted explicitly, and a broken `whisper-rs` safe abort
   callback was removed after it intermittently aborted healthy Windows
-  inference.
+  inference. The published Codex machine baseline passes 3/3 samples and 93/93
+  assertions with 16-17 tool calls and 236,336-251,345 tokens per sample. Human
+  acceptance remains pending.
 - M37 finished-cut preparation: titles and captions now use one exact Inter-
   measured layout across preview, export, delivery conformance, and QA. Type
   scales from the short edge, wraps inside an 8% safe area, adapts only when it

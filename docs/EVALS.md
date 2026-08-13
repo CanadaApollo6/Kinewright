@@ -60,10 +60,13 @@ cargo run -p openreel-agent --bin openreel-eval -- `
   --samples 3
 ```
 
-V3 has no published baseline yet. A baseline is not machine green alone: all
-three samples must pass the machine contract, then a person must accept at
-least two SHA-bound outputs with an overall mean of at least 3.5 and no review
-dimension below 3.0.
+The current v3 Codex machine baseline passed all three samples and all 93
+assertions. Samples used 16-17 tool calls and 236,336-251,345 reported tokens,
+and all three produced the same 602-frame 1080x1920 MP4 at 2.39% independently
+measured word error rate. The exact record lives in
+[`benchmarks/auto-edit/v3/baseline.json`](../benchmarks/auto-edit/v3/baseline.json).
+Human review remains pending: a person must accept at least two SHA-bound
+outputs with an overall mean of at least 3.5 and no review dimension below 3.0.
 
 ## Seed suite
 

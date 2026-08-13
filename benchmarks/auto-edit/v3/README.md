@@ -37,6 +37,12 @@ cargo run -p openreel-agent --bin openreel-eval -- `
   --samples 3
 ```
 
+The published Codex baseline on revision `f232e35` passed all three samples and
+all 93 assertions. It used 16-17 tool calls and 236,336-251,345 reported tokens
+per sample. Every trial produced the same 602-frame MP4 at 2.39% independently
+measured word error rate. The exact machine record is in
+[`baseline.json`](baseline.json); human review remains pending.
+
 Each output is SHA-bound to a separate human review. The milestone passes only
 when all three samples pass the machine contract, at least two are accepted by
 a person, the overall human mean is at least 3.5, no dimension is below 3, and
