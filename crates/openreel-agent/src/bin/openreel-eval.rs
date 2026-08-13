@@ -2146,4 +2146,28 @@ mod tests {
         assert_eq!(baseline["human_review"]["mean_rating"], 2.25);
         assert_eq!(baseline["human_review"]["ratings"]["pacing"], 2.5);
     }
+
+    #[test]
+    fn published_v4_baseline_records_machine_success_and_pending_human_review() {
+        let baseline: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v4/baseline.json"
+        ))
+        .unwrap();
+        let machine = &baseline["machine_summary"];
+        assert_eq!(machine["samples_passed"], 3);
+        assert_eq!(machine["samples_total"], 3);
+        assert_eq!(machine["assertions_passed"], 99);
+        assert_eq!(machine["assertions_total"], 99);
+        assert_eq!(
+            baseline["deliverable"]["sentence_boundaries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|boundary| boundary["gap_project_frames"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            [12, 12, 12, 12]
+        );
+        assert_eq!(baseline["human_review"]["status"], "pending");
+        assert_eq!(baseline["benchmark_status"], "pending_human_review");
+    }
 }

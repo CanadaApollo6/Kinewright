@@ -90,7 +90,12 @@ cargo run -p openreel-agent --bin openreel-eval -- `
 M39 requires a 3/3 machine pass before human review. Its human gate is at
 least two accepted SHA-bound artifacts, a 4.0/5 overall mean, 4.5/5 pacing,
 3.5/5 in every other dimension, and zero audible fillers or material caption
-errors. No machine baseline has been published yet.
+errors. The current Codex machine baseline passes 3/3 samples and 99/99
+assertions. All three artifacts are byte-identical, 607 frames long, and have
+four independently measured 12-frame sentence gaps. Samples used 17-19 tool
+calls and 262,061-324,011 reported tokens. The exact record lives in
+[`benchmarks/auto-edit/v4/baseline.json`](../benchmarks/auto-edit/v4/baseline.json).
+Human review remains pending, so M39 is not complete.
 
 ## Seed suite
 

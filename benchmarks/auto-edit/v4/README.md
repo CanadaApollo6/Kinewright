@@ -34,11 +34,20 @@ cargo run -p openreel-agent --bin openreel-eval -- `
   --samples 3
 ```
 
+The published Codex machine baseline on revision `988a049` passes all three
+samples and all 99 assertions. Every sample produced the same 607-frame MP4
+with sentence-boundary gaps of 12, 12, 12, and 12 project frames and a 4.77%
+independent rendered-dialogue word error rate. Samples used 17-19 tool calls
+and 262,061-324,011 reported tokens. The exact record is in
+[`baseline.json`](baseline.json).
+
 Each output remains SHA-bound to separate human review. The milestone passes
 only when all three samples pass the machine contract, at least two are
 accepted by a person, mean human rating is at least 4.0, pacing is at least
 4.5, no other dimension falls below 3.5, and no material caption error or
 audible filler survives.
+
+Human review is pending. A machine pass alone does not complete M39.
 
 This is still a synthetic motion-graphic fixture. It can isolate dialogue
 editing and narrative correctness, but it cannot establish professional shot

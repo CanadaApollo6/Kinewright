@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "openreel-dialogue-pacing-v4",
+  "suite_manifest": "benchmarks/auto-edit/v4/manifest.json",
+  "source_trace": {
+    "filename": "openreel-eval-20260813-223217-codex/results.jsonl",
+    "sha256": "ad75d656c3df936627810ae908caac08731a0465f72140f1f1b79b60f6bd5b14",
+    "note": "The raw trace and media package are generated local artifacts under target/evals and are intentionally not committed."
+  },
+  "environment": {
+    "timestamp_utc": "2026-08-13T22:32:17Z",
+    "harness": "codex",
+    "harness_version": "codex-cli 0.147.0",
+    "model": "harness-default",
+    "os": "windows",
+    "architecture": "x86_64",
+    "openreel_version": "0.1.0",
+    "openreel_revision": "988a0498cb9bd287e83928195f62e4a6e45ecba9"
+  },
+  "machine_summary": {
+    "samples_passed": 3,
+    "samples_total": 3,
+    "assertions_passed": 99,
+    "assertions_total": 99,
+    "turns": 3,
+    "tool_calls": 53,
+    "input_tokens": 840074,
+    "cached_input_tokens": 717056,
+    "output_tokens": 8075,
+    "reasoning_output_tokens": 2068,
+    "total_tokens": 848149,
+    "mean_total_tokens": 282716.3333,
+    "cost_usd": null,
+    "wall_time_ms": 300064,
+    "mean_wall_time_ms": 100021.3333,
+    "operations_applied": 105
+  },
+  "samples": [
+    {
+      "id": "f3-sample-1",
+      "passed": true,
+      "assertions_passed": 33,
+      "assertions_total": 33,
+      "turns": 1,
+      "tool_calls": 19,
+      "input_tokens": 321313,
+      "cached_input_tokens": 270848,
+      "output_tokens": 2698,
+      "reasoning_output_tokens": 689,
+      "total_tokens": 324011,
+      "wall_time_ms": 106599,
+      "operations_applied": 35,
+      "sentence_boundary_gaps_project_frames": [12, 12, 12, 12],
+      "rendered_word_error_rate_basis_points": 477,
+      "output_sha256": "39ebb79feb96915c845343b043d8879cc2756412f42180f7469936c329327162"
+    },
+    {
+      "id": "f3-sample-2",
+      "passed": true,
+      "assertions_passed": 33,
+      "assertions_total": 33,
+      "turns": 1,
+      "tool_calls": 17,
+      "input_tokens": 259384,
+      "cached_input_tokens": 215040,
+      "output_tokens": 2677,
+      "reasoning_output_tokens": 585,
+      "total_tokens": 262061,
+      "wall_time_ms": 97896,
+      "operations_applied": 35,
+      "sentence_boundary_gaps_project_frames": [12, 12, 12, 12],
+      "rendered_word_error_rate_basis_points": 477,
+      "output_sha256": "39ebb79feb96915c845343b043d8879cc2756412f42180f7469936c329327162"
+    },
+    {
+      "id": "f3-sample-3",
+      "passed": true,
+      "assertions_passed": 33,
+      "assertions_total": 33,
+      "turns": 1,
+      "tool_calls": 17,
+      "input_tokens": 259377,
+      "cached_input_tokens": 231168,
+      "output_tokens": 2700,
+      "reasoning_output_tokens": 794,
+      "total_tokens": 262077,
+      "wall_time_ms": 95569,
+      "operations_applied": 35,
+      "sentence_boundary_gaps_project_frames": [12, 12, 12, 12],
+      "rendered_word_error_rate_basis_points": 477,
+      "output_sha256": "39ebb79feb96915c845343b043d8879cc2756412f42180f7469936c329327162"
+    }
+  ],
+  "deliverable": {
+    "profile": "vertical_short",
+    "resolution": [1080, 1920],
+    "duration_frames": 607,
+    "output_bytes": 3928765,
+    "output_sha256": "39ebb79feb96915c845343b043d8879cc2756412f42180f7469936c329327162",
+    "sentence_boundaries": [
+      {"previous_word": "rain", "next_word": "Neighbors", "gap_project_frames": 12},
+      {"previous_word": "instead", "next_word": "Over", "gap_project_frames": 12},
+      {"previous_word": "beds", "next_word": "Then", "gap_project_frames": 12},
+      {"previous_word": "peppers.", "next_word": "Now", "gap_project_frames": 12}
+    ],
+    "rendered_word_error_rate_basis_points": 477,
+    "proof_sample_frames": [0, 75, 151, 227, 303, 378, 454, 530, 606]
+  },
+  "human_review": {
+    "status": "pending",
+    "review_template": "target/evals/openreel-eval-20260813-223217-codex/human-review.json",
+    "unique_artifacts": 1,
+    "required_sample_acceptances": 2,
+    "required_mean_rating": 4.0,
+    "required_pacing_rating": 4.5,
+    "minimum_other_dimension_rating": 3.5,
+    "maximum_material_caption_errors": 0,
+    "maximum_audible_fillers": 0
+  },
+  "benchmark_status": "pending_human_review"
+}
