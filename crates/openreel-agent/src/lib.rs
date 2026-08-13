@@ -5,6 +5,7 @@ mod branch;
 mod cursor;
 mod drivers;
 pub mod eval;
+pub mod export_queue;
 mod models;
 mod protocol;
 mod render;

@@ -212,6 +212,9 @@ The implemented contract, proof gates, and deliberate limits are recorded in
 - speaker-aware multicam and subject-aware reframe;
 - platform variants, export queue, and delivery conformance.
 
+The implemented contract, proof gates, and deliberate limits are recorded in
+[M34 - Creator leverage and delivery](M34-CREATOR-DELIVERY-VERIFICATION.md).
+
 The published "footage in, finished cut out" benchmark should grow continuously
 through every milestone instead of waiting for a final automation pass. Its
 history is the scoreboard for both foundational work and Pillar B.

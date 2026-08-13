@@ -5,8 +5,8 @@ use std::{
 
 use openreel_agent::{ClaudeCodeDriver, CursorAcpDriver};
 use openreel_core::{
-    AgentDriver, Analysis, AssetId, ClipId, Core, Document, Event, MarkerId, Playback, TimeCode,
-    TimelineRevision,
+    AgentDriver, Analysis, AssetId, ClipId, Core, Document, Event, Export, MarkerId, Playback,
+    TimeCode, TimelineRevision,
 };
 
 use crate::{
@@ -54,6 +54,7 @@ impl ProjectSession {
         project_path: Option<PathBuf>,
         playback: &Arc<dyn Playback>,
         analysis: &Arc<dyn Analysis>,
+        exporter: &Arc<dyn Export>,
     ) -> Result<Self, String> {
         let name = name.into();
         let core = Core::spawn(document.clone()).map_err(|error| error.to_string())?;
@@ -94,6 +95,7 @@ impl ProjectSession {
                 &document,
                 playback,
                 analysis,
+                exporter,
             )?],
             active_thread: 0,
             next_thread_number: 2,

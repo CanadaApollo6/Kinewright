@@ -12,7 +12,7 @@ use openreel_agent::{
 };
 use openreel_core::{
     AgentDriver, AgentEvent, AgentSession, Analysis, AuthenticationStatus, Command, Document,
-    Event, HarnessInfo, Playback, QaSeverity, SessionConfig, TimeCode, TimelineRevision,
+    Event, Export, HarnessInfo, Playback, QaSeverity, SessionConfig, TimeCode, TimelineRevision,
     qa_document,
 };
 use serde::Serialize;
@@ -211,6 +211,7 @@ impl BranchProvenance {
 }
 
 impl AgentThread {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         name: impl Into<String>,
         harness: AgentHarnessChoice,
@@ -219,14 +220,16 @@ impl AgentThread {
         base_document: &Arc<Document>,
         playback: &Arc<dyn Playback>,
         analysis: &Arc<dyn Analysis>,
+        exporter: &Arc<dyn Export>,
     ) -> Result<Self, String> {
         let name = name.into();
         let branch = TimelineBranch::new(name.clone(), base_revision, Arc::clone(base_document))
             .map_err(|error| error.to_string())?;
-        let mcp_server = match McpServer::start_isolated(
+        let mcp_server = match McpServer::start_isolated_with_exporter(
             branch.core(),
             Arc::clone(playback),
             Arc::clone(analysis),
+            Arc::clone(exporter),
         ) {
             Ok(server) => Some(server),
             Err(error) => {
@@ -262,6 +265,7 @@ impl AgentThread {
         base_document: Arc<Document>,
         playback: Arc<dyn Playback>,
         analysis: Arc<dyn Analysis>,
+        exporter: Arc<dyn Export>,
     ) -> Result<(), String> {
         if let Some(confirmations) = &self.confirmations {
             confirmations.reject_all("the agent branch was replaced");
@@ -270,8 +274,9 @@ impl AgentThread {
         self.selected_operations.clear();
         let branch = TimelineBranch::new(self.name.clone(), base_revision, base_document)
             .map_err(|error| error.to_string())?;
-        let server = McpServer::start_isolated(branch.core(), playback, analysis)
-            .map_err(|error| error.to_string())?;
+        let server =
+            McpServer::start_isolated_with_exporter(branch.core(), playback, analysis, exporter)
+                .map_err(|error| error.to_string())?;
         self.confirmations = Some(server.confirmations());
         self.mcp_server = Some(server);
         self.branch = branch;
@@ -507,6 +512,7 @@ impl OpenReelApp {
             document,
             Arc::clone(&self.playback),
             Arc::clone(&self.analysis),
+            Arc::clone(&self.exporter),
         );
         if let Err(error) = result {
             self.record_error("Agent branch", error);
@@ -890,6 +896,7 @@ impl OpenReelApp {
             &base_document,
             &self.playback,
             &self.analysis,
+            &self.exporter,
         );
         let Ok(thread) = thread else {
             self.record_error("Agent branch", "Could not create an isolated agent branch");

@@ -4,12 +4,14 @@ mod actor;
 mod agent;
 mod automation;
 mod captions;
+mod creator;
 mod delivery;
 mod editorial;
 mod effect;
 mod journal;
 mod media;
 mod model;
+mod multicam;
 mod operation;
 mod qa;
 mod time;
@@ -24,11 +26,18 @@ pub use agent::{
 };
 pub use automation::{AutomationCurve, AutomationCurveError, Keyframe, KeyframeInterpolation};
 pub use captions::{
-    CaptionCue, CaptionPlanError, caption_cues, caption_title_operations, dedup_timeline_words,
-    srt, vtt,
+    CaptionCue, CaptionMotion, CaptionPlanError, animated_caption_operations, caption_cues,
+    caption_title_operations, dedup_timeline_words, srt, vtt,
+};
+pub use creator::{
+    BeatPacingPlan, BeatPacingPoint, CreatorPlanError, MusicBeatAnchor, MusicDurationFit,
+    MusicEndBeatAlignment, MusicFitPlan, MusicFitStrategy, MusicPlaybackMode, MusicRepeatMode,
+    TimelineBeatAnalysisState, beat_pacing_plan, music_fit_plan,
 };
 pub use delivery::{
-    DeliveryAspect, DeliveryVariant, DeliveryVariantError, document_for_delivery_variant,
+    DeliveryAspect, DeliveryConformanceReport, DeliveryProfile, DeliveryVariant,
+    DeliveryVariantError, delivery_conformance, document_for_delivery_profile,
+    document_for_delivery_variant,
 };
 pub use editorial::ThreePointMode;
 pub use effect::{
@@ -50,6 +59,11 @@ pub use model::{
     EffectId, FreezeFrame, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset,
     MediaBin, MediaCatalog, MediaKind, ParamValue, SourceSelect, StringOut, StringOutId, SyncGroup,
     SyncGroupId, SyncGroupMember, Track, TrackId, TrackKind, Transition, clip_effective_fps,
+};
+pub use multicam::{
+    ReframeFocusBounds, SpeakerAngleAssignment, SpeakerMulticamCut, SpeakerMulticamError,
+    SpeakerMulticamPlan, SpeakerMulticamSettings, SubjectCenterSample, SubjectReframeError,
+    SubjectReframePlan, SubjectReframeSettings, plan_speaker_multicam, plan_subject_reframe,
 };
 pub use operation::{ApplyOp, BatchError, OpError, Operation, apply_batch};
 pub use qa::{QaIssue, QaReport, QaSeverity, qa_document};

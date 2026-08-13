@@ -1,8 +1,13 @@
+use std::collections::BTreeMap;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    CaptionPreset, Document, Operation, Rational, TimeCode, TimelineTranscriptWord, Track, TrackId,
-    TrackKind,
+    AutomationCurve, CaptionPreset, ClipId, Document, Effect, EffectId, Keyframe,
+    KeyframeInterpolation, Operation, ParamValue, Rational, TimeCode, TimelineTranscriptWord,
+    Track, TrackId, TrackKind,
 };
 
 const MAX_CAPTION_CHARACTERS: usize = 42;
@@ -13,6 +18,31 @@ pub struct CaptionCue {
     pub start: TimeCode,
     pub end: TimeCode,
     pub text: String,
+}
+
+/// Stable caption motion compositions built from ordinary effect automation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptionMotion {
+    #[default]
+    None,
+    Fade,
+    Pop,
+    SlideUp,
+}
+
+impl CaptionMotion {
+    pub const ALL: [Self; 4] = [Self::None, Self::Fade, Self::Pop, Self::SlideUp];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Fade => "fade",
+            Self::Pop => "pop",
+            Self::SlideUp => "slide_up",
+        }
+    }
 }
 
 /// Collapse repeated A/V copies of the same audible word at the same source
@@ -40,6 +70,8 @@ pub enum CaptionPlanError {
     NoCues,
     #[error("track id space is exhausted")]
     TrackIdExhausted,
+    #[error("clip id space is exhausted")]
+    ClipIdExhausted,
     #[error("caption cue duration must be positive")]
     InvalidCueDuration,
 }
@@ -54,6 +86,20 @@ pub fn caption_title_operations(
     cues: &[CaptionCue],
     preset: CaptionPreset,
 ) -> Result<Vec<Operation>, CaptionPlanError> {
+    animated_caption_operations(document, cues, preset, CaptionMotion::None)
+}
+
+/// Build one atomic caption track with optional renderer-native motion curves.
+///
+/// # Errors
+///
+/// Returns an error for empty/invalid cues or exhausted track/clip ids.
+pub fn animated_caption_operations(
+    document: &Document,
+    cues: &[CaptionCue],
+    preset: CaptionPreset,
+    motion: CaptionMotion,
+) -> Result<Vec<Operation>, CaptionPlanError> {
     if cues.is_empty() {
         return Err(CaptionPlanError::NoCues);
     }
@@ -66,7 +112,25 @@ pub fn caption_title_operations(
         .checked_add(1)
         .map(TrackId)
         .ok_or(CaptionPlanError::TrackIdExhausted)?;
-    let mut operations = Vec::with_capacity(cues.len().saturating_add(1));
+    let first_clip_id = document
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .map(|clip| clip.id.0)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(CaptionPlanError::ClipIdExhausted)?;
+    let effects_per_cue = usize::from(motion != CaptionMotion::None)
+        + usize::from(matches!(
+            motion,
+            CaptionMotion::Pop | CaptionMotion::SlideUp
+        ));
+    let mut operations = Vec::with_capacity(
+        cues.len()
+            .saturating_mul(1 + effects_per_cue)
+            .saturating_add(1),
+    );
     operations.push(Operation::AddTrack {
         track: Track {
             id: track_id,
@@ -75,7 +139,7 @@ pub fn caption_title_operations(
             clips: Vec::new(),
         },
     });
-    for cue in cues {
+    for (index, cue) in cues.iter().enumerate() {
         let duration = cue
             .end
             .checked_sub(cue.start)
@@ -87,8 +151,104 @@ pub fn caption_title_operations(
             duration,
             title: preset.title(cue.text.clone()),
         });
+        let clip = first_clip_id
+            .checked_add(u64::try_from(index).unwrap_or(u64::MAX))
+            .map(ClipId)
+            .ok_or(CaptionPlanError::ClipIdExhausted)?;
+        operations.extend(caption_motion_effects(clip, duration, motion));
     }
     Ok(operations)
+}
+
+fn caption_motion_effects(
+    clip: ClipId,
+    duration: TimeCode,
+    motion: CaptionMotion,
+) -> Vec<Operation> {
+    // A one-frame cue has no temporal room to animate. Leaving it at the
+    // title's native opacity is both readable and deterministic.
+    if motion == CaptionMotion::None || duration <= TimeCode(1) {
+        return Vec::new();
+    }
+    let last = TimeCode(duration.0.saturating_sub(1));
+    let entrance = TimeCode((duration.0 / 4).clamp(1, 6).min(last.0));
+    let exit = TimeCode(last.0.saturating_sub(entrance.0));
+    let opacity_curve = dedup_keyframes([
+        keyframe(TimeCode::ZERO, 0, KeyframeInterpolation::EaseOut),
+        keyframe(entrance, 100, KeyframeInterpolation::Hold),
+        keyframe(exit, 100, KeyframeInterpolation::EaseIn),
+        keyframe(last, 0, KeyframeInterpolation::Linear),
+    ]);
+    let mut operations = vec![Operation::AddEffect {
+        clip,
+        effect: Effect {
+            id: EffectId(1),
+            name: "opacity".to_owned(),
+            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(100))]),
+            keyframes: BTreeMap::from([("percent".to_owned(), opacity_curve)]),
+        },
+    }];
+    let transform = match motion {
+        CaptionMotion::None | CaptionMotion::Fade => None,
+        CaptionMotion::Pop => {
+            let overshoot = TimeCode((entrance.0 / 2).max(1));
+            Some((
+                "scale_percent",
+                BTreeMap::from([
+                    ("scale_percent".to_owned(), ParamValue::Integer(100)),
+                    ("x_percent".to_owned(), ParamValue::Integer(0)),
+                    ("y_percent".to_owned(), ParamValue::Integer(0)),
+                ]),
+                dedup_keyframes([
+                    keyframe(TimeCode::ZERO, 80, KeyframeInterpolation::EaseOut),
+                    keyframe(overshoot, 110, KeyframeInterpolation::EaseInOut),
+                    keyframe(entrance, 100, KeyframeInterpolation::Linear),
+                ]),
+            ))
+        }
+        CaptionMotion::SlideUp => Some((
+            "y_percent",
+            BTreeMap::from([
+                ("scale_percent".to_owned(), ParamValue::Integer(100)),
+                ("x_percent".to_owned(), ParamValue::Integer(0)),
+                ("y_percent".to_owned(), ParamValue::Integer(0)),
+            ]),
+            dedup_keyframes([
+                keyframe(TimeCode::ZERO, 15, KeyframeInterpolation::EaseOut),
+                keyframe(entrance, 0, KeyframeInterpolation::Linear),
+            ]),
+        )),
+    };
+    if let Some((parameter, parameters, curve)) = transform {
+        operations.push(Operation::AddEffect {
+            clip,
+            effect: Effect {
+                id: EffectId(2),
+                name: "transform".to_owned(),
+                parameters,
+                keyframes: BTreeMap::from([(parameter.to_owned(), curve)]),
+            },
+        });
+    }
+    operations
+}
+
+const fn keyframe(at: TimeCode, value: i64, interpolation: KeyframeInterpolation) -> Keyframe {
+    Keyframe {
+        at,
+        value,
+        interpolation,
+    }
+}
+
+fn dedup_keyframes<const N: usize>(keyframes: [Keyframe; N]) -> AutomationCurve {
+    let mut deduped = BTreeMap::new();
+    for keyframe in keyframes {
+        deduped.insert(keyframe.at, keyframe);
+    }
+    AutomationCurve {
+        keyframes: deduped.into_values().collect(),
+    }
 }
 
 /// Build readable caption cues from ordered, de-duplicated timeline words.
@@ -337,6 +497,46 @@ mod tests {
     }
 
     #[test]
+    fn animated_caption_presets_build_valid_editable_effect_curves() {
+        let document = Document {
+            fps: Rational::new(30, 1).unwrap(),
+            ..Document::default()
+        };
+        let cues = [cue(0, 24, "Hello"), cue(30, 60, "again")];
+        for motion in CaptionMotion::ALL {
+            let operations =
+                animated_caption_operations(&document, &cues, CaptionPreset::Social, motion)
+                    .unwrap();
+            let mut applied = document.clone();
+            apply_batch(&mut applied, &operations).unwrap();
+            let clips = &applied.tracks[0].clips;
+            assert_eq!(clips.len(), 2);
+            for clip in clips {
+                assert_eq!(
+                    clip.effects.len(),
+                    match motion {
+                        CaptionMotion::None => 0,
+                        CaptionMotion::Fade => 1,
+                        CaptionMotion::Pop | CaptionMotion::SlideUp => 2,
+                    }
+                );
+                if motion != CaptionMotion::None {
+                    let opacity = &clip.effects[0];
+                    assert_eq!(
+                        opacity.integer_parameter_at("percent", TimeCode::ZERO),
+                        Some(0)
+                    );
+                    assert_eq!(
+                        opacity
+                            .integer_parameter_at("percent", TimeCode(clip.source_range.end.0 / 2)),
+                        Some(100)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn one_long_word_still_becomes_its_own_cue() {
         let fps = Rational::new(30, 1).unwrap();
         let long = "a".repeat(43);
@@ -390,5 +590,29 @@ mod tests {
         let fps = Rational::default();
         assert_eq!(srt(&[], fps), "");
         assert_eq!(vtt(&[], fps), "WEBVTT\n\n");
+    }
+
+    #[test]
+    fn one_frame_caption_stays_visible_without_degenerate_motion() {
+        let document = Document::default();
+        let operations = animated_caption_operations(
+            &document,
+            &[CaptionCue {
+                start: TimeCode(10),
+                end: TimeCode(11),
+                text: "Now".to_owned(),
+            }],
+            CaptionPreset::Clean,
+            CaptionMotion::Pop,
+        )
+        .unwrap();
+
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|operation| matches!(operation, Operation::AddEffect { .. }))
+                .count(),
+            0
+        );
     }
 }

@@ -15,12 +15,15 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use openreel_core::{
-    Analysis, AnalysisKind, AssetId, AutomationCurve, BeatStatus, CaptionPreset, ClipContent,
-    ClipId, Command, Core, DeliveryAspect, DeliveryVariant, Document, EffectId, Event, Keyframe,
-    KeyframeInterpolation, MediaKind, Operation, Playback, Query, QueryResult, SceneStatus,
-    SilenceStatus, TimeCode, TimelineBeat, TimelineRevision, TimelineSceneChange,
-    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, caption_cues,
-    caption_title_operations, dedup_timeline_words, document_for_delivery_variant, qa_document,
+    Analysis, AnalysisKind, AssetId, AutomationCurve, BeatStatus, CaptionMotion, CaptionPreset,
+    ClipContent, ClipId, Command, Core, DeliveryAspect, DeliveryProfile, DeliveryVariant, Document,
+    EffectId, Event, Export, ExportCancellation, Keyframe, KeyframeInterpolation, MediaKind,
+    Operation, Playback, Query, QueryResult, SceneStatus, SilenceStatus, SpeakerAngleAssignment,
+    SpeakerMulticamSettings, SyncGroupId, ThreePointMode, TimeCode, TimelineBeat,
+    TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange, TimelineSilenceSpan,
+    TimelineTranscriptWord, TrackId, TranscriptStatus, animated_caption_operations,
+    beat_pacing_plan, caption_cues, dedup_timeline_words, delivery_conformance,
+    document_for_delivery_variant, music_fit_plan, plan_speaker_multicam, qa_document,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -40,6 +43,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
+    export_queue::{ExportJobId, ExportQueue, ExportQueueError, QueueExportRequest},
     render::{
         render_asset_scene_changes, render_asset_silences, render_asset_transcript,
         render_clip_info, render_timeline_scene_changes, render_timeline_silences,
@@ -200,6 +204,8 @@ pub enum McpServerError {
     Listener(#[source] std::io::Error),
     #[error("could not start the OpenReel MCP server thread: {0}")]
     Thread(#[source] std::io::Error),
+    #[error("could not start the OpenReel export queue: {0}")]
+    ExportQueue(#[from] ExportQueueError),
 }
 
 pub struct McpServer {
@@ -223,6 +229,27 @@ impl McpServer {
         Self::start_with_broker(core, playback, analysis, ConfirmationBroker::default())
     }
 
+    /// Start the live MCP server with agent-accessible delivery exports.
+    ///
+    /// # Errors
+    ///
+    /// Returns an MCP server error when the listener, export worker, or server thread cannot start.
+    pub fn start_with_exporter(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        exporter: Arc<dyn Export>,
+    ) -> Result<Self, McpServerError> {
+        Self::start_configured(
+            core,
+            playback,
+            analysis,
+            Some(exporter),
+            ConfirmationBroker::default(),
+            true,
+        )
+    }
+
     /// Start a branch-scoped MCP server whose edits and proof renders never
     /// replace the live playback document.
     ///
@@ -238,6 +265,28 @@ impl McpServer {
             core,
             playback,
             analysis,
+            None,
+            ConfirmationBroker::default(),
+            false,
+        )
+    }
+
+    /// Start a branch-scoped MCP server with serial exports of immutable branch snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an MCP server error when the listener, export worker, or server thread cannot start.
+    pub fn start_isolated_with_exporter(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        exporter: Arc<dyn Export>,
+    ) -> Result<Self, McpServerError> {
+        Self::start_configured(
+            core,
+            playback,
+            analysis,
+            Some(exporter),
             ConfirmationBroker::default(),
             false,
         )
@@ -249,13 +298,14 @@ impl McpServer {
         analysis: Arc<dyn Analysis>,
         confirmations: ConfirmationBroker,
     ) -> Result<Self, McpServerError> {
-        Self::start_configured(core, playback, analysis, confirmations, true)
+        Self::start_configured(core, playback, analysis, None, confirmations, true)
     }
 
     fn start_configured(
         core: Core,
         playback: Arc<dyn Playback>,
         analysis: Arc<dyn Analysis>,
+        exporter: Option<Arc<dyn Export>>,
         confirmations: ConfirmationBroker,
         publish_to_playback: bool,
     ) -> Result<Self, McpServerError> {
@@ -267,10 +317,12 @@ impl McpServer {
             .map_err(McpServerError::Listener)?;
         let endpoint = format!("http://{address}/mcp");
         let (shutdown, shutdown_rx) = oneshot::channel();
+        let export_queue = exporter.map(ExportQueue::new).transpose()?;
         let handler = OpenReelMcp::configured(
             core,
             playback,
             analysis,
+            export_queue,
             confirmations.clone(),
             publish_to_playback,
         );
@@ -347,6 +399,7 @@ struct OpenReelMcp {
     core: Core,
     playback: Arc<dyn Playback>,
     analysis: Arc<dyn Analysis>,
+    export_queue: Option<ExportQueue>,
     confirmations: ConfirmationBroker,
     publish_to_playback: bool,
 }
@@ -359,13 +412,14 @@ impl OpenReelMcp {
         analysis: Arc<dyn Analysis>,
         confirmations: ConfirmationBroker,
     ) -> Self {
-        Self::configured(core, playback, analysis, confirmations, true)
+        Self::configured(core, playback, analysis, None, confirmations, true)
     }
 
     fn configured(
         core: Core,
         playback: Arc<dyn Playback>,
         analysis: Arc<dyn Analysis>,
+        export_queue: Option<ExportQueue>,
         confirmations: ConfirmationBroker,
         publish_to_playback: bool,
     ) -> Self {
@@ -373,6 +427,7 @@ impl OpenReelMcp {
             core,
             playback,
             analysis,
+            export_queue,
             confirmations,
             publish_to_playback,
         }
@@ -426,6 +481,10 @@ impl OpenReelMcp {
                 let args: TrackMaskArgs = decode_args("track_mask_region", arguments)?;
                 self.track_mask_region(&args)
             }
+            "track_reframe_subject" => {
+                let args: TrackReframeArgs = decode_args("track_reframe_subject", arguments)?;
+                self.track_reframe_subject(&args)
+            }
             "get_timeline_storyboard" => {
                 let args: StoryboardArgs = decode_args("get_timeline_storyboard", arguments)?;
                 self.timeline_storyboard(args)
@@ -464,6 +523,19 @@ impl OpenReelMcp {
                 let args: TimelineBeatsArgs = decode_args("get_timeline_beats", arguments)?;
                 self.timeline_beats(args.range, args.min_strength)
             }
+            "plan_beat_pacing" => {
+                let args: BeatPacingPlanArgs = decode_args("plan_beat_pacing", arguments)?;
+                self.plan_beat_pacing(args)
+            }
+            "plan_music_fit" => {
+                let args: MusicFitPlanArgs = decode_args("plan_music_fit", arguments)?;
+                self.plan_music_fit(&args)
+            }
+            "plan_speaker_multicam" => {
+                let args: SpeakerMulticamPlanArgs =
+                    decode_args("plan_speaker_multicam", arguments)?;
+                self.plan_speaker_multicam(args)
+            }
             "get_analysis_status" => {
                 let args: AnalysisStatusArgs = decode_args("get_analysis_status", arguments)?;
                 self.analysis_status(args.asset_id)
@@ -471,10 +543,25 @@ impl OpenReelMcp {
             "get_caption_presets" => Ok(Self::caption_presets()),
             "add_styled_captions" => {
                 let args: StyledCaptionsArgs = decode_args("add_styled_captions", arguments)?;
-                self.add_styled_captions(args.expected_revision, args.preset)
+                self.add_styled_captions(args.expected_revision, args.preset, args.motion)
             }
             "get_qa_report" => Ok(self.qa_report()?),
             "get_delivery_variants" => Ok(Self::delivery_variants()),
+            "get_delivery_profiles" => Ok(self.delivery_profiles()?),
+            "get_delivery_conformance" => {
+                let args: DeliveryConformanceArgs =
+                    decode_args("get_delivery_conformance", arguments)?;
+                self.delivery_conformance(&args)
+            }
+            "queue_export" => {
+                let args: QueueExportArgs = decode_args("queue_export", arguments)?;
+                self.queue_export(args)
+            }
+            "get_export_jobs" => Ok(self.export_jobs()),
+            "cancel_export" => {
+                let args: ExportJobArgs = decode_args("cancel_export", arguments)?;
+                Ok(self.cancel_export(args.job_id))
+            }
             "get_delivery_variant_storyboard" => {
                 let args: DeliveryStoryboardArgs =
                     decode_args("get_delivery_variant_storyboard", arguments)?;
@@ -712,6 +799,7 @@ impl OpenReelMcp {
                 "color_token": title.color_token,
                 "position": title.position.as_str(),
                 "background_scrim": title.background_scrim,
+                "motions": CaptionMotion::ALL.map(CaptionMotion::as_str),
             })
         });
         success_text(
@@ -724,6 +812,7 @@ impl OpenReelMcp {
         &self,
         expected_revision: TimelineRevision,
         preset: CaptionPreset,
+        motion: CaptionMotion,
     ) -> Result<CallToolResult, McpError> {
         let (actual_revision, document) = self.snapshot()?;
         if expected_revision != actual_revision {
@@ -735,7 +824,7 @@ impl OpenReelMcp {
             .map_err(|error| McpError::internal_error(error.to_string(), None))?;
         let words = dedup_timeline_words(words);
         let cues = caption_cues(&words, document.fps);
-        let operations = match caption_title_operations(&document, &cues, preset) {
+        let operations = match animated_caption_operations(&document, &cues, preset, motion) {
             Ok(operations) => operations,
             Err(error) => return Ok(error_text(error.to_string())),
         };
@@ -770,6 +859,154 @@ impl OpenReelMcp {
         success_text(
             serde_json::to_string_pretty(&variants)
                 .unwrap_or_else(|error| format!("could not serialize variants: {error}")),
+        )
+    }
+
+    fn delivery_profiles(&self) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let profiles = DeliveryProfile::ALL.map(|profile| {
+            let settings = profile.export_settings(&document, ExportCancellation::default());
+            serde_json::json!({
+                "id": profile.as_str(),
+                "container": profile.container_extension(),
+                "aspect": profile.aspect(),
+                "resolution": {
+                    "width": settings.resolution.0,
+                    "height": settings.resolution.1,
+                },
+                "video_codec": settings.video_codec,
+                "audio_codec": settings.audio_codec,
+                "video_bitrate": settings.video_bitrate,
+                "audio_bitrate": settings.audio_bitrate,
+                "fps": {
+                    "numerator": settings.fps.numerator(),
+                    "denominator": settings.fps.denominator(),
+                },
+            })
+        });
+        let structured = serde_json::json!({
+            "timeline_revision": revision,
+            "profiles": profiles,
+        });
+        Ok(success_structured(
+            serde_json::to_string_pretty(&structured)
+                .map_err(|error| McpError::internal_error(error.to_string(), None))?,
+            structured,
+        ))
+    }
+
+    fn delivery_conformance(
+        &self,
+        args: &DeliveryConformanceArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let report = match delivery_conformance(
+            &document,
+            args.profile,
+            args.focus_x_percent,
+            args.focus_y_percent,
+        ) {
+            Ok(report) => report,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let structured = serde_json::json!({
+            "timeline_revision": revision,
+            "export_ready": report.export_ready(),
+            "report": report,
+        });
+        Ok(success_structured(
+            serde_json::to_string_pretty(&structured)
+                .map_err(|error| McpError::internal_error(error.to_string(), None))?,
+            structured,
+        ))
+    }
+
+    fn queue_export(&self, args: QueueExportArgs) -> Result<CallToolResult, McpError> {
+        let Some(queue) = &self.export_queue else {
+            return Ok(error_text(
+                "agent exports are unavailable because this MCP server has no export backend",
+            ));
+        };
+        let (actual_revision, document) = self.snapshot()?;
+        if args.expected_revision != actual_revision {
+            return Ok(revision_conflict_text(
+                args.expected_revision,
+                actual_revision,
+            ));
+        }
+        if document
+            .media_pool
+            .iter()
+            .any(|asset| paths_resolve_equal(&args.output_path, &asset.path))
+        {
+            return Ok(error_text(
+                "refusing to export over a source media asset used by this project",
+            ));
+        }
+        if args.overwrite {
+            let description = format!(
+                "The agent wants permission to replace the regular file at {} if it exists when this queued export starts.",
+                args.output_path.display()
+            );
+            if let Err(reason) = self.confirmations.confirm("queue_export", description) {
+                return Ok(error_text(format!(
+                    "refused destructive tool queue_export: {reason}"
+                )));
+            }
+        }
+        let record = match queue.enqueue(
+            &document,
+            QueueExportRequest {
+                output_path: args.output_path,
+                profile: args.profile,
+                focus_x_percent: args.focus_x_percent,
+                focus_y_percent: args.focus_y_percent,
+                overwrite: args.overwrite,
+            },
+        ) {
+            Ok(record) => record,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let structured = serde_json::json!({
+            "timeline_revision": actual_revision.0,
+            "job": record,
+        });
+        Ok(success_structured(
+            format!(
+                "queued export job {} from immutable timeline revision {} to {}",
+                record.id.0,
+                actual_revision.0,
+                record.output_path.display(),
+            ),
+            structured,
+        ))
+    }
+
+    fn export_jobs(&self) -> CallToolResult {
+        let Some(queue) = &self.export_queue else {
+            return error_text(
+                "agent exports are unavailable because this MCP server has no export backend",
+            );
+        };
+        let jobs = queue.list();
+        success_structured(
+            format!("{} retained export job(s)", jobs.len()),
+            serde_json::json!({"jobs": jobs}),
+        )
+    }
+
+    fn cancel_export(&self, job_id: ExportJobId) -> CallToolResult {
+        let Some(queue) = &self.export_queue else {
+            return error_text(
+                "agent exports are unavailable because this MCP server has no export backend",
+            );
+        };
+        let Some(job) = queue.cancel(job_id) else {
+            return error_text(format!("export job {} does not exist", job_id.0));
+        };
+        success_structured(
+            format!("export job {} is now {:?}", job_id.0, job.state),
+            serde_json::json!({"job": job}),
         )
     }
 
@@ -950,72 +1187,21 @@ impl OpenReelMcp {
             return Ok(error_text("max_width must be in 64..=512"));
         }
 
-        let mut isolated = (*document).clone();
-        for track in &mut isolated.tracks {
-            track.clips.retain(|candidate| candidate.id == args.clip_id);
-            for candidate in &mut track.clips {
-                candidate.effects.retain(|effect| effect.name != "mask");
-            }
-        }
-        isolated.tracks.retain(|track| !track.clips.is_empty());
-        let isolated = Arc::new(isolated);
-        let project_frame = |local: TimeCode| {
-            clip.timeline_start
-                .checked_add(local)
-                .ok_or_else(|| McpError::internal_error("tracking frame overflowed", None))
-        };
-
-        let first_local = sample_frames[0];
-        let first_project = project_frame(first_local)?;
-        let mut previous = match self.analysis.thumbnail_for_document(
-            Arc::clone(&isolated),
-            first_project,
+        let tracked = match self.track_clip_region(&RegionTrackingRequest {
+            document: &document,
+            clip_id: args.clip_id,
+            clip_timeline_start: clip.timeline_start,
+            sample_frames: &sample_frames,
+            center_percent,
+            box_percent,
+            search_radius_percent: search_radius,
             max_width,
-        ) {
-            Ok(image) => image,
-            Err(error) => return Ok(error_text(error.to_string())),
+            excluded_effect_name: "mask",
+        }) {
+            Ok(tracked) => tracked,
+            Err(error) => return Ok(error_text(error)),
         };
-        let half_size = tracking_half_size(&previous, box_percent);
-        let mut center = clamp_tracking_center(
-            &previous,
-            [
-                percent_to_pixel(center_percent[0], previous.width),
-                percent_to_pixel(center_percent[1], previous.height),
-            ],
-            half_size,
-        );
-        let mut observations = vec![TrackingObservation {
-            local_frame: first_local,
-            project_frame: first_project,
-            center,
-            confidence_basis_points: 10_000,
-        }];
-
-        for local_frame in sample_frames.iter().copied().skip(1) {
-            let project_frame = project_frame(local_frame)?;
-            let current = match self.analysis.thumbnail_for_document(
-                Arc::clone(&isolated),
-                project_frame,
-                max_width,
-            ) {
-                Ok(image) => image,
-                Err(error) => return Ok(error_text(error.to_string())),
-            };
-            if current.width != previous.width || current.height != previous.height {
-                return Ok(error_text(
-                    "tracking compositor resolution changed between samples",
-                ));
-            }
-            let tracked = track_region(&previous, &current, center, half_size, search_radius);
-            center = tracked.center;
-            observations.push(TrackingObservation {
-                local_frame,
-                project_frame,
-                center,
-                confidence_basis_points: tracked.confidence_basis_points,
-            });
-            previous = current;
-        }
+        let observations = tracked.observations;
 
         let curve_for = |axis: usize, extent: u32| AutomationCurve {
             keyframes: observations
@@ -1027,8 +1213,8 @@ impl OpenReelMcp {
                 })
                 .collect(),
         };
-        let x_curve = curve_for(0, previous.width);
-        let y_curve = curve_for(1, previous.height);
+        let x_curve = curve_for(0, tracked.width);
+        let y_curve = curve_for(1, tracked.height);
         let operations = vec![
             Operation::SetEffectKeyframes {
                 clip: args.clip_id,
@@ -1049,8 +1235,8 @@ impl OpenReelMcp {
                 serde_json::json!({
                     "local_frame": observation.local_frame.0,
                     "project_frame": observation.project_frame.0,
-                    "center_x_percent": pixel_to_percent(observation.center[0], previous.width),
-                    "center_y_percent": pixel_to_percent(observation.center[1], previous.height),
+                    "center_x_percent": pixel_to_percent(observation.center[0], tracked.width),
+                    "center_y_percent": pixel_to_percent(observation.center[1], tracked.height),
                     "confidence_basis_points": observation.confidence_basis_points,
                 })
             })
@@ -1079,6 +1265,256 @@ impl OpenReelMcp {
             ),
             structured,
         ))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn track_reframe_subject(&self, args: &TrackReframeArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let Some(clip) = document.clip(args.clip_id) else {
+            return Ok(error_text(format!("clip {} does not exist", args.clip_id)));
+        };
+        if !matches!(clip.content, ClipContent::Media) {
+            return Ok(error_text("subject reframe tracking requires a media clip"));
+        }
+        let Some(effect) = clip
+            .effects
+            .iter()
+            .find(|effect| effect.id == args.effect_id)
+        else {
+            return Ok(error_text(format!(
+                "effect {} does not exist on clip {}",
+                args.effect_id, args.clip_id
+            )));
+        };
+        if effect.name != "reframe" {
+            return Ok(error_text(format!(
+                "effect {} is {}; subject tracking requires a reframe effect",
+                args.effect_id, effect.name
+            )));
+        }
+        if !(1..=75).contains(&args.subject_width_percent)
+            || !(1..=75).contains(&args.subject_height_percent)
+        {
+            return Ok(error_text(
+                "subject_width_percent and subject_height_percent must each be in 1..=75",
+            ));
+        }
+        let duration = match document.clip_duration(clip) {
+            Ok(duration) => duration,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let start = args.start_local_frame.unwrap_or(TimeCode::ZERO);
+        let end = args.end_local_frame.unwrap_or(duration);
+        if start < TimeCode::ZERO || end > duration || end <= start {
+            return Ok(error_text(format!(
+                "tracking range {start}..{end} is outside clip-local range 0..{duration}"
+            )));
+        }
+        let step = args.step_frames.unwrap_or(DEFAULT_TRACKING_STEP_FRAMES);
+        if !(1..=120).contains(&step) {
+            return Ok(error_text("step_frames must be in 1..=120"));
+        }
+        let sample_frames = tracking_sample_frames(start..end, step);
+        if sample_frames.len() > MAX_TRACKING_SAMPLES {
+            return Ok(error_text(format!(
+                "tracking would render {} samples; increase step_frames to stay at or below {MAX_TRACKING_SAMPLES}",
+                sample_frames.len()
+            )));
+        }
+        let parameter = |name: &str| {
+            u8::try_from(
+                effect
+                    .integer_parameter_at(name, start)
+                    .unwrap_or(50)
+                    .clamp(0, 100),
+            )
+            .unwrap_or(50)
+        };
+        let search_radius = args
+            .search_radius_percent
+            .unwrap_or(DEFAULT_TRACKING_SEARCH_RADIUS_PERCENT);
+        if !(1..=25).contains(&search_radius) {
+            return Ok(error_text("search_radius_percent must be in 1..=25"));
+        }
+        let max_width = args.max_width.unwrap_or(DEFAULT_TRACKING_WIDTH);
+        if !(64..=512).contains(&max_width) {
+            return Ok(error_text("max_width must be in 64..=512"));
+        }
+        let tracked = match self.track_clip_region(&RegionTrackingRequest {
+            document: &document,
+            clip_id: args.clip_id,
+            clip_timeline_start: clip.timeline_start,
+            sample_frames: &sample_frames,
+            center_percent: [parameter("focus_x_percent"), parameter("focus_y_percent")],
+            box_percent: [
+                i64::from(args.subject_width_percent),
+                i64::from(args.subject_height_percent),
+            ],
+            search_radius_percent: search_radius,
+            max_width,
+            excluded_effect_name: "reframe",
+        }) {
+            Ok(tracked) => tracked,
+            Err(error) => return Ok(error_text(error)),
+        };
+        let curve_for = |axis: usize, extent: u32| AutomationCurve {
+            keyframes: tracked
+                .observations
+                .iter()
+                .map(|observation| Keyframe {
+                    at: observation.local_frame,
+                    value: i64::from(pixel_to_percent(observation.center[axis], extent)),
+                    interpolation: KeyframeInterpolation::EaseInOut,
+                })
+                .collect(),
+        };
+        let x_curve = curve_for(0, tracked.width);
+        let y_curve = curve_for(1, tracked.height);
+        let operations = vec![
+            Operation::SetEffectKeyframes {
+                clip: args.clip_id,
+                effect: args.effect_id,
+                name: "focus_x_percent".to_owned(),
+                curve: x_curve.clone(),
+            },
+            Operation::SetEffectKeyframes {
+                clip: args.clip_id,
+                effect: args.effect_id,
+                name: "focus_y_percent".to_owned(),
+                curve: y_curve.clone(),
+            },
+        ];
+        let observations = tracked
+            .observations
+            .iter()
+            .map(|observation| {
+                serde_json::json!({
+                    "local_frame": observation.local_frame.0,
+                    "project_frame": observation.project_frame.0,
+                    "focus_x_percent": pixel_to_percent(observation.center[0], tracked.width),
+                    "focus_y_percent": pixel_to_percent(observation.center[1], tracked.height),
+                    "confidence_basis_points": observation.confidence_basis_points,
+                })
+            })
+            .collect::<Vec<_>>();
+        let minimum_confidence = tracked
+            .observations
+            .iter()
+            .map(|observation| observation.confidence_basis_points)
+            .min()
+            .unwrap_or_default();
+        let structured = serde_json::json!({
+            "timeline_revision": revision.0,
+            "clip_id": args.clip_id.0,
+            "effect_id": args.effect_id.0,
+            "range": {"start": start.0, "end": end.0, "step_frames": step},
+            "subject_template": {
+                "width_percent": args.subject_width_percent,
+                "height_percent": args.subject_height_percent,
+            },
+            "minimum_confidence_basis_points": minimum_confidence,
+            "observations": observations,
+            "curves": {
+                "focus_x_percent": x_curve,
+                "focus_y_percent": y_curve,
+            },
+            "apply_edit_plan": {
+                "expected_revision": revision.0,
+                "operations": operations,
+            },
+            "detection_boundary": "tracks the explicitly supplied subject region; no learned person or face detection",
+        });
+        Ok(success_structured(
+            format!(
+                "tracked reframe effect {} on clip {} across {} samples (minimum confidence {minimum_confidence}/10000); review low-confidence spans, then apply the returned revision-gated operations to accept the editable focus curves",
+                args.effect_id,
+                args.clip_id,
+                tracked.observations.len(),
+            ),
+            structured,
+        ))
+    }
+
+    fn track_clip_region(
+        &self,
+        request: &RegionTrackingRequest<'_>,
+    ) -> Result<TrackedRegion, String> {
+        let mut isolated = request.document.clone();
+        for track in &mut isolated.tracks {
+            track
+                .clips
+                .retain(|candidate| candidate.id == request.clip_id);
+            for candidate in &mut track.clips {
+                candidate
+                    .effects
+                    .retain(|effect| effect.name != request.excluded_effect_name);
+            }
+        }
+        isolated.tracks.retain(|track| !track.clips.is_empty());
+        let isolated = Arc::new(isolated);
+        let project_frame = |local: TimeCode| {
+            request
+                .clip_timeline_start
+                .checked_add(local)
+                .ok_or_else(|| "tracking frame overflowed".to_owned())
+        };
+        let Some(first_local) = request.sample_frames.first().copied() else {
+            return Err("tracking requires at least one sample".to_owned());
+        };
+        let first_project = project_frame(first_local)?;
+        let mut previous = self
+            .analysis
+            .thumbnail_for_document(Arc::clone(&isolated), first_project, request.max_width)
+            .map_err(|error| error.to_string())?;
+        let width = previous.width;
+        let height = previous.height;
+        let half_size = tracking_half_size(&previous, request.box_percent);
+        let mut center = clamp_tracking_center(
+            &previous,
+            [
+                percent_to_pixel(request.center_percent[0], width),
+                percent_to_pixel(request.center_percent[1], height),
+            ],
+            half_size,
+        );
+        let mut observations = vec![TrackingObservation {
+            local_frame: first_local,
+            project_frame: first_project,
+            center,
+            confidence_basis_points: 10_000,
+        }];
+
+        for local_frame in request.sample_frames.iter().copied().skip(1) {
+            let project_frame = project_frame(local_frame)?;
+            let current = self
+                .analysis
+                .thumbnail_for_document(Arc::clone(&isolated), project_frame, request.max_width)
+                .map_err(|error| error.to_string())?;
+            if current.width != width || current.height != height {
+                return Err("tracking compositor resolution changed between samples".to_owned());
+            }
+            let tracked = track_region(
+                &previous,
+                &current,
+                center,
+                half_size,
+                request.search_radius_percent,
+            );
+            center = tracked.center;
+            observations.push(TrackingObservation {
+                local_frame,
+                project_frame,
+                center,
+                confidence_basis_points: tracked.confidence_basis_points,
+            });
+            previous = current;
+        }
+
+        Ok(TrackedRegion {
+            observations,
+            width,
+            height,
+        })
     }
 
     fn timeline_storyboard(&self, args: StoryboardArgs) -> Result<CallToolResult, McpError> {
@@ -1776,6 +2212,205 @@ impl OpenReelMcp {
             }),
         ))
     }
+
+    fn plan_beat_pacing(&self, args: BeatPacingPlanArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let minimum_strength = match args.min_strength {
+            Some(value) => match percentage_to_basis_points(value, "min_strength") {
+                Ok(value) => value,
+                Err(error) => return Ok(error_text(error)),
+            },
+            None => DEFAULT_BEAT_STRENGTH_BASIS_POINTS,
+        };
+        let range = args.range.map(|range| range.start..range.end);
+        let referenced_assets = document
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .filter(|clip| clip.content.is_media())
+            .map(|clip| clip.asset)
+            .collect::<BTreeSet<_>>();
+        let mut pending = Vec::new();
+        let mut unavailable = Vec::new();
+        for asset_id in &referenced_assets {
+            let Some(asset) = document.asset(*asset_id) else {
+                continue;
+            };
+            if self.analysis.beat_status(asset) == BeatStatus::NotRequested {
+                self.analysis.request_beat_detection(asset.clone());
+            }
+            match self.analysis.beat_status(asset) {
+                BeatStatus::Ready(_) | BeatStatus::NoAudio => {}
+                BeatStatus::Failed(reason) => {
+                    unavailable.push((*asset_id, format!("failed: {reason}")));
+                }
+                BeatStatus::Cancelled => {
+                    unavailable.push((*asset_id, "cancelled".to_owned()));
+                }
+                BeatStatus::NotRequested
+                | BeatStatus::Queued
+                | BeatStatus::Hashing
+                | BeatStatus::Analyzing { .. } => pending.push(*asset_id),
+            }
+        }
+        let analysis_state = if !unavailable.is_empty() {
+            let reason = unavailable
+                .iter()
+                .map(|(asset, reason)| format!("asset {asset}: {reason}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            TimelineBeatAnalysisState::Unavailable {
+                asset_ids: unavailable.into_iter().map(|(asset, _)| asset).collect(),
+                reason,
+            }
+        } else if pending.is_empty() {
+            TimelineBeatAnalysisState::Ready
+        } else {
+            TimelineBeatAnalysisState::Pending { asset_ids: pending }
+        };
+        let beats = match self
+            .analysis
+            .timeline_beats(&document, range.clone(), minimum_strength)
+        {
+            Ok(beats) => beats,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let plan = match beat_pacing_plan(
+            &document,
+            args.clip_id,
+            range,
+            &beats,
+            &analysis_state,
+            minimum_strength,
+            args.minimum_spacing_frames.unwrap_or(TimeCode(6)),
+        ) {
+            Ok(plan) => plan,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let structured = serde_json::json!({
+            "timeline_revision": revision.0,
+            "plan": plan,
+            "apply_edit_plan": {
+                "expected_revision": revision.0,
+                "operations": plan.operations,
+            },
+        });
+        Ok(success_structured(
+            format!(
+                "planned {} beat-aligned split(s) for clip {}; inspect the selected onsets, then apply the returned revision-gated operations",
+                plan.operations.len(),
+                plan.target_clip,
+            ),
+            structured,
+        ))
+    }
+
+    fn plan_music_fit(&self, args: &MusicFitPlanArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let Some(asset) = document.asset(args.asset_id) else {
+            return Ok(error_text(format!(
+                "asset {} does not exist",
+                args.asset_id
+            )));
+        };
+        let minimum_strength = match args.min_strength {
+            Some(value) => match percentage_to_basis_points(value, "min_strength") {
+                Ok(value) => value,
+                Err(error) => return Ok(error_text(error)),
+            },
+            None => DEFAULT_BEAT_STRENGTH_BASIS_POINTS,
+        };
+        if self.analysis.beat_status(asset) == BeatStatus::NotRequested {
+            self.analysis.request_beat_detection(asset.clone());
+        }
+        let status = self.analysis.beat_status(asset);
+        let plan = match music_fit_plan(
+            &document,
+            args.track_id,
+            args.asset_id,
+            args.timeline_range.start..args.timeline_range.end,
+            args.preferred_source_start,
+            &status,
+            minimum_strength,
+            args.mode,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let structured = serde_json::json!({
+            "timeline_revision": revision.0,
+            "plan": plan,
+            "apply_edit_plan": {
+                "expected_revision": revision.0,
+                "operations": plan.operations,
+            },
+        });
+        Ok(success_structured(
+            format!(
+                "planned a beat-anchored real-time music edit from source frames {}..{} into project frames {}..{}; no looping or hidden time stretch was used",
+                plan.source_range.start.0,
+                plan.source_range.end.0,
+                plan.timeline_range.start.0,
+                plan.timeline_range.end.0,
+            ),
+            structured,
+        ))
+    }
+
+    fn plan_speaker_multicam(
+        &self,
+        args: SpeakerMulticamPlanArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let Some(reference_asset) = document.asset(args.reference_asset_id) else {
+            return Ok(error_text(format!(
+                "asset {} does not exist",
+                args.reference_asset_id
+            )));
+        };
+        let mut transcript_status = self.analysis.transcript_status(reference_asset);
+        if transcript_status == TranscriptStatus::NotRequested {
+            self.analysis.request_transcription(reference_asset.clone());
+            transcript_status = self.analysis.transcript_status(reference_asset);
+        }
+        let TranscriptStatus::Ready(transcript) = transcript_status else {
+            return Ok(error_text(format!(
+                "speaker-aware multicam requires a ready diarized transcript for asset {}; current analysis state: {}",
+                args.reference_asset_id,
+                render_asset_transcript(args.reference_asset_id, &transcript_status),
+            )));
+        };
+        let settings = SpeakerMulticamSettings {
+            sync_group: args.sync_group_id,
+            target_track: args.target_track_id,
+            group_start: args.group_range.start,
+            group_end: args.group_range.end,
+            record_start: args.record_start,
+            maximum_word_gap_frames: args.maximum_word_gap_frames.unwrap_or(TimeCode(3)),
+            minimum_shot_frames: args.minimum_shot_frames.unwrap_or(TimeCode(5)),
+            assignments: args.assignments,
+        };
+        let plan = match plan_speaker_multicam(&document, &transcript, &settings) {
+            Ok(plan) => plan,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let structured = serde_json::json!({
+            "timeline_revision": revision.0,
+            "plan": plan,
+            "apply_edit_plan": {
+                "expected_revision": revision.0,
+                "operations": plan.operations,
+            },
+        });
+        Ok(success_structured(
+            format!(
+                "planned {} speaker-aware multicam shot(s) from transcript asset {}; operations are latest-first for atomic overwrite application",
+                plan.cuts.len(),
+                plan.reference_asset,
+            ),
+            structured,
+        ))
+    }
 }
 
 impl ServerHandler for OpenReelMcp {
@@ -1891,6 +2526,67 @@ struct DeliveryStoryboardArgs {
     storyboard: StoryboardArgs,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TrackReframeArgs {
+    /// Stable media clip id containing the reframe effect.
+    clip_id: ClipId,
+    /// Stable reframe effect id on the clip.
+    effect_id: EffectId,
+    /// Width of the initial subject template as a frame percentage, in 1..=75.
+    subject_width_percent: u8,
+    /// Height of the initial subject template as a frame percentage, in 1..=75.
+    subject_height_percent: u8,
+    /// First clip-local frame to track. Defaults to zero.
+    #[serde(default)]
+    start_local_frame: Option<TimeCode>,
+    /// Exclusive clip-local end frame. Defaults to the clip duration.
+    #[serde(default)]
+    end_local_frame: Option<TimeCode>,
+    /// Distance between editable focus keyframes. Defaults to 5; valid range 1..=120.
+    #[serde(default)]
+    step_frames: Option<i64>,
+    /// Search radius around the prior subject center as a frame percentage. Defaults to 10.
+    #[serde(default)]
+    search_radius_percent: Option<u8>,
+    /// Analysis render width. Defaults to 256; valid range 64..=512.
+    #[serde(default)]
+    max_width: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DeliveryConformanceArgs {
+    /// Stable delivery contract returned by `get_delivery_profiles`.
+    profile: DeliveryProfile,
+    /// Explicit horizontal focal point used when the profile changes aspect ratio.
+    #[serde(default = "default_delivery_focus")]
+    focus_x_percent: u8,
+    /// Explicit vertical focal point used when the profile changes aspect ratio.
+    #[serde(default = "default_delivery_focus")]
+    focus_y_percent: u8,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct QueueExportArgs {
+    /// Exact branch revision whose immutable snapshot should be rendered.
+    expected_revision: TimelineRevision,
+    /// Destination media file. Parent directories must already exist.
+    output_path: PathBuf,
+    /// Stable delivery contract returned by `get_delivery_profiles`.
+    profile: DeliveryProfile,
+    #[serde(default = "default_delivery_focus")]
+    focus_x_percent: u8,
+    #[serde(default = "default_delivery_focus")]
+    focus_y_percent: u8,
+    /// Explicit permission to replace a regular destination file. Always requires human confirmation.
+    #[serde(default)]
+    overwrite: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ExportJobArgs {
+    job_id: ExportJobId,
+}
+
 const fn default_delivery_focus() -> u8 {
     50
 }
@@ -1990,6 +2686,66 @@ struct TimelineBeatsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct BeatPacingPlanArgs {
+    /// Existing media clip to split at the selected musical onsets.
+    clip_id: ClipId,
+    /// Optional half-open subrange in exact project frames. Defaults to the clip range.
+    #[serde(default)]
+    range: Option<TranscriptRangeArgs>,
+    /// Optional onset-strength threshold from 0 through 100 percent. Defaults to 10.
+    #[serde(default)]
+    min_strength: Option<f64>,
+    /// Minimum distance between selected onsets in project frames. Defaults to 6.
+    #[serde(default)]
+    minimum_spacing_frames: Option<TimeCode>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MusicFitPlanArgs {
+    /// Existing audio-capable target track.
+    track_id: TrackId,
+    /// Audio-capable media asset with beat analysis.
+    asset_id: AssetId,
+    /// Exact half-open project range the straight music edit must fill.
+    timeline_range: TranscriptRangeArgs,
+    /// Optional preferred source position. The nearest eligible beat with enough remaining source wins.
+    #[serde(default)]
+    preferred_source_start: Option<TimeCode>,
+    /// Optional onset-strength threshold from 0 through 100 percent. Defaults to 10.
+    #[serde(default)]
+    min_strength: Option<f64>,
+    /// Three-point collision policy. Overwrite is the predictable default for fitting a music bed.
+    #[serde(default = "default_three_point_overwrite")]
+    mode: ThreePointMode,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SpeakerMulticamPlanArgs {
+    /// Existing sync group containing the named camera angles.
+    sync_group_id: SyncGroupId,
+    /// Existing video track that will receive overwrite edits.
+    target_track_id: TrackId,
+    /// Sync-group member whose ready diarized transcript supplies speaker timing.
+    reference_asset_id: AssetId,
+    /// Half-open interval in sync-group project frames.
+    group_range: TranscriptRangeArgs,
+    /// Project-frame position corresponding to `group_range.start`.
+    record_start: TimeCode,
+    /// Merge same-angle words across gaps no larger than this. Defaults to 3 frames.
+    #[serde(default)]
+    maximum_word_gap_frames: Option<TimeCode>,
+    /// Suppress rapid shots shorter than this. Defaults to 5 frames.
+    #[serde(default)]
+    minimum_shot_frames: Option<TimeCode>,
+    /// Explicit diarization-label to sync-angle assignments.
+    assignments: Vec<SpeakerAngleAssignment>,
+}
+
+const fn default_three_point_overwrite() -> ThreePointMode {
+    ThreePointMode::Overwrite
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct AnalysisStatusArgs {
     /// Stable asset id shown by `get_timeline_state`.
     asset_id: AssetId,
@@ -2018,6 +2774,9 @@ struct StyledCaptionsArgs {
     expected_revision: TimelineRevision,
     /// Stable declarative style shared by preview and export.
     preset: CaptionPreset,
+    /// Renderer-native motion composition. Defaults to none.
+    #[serde(default)]
+    motion: CaptionMotion,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2159,6 +2918,24 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "plan_beat_pacing",
+            "Build a deterministic, revision-gated SplitClip plan from fully analyzed timeline beats. Selected beats are inspectable in ascending order and operations are safely ordered newest-first; the timeline is not changed until apply_edit_plan.",
+            schema_object::<BeatPacingPlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "plan_music_fit",
+            "Build one exact-duration, beat-anchored ThreePointEdit for an audio asset and project range. The plan reports plainly that it is a straight real-time cut with no hidden looping or time stretch.",
+            schema_object::<MusicFitPlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "plan_speaker_multicam",
+            "Build a revision-gated multicam overwrite plan from real diarization labels, explicit speaker-to-angle assignments, and an existing sync group. Missing or ambiguous speaker data is returned as an error; the timeline is not changed until apply_edit_plan.",
+            schema_object::<SpeakerMulticamPlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "get_analysis_status",
             "Return the uniform transcript, silence, scene, and beat job lifecycle for one asset without starting work.",
             schema_object::<AnalysisStatusArgs>(),
@@ -2172,7 +2949,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "add_styled_captions",
-            "Build transcript-timed burned-in captions using one stable preset and apply them as one revision-gated undo entry.",
+            "Build transcript-timed burned-in captions using one stable preset plus optional fade, pop, or slide-up automation, then apply them as one revision-gated undo entry.",
             schema_object::<StyledCaptionsArgs>(),
         )
         .with_annotations(
@@ -2194,6 +2971,48 @@ fn inspector_tools() -> Vec<Tool> {
             schema_object::<EmptyArgs>(),
         )
         .with_annotations(read_only()),
+        Tool::new(
+            "get_delivery_profiles",
+            "List the stable source-master, YouTube 1080p, vertical-short, and square-social contracts using the current project frame rate, including exact raster, codecs, and bitrates.",
+            schema_object::<EmptyArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_delivery_conformance",
+            "Materialize one delivery profile from the current branch snapshot and run structural QA against the exact document and export settings that would render.",
+            schema_object::<DeliveryConformanceArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "queue_export",
+            "Queue a serial export of an immutable revision-gated branch snapshot using one stable delivery profile. New files require no confirmation; overwrite=true always enters the human confirmation broker and source media can never be targeted.",
+            schema_object::<QueueExportArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(false)
+                .open_world(true),
+        ),
+        Tool::new(
+            "get_export_jobs",
+            "Return every retained export job in enqueue order with immutable request, conformance, progress, terminal state, and error data.",
+            schema_object::<EmptyArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "cancel_export",
+            "Idempotently cancel one queued or running export job. The backend observes the shared cancellation token cooperatively.",
+            schema_object::<ExportJobArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(true),
+        ),
         Tool::new(
             "get_delivery_variant_storyboard",
             "Render a real-compositor storyboard for a non-destructive delivery aspect using an explicit 0..=100 focal point. This is deterministic cover framing, not learned subject tracking.",
@@ -2273,6 +3092,12 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "track_reframe_subject",
+            "Follow an explicitly framed subject through a clip using deterministic sequential template matching, then return confidence observations and revision-gated editable focus curves for an existing reframe effect. This tracks the supplied region; it is not a learned person detector and never silently mutates the timeline.",
+            schema_object::<TrackReframeArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "get_timeline_storyboard",
             "Render a bounded PNG contact sheet from the real timeline compositor with a cell-to-frame manifest and timeline revision. Use it to survey footage and as visual proof after editing.",
             schema_object::<StoryboardArgs>(),
@@ -2330,6 +3155,33 @@ fn error_text(text: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(text)])
 }
 
+fn paths_resolve_equal(left: &Path, right: &Path) -> bool {
+    let resolved = |path: &Path| {
+        if let Ok(canonical) = path.canonicalize() {
+            return Some(canonical);
+        }
+        let absolute = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            std::env::current_dir().ok()?.join(path)
+        };
+        let parent = absolute.parent()?.canonicalize().ok()?;
+        Some(parent.join(absolute.file_name()?))
+    };
+    let (Some(left), Some(right)) = (resolved(left), resolved(right)) else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
 fn encode_png(image: &openreel_core::RgbaImage) -> Result<Vec<u8>, McpError> {
     let mut png = Vec::new();
     PngEncoder::new(&mut png)
@@ -2349,6 +3201,24 @@ struct TrackingObservation {
     project_frame: TimeCode,
     center: [u32; 2],
     confidence_basis_points: u16,
+}
+
+struct RegionTrackingRequest<'a> {
+    document: &'a Document,
+    clip_id: ClipId,
+    clip_timeline_start: TimeCode,
+    sample_frames: &'a [TimeCode],
+    center_percent: [u8; 2],
+    box_percent: [i64; 2],
+    search_radius_percent: u8,
+    max_width: u32,
+    excluded_effect_name: &'a str,
+}
+
+struct TrackedRegion {
+    observations: Vec<TrackingObservation>,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3327,6 +4197,7 @@ mod tests {
             core,
             playback.clone(),
             analysis,
+            None,
             ConfirmationBroker::default(),
             false,
         );
@@ -3384,6 +4255,52 @@ mod tests {
             result.structured_content.unwrap()["delivery_variant"]["aspect"],
             "vertical"
         );
+    }
+
+    #[test]
+    fn m34_agent_tools_expose_creator_plans_tracking_and_delivery_jobs() {
+        let tools = OpenReelMcp::tools().unwrap();
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<BTreeSet<_>>();
+        for name in [
+            "plan_beat_pacing",
+            "plan_music_fit",
+            "plan_speaker_multicam",
+            "track_reframe_subject",
+            "get_delivery_profiles",
+            "get_delivery_conformance",
+            "queue_export",
+            "get_export_jobs",
+            "cancel_export",
+        ] {
+            assert!(names.contains(name), "missing M34 tool {name}");
+        }
+
+        let mut registered = crate::schema::all_tool_names().unwrap();
+        registered.sort_unstable();
+        let mut served = tools
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect::<Vec<_>>();
+        served.sort_unstable();
+        assert_eq!(registered, served);
+    }
+
+    #[test]
+    fn source_path_guard_resolves_a_nonexistent_destination_through_dot_dot() {
+        let directory =
+            std::env::temp_dir().join(format!("openreel-source-guard-{}", std::process::id()));
+        let nested = directory.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let source = directory.join("source.mp4");
+        std::fs::write(&source, b"source").unwrap();
+        let aliased = nested.join("..").join("source.mp4");
+
+        assert!(paths_resolve_equal(&aliased, &source));
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -112,9 +112,16 @@ impl OpenReelApp {
         let playback: Arc<dyn Playback> = media.clone();
         let analysis: Arc<dyn Analysis> = media.clone();
         let exporter: Arc<dyn Export> = media;
-        let project =
-            ProjectSession::create(1, "Project 1", document.clone(), None, &playback, &analysis)
-                .expect("default project session must be valid");
+        let project = ProjectSession::create(
+            1,
+            "Project 1",
+            document.clone(),
+            None,
+            &playback,
+            &analysis,
+            &exporter,
+        )
+        .expect("default project session must be valid");
         let error_log = ErrorLog::default();
         let claude_info = ClaudeCodeDriver.detect();
         let codex_info = CodexDriver.detect();
@@ -228,6 +235,7 @@ impl OpenReelApp {
             project_path,
             &self.playback,
             &self.analysis,
+            &self.exporter,
         )
     }
 
