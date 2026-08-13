@@ -644,6 +644,10 @@ impl OpenReelMcp {
                     decode_args("get_timeline_transcript", arguments)?;
                 self.timeline_transcript(args.range)
             }
+            "get_dialogue_pacing" => {
+                let args: DialoguePacingArgs = decode_args("get_dialogue_pacing", arguments)?;
+                self.dialogue_pacing(&args)
+            }
             "get_silences" => {
                 let args: SilencesArgs = decode_args("get_silences", arguments)?;
                 self.asset_silences(args.asset_id, args.min_duration_frames)
@@ -2590,6 +2594,84 @@ impl OpenReelMcp {
         Ok(success_text(rendered))
     }
 
+    fn dialogue_pacing(&self, args: &DialoguePacingArgs) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let range = validated_timeline_range(
+            &document,
+            args.range.as_ref().map(|range| TranscriptRangeArgs {
+                start: range.start,
+                end: range.end,
+            }),
+            "dialogue pacing",
+        )?;
+        let minimum = args.minimum_pause_frames.unwrap_or(TimeCode(9));
+        let maximum = args.maximum_pause_frames.unwrap_or(TimeCode(15));
+        let capitalization_minimum = args
+            .capitalization_boundary_minimum_frames
+            .unwrap_or(TimeCode(4));
+        if minimum < TimeCode::ZERO || maximum < minimum || capitalization_minimum < TimeCode::ZERO
+        {
+            return Ok(error_text(
+                "dialogue pacing requires 0 <= minimum_pause_frames <= maximum_pause_frames and a non-negative capitalization boundary minimum",
+            ));
+        }
+        for asset in &document.media_pool {
+            if self.analysis.transcript_status(asset) == TranscriptStatus::NotRequested {
+                self.analysis.request_transcription(asset.clone());
+            }
+        }
+        let words = match self
+            .analysis
+            .timeline_transcript(&document, Some(range.clone()))
+        {
+            Ok(words) => dedup_timeline_words(words),
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let pacing = dialogue_pacing_gaps(&words, minimum, maximum, capitalization_minimum);
+        let short = pacing.iter().filter(|gap| gap.status == "short").count();
+        let long = pacing.iter().filter(|gap| gap.status == "long").count();
+        let target = pacing.len().saturating_sub(short).saturating_sub(long);
+        let ready = short == 0 && long == 0;
+        let mut rendered = format!(
+            "dialogue pacing range={}..{} boundaries={} target={} short={} long={} ready={ready}",
+            range.start.0,
+            range.end.0,
+            pacing.len(),
+            target,
+            short,
+            long,
+        );
+        for gap in &pacing {
+            let _ = write!(
+                rendered,
+                "\n{}..{} gap={} status={} {:?} -> {:?} reason={}",
+                gap.previous_end.0,
+                gap.next_start.0,
+                gap.pause_frames.0,
+                gap.status,
+                gap.previous_word,
+                gap.next_word,
+                gap.reason,
+            );
+        }
+        Ok(success_structured(
+            rendered,
+            serde_json::json!({
+                "range": {"start": range.start.0, "end": range.end.0},
+                "target_pause_frames": {"minimum": minimum.0, "maximum": maximum.0},
+                "capitalization_boundary_minimum_frames": capitalization_minimum.0,
+                "summary": {
+                    "boundaries": pacing.len(),
+                    "target": target,
+                    "short": short,
+                    "long": long,
+                    "ready": ready,
+                },
+                "gaps": pacing,
+            }),
+        ))
+    }
+
     fn timeline_silences(
         &self,
         requested: Option<TranscriptRangeArgs>,
@@ -2747,7 +2829,7 @@ impl OpenReelMcp {
             return Ok(error_text("minimum_silence_source_frames must be positive"));
         }
         let remove_fillers = args.remove_fillers.unwrap_or(true);
-        let (retained_pause, filler_padding) = match dialogue_pacing_settings(args) {
+        let pacing = match dialogue_pacing_settings(args) {
             Ok(settings) => settings,
             Err(error) => return Ok(error_text(error)),
         };
@@ -2771,8 +2853,7 @@ impl OpenReelMcp {
                 &silences,
                 minimum,
                 remove_fillers,
-                retained_pause,
-                filler_padding,
+                pacing,
             );
             if ranges.is_empty() {
                 return Ok(error_text(format!(
@@ -2792,10 +2873,7 @@ impl OpenReelMcp {
                     McpError::internal_error("dialogue assembly overflowed", None)
                 })?;
             }
-            selections.push(serde_json::json!({
-                "asset_id": asset_id,
-                "kept_source_ranges": ranges,
-            }));
+            selections.push(dialogue_selection(*asset_id, &ranges, &transcript, pacing));
         }
 
         let mut candidate = document.as_ref().clone();
@@ -2806,8 +2884,9 @@ impl OpenReelMcp {
         }
         let structured = serde_json::json!({
             "timeline_revision": revision,
-            "retained_pause_source_frames": retained_pause,
-            "filler_padding_source_frames": filler_padding,
+            "retained_pause_source_frames": pacing.retained_pause,
+            "filler_padding_source_frames": pacing.filler_padding,
+            "filler_bridge_pause_source_frames": pacing.filler_bridge_pause,
             "selections": selections,
             "resulting_range": {
                 "start": args.timeline_start.unwrap_or(TimeCode::ZERO),
@@ -3541,6 +3620,9 @@ struct DialogueAssemblyPlanArgs {
     /// Extra source frames removed on each side of a recognized filler boundary. Defaults to zero.
     #[serde(default)]
     filler_padding_source_frames: Option<TimeCode>,
+    /// Exact total pause retained between non-filler words bracketing a removed filler run. Use this to normalize sentence rhythm; omit to preserve the legacy detector-driven behavior.
+    #[serde(default)]
+    filler_bridge_pause_source_frames: Option<TimeCode>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -3739,6 +3821,22 @@ struct TimelineTranscriptArgs {
     /// Optional half-open range in exact project frames. Omit for the full timeline.
     #[serde(default)]
     range: Option<TranscriptRangeArgs>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DialoguePacingArgs {
+    /// Optional half-open range in exact project frames. Omit for the full timeline.
+    #[serde(default)]
+    range: Option<TranscriptRangeArgs>,
+    /// Shortest acceptable pause at a detected sentence boundary. Defaults to 9 project frames.
+    #[serde(default)]
+    minimum_pause_frames: Option<TimeCode>,
+    /// Longest acceptable pause at a detected sentence boundary. Defaults to 15 project frames.
+    #[serde(default)]
+    maximum_pause_frames: Option<TimeCode>,
+    /// Minimum word gap for an uppercase next word to count as a sentence boundary. Defaults to 4 project frames.
+    #[serde(default)]
+    capitalization_boundary_minimum_frames: Option<TimeCode>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -4094,6 +4192,12 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "get_dialogue_pacing",
+            "Measure compact sentence-boundary word gaps on the audible timeline and classify each as short, target, or long. Boundaries use punctuation, asset or speaker changes, and pause-backed capitalization so agents can verify rhythm instead of guessing from clip edges.",
+            schema_object::<DialoguePacingArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "import_media",
             "Probe a media path, then add the resulting asset metadata through Operation::AddAsset when expected_revision still matches.",
             schema_object::<ImportMediaArgs>(),
@@ -4126,17 +4230,201 @@ fn clamp_caption_cues_to_duration(cues: &mut Vec<CaptionCue>, duration: TimeCode
     cues.retain(|cue| cue.start < duration && cue.end > cue.start);
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct DialoguePacingGap {
+    previous_word: String,
+    next_word: String,
+    previous_end: TimeCode,
+    next_start: TimeCode,
+    pause_frames: TimeCode,
+    status: &'static str,
+    reason: String,
+}
+
+fn dialogue_pacing_gaps(
+    words: &[TimelineTranscriptWord],
+    minimum_pause_frames: TimeCode,
+    maximum_pause_frames: TimeCode,
+    capitalization_boundary_minimum_frames: TimeCode,
+) -> Vec<DialoguePacingGap> {
+    let audible = words
+        .iter()
+        .filter(|word| !is_filler_word(&word.text))
+        .collect::<Vec<_>>();
+    audible
+        .windows(2)
+        .filter_map(|pair| {
+            let previous = pair[0];
+            let next = pair[1];
+            let pause_frames =
+                TimeCode(next.project_start.0.saturating_sub(previous.project_end.0));
+            let mut reasons = Vec::new();
+            if previous.asset != next.asset {
+                reasons.push("asset_change");
+            }
+            if previous.speaker.is_some()
+                && next.speaker.is_some()
+                && previous.speaker != next.speaker
+            {
+                reasons.push("speaker_change");
+            }
+            if word_ends_sentence(&previous.text) {
+                reasons.push("terminal_punctuation");
+            }
+            if pause_frames >= capitalization_boundary_minimum_frames
+                && word_starts_uppercase(&next.text)
+            {
+                reasons.push("pause_backed_capitalization");
+            }
+            if reasons.is_empty() {
+                return None;
+            }
+            let status = if pause_frames < minimum_pause_frames {
+                "short"
+            } else if pause_frames > maximum_pause_frames {
+                "long"
+            } else {
+                "target"
+            };
+            Some(DialoguePacingGap {
+                previous_word: previous.text.clone(),
+                next_word: next.text.clone(),
+                previous_end: previous.project_end,
+                next_start: next.project_start,
+                pause_frames,
+                status,
+                reason: reasons.join("+"),
+            })
+        })
+        .collect()
+}
+
+fn word_ends_sentence(text: &str) -> bool {
+    text.trim_end_matches(['\"', '\'', ')', ']', '}'])
+        .ends_with(['.', '!', '?'])
+}
+
+fn word_starts_uppercase(text: &str) -> bool {
+    text.chars()
+        .find(|character| character.is_alphabetic())
+        .is_some_and(char::is_uppercase)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DialoguePacingSettings {
+    retained_pause: TimeCode,
+    filler_padding: TimeCode,
+    filler_bridge_pause: Option<TimeCode>,
+}
+
 fn dialogue_pacing_settings(
     args: &DialogueAssemblyPlanArgs,
-) -> Result<(TimeCode, TimeCode), &'static str> {
+) -> Result<DialoguePacingSettings, &'static str> {
     let retained = args.retained_pause_source_frames.unwrap_or(TimeCode::ZERO);
     let padding = args.filler_padding_source_frames.unwrap_or(TimeCode::ZERO);
-    if retained < TimeCode::ZERO || padding < TimeCode::ZERO {
+    let filler_bridge_pause = args.filler_bridge_pause_source_frames;
+    if retained < TimeCode::ZERO
+        || padding < TimeCode::ZERO
+        || filler_bridge_pause.is_some_and(|pause| pause < TimeCode::ZERO)
+    {
         return Err(
-            "retained_pause_source_frames and filler_padding_source_frames must be non-negative",
+            "retained_pause_source_frames, filler_padding_source_frames, and filler_bridge_pause_source_frames must be non-negative",
         );
     }
-    Ok((retained, padding))
+    Ok(DialoguePacingSettings {
+        retained_pause: retained,
+        filler_padding: padding,
+        filler_bridge_pause,
+    })
+}
+
+fn dialogue_selection(
+    asset_id: AssetId,
+    ranges: &[std::ops::Range<TimeCode>],
+    transcript: &AssetTranscript,
+    pacing: DialoguePacingSettings,
+) -> serde_json::Value {
+    serde_json::json!({
+        "asset_id": asset_id,
+        "kept_source_ranges": ranges,
+        "filler_bridges": dialogue_filler_bridges(transcript, pacing.filler_bridge_pause),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct DialogueFillerBridge {
+    previous_word: String,
+    next_word: String,
+    source_start: TimeCode,
+    source_end: TimeCode,
+    cut_start: TimeCode,
+    cut_end: TimeCode,
+    requested_pause_source_frames: TimeCode,
+    retained_pause_source_frames: TimeCode,
+}
+
+fn dialogue_filler_bridges(
+    transcript: &AssetTranscript,
+    requested_pause: Option<TimeCode>,
+) -> Vec<DialogueFillerBridge> {
+    let Some(requested_pause) = requested_pause else {
+        return Vec::new();
+    };
+    let mut bridges = Vec::new();
+    let mut index = 0;
+    while index < transcript.words.len() {
+        if !is_filler_word(&transcript.words[index].text) {
+            index += 1;
+            continue;
+        }
+        let first_filler = index;
+        while index < transcript.words.len() && is_filler_word(&transcript.words[index].text) {
+            index += 1;
+        }
+        let next_non_filler = index;
+        let Some(previous_non_filler) = first_filler.checked_sub(1) else {
+            continue;
+        };
+        let Some(next) = transcript.words.get(next_non_filler) else {
+            continue;
+        };
+        let previous = &transcript.words[previous_non_filler];
+        let first = &transcript.words[first_filler];
+        let last = &transcript.words[next_non_filler - 1];
+        if previous.source_end > first.source_start
+            || first.source_start > last.source_end
+            || last.source_end > next.source_start
+        {
+            continue;
+        }
+        let left_available = first.source_start.0.saturating_sub(previous.source_end.0);
+        let right_available = next.source_start.0.saturating_sub(last.source_end.0);
+        let requested = requested_pause.0;
+        let mut left = (requested / 2).min(left_available);
+        let mut right = requested.saturating_sub(left).min(right_available);
+        let mut remaining = requested.saturating_sub(left).saturating_sub(right);
+        let left_extra = left_available.saturating_sub(left).min(remaining);
+        left = left.saturating_add(left_extra);
+        remaining = remaining.saturating_sub(left_extra);
+        let right_extra = right_available.saturating_sub(right).min(remaining);
+        right = right.saturating_add(right_extra);
+        let cut_start = TimeCode(previous.source_end.0.saturating_add(left));
+        let cut_end = TimeCode(next.source_start.0.saturating_sub(right));
+        if cut_end <= cut_start {
+            continue;
+        }
+        bridges.push(DialogueFillerBridge {
+            previous_word: previous.text.clone(),
+            next_word: next.text.clone(),
+            source_start: previous.source_end,
+            source_end: next.source_start,
+            cut_start,
+            cut_end,
+            requested_pause_source_frames: requested_pause,
+            retained_pause_source_frames: TimeCode(left.saturating_add(right)),
+        });
+    }
+    bridges
 }
 
 fn dialogue_keep_ranges(
@@ -4145,9 +4433,13 @@ fn dialogue_keep_ranges(
     silences: &AssetSilences,
     minimum_silence_source_frames: TimeCode,
     remove_fillers: bool,
-    retained_pause_source_frames: TimeCode,
-    filler_padding_source_frames: TimeCode,
+    pacing: DialoguePacingSettings,
 ) -> Vec<std::ops::Range<TimeCode>> {
+    let bridges = if remove_fillers {
+        dialogue_filler_bridges(transcript, pacing.filler_bridge_pause)
+    } else {
+        Vec::new()
+    };
     let mut cuts = silences
         .spans
         .iter()
@@ -4161,11 +4453,12 @@ fn dialogue_keep_ranges(
                 Some(&transcript.words),
             )
         })
+        .flat_map(|span| subtract_dialogue_bridges(span.source_start..span.source_end, &bridges))
         .filter_map(|span| {
-            let before = retained_pause_source_frames.0 / 2;
-            let after = retained_pause_source_frames.0.saturating_sub(before);
-            let start = TimeCode(span.source_start.0.saturating_add(before));
-            let end = TimeCode(span.source_end.0.saturating_sub(after));
+            let before = pacing.retained_pause.0 / 2;
+            let after = pacing.retained_pause.0.saturating_sub(before);
+            let start = TimeCode(span.start.0.saturating_add(before));
+            let end = TimeCode(span.end.0.saturating_sub(after));
             (end > start).then_some(start..end)
         })
         .collect::<Vec<_>>();
@@ -4175,17 +4468,15 @@ fn dialogue_keep_ranges(
                 .words
                 .iter()
                 .filter(|word| is_filler_word(&word.text))
+                .filter(|word| {
+                    !bridges.iter().any(|bridge| {
+                        word.source_start >= bridge.source_start
+                            && word.source_end <= bridge.source_end
+                    })
+                })
                 .map(|word| {
-                    TimeCode(
-                        word.source_start
-                            .0
-                            .saturating_sub(filler_padding_source_frames.0),
-                    )
-                        ..TimeCode(
-                            word.source_end
-                                .0
-                                .saturating_add(filler_padding_source_frames.0),
-                        )
+                    TimeCode(word.source_start.0.saturating_sub(pacing.filler_padding.0))
+                        ..TimeCode(word.source_end.0.saturating_add(pacing.filler_padding.0))
                 }),
         );
     }
@@ -4194,25 +4485,16 @@ fn dialogue_keep_ranges(
         cut.end = cut.end.clamp(TimeCode::ZERO, asset.duration);
     }
     cuts.retain(|cut| cut.end > cut.start);
-    cuts.sort_by_key(|cut| (cut.start, cut.end));
-
-    let mut merged = Vec::<std::ops::Range<TimeCode>>::new();
-    for cut in cuts {
-        if let Some(previous) = merged.last_mut()
-            && cut.start.0
-                <= previous
-                    .end
-                    .0
-                    .saturating_add(retained_pause_source_frames.0)
-        {
-            previous.end = previous.end.max(cut.end);
-        } else {
-            merged.push(cut);
-        }
-    }
+    let mut merged = merge_dialogue_cuts(cuts, pacing.retained_pause);
+    merged.extend(
+        bridges
+            .iter()
+            .map(|bridge| bridge.cut_start..bridge.cut_end),
+    );
+    let exact = merge_dialogue_cuts(merged, TimeCode::ZERO);
     let mut kept = Vec::new();
     let mut cursor = TimeCode::ZERO;
-    for cut in merged {
+    for cut in exact {
         if cut.start > cursor {
             kept.push(cursor..cut.start);
         }
@@ -4222,6 +4504,52 @@ fn dialogue_keep_ranges(
         kept.push(cursor..asset.duration);
     }
     kept
+}
+
+fn merge_dialogue_cuts(
+    mut cuts: Vec<std::ops::Range<TimeCode>>,
+    join_gap: TimeCode,
+) -> Vec<std::ops::Range<TimeCode>> {
+    cuts.sort_by_key(|cut| (cut.start, cut.end));
+    let mut merged = Vec::<std::ops::Range<TimeCode>>::new();
+    for cut in cuts {
+        if let Some(previous) = merged.last_mut()
+            && cut.start.0 <= previous.end.0.saturating_add(join_gap.0)
+        {
+            previous.end = previous.end.max(cut.end);
+        } else {
+            merged.push(cut);
+        }
+    }
+    merged
+}
+
+fn subtract_dialogue_bridges(
+    range: std::ops::Range<TimeCode>,
+    bridges: &[DialogueFillerBridge],
+) -> Vec<std::ops::Range<TimeCode>> {
+    let mut remaining = vec![range];
+    for bridge in bridges {
+        let excluded = bridge.source_start..bridge.source_end;
+        let mut next = Vec::new();
+        for candidate in remaining {
+            if excluded.end <= candidate.start || excluded.start >= candidate.end {
+                next.push(candidate);
+                continue;
+            }
+            if candidate.start < excluded.start {
+                next.push(candidate.start..excluded.start.min(candidate.end));
+            }
+            if candidate.end > excluded.end {
+                next.push(excluded.end.max(candidate.start)..candidate.end);
+            }
+        }
+        remaining = next;
+    }
+    remaining
+        .into_iter()
+        .filter(|range| range.end > range.start)
+        .collect()
 }
 
 fn success_text(text: impl Into<String>) -> CallToolResult {
@@ -6150,8 +6478,11 @@ mod tests {
                 &silences,
                 TimeCode(20),
                 true,
-                TimeCode::ZERO,
-                TimeCode::ZERO,
+                DialoguePacingSettings {
+                    retained_pause: TimeCode::ZERO,
+                    filler_padding: TimeCode::ZERO,
+                    filler_bridge_pause: None,
+                },
             ),
             vec![
                 TimeCode(0)..TimeCode(20),
@@ -6204,11 +6535,135 @@ mod tests {
                 &silences,
                 TimeCode(20),
                 true,
-                TimeCode(6),
-                TimeCode(3),
+                DialoguePacingSettings {
+                    retained_pause: TimeCode(6),
+                    filler_padding: TimeCode(3),
+                    filler_bridge_pause: None,
+                },
             ),
             vec![TimeCode(0)..TimeCode(23), TimeCode(85)..TimeCode(120),]
         );
+    }
+
+    #[test]
+    fn dialogue_filler_bridge_normalizes_sentence_pause_exactly() {
+        let fps = Rational::new(30, 1).unwrap();
+        let asset = MediaAsset {
+            id: AssetId(1),
+            path: "dialogue.mp4".into(),
+            name: "dialogue".to_owned(),
+            duration: TimeCode(120),
+            fps,
+            kind: MediaKind::AudioVideo,
+            resolution: Some((320, 180)),
+        };
+        let transcript = AssetTranscript {
+            asset: asset.id,
+            content_sha256: "fixture".to_owned(),
+            source_fps: fps,
+            words: vec![
+                TranscriptWord {
+                    text: "First.".to_owned(),
+                    source_start: TimeCode(5),
+                    source_end: TimeCode(15),
+                    speaker: None,
+                },
+                TranscriptWord {
+                    text: "Um".to_owned(),
+                    source_start: TimeCode(25),
+                    source_end: TimeCode(30),
+                    speaker: None,
+                },
+                TranscriptWord {
+                    text: "uh,".to_owned(),
+                    source_start: TimeCode(30),
+                    source_end: TimeCode(35),
+                    speaker: None,
+                },
+                TranscriptWord {
+                    text: "Then".to_owned(),
+                    source_start: TimeCode(50),
+                    source_end: TimeCode(60),
+                    speaker: None,
+                },
+            ],
+        };
+        let silences = AssetSilences {
+            asset: asset.id,
+            content_sha256: "fixture".to_owned(),
+            source_fps: fps,
+            source_frames: asset.duration,
+            threshold_dbfs_hundredths: -4_000,
+            window_milliseconds: 20,
+            spans: vec![
+                SilenceSpan {
+                    source_start: TimeCode(15),
+                    source_end: TimeCode(25),
+                },
+                SilenceSpan {
+                    source_start: TimeCode(35),
+                    source_end: TimeCode(50),
+                },
+            ],
+        };
+
+        let bridges = dialogue_filler_bridges(&transcript, Some(TimeCode(12)));
+        assert_eq!(bridges.len(), 1);
+        assert_eq!(bridges[0].cut_start, TimeCode(21));
+        assert_eq!(bridges[0].cut_end, TimeCode(44));
+        assert_eq!(bridges[0].retained_pause_source_frames, TimeCode(12));
+        assert_eq!(
+            dialogue_keep_ranges(
+                &asset,
+                &transcript,
+                &silences,
+                TimeCode(5),
+                true,
+                DialoguePacingSettings {
+                    retained_pause: TimeCode(6),
+                    filler_padding: TimeCode(3),
+                    filler_bridge_pause: Some(TimeCode(12)),
+                },
+            ),
+            vec![TimeCode(0)..TimeCode(21), TimeCode(44)..TimeCode(120)]
+        );
+    }
+
+    #[test]
+    fn dialogue_pacing_classifies_sentence_gaps_without_marking_word_gaps() {
+        let word = |text: &str, asset: u64, start: i64, end: i64| TimelineTranscriptWord {
+            text: text.to_owned(),
+            speaker: None,
+            asset: AssetId(asset),
+            track: TrackId(1),
+            clip: ClipId(asset),
+            source_start: TimeCode(start),
+            source_end: TimeCode(end),
+            project_start: TimeCode(start),
+            project_end: TimeCode(end),
+        };
+        let words = vec![
+            word("rain", 1, 80, 100),
+            word("Neighbors", 1, 112, 130),
+            word("instead", 1, 180, 200),
+            word("Over", 2, 212, 230),
+            word("beds", 2, 280, 300),
+            word("Then", 2, 307, 325),
+            word("peppers.", 2, 380, 400),
+            word("Now", 3, 420, 438),
+            word("continues", 3, 440, 458),
+        ];
+
+        let gaps = dialogue_pacing_gaps(&words, TimeCode(9), TimeCode(15), TimeCode(4));
+        assert_eq!(gaps.len(), 4);
+        assert_eq!(gaps[0].status, "target");
+        assert_eq!(gaps[0].reason, "pause_backed_capitalization");
+        assert_eq!(gaps[1].status, "target");
+        assert!(gaps[1].reason.contains("asset_change"));
+        assert_eq!(gaps[2].status, "short");
+        assert_eq!(gaps[2].pause_frames, TimeCode(7));
+        assert_eq!(gaps[3].status, "long");
+        assert!(gaps[3].reason.contains("terminal_punctuation"));
     }
 
     #[test]

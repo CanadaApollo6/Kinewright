@@ -15,8 +15,8 @@ use openreel_core::{
     ClipContent, Command, Core, DeliveryConformanceReport, DeliveryProfile, Document, Event,
     Export, ExportCancellation, HarnessInfo, MediaKind, Operation, ParamValue, Playback, Query,
     QueryResult, SessionConfig, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
-    TranscriptStatus, delivery_conformance, document_for_delivery_profile,
-    map_source_range_to_project, qa_document,
+    TimelineTranscriptWord, TranscriptStatus, dedup_timeline_words, delivery_conformance,
+    document_for_delivery_profile, is_filler_word, map_source_range_to_project, qa_document,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -140,6 +140,11 @@ pub enum EvalAssertion {
     NoSilenceAtLeast {
         source_frames: TimeCode,
     },
+    DialoguePauseBounds {
+        minimum_project_frames: TimeCode,
+        maximum_project_frames: TimeCode,
+        capitalization_boundary_minimum_frames: TimeCode,
+    },
     SceneChangesAreCuts {
         scene_set: String,
     },
@@ -261,6 +266,7 @@ impl SessionMetrics {
 pub struct EvalOutcome {
     pub final_document: Document,
     pub final_words: Vec<String>,
+    pub final_timeline_words: Vec<TimelineTranscriptWord>,
     pub remaining_silences: Vec<TimelineSilenceSpan>,
     pub remaining_scenes: Vec<TimelineSceneChange>,
     pub context: FixtureContext,
@@ -533,12 +539,15 @@ pub fn run_eval_with_artifacts(
     session.tool_surface = server.tool_surface_metrics();
     let final_document = query_document(&fixture.core)?;
     let operations = query_operations(&fixture.core)?;
-    let final_words = fixture
-        .analysis
-        .timeline_transcript(&final_document, None)
-        .map_err(|error| EvalError::Media(error.to_string()))?
-        .into_iter()
-        .map(|word| word.text)
+    let final_timeline_words = dedup_timeline_words(
+        fixture
+            .analysis
+            .timeline_transcript(&final_document, None)
+            .map_err(|error| EvalError::Media(error.to_string()))?,
+    );
+    let final_words = final_timeline_words
+        .iter()
+        .map(|word| word.text.clone())
         .collect::<Vec<_>>();
     let remaining_silences = fixture
         .analysis
@@ -579,6 +588,7 @@ pub fn run_eval_with_artifacts(
     let outcome = EvalOutcome {
         final_document: (*final_document).clone(),
         final_words,
+        final_timeline_words,
         remaining_silences,
         remaining_scenes,
         context: fixture.context.clone(),
@@ -1570,6 +1580,16 @@ fn evaluate_assertion(
                 ),
             )
         }
+        EvalAssertion::DialoguePauseBounds {
+            minimum_project_frames,
+            maximum_project_frames,
+            capitalization_boundary_minimum_frames,
+        } => evaluate_dialogue_pause_bounds(
+            &outcome.final_timeline_words,
+            *minimum_project_frames,
+            *maximum_project_frames,
+            *capitalization_boundary_minimum_frames,
+        ),
         EvalAssertion::SceneChangesAreCuts { scene_set } => evaluate_scene_cuts(scene_set, outcome),
         EvalAssertion::RequiredToolUsage { all_of, any_of } => {
             let called = outcome
@@ -1869,6 +1889,66 @@ fn evaluate_source_clips(clips: &[ExpectedSourceClip], outcome: &EvalOutcome) ->
         "exact source clips",
         observed == clips,
         format!("expected {clips:?}, observed {observed:?}"),
+    )
+}
+
+fn evaluate_dialogue_pause_bounds(
+    words: &[TimelineTranscriptWord],
+    minimum: TimeCode,
+    maximum: TimeCode,
+    capitalization_minimum: TimeCode,
+) -> AssertionResult {
+    let audible = words
+        .iter()
+        .filter(|word| !is_filler_word(&word.text))
+        .collect::<Vec<_>>();
+    let boundaries = audible
+        .windows(2)
+        .filter_map(|pair| {
+            let previous = pair[0];
+            let next = pair[1];
+            let pause = TimeCode(next.project_start.0.saturating_sub(previous.project_end.0));
+            let punctuated = eval_word_ends_sentence(&previous.text);
+            let asset_change = previous.asset != next.asset;
+            let speaker_change = previous.speaker.is_some()
+                && next.speaker.is_some()
+                && previous.speaker != next.speaker;
+            let capitalized = pause >= capitalization_minimum
+                && next
+                    .text
+                    .chars()
+                    .find(|character| character.is_alphabetic())
+                    .is_some_and(char::is_uppercase);
+            (punctuated || asset_change || speaker_change || capitalized).then_some((
+                previous.text.as_str(),
+                next.text.as_str(),
+                pause,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let violations = boundaries
+        .iter()
+        .filter(|(_, _, pause)| *pause < minimum || *pause > maximum)
+        .map(|(previous, next, pause)| format!("{previous:?}->{next:?}={}", pause.0))
+        .collect::<Vec<_>>();
+    assertion_result(
+        "dialogue sentence pacing",
+        !boundaries.is_empty() && violations.is_empty(),
+        format!(
+            "expected every detected boundary in {}..={} project frames; observed {} boundary gap(s), violations={violations:?}",
+            minimum.0,
+            maximum.0,
+            boundaries.len(),
+        ),
+    )
+}
+
+fn eval_word_ends_sentence(text: &str) -> bool {
+    matches!(
+        text.trim_end_matches(['\"', '\'', ')', ']', '}'])
+            .chars()
+            .next_back(),
+        Some('.' | '!' | '?')
     )
 }
 
@@ -2768,6 +2848,7 @@ mod tests {
         let outcome = EvalOutcome {
             final_document,
             final_words: Vec::new(),
+            final_timeline_words: Vec::new(),
             remaining_silences: Vec::new(),
             remaining_scenes: Vec::new(),
             context,
@@ -2829,6 +2910,7 @@ mod tests {
         let outcome = EvalOutcome {
             final_document: document(),
             final_words: vec!["alpha".to_owned(), "bravo".to_owned()],
+            final_timeline_words: Vec::new(),
             remaining_silences: Vec::new(),
             remaining_scenes: Vec::new(),
             context,
@@ -2877,6 +2959,35 @@ mod tests {
     }
 
     #[test]
+    fn dialogue_pause_assertion_catches_the_m38_short_boundary() {
+        let word = |text: &str, asset: u64, start: i64, end: i64| TimelineTranscriptWord {
+            text: text.to_owned(),
+            speaker: None,
+            asset: AssetId(asset),
+            track: TrackId(1),
+            clip: ClipId(asset),
+            source_start: TimeCode(start),
+            source_end: TimeCode(end),
+            project_start: TimeCode(start),
+            project_end: TimeCode(end),
+        };
+        let words = vec![
+            word("rain", 1, 80, 100),
+            word("Neighbors", 1, 112, 130),
+            word("beds", 2, 280, 300),
+            word("Then", 2, 307, 325),
+            word("peppers.", 2, 380, 400),
+            word("Now", 3, 412, 430),
+        ];
+
+        let rejected =
+            evaluate_dialogue_pause_bounds(&words, TimeCode(9), TimeCode(15), TimeCode(4));
+        assert!(!rejected.passed);
+        assert!(rejected.detail.contains("beds"));
+        assert!(rejected.detail.contains("=7"));
+    }
+
+    #[test]
     fn exact_caption_words_catch_the_m37_material_error() {
         let mut final_document = document();
         final_document.tracks.push(Track {
@@ -2906,6 +3017,7 @@ mod tests {
         let mut outcome = EvalOutcome {
             final_document,
             final_words: Vec::new(),
+            final_timeline_words: Vec::new(),
             remaining_silences: Vec::new(),
             remaining_scenes: Vec::new(),
             context,

@@ -159,8 +159,9 @@ fn eval_suite(suite: &str) -> Result<(&'static str, Vec<EvalDefinition>), EvalEr
         "auto-edit-v1" | "v1" => Ok(("openreel-auto-edit-v1", seed_suite())),
         "finished-cut-v2" | "v2" => Ok(("openreel-finished-cut-v2", finished_cut_suite())),
         "editorial-cut-v3" | "v3" => Ok(("openreel-editorial-cut-v3", editorial_cut_suite())),
+        "dialogue-pacing-v4" | "v4" => Ok(("openreel-dialogue-pacing-v4", dialogue_pacing_suite())),
         other => Err(EvalError::Agent(format!(
-            "unknown suite {other:?}; expected auto-edit-v1, finished-cut-v2, or editorial-cut-v3"
+            "unknown suite {other:?}; expected auto-edit-v1, finished-cut-v2, editorial-cut-v3, or dialogue-pacing-v4"
         ))),
     }
 }
@@ -168,7 +169,7 @@ fn eval_suite(suite: &str) -> Result<(&'static str, Vec<EvalDefinition>), EvalEr
 fn is_packaged_benchmark(benchmark_id: &str) -> bool {
     matches!(
         benchmark_id,
-        "openreel-finished-cut-v2" | "openreel-editorial-cut-v3"
+        "openreel-finished-cut-v2" | "openreel-editorial-cut-v3" | "openreel-dialogue-pacing-v4"
     )
 }
 
@@ -321,7 +322,7 @@ impl Options {
                 }
                 "-h" | "--help" => {
                     println!(
-                        "Usage: OPENREEL_EVAL=1 cargo run -p openreel-agent --bin openreel-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p openreel-agent --bin openreel-eval -- --score-review PATH"
+                        "Usage: OPENREEL_EVAL=1 cargo run -p openreel-agent --bin openreel-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3|dialogue-pacing-v4] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p openreel-agent --bin openreel-eval -- --score-review PATH"
                     );
                     return Err(EvalError::Agent("help requested".to_owned()));
                 }
@@ -809,6 +810,30 @@ fn editorial_cut_suite() -> Vec<EvalDefinition> {
     }]
 }
 
+fn dialogue_pacing_suite() -> Vec<EvalDefinition> {
+    let mut definitions = editorial_cut_suite();
+    let definition = &mut definitions[0];
+    definition.name = "f3 sentence-paced neighborhood garden story";
+    definition.rationale = "Measures coherent editorial assembly plus explicit, independently scored sentence-boundary rhythm after filler removal.";
+    definition.fixture_builder = fixture_dialogue_pacing_story;
+    definition.prompts = &[
+        "Create a finished vertical social story about a neighborhood garden from the five takes. Batch-load the exact named capabilities in this brief in one get_capability call, and search only for a need that remains unnamed. Inspect all five takes in one get_transcripts call. Choose the three takes that form this factual arc: the empty lot collected weeds and rainwater; neighbors turned it into food-growing space by building raised beds and planting tomatoes, herbs, and peppers; the Saturday market now supplies fresh produce to dozens of local families. Reject every flub or factually wrong alternate. Use plan_dialogue_assembly to preserve the clean spoken content in story order, remove all audible um sounds with 3 source frames of filler padding, remove raw dead air at least 20 source frames long, retain 6 source frames around ordinary silence cuts, and normalize every removed filler bridge to exactly 12 source frames of sentence pause. Keep the real-time A/V source dialogue audible without duplicating it onto an audio track. Use add_styled_captions with the social preset and pop motion. The exact intended caption wording, excluding fillers, is: 'Last spring this empty lot collected weeds and rainwater. Neighbors decided it could feed families instead. Over three weekends volunteers built raised beds. Then they planted tomatoes herbs and peppers. Now the Saturday market supplies fresh produce to dozens of local families.' Inspect every generated cue with get_captions and use plan_caption_corrections plus prepare_edit_plan and commit_edit_plan if any cue differs from those intended words. Verify get_dialogue_pacing with a 9-to-15-project-frame target and a 4-frame capitalization boundary minimum. Finish with one get_editorial_readiness call using vertical_short, minimum 20 source frames, centered 50/50 focus, nine storyboard frames, and 240-pixel cells. Do not queue export; the benchmark renders and independently transcribes the exact verified snapshot. Keep working until both pacing and readiness are true.",
+    ];
+    definition.assertions.insert(
+        12,
+        EvalAssertion::DialoguePauseBounds {
+            minimum_project_frames: TimeCode(9),
+            maximum_project_frames: TimeCode(15),
+            capitalization_boundary_minimum_frames: TimeCode(4),
+        },
+    );
+    let undo = definition.assertions.len().saturating_sub(1);
+    definition
+        .assertions
+        .insert(undo, required_all(&["get_dialogue_pacing"]));
+    definitions
+}
+
 fn aliases(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
@@ -1185,14 +1210,31 @@ struct EditorialTake {
 
 #[allow(clippy::too_many_lines)]
 fn fixture_editorial_story() -> Result<PreparedFixture, EvalError> {
-    let truth: EditorialGroundTruth = serde_json::from_str(include_str!(
-        "../../../../benchmarks/auto-edit/v3/ground-truth.json"
-    ))
-    .map_err(|error| EvalError::Fixture(format!("invalid v3 ground truth: {error}")))?;
+    fixture_editorial_story_from(
+        include_str!("../../../../benchmarks/auto-edit/v3/ground-truth.json"),
+        "v3",
+    )
+}
+
+fn fixture_dialogue_pacing_story() -> Result<PreparedFixture, EvalError> {
+    fixture_editorial_story_from(
+        include_str!("../../../../benchmarks/auto-edit/v4/ground-truth.json"),
+        "v4",
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn fixture_editorial_story_from(
+    ground_truth: &str,
+    benchmark_version: &str,
+) -> Result<PreparedFixture, EvalError> {
+    let truth: EditorialGroundTruth = serde_json::from_str(ground_truth).map_err(|error| {
+        EvalError::Fixture(format!("invalid {benchmark_version} ground truth: {error}"))
+    })?;
     if truth.schema_version != 1 || truth.story_id.trim().is_empty() {
-        return Err(EvalError::Fixture(
-            "v3 ground truth has an unsupported schema or empty story id".to_owned(),
-        ));
+        return Err(EvalError::Fixture(format!(
+            "{benchmark_version} ground truth has an unsupported schema or empty story id"
+        )));
     }
     let accepted_order = truth
         .takes
@@ -1207,9 +1249,9 @@ fn fixture_editorial_story() -> Result<PreparedFixture, EvalError> {
             .map(String::as_str)
             .collect::<Vec<_>>()
     {
-        return Err(EvalError::Fixture(
-            "v3 accepted takes do not match expected_take_order".to_owned(),
-        ));
+        return Err(EvalError::Fixture(format!(
+            "{benchmark_version} accepted takes do not match expected_take_order"
+        )));
     }
 
     let media = eval_engine();
@@ -1249,13 +1291,15 @@ fn fixture_editorial_story() -> Result<PreparedFixture, EvalError> {
     let mut selected_fillers = BTreeSet::new();
     for take_id in &truth.expected_take_order {
         let asset_id = *context.asset_aliases.get(take_id).ok_or_else(|| {
-            EvalError::Fixture(format!("v3 expected take {take_id:?} does not exist"))
+            EvalError::Fixture(format!(
+                "{benchmark_version} expected take {take_id:?} does not exist"
+            ))
         })?;
         let recognized = normalized_words(&joined_words(&transcripts[&asset_id]));
         let (fillers, spoken_words) = partition_fillers(&recognized);
         if spoken_words.is_empty() {
             return Err(EvalError::Fixture(format!(
-                "v3 accepted take {take_id:?} ASR produced no content words"
+                "{benchmark_version} accepted take {take_id:?} ASR produced no content words"
             )));
         }
         selected_fillers.extend(fillers);
@@ -1266,7 +1310,7 @@ fn fixture_editorial_story() -> Result<PreparedFixture, EvalError> {
     let required_fillers = BTreeSet::from(["um".to_owned()]);
     if !required_fillers.is_subset(&selected_fillers) {
         return Err(EvalError::Fixture(format!(
-            "v3 source ASR must recognize the authored filler before it can be scored; observed {selected_fillers:?}"
+            "{benchmark_version} source ASR must recognize the authored filler before it can be scored; observed {selected_fillers:?}"
         )));
     }
     context.word_sets.insert(
@@ -1275,9 +1319,9 @@ fn fixture_editorial_story() -> Result<PreparedFixture, EvalError> {
     );
     let authored_dialogue = normalized_words(&truth.expected_dialogue);
     if authored_dialogue.is_empty() || truth.excluded_words.is_empty() {
-        return Err(EvalError::Fixture(
-            "v3 authored dialogue and exclusions must be non-empty".to_owned(),
-        ));
+        return Err(EvalError::Fixture(format!(
+            "{benchmark_version} authored dialogue and exclusions must be non-empty"
+        )));
     }
     context
         .word_sets
@@ -1291,12 +1335,16 @@ fn fixture_editorial_story() -> Result<PreparedFixture, EvalError> {
         .iter()
         .map(|take| {
             let asset_id = context.asset_aliases.get(take).ok_or_else(|| {
-                EvalError::Fixture(format!("v3 expected take {take:?} does not exist"))
+                EvalError::Fixture(format!(
+                    "{benchmark_version} expected take {take:?} does not exist"
+                ))
             })?;
             assets
                 .iter()
                 .find(|asset| asset.id == *asset_id)
-                .ok_or_else(|| EvalError::Fixture(format!("v3 asset {asset_id} is missing")))
+                .ok_or_else(|| {
+                    EvalError::Fixture(format!("{benchmark_version} asset {asset_id} is missing"))
+                })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let maximum = TimeCode(
@@ -1964,6 +2012,70 @@ mod tests {
 
         let truth: EditorialGroundTruth = serde_json::from_str(include_str!(
             "../../../../benchmarks/auto-edit/v3/ground-truth.json"
+        ))
+        .unwrap();
+        assert_eq!(truth.schema_version, 1);
+        assert_eq!(truth.takes.len(), 5);
+        assert_eq!(truth.expected_take_order, ["take-01", "take-03", "take-04"]);
+        assert_eq!(truth.takes.iter().filter(|take| take.accepted).count(), 3);
+    }
+
+    #[test]
+    fn published_v4_manifest_tracks_the_dialogue_pacing_suite_and_ground_truth() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v4/manifest.json"
+        ))
+        .unwrap();
+        assert_eq!(manifest["schema_version"], 4);
+        assert_eq!(manifest["benchmark_id"], "openreel-dialogue-pacing-v4");
+        let definitions = dialogue_pacing_suite();
+        assert_eq!(definitions.len(), 1);
+        let definition = &definitions[0];
+        let task = &manifest["tasks"][0];
+        assert_eq!(
+            task["id"].as_str(),
+            definition.name.split_whitespace().next()
+        );
+        assert_eq!(task["prompt"], definition.prompts[0]);
+        let deliverable = definition.deliverable.unwrap();
+        assert_eq!(deliverable.profile, DeliveryProfile::VerticalShort);
+        assert_eq!(
+            deliverable.expected_transcript_word_set,
+            Some("authored-dialogue")
+        );
+        assert_eq!(deliverable.maximum_word_error_rate_basis_points, 1_500);
+        assert_eq!(task["delivery"]["profile"], deliverable.profile.as_str());
+        assert_eq!(task["delivery"]["proof_frames"], deliverable.proof_frames);
+        assert_eq!(
+            task["delivery"]["maximum_word_error_rate_basis_points"],
+            deliverable.maximum_word_error_rate_basis_points
+        );
+        assert_eq!(task["budget"]["turns"], definition.budgets.max_turns);
+        assert_eq!(
+            task["budget"]["tool_calls"],
+            definition.budgets.max_tool_calls
+        );
+        assert_eq!(
+            task["budget"]["operations"],
+            definition.budgets.max_operations
+        );
+        assert_eq!(task["budget"]["tokens"], definition.budgets.max_tokens);
+        assert_eq!(
+            task["budget"]["wall_time_ms"],
+            u64::try_from(definition.budgets.max_wall_time.as_millis()).unwrap()
+        );
+        assert_eq!(task["budget"]["undos"], definition.budgets.max_undos);
+        assert!(definition.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::DialoguePauseBounds {
+                minimum_project_frames: TimeCode(9),
+                maximum_project_frames: TimeCode(15),
+                capitalization_boundary_minimum_frames: TimeCode(4),
+            }
+        )));
+
+        let truth: EditorialGroundTruth = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v4/ground-truth.json"
         ))
         .unwrap();
         assert_eq!(truth.schema_version, 1);

@@ -33,7 +33,7 @@ OpenReel is a native Windows video editor written in Rust that is, at its core, 
 - Agent editing with senses and plans: transcript, silence, and scene-change inspectors; atomic multi-operation edit plans with a **single undo entry** and one summarized confirmation for anything destructive; plan results self-report remaining dead air so the agent finishes the job
 - The agent has *eyes*: it can fetch actual frames from your timeline, not just metadata
 - **Measured agent competence**: a scored eval suite (`openreel-eval`) with an [exact-operation baseline](benchmarks/auto-edit/v1/README.md) and a [finished-cut benchmark](benchmarks/auto-edit/v2/README.md) that renders, probes, hashes, and packages a real MP4 for separate human review — see `docs/EVALS.md`
-- The [editorial-truth benchmark](benchmarks/auto-edit/v3/README.md) independently checks rendered speech and exact authored captions before separate human review
+- The [editorial-truth benchmark](benchmarks/auto-edit/v3/README.md) independently checks rendered speech and exact authored captions; [dialogue-pacing v4](benchmarks/auto-edit/v4/README.md) adds independently measured sentence rhythm before separate human review
 - Context-sensitive inspector panel (clips, titles, markers) driven by the same effect table that validates operations
 - Transcript panel with click-word-to-seek
 - Crash recovery from an operation journal
@@ -77,7 +77,7 @@ Claude Code and Codex sessions run with their built-in shell/file/web tools disa
 
 Details: [agent harnesses](docs/agent-harnesses.md) · [M36 agent runtime efficiency](docs/M36-AGENT-RUNTIME-EFFICIENCY.md) · [M37 human-acceptable first cut](docs/M37-HUMAN-ACCEPTABLE-FIRST-CUT.md) · [model-first editor](docs/MODEL-FIRST-EDITOR.md) · [current product position](docs/PRODUCT-POSITION-M35-2026-08.md) · [transcription](docs/TRANSCRIPTION.md)
 
-M38: [editorial truth, independent output scoring, and caption correction](docs/M38-EDITORIAL-TRUTH.md).
+M38: [editorial truth, independent output scoring, and caption correction](docs/M38-EDITORIAL-TRUTH.md). M39: [normalized filler bridges and independently scored dialogue pacing](docs/M39-DIALOGUE-PACING.md).
 
 ## Architecture
 

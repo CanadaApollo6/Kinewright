@@ -9,6 +9,14 @@ All notable changes to OpenReel are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Added
+- M39 dialogue pacing: dialogue assembly can now normalize the total clean
+  pause retained across a removed filler run without preserving filler audio,
+  while a compact read-only pacing inspector reports sentence boundaries and
+  short/target/long gaps. The evaluator independently derives those boundaries
+  from final timeline words and the immutable v4 benchmark requires every gap
+  to land between 9 and 15 project frames. The human exit target rises from
+  M38's accepted 4/5 pacing score to 4.5/5; machine results and human acceptance
+  remain separate.
 - M38 editorial truth benchmark: a new locally generated five-take garden
   story replaces the incoherent color-bar fixture with accepted and rejected
   facts, exact authored captions, and semantically distinct vertical scenes.

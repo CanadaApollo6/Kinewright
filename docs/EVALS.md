@@ -70,6 +70,28 @@ dimension below 3.5, no audible filler, and no material caption error. One
 viewing was applied to all three SHA-bound rows because their artifact hashes
 were identical. M38 passes its full machine-and-human exit contract.
 
+The dialogue-pacing contract lives under
+[`benchmarks/auto-edit/v4`](../benchmarks/auto-edit/v4/README.md). It preserves
+the accepted v3 story and output assertions, then independently requires every
+detected sentence-boundary gap to land between 9 and 15 project frames. The
+agent can normalize the pause across removed filler runs and inspect the final
+rhythm without receiving the evaluator's result. Run it with:
+
+```powershell
+& .\scripts\setup-ffmpeg.ps1
+$env:OPENREEL_EVAL = '1'
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --suite dialogue-pacing-v4 `
+  --harness codex `
+  --only f3 `
+  --samples 3
+```
+
+M39 requires a 3/3 machine pass before human review. Its human gate is at
+least two accepted SHA-bound artifacts, a 4.0/5 overall mean, 4.5/5 pacing,
+3.5/5 in every other dimension, and zero audible fillers or material caption
+errors. No machine baseline has been published yet.
+
 ## Seed suite
 
 | Eval | Rationale | USD ceiling |

@@ -1,0 +1,89 @@
+{
+  "schema_version": 4,
+  "benchmark_id": "openreel-dialogue-pacing-v4",
+  "title": "OpenReel Dialogue-Pacing Benchmark v4",
+  "runner": "cargo run -p openreel-agent --bin openreel-eval -- --suite dialogue-pacing-v4",
+  "implementation": "crates/openreel-agent/src/bin/openreel-eval.rs",
+  "inherits": "benchmarks/auto-edit/v3",
+  "fixture_provenance": {
+    "policy": "Generated locally from checked-in authored text and deterministic FFmpeg motion-graphic scenes; no private footage or downloaded corpus.",
+    "video": "Five semantically distinct vertical scenes depict an empty lot, a retake, a garden build, and two market outcomes.",
+    "speech": "Windows SAPI creates the authored dialogue, mistakes, fillers, and pauses in ground-truth.json.",
+    "analysis": "Source analysis guides the agent; independent timeline-word pacing, post-render Whisper, and authored caption comparison score the finished artifact.",
+    "time_base": "All editing and scoring use exact integer source or project frames."
+  },
+  "score_layers": {
+    "machine": [
+      "story take selection and ordering",
+      "authored caption sequence accuracy",
+      "independent rendered-dialogue transcription",
+      "dialogue cleanup and exact sentence-boundary pause bounds",
+      "technical QA, delivery conformance, proof, and MP4 identity",
+      "tool-use, token, operation, and wall-time budgets"
+    ],
+    "human": {
+      "acceptance": "Would the reviewer publish or deliver this exact artifact without another edit?",
+      "ratings": ["story", "pacing", "visual_finish", "audio_finish", "captions", "delivery_readiness"],
+      "scale": "1..=5 in 0.5-point increments",
+      "pacing_target": "At least 4.5/5; M38 established a 4.0/5 accepted baseline."
+    }
+  },
+  "acceptance_target": {
+    "samples": 3,
+    "minimum_machine_passes": 3,
+    "minimum_human_accepts": 2,
+    "minimum_mean_human_rating": 4.0,
+    "minimum_pacing_rating": 4.5,
+    "minimum_other_dimension_rating": 3.5,
+    "maximum_material_caption_errors": 0,
+    "maximum_audible_retained_fillers": 0
+  },
+  "tasks": [
+    {
+      "id": "f3",
+      "name": "sentence-paced neighborhood garden story",
+      "fixture": "fixture_editorial_story",
+      "ground_truth": "benchmarks/auto-edit/v4/ground-truth.json",
+      "prompt": "Create a finished vertical social story about a neighborhood garden from the five takes. Batch-load the exact named capabilities in this brief in one get_capability call, and search only for a need that remains unnamed. Inspect all five takes in one get_transcripts call. Choose the three takes that form this factual arc: the empty lot collected weeds and rainwater; neighbors turned it into food-growing space by building raised beds and planting tomatoes, herbs, and peppers; the Saturday market now supplies fresh produce to dozens of local families. Reject every flub or factually wrong alternate. Use plan_dialogue_assembly to preserve the clean spoken content in story order, remove all audible um sounds with 3 source frames of filler padding, remove raw dead air at least 20 source frames long, retain 6 source frames around ordinary silence cuts, and normalize every removed filler bridge to exactly 12 source frames of sentence pause. Keep the real-time A/V source dialogue audible without duplicating it onto an audio track. Use add_styled_captions with the social preset and pop motion. The exact intended caption wording, excluding fillers, is: 'Last spring this empty lot collected weeds and rainwater. Neighbors decided it could feed families instead. Over three weekends volunteers built raised beds. Then they planted tomatoes herbs and peppers. Now the Saturday market supplies fresh produce to dozens of local families.' Inspect every generated cue with get_captions and use plan_caption_corrections plus prepare_edit_plan and commit_edit_plan if any cue differs from those intended words. Verify get_dialogue_pacing with a 9-to-15-project-frame target and a 4-frame capitalization boundary minimum. Finish with one get_editorial_readiness call using vertical_short, minimum 20 source frames, centered 50/50 focus, nine storyboard frames, and 240-pixel cells. Do not queue export; the benchmark renders and independently transcribes the exact verified snapshot. Keep working until both pacing and readiness are true.",
+      "delivery": {
+        "profile": "vertical_short",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 9,
+        "proof_cell_width": 240,
+        "require_audio": true,
+        "expected_transcript_word_set": "authored-dialogue",
+        "maximum_word_error_rate_basis_points": 1500
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 48,
+        "operations": 80,
+        "tokens": 500000,
+        "cost_usd": null,
+        "wall_time_ms": 3000000,
+        "undos": 80
+      },
+      "machine_assertions": [
+        "timeline non-empty",
+        "accepted take order",
+        "alternate takes absent",
+        "media gapless",
+        "recognized selected content retained",
+        "recognized fillers and authored exclusions absent",
+        "no cuttable silence",
+        "duration bounds",
+        "styled captions",
+        "authored caption words exact and ordered",
+        "delivery caption safe area",
+        "timeline audio present",
+        "sentence boundary gaps between 9 and 15 project frames",
+        "technical QA export ready",
+        "required capability evidence",
+        "undo integrity",
+        "independently probed MP4 identity",
+        "independent post-render transcript at or below 15% ordered word error rate"
+      ]
+    }
+  ]
+}

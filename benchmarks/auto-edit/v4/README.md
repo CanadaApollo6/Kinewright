@@ -1,0 +1,45 @@
+# OpenReel Dialogue-Pacing Benchmark v4
+
+V4 targets the one material weakness left in the accepted M38 cut: sentence
+rhythm. The M38 output scored 4/5 for pacing and contained project-frame gaps
+of 12, 7, 12, and 12 at detected sentence boundaries. The 7-frame transition
+was valid by the old cleanup contract, but it made the finished narration feel
+less consistent.
+
+The fixture and editorial truth are unchanged from v3. Keeping that successful
+artifact contract stable isolates the pacing change. V4 adds:
+
+- exact pause retention across consecutive removed filler words;
+- a compact `get_dialogue_pacing` inspector that reports sentence boundaries,
+  measured gaps, reasons, and short/target/long status;
+- an evaluator-owned assertion requiring every detected sentence gap to land
+  between 9 and 15 project frames;
+- a higher human gate: pacing at least 4.5/5, overall mean at least 4.0/5, and
+  every other dimension at least 3.5/5.
+
+The model is asked for a 12-source-frame bridge where fillers are removed. The
+planner removes the whole filler run atomically and divides the retained pause
+across its two clean speech boundaries without preserving filler audio. The
+independent evaluator measures final timeline words, not planner claims.
+
+Run three subscription-backed samples with:
+
+```powershell
+& .\scripts\setup-ffmpeg.ps1
+$env:OPENREEL_EVAL = '1'
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --suite dialogue-pacing-v4 `
+  --harness codex `
+  --only f3 `
+  --samples 3
+```
+
+Each output remains SHA-bound to separate human review. The milestone passes
+only when all three samples pass the machine contract, at least two are
+accepted by a person, mean human rating is at least 4.0, pacing is at least
+4.5, no other dimension falls below 3.5, and no material caption error or
+audible filler survives.
+
+This is still a synthetic motion-graphic fixture. It can isolate dialogue
+editing and narrative correctness, but it cannot establish professional shot
+taste or photoreal finishing.
