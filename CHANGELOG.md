@@ -19,8 +19,10 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   context. Capability queries and schema opens can be batched, and the new
   transcript/silence-backed dialogue assembly planner removes model-side frame
   arithmetic. The resulting Codex sample passes 32/32 machine assertions with
-  234,924 tokens, 67.9% below the prior passing baseline; SHA-bound human review
-  remains pending
+  234,924 tokens, 67.9% below the prior passing baseline. SHA-bound human review
+  then rejected the artifact at a 2.25/5 mean, exposing retained audible
+  fillers, inaccurate captions, awkward cuts, unclear story assembly, and a
+  reproducible-fixture visual surface that cannot measure real shot selection
 - M36 compact agent runtime: OpenReel-owned Claude, Codex, Cursor, and eval
   sessions expose seven stable tools instead of the complete catalog,
   discover exact capability schemas on demand, validate revision-bound edit

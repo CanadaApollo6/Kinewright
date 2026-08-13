@@ -43,8 +43,17 @@
     "proof_sample_frames": [0, 52, 105, 157, 210, 262, 315, 367, 420]
   },
   "human_review": {
-    "first_pass_acceptance": null,
-    "ratings": null,
-    "observation": "Machine assertions and an agent inspection of the proof are green. A person has not watched the SHA-bound MP4 with audio, so acceptance remains pending."
+    "reviewer": "Riel St Amand",
+    "first_pass_acceptance": false,
+    "ratings": {
+      "story": 2.0,
+      "pacing": 2.5,
+      "visual_finish": 2.5,
+      "audio_finish": 3.0,
+      "captions": 2.0,
+      "delivery_readiness": 1.5
+    },
+    "mean_rating": 2.25,
+    "observation": "Rejected after repeated watch-throughs. Two audible fillers survived, story language was hard to interpret, cuts and pacing were awkward, synthetic color-bar visuals lacked narrative intent, and captions contained material transcription errors. Speech clarity and level consistency were the strongest qualities, but the artifact was not delivery-ready."
   }
 }

@@ -248,8 +248,8 @@ and remaining live A/B proof gate are recorded in
 - compact generated-caption state and counted bulk-plan outcomes;
 - an approval-gated rerun of the exact M35 finished-cut task.
 
-The implemented preparation, remaining human acceptance boundary, benchmark
-command, and rollback criteria are recorded in
+The implemented preparation, rejected 2.25/5 human result, benchmark command,
+and resulting evaluator gaps are recorded in
 [M37 - Human-acceptable first cut](M37-HUMAN-ACCEPTABLE-FIRST-CUT.md).
 
 The published "footage in, finished cut out" benchmark should grow continuously

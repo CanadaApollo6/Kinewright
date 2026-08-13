@@ -39,8 +39,9 @@ cargo run -p openreel-agent --bin openreel-eval -- `
 The current v2 Codex baseline passed 32/32 machine assertions in 108.126 seconds
 with 18 tool calls and 234,924 reported tokens. It produced an independently
 probed 421-frame 1080x1920 audio-video MP4. This is 67.9% fewer tokens than the
-first passing v2 sample. Human acceptance remains unset until a person watches
-the SHA-bound artifact with audio.
+first passing v2 sample. The SHA-bound human review rejected it with a 2.25/5
+mean after finding retained audible fillers, inaccurate captions, awkward cuts,
+unclear story assembly, and no visual narrative in the synthetic fixture.
 
 ## Seed suite
 

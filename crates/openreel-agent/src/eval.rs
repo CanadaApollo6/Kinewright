@@ -311,7 +311,7 @@ pub struct EvalDeliverableResult {
     pub errors: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HumanReviewFile {
     pub schema_version: u32,
     pub benchmark_id: String,
@@ -320,7 +320,7 @@ pub struct HumanReviewFile {
     pub tasks: Vec<HumanTaskReview>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HumanTaskReview {
     pub task_id: String,
     pub artifact_sha256: Option<String>,
@@ -329,14 +329,14 @@ pub struct HumanTaskReview {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HumanRatings {
-    pub story: Option<u8>,
-    pub pacing: Option<u8>,
-    pub visual_finish: Option<u8>,
-    pub audio_finish: Option<u8>,
-    pub captions: Option<u8>,
-    pub delivery_readiness: Option<u8>,
+    pub story: Option<f64>,
+    pub pacing: Option<f64>,
+    pub visual_finish: Option<f64>,
+    pub audio_finish: Option<f64>,
+    pub captions: Option<f64>,
+    pub delivery_readiness: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -350,6 +350,7 @@ pub struct HumanReviewSummary {
     pub tasks_pending: usize,
     pub tasks_accepted: usize,
     pub acceptance_rate: Option<f64>,
+    pub overall_mean_rating: Option<f64>,
     pub mean_ratings: HumanMeanRatings,
 }
 
@@ -831,7 +832,7 @@ pub fn human_review_template(
 /// # Errors
 ///
 /// Returns an error for duplicate tasks, partial reviews, invalid digests, or
-/// ratings outside the inclusive 1..=5 scale.
+/// ratings outside the inclusive 1..=5 scale or its half-point increments.
 pub fn summarize_human_review(review: &HumanReviewFile) -> Result<HumanReviewSummary, EvalError> {
     if review.schema_version != 1 {
         return Err(EvalError::Output(format!(
@@ -876,10 +877,10 @@ pub fn summarize_human_review(review: &HumanReviewFile) -> Result<HumanReviewSum
                 if let Some(invalid) = rating_values
                     .into_iter()
                     .flatten()
-                    .find(|rating| !(1..=5).contains(rating))
+                    .find(|rating| !valid_human_rating(*rating))
                 {
                     return Err(EvalError::Output(format!(
-                        "task {} rating {invalid} is outside 1..=5",
+                        "task {} rating {invalid} must be between 1 and 5 in 0.5 increments",
                         task.task_id
                     )));
                 }
@@ -910,6 +911,7 @@ pub fn summarize_human_review(review: &HumanReviewFile) -> Result<HumanReviewSum
         tasks_pending: review.tasks.len().saturating_sub(reviewed.len()),
         tasks_accepted: accepted,
         acceptance_rate,
+        overall_mean_rating: overall_mean_rating(&reviewed),
         mean_ratings: HumanMeanRatings {
             story: mean_rating(&reviewed, |ratings| ratings.story),
             pacing: mean_rating(&reviewed, |ratings| ratings.pacing),
@@ -922,7 +924,7 @@ pub fn summarize_human_review(review: &HumanReviewFile) -> Result<HumanReviewSum
 }
 
 impl HumanRatings {
-    fn values(&self) -> [Option<u8>; 6] {
+    fn values(&self) -> [Option<f64>; 6] {
         [
             self.story,
             self.pacing,
@@ -934,9 +936,15 @@ impl HumanRatings {
     }
 }
 
+fn valid_human_rating(rating: f64) -> bool {
+    rating.is_finite()
+        && (1.0..=5.0).contains(&rating)
+        && (rating * 2.0).fract().abs() <= f64::EPSILON
+}
+
 fn mean_rating(
     reviewed: &[&HumanTaskReview],
-    select: impl Fn(&HumanRatings) -> Option<u8>,
+    select: impl Fn(&HumanRatings) -> Option<f64>,
 ) -> Option<f64> {
     if reviewed.is_empty() {
         return None;
@@ -944,10 +952,23 @@ fn mean_rating(
     let sum = reviewed
         .iter()
         .filter_map(|task| select(&task.ratings))
-        .map(u32::from)
-        .try_fold(0_u32, u32::checked_add)?;
+        .sum::<f64>();
     let count = u32::try_from(reviewed.len()).ok()?;
-    Some(f64::from(sum) / f64::from(count))
+    Some(sum / f64::from(count))
+}
+
+fn overall_mean_rating(reviewed: &[&HumanTaskReview]) -> Option<f64> {
+    if reviewed.is_empty() {
+        return None;
+    }
+    let sum = reviewed
+        .iter()
+        .flat_map(|task| task.ratings.values())
+        .flatten()
+        .sum::<f64>();
+    let rating_count = reviewed.len().checked_mul(6)?;
+    let rating_count = u32::try_from(rating_count).ok()?;
+    Some(sum / f64::from(rating_count))
 }
 
 fn finish_deliverable(mut result: EvalDeliverableResult) -> EvalDeliverableResult {
@@ -2696,18 +2717,19 @@ mod tests {
         review.reviewer = Some("human".to_owned());
         review.tasks[0].accepted = Some(true);
         review.tasks[0].ratings = HumanRatings {
-            story: Some(4),
-            pacing: Some(3),
-            visual_finish: Some(5),
-            audio_finish: Some(4),
-            captions: Some(5),
-            delivery_readiness: Some(4),
+            story: Some(4.0),
+            pacing: Some(2.5),
+            visual_finish: Some(5.0),
+            audio_finish: Some(4.0),
+            captions: Some(5.0),
+            delivery_readiness: Some(4.0),
         };
         let scored = summarize_human_review(&review).unwrap();
         assert_eq!(scored.tasks_reviewed, 1);
         assert_eq!(scored.tasks_accepted, 1);
         assert_eq!(scored.acceptance_rate, Some(1.0));
-        assert_eq!(scored.mean_ratings.pacing, Some(3.0));
+        assert_eq!(scored.mean_ratings.pacing, Some(2.5));
+        assert_eq!(scored.overall_mean_rating, Some(24.5 / 6.0));
     }
 
     #[test]
@@ -2722,7 +2744,7 @@ mod tests {
                 artifact_sha256: Some("b".repeat(64)),
                 accepted: Some(false),
                 ratings: HumanRatings {
-                    story: Some(0),
+                    story: Some(0.5),
                     ..HumanRatings::default()
                 },
                 notes: None,
@@ -2730,13 +2752,16 @@ mod tests {
         };
         assert!(summarize_human_review(&review).is_err());
         review.tasks[0].ratings = HumanRatings {
-            story: Some(1),
-            pacing: Some(2),
-            visual_finish: Some(3),
-            audio_finish: Some(4),
-            captions: Some(5),
-            delivery_readiness: Some(6),
+            story: Some(1.0),
+            pacing: Some(2.0),
+            visual_finish: Some(3.0),
+            audio_finish: Some(4.0),
+            captions: Some(5.0),
+            delivery_readiness: Some(6.0),
         };
+        assert!(summarize_human_review(&review).is_err());
+
+        review.tasks[0].ratings.delivery_readiness = Some(4.25);
         assert!(summarize_human_review(&review).is_err());
     }
 

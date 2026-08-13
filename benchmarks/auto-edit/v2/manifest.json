@@ -29,7 +29,7 @@
         "captions",
         "delivery_readiness"
       ],
-      "scale": "1..=5"
+      "scale": "1..=5 in 0.5-point increments"
     }
   },
   "artifacts": [

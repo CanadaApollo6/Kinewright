@@ -3,8 +3,9 @@
 M37 prepares a controlled rerun of the exact M35 finished-cut task. It closes
 the visible caption overflow found in the first artifact, adds a machine gate
 for the defect, and removes repeated runtime text that would otherwise inflate
-the model context. The approved subscription-backed run is complete; human
-watch-through remains pending.
+the model context. The approved subscription-backed run is complete. Its first
+human watch-through rejected the artifact and exposed gaps that the machine
+score did not detect.
 
 ## Acceptance target
 
@@ -154,8 +155,20 @@ Against the M35 passing baseline, this is:
 The independent artifact probe found 421 frames at 1080x1920 with both video
 and audio streams. The MP4 is 6,486,073 bytes with SHA-256
 `2b03c1487fe069bb29a0e33d51c14f73221874623c1331c3640d6b5c3757eaa5`.
-The packaged `human-review.json` remains unscored and `accepted` remains
-`null`; the machine result is not presented as human acceptance.
+The SHA-bound human review rejected the first pass. Ratings were story 2.0,
+pacing 2.5, visual finish 2.5, audio finish 3.0, captions 2.0, and delivery
+readiness 1.5, for a 2.25 mean. The reviewer heard two retained `um`s, found the
+assembled story difficult to interpret, described awkward picture and audio
+cuts, found no narrative intent in the synthetic color-bar visuals, and caught
+a material caption error: `River map steadies the expedition` rendered as
+`Map Steady the Exped`.
+
+This is the intended outcome of keeping the score layers separate: M37 remains
+a 32/32 machine pass but is a failed human first-pass gate. In particular, the
+recognized-word assertion proved only that Whisper no longer reported the
+fixture's expected filler token; it did not prove that no audible filler
+survived. Caption presence, animation, and containment likewise did not prove
+transcription accuracy.
 
 ## Tradeoffs and revisit points
 
@@ -169,3 +182,9 @@ The packaged `human-review.json` remains unscored and `accepted` remains
   inspector instead of expanding the always-on project state again.
 - M37 fixes the known visual escape. It does not pre-score pacing, taste, audio
   quality, or publishability. The human acceptance gate remains the authority.
+- The generated color fields make the run reproducible but cannot measure
+  meaningful shot selection or visual storytelling. Future finished-cut tasks
+  need semantically legible footage and blind review.
+- Filler and caption gates need an independent post-render listening or
+  transcription pass. Reusing the same recognition evidence for editing and
+  scoring allowed both audible fillers and inaccurate captions through.

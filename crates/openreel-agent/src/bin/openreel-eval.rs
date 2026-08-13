@@ -1567,7 +1567,8 @@ mod tests {
         );
         assert_eq!(deliverable["resolution"], deliverable["probed_resolution"]);
         assert_eq!(deliverable["output_sha256"].as_str().unwrap().len(), 64);
-        assert!(baseline["human_review"]["first_pass_acceptance"].is_null());
-        assert!(baseline["human_review"]["ratings"].is_null());
+        assert_eq!(baseline["human_review"]["first_pass_acceptance"], false);
+        assert_eq!(baseline["human_review"]["mean_rating"], 2.25);
+        assert_eq!(baseline["human_review"]["ratings"]["pacing"], 2.5);
     }
 }

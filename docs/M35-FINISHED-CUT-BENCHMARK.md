@@ -41,7 +41,8 @@ and records:
 - delivery readiness.
 
 Every rating is required when an acceptance decision is set. Partial reviews,
-duplicate task IDs, invalid hashes, and scores outside `1..=5` are rejected.
+duplicate task IDs, invalid hashes, scores outside `1..=5`, and values that are
+not half-point increments are rejected.
 
 ## Artifact contract
 
