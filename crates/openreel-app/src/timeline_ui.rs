@@ -2097,6 +2097,7 @@ mod tests {
             speed_percent: 100,
         };
         Document {
+            catalog: openreel_core::MediaCatalog::default(),
             tracks: vec![
                 Track {
                     id: TrackId(1),

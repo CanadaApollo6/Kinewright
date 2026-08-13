@@ -903,6 +903,7 @@ fn single_asset_document(asset: MediaAsset) -> Document {
 
 fn empty_timeline_document(assets: Vec<MediaAsset>) -> Document {
     Document {
+        catalog: openreel_core::MediaCatalog::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -949,6 +950,7 @@ fn timeline_document(
             .ok_or_else(|| EvalError::Fixture("fixture duration overflowed".to_owned()))?;
     }
     Ok(Document {
+        catalog: openreel_core::MediaCatalog::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,

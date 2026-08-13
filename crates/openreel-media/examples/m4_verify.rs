@@ -32,6 +32,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let red = engine.probe(&red_path)?;
     let blue = engine.probe(&blue_path)?;
     let mut document = Document {
+        catalog: openreel_core::MediaCatalog::default(),
         tracks: vec![
             Track {
                 id: TrackId(1),

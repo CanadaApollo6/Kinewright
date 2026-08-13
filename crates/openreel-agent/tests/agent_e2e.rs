@@ -244,6 +244,91 @@ fn codex_edits_an_isolated_branch_then_one_merge_publishes_it() {
 }
 
 #[test]
+fn codex_uses_m32_source_and_catalog_primitives_on_an_isolated_branch() {
+    if std::env::var("OPENREEL_M32_AGENT_TEST").as_deref() != Ok("1") {
+        eprintln!("skipped: set OPENREEL_M32_AGENT_TEST=1 to run the Codex M32 smoke");
+        return;
+    }
+
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let original = fixture_document();
+    let live = Core::spawn(original.clone()).unwrap();
+    let Event::QueryResult(QueryResult::Snapshot { revision, document }) =
+        live.request(Command::Query(Query::Snapshot)).unwrap()
+    else {
+        panic!("expected live snapshot");
+    };
+    let branch = TimelineBranch::new("Codex M32 smoke", revision, document).unwrap();
+    let server = McpServer::start_isolated(branch.core(), media.clone(), media).unwrap();
+    let mut session = openreel_agent::CodexDriver
+        .start_session(SessionConfig {
+            working_directory: std::env::current_dir().ok(),
+            model: None,
+            effort: None,
+            service_tier: None,
+            max_turns: Some(2),
+            mcp_url: Some(server.endpoint().to_owned()),
+        })
+        .expect("the gated test requires Codex CLI 0.147.0+ with a subscription login");
+    let events = session.events();
+    let prompt = "Use search_media to find the headless fixture and get_source_info to inspect source frames 30 through 120. Then apply exactly one atomic edit plan with three operations: slip clip 1 to new_source_in 30; create bin 1 named Selects containing asset 1; create string-out 1 named Opening selects with one select from asset 1, source 30 through 60, labeled Opening. Inspect the final timeline.";
+    println!("USER: {prompt}");
+    session.send_user_message(prompt.to_owned()).unwrap();
+
+    let deadline = Instant::now() + Duration::from_mins(3);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "Codex M32 turn timed out");
+        let event = events
+            .recv_timeout(remaining.min(Duration::from_millis(100)))
+            .unwrap_or_else(|error| match error {
+                crossbeam_channel::RecvTimeoutError::Timeout => AgentEvent::Text(String::new()),
+                crossbeam_channel::RecvTimeoutError::Disconnected => {
+                    panic!("Codex M32 event stream ended")
+                }
+            });
+        if event == AgentEvent::Text(String::new()) {
+            continue;
+        }
+        println!("AGENT: {event:?}");
+        if let AgentEvent::Error(error) = &event {
+            panic!("Codex driver error: {error}");
+        }
+        if event == AgentEvent::Done {
+            break;
+        }
+    }
+
+    assert_eq!(
+        &*query_document(&live),
+        &original,
+        "branch leaked into live"
+    );
+    let comparison = branch.compare().unwrap();
+    assert_eq!(comparison.operations.len(), 3);
+    assert_eq!(
+        comparison.document.clip(ClipId(1)).unwrap().source_range,
+        TimeCode(30)..TimeCode(120)
+    );
+    assert_eq!(comparison.document.catalog.bins.len(), 1);
+    assert_eq!(comparison.document.catalog.string_outs.len(), 1);
+    let outcome = branch.merge_into(&live).unwrap();
+    assert!(matches!(
+        outcome,
+        BranchApplyOutcome::Applied {
+            operation_count: 3,
+            ..
+        }
+    ));
+    live.request(Command::Undo).unwrap();
+    assert_eq!(&*query_document(&live), &original);
+    println!("ASSERT: one model plan used M32 primitives; branch merge and one undo are exact");
+
+    session.interrupt();
+    server.shutdown();
+}
+
+#[test]
 fn cursor_splits_then_deletes_via_the_live_mcp_server() {
     if std::env::var("OPENREEL_CURSOR_AGENT_TEST").as_deref() != Ok("1") {
         eprintln!(
@@ -344,6 +429,7 @@ fn fixture_document() -> Document {
         resolution: Some((320, 180)),
     };
     Document {
+        catalog: openreel_core::MediaCatalog::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,

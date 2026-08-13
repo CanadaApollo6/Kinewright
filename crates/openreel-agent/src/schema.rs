@@ -8,9 +8,11 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 22] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 24] = [
     "get_timeline_state",
     "get_clip_info",
+    "get_source_info",
+    "search_media",
     "get_frame_at",
     "get_timeline_storyboard",
     "get_transcript",
@@ -137,6 +139,13 @@ pub fn all_tool_names() -> Result<Vec<String>, SchemaError> {
 pub fn operation_tool_name(operation: &Operation) -> &'static str {
     match operation {
         Operation::AddAsset { .. } => "add_asset",
+        Operation::UpsertBin { .. } => "upsert_bin",
+        Operation::RemoveBin { .. } => "remove_bin",
+        Operation::SetAssetBin { .. } => "set_asset_bin",
+        Operation::UpsertStringOut { .. } => "upsert_string_out",
+        Operation::RemoveStringOut { .. } => "remove_string_out",
+        Operation::UpsertSyncGroup { .. } => "upsert_sync_group",
+        Operation::RemoveSyncGroup { .. } => "remove_sync_group",
         Operation::AddTrack { .. } => "add_track",
         Operation::RemoveTrack { .. } => "remove_track",
         Operation::SetTrackSyncLock { .. } => "set_track_sync_lock",
@@ -145,6 +154,12 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::SplitClip { .. } => "split_clip",
         Operation::TrimClip { .. } => "trim_clip",
         Operation::MoveClip { .. } => "move_clip",
+        Operation::ThreePointEdit { .. } => "three_point_edit",
+        Operation::SlipClip { .. } => "slip_clip",
+        Operation::RollEdit { .. } => "roll_edit",
+        Operation::SlideClip { .. } => "slide_clip",
+        Operation::ReplaceClip { .. } => "replace_clip",
+        Operation::FitToFill { .. } => "fit_to_fill",
         Operation::DeleteClip { .. } => "delete_clip",
         Operation::RippleDeleteClip { .. } => "ripple_delete_clip",
         Operation::RippleInsertGap { .. } => "ripple_insert_gap",
@@ -177,6 +192,7 @@ pub fn schema_object<T: schemars::JsonSchema>() -> Arc<JsonObject> {
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn operation_tool(
     variant_schema: &Value,
     definitions: Option<&Value>,
@@ -259,6 +275,33 @@ fn operation_tool(
         ),
         "LinkClips" | "UnlinkClips" => description.push_str(
             " Links are metadata: moving, trimming, or deleting a member requires an atomic plan covering its whole link group.",
+        ),
+        "UpsertBin" | "RemoveBin" | "SetAssetBin" => description.push_str(
+            " Bins are hierarchical project metadata. An asset can belong to at most one bin; removing a bin moves its assets back to the unfiled root and rejects bins that still have children.",
+        ),
+        "UpsertStringOut" | "RemoveStringOut" => description.push_str(
+            " A string-out is an ordered set of labeled, exact source-frame selects and does not mutate the timeline.",
+        ),
+        "UpsertSyncGroup" | "RemoveSyncGroup" => description.push_str(
+            " A sync group requires at least two distinct assets with named angles and exact frame offsets relative to group zero. This is reusable multicam foundation metadata.",
+        ),
+        "ThreePointEdit" => description.push_str(
+            " Mark exactly three of source_in, source_out, timeline_in, and timeline_out; the fourth boundary is derived with exact frame-rate mapping. Insert opens time on the target and sync-locked tracks. Overwrite replaces only the selected target-track range.",
+        ),
+        "SlipClip" => description.push_str(
+            " Preserves the clip's timeline start, duration, speed, effects, and links while changing its source in/out by an equal amount.",
+        ),
+        "RollEdit" => description.push_str(
+            " The clips must be butt-joined media neighbors. Moving their shared boundary preserves the sequence duration.",
+        ),
+        "SlideClip" => description.push_str(
+            " The clip must have butt-joined media neighbors on both sides. Its source remains fixed while its neighbors absorb the move and the sequence duration stays fixed.",
+        ),
+        "ReplaceClip" => description.push_str(
+            " The replacement source must map to the clip's exact current project duration. Timeline placement, clip id, effects, audio shaping, links, and transition metadata are preserved.",
+        ),
+        "FitToFill" => description.push_str(
+            " Finds an exact integer speed from 10% through 1000% for the replacement source to occupy the clip's current timeline slot. It rejects unrepresentable fits instead of drifting a boundary.",
         ),
         "AddMarker" | "MoveMarker" | "RemoveMarker" | "SetMarkerParam" => description.push_str(
             " Markers are non-destructive editorial suggestions and are preferred when reviewing footage.",
@@ -353,6 +396,13 @@ mod tests {
             names,
             [
                 "add_asset",
+                "upsert_bin",
+                "remove_bin",
+                "set_asset_bin",
+                "upsert_string_out",
+                "remove_string_out",
+                "upsert_sync_group",
+                "remove_sync_group",
                 "add_track",
                 "remove_track",
                 "set_track_sync_lock",
@@ -361,6 +411,12 @@ mod tests {
                 "split_clip",
                 "trim_clip",
                 "move_clip",
+                "three_point_edit",
+                "slip_clip",
+                "roll_edit",
+                "slide_clip",
+                "replace_clip",
+                "fit_to_fill",
                 "delete_clip",
                 "ripple_delete_clip",
                 "ripple_insert_gap",

@@ -410,6 +410,7 @@ mod tests {
             resolution: Some((1_920, 1_080)),
         };
         Document {
+            catalog: openreel_core::MediaCatalog::default(),
             tracks: vec![
                 Track {
                     id: TrackId(1),
@@ -468,6 +469,7 @@ mod tests {
     fn word_with_text(text: &str, start: i64, end: i64) -> TimelineTranscriptWord {
         TimelineTranscriptWord {
             text: text.to_owned(),
+            speaker: None,
             asset: AssetId(1),
             track: TrackId(1),
             clip: ClipId(1),

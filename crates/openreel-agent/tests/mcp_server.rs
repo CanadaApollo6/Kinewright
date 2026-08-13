@@ -423,6 +423,7 @@ fn edit_plan_document() -> Document {
         resolution: Some((320, 180)),
     };
     Document {
+        catalog: openreel_core::MediaCatalog::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,

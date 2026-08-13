@@ -96,6 +96,7 @@ mod tests {
             text: "word".to_owned(),
             source_start: TimeCode(start),
             source_end: TimeCode(end),
+            speaker: None,
         }
     }
 

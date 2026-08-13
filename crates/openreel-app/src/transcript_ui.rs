@@ -497,6 +497,7 @@ mod tests {
     fn word(clip: u64, source_start: i64) -> TimelineTranscriptWord {
         TimelineTranscriptWord {
             text: format!("word-{source_start}"),
+            speaker: None,
             asset: AssetId(clip),
             track: TrackId(1),
             clip: ClipId(clip),

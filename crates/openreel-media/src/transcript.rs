@@ -474,6 +474,7 @@ fn push_word(
         text: text.to_owned(),
         source_start,
         source_end,
+        speaker: None,
     });
     Ok(())
 }
@@ -583,6 +584,7 @@ where
                 }
                 words.push(TimelineTranscriptWord {
                     text: word.text.clone(),
+                    speaker: word.speaker.clone(),
                     asset: asset.id,
                     track: track.id,
                     clip: clip.id,
@@ -773,6 +775,7 @@ mod tests {
                 text: "hello".to_owned(),
                 source_start: TimeCode(24),
                 source_end: TimeCode(36),
+                speaker: Some("speaker-a".to_owned()),
             }],
         }
     }
@@ -839,16 +842,19 @@ mod tests {
                     text: "before".to_owned(),
                     source_start: TimeCode(8),
                     source_end: TimeCode(12),
+                    speaker: None,
                 },
                 TranscriptWord {
                     text: "inside".to_owned(),
                     source_start: TimeCode(15),
                     source_end: TimeCode(18),
+                    speaker: Some("speaker-a".to_owned()),
                 },
                 TranscriptWord {
                     text: "after".to_owned(),
                     source_start: TimeCode(39),
                     source_end: TimeCode(42),
+                    speaker: None,
                 },
             ],
         });
@@ -877,6 +883,7 @@ mod tests {
                 text: "hello".to_owned(),
                 source_start: TimeCode(11),
                 source_end: TimeCode(13),
+                speaker: None,
             }],
         });
         let mapped =
@@ -908,6 +915,7 @@ mod tests {
                 text: "hello".to_owned(),
                 source_start: TimeCode(15),
                 source_end: TimeCode(18),
+                speaker: None,
             }],
         });
 
@@ -945,6 +953,7 @@ mod tests {
         )
         .unwrap();
         Document {
+            catalog: openreel_core::MediaCatalog::default(),
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,

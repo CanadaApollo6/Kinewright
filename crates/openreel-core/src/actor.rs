@@ -734,6 +734,7 @@ mod tests {
             })
             .collect();
         Document {
+            catalog: crate::MediaCatalog::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,

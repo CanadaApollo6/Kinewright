@@ -38,6 +38,9 @@ id_type!(ClipId);
 id_type!(EffectId);
 id_type!(LinkId);
 id_type!(MarkerId);
+id_type!(BinId);
+id_type!(StringOutId);
+id_type!(SyncGroupId);
 
 /// Number of presentation-token choices available to project markers.
 ///
@@ -261,6 +264,74 @@ pub struct Marker {
     pub color_token: u8,
 }
 
+/// One hierarchical media-pool bin. An asset belongs to at most one bin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MediaBin {
+    pub id: BinId,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub parent: Option<BinId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub assets: Vec<AssetId>,
+}
+
+/// One labeled source range inside an ordered string-out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SourceSelect {
+    pub asset: AssetId,
+    pub source: std::ops::Range<TimeCode>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(default)]
+    pub label: String,
+}
+
+/// Ordered source selects used to review, compare, and build a rough cut.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StringOut {
+    pub id: StringOutId,
+    pub name: String,
+    pub selects: Vec<SourceSelect>,
+}
+
+/// One synchronized source angle. `offset` is relative to the sync group's
+/// zero point and may be negative when this source starts early.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SyncGroupMember {
+    pub asset: AssetId,
+    pub offset: TimeCode,
+    pub angle_name: String,
+}
+
+/// Reusable synchronization metadata and the stable foundation for multicam.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SyncGroup {
+    pub id: SyncGroupId,
+    pub name: String,
+    pub members: Vec<SyncGroupMember>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MediaCatalog {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub bins: Vec<MediaBin>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub string_outs: Vec<StringOut>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub sync_groups: Vec<SyncGroup>,
+}
+
+impl MediaCatalog {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.bins.is_empty() && self.string_outs.is_empty() && self.sync_groups.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Document {
     /// Video and audio tracks, ordered z-bottom to top.
@@ -271,6 +342,10 @@ pub struct Document {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub markers: Vec<Marker>,
+    /// Branchable, undoable media organization and multicam foundation.
+    #[serde(default, skip_serializing_if = "MediaCatalog::is_empty")]
+    #[schemars(default)]
+    pub catalog: MediaCatalog,
     pub fps: Rational,
     pub resolution: (u32, u32),
     pub duration: TimeCode,
@@ -282,6 +357,7 @@ impl Default for Document {
             tracks: Vec::new(),
             media_pool: Vec::new(),
             markers: Vec::new(),
+            catalog: MediaCatalog::default(),
             fps: Rational::default(),
             resolution: (1_920, 1_080),
             duration: TimeCode::ZERO,

@@ -1059,6 +1059,24 @@ pub(crate) fn review_preroll_frames(fps: openreel_core::Rational) -> i64 {
 pub(crate) fn operation_status(operation: &Operation) -> String {
     match operation {
         Operation::AddAsset { asset } => format!("Imported {}", asset.name),
+        Operation::UpsertBin { bin } => format!("Saved bin {}", bin.name),
+        Operation::RemoveBin { bin } => format!("Removed bin {bin}"),
+        Operation::SetAssetBin { asset, bin } => bin.map_or_else(
+            || format!("Moved asset {asset} to the media root"),
+            |bin| format!("Moved asset {asset} to bin {bin}"),
+        ),
+        Operation::UpsertStringOut { string_out } => {
+            format!("Saved string-out {}", string_out.name)
+        }
+        Operation::RemoveStringOut { string_out } => {
+            format!("Removed string-out {string_out}")
+        }
+        Operation::UpsertSyncGroup { sync_group } => {
+            format!("Saved sync group {}", sync_group.name)
+        }
+        Operation::RemoveSyncGroup { sync_group } => {
+            format!("Removed sync group {sync_group}")
+        }
         Operation::AddTrack { track } => format!("Added {:?} track {}", track.kind, track.id),
         Operation::RemoveTrack { track } => format!("Removed track {track}"),
         Operation::SetTrackSyncLock { track, locked } => format!(
@@ -1075,6 +1093,22 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
         Operation::SplitClip { clip, at } => format!("Split clip {clip} at frame {at}"),
         Operation::TrimClip { clip, .. } => format!("Trimmed clip {clip}"),
         Operation::MoveClip { clip, to, .. } => format!("Moved clip {clip} to frame {to}"),
+        Operation::ThreePointEdit { mode, asset, .. } => {
+            format!("Applied {mode:?} three-point edit from asset {asset}")
+        }
+        Operation::SlipClip { clip, .. } => format!("Slipped clip {clip}"),
+        Operation::RollEdit {
+            left_clip,
+            right_clip,
+            to,
+        } => format!("Rolled clips {left_clip}/{right_clip} to frame {to}"),
+        Operation::SlideClip { clip, to } => format!("Slid clip {clip} to frame {to}"),
+        Operation::ReplaceClip { clip, asset, .. } => {
+            format!("Replaced clip {clip} with asset {asset}")
+        }
+        Operation::FitToFill { clip, asset, .. } => {
+            format!("Fit asset {asset} into clip {clip}")
+        }
         Operation::DeleteClip { clip } => format!("Deleted clip {clip}"),
         Operation::RippleDeleteClip { clip } => format!("Ripple deleted clip {clip}"),
         Operation::RippleInsertGap {

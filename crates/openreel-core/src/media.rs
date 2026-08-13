@@ -141,6 +141,10 @@ pub struct TranscriptWord {
     pub text: String,
     pub source_start: TimeCode,
     pub source_end: TimeCode,
+    /// Optional stable diarization label. Plain Whisper transcripts leave it
+    /// unset; speaker-aware backends can populate it without changing edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
 }
 
 /// Derived, reproducible speech data for one media asset. This deliberately
@@ -188,6 +192,7 @@ impl TranscriptStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineTranscriptWord {
     pub text: String,
+    pub speaker: Option<String>,
     pub asset: AssetId,
     pub track: TrackId,
     pub clip: ClipId,

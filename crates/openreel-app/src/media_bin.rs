@@ -1,7 +1,9 @@
 use std::{sync::Arc, thread};
 
 use eframe::egui;
-use openreel_core::{AssetId, ClipId, MediaKind, Operation, TimeCode, Track, TrackId, TrackKind};
+use openreel_core::{
+    AssetId, ClipId, MediaKind, Operation, ThreePointMode, TimeCode, Track, TrackId, TrackKind,
+};
 
 use crate::{
     app::OpenReelApp,
@@ -134,6 +136,18 @@ impl OpenReelApp {
     pub(crate) fn media_bin(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Media");
+            let catalog = &self.focused().document.catalog;
+            if !catalog.is_empty() {
+                ui.colored_label(
+                    color::TEXT_MUTED,
+                    format!(
+                        "{} bins · {} string-outs · {} sync groups",
+                        catalog.bins.len(),
+                        catalog.string_outs.len(),
+                        catalog.sync_groups.len()
+                    ),
+                );
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let button =
                     egui::Button::image_and_text(Icon::Import.image(size::ICON_MD), "Import")
@@ -147,6 +161,7 @@ impl OpenReelApp {
         ui.add_space(space::ONE);
         ui.separator();
         ui.add_space(space::ONE);
+        self.source_monitor_controls(ui);
         if self.focused().document.media_pool.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(space::EIGHT);
@@ -224,6 +239,19 @@ impl OpenReelApp {
                                         .font(theme::semibold(type_size::BODY)),
                                 );
                                 ui.colored_label(color::TEXT_MUTED, asset_metadata(&asset));
+                                if let Some(bin) = self
+                                    .focused()
+                                    .document
+                                    .catalog
+                                    .bins
+                                    .iter()
+                                    .find(|bin| bin.assets.contains(&asset.id))
+                                {
+                                    ui.colored_label(
+                                        color::TEXT_MUTED,
+                                        format!("BIN · {}", bin.name),
+                                    );
+                                }
                             });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -247,11 +275,97 @@ impl OpenReelApp {
                         egui::Sense::click(),
                     );
                     if card_response.clicked() || response.inner.clicked() {
-                        self.focused_mut().selected_asset = Some(asset.id);
+                        self.select_source_asset(asset.id);
                     }
                     ui.add_space(space::ONE);
                 }
             });
+    }
+
+    fn select_source_asset(&mut self, asset_id: AssetId) {
+        let duration = self
+            .focused()
+            .document
+            .asset(asset_id)
+            .map_or(TimeCode::ZERO, |asset| asset.duration);
+        let session = self.focused_mut();
+        if session.selected_asset != Some(asset_id) {
+            session.source_in = TimeCode::ZERO;
+            session.source_out = duration;
+        }
+        session.selected_asset = Some(asset_id);
+    }
+
+    fn source_monitor_controls(&mut self, ui: &mut egui::Ui) {
+        let Some(asset_id) = self.focused().selected_asset else {
+            return;
+        };
+        let Some(asset) = self.focused().document.asset(asset_id).cloned() else {
+            return;
+        };
+        if self.focused().source_out <= self.focused().source_in
+            || self.focused().source_out > asset.duration
+        {
+            let session = self.focused_mut();
+            session.source_in = TimeCode::ZERO;
+            session.source_out = asset.duration;
+        }
+
+        theme::card_frame(true).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("SOURCE").font(theme::semibold(type_size::CAPTION)));
+                ui.colored_label(color::TEXT_MUTED, &asset.name);
+            });
+            let mut source_in = self.focused().source_in.0;
+            let mut source_out = self.focused().source_out.0;
+            ui.horizontal(|ui| {
+                ui.label("In");
+                ui.add(
+                    egui::DragValue::new(&mut source_in)
+                        .range(0..=asset.duration.0.saturating_sub(1)),
+                );
+                ui.label("Out");
+                ui.add(egui::DragValue::new(&mut source_out).range(1..=asset.duration.0));
+            });
+            source_in = source_in.clamp(0, asset.duration.0.saturating_sub(1));
+            source_out = source_out.clamp(source_in.saturating_add(1), asset.duration.0);
+            self.focused_mut().source_in = TimeCode(source_in);
+            self.focused_mut().source_out = TimeCode(source_out);
+
+            ui.horizontal(|ui| {
+                for (label, mode) in [
+                    ("Insert at playhead", ThreePointMode::Insert),
+                    ("Overwrite", ThreePointMode::Overwrite),
+                ] {
+                    if ui.button(label).clicked() {
+                        let track = self
+                            .focused()
+                            .document
+                            .tracks
+                            .iter()
+                            .find(|track| asset.kind.supports(track.kind))
+                            .map(|track| track.id);
+                        if let Some(track) = track {
+                            self.send_operation(Operation::ThreePointEdit {
+                                track,
+                                asset: asset.id,
+                                source_in: Some(TimeCode(source_in)),
+                                source_out: Some(TimeCode(source_out)),
+                                timeline_in: Some(self.focused().position),
+                                timeline_out: None,
+                                mode,
+                            });
+                        } else {
+                            self.record_error(
+                                "Source monitor",
+                                format!("No compatible track exists for {}", asset.name),
+                            );
+                        }
+                    }
+                }
+            });
+        });
+        ui.add_space(space::ONE);
     }
 }
 
@@ -373,6 +487,7 @@ mod tests {
             resolution: Some((1_920, 1_080)),
         };
         let document = Document {
+            catalog: openreel_core::MediaCatalog::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,

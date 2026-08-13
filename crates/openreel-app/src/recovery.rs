@@ -162,6 +162,7 @@ struct RecoveryReport {
     damage: Option<Damage>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Inspection {
     Missing,
     Recoverable(RecoveryReport),
@@ -509,6 +510,7 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[allow(clippy::large_enum_variant)]
 enum PendingState {
     Recoverable(RecoveryReport),
     Unusable(Damage),

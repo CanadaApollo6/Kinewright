@@ -30,12 +30,15 @@ pub fn render_timeline_state(document: &Document) -> String {
         .sum::<usize>();
     let _ = writeln!(
         output,
-        "tracks={} clips={} assets={} markers={} link_groups={}",
+        "tracks={} clips={} assets={} markers={} link_groups={} bins={} string_outs={} sync_groups={}",
         document.tracks.len(),
         clip_count,
         document.media_pool.len(),
         document.markers.len(),
         link_groups(document).len(),
+        document.catalog.bins.len(),
+        document.catalog.string_outs.len(),
+        document.catalog.sync_groups.len(),
     );
 
     for track in &document.tracks {
@@ -149,6 +152,7 @@ pub fn render_timeline_state(document: &Document) -> String {
             asset.path,
         );
     }
+    render_catalog(&mut output, document);
     if output.ends_with('\n') {
         output.pop();
     }
@@ -376,9 +380,10 @@ pub fn render_asset_transcript(asset: AssetId, status: &TranscriptStatus) -> Str
             for word in &transcript.words {
                 let _ = writeln!(
                     output,
-                    "{}..{} {:?}",
+                    "{}..{}{} {:?}",
                     frame_and_seconds(word.source_start, transcript.source_fps),
                     frame_and_seconds(word.source_end, transcript.source_fps),
+                    render_speaker(word.speaker.as_deref()),
                     word.text
                 );
             }
@@ -406,18 +411,83 @@ pub fn render_timeline_transcript(
             .map_or(word_project_fallback_fps(document), |asset| asset.fps);
         let _ = writeln!(
             output,
-            "clip={} asset={} project={}..{} source={}..{} {:?}",
+            "clip={} asset={} project={}..{} source={}..{}{} {:?}",
             word.clip,
             word.asset,
             frame_and_seconds(word.project_start, document.fps),
             frame_and_seconds(word.project_end, document.fps),
             frame_and_seconds(word.source_start, source_fps),
             frame_and_seconds(word.source_end, source_fps),
+            render_speaker(word.speaker.as_deref()),
             word.text
         );
     }
     output.pop();
     output
+}
+
+fn render_catalog(output: &mut String, document: &Document) {
+    if !document.catalog.bins.is_empty() {
+        output.push_str("bins:\n");
+        for bin in &document.catalog.bins {
+            let assets = bin
+                .assets
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let parent = bin
+                .parent
+                .map_or_else(|| "root".to_owned(), |parent| parent.to_string());
+            let _ = writeln!(
+                output,
+                "  bin {} {:?} parent={} assets={}",
+                bin.id, bin.name, parent, assets
+            );
+        }
+    }
+    if !document.catalog.string_outs.is_empty() {
+        output.push_str("string_outs:\n");
+        for string_out in &document.catalog.string_outs {
+            let _ = writeln!(
+                output,
+                "  string_out {} {:?} selects={}",
+                string_out.id,
+                string_out.name,
+                string_out.selects.len()
+            );
+            for select in &string_out.selects {
+                let _ = writeln!(
+                    output,
+                    "    asset={} source={}..{} label={:?}",
+                    select.asset, select.source.start, select.source.end, select.label
+                );
+            }
+        }
+    }
+    if !document.catalog.sync_groups.is_empty() {
+        output.push_str("sync_groups:\n");
+        for group in &document.catalog.sync_groups {
+            let _ = writeln!(
+                output,
+                "  sync_group {} {:?} members={}",
+                group.id,
+                group.name,
+                group.members.len()
+            );
+            for member in &group.members {
+                let _ = writeln!(
+                    output,
+                    "    asset={} offset={} angle={:?}",
+                    member.asset, member.offset, member.angle_name
+                );
+            }
+        }
+    }
+}
+
+fn render_speaker(speaker: Option<&str>) -> String {
+    speaker.map_or_else(String::new, |speaker| format!(" speaker={speaker:?}"))
 }
 
 #[must_use]
@@ -703,6 +773,7 @@ mod tests {
 
     fn fixture() -> Document {
         Document {
+            catalog: openreel_core::MediaCatalog::default(),
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,
@@ -772,7 +843,7 @@ mod tests {
     #[test]
     fn timeline_state_matches_the_compact_golden_rendering() {
         let expected = r#"project fps=30/1 size=1920x1080 duration=180f/6.000s
-tracks=1 clips=2 assets=1 markers=1 link_groups=1
+tracks=1 clips=2 assets=1 markers=1 link_groups=1 bins=0 string_outs=0 sync_groups=0
 track 7 video sync_lock=true clips=2
   clip 10 asset=4 "interview.mp4" timeline=0f/0.000s..90f/3.000s duration=90f/3.000s source=30f/1.000s..120f/4.000s effects=[3:brightness(percent=25)] transition_in=crossfade:15f
   clip 11 asset=4 "interview.mp4" timeline=120f/4.000s..180f/6.000s duration=60f/2.000s source=150f/5.000s..210f/7.000s effects=none transition_in=none
@@ -952,6 +1023,7 @@ assets:
         let words = vec![
             TimelineTranscriptWord {
                 text: "Hello".to_owned(),
+                speaker: None,
                 asset: AssetId(4),
                 track: TrackId(7),
                 clip: ClipId(10),
@@ -962,6 +1034,7 @@ assets:
             },
             TimelineTranscriptWord {
                 text: "um".to_owned(),
+                speaker: None,
                 asset: AssetId(4),
                 track: TrackId(7),
                 clip: ClipId(10),

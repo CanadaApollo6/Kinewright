@@ -1369,6 +1369,7 @@ mod tests {
             resolution: Some((320, 180)),
         };
         Document {
+            catalog: openreel_core::MediaCatalog::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -1465,16 +1466,19 @@ mod tests {
                     text: "left".to_owned(),
                     source_start: TimeCode(0),
                     source_end: TimeCode(15),
+                    speaker: None,
                 },
                 openreel_core::TranscriptWord {
                     text: "middle".to_owned(),
                     source_start: TimeCode(38),
                     source_end: TimeCode(52),
+                    speaker: None,
                 },
                 openreel_core::TranscriptWord {
                     text: "right".to_owned(),
                     source_start: TimeCode(78),
                     source_end: TimeCode(90),
+                    speaker: None,
                 },
             ],
         };

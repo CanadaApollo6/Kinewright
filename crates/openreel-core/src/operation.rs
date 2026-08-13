@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AssetId, CaptionPreset, Clip, ClipContent, ClipId, Document, Effect, EffectId, FreezeFrame,
-    LinkId, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, ParamValue, TimeCode,
+    AssetId, BinId, CaptionPreset, Clip, ClipContent, ClipId, Document, Effect, EffectId,
+    FreezeFrame, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin,
+    ParamValue, StringOut, StringOutId, SyncGroup, SyncGroupId, ThreePointMode, TimeCode,
     TimeMappingError, Title, TitleParameterKind, TitlePosition, Track, TrackId, TrackKind,
     Transition, map_source_range_to_project, title_parameter_descriptor,
 };
@@ -15,6 +16,29 @@ use crate::{
 pub enum Operation {
     AddAsset {
         asset: MediaAsset,
+    },
+    UpsertBin {
+        bin: MediaBin,
+    },
+    RemoveBin {
+        bin: BinId,
+    },
+    /// Move an asset to one bin, or back to the unfiled media-pool root.
+    SetAssetBin {
+        asset: AssetId,
+        bin: Option<BinId>,
+    },
+    UpsertStringOut {
+        string_out: StringOut,
+    },
+    RemoveStringOut {
+        string_out: StringOutId,
+    },
+    UpsertSyncGroup {
+        sync_group: SyncGroup,
+    },
+    RemoveSyncGroup {
+        sync_group: SyncGroupId,
     },
     AddTrack {
         track: Track,
@@ -52,6 +76,46 @@ pub enum Operation {
         clip: ClipId,
         to_track: TrackId,
         to: TimeCode,
+    },
+    /// Perform a source-monitor edit from exactly three marked boundaries.
+    /// The missing fourth boundary is derived using exact frame-rate mapping.
+    ThreePointEdit {
+        track: TrackId,
+        asset: AssetId,
+        source_in: Option<TimeCode>,
+        source_out: Option<TimeCode>,
+        timeline_in: Option<TimeCode>,
+        timeline_out: Option<TimeCode>,
+        mode: ThreePointMode,
+    },
+    /// Change the media under a fixed timeline slot while preserving duration.
+    SlipClip {
+        clip: ClipId,
+        new_source_in: TimeCode,
+    },
+    /// Move the shared boundary between two butt-joined media clips.
+    RollEdit {
+        left_clip: ClipId,
+        right_clip: ClipId,
+        to: TimeCode,
+    },
+    /// Move a media clip between two butt-joined neighbors while preserving
+    /// the sequence's outer boundaries.
+    SlideClip {
+        clip: ClipId,
+        to: TimeCode,
+    },
+    /// Replace a media clip's source while preserving its exact timeline slot.
+    ReplaceClip {
+        clip: ClipId,
+        asset: AssetId,
+        source: std::ops::Range<TimeCode>,
+    },
+    /// Replace and retime source media to fill a clip's exact timeline slot.
+    FitToFill {
+        clip: ClipId,
+        asset: AssetId,
+        source: std::ops::Range<TimeCode>,
     },
     DeleteClip {
         clip: ClipId,
@@ -225,6 +289,42 @@ impl ApplyOp for Operation {
 pub enum OpError {
     #[error("asset {0} already exists")]
     DuplicateAsset(AssetId),
+    #[error("bin {0} occurs more than once")]
+    DuplicateBin(BinId),
+    #[error("bin {0} does not exist")]
+    MissingBin(BinId),
+    #[error("bin {0} must have a non-empty name")]
+    EmptyBinName(BinId),
+    #[error("bin {0} cannot be its own parent")]
+    BinSelfParent(BinId),
+    #[error("bin hierarchy contains a cycle through bin {0}")]
+    BinCycle(BinId),
+    #[error("bin {0} has child bins and cannot be removed")]
+    BinHasChildren(BinId),
+    #[error("asset {asset} occurs more than once in bin {bin}")]
+    DuplicateBinAsset { bin: BinId, asset: AssetId },
+    #[error("asset {asset} belongs to both bin {first} and bin {second}")]
+    AssetInMultipleBins {
+        asset: AssetId,
+        first: BinId,
+        second: BinId,
+    },
+    #[error("string-out {0} occurs more than once")]
+    DuplicateStringOut(StringOutId),
+    #[error("string-out {0} does not exist")]
+    MissingStringOut(StringOutId),
+    #[error("string-out {0} must have a name and at least one source select")]
+    InvalidStringOut(StringOutId),
+    #[error("sync group {0} occurs more than once")]
+    DuplicateSyncGroup(SyncGroupId),
+    #[error("sync group {0} does not exist")]
+    MissingSyncGroup(SyncGroupId),
+    #[error("sync group {0} must have a name and at least two members")]
+    InvalidSyncGroup(SyncGroupId),
+    #[error("asset {asset} occurs more than once in sync group {group}")]
+    DuplicateSyncGroupAsset { group: SyncGroupId, asset: AssetId },
+    #[error("sync group {group} has an empty angle name for asset {asset}")]
+    EmptySyncAngle { group: SyncGroupId, asset: AssetId },
     #[error("track {0} occurs more than once")]
     DuplicateTrack(TrackId),
     #[error("new track {0} must be empty")]
@@ -275,6 +375,32 @@ pub enum OpError {
     SplitOutsideClip { clip: ClipId, at: TimeCode },
     #[error("project frame {at} inside clip {clip} is not an integer source-frame boundary")]
     UnrepresentableSplit { clip: ClipId, at: TimeCode },
+    #[error("editorial operation requires media clip {0}")]
+    EditorialRequiresMedia(ClipId),
+    #[error("clips {left} and {right} must be butt-joined neighbors on the same track")]
+    ClipsNotAdjacent { left: ClipId, right: ClipId },
+    #[error("clip {clip} must have butt-joined media neighbors on both sides")]
+    SlideRequiresNeighbors { clip: ClipId },
+    #[error("project frame {at} cannot be represented as a source boundary for clip {clip}")]
+    UnrepresentableEditBoundary { clip: ClipId, at: TimeCode },
+    #[error("exactly three of source_in, source_out, timeline_in, and timeline_out must be marked")]
+    InvalidThreePointSelection,
+    #[error("three-point edit produced an invalid source range {start}..{end}")]
+    InvalidThreePointSource { start: TimeCode, end: TimeCode },
+    #[error("three-point edit produced an invalid timeline range {start}..{end}")]
+    InvalidThreePointTimeline { start: TimeCode, end: TimeCode },
+    #[error(
+        "replacement source maps to {actual} project frames, but clip {clip} occupies {required}"
+    )]
+    ReplacementDurationMismatch {
+        clip: ClipId,
+        required: TimeCode,
+        actual: TimeCode,
+    },
+    #[error(
+        "source range cannot be fit exactly into clip {clip} with an integer speed from 10% through 1000%"
+    )]
+    FitToFillUnrepresentable { clip: ClipId },
     #[error("document frame rate is invalid")]
     InvalidProjectRate,
     #[error("asset {0} has an invalid frame rate")]
@@ -427,9 +553,26 @@ pub enum BatchError {
     },
 }
 
+#[allow(clippy::too_many_lines)]
 fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpError> {
     match operation {
         Operation::AddAsset { asset } => add_asset(doc, asset.clone()),
+        Operation::UpsertBin { bin } => {
+            upsert_bin(doc, bin.clone());
+            Ok(())
+        }
+        Operation::RemoveBin { bin } => remove_bin(doc, *bin),
+        Operation::SetAssetBin { asset, bin } => set_asset_bin(doc, *asset, *bin),
+        Operation::UpsertStringOut { string_out } => {
+            upsert_string_out(doc, string_out.clone());
+            Ok(())
+        }
+        Operation::RemoveStringOut { string_out } => remove_string_out(doc, *string_out),
+        Operation::UpsertSyncGroup { sync_group } => {
+            upsert_sync_group(doc, sync_group.clone());
+            Ok(())
+        }
+        Operation::RemoveSyncGroup { sync_group } => remove_sync_group(doc, *sync_group),
         Operation::AddTrack { track } => add_track(doc, track.clone()),
         Operation::RemoveTrack { track } => remove_track(doc, *track),
         Operation::SetTrackSyncLock { track, locked } => set_track_sync_lock(doc, *track, *locked),
@@ -455,6 +598,44 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
         Operation::SplitClip { clip, at } => split_clip(doc, *clip, *at),
         Operation::TrimClip { clip, new_source } => trim_clip(doc, *clip, new_source.clone()),
         Operation::MoveClip { clip, to_track, to } => move_clip(doc, *clip, *to_track, *to),
+        Operation::ThreePointEdit {
+            track,
+            asset,
+            source_in,
+            source_out,
+            timeline_in,
+            timeline_out,
+            mode,
+        } => three_point_edit(
+            doc,
+            *track,
+            *asset,
+            *source_in,
+            *source_out,
+            *timeline_in,
+            *timeline_out,
+            *mode,
+        ),
+        Operation::SlipClip {
+            clip,
+            new_source_in,
+        } => slip_clip(doc, *clip, *new_source_in),
+        Operation::RollEdit {
+            left_clip,
+            right_clip,
+            to,
+        } => roll_edit(doc, *left_clip, *right_clip, *to),
+        Operation::SlideClip { clip, to } => slide_clip(doc, *clip, *to),
+        Operation::ReplaceClip {
+            clip,
+            asset,
+            source,
+        } => replace_clip(doc, *clip, *asset, source.clone(), false),
+        Operation::FitToFill {
+            clip,
+            asset,
+            source,
+        } => replace_clip(doc, *clip, *asset, source.clone(), true),
         Operation::DeleteClip { clip } => delete_clip(doc, *clip),
         Operation::RippleDeleteClip { clip } => ripple_delete_clip(doc, *clip),
         Operation::RippleInsertGap {
@@ -543,6 +724,112 @@ fn add_asset(doc: &mut Document, asset: MediaAsset) -> Result<(), OpError> {
     }
     validate_asset(&asset)?;
     doc.media_pool.push(asset);
+    Ok(())
+}
+
+fn upsert_bin(doc: &mut Document, bin: MediaBin) {
+    if let Some(index) = doc
+        .catalog
+        .bins
+        .iter()
+        .position(|existing| existing.id == bin.id)
+    {
+        doc.catalog.bins[index] = bin;
+    } else {
+        doc.catalog.bins.push(bin);
+    }
+    doc.catalog.bins.sort_by_key(|bin| bin.id);
+}
+
+fn remove_bin(doc: &mut Document, bin_id: BinId) -> Result<(), OpError> {
+    if doc
+        .catalog
+        .bins
+        .iter()
+        .any(|bin| bin.parent == Some(bin_id))
+    {
+        return Err(OpError::BinHasChildren(bin_id));
+    }
+    let index = doc
+        .catalog
+        .bins
+        .iter()
+        .position(|bin| bin.id == bin_id)
+        .ok_or(OpError::MissingBin(bin_id))?;
+    doc.catalog.bins.remove(index);
+    Ok(())
+}
+
+fn set_asset_bin(
+    doc: &mut Document,
+    asset_id: AssetId,
+    destination: Option<BinId>,
+) -> Result<(), OpError> {
+    if doc.asset(asset_id).is_none() {
+        return Err(OpError::MissingAsset(asset_id));
+    }
+    if destination.is_some_and(|id| !doc.catalog.bins.iter().any(|bin| bin.id == id)) {
+        return Err(OpError::MissingBin(destination.expect("checked as some")));
+    }
+    for bin in &mut doc.catalog.bins {
+        bin.assets.retain(|asset| *asset != asset_id);
+        if Some(bin.id) == destination {
+            bin.assets.push(asset_id);
+            bin.assets.sort_unstable();
+        }
+    }
+    Ok(())
+}
+
+fn upsert_string_out(doc: &mut Document, string_out: StringOut) {
+    if let Some(index) = doc
+        .catalog
+        .string_outs
+        .iter()
+        .position(|existing| existing.id == string_out.id)
+    {
+        doc.catalog.string_outs[index] = string_out;
+    } else {
+        doc.catalog.string_outs.push(string_out);
+    }
+    doc.catalog
+        .string_outs
+        .sort_by_key(|string_out| string_out.id);
+}
+
+fn remove_string_out(doc: &mut Document, id: StringOutId) -> Result<(), OpError> {
+    let index = doc
+        .catalog
+        .string_outs
+        .iter()
+        .position(|string_out| string_out.id == id)
+        .ok_or(OpError::MissingStringOut(id))?;
+    doc.catalog.string_outs.remove(index);
+    Ok(())
+}
+
+fn upsert_sync_group(doc: &mut Document, sync_group: SyncGroup) {
+    if let Some(index) = doc
+        .catalog
+        .sync_groups
+        .iter()
+        .position(|existing| existing.id == sync_group.id)
+    {
+        doc.catalog.sync_groups[index] = sync_group;
+    } else {
+        doc.catalog.sync_groups.push(sync_group);
+    }
+    doc.catalog.sync_groups.sort_by_key(|group| group.id);
+}
+
+fn remove_sync_group(doc: &mut Document, id: SyncGroupId) -> Result<(), OpError> {
+    let index = doc
+        .catalog
+        .sync_groups
+        .iter()
+        .position(|group| group.id == id)
+        .ok_or(OpError::MissingSyncGroup(id))?;
+    doc.catalog.sync_groups.remove(index);
     Ok(())
 }
 
@@ -827,6 +1114,454 @@ fn move_clip(
         .clips
         .sort_by_key(|clip| (clip.timeline_start, clip.id));
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn three_point_edit(
+    doc: &mut Document,
+    track_id: TrackId,
+    asset_id: AssetId,
+    source_in: Option<TimeCode>,
+    source_out: Option<TimeCode>,
+    timeline_in: Option<TimeCode>,
+    timeline_out: Option<TimeCode>,
+    mode: ThreePointMode,
+) -> Result<(), OpError> {
+    let marks = [source_in, source_out, timeline_in, timeline_out]
+        .into_iter()
+        .flatten()
+        .count();
+    if marks != 3 {
+        return Err(OpError::InvalidThreePointSelection);
+    }
+    let asset = doc
+        .asset(asset_id)
+        .ok_or(OpError::MissingAsset(asset_id))?
+        .clone();
+    let track = doc
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+        .ok_or(OpError::MissingTrack(track_id))?;
+    validate_track_compatibility(&asset, track)?;
+
+    let (source, timeline) = match (source_in, source_out, timeline_in, timeline_out) {
+        (Some(source_in), Some(source_out), Some(timeline_in), None) => {
+            let source = source_in..source_out;
+            validate_source_range(&asset, &source)?;
+            let duration = map_source_range_to_project(source.clone(), asset.fps, doc.fps)?;
+            let timeline_out = timeline_in
+                .checked_add(duration)
+                .ok_or(OpError::TimeOverflow)?;
+            (source, timeline_in..timeline_out)
+        }
+        (Some(source_in), Some(source_out), None, Some(timeline_out)) => {
+            let source = source_in..source_out;
+            validate_source_range(&asset, &source)?;
+            let duration = map_source_range_to_project(source.clone(), asset.fps, doc.fps)?;
+            let timeline_in = timeline_out
+                .checked_sub(duration)
+                .ok_or(OpError::TimeOverflow)?;
+            (source, timeline_in..timeline_out)
+        }
+        (Some(source_in), None, Some(timeline_in), Some(timeline_out)) => {
+            validate_timeline_range(timeline_in, timeline_out)?;
+            let duration = timeline_out
+                .checked_sub(timeline_in)
+                .ok_or(OpError::TimeOverflow)?;
+            let source_out = source_end_for_project_duration(
+                source_in,
+                asset.duration,
+                asset.fps,
+                doc.fps,
+                duration,
+            )
+            .ok_or(OpError::InvalidThreePointSource {
+                start: source_in,
+                end: asset.duration,
+            })?;
+            (source_in..source_out, timeline_in..timeline_out)
+        }
+        (None, Some(source_out), Some(timeline_in), Some(timeline_out)) => {
+            validate_timeline_range(timeline_in, timeline_out)?;
+            let duration = timeline_out
+                .checked_sub(timeline_in)
+                .ok_or(OpError::TimeOverflow)?;
+            let source_in = source_start_for_project_duration(
+                TimeCode::ZERO,
+                source_out,
+                asset.fps,
+                doc.fps,
+                duration,
+            )
+            .ok_or(OpError::InvalidThreePointSource {
+                start: TimeCode::ZERO,
+                end: source_out,
+            })?;
+            (source_in..source_out, timeline_in..timeline_out)
+        }
+        _ => return Err(OpError::InvalidThreePointSelection),
+    };
+    validate_source_range(&asset, &source)?;
+    validate_timeline_range(timeline.start, timeline.end)?;
+    let duration = timeline
+        .end
+        .checked_sub(timeline.start)
+        .ok_or(OpError::TimeOverflow)?;
+    let mapped = map_source_range_to_project(source.clone(), asset.fps, doc.fps)?;
+    if mapped != duration {
+        return Err(OpError::InvalidThreePointSource {
+            start: source.start,
+            end: source.end,
+        });
+    }
+
+    match mode {
+        ThreePointMode::Insert => {
+            let straddling = doc
+                .tracks
+                .iter()
+                .filter(|track| track.id == track_id || track.sync_lock)
+                .filter_map(|track| {
+                    track.clips.iter().find_map(|clip| {
+                        let end = doc.clip_end(clip).ok()?;
+                        (clip.timeline_start < timeline.start && timeline.start < end)
+                            .then_some(clip.id)
+                    })
+                })
+                .collect::<Vec<_>>();
+            for clip in straddling {
+                split_clip(doc, clip, timeline.start)?;
+            }
+            ripple_insert_gap(doc, track_id, timeline.start, duration)?;
+        }
+        ThreePointMode::Overwrite => {
+            clear_track_range(doc, track_id, timeline.clone())?;
+        }
+    }
+    add_clip(doc, track_id, asset_id, timeline.start, source)
+}
+
+fn validate_timeline_range(start: TimeCode, end: TimeCode) -> Result<(), OpError> {
+    if start < TimeCode::ZERO || end <= start {
+        return Err(OpError::InvalidThreePointTimeline { start, end });
+    }
+    Ok(())
+}
+
+fn clear_track_range(
+    doc: &mut Document,
+    track_id: TrackId,
+    range: std::ops::Range<TimeCode>,
+) -> Result<(), OpError> {
+    for boundary in [range.end, range.start] {
+        let candidate = doc
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .ok_or(OpError::MissingTrack(track_id))?
+            .clips
+            .iter()
+            .find_map(|clip| {
+                let end = doc.clip_end(clip).ok()?;
+                (clip.timeline_start < boundary && boundary < end).then_some(clip.id)
+            });
+        if let Some(clip) = candidate {
+            split_clip(doc, clip, boundary)?;
+        }
+    }
+
+    let remove = doc
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+        .ok_or(OpError::MissingTrack(track_id))?
+        .clips
+        .iter()
+        .filter_map(|clip| {
+            let end = doc.clip_end(clip).ok()?;
+            (clip.timeline_start >= range.start && end <= range.end).then_some(clip.id)
+        })
+        .collect::<Vec<_>>();
+    for clip in remove {
+        delete_clip(doc, clip)?;
+    }
+    Ok(())
+}
+
+fn slip_clip(doc: &mut Document, clip_id: ClipId, new_source_in: TimeCode) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let clip = &doc.tracks[track_index].clips[clip_index];
+    if !clip.content.is_media() {
+        return Err(OpError::EditorialRequiresMedia(clip_id));
+    }
+    let span = clip
+        .source_range
+        .end
+        .checked_sub(clip.source_range.start)
+        .ok_or(OpError::TimeOverflow)?;
+    let new_source_out = new_source_in
+        .checked_add(span)
+        .ok_or(OpError::TimeOverflow)?;
+    let asset = doc
+        .asset(clip.asset)
+        .ok_or(OpError::MissingAsset(clip.asset))?;
+    validate_source_range(asset, &(new_source_in..new_source_out))?;
+    doc.tracks[track_index].clips[clip_index].source_range = new_source_in..new_source_out;
+    Ok(())
+}
+
+fn roll_edit(
+    doc: &mut Document,
+    left_id: ClipId,
+    right_id: ClipId,
+    to: TimeCode,
+) -> Result<(), OpError> {
+    let (track_index, left_index) = find_clip(doc, left_id)?;
+    let (right_track_index, right_index) = find_clip(doc, right_id)?;
+    if track_index != right_track_index || right_index != left_index + 1 {
+        return Err(OpError::ClipsNotAdjacent {
+            left: left_id,
+            right: right_id,
+        });
+    }
+    let left = doc.tracks[track_index].clips[left_index].clone();
+    let right = doc.tracks[track_index].clips[right_index].clone();
+    require_media(&left)?;
+    require_media(&right)?;
+    let left_end = doc.clip_end(&left)?;
+    let right_end = doc.clip_end(&right)?;
+    if left_end != right.timeline_start || to <= left.timeline_start || to >= right_end {
+        return Err(OpError::ClipsNotAdjacent {
+            left: left_id,
+            right: right_id,
+        });
+    }
+
+    let left_asset = doc
+        .asset(left.asset)
+        .ok_or(OpError::MissingAsset(left.asset))?;
+    let left_fps = crate::clip_effective_fps(left_asset.fps, &left)?;
+    let left_duration = to
+        .checked_sub(left.timeline_start)
+        .ok_or(OpError::TimeOverflow)?;
+    let left_source_out = source_end_for_project_duration(
+        left.source_range.start,
+        left_asset.duration,
+        left_fps,
+        doc.fps,
+        left_duration,
+    )
+    .ok_or(OpError::UnrepresentableEditBoundary {
+        clip: left_id,
+        at: to,
+    })?;
+
+    let right_asset = doc
+        .asset(right.asset)
+        .ok_or(OpError::MissingAsset(right.asset))?;
+    let right_fps = crate::clip_effective_fps(right_asset.fps, &right)?;
+    let right_duration = right_end.checked_sub(to).ok_or(OpError::TimeOverflow)?;
+    let right_source_in = source_start_for_project_duration(
+        TimeCode::ZERO,
+        right.source_range.end,
+        right_fps,
+        doc.fps,
+        right_duration,
+    )
+    .ok_or(OpError::UnrepresentableEditBoundary {
+        clip: right_id,
+        at: to,
+    })?;
+
+    doc.tracks[track_index].clips[left_index].source_range.end = left_source_out;
+    doc.tracks[track_index].clips[right_index]
+        .source_range
+        .start = right_source_in;
+    doc.tracks[track_index].clips[right_index].timeline_start = to;
+    Ok(())
+}
+
+fn slide_clip(doc: &mut Document, clip_id: ClipId, to: TimeCode) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let track_len = doc.tracks[track_index].clips.len();
+    if clip_index == 0 || clip_index + 1 >= track_len {
+        return Err(OpError::SlideRequiresNeighbors { clip: clip_id });
+    }
+    let left = doc.tracks[track_index].clips[clip_index - 1].clone();
+    let middle = doc.tracks[track_index].clips[clip_index].clone();
+    let right = doc.tracks[track_index].clips[clip_index + 1].clone();
+    require_media(&left)?;
+    require_media(&middle)?;
+    require_media(&right)?;
+    let left_end = doc.clip_end(&left)?;
+    let middle_duration = doc.clip_duration(&middle)?;
+    let middle_end = doc.clip_end(&middle)?;
+    let right_end = doc.clip_end(&right)?;
+    let new_end = to
+        .checked_add(middle_duration)
+        .ok_or(OpError::TimeOverflow)?;
+    if left_end != middle.timeline_start
+        || middle_end != right.timeline_start
+        || to <= left.timeline_start
+        || new_end >= right_end
+    {
+        return Err(OpError::SlideRequiresNeighbors { clip: clip_id });
+    }
+
+    let left_asset = doc
+        .asset(left.asset)
+        .ok_or(OpError::MissingAsset(left.asset))?;
+    let left_fps = crate::clip_effective_fps(left_asset.fps, &left)?;
+    let left_duration = to
+        .checked_sub(left.timeline_start)
+        .ok_or(OpError::TimeOverflow)?;
+    let left_source_out = source_end_for_project_duration(
+        left.source_range.start,
+        left_asset.duration,
+        left_fps,
+        doc.fps,
+        left_duration,
+    )
+    .ok_or(OpError::UnrepresentableEditBoundary {
+        clip: left.id,
+        at: to,
+    })?;
+
+    let right_asset = doc
+        .asset(right.asset)
+        .ok_or(OpError::MissingAsset(right.asset))?;
+    let right_fps = crate::clip_effective_fps(right_asset.fps, &right)?;
+    let right_duration = right_end
+        .checked_sub(new_end)
+        .ok_or(OpError::TimeOverflow)?;
+    let right_source_in = source_start_for_project_duration(
+        TimeCode::ZERO,
+        right.source_range.end,
+        right_fps,
+        doc.fps,
+        right_duration,
+    )
+    .ok_or(OpError::UnrepresentableEditBoundary {
+        clip: right.id,
+        at: new_end,
+    })?;
+
+    doc.tracks[track_index].clips[clip_index - 1]
+        .source_range
+        .end = left_source_out;
+    doc.tracks[track_index].clips[clip_index].timeline_start = to;
+    doc.tracks[track_index].clips[clip_index + 1]
+        .source_range
+        .start = right_source_in;
+    doc.tracks[track_index].clips[clip_index + 1].timeline_start = new_end;
+    Ok(())
+}
+
+fn replace_clip(
+    doc: &mut Document,
+    clip_id: ClipId,
+    asset_id: AssetId,
+    source: std::ops::Range<TimeCode>,
+    fit_to_fill: bool,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let original = doc.tracks[track_index].clips[clip_index].clone();
+    require_media(&original)?;
+    let required = doc.clip_duration(&original)?;
+    let asset = doc.asset(asset_id).ok_or(OpError::MissingAsset(asset_id))?;
+    validate_source_range(asset, &source)?;
+    validate_track_compatibility(asset, &doc.tracks[track_index])?;
+
+    let speed_percent = if fit_to_fill {
+        let real_time_duration = map_source_range_to_project(source.clone(), asset.fps, doc.fps)?.0;
+        let ideal_speed = real_time_duration
+            .checked_mul(100)
+            .and_then(|value| value.checked_add(required.0 / 2))
+            .and_then(|value| value.checked_div(required.0))
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or(OpError::TimeOverflow)?;
+        (CLIP_SPEED_MIN_PERCENT..=CLIP_SPEED_MAX_PERCENT)
+            .filter_map(|speed| {
+                let effective = crate::speed_scaled_fps(asset.fps, speed).ok()?;
+                let duration =
+                    map_source_range_to_project(source.clone(), effective, doc.fps).ok()?;
+                (duration == required).then_some(speed)
+            })
+            .min_by_key(|speed| speed.abs_diff(ideal_speed))
+            .ok_or(OpError::FitToFillUnrepresentable { clip: clip_id })?
+    } else {
+        let actual = map_source_range_to_project(source.clone(), asset.fps, doc.fps)?;
+        if actual != required {
+            return Err(OpError::ReplacementDurationMismatch {
+                clip: clip_id,
+                required,
+                actual,
+            });
+        }
+        100
+    };
+
+    let clip = &mut doc.tracks[track_index].clips[clip_index];
+    clip.asset = asset_id;
+    clip.source_range = source;
+    clip.content = ClipContent::Media;
+    clip.speed_percent = speed_percent;
+    Ok(())
+}
+
+fn require_media(clip: &Clip) -> Result<(), OpError> {
+    if clip.content.is_media() {
+        Ok(())
+    } else {
+        Err(OpError::EditorialRequiresMedia(clip.id))
+    }
+}
+
+fn source_end_for_project_duration(
+    source_start: TimeCode,
+    maximum_end: TimeCode,
+    source_fps: crate::Rational,
+    project_fps: crate::Rational,
+    project_duration: TimeCode,
+) -> Option<TimeCode> {
+    let mut low = source_start.0.checked_add(1)?;
+    let mut high = maximum_end.0;
+    while low <= high {
+        let middle = low + (high - low) / 2;
+        let candidate = TimeCode(middle);
+        let mapped =
+            map_source_range_to_project(source_start..candidate, source_fps, project_fps).ok()?;
+        match mapped.cmp(&project_duration) {
+            std::cmp::Ordering::Less => low = middle.checked_add(1)?,
+            std::cmp::Ordering::Greater => high = middle.checked_sub(1)?,
+            std::cmp::Ordering::Equal => return Some(candidate),
+        }
+    }
+    None
+}
+
+fn source_start_for_project_duration(
+    minimum_start: TimeCode,
+    source_end: TimeCode,
+    source_fps: crate::Rational,
+    project_fps: crate::Rational,
+    project_duration: TimeCode,
+) -> Option<TimeCode> {
+    let mut low = minimum_start.0;
+    let mut high = source_end.0.checked_sub(1)?;
+    while low <= high {
+        let middle = low + (high - low) / 2;
+        let candidate = TimeCode(middle);
+        let mapped =
+            map_source_range_to_project(candidate..source_end, source_fps, project_fps).ok()?;
+        match mapped.cmp(&project_duration) {
+            std::cmp::Ordering::Greater => low = middle.checked_add(1)?,
+            std::cmp::Ordering::Less => high = middle.checked_sub(1)?,
+            std::cmp::Ordering::Equal => return Some(candidate),
+        }
+    }
+    None
 }
 
 fn delete_clip(doc: &mut Document, clip_id: ClipId) -> Result<(), OpError> {
@@ -1617,6 +2352,8 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
         validate_asset(asset)?;
     }
 
+    validate_catalog(doc)?;
+
     let mut track_ids = HashSet::new();
     let mut clip_ids = HashSet::new();
     let mut expected_duration = TimeCode::ZERO;
@@ -1730,6 +2467,106 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
             expected: expected_duration,
             actual: doc.duration,
         });
+    }
+    Ok(())
+}
+
+fn validate_catalog(doc: &Document) -> Result<(), OpError> {
+    let mut bin_ids = HashSet::new();
+    let mut asset_bins = std::collections::HashMap::new();
+    for bin in &doc.catalog.bins {
+        if !bin_ids.insert(bin.id) {
+            return Err(OpError::DuplicateBin(bin.id));
+        }
+        if bin.name.trim().is_empty() {
+            return Err(OpError::EmptyBinName(bin.id));
+        }
+        if bin.parent == Some(bin.id) {
+            return Err(OpError::BinSelfParent(bin.id));
+        }
+        let mut assets = HashSet::new();
+        for asset in &bin.assets {
+            if doc.asset(*asset).is_none() {
+                return Err(OpError::MissingAsset(*asset));
+            }
+            if !assets.insert(*asset) {
+                return Err(OpError::DuplicateBinAsset {
+                    bin: bin.id,
+                    asset: *asset,
+                });
+            }
+            if let Some(first) = asset_bins.insert(*asset, bin.id) {
+                return Err(OpError::AssetInMultipleBins {
+                    asset: *asset,
+                    first,
+                    second: bin.id,
+                });
+            }
+        }
+    }
+    for bin in &doc.catalog.bins {
+        if let Some(parent) = bin.parent
+            && !bin_ids.contains(&parent)
+        {
+            return Err(OpError::MissingBin(parent));
+        }
+        let mut seen = HashSet::new();
+        let mut cursor = Some(bin.id);
+        while let Some(id) = cursor {
+            if !seen.insert(id) {
+                return Err(OpError::BinCycle(id));
+            }
+            cursor = doc
+                .catalog
+                .bins
+                .iter()
+                .find(|candidate| candidate.id == id)
+                .and_then(|candidate| candidate.parent);
+        }
+    }
+
+    let mut string_out_ids = HashSet::new();
+    for string_out in &doc.catalog.string_outs {
+        if !string_out_ids.insert(string_out.id) {
+            return Err(OpError::DuplicateStringOut(string_out.id));
+        }
+        if string_out.name.trim().is_empty() || string_out.selects.is_empty() {
+            return Err(OpError::InvalidStringOut(string_out.id));
+        }
+        for select in &string_out.selects {
+            let asset = doc
+                .asset(select.asset)
+                .ok_or(OpError::MissingAsset(select.asset))?;
+            validate_source_range(asset, &select.source)?;
+        }
+    }
+
+    let mut sync_group_ids = HashSet::new();
+    for group in &doc.catalog.sync_groups {
+        if !sync_group_ids.insert(group.id) {
+            return Err(OpError::DuplicateSyncGroup(group.id));
+        }
+        if group.name.trim().is_empty() || group.members.len() < 2 {
+            return Err(OpError::InvalidSyncGroup(group.id));
+        }
+        let mut assets = HashSet::new();
+        for member in &group.members {
+            if doc.asset(member.asset).is_none() {
+                return Err(OpError::MissingAsset(member.asset));
+            }
+            if !assets.insert(member.asset) {
+                return Err(OpError::DuplicateSyncGroupAsset {
+                    group: group.id,
+                    asset: member.asset,
+                });
+            }
+            if member.angle_name.trim().is_empty() {
+                return Err(OpError::EmptySyncAngle {
+                    group: group.id,
+                    asset: member.asset,
+                });
+            }
+        }
     }
     Ok(())
 }

@@ -1144,6 +1144,7 @@ mod tests {
     fn video_only_timeline_feeds_silence_for_the_audio_master_clock() {
         let fps = Rational::new(10, 1).unwrap();
         let document = Document {
+            catalog: openreel_core::MediaCatalog::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -1205,6 +1206,7 @@ mod tests {
 
     fn parity_document(voice: &Path, bed: &Path, fps: Rational) -> Document {
         Document {
+            catalog: openreel_core::MediaCatalog::default(),
             tracks: vec![
                 Track {
                     id: TrackId(1),

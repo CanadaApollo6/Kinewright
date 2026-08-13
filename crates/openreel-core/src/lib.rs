@@ -4,6 +4,7 @@ mod actor;
 mod agent;
 mod captions;
 mod delivery;
+mod editorial;
 mod effect;
 mod journal;
 mod media;
@@ -27,6 +28,7 @@ pub use captions::{
 pub use delivery::{
     DeliveryAspect, DeliveryVariant, DeliveryVariantError, document_for_delivery_variant,
 };
+pub use editorial::ThreePointMode;
 pub use effect::{
     EFFECT_DESCRIPTORS, EffectDescriptor, EffectParameterDescriptor, EffectUniform,
     effect_descriptor,
@@ -42,9 +44,10 @@ pub use media::{
     WaveformPeak,
 };
 pub use model::{
-    AssetId, Clip, ClipContent, ClipId, Document, Effect, EffectId, FreezeFrame, LinkId,
-    MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaKind, ParamValue, Track, TrackId,
-    TrackKind, Transition, clip_effective_fps,
+    AssetId, BinId, Clip, ClipContent, ClipId, Document, Effect, EffectId, FreezeFrame, LinkId,
+    MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin, MediaCatalog, MediaKind,
+    ParamValue, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember,
+    Track, TrackId, TrackKind, Transition, clip_effective_fps,
 };
 pub use operation::{ApplyOp, BatchError, OpError, Operation, apply_batch};
 pub use qa::{QaIssue, QaReport, QaSeverity, qa_document};

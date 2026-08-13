@@ -219,6 +219,7 @@ mod tests {
             assets.push(asset);
         }
         Document {
+            catalog: crate::MediaCatalog::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Audio,
@@ -236,6 +237,7 @@ mod tests {
     fn word(clip: u64, start: i64, end: i64) -> TimelineTranscriptWord {
         TimelineTranscriptWord {
             text: format!("word-{start}"),
+            speaker: None,
             asset: AssetId(clip),
             track: TrackId(1),
             clip: ClipId(clip),

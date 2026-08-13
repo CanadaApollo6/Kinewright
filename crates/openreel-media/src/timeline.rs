@@ -452,6 +452,7 @@ mod tests {
 
     fn fixture() -> Document {
         Document {
+            catalog: openreel_core::MediaCatalog::default(),
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,

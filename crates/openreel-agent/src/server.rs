@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Write as _,
     future::Future,
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
@@ -16,10 +16,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use openreel_core::{
     Analysis, AnalysisKind, AssetId, BeatStatus, CaptionPreset, ClipId, Command, Core,
-    DeliveryAspect, DeliveryVariant, Document, Event, Operation, Playback, Query, QueryResult,
-    SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineRevision, TimelineSceneChange,
-    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, caption_cues,
-    caption_title_operations, dedup_timeline_words, document_for_delivery_variant, qa_document,
+    DeliveryAspect, DeliveryVariant, Document, Event, MediaKind, Operation, Playback, Query,
+    QueryResult, SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineRevision,
+    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus,
+    caption_cues, caption_title_operations, dedup_timeline_words, document_for_delivery_variant,
+    qa_document,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -400,6 +401,14 @@ impl OpenReelMcp {
                     Ok(rendered) => success_text(rendered),
                     Err(error) => error_text(error),
                 })
+            }
+            "get_source_info" => {
+                let args: SourceInfoArgs = decode_args("get_source_info", arguments)?;
+                self.source_info(&args)
+            }
+            "search_media" => {
+                let args: MediaSearchArgs = decode_args("search_media", arguments)?;
+                self.search_media(&args)
             }
             "get_frame_at" => {
                 let args: FrameAtArgs = decode_args("get_frame_at", arguments)?;
@@ -925,6 +934,284 @@ impl OpenReelMcp {
         Ok(result)
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn source_info(&self, args: &SourceInfoArgs) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let Some(asset) = document.asset(args.asset_id) else {
+            return Ok(error_text(format!(
+                "asset {} does not exist",
+                args.asset_id
+            )));
+        };
+        let source_in = args.source_in.unwrap_or(TimeCode::ZERO);
+        let source_out = args.source_out.unwrap_or(asset.duration);
+        if source_in < TimeCode::ZERO || source_out > asset.duration || source_out <= source_in {
+            return Ok(error_text(format!(
+                "source monitor range {source_in}..{source_out} is outside asset {} range 0..{}",
+                asset.id, asset.duration
+            )));
+        }
+
+        let transcript = match self.analysis.transcript_status(asset) {
+            TranscriptStatus::Ready(transcript) => Some(transcript),
+            _ => None,
+        };
+        let words = transcript
+            .as_ref()
+            .map(|transcript| {
+                transcript
+                    .words
+                    .iter()
+                    .filter(|word| word.source_end > source_in && word.source_start < source_out)
+                    .map(|word| {
+                        serde_json::json!({
+                            "text": word.text,
+                            "speaker": word.speaker,
+                            "source_start": word.source_start.0,
+                            "source_end": word.source_end.0,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let speakers = transcript
+            .as_ref()
+            .into_iter()
+            .flat_map(|transcript| &transcript.words)
+            .filter(|word| word.source_end > source_in && word.source_start < source_out)
+            .filter_map(|word| word.speaker.as_deref())
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let scenes = match self.analysis.scene_status(asset) {
+            SceneStatus::Ready(scenes) => scenes
+                .changes
+                .iter()
+                .filter(|change| {
+                    change.source_frame >= source_in && change.source_frame < source_out
+                })
+                .map(|change| {
+                    serde_json::json!({
+                        "source_frame": change.source_frame.0,
+                        "confidence_basis_points": change.confidence_basis_points,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        let beats = match self.analysis.beat_status(asset) {
+            BeatStatus::Ready(beats) => beats
+                .beats
+                .iter()
+                .filter(|beat| beat.source_frame >= source_in && beat.source_frame < source_out)
+                .map(|beat| {
+                    serde_json::json!({
+                        "source_frame": beat.source_frame.0,
+                        "strength_basis_points": beat.strength_basis_points,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        let value = serde_json::json!({
+            "asset": {
+                "id": asset.id.0,
+                "name": asset.name,
+                "path": asset.path,
+                "kind": asset.kind,
+                "duration": asset.duration.0,
+                "fps": {
+                    "numerator": asset.fps.numerator(),
+                    "denominator": asset.fps.denominator(),
+                },
+                "resolution": asset.resolution,
+            },
+            "source_monitor": {
+                "source_in": source_in.0,
+                "source_out": source_out.0,
+                "duration": source_out.0 - source_in.0,
+                "in_marked": args.source_in.is_some(),
+                "out_marked": args.source_out.is_some(),
+            },
+            "speakers": speakers,
+            "words": words,
+            "scene_changes": scenes,
+            "beats": beats,
+            "analysis_jobs": self.analysis.analysis_jobs(asset),
+        });
+        Ok(success_structured(
+            format!(
+                "source asset={} range={}..{} words={} scenes={} beats={}\n{}",
+                asset.id,
+                source_in,
+                source_out,
+                value["words"].as_array().map_or(0, Vec::len),
+                value["scene_changes"].as_array().map_or(0, Vec::len),
+                value["beats"].as_array().map_or(0, Vec::len),
+                value
+            ),
+            value,
+        ))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn search_media(&self, args: &MediaSearchArgs) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let query = args
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .map(str::to_lowercase);
+        let speaker = args
+            .speaker
+            .as_deref()
+            .map(str::trim)
+            .filter(|speaker| !speaker.is_empty())
+            .map(str::to_lowercase);
+        let limit = args.limit.unwrap_or(25).clamp(1, 100);
+        let mut matches = Vec::new();
+
+        for asset in &document.media_pool {
+            if args.kind.is_some_and(|kind| kind != asset.kind)
+                || args
+                    .min_width
+                    .is_some_and(|minimum| asset.resolution.is_none_or(|value| value.0 < minimum))
+                || args
+                    .min_height
+                    .is_some_and(|minimum| asset.resolution.is_none_or(|value| value.1 < minimum))
+                || args
+                    .min_duration_frames
+                    .is_some_and(|minimum| asset.duration < minimum)
+            {
+                continue;
+            }
+
+            let transcript = match self.analysis.transcript_status(asset) {
+                TranscriptStatus::Ready(transcript) => Some(transcript),
+                _ => None,
+            };
+            if args
+                .has_transcript
+                .is_some_and(|required| required != transcript.is_some())
+            {
+                continue;
+            }
+            let scene_count = match self.analysis.scene_status(asset) {
+                SceneStatus::Ready(scenes) => scenes.changes.len(),
+                _ => 0,
+            };
+            if args
+                .min_scene_count
+                .is_some_and(|minimum| scene_count < minimum)
+            {
+                continue;
+            }
+            let beat_count = match self.analysis.beat_status(asset) {
+                BeatStatus::Ready(beats) => beats.beats.len(),
+                _ => 0,
+            };
+            if args
+                .min_beat_count
+                .is_some_and(|minimum| beat_count < minimum)
+            {
+                continue;
+            }
+
+            let speaker_labels = transcript
+                .as_ref()
+                .into_iter()
+                .flat_map(|transcript| &transcript.words)
+                .filter_map(|word| word.speaker.as_deref())
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>();
+            if let Some(speaker) = speaker.as_deref()
+                && !speaker_labels
+                    .iter()
+                    .any(|label| label.to_lowercase() == speaker)
+            {
+                continue;
+            }
+
+            let name_match = query.as_ref().is_some_and(|query| {
+                asset.name.to_lowercase().contains(query)
+                    || asset.path.to_string_lossy().to_lowercase().contains(query)
+            });
+            let matching_words = transcript
+                .as_ref()
+                .into_iter()
+                .flat_map(|transcript| &transcript.words)
+                .filter(|word| {
+                    query.as_ref().is_some_and(|query| {
+                        word.text.to_lowercase().contains(query)
+                            || word
+                                .speaker
+                                .as_ref()
+                                .is_some_and(|speaker| speaker.to_lowercase().contains(query))
+                    })
+                })
+                .collect::<Vec<_>>();
+            if query.is_some() && !name_match && matching_words.is_empty() {
+                continue;
+            }
+            let score = usize::from(name_match) * 100 + matching_words.len().min(99);
+            let word_matches = matching_words
+                .into_iter()
+                .take(12)
+                .map(|word| {
+                    serde_json::json!({
+                        "text": word.text,
+                        "speaker": word.speaker,
+                        "source_start": word.source_start.0,
+                        "source_end": word.source_end.0,
+                    })
+                })
+                .collect::<Vec<_>>();
+            matches.push((
+                score,
+                asset.id,
+                serde_json::json!({
+                    "asset_id": asset.id.0,
+                    "name": asset.name,
+                    "path": asset.path,
+                    "kind": asset.kind,
+                    "duration": asset.duration.0,
+                    "fps": {
+                        "numerator": asset.fps.numerator(),
+                        "denominator": asset.fps.denominator(),
+                    },
+                    "resolution": asset.resolution,
+                    "score": score,
+                    "word_matches": word_matches,
+                    "speakers": speaker_labels,
+                    "scene_count": scene_count,
+                    "beat_count": beat_count,
+                    "analysis_jobs": self.analysis.analysis_jobs(asset),
+                }),
+            ));
+        }
+        matches.sort_by_key(|(score, asset, _)| (std::cmp::Reverse(*score), *asset));
+        let total_matches = matches.len();
+        let hits = matches
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, hit)| hit)
+            .collect::<Vec<_>>();
+        let value = serde_json::json!({
+            "query": args.query,
+            "speaker": args.speaker,
+            "total_matches": total_matches,
+            "returned": hits.len(),
+            "hits": hits,
+        });
+        Ok(success_structured(
+            format!(
+                "media search matched {} asset(s), returned {}\n{}",
+                total_matches, value["returned"], value
+            ),
+            value,
+        ))
+    }
+
     fn asset_transcript(&self, asset_id: AssetId) -> Result<CallToolResult, McpError> {
         let document = self.document()?;
         let Some(asset) = document.asset(asset_id) else {
@@ -1339,6 +1626,49 @@ struct ImportMediaArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct SourceInfoArgs {
+    /// Stable asset id shown by `get_timeline_state` or `search_media`.
+    asset_id: AssetId,
+    /// Optional source-monitor in mark in exact asset frames.
+    #[serde(default)]
+    source_in: Option<TimeCode>,
+    /// Optional source-monitor out mark in exact asset frames.
+    #[serde(default)]
+    source_out: Option<TimeCode>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MediaSearchArgs {
+    /// Case-insensitive text matched against asset name, path, cached words,
+    /// and cached speaker labels.
+    #[serde(default)]
+    query: Option<String>,
+    /// Case-insensitive exact diarization label from cached transcript words.
+    #[serde(default)]
+    speaker: Option<String>,
+    #[serde(default)]
+    kind: Option<MediaKind>,
+    #[serde(default)]
+    min_width: Option<u32>,
+    #[serde(default)]
+    min_height: Option<u32>,
+    #[serde(default)]
+    min_duration_frames: Option<TimeCode>,
+    /// Require at least this many cached scene boundaries.
+    #[serde(default)]
+    min_scene_count: Option<usize>,
+    /// Require at least this many cached beat onsets.
+    #[serde(default)]
+    min_beat_count: Option<usize>,
+    /// Require a ready cached transcript when true, or no ready transcript when false.
+    #[serde(default)]
+    has_transcript: Option<bool>,
+    /// Maximum hits to return. Defaults to 25 and is capped at 100.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct TranscriptArgs {
     /// Stable asset id shown by `get_timeline_state`.
     asset_id: AssetId,
@@ -1632,6 +1962,18 @@ fn inspector_tools() -> Vec<Tool> {
             "get_clip_info",
             "Return detailed live information for one clip id.",
             schema_object::<ClipInfoArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_source_info",
+            "Inspect one asset as source media with optional exact source-frame in/out marks. Returns technical metadata plus cached transcript words, speaker labels, scene boundaries, beats, and analysis lifecycle for that range.",
+            schema_object::<SourceInfoArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "search_media",
+            "Search the media graph by name/path text, cached transcript words, speaker label, media kind, resolution, duration, scene density, beat density, and transcript availability. Returns stable asset ids and exact matching source ranges for source-monitor and three-point edits.",
+            schema_object::<MediaSearchArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -2054,9 +2396,9 @@ fn render_plan_outcomes(
 mod tests {
     use super::*;
     use openreel_core::{
-        AssetId, Clip, FrameTexture, Marker, MarkerId, MediaAsset, MediaError, MediaEvent,
-        MediaKind, ParamValue, Rational, RgbaImage, SceneStatus, SilenceStatus,
-        TimelineSceneChange, TimelineSilenceSpan, Title, Track, TrackId, TrackKind,
+        AssetId, AssetTranscript, Clip, FrameTexture, Marker, MarkerId, MediaAsset, MediaError,
+        MediaEvent, MediaKind, ParamValue, Rational, RgbaImage, SceneStatus, SilenceStatus,
+        TimelineSceneChange, TimelineSilenceSpan, Title, Track, TrackId, TrackKind, TranscriptWord,
         VisualAssetResult,
     };
     use serde_json::json;
@@ -2066,7 +2408,10 @@ mod tests {
         time::Instant,
     };
 
-    struct NoopMedia;
+    #[derive(Default)]
+    struct NoopMedia {
+        transcript: Option<Arc<AssetTranscript>>,
+    }
 
     impl Playback for NoopMedia {
         fn set_document(&self, _doc: Arc<Document>) {}
@@ -2103,8 +2448,16 @@ mod tests {
 
         fn request_transcription(&self, _asset: MediaAsset) {}
 
-        fn transcript_status(&self, _asset: &MediaAsset) -> TranscriptStatus {
-            TranscriptStatus::NotRequested
+        fn transcript_status(&self, asset: &MediaAsset) -> TranscriptStatus {
+            self.transcript
+                .as_ref()
+                .map_or(TranscriptStatus::NotRequested, |transcript| {
+                    if transcript.asset == asset.id {
+                        TranscriptStatus::Ready(Arc::clone(transcript))
+                    } else {
+                        TranscriptStatus::NotRequested
+                    }
+                })
         }
 
         fn timeline_transcript(
@@ -2191,6 +2544,7 @@ mod tests {
             resolution: Some((320, 180)),
         };
         let document = Document {
+            catalog: openreel_core::MediaCatalog::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -2216,7 +2570,7 @@ mod tests {
             resolution: (320, 180),
             duration: TimeCode(60),
         };
-        let media = Arc::new(NoopMedia);
+        let media = Arc::new(NoopMedia::default());
         (Core::spawn(document).unwrap(), media.clone(), media)
     }
 
@@ -2317,6 +2671,75 @@ mod tests {
             result.structured_content.unwrap()["delivery_variant"]["aspect"],
             "vertical"
         );
+    }
+
+    #[test]
+    fn m32_tools_expose_professional_edits_source_monitor_and_faceted_search() {
+        let names = OpenReelMcp::tools()
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect::<Vec<_>>();
+        for name in [
+            "three_point_edit",
+            "slip_clip",
+            "roll_edit",
+            "slide_clip",
+            "replace_clip",
+            "fit_to_fill",
+            "get_source_info",
+            "search_media",
+        ] {
+            assert!(names.iter().any(|candidate| candidate == name));
+        }
+
+        let (core, playback, _) = fixture();
+        let transcript = Arc::new(AssetTranscript {
+            asset: AssetId(1),
+            content_sha256: "fixture".to_owned(),
+            source_fps: Rational::new(30, 1).unwrap(),
+            words: vec![TranscriptWord {
+                text: "wedding vows".to_owned(),
+                source_start: TimeCode(12),
+                source_end: TimeCode(24),
+                speaker: Some("Partner".to_owned()),
+            }],
+        });
+        let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia {
+            transcript: Some(transcript),
+        });
+        let service = OpenReelMcp::new(core, playback, analysis, ConfirmationBroker::default());
+
+        let source = service
+            .source_info(&SourceInfoArgs {
+                asset_id: AssetId(1),
+                source_in: Some(TimeCode(10)),
+                source_out: Some(TimeCode(30)),
+            })
+            .unwrap();
+        assert_eq!(source.is_error, Some(false));
+        let source = source.structured_content.unwrap();
+        assert_eq!(source["source_monitor"]["duration"], 20);
+        assert_eq!(source["words"][0]["speaker"], "Partner");
+
+        let search = service
+            .search_media(&MediaSearchArgs {
+                query: Some("vows".to_owned()),
+                speaker: Some("partner".to_owned()),
+                kind: Some(MediaKind::Video),
+                min_width: Some(320),
+                min_height: Some(180),
+                min_duration_frames: Some(TimeCode(60)),
+                min_scene_count: None,
+                min_beat_count: None,
+                has_transcript: Some(true),
+                limit: Some(10),
+            })
+            .unwrap();
+        assert_eq!(search.is_error, Some(false));
+        let search = search.structured_content.unwrap();
+        assert_eq!(search["total_matches"], 1);
+        assert_eq!(search["hits"][0]["word_matches"][0]["source_start"], 12);
     }
 
     fn delete_request() -> CallToolRequestParams {

@@ -99,6 +99,7 @@ mod tests {
     fn word(text: &str, start: i64, end: i64) -> TimelineTranscriptWord {
         TimelineTranscriptWord {
             text: text.to_owned(),
+            speaker: None,
             asset: AssetId(1),
             track: TrackId(1),
             clip: ClipId(1),

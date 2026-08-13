@@ -6,10 +6,11 @@ use std::{
 };
 
 use openreel_core::{
-    AssetId, Clip, ClipContent, ClipId, Command, Core, Document, Effect, EffectId, Event,
-    FreezeFrame, LinkId, Marker, MarkerId, MediaAsset, MediaKind, OpError, Operation, ParamValue,
-    Rational, TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition, Track, TrackId, TrackKind,
-    Transition, transition_descriptor,
+    AssetId, BinId, Clip, ClipContent, ClipId, Command, Core, Document, Effect, EffectId, Event,
+    FreezeFrame, LinkId, Marker, MarkerId, MediaAsset, MediaBin, MediaKind, OpError, Operation,
+    ParamValue, Rational, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId,
+    SyncGroupMember, TRANSITION_DESCRIPTORS, ThreePointMode, TimeCode, Title, TitlePosition, Track,
+    TrackId, TrackKind, Transition, transition_descriptor,
 };
 use proptest::prelude::*;
 
@@ -27,6 +28,7 @@ fn asset(id: u64, fps: Rational, duration: i64) -> MediaAsset {
 
 fn empty_timeline(fps: Rational) -> Document {
     Document {
+        catalog: openreel_core::MediaCatalog::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -85,6 +87,31 @@ fn document_with_three_clips() -> Document {
     doc
 }
 
+fn document_with_butt_joined_clips() -> Document {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut doc = empty_timeline(fps);
+    Operation::AddAsset {
+        asset: asset(1, fps, 600),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    for (at, source) in [
+        (0, TimeCode(50)..TimeCode(100)),
+        (50, TimeCode(150)..TimeCode(180)),
+        (80, TimeCode(220)..TimeCode(270)),
+    ] {
+        Operation::AddClip {
+            track: TrackId(1),
+            asset: AssetId(1),
+            at: TimeCode(at),
+            source,
+        }
+        .apply(&mut doc)
+        .unwrap();
+    }
+    doc
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn document_and_every_operation_variant_round_trip_through_json() {
@@ -96,6 +123,54 @@ fn document_and_every_operation_variant_round_trip_through_json() {
     let operations = vec![
         Operation::AddAsset {
             asset: asset(2, Rational::new(24_000, 1_001).unwrap(), 240),
+        },
+        Operation::UpsertBin {
+            bin: MediaBin {
+                id: BinId(1),
+                name: "Ceremony".to_owned(),
+                parent: None,
+                assets: vec![AssetId(1)],
+            },
+        },
+        Operation::RemoveBin { bin: BinId(1) },
+        Operation::SetAssetBin {
+            asset: AssetId(1),
+            bin: Some(BinId(1)),
+        },
+        Operation::UpsertStringOut {
+            string_out: StringOut {
+                id: StringOutId(1),
+                name: "Vows".to_owned(),
+                selects: vec![SourceSelect {
+                    asset: AssetId(1),
+                    source: TimeCode(10)..TimeCode(20),
+                    label: "Promise".to_owned(),
+                }],
+            },
+        },
+        Operation::RemoveStringOut {
+            string_out: StringOutId(1),
+        },
+        Operation::UpsertSyncGroup {
+            sync_group: SyncGroup {
+                id: SyncGroupId(1),
+                name: "Ceremony angles".to_owned(),
+                members: vec![
+                    SyncGroupMember {
+                        asset: AssetId(1),
+                        offset: TimeCode::ZERO,
+                        angle_name: "Wide".to_owned(),
+                    },
+                    SyncGroupMember {
+                        asset: AssetId(2),
+                        offset: TimeCode(3),
+                        angle_name: "Close".to_owned(),
+                    },
+                ],
+            },
+        },
+        Operation::RemoveSyncGroup {
+            sync_group: SyncGroupId(1),
         },
         Operation::AddTrack {
             track: Track {
@@ -134,6 +209,38 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             clip: ClipId(1),
             to_track: TrackId(1),
             to: TimeCode(60),
+        },
+        Operation::ThreePointEdit {
+            track: TrackId(1),
+            asset: AssetId(1),
+            source_in: Some(TimeCode(10)),
+            source_out: Some(TimeCode(40)),
+            timeline_in: Some(TimeCode(60)),
+            timeline_out: None,
+            mode: ThreePointMode::Insert,
+        },
+        Operation::SlipClip {
+            clip: ClipId(1),
+            new_source_in: TimeCode(10),
+        },
+        Operation::RollEdit {
+            left_clip: ClipId(1),
+            right_clip: ClipId(2),
+            to: TimeCode(30),
+        },
+        Operation::SlideClip {
+            clip: ClipId(2),
+            to: TimeCode(40),
+        },
+        Operation::ReplaceClip {
+            clip: ClipId(1),
+            asset: AssetId(1),
+            source: TimeCode(20)..TimeCode(50),
+        },
+        Operation::FitToFill {
+            clip: ClipId(1),
+            asset: AssetId(1),
+            source: TimeCode(20)..TimeCode(80),
         },
         Operation::DeleteClip { clip: ClipId(1) },
         Operation::RippleDeleteClip { clip: ClipId(1) },
@@ -211,6 +318,10 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             duration: TimeCode(60),
             asset: AssetId(1),
             source_frame: TimeCode(24),
+        },
+        Operation::SetClipSpeed {
+            clip: ClipId(1),
+            speed_percent: 200,
         },
     ];
 
@@ -1861,6 +1972,7 @@ fn unsorted_input_document_is_rejected() {
         ..later.clone()
     };
     let doc = Document {
+        catalog: openreel_core::MediaCatalog::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -1889,6 +2001,400 @@ fn out_of_bounds_trim_is_rejected_atomically() {
     .unwrap_err();
 
     assert!(matches!(error, OpError::SourceOutOfBounds { .. }));
+    assert_eq!(doc, before);
+}
+
+#[test]
+fn slip_preserves_the_timeline_slot_and_moves_equal_source_handles() {
+    let mut doc = document_with_butt_joined_clips();
+    let before_duration = doc.duration;
+
+    Operation::SlipClip {
+        clip: ClipId(2),
+        new_source_in: TimeCode(170),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    let clip = doc.clip(ClipId(2)).unwrap();
+    assert_eq!(clip.timeline_start, TimeCode(50));
+    assert_eq!(clip.source_range, TimeCode(170)..TimeCode(200));
+    assert_eq!(doc.duration, before_duration);
+}
+
+#[test]
+fn roll_moves_only_the_shared_boundary_and_preserves_outer_duration() {
+    let mut doc = document_with_butt_joined_clips();
+
+    Operation::RollEdit {
+        left_clip: ClipId(1),
+        right_clip: ClipId(2),
+        to: TimeCode(60),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    let left = doc.clip(ClipId(1)).unwrap();
+    let right = doc.clip(ClipId(2)).unwrap();
+    assert_eq!(left.source_range, TimeCode(50)..TimeCode(110));
+    assert_eq!(right.source_range, TimeCode(160)..TimeCode(180));
+    assert_eq!(right.timeline_start, TimeCode(60));
+    assert_eq!(doc.duration, TimeCode(130));
+}
+
+#[test]
+fn slide_keeps_middle_source_and_sequence_outer_boundaries_fixed() {
+    let mut doc = document_with_butt_joined_clips();
+    let middle_source = doc.clip(ClipId(2)).unwrap().source_range.clone();
+
+    Operation::SlideClip {
+        clip: ClipId(2),
+        to: TimeCode(60),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    assert_eq!(doc.clip(ClipId(1)).unwrap().source_range.end, TimeCode(110));
+    let middle = doc.clip(ClipId(2)).unwrap();
+    assert_eq!(middle.timeline_start, TimeCode(60));
+    assert_eq!(middle.source_range, middle_source);
+    let right = doc.clip(ClipId(3)).unwrap();
+    assert_eq!(right.timeline_start, TimeCode(90));
+    assert_eq!(right.source_range.start, TimeCode(230));
+    assert_eq!(doc.duration, TimeCode(130));
+}
+
+#[test]
+fn replace_and_fit_to_fill_preserve_the_clip_slot() {
+    let mut replaced = document_with_butt_joined_clips();
+    Operation::ReplaceClip {
+        clip: ClipId(2),
+        asset: AssetId(1),
+        source: TimeCode(300)..TimeCode(330),
+    }
+    .apply(&mut replaced)
+    .unwrap();
+    let clip = replaced.clip(ClipId(2)).unwrap();
+    assert_eq!(clip.timeline_start, TimeCode(50));
+    assert_eq!(clip.source_range, TimeCode(300)..TimeCode(330));
+    assert_eq!(clip.speed_percent, 100);
+
+    let mut fitted = document_with_butt_joined_clips();
+    Operation::FitToFill {
+        clip: ClipId(2),
+        asset: AssetId(1),
+        source: TimeCode(300)..TimeCode(360),
+    }
+    .apply(&mut fitted)
+    .unwrap();
+    let clip = fitted.clip(ClipId(2)).unwrap();
+    assert_eq!(clip.timeline_start, TimeCode(50));
+    assert_eq!(fitted.clip_duration(clip).unwrap(), TimeCode(30));
+    assert_eq!(clip.speed_percent, 200);
+    assert_eq!(fitted.duration, TimeCode(130));
+}
+
+#[test]
+fn three_point_insert_and_overwrite_derive_the_unmarked_boundary() {
+    let original = document_with_butt_joined_clips();
+    let mut inserted = original.clone();
+    Operation::ThreePointEdit {
+        track: TrackId(1),
+        asset: AssetId(1),
+        source_in: Some(TimeCode(300)),
+        source_out: Some(TimeCode(330)),
+        timeline_in: Some(TimeCode(50)),
+        timeline_out: None,
+        mode: ThreePointMode::Insert,
+    }
+    .apply(&mut inserted)
+    .unwrap();
+    assert_eq!(
+        inserted.clip(ClipId(4)).unwrap().timeline_start,
+        TimeCode(50)
+    );
+    assert_eq!(
+        inserted.clip(ClipId(2)).unwrap().timeline_start,
+        TimeCode(80)
+    );
+    assert_eq!(inserted.duration, TimeCode(160));
+
+    let mut overwritten = original;
+    Operation::ThreePointEdit {
+        track: TrackId(1),
+        asset: AssetId(1),
+        source_in: Some(TimeCode(300)),
+        source_out: None,
+        timeline_in: Some(TimeCode(50)),
+        timeline_out: Some(TimeCode(80)),
+        mode: ThreePointMode::Overwrite,
+    }
+    .apply(&mut overwritten)
+    .unwrap();
+    assert!(overwritten.clip(ClipId(2)).is_none());
+    let replacement = overwritten.clip(ClipId(4)).unwrap();
+    assert_eq!(replacement.timeline_start, TimeCode(50));
+    assert_eq!(replacement.source_range, TimeCode(300)..TimeCode(330));
+    assert_eq!(overwritten.duration, TimeCode(130));
+}
+
+#[test]
+fn three_point_insert_splits_a_target_clip_at_the_record_point() {
+    let mut doc = document_with_butt_joined_clips();
+
+    Operation::ThreePointEdit {
+        track: TrackId(1),
+        asset: AssetId(1),
+        source_in: Some(TimeCode(300)),
+        source_out: Some(TimeCode(310)),
+        timeline_in: Some(TimeCode(25)),
+        timeline_out: None,
+        mode: ThreePointMode::Insert,
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    let inserted = doc
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .find(|clip| clip.source_range == (TimeCode(300)..TimeCode(310)))
+        .unwrap();
+    assert_eq!(inserted.timeline_start, TimeCode(25));
+    let right_half = doc
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .find(|clip| clip.source_range.start == TimeCode(75))
+        .unwrap();
+    assert_eq!(right_half.timeline_start, TimeCode(35));
+    assert_eq!(doc.duration, TimeCode(140));
+}
+
+#[test]
+fn three_point_insert_splits_every_sync_locked_straddler_before_ripple() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut doc = empty_timeline(fps);
+    Operation::AddTrack {
+        track: Track {
+            id: TrackId(2),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: Vec::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::AddAsset {
+        asset: asset(1, fps, 300),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    for track in [TrackId(1), TrackId(2)] {
+        Operation::AddClip {
+            track,
+            asset: AssetId(1),
+            at: TimeCode::ZERO,
+            source: TimeCode::ZERO..TimeCode(100),
+        }
+        .apply(&mut doc)
+        .unwrap();
+    }
+
+    Operation::ThreePointEdit {
+        track: TrackId(1),
+        asset: AssetId(1),
+        source_in: Some(TimeCode(200)),
+        source_out: Some(TimeCode(210)),
+        timeline_in: Some(TimeCode(50)),
+        timeline_out: None,
+        mode: ThreePointMode::Insert,
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    assert_eq!(doc.tracks[0].clips.len(), 3);
+    assert_eq!(doc.tracks[1].clips.len(), 2);
+    assert_eq!(doc.tracks[0].clips[2].timeline_start, TimeCode(60));
+    assert_eq!(doc.tracks[1].clips[1].timeline_start, TimeCode(60));
+    assert_eq!(doc.duration, TimeCode(110));
+}
+
+#[test]
+fn professional_edits_reject_missing_handles_atomically() {
+    let mut doc = document_with_butt_joined_clips();
+    let before = doc.clone();
+
+    assert!(matches!(
+        Operation::SlipClip {
+            clip: ClipId(2),
+            new_source_in: TimeCode(590),
+        }
+        .apply(&mut doc),
+        Err(OpError::SourceOutOfBounds { .. })
+    ));
+    assert_eq!(doc, before);
+
+    assert!(matches!(
+        Operation::ThreePointEdit {
+            track: TrackId(1),
+            asset: AssetId(1),
+            source_in: Some(TimeCode(10)),
+            source_out: Some(TimeCode(20)),
+            timeline_in: Some(TimeCode(30)),
+            timeline_out: Some(TimeCode(40)),
+            mode: ThreePointMode::Overwrite,
+        }
+        .apply(&mut doc),
+        Err(OpError::InvalidThreePointSelection)
+    ));
+    assert_eq!(doc, before);
+}
+
+#[test]
+fn bins_string_outs_and_sync_groups_are_validated_undoable_catalog_data() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut doc = empty_timeline(fps);
+    for id in [1, 2] {
+        Operation::AddAsset {
+            asset: asset(id, fps, 300),
+        }
+        .apply(&mut doc)
+        .unwrap();
+    }
+    Operation::UpsertBin {
+        bin: MediaBin {
+            id: BinId(1),
+            name: "Ceremony".to_owned(),
+            parent: None,
+            assets: Vec::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::SetAssetBin {
+        asset: AssetId(1),
+        bin: Some(BinId(1)),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(doc.catalog.bins[0].assets, vec![AssetId(1)]);
+
+    Operation::UpsertStringOut {
+        string_out: StringOut {
+            id: StringOutId(1),
+            name: "Best vows".to_owned(),
+            selects: vec![SourceSelect {
+                asset: AssetId(1),
+                source: TimeCode(30)..TimeCode(90),
+                label: "Partner A".to_owned(),
+            }],
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::UpsertSyncGroup {
+        sync_group: SyncGroup {
+            id: SyncGroupId(1),
+            name: "Ceremony angles".to_owned(),
+            members: vec![
+                SyncGroupMember {
+                    asset: AssetId(1),
+                    offset: TimeCode::ZERO,
+                    angle_name: "Wide".to_owned(),
+                },
+                SyncGroupMember {
+                    asset: AssetId(2),
+                    offset: TimeCode(-3),
+                    angle_name: "Close".to_owned(),
+                },
+            ],
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    doc.validate().unwrap();
+    let reopened: Document = serde_json::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
+    assert_eq!(reopened, doc);
+
+    let core = Core::spawn(doc.clone()).unwrap();
+    assert!(matches!(
+        core.request(Command::Do(Operation::RemoveStringOut {
+            string_out: StringOutId(1),
+        }))
+        .unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    let Event::DocumentChanged { doc: restored, .. } = core.request(Command::Undo).unwrap() else {
+        panic!("catalog undo must restore the exact document");
+    };
+    assert_eq!(*restored, doc);
+}
+
+#[test]
+fn catalog_rejects_cycles_duplicate_members_and_invalid_selects_atomically() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut doc = empty_timeline(fps);
+    Operation::AddAsset {
+        asset: asset(1, fps, 300),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let before = doc.clone();
+
+    assert!(matches!(
+        Operation::UpsertBin {
+            bin: MediaBin {
+                id: BinId(1),
+                name: "Loop".to_owned(),
+                parent: Some(BinId(1)),
+                assets: Vec::new(),
+            },
+        }
+        .apply(&mut doc),
+        Err(OpError::BinSelfParent(BinId(1)))
+    ));
+    assert_eq!(doc, before);
+
+    assert!(matches!(
+        Operation::UpsertStringOut {
+            string_out: StringOut {
+                id: StringOutId(1),
+                name: "Bad".to_owned(),
+                selects: vec![SourceSelect {
+                    asset: AssetId(1),
+                    source: TimeCode(290)..TimeCode(310),
+                    label: String::new(),
+                }],
+            },
+        }
+        .apply(&mut doc),
+        Err(OpError::SourceOutOfBounds { .. })
+    ));
+    assert_eq!(doc, before);
+
+    assert!(matches!(
+        Operation::UpsertSyncGroup {
+            sync_group: SyncGroup {
+                id: SyncGroupId(1),
+                name: "Bad".to_owned(),
+                members: vec![
+                    SyncGroupMember {
+                        asset: AssetId(1),
+                        offset: TimeCode::ZERO,
+                        angle_name: "A".to_owned(),
+                    },
+                    SyncGroupMember {
+                        asset: AssetId(1),
+                        offset: TimeCode(1),
+                        angle_name: "B".to_owned(),
+                    },
+                ],
+            },
+        }
+        .apply(&mut doc),
+        Err(OpError::DuplicateSyncGroupAsset { .. })
+    ));
     assert_eq!(doc, before);
 }
 

@@ -135,6 +135,7 @@ mod tests {
             })
             .collect();
         Document {
+            catalog: openreel_core::MediaCatalog::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
