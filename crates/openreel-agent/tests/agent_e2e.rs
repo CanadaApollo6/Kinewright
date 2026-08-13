@@ -4,7 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use openreel_agent::{ClaudeCodeDriver, CursorAcpDriver, McpServer};
+use openreel_agent::{
+    BranchApplyOutcome, ClaudeCodeDriver, CursorAcpDriver, McpServer, TimelineBranch,
+};
 use openreel_core::{
     AgentDriver, AgentEvent, AssetId, Clip, ClipId, Command, Core, Document, Event, MediaAsset,
     MediaKind, Query, QueryResult, Rational, SessionConfig, TimeCode, Track, TrackId, TrackKind,
@@ -151,6 +153,91 @@ fn codex_splits_then_deletes_via_the_live_mcp_server() {
     let _ = core.request(Command::Undo).unwrap();
     assert_eq!(&*query_document(&core), &original);
     println!("ASSERT: two undo commands restore the original two-clip document");
+
+    session.interrupt();
+    server.shutdown();
+}
+
+#[test]
+fn codex_edits_an_isolated_branch_then_one_merge_publishes_it() {
+    if std::env::var("OPENREEL_BRANCH_AGENT_TEST").as_deref() != Ok("1") {
+        eprintln!(
+            "skipped: set OPENREEL_BRANCH_AGENT_TEST=1 to run the installed Codex branch smoke"
+        );
+        return;
+    }
+
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let original = fixture_document();
+    let live = Core::spawn(original.clone()).unwrap();
+    let Event::QueryResult(QueryResult::Snapshot { revision, document }) =
+        live.request(Command::Query(Query::Snapshot)).unwrap()
+    else {
+        panic!("expected live snapshot");
+    };
+    let branch = TimelineBranch::new("Codex smoke", revision, document).unwrap();
+    let server = McpServer::start_isolated(branch.core(), media.clone(), media).unwrap();
+    let mut session = openreel_agent::CodexDriver
+        .start_session(SessionConfig {
+            working_directory: std::env::current_dir().ok(),
+            model: None,
+            effort: None,
+            service_tier: None,
+            max_turns: Some(2),
+            mcp_url: Some(server.endpoint().to_owned()),
+        })
+        .expect("the gated test requires Codex CLI 0.147.0+ with a subscription login");
+    let events = session.events();
+    let prompt = "Inspect the timeline. Apply one atomic edit plan that splits clip 1 at project frame 30 and adds a marker at frame 30 labeled M31 proof. Then inspect the timeline and run the QA report.";
+    println!("USER: {prompt}");
+    session.send_user_message(prompt.to_owned()).unwrap();
+
+    let deadline = Instant::now() + Duration::from_mins(3);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "Codex branch turn timed out");
+        let event = events
+            .recv_timeout(remaining.min(Duration::from_millis(100)))
+            .unwrap_or_else(|error| match error {
+                crossbeam_channel::RecvTimeoutError::Timeout => AgentEvent::Text(String::new()),
+                crossbeam_channel::RecvTimeoutError::Disconnected => {
+                    panic!("Codex branch event stream ended")
+                }
+            });
+        if event == AgentEvent::Text(String::new()) {
+            continue;
+        }
+        println!("AGENT: {event:?}");
+        if let AgentEvent::Error(error) = &event {
+            panic!("Codex driver error: {error}");
+        }
+        if event == AgentEvent::Done {
+            break;
+        }
+    }
+
+    assert_eq!(
+        &*query_document(&live),
+        &original,
+        "branch leaked into live"
+    );
+    let comparison = branch.compare().unwrap();
+    assert_eq!(comparison.operations.len(), 2);
+    assert_eq!(comparison.document.markers.len(), 1);
+    assert_eq!(comparison.document.tracks[0].clips.len(), 3);
+    let outcome = branch.merge_into(&live).unwrap();
+    assert!(matches!(
+        outcome,
+        BranchApplyOutcome::Applied {
+            revision: openreel_core::TimelineRevision(1),
+            operation_count: 2,
+            ..
+        }
+    ));
+    assert_eq!(&*query_document(&live), &*comparison.document);
+    live.request(Command::Undo).unwrap();
+    assert_eq!(&*query_document(&live), &original);
+    println!("ASSERT: live stayed unchanged until one merge; one undo restored the base");
 
     session.interrupt();
     server.shutdown();

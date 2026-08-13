@@ -12,6 +12,9 @@ pub enum EffectUniform {
     CropRight,
     CropTop,
     CropBottom,
+    ReframeAspect,
+    ReframeFocusX,
+    ReframeFocusY,
 }
 
 /// The accepted integer domain and neutral value for one effect parameter.
@@ -138,6 +141,32 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
                 max: 45,
                 neutral: 0,
                 uniform: EffectUniform::CropBottom,
+            },
+        ],
+    },
+    EffectDescriptor {
+        name: "reframe",
+        parameters: &[
+            EffectParameterDescriptor {
+                name: "target_aspect_basis_points",
+                min: 1_000,
+                max: 40_000,
+                neutral: 17_778,
+                uniform: EffectUniform::ReframeAspect,
+            },
+            EffectParameterDescriptor {
+                name: "focus_x_percent",
+                min: 0,
+                max: 100,
+                neutral: 50,
+                uniform: EffectUniform::ReframeFocusX,
+            },
+            EffectParameterDescriptor {
+                name: "focus_y_percent",
+                min: 0,
+                max: 100,
+                neutral: 50,
+                uniform: EffectUniform::ReframeFocusY,
             },
         ],
     },

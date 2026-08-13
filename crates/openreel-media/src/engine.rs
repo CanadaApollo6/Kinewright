@@ -83,6 +83,7 @@ enum Control {
     Play(TimeCode),
     Pause,
     Thumbnail {
+        document: Option<Arc<Document>>,
         at: TimeCode,
         max_width: u32,
         reply: Sender<Result<RgbaImage, MediaError>>,
@@ -371,6 +372,27 @@ impl Analysis for FfmpegMediaEngine {
         let (reply, response) = bounded(1);
         self.control_tx
             .send(Control::Thumbnail {
+                document: None,
+                at,
+                max_width,
+                reply,
+            })
+            .map_err(|_| MediaError::Backend("media worker stopped".to_owned()))?;
+        response
+            .recv()
+            .map_err(|_| MediaError::Backend("media worker stopped".to_owned()))?
+    }
+
+    fn thumbnail_for_document(
+        &self,
+        document: Arc<Document>,
+        at: TimeCode,
+        max_width: u32,
+    ) -> Result<RgbaImage, MediaError> {
+        let (reply, response) = bounded(1);
+        self.control_tx
+            .send(Control::Thumbnail {
+                document: Some(document),
                 at,
                 max_width,
                 reply,
@@ -407,6 +429,16 @@ impl Export for FfmpegMediaEngine {
             .read()
             .map_err(|_| MediaError::Backend("export document lock was poisoned".to_owned()))?
             .clone();
+        crate::export::export_document(&document, out, &settings, &progress, self.gpu.clone())
+    }
+
+    fn export_document(
+        &self,
+        document: Arc<Document>,
+        out: &Path,
+        settings: ExportSettings,
+        progress: ProgressSink,
+    ) -> Result<(), MediaError> {
         crate::export::export_document(&document, out, &settings, &progress, self.gpu.clone())
     }
 }
@@ -485,15 +517,17 @@ impl Worker {
             Control::Play(from) => self.start_playback(from),
             Control::Pause => self.pause(),
             Control::Thumbnail {
+                document,
                 at,
                 max_width,
                 reply,
             } => {
                 let scale = RenderScale::Proxy { max_width };
-                let resolution = scale.output_resolution(self.document.resolution);
+                let document = document.as_deref().unwrap_or(&self.document);
+                let resolution = scale.output_resolution(document.resolution);
                 let result = self
                     .renderer
-                    .render(&self.document, at, resolution, scale, DecodeStrategy::Seek)
+                    .render(document, at, resolution, scale, DecodeStrategy::Seek)
                     .map(|frame| RgbaImage {
                         width: frame.width,
                         height: frame.height,

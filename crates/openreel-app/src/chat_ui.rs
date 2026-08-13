@@ -1,16 +1,21 @@
 use std::{
+    collections::BTreeSet,
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use eframe::egui;
 use openreel_agent::{
-    CODEX_SANDBOX_NOTICE, CURSOR_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver, CursorAcpDriver,
+    BranchApplyOutcome, CODEX_SANDBOX_NOTICE, CURSOR_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver,
+    ConfirmationBroker, ConfirmationRequest, CursorAcpDriver, McpServer, TimelineBranch,
 };
 use openreel_core::{
-    AgentDriver, AgentEvent, AgentSession, AuthenticationStatus, HarnessInfo, SessionConfig,
-    TimeCode,
+    AgentDriver, AgentEvent, AgentSession, Analysis, AuthenticationStatus, Command, Document,
+    Event, HarnessInfo, Playback, QaSeverity, SessionConfig, TimeCode, TimelineRevision,
+    qa_document,
 };
+use serde::Serialize;
 
 use crate::{
     app::OpenReelApp,
@@ -105,6 +110,13 @@ enum EditCardAction {
     Undo,
 }
 
+enum BranchReviewAction {
+    Review(Arc<Document>),
+    Merge,
+    CherryPick,
+    Discard,
+}
+
 /// Session token usage. Dollar figures are deliberately not surfaced: the
 /// supported harnesses run on flat-fee subscriptions, so a running cost
 /// readout is noise; the per-thread Stop control remains available instead.
@@ -142,17 +154,91 @@ pub(crate) struct AgentThread {
     pub(crate) input: String,
     pub(crate) usage: UsageAccumulator,
     pub(crate) chat: Vec<ChatEntry>,
+    pub(crate) branch: TimelineBranch,
+    pub(crate) mcp_server: Option<McpServer>,
+    pub(crate) confirmations: Option<ConfirmationBroker>,
+    pub(crate) pending_confirmations: Vec<ConfirmationRequest>,
+    pub(crate) selected_operations: BTreeSet<usize>,
+    pub(crate) provenance: BranchProvenance,
     last_activity: Instant,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProvenanceKind {
+    Prompt,
+    Inspection,
+    Proof,
+    ToolResult,
+    Approval,
+    OperationSnapshot,
+    Qa,
+    Decision,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ProvenanceEvent {
+    sequence: u64,
+    kind: ProvenanceKind,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct BranchProvenance {
+    events: Vec<ProvenanceEvent>,
+    #[serde(skip)]
+    next_sequence: u64,
+}
+
+impl BranchProvenance {
+    fn record(&mut self, kind: ProvenanceKind, detail: impl Into<String>) {
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.events.push(ProvenanceEvent {
+            sequence: self.next_sequence,
+            kind,
+            detail: detail.into(),
+        });
+    }
+
+    fn json(&self) -> String {
+        serde_json::to_string_pretty(self)
+            .unwrap_or_else(|error| format!("could not serialize provenance: {error}"))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
 }
 
 impl AgentThread {
     pub(crate) fn new(
         name: impl Into<String>,
         harness: AgentHarnessChoice,
-        chat: Vec<ChatEntry>,
-    ) -> Self {
-        Self {
-            name: name.into(),
+        mut chat: Vec<ChatEntry>,
+        base_revision: TimelineRevision,
+        base_document: &Arc<Document>,
+        playback: &Arc<dyn Playback>,
+        analysis: &Arc<dyn Analysis>,
+    ) -> Result<Self, String> {
+        let name = name.into();
+        let branch = TimelineBranch::new(name.clone(), base_revision, Arc::clone(base_document))
+            .map_err(|error| error.to_string())?;
+        let mcp_server = match McpServer::start_isolated(
+            branch.core(),
+            Arc::clone(playback),
+            Arc::clone(analysis),
+        ) {
+            Ok(server) => Some(server),
+            Err(error) => {
+                chat.push(ChatEntry::Text(format!(
+                    "Could not start this thread's OpenReel agent server: {error}"
+                )));
+                None
+            }
+        };
+        let confirmations = mcp_server.as_ref().map(McpServer::confirmations);
+        Ok(Self {
+            name,
             harness,
             session: None,
             events: None,
@@ -160,8 +246,36 @@ impl AgentThread {
             input: String::new(),
             usage: UsageAccumulator::default(),
             chat,
+            branch,
+            mcp_server,
+            confirmations,
+            pending_confirmations: Vec::new(),
+            selected_operations: BTreeSet::new(),
+            provenance: BranchProvenance::default(),
             last_activity: Instant::now(),
+        })
+    }
+
+    fn replace_branch(
+        &mut self,
+        base_revision: TimelineRevision,
+        base_document: Arc<Document>,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+    ) -> Result<(), String> {
+        if let Some(confirmations) = &self.confirmations {
+            confirmations.reject_all("the agent branch was replaced");
         }
+        self.pending_confirmations.clear();
+        self.selected_operations.clear();
+        let branch = TimelineBranch::new(self.name.clone(), base_revision, base_document)
+            .map_err(|error| error.to_string())?;
+        let server = McpServer::start_isolated(branch.core(), playback, analysis)
+            .map_err(|error| error.to_string())?;
+        self.confirmations = Some(server.confirmations());
+        self.mcp_server = Some(server);
+        self.branch = branch;
+        Ok(())
     }
 }
 
@@ -210,6 +324,7 @@ impl OpenReelApp {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn start_agent_turn(&mut self) {
         let project_index = self.focused_project;
         let thread_index = self.projects[project_index].active_thread;
@@ -220,7 +335,22 @@ impl OpenReelApp {
         if message.is_empty() || self.projects[project_index].threads[thread_index].running {
             return;
         }
-        let Some(endpoint) = self.projects[project_index]
+        let refresh_branch = self.projects[project_index].threads[thread_index]
+            .branch
+            .compare()
+            .is_ok_and(|comparison| {
+                comparison.operations.is_empty()
+                    && comparison.base_revision != self.projects[project_index].revision
+            });
+        if refresh_branch {
+            self.stop_agent(thread_index);
+            let revision = self.projects[project_index].revision;
+            let document = Arc::clone(&self.projects[project_index].document);
+            if !self.replace_agent_branch(project_index, thread_index, revision, document) {
+                return;
+            }
+        }
+        let Some(endpoint) = self.projects[project_index].threads[thread_index]
             .mcp_server
             .as_ref()
             .map(|server| server.endpoint().to_owned())
@@ -302,7 +432,10 @@ impl OpenReelApp {
                 if first_user_message {
                     thread.name = thread_title(&message);
                 }
-                thread.chat.push(ChatEntry::User(message));
+                thread.chat.push(ChatEntry::User(message.clone()));
+                thread
+                    .provenance
+                    .record(ProvenanceKind::Prompt, message.clone());
                 thread.input.clear();
                 thread.running = true;
                 thread.last_activity = Instant::now();
@@ -356,21 +489,290 @@ impl OpenReelApp {
         thread.session = None;
         thread.events = None;
         thread.running = false;
-        if had_session && let Some(confirmations) = &self.projects[project_index].confirmations {
+        if had_session && let Some(confirmations) = &thread.confirmations {
             confirmations.reject_all("the agent session was interrupted");
         }
         "Agent stopped".clone_into(&mut self.status);
     }
 
+    fn replace_agent_branch(
+        &mut self,
+        project_index: usize,
+        thread_index: usize,
+        revision: TimelineRevision,
+        document: Arc<Document>,
+    ) -> bool {
+        let result = self.projects[project_index].threads[thread_index].replace_branch(
+            revision,
+            document,
+            Arc::clone(&self.playback),
+            Arc::clone(&self.analysis),
+        );
+        if let Err(error) = result {
+            self.record_error("Agent branch", error);
+            false
+        } else {
+            true
+        }
+    }
+
+    fn record_applied_branch(
+        &mut self,
+        project_index: usize,
+        thread_index: usize,
+        before: &Document,
+        after: &Document,
+        summary: String,
+    ) {
+        if let Some(range) = crate::edit_diff::changed_project_range(before, after) {
+            let cue = TimeCode(
+                range
+                    .start
+                    .0
+                    .saturating_sub(crate::app::review_preroll_frames(after.fps))
+                    .max(0),
+            );
+            self.projects[project_index].threads[thread_index]
+                .chat
+                .push(ChatEntry::EditCard {
+                    summary,
+                    start: range.start,
+                    end: range.end,
+                    cue,
+                });
+            if project_index == self.focused_project {
+                self.projects[project_index].position =
+                    TimeCode(cue.0.min(after.duration.0.saturating_sub(1).max(0)));
+            }
+        } else {
+            self.projects[project_index].threads[thread_index]
+                .chat
+                .push(ChatEntry::Text(summary));
+        }
+    }
+
+    fn merge_agent_branch(&mut self, project_index: usize, thread_index: usize) {
+        self.stop_agent(thread_index);
+        let branch = self.projects[project_index].threads[thread_index]
+            .branch
+            .clone();
+        let live = self.projects[project_index].core.clone();
+        let before = Arc::clone(&self.projects[project_index].document);
+        match branch.merge_into(&live) {
+            Ok(BranchApplyOutcome::Applied {
+                revision,
+                document,
+                operation_count,
+            }) => {
+                self.projects[project_index].threads[thread_index]
+                    .provenance
+                    .record(
+                        ProvenanceKind::Decision,
+                        format!(
+                            "merged {operation_count} operation(s) at live revision {revision}"
+                        ),
+                    );
+                self.record_applied_branch(
+                    project_index,
+                    thread_index,
+                    &before,
+                    &document,
+                    format!("Merged {operation_count} branch edit(s)"),
+                );
+                let _ = self.replace_agent_branch(
+                    project_index,
+                    thread_index,
+                    revision,
+                    Arc::clone(&document),
+                );
+                self.status = format!("Merged {operation_count} agent edits");
+            }
+            Ok(BranchApplyOutcome::NoChanges) => {
+                "The agent branch has no edits".clone_into(&mut self.status);
+            }
+            Ok(BranchApplyOutcome::Conflict { expected, actual }) => {
+                let message = format!(
+                    "Branch merge stopped: it was based on live revision {expected}, but live is now {actual}. Review and cherry-pick compatible operations or discard the branch."
+                );
+                self.projects[project_index].threads[thread_index]
+                    .chat
+                    .push(ChatEntry::Text(message.clone()));
+                self.status = message;
+            }
+            Ok(BranchApplyOutcome::Rejected { error, .. }) => {
+                self.record_error("Agent branch", format!("Branch merge rejected: {error}"));
+            }
+            Err(error) => self.record_error("Agent branch", error.to_string()),
+        }
+    }
+
+    fn cherry_pick_agent_branch(&mut self, project_index: usize, thread_index: usize) {
+        self.stop_agent(thread_index);
+        let branch = self.projects[project_index].threads[thread_index]
+            .branch
+            .clone();
+        let comparison = match branch.compare() {
+            Ok(comparison) => comparison,
+            Err(error) => {
+                self.record_error("Agent branch", error.to_string());
+                return;
+            }
+        };
+        let selected = self.projects[project_index].threads[thread_index]
+            .selected_operations
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let expected = self.projects[project_index].revision;
+        let live = self.projects[project_index].core.clone();
+        let before = Arc::clone(&self.projects[project_index].document);
+        match branch.cherry_pick_into(&live, expected, &selected) {
+            Ok(BranchApplyOutcome::Applied {
+                revision,
+                document,
+                operation_count,
+            }) => {
+                let selected_set = selected.iter().copied().collect::<BTreeSet<_>>();
+                let remaining = comparison
+                    .operations
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| !selected_set.contains(&(index + 1)))
+                    .map(|(_, operation)| operation.clone())
+                    .collect::<Vec<_>>();
+                self.projects[project_index].threads[thread_index]
+                    .provenance
+                    .record(
+                        ProvenanceKind::Decision,
+                        format!("cherry-picked branch operations {selected:?} at {revision}"),
+                    );
+                self.record_applied_branch(
+                    project_index,
+                    thread_index,
+                    &before,
+                    &document,
+                    format!("Cherry-picked {operation_count} branch edit(s)"),
+                );
+                if self.replace_agent_branch(
+                    project_index,
+                    thread_index,
+                    revision,
+                    Arc::clone(&document),
+                ) && !remaining.is_empty()
+                {
+                    let event = self.projects[project_index].threads[thread_index]
+                        .branch
+                        .core()
+                        .request(Command::DoBatchIfRevision {
+                            expected: TimelineRevision::default(),
+                            operations: remaining,
+                        });
+                    if !matches!(event, Ok(Event::DocumentChanged { .. })) {
+                        self.projects[project_index].threads[thread_index]
+                            .chat
+                            .push(ChatEntry::Text(
+                                "The selected edits were applied, but the remaining branch edits no longer form a valid plan on the new live cut. They were discarded."
+                                    .to_owned(),
+                            ));
+                    }
+                }
+                self.status = format!("Cherry-picked {operation_count} agent edits");
+            }
+            Ok(BranchApplyOutcome::NoChanges) => {
+                "Select at least one branch operation".clone_into(&mut self.status);
+            }
+            Ok(BranchApplyOutcome::Conflict { expected, actual }) => {
+                self.status = format!(
+                    "Cherry-pick stopped: expected live revision {expected}, actual {actual}"
+                );
+            }
+            Ok(BranchApplyOutcome::Rejected { error, .. }) => {
+                self.record_error("Agent branch", format!("Cherry-pick rejected: {error}"));
+            }
+            Err(error) => self.record_error("Agent branch", error.to_string()),
+        }
+    }
+
+    fn discard_agent_branch(&mut self, project_index: usize, thread_index: usize) {
+        self.stop_agent(thread_index);
+        let revision = self.projects[project_index].revision;
+        let document = Arc::clone(&self.projects[project_index].document);
+        let operation_count = self.projects[project_index].threads[thread_index]
+            .branch
+            .compare()
+            .map_or(0, |comparison| comparison.operations.len());
+        self.projects[project_index].threads[thread_index]
+            .provenance
+            .record(
+                ProvenanceKind::Decision,
+                format!("discarded {operation_count} branch operation(s)"),
+            );
+        if self.replace_agent_branch(project_index, thread_index, revision, document) {
+            self.projects[project_index].threads[thread_index]
+                .chat
+                .push(ChatEntry::Text(format!(
+                    "Discarded {operation_count} unmerged branch edit(s)."
+                )));
+            "Agent branch discarded".clone_into(&mut self.status);
+        }
+    }
+
+    fn review_agent_branch(
+        &mut self,
+        ctx: &egui::Context,
+        project_index: usize,
+        thread_index: usize,
+        document: Arc<Document>,
+    ) {
+        if document.duration <= TimeCode::ZERO {
+            "The branch timeline is empty".clone_into(&mut self.status);
+            return;
+        }
+        let at = TimeCode(
+            self.projects[project_index]
+                .position
+                .0
+                .clamp(0, document.duration.0.saturating_sub(1)),
+        );
+        match self.analysis.thumbnail_for_document(document, at, 1_280) {
+            Ok(frame) => {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [frame.width as usize, frame.height as usize],
+                    &frame.pixels,
+                );
+                if let Some(texture) = &mut self.texture {
+                    texture.set(image, egui::TextureOptions::LINEAR);
+                } else {
+                    self.texture = Some(ctx.load_texture(
+                        "openreel-branch-preview",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+                self.projects[project_index].threads[thread_index]
+                    .provenance
+                    .record(
+                        ProvenanceKind::Proof,
+                        format!("reviewed branch frame {}", at.0),
+                    );
+                self.status = format!("Reviewing isolated branch frame {}", at.0);
+            }
+            Err(error) => self.record_error("Branch preview", error.to_string()),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn poll_agent(&mut self, ctx: &egui::Context) {
         for project in &mut self.projects {
-            if let Some(confirmations) = &project.confirmations {
-                project
-                    .pending_confirmations
-                    .retain(|request| confirmations.is_pending(request.id));
-                project
-                    .pending_confirmations
-                    .extend(confirmations.pending_requests());
+            for thread in &mut project.threads {
+                if let Some(confirmations) = &thread.confirmations {
+                    thread
+                        .pending_confirmations
+                        .retain(|request| confirmations.is_pending(request.id));
+                    thread
+                        .pending_confirmations
+                        .extend(confirmations.pending_requests());
+                }
             }
         }
         let events = self
@@ -410,11 +812,24 @@ impl OpenReelApp {
                     self.record_error("Agent", format!("{project_name}: {error}"));
                 }
                 AgentEvent::ToolCall { name, arguments } => {
+                    let kind = if name == "get_frame_at" || name.contains("storyboard") {
+                        ProvenanceKind::Proof
+                    } else if name.starts_with("get_") {
+                        ProvenanceKind::Inspection
+                    } else {
+                        ProvenanceKind::OperationSnapshot
+                    };
+                    self.projects[project_index].threads[thread_index]
+                        .provenance
+                        .record(kind, format!("{name}: {arguments}"));
                     self.projects[project_index].threads[thread_index]
                         .chat
                         .push(ChatEntry::ToolCall { name, arguments });
                 }
                 AgentEvent::ToolResult { name, result } => {
+                    self.projects[project_index].threads[thread_index]
+                        .provenance
+                        .record(ProvenanceKind::ToolResult, format!("{name}: {result}"));
                     self.projects[project_index].threads[thread_index]
                         .chat
                         .push(ChatEntry::ToolResult { name, result });
@@ -430,7 +845,19 @@ impl OpenReelApp {
                         output_tokens,
                     }),
                 AgentEvent::Done => {
-                    self.projects[project_index].threads[thread_index].running = false;
+                    let thread = &mut self.projects[project_index].threads[thread_index];
+                    thread.running = false;
+                    if let Ok(comparison) = thread.branch.compare() {
+                        let detail = serde_json::to_string(&*comparison.operations)
+                            .unwrap_or_else(|error| error.to_string());
+                        thread
+                            .provenance
+                            .record(ProvenanceKind::OperationSnapshot, detail);
+                        let qa = qa_document(&comparison.document);
+                        let detail =
+                            serde_json::to_string(&qa).unwrap_or_else(|error| error.to_string());
+                        thread.provenance.record(ProvenanceKind::Qa, detail);
+                    }
                     if project_index == self.focused_project {
                         "Agent turn finished".clone_into(&mut self.status);
                     }
@@ -453,11 +880,22 @@ impl OpenReelApp {
         self.projects[project_index].next_thread_number = self.projects[project_index]
             .next_thread_number
             .saturating_add(1);
-        self.projects[project_index].threads.push(AgentThread::new(
+        let base_revision = self.projects[project_index].revision;
+        let base_document = Arc::clone(&self.projects[project_index].document);
+        let thread = AgentThread::new(
             format!("Thread {next_number}"),
             harness,
             Vec::new(),
-        ));
+            base_revision,
+            &base_document,
+            &self.playback,
+            &self.analysis,
+        );
+        let Ok(thread) = thread else {
+            self.record_error("Agent branch", "Could not create an isolated agent branch");
+            return;
+        };
+        self.projects[project_index].threads.push(thread);
         self.projects[project_index].active_thread = self.projects[project_index].threads.len() - 1;
     }
 
@@ -526,7 +964,10 @@ impl OpenReelApp {
                     let focused = project_index == self.focused_project;
                     let display_name = project.display_name();
                     let running = project.threads.iter().any(|thread| thread.running);
-                    let confirms = !project.pending_confirmations.is_empty();
+                    let confirms = project
+                        .threads
+                        .iter()
+                        .any(|thread| !thread.pending_confirmations.is_empty());
                     let can_close_project = self.projects.len() > 1;
                     let collapsed_caption = background_project_caption(project);
                     let mut close_clicked = false;
@@ -672,6 +1113,196 @@ impl OpenReelApp {
             self.close_agent_thread(index);
         } else if let Some(index) = focus_thread {
             self.projects[project_index].active_thread = index;
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn branch_review_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        project_index: usize,
+        thread_index: usize,
+    ) {
+        let comparison = match self.projects[project_index].threads[thread_index]
+            .branch
+            .compare()
+        {
+            Ok(comparison) => comparison,
+            Err(error) => {
+                ui.colored_label(color::STATUS_DANGER, format!("Branch unavailable: {error}"));
+                return;
+            }
+        };
+        let provenance_empty = self.projects[project_index].threads[thread_index]
+            .provenance
+            .is_empty();
+        if comparison.operations.is_empty() && provenance_empty {
+            return;
+        }
+        let live_revision = self.projects[project_index].revision;
+        let running = self.projects[project_index].threads[thread_index].running;
+        let operation_summaries = comparison
+            .operations
+            .iter()
+            .map(crate::app::operation_status)
+            .collect::<Vec<_>>();
+        let qa = qa_document(&comparison.document);
+        let mut action = None;
+        let card = egui::Frame::new()
+            .fill(color::SURFACE_RAISED)
+            .stroke(egui::Stroke::new(1.0, color::ACCENT_DIM_BORDER))
+            .corner_radius(radius::MD)
+            .inner_margin(egui::Margin::same(theme::margin(space::TWO)))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(theme::caps_label("ISOLATED BRANCH", color::ACCENT));
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} edit(s) · base r{} · branch r{}",
+                            comparison.operations.len(),
+                            comparison.base_revision,
+                            comparison.branch_revision,
+                        ))
+                        .size(type_size::MICRO)
+                        .color(color::TEXT_MUTED),
+                    );
+                });
+                if comparison.base_revision != live_revision {
+                    ui.colored_label(
+                        color::STATUS_WARNING,
+                        format!(
+                            "Live moved to r{live_revision}. Merge-all will remain blocked by revision safety; select compatible edits to cherry-pick."
+                        ),
+                    );
+                }
+                ui.label(
+                    egui::RichText::new(format!(
+                        "QA Â· {} error(s) Â· {} warning(s) Â· {} note(s)",
+                        qa.count(QaSeverity::Error),
+                        qa.count(QaSeverity::Warning),
+                        qa.count(QaSeverity::Info),
+                    ))
+                    .size(type_size::MICRO)
+                    .color(if qa.export_ready() {
+                        color::STATUS_SUCCESS
+                    } else {
+                        color::STATUS_DANGER
+                    }),
+                );
+                if !qa.issues.is_empty() {
+                    egui::CollapsingHeader::new("QA details").show(ui, |ui| {
+                        for issue in &qa.issues {
+                            ui.label(format!(
+                                "{:?} Â· {} Â· {}",
+                                issue.severity, issue.code, issue.message
+                            ));
+                        }
+                    });
+                }
+                if !operation_summaries.is_empty() {
+                    egui::CollapsingHeader::new("Review operations")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for (offset, summary) in operation_summaries.iter().enumerate() {
+                                let index = offset + 1;
+                                let mut selected = self.projects[project_index].threads
+                                    [thread_index]
+                                    .selected_operations
+                                    .contains(&index);
+                                if ui
+                                    .checkbox(&mut selected, format!("{index}. {summary}"))
+                                    .changed()
+                                {
+                                    if selected {
+                                        self.projects[project_index].threads[thread_index]
+                                            .selected_operations
+                                            .insert(index);
+                                    } else {
+                                        self.projects[project_index].threads[thread_index]
+                                            .selected_operations
+                                            .remove(&index);
+                                    }
+                                }
+                            }
+                        });
+                }
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(
+                            !running && comparison.document.duration > TimeCode::ZERO,
+                            egui::Button::new("Review frame"),
+                        )
+                        .on_hover_text("Render this branch at the live playhead without changing live playback")
+                        .clicked()
+                    {
+                        action = Some(BranchReviewAction::Review(Arc::clone(
+                            &comparison.document,
+                        )));
+                    }
+                    if ui
+                        .add_enabled(
+                            !running && !comparison.operations.is_empty(),
+                            egui::Button::new("Merge all"),
+                        )
+                        .clicked()
+                    {
+                        action = Some(BranchReviewAction::Merge);
+                    }
+                    let selected_count = self.projects[project_index].threads[thread_index]
+                        .selected_operations
+                        .len();
+                    if ui
+                        .add_enabled(
+                            !running && selected_count > 0,
+                            egui::Button::new(format!("Cherry-pick {selected_count}")),
+                        )
+                        .clicked()
+                    {
+                        action = Some(BranchReviewAction::CherryPick);
+                    }
+                    if ui
+                        .add_enabled(
+                            !running && !comparison.operations.is_empty(),
+                            egui::Button::new("Discard"),
+                        )
+                        .clicked()
+                    {
+                        action = Some(BranchReviewAction::Discard);
+                    }
+                });
+                if !provenance_empty {
+                    egui::CollapsingHeader::new("Provenance")
+                        .id_salt(("branch-provenance", project_index, thread_index))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(
+                                    self.projects[project_index].threads[thread_index]
+                                        .provenance
+                                        .json(),
+                                )
+                                .font(theme::code_font())
+                                .color(color::TEXT_SECONDARY),
+                            );
+                        });
+                }
+            });
+        theme::paint_raised_lighting(ui.painter(), card.response.rect, radius::px(radius::MD));
+        ui.add_space(space::ONE);
+
+        match action {
+            Some(BranchReviewAction::Review(document)) => {
+                self.review_agent_branch(ui.ctx(), project_index, thread_index, document);
+            }
+            Some(BranchReviewAction::Merge) => {
+                self.merge_agent_branch(project_index, thread_index);
+            }
+            Some(BranchReviewAction::CherryPick) => {
+                self.cherry_pick_agent_branch(project_index, thread_index);
+            }
+            Some(BranchReviewAction::Discard) => {
+                self.discard_agent_branch(project_index, thread_index);
+            }
+            None => {}
         }
     }
 
@@ -840,7 +1471,7 @@ impl OpenReelApp {
         });
 
         let mut confirmation_decision = None;
-        for request in &self.projects[project_index].pending_confirmations {
+        for request in &self.projects[project_index].threads[active_thread].pending_confirmations {
             let card = egui::Frame::new()
                 .fill(color::SURFACE_RAISED)
                 .stroke(egui::Stroke::new(1.0, color::STATUS_WARNING))
@@ -878,7 +1509,8 @@ impl OpenReelApp {
             theme::paint_raised_lighting(ui.painter(), card.response.rect, radius::px(radius::MD));
         }
         if let Some((id, approve)) = confirmation_decision
-            && let Some(confirmations) = &self.projects[project_index].confirmations
+            && let Some(confirmations) =
+                &self.projects[project_index].threads[active_thread].confirmations
         {
             let resolved = if approve {
                 confirmations.approve(id)
@@ -886,18 +1518,23 @@ impl OpenReelApp {
                 confirmations.reject(id, "rejected by user")
             };
             if resolved {
-                self.projects[project_index]
+                self.projects[project_index].threads[active_thread]
                     .pending_confirmations
                     .retain(|request| request.id != id);
-                self.projects[project_index].threads[active_thread]
-                    .chat
-                    .push(ChatEntry::Text(if approve {
-                        "Approved destructive edit.".to_owned()
-                    } else {
-                        "Rejected destructive edit.".to_owned()
-                    }));
+                let thread = &mut self.projects[project_index].threads[active_thread];
+                thread.provenance.record(
+                    ProvenanceKind::Approval,
+                    if approve { "approved" } else { "rejected" },
+                );
+                thread.chat.push(ChatEntry::Text(if approve {
+                    "Approved destructive edit.".to_owned()
+                } else {
+                    "Rejected destructive edit.".to_owned()
+                }));
             }
         }
+
+        self.branch_review_panel(ui, project_index, active_thread);
 
         // Reserve room below the history for the composer and send row - an
         // uncapped scroll area consumes the whole dock and pushes the input
@@ -1380,7 +2017,9 @@ impl OpenReelApp {
                         .trim()
                         .is_empty()
                         && selected_available
-                        && self.projects[project_index].mcp_server.is_some();
+                        && self.projects[project_index].threads[active_thread]
+                            .mcp_server
+                            .is_some();
                     if ui
                         .add_enabled(
                             can_send,

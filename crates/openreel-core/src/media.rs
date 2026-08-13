@@ -432,6 +432,24 @@ pub trait Analysis: Send + Sync {
     ///
     /// Returns a media error when decoding or compositing fails.
     fn thumbnail_at(&self, t: TimeCode, max_w: u32) -> Result<RgbaImage, MediaError>;
+    /// Decode a thumbnail against an explicit immutable document without
+    /// changing the live playback document.
+    ///
+    /// Backends that do not maintain playback state may use the default.
+    /// Stateful backends should override this method so branch proofs cannot
+    /// disturb the user's monitor or transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when decoding or compositing fails.
+    fn thumbnail_for_document(
+        &self,
+        _document: Arc<Document>,
+        t: TimeCode,
+        max_w: u32,
+    ) -> Result<RgbaImage, MediaError> {
+        self.thumbnail_at(t, max_w)
+    }
     /// Queue derived speech recognition without blocking the caller. Repeated
     /// requests for the same asset are coalesced by the implementation.
     fn request_transcription(&self, asset: MediaAsset);
@@ -679,4 +697,22 @@ pub trait Export: Send + Sync {
         settings: ExportSettings,
         progress: ProgressSink,
     ) -> Result<(), MediaError>;
+
+    /// Export an explicit immutable document without replacing live playback.
+    ///
+    /// The default preserves compatibility for stateless test backends.
+    /// Stateful production backends should override it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when export fails or is cancelled.
+    fn export_document(
+        &self,
+        _document: Arc<Document>,
+        out: &Path,
+        settings: ExportSettings,
+        progress: ProgressSink,
+    ) -> Result<(), MediaError> {
+        self.export(out, settings, progress)
+    }
 }

@@ -7,8 +7,8 @@ use std::{
 
 use eframe::egui;
 use openreel_core::{
-    CaptionCue, ExportCancellation, ExportProgress, ExportSettings, MediaError, Rational, TimeCode,
-    srt, vtt,
+    CaptionCue, DeliveryAspect, DeliveryVariant, ExportCancellation, ExportProgress,
+    ExportSettings, MediaError, Rational, TimeCode, document_for_delivery_variant, srt, vtt,
 };
 
 use crate::{
@@ -24,6 +24,9 @@ pub(crate) struct ExportDialog {
     pub(crate) height: u32,
     pub(crate) fps_numerator: u32,
     pub(crate) fps_denominator: u32,
+    pub(crate) delivery_aspect: Option<DeliveryAspect>,
+    pub(crate) focus_x_percent: u8,
+    pub(crate) focus_y_percent: u8,
 }
 
 pub(crate) struct ExportJob {
@@ -57,8 +60,12 @@ impl CaptionFormat {
 
 impl OpenReelApp {
     pub(crate) fn open_export_dialog(&mut self) {
-        self.export_dialog.width = self.focused().document.resolution.0;
-        self.export_dialog.height = self.focused().document.resolution.1;
+        let resolution = self.export_dialog.delivery_aspect.map_or(
+            self.focused().document.resolution,
+            DeliveryAspect::resolution,
+        );
+        self.export_dialog.width = resolution.0;
+        self.export_dialog.height = resolution.1;
         self.export_dialog.fps_numerator = self.focused().document.fps.numerator();
         self.export_dialog.fps_denominator = self.focused().document.fps.denominator();
         if let Some(project_path) = &self.focused().project_path {
@@ -112,6 +119,28 @@ impl OpenReelApp {
             self.export_dialog.output = output.display().to_string();
         }
         let cancellation = ExportCancellation::default();
+        let document = if let Some(aspect) = self.export_dialog.delivery_aspect {
+            let variant = match DeliveryVariant::new(
+                aspect,
+                self.export_dialog.focus_x_percent,
+                self.export_dialog.focus_y_percent,
+            ) {
+                Ok(variant) => variant,
+                Err(error) => {
+                    self.record_error("Export", error.to_string());
+                    return;
+                }
+            };
+            match document_for_delivery_variant(&self.focused().document, variant) {
+                Ok(document) => Arc::new(document),
+                Err(error) => {
+                    self.record_error("Export", error.to_string());
+                    return;
+                }
+            }
+        } else {
+            Arc::clone(&self.focused().document)
+        };
         let settings = ExportSettings {
             fps,
             resolution: (self.export_dialog.width, self.export_dialog.height),
@@ -124,11 +153,13 @@ impl OpenReelApp {
         let (progress_tx, progress_rx) = crossbeam_channel::unbounded();
         let (result_tx, result_rx) = mpsc::channel();
         let media = Arc::clone(&self.exporter);
+        let worker_document = document;
         let worker_output = output.clone();
         let spawn = thread::Builder::new()
             .name("openreel-export".to_owned())
             .spawn(move || {
-                let result = media.export(&worker_output, settings, progress_tx);
+                let result =
+                    media.export_document(worker_document, &worker_output, settings, progress_tx);
                 let _ = result_tx.send((worker_output, result));
             });
         if let Err(error) = spawn {
@@ -244,6 +275,49 @@ impl OpenReelApp {
                     egui::RichText::new("H.264 video · AAC audio · MP4 container")
                         .color(color::TEXT_SECONDARY),
                 );
+                ui.add_space(space::TWO);
+                let before_aspect = self.export_dialog.delivery_aspect;
+                ui.horizontal(|ui| {
+                    ui.label("Delivery");
+                    egui::ComboBox::from_id_salt("export-delivery-aspect")
+                        .selected_text(
+                            self.export_dialog
+                                .delivery_aspect
+                                .map_or("Master", DeliveryAspect::as_str),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.export_dialog.delivery_aspect,
+                                None,
+                                "Master",
+                            );
+                            for aspect in DeliveryAspect::ALL {
+                                ui.selectable_value(
+                                    &mut self.export_dialog.delivery_aspect,
+                                    Some(aspect),
+                                    aspect.as_str(),
+                                );
+                            }
+                        });
+                    if self.export_dialog.delivery_aspect.is_some() {
+                        ui.label("Focal point");
+                        ui.add(
+                            egui::DragValue::new(&mut self.export_dialog.focus_x_percent)
+                                .range(0..=100)
+                                .suffix("% x"),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut self.export_dialog.focus_y_percent)
+                                .range(0..=100)
+                                .suffix("% y"),
+                        );
+                    }
+                });
+                if self.export_dialog.delivery_aspect != before_aspect
+                    && let Some(aspect) = self.export_dialog.delivery_aspect
+                {
+                    (self.export_dialog.width, self.export_dialog.height) = aspect.resolution();
+                }
                 ui.add_space(space::TWO);
                 egui::Grid::new("export-settings")
                     .num_columns(2)

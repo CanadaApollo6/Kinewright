@@ -15,7 +15,6 @@ use openreel_core::{
 use openreel_media::{FfmpegMediaEngine, GpuContext};
 
 use crate::{
-    chat_ui::ChatEntry,
     error_ui::ErrorLog,
     export_ui::{ExportDialog, ExportJob},
     icons::Icon,
@@ -105,7 +104,7 @@ impl OpenReelApp {
     // Construction keeps all channel subscriptions and coupled UI state initialization together.
     #[allow(clippy::too_many_lines)]
     fn new(media: Arc<FfmpegMediaEngine>) -> Self {
-        let document = Document::default();
+        let document = default_project_document();
         let frames = media.frames();
         let media_events = media.events();
         let visual_cache = crate::visual_cache::VisualCache::new(media.visual_asset_results());
@@ -123,7 +122,7 @@ impl OpenReelApp {
         let resolution = document.resolution;
         let fps = document.fps;
         let error_log_open = error_log.len() > 0;
-        let mut app = Self {
+        let app = Self {
             projects: vec![project],
             focused_project: 0,
             next_project_id: 2,
@@ -176,7 +175,7 @@ impl OpenReelApp {
             exit_discarded_projects: Vec::new(),
             allow_close: false,
             last_window_title: String::new(),
-            status: "Creating default video track…".to_owned(),
+            status: "Ready".to_owned(),
             export_dialog: ExportDialog {
                 open: false,
                 output: "export.mp4".to_owned(),
@@ -184,6 +183,9 @@ impl OpenReelApp {
                 height: resolution.1,
                 fps_numerator: fps.numerator(),
                 fps_denominator: fps.denominator(),
+                delivery_aspect: None,
+                focus_x_percent: 50,
+                focus_y_percent: 50,
             },
             export_job: None,
             help_open: false,
@@ -194,24 +196,6 @@ impl OpenReelApp {
             recording: None,
             record_dialog: crate::recording::RecordDialog::default(),
         };
-        if app
-            .focused()
-            .core
-            .send(Command::Do(Operation::AddTrack {
-                track: Track {
-                    id: DEFAULT_TRACK_ID,
-                    kind: TrackKind::Video,
-                    sync_lock: true,
-                    clips: Vec::new(),
-                },
-            }))
-            .is_err()
-        {
-            app.record_error(
-                "Operations",
-                "Core actor stopped while creating the default track",
-            );
-        }
         app.playback
             .set_document(Arc::clone(&app.focused().document));
         app.playback.request_frame(TimeCode::ZERO);
@@ -326,7 +310,7 @@ impl OpenReelApp {
 
     pub(crate) fn new_project(&mut self) {
         let name = format!("Project {}", self.next_project_id);
-        let session = match self.create_project_session(name, Document::default(), None) {
+        let session = match self.create_project_session(name, default_project_document(), None) {
             Ok(session) => session,
             Err(error) => {
                 self.record_error(
@@ -338,15 +322,7 @@ impl OpenReelApp {
         };
         self.projects.push(session);
         self.focus_project(self.projects.len() - 1);
-        "Creating default video track…".clone_into(&mut self.status);
-        self.send_operation(Operation::AddTrack {
-            track: Track {
-                id: DEFAULT_TRACK_ID,
-                kind: TrackKind::Video,
-                sync_lock: true,
-                clips: Vec::new(),
-            },
-        });
+        "Ready".clone_into(&mut self.status);
     }
 
     fn open_project(&mut self, path: &Path) {
@@ -680,46 +656,6 @@ impl OpenReelApp {
                         })
                         .cloned()
                         .collect::<Vec<_>>();
-                    // Timeline attribution is ambiguous with concurrent
-                    // writers, so every running thread receives the same
-                    // review card while the monitor cues only once.
-                    let any_agent_running = self.projects[project_index]
-                        .threads
-                        .iter()
-                        .any(|thread| thread.running);
-                    if any_agent_running
-                        && let Some(range) = crate::edit_diff::changed_project_range(
-                            &self.projects[project_index].document,
-                            &doc,
-                        )
-                    {
-                        let cue = TimeCode(
-                            range
-                                .start
-                                .0
-                                .saturating_sub(review_preroll_frames(doc.fps))
-                                .max(0),
-                        );
-                        let edit_card = ChatEntry::EditCard {
-                            summary: last_op
-                                .as_ref()
-                                .map_or_else(|| "Edited the timeline".to_owned(), operation_status),
-                            start: range.start,
-                            end: range.end,
-                            cue,
-                        };
-                        for thread in self.projects[project_index]
-                            .threads
-                            .iter_mut()
-                            .filter(|thread| thread.running)
-                        {
-                            thread.chat.push(edit_card.clone());
-                        }
-                        if project_index == self.focused_project {
-                            self.projects[project_index].position =
-                                TimeCode(cue.0.min(doc.duration.0.saturating_sub(1).max(0)));
-                        }
-                    }
                     self.projects[project_index].document = Arc::clone(&doc);
                     self.projects[project_index].revision = revision;
                     self.projects[project_index].transcript_selection = None;
@@ -1034,8 +970,12 @@ impl OpenReelApp {
         // rail's import row - media lands on the timeline either way.
         // Summoned surfaces slide rather than pop (M28 motion): the animated
         // panel variants ease presence over the house animation_time.
-        let mut strip_open =
-            self.show_material_strip || !self.focused().pending_confirmations.is_empty();
+        let mut strip_open = self.show_material_strip
+            || self
+                .focused()
+                .threads
+                .iter()
+                .any(|thread| !thread.pending_confirmations.is_empty());
         let mut thread_rail_open = self.show_thread_rail;
         let mut media_rail_open = self.show_media_rail;
         egui::Panel::bottom("timeline-dock")
@@ -1110,13 +1050,13 @@ impl OpenReelApp {
 }
 
 /// Two seconds of lead-in so a reviewed change plays with context.
-fn review_preroll_frames(fps: openreel_core::Rational) -> i64 {
+pub(crate) fn review_preroll_frames(fps: openreel_core::Rational) -> i64 {
     let nominal = i64::from(fps.numerator().saturating_add(fps.denominator() / 2))
         / i64::from(fps.denominator().max(1));
     nominal.max(1) * 2
 }
 
-fn operation_status(operation: &Operation) -> String {
+pub(crate) fn operation_status(operation: &Operation) -> String {
     match operation {
         Operation::AddAsset { asset } => format!("Imported {}", asset.name),
         Operation::AddTrack { track } => format!("Added {:?} track {}", track.kind, track.id),
@@ -1173,6 +1113,18 @@ fn operation_status(operation: &Operation) -> String {
             clip,
             speed_percent,
         } => format!("Set clip {clip} speed to {speed_percent}%"),
+    }
+}
+
+fn default_project_document() -> Document {
+    Document {
+        tracks: vec![Track {
+            id: DEFAULT_TRACK_ID,
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: Vec::new(),
+        }],
+        ..Document::default()
     }
 }
 

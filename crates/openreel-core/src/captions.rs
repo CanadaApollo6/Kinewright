@@ -1,4 +1,9 @@
-use crate::{Rational, TimeCode, TimelineTranscriptWord};
+use thiserror::Error;
+
+use crate::{
+    CaptionPreset, Document, Operation, Rational, TimeCode, TimelineTranscriptWord, Track, TrackId,
+    TrackKind,
+};
 
 const MAX_CAPTION_CHARACTERS: usize = 42;
 
@@ -8,6 +13,82 @@ pub struct CaptionCue {
     pub start: TimeCode,
     pub end: TimeCode,
     pub text: String,
+}
+
+/// Collapse repeated A/V copies of the same audible word at the same source
+/// and project interval while preserving first-track order.
+#[must_use]
+pub fn dedup_timeline_words(words: Vec<TimelineTranscriptWord>) -> Vec<TimelineTranscriptWord> {
+    let mut seen = std::collections::HashSet::new();
+    words
+        .into_iter()
+        .filter(|word| {
+            seen.insert((
+                word.asset,
+                word.source_start,
+                word.source_end,
+                word.project_start,
+                word.project_end,
+            ))
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum CaptionPlanError {
+    #[error("there are no caption cues to add")]
+    NoCues,
+    #[error("track id space is exhausted")]
+    TrackIdExhausted,
+    #[error("caption cue duration must be positive")]
+    InvalidCueDuration,
+}
+
+/// Build one atomic title-track plan from transcript cues and a stable style preset.
+///
+/// # Errors
+///
+/// Returns an error for empty cues, invalid intervals, or exhausted track ids.
+pub fn caption_title_operations(
+    document: &Document,
+    cues: &[CaptionCue],
+    preset: CaptionPreset,
+) -> Result<Vec<Operation>, CaptionPlanError> {
+    if cues.is_empty() {
+        return Err(CaptionPlanError::NoCues);
+    }
+    let track_id = document
+        .tracks
+        .iter()
+        .map(|track| track.id.0)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .map(TrackId)
+        .ok_or(CaptionPlanError::TrackIdExhausted)?;
+    let mut operations = Vec::with_capacity(cues.len().saturating_add(1));
+    operations.push(Operation::AddTrack {
+        track: Track {
+            id: track_id,
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: Vec::new(),
+        },
+    });
+    for cue in cues {
+        let duration = cue
+            .end
+            .checked_sub(cue.start)
+            .filter(|duration| *duration > TimeCode::ZERO)
+            .ok_or(CaptionPlanError::InvalidCueDuration)?;
+        operations.push(Operation::AddTitle {
+            track: track_id,
+            at: cue.start,
+            duration,
+            title: preset.title(cue.text.clone()),
+        });
+    }
+    Ok(operations)
 }
 
 /// Build readable caption cues from ordered, de-duplicated timeline words.
@@ -161,7 +242,7 @@ fn frame_milliseconds(frames: TimeCode, fps: Rational) -> i128 {
 
 #[cfg(test)]
 mod tests {
-    use crate::{AssetId, ClipId, TrackId};
+    use crate::{AssetId, ClipContent, ClipId, TrackId, apply_batch};
 
     use super::*;
 
@@ -236,6 +317,22 @@ mod tests {
                 cue(6, 23, "x"),
             ]
         );
+    }
+
+    #[test]
+    fn caption_presets_resolve_to_declarative_title_operations() {
+        let document = Document::default();
+        let cues = [cue(0, 15, "Hello")];
+        for preset in CaptionPreset::ALL {
+            let operations = caption_title_operations(&document, &cues, preset).unwrap();
+            let mut applied = document.clone();
+            apply_batch(&mut applied, &operations).unwrap();
+            let ClipContent::Title(title) = &applied.tracks[0].clips[0].content else {
+                panic!("expected caption title");
+            };
+            assert_eq!(title.caption_preset, Some(preset));
+            assert_eq!(title.text, "Hello");
+        }
     }
 
     #[test]

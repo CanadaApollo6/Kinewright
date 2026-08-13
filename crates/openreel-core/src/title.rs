@@ -26,6 +26,7 @@ pub enum TitleParameterKind {
     Integer { min: i64, max: i64 },
     Boolean,
     Position,
+    CaptionPreset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +91,10 @@ pub const TITLE_PARAMETER_DESCRIPTORS: &[TitleParameterDescriptor] = &[
         kind: TitleParameterKind::Position,
     },
     TitleParameterDescriptor {
+        name: "caption_preset",
+        kind: TitleParameterKind::CaptionPreset,
+    },
+    TitleParameterDescriptor {
         name: "background_scrim",
         kind: TitleParameterKind::Boolean,
     },
@@ -144,6 +149,61 @@ impl std::str::FromStr for TitlePosition {
     }
 }
 
+/// Stable, renderer-independent caption compositions. A preset resolves to
+/// ordinary title fields, so preview and export share exactly the same result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptionPreset {
+    Clean,
+    Social,
+    Minimal,
+}
+
+impl CaptionPreset {
+    pub const ALL: [Self; 3] = [Self::Clean, Self::Social, Self::Minimal];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Social => "social",
+            Self::Minimal => "minimal",
+        }
+    }
+
+    #[must_use]
+    pub fn title(self, text: impl Into<String>) -> Title {
+        let (font_size_token, color_token, position, background_scrim) = match self {
+            Self::Clean => (0, 0, TitlePosition::LowerThird, true),
+            Self::Social => (2, 2, TitlePosition::Center, true),
+            Self::Minimal => (0, 0, TitlePosition::LowerThird, false),
+        };
+        Title {
+            text: text.into(),
+            font_size_token,
+            color_token,
+            position,
+            background_scrim,
+            fade_in_frames: TimeCode::ZERO,
+            fade_out_frames: TimeCode::ZERO,
+            caption_preset: Some(self),
+        }
+    }
+}
+
+impl std::str::FromStr for CaptionPreset {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "clean" => Ok(Self::Clean),
+            "social" => Ok(Self::Social),
+            "minimal" => Ok(Self::Minimal),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Title {
@@ -154,6 +214,9 @@ pub struct Title {
     pub background_scrim: bool,
     pub fade_in_frames: TimeCode,
     pub fade_out_frames: TimeCode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub caption_preset: Option<CaptionPreset>,
 }
 
 impl Default for Title {
@@ -166,6 +229,7 @@ impl Default for Title {
             background_scrim: true,
             fade_in_frames: TimeCode::ZERO,
             fade_out_frames: TimeCode::ZERO,
+            caption_preset: None,
         }
     }
 }
@@ -201,6 +265,12 @@ pub fn title_parameter_value(title: &Title, name: &str) -> Option<ParamValue> {
         "font_size_token" => Some(ParamValue::Integer(i64::from(title.font_size_token))),
         "color_token" => Some(ParamValue::Integer(i64::from(title.color_token))),
         "position" => Some(ParamValue::Text(title.position.as_str().to_owned())),
+        "caption_preset" => Some(ParamValue::Text(
+            title
+                .caption_preset
+                .map_or("none", CaptionPreset::as_str)
+                .to_owned(),
+        )),
         "background_scrim" => Some(ParamValue::Boolean(title.background_scrim)),
         "fade_in_frames" => Some(ParamValue::Integer(title.fade_in_frames.0)),
         "fade_out_frames" => Some(ParamValue::Integer(title.fade_out_frames.0)),

@@ -1,6 +1,7 @@
 //! `MCP` tools and installed-agent CLI drivers for the live `OpenReel` process.
 
 mod acp;
+mod branch;
 mod cursor;
 mod drivers;
 pub mod eval;
@@ -11,6 +12,7 @@ mod schema;
 mod server;
 mod silence;
 
+pub use branch::{BranchApplyOutcome, BranchComparison, BranchError, TimelineBranch};
 pub use cursor::{CURSOR_SANDBOX_NOTICE, CursorAcpDriver, cursor_models};
 pub use drivers::{CODEX_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver};
 pub use models::{

@@ -60,6 +60,8 @@ pub enum Query {
     Snapshot,
     Clip(ClipId),
     OpLog,
+    /// Operations represented by the current undo stack, excluding undone work.
+    AppliedOperations,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +73,7 @@ pub enum QueryResult {
     },
     Clip(Option<Clip>),
     OpLog(Arc<Vec<Operation>>),
+    AppliedOperations(Arc<Vec<Operation>>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,6 +269,12 @@ impl CoreState {
             },
             Query::Clip(id) => QueryResult::Clip(self.document.clip(*id).cloned()),
             Query::OpLog => QueryResult::OpLog(Arc::new(self.op_log.clone())),
+            Query::AppliedOperations => QueryResult::AppliedOperations(Arc::new(
+                self.undo
+                    .iter()
+                    .flat_map(|entry| entry.operations.iter().cloned())
+                    .collect(),
+            )),
         }
     }
 
@@ -581,6 +590,46 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn applied_operations_follow_undo_and_redo_instead_of_the_append_only_log() {
+        let core = Core::spawn(Document::default()).unwrap();
+        let first = Operation::AddAsset { asset: asset(1) };
+        let second = Operation::AddTrack {
+            track: Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: Vec::new(),
+            },
+        };
+        core.request(Command::Do(first.clone())).unwrap();
+        core.request(Command::Do(second.clone())).unwrap();
+        core.request(Command::Undo).unwrap();
+
+        let Event::QueryResult(QueryResult::AppliedOperations(applied)) = core
+            .request(Command::Query(Query::AppliedOperations))
+            .unwrap()
+        else {
+            panic!("expected applied operation query");
+        };
+        assert_eq!(&*applied, std::slice::from_ref(&first));
+        let Event::QueryResult(QueryResult::OpLog(log)) =
+            core.request(Command::Query(Query::OpLog)).unwrap()
+        else {
+            panic!("expected append-only log query");
+        };
+        assert_eq!(&*log, &[first.clone(), second.clone()]);
+
+        core.request(Command::Redo).unwrap();
+        let Event::QueryResult(QueryResult::AppliedOperations(applied)) = core
+            .request(Command::Query(Query::AppliedOperations))
+            .unwrap()
+        else {
+            panic!("expected applied operation query");
+        };
+        assert_eq!(&*applied, &[first, second]);
     }
 
     #[test]

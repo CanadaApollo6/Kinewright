@@ -15,10 +15,11 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use openreel_core::{
-    Analysis, AnalysisKind, AssetId, BeatStatus, ClipId, Command, Core, Document, Event, Operation,
-    Playback, Query, QueryResult, SceneStatus, SilenceStatus, TimeCode, TimelineBeat,
-    TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TranscriptStatus,
+    Analysis, AnalysisKind, AssetId, BeatStatus, CaptionPreset, ClipId, Command, Core,
+    DeliveryAspect, DeliveryVariant, Document, Event, Operation, Playback, Query, QueryResult,
+    SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineRevision, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, caption_cues,
+    caption_title_operations, dedup_timeline_words, document_for_delivery_variant, qa_document,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -217,11 +218,41 @@ impl McpServer {
         Self::start_with_broker(core, playback, analysis, ConfirmationBroker::default())
     }
 
+    /// Start a branch-scoped MCP server whose edits and proof renders never
+    /// replace the live playback document.
+    ///
+    /// # Errors
+    ///
+    /// Returns an MCP server error when the listener or server thread cannot start.
+    pub fn start_isolated(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+    ) -> Result<Self, McpServerError> {
+        Self::start_configured(
+            core,
+            playback,
+            analysis,
+            ConfirmationBroker::default(),
+            false,
+        )
+    }
+
     fn start_with_broker(
         core: Core,
         playback: Arc<dyn Playback>,
         analysis: Arc<dyn Analysis>,
         confirmations: ConfirmationBroker,
+    ) -> Result<Self, McpServerError> {
+        Self::start_configured(core, playback, analysis, confirmations, true)
+    }
+
+    fn start_configured(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        confirmations: ConfirmationBroker,
+        publish_to_playback: bool,
     ) -> Result<Self, McpServerError> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .map_err(McpServerError::Bind)?;
@@ -231,7 +262,13 @@ impl McpServer {
             .map_err(McpServerError::Listener)?;
         let endpoint = format!("http://{address}/mcp");
         let (shutdown, shutdown_rx) = oneshot::channel();
-        let handler = OpenReelMcp::new(core, playback, analysis, confirmations.clone());
+        let handler = OpenReelMcp::configured(
+            core,
+            playback,
+            analysis,
+            confirmations.clone(),
+            publish_to_playback,
+        );
         let server_thread = thread::Builder::new()
             .name("openreel-mcp".to_owned())
             .spawn(move || run_server(listener, handler, shutdown_rx))
@@ -306,20 +343,33 @@ struct OpenReelMcp {
     playback: Arc<dyn Playback>,
     analysis: Arc<dyn Analysis>,
     confirmations: ConfirmationBroker,
+    publish_to_playback: bool,
 }
 
 impl OpenReelMcp {
+    #[cfg(test)]
     fn new(
         core: Core,
         playback: Arc<dyn Playback>,
         analysis: Arc<dyn Analysis>,
         confirmations: ConfirmationBroker,
     ) -> Self {
+        Self::configured(core, playback, analysis, confirmations, true)
+    }
+
+    fn configured(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        confirmations: ConfirmationBroker,
+        publish_to_playback: bool,
+    ) -> Self {
         Self {
             core,
             playback,
             analysis,
             confirmations,
+            publish_to_playback,
         }
     }
 
@@ -397,6 +447,18 @@ impl OpenReelMcp {
                 let args: AnalysisStatusArgs = decode_args("get_analysis_status", arguments)?;
                 self.analysis_status(args.asset_id)
             }
+            "get_caption_presets" => Ok(Self::caption_presets()),
+            "add_styled_captions" => {
+                let args: StyledCaptionsArgs = decode_args("add_styled_captions", arguments)?;
+                self.add_styled_captions(args.expected_revision, args.preset)
+            }
+            "get_qa_report" => Ok(self.qa_report()?),
+            "get_delivery_variants" => Ok(Self::delivery_variants()),
+            "get_delivery_variant_storyboard" => {
+                let args: DeliveryStoryboardArgs =
+                    decode_args("get_delivery_variant_storyboard", arguments)?;
+                self.delivery_variant_storyboard(args)
+            }
             "request_analysis" => {
                 let args: RequestAnalysisArgs = decode_args("request_analysis", arguments)?;
                 self.request_analysis(args.asset_id, &args.kinds)
@@ -407,7 +469,12 @@ impl OpenReelMcp {
             }
             "apply_edit_plan" => {
                 let args: EditPlanArgs = decode_args("apply_edit_plan", arguments)?;
-                self.apply_edit_plan(args.expected_revision, &args.operations)
+                let operations = args
+                    .operations
+                    .into_iter()
+                    .map(|operation| operation.0)
+                    .collect::<Vec<_>>();
+                self.apply_edit_plan(args.expected_revision, &operations)
             }
             "import_media" => {
                 let args: ImportMediaArgs = decode_args("import_media", arguments)?;
@@ -510,7 +577,9 @@ impl OpenReelMcp {
             operation,
         }) {
             Ok(Event::DocumentChanged { doc, revision, .. }) => {
-                self.playback.set_document(Arc::clone(&doc));
+                if self.publish_to_playback {
+                    self.playback.set_document(Arc::clone(&doc));
+                }
                 if let Some(asset) = imported_asset {
                     self.request_asset_analysis(asset);
                 }
@@ -575,7 +644,9 @@ impl OpenReelMcp {
             .map_err(|error| McpError::internal_error(error.to_string(), None))?;
         Ok(match event {
             Event::DocumentChanged { doc, revision, .. } => {
-                self.playback.set_document(Arc::clone(&doc));
+                if self.publish_to_playback {
+                    self.playback.set_document(Arc::clone(&doc));
+                }
                 for asset in added_assets {
                     self.request_asset_analysis(asset);
                 }
@@ -609,6 +680,76 @@ impl OpenReelMcp {
         self.analysis.request_silence_detection(asset.clone());
         self.analysis.request_scene_detection(asset.clone());
         self.analysis.request_beat_detection(asset);
+    }
+
+    fn caption_presets() -> CallToolResult {
+        let presets = CaptionPreset::ALL.map(|preset| {
+            let title = preset.title("Example caption");
+            serde_json::json!({
+                "id": preset.as_str(),
+                "font_size_token": title.font_size_token,
+                "color_token": title.color_token,
+                "position": title.position.as_str(),
+                "background_scrim": title.background_scrim,
+            })
+        });
+        success_text(
+            serde_json::to_string_pretty(&presets)
+                .unwrap_or_else(|error| format!("could not serialize presets: {error}")),
+        )
+    }
+
+    fn add_styled_captions(
+        &self,
+        expected_revision: TimelineRevision,
+        preset: CaptionPreset,
+    ) -> Result<CallToolResult, McpError> {
+        let (actual_revision, document) = self.snapshot()?;
+        if expected_revision != actual_revision {
+            return Ok(revision_conflict_text(expected_revision, actual_revision));
+        }
+        let words = self
+            .analysis
+            .timeline_transcript(&document, None)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        let words = dedup_timeline_words(words);
+        let cues = caption_cues(&words, document.fps);
+        let operations = match caption_title_operations(&document, &cues, preset) {
+            Ok(operations) => operations,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        self.apply_edit_plan(expected_revision, &operations)
+    }
+
+    fn qa_report(&self) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let report = qa_document(&document);
+        let json = serde_json::to_string_pretty(&serde_json::json!({
+            "timeline_revision": revision,
+            "export_ready": report.export_ready(),
+            "error_count": report.count(openreel_core::QaSeverity::Error),
+            "warning_count": report.count(openreel_core::QaSeverity::Warning),
+            "info_count": report.count(openreel_core::QaSeverity::Info),
+            "issues": report.issues,
+        }))
+        .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        Ok(success_text(json))
+    }
+
+    fn delivery_variants() -> CallToolResult {
+        let variants = DeliveryAspect::ALL.map(|aspect| {
+            let (width, height) = aspect.resolution();
+            serde_json::json!({
+                "aspect": aspect,
+                "label": aspect.as_str(),
+                "resolution": {"width": width, "height": height},
+                "framing": "deterministic cover crop with explicit focal point",
+            })
+        });
+        success_text(
+            serde_json::to_string_pretty(&variants)
+                .unwrap_or_else(|error| format!("could not serialize variants: {error}")),
+        )
     }
 
     /// Deterministic completion feedback: the plan result itself reports how
@@ -670,11 +811,14 @@ impl OpenReelMcp {
                 timecode.0, document.duration.0
             )));
         }
-        self.playback.set_document(document);
-        let image = match self.analysis.thumbnail_at(timecode, THUMBNAIL_MAX_WIDTH) {
-            Ok(image) => image,
-            Err(error) => return Ok(error_text(error.to_string())),
-        };
+        let image =
+            match self
+                .analysis
+                .thumbnail_for_document(document, timecode, THUMBNAIL_MAX_WIDTH)
+            {
+                Ok(image) => image,
+                Err(error) => return Ok(error_text(error.to_string())),
+            };
         let png = encode_png(&image)?;
         Ok(CallToolResult::success(vec![
             ContentBlock::text(format!(
@@ -687,7 +831,48 @@ impl OpenReelMcp {
 
     fn timeline_storyboard(&self, args: StoryboardArgs) -> Result<CallToolResult, McpError> {
         let (revision, document) = self.snapshot()?;
-        let range = validated_timeline_range(&document, args.range, "timeline storyboard")?;
+        self.storyboard_for_document(revision, &document, args, "timeline storyboard", None)
+    }
+
+    fn delivery_variant_storyboard(
+        &self,
+        args: DeliveryStoryboardArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let variant =
+            match DeliveryVariant::new(args.aspect, args.focus_x_percent, args.focus_y_percent) {
+                Ok(variant) => variant,
+                Err(error) => return Ok(error_text(error.to_string())),
+            };
+        let document = match document_for_delivery_variant(&document, variant) {
+            Ok(document) => Arc::new(document),
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let metadata = serde_json::json!({
+            "aspect": variant.aspect,
+            "aspect_label": variant.aspect.as_str(),
+            "focus_x_percent": variant.focus_x_percent,
+            "focus_y_percent": variant.focus_y_percent,
+            "resolution": {"width": document.resolution.0, "height": document.resolution.1},
+        });
+        self.storyboard_for_document(
+            revision,
+            &document,
+            args.storyboard,
+            "delivery variant storyboard",
+            Some(metadata),
+        )
+    }
+
+    fn storyboard_for_document(
+        &self,
+        revision: TimelineRevision,
+        document: &Arc<Document>,
+        args: StoryboardArgs,
+        label: &str,
+        variant: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let range = validated_timeline_range(document, args.range, label)?;
         let frame_count = args.frame_count.unwrap_or(STORYBOARD_DEFAULT_FRAMES);
         if !(1..=STORYBOARD_MAX_FRAMES).contains(&frame_count) {
             return Ok(error_text(format!(
@@ -701,10 +886,12 @@ impl OpenReelMcp {
             )));
         }
         let frames = storyboard_sample_frames(&range, frame_count);
-        self.playback.set_document(Arc::clone(&document));
         let mut images = Vec::with_capacity(frames.len());
         for frame in &frames {
-            match self.analysis.thumbnail_at(*frame, max_width) {
+            match self
+                .analysis
+                .thumbnail_for_document(Arc::clone(document), *frame, max_width)
+            {
                 Ok(image) => images.push(image),
                 Err(error) => return Ok(error_text(error.to_string())),
             }
@@ -721,14 +908,17 @@ impl OpenReelMcp {
                 })
             })
             .collect::<Vec<_>>();
-        let manifest = serde_json::json!({
+        let mut manifest = serde_json::json!({
             "timeline_revision": revision.0,
             "range": {"start": range.start.0, "end": range.end.0},
             "cells": cells,
             "sheet": {"width": sheet.width, "height": sheet.height},
         });
+        if let Some(variant) = variant {
+            manifest["delivery_variant"] = variant;
+        }
         let mut result = CallToolResult::success(vec![
-            ContentBlock::text(format!("timeline storyboard {manifest}")),
+            ContentBlock::text(format!("{label} {manifest}")),
             ContentBlock::image(BASE64.encode(png), "image/png"),
         ]);
         result.structured_content = Some(manifest);
@@ -1126,6 +1316,21 @@ struct StoryboardArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct DeliveryStoryboardArgs {
+    aspect: DeliveryAspect,
+    #[serde(default = "default_delivery_focus")]
+    focus_x_percent: u8,
+    #[serde(default = "default_delivery_focus")]
+    focus_y_percent: u8,
+    #[serde(flatten)]
+    storyboard: StoryboardArgs,
+}
+
+const fn default_delivery_focus() -> u8 {
+    50
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ImportMediaArgs {
     /// Exact revision returned by `get_timeline_state` before planning this import.
     expected_revision: TimelineRevision,
@@ -1200,6 +1405,14 @@ struct CancelAnalysisArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct StyledCaptionsArgs {
+    /// Exact revision returned by `get_timeline_state` before planning captions.
+    expected_revision: TimelineRevision,
+    /// Stable declarative style shared by preview and export.
+    preset: CaptionPreset,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct TimelineDerivedArgs {
     /// Optional half-open range in exact project frames. Omit for the full timeline.
     #[serde(default)]
@@ -1211,7 +1424,65 @@ struct EditPlanArgs {
     /// Exact revision returned by `get_timeline_state` before planning this batch.
     expected_revision: TimelineRevision,
     /// Ordered operations. Each item uses the generated Operation schema and sees prior effects.
-    operations: Vec<Operation>,
+    operations: Vec<PlanOperation>,
+}
+
+/// The generated schema remains the authoritative `Operation` schema, while
+/// decoding also accepts the compact `{"op":"split_clip", ...}` shape that
+/// coding agents naturally emit.
+#[derive(Debug, Clone, JsonSchema)]
+struct PlanOperation(Operation);
+
+impl<'de> Deserialize<'de> for PlanOperation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        decode_plan_operation_value(value)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+fn decode_plan_operation_value(value: serde_json::Value) -> Result<Operation, String> {
+    if let Ok(operation) = serde_json::from_value::<Operation>(value.clone()) {
+        return Ok(operation);
+    }
+    let serde_json::Value::Object(mut object) = value else {
+        return Err("operation must be an object".to_owned());
+    };
+    if let Some(op) = object.remove("op") {
+        let op = op
+            .as_str()
+            .ok_or_else(|| "operation op must be a snake_case string".to_owned())?;
+        let variant = snake_to_pascal(op);
+        let tagged = serde_json::Value::Object(serde_json::Map::from_iter([(
+            variant,
+            serde_json::Value::Object(object),
+        )]));
+        return serde_json::from_value(tagged).map_err(|error| error.to_string());
+    }
+    if object.len() == 1 {
+        let (name, payload) = object.into_iter().next().expect("length checked");
+        let variant = snake_to_pascal(&name);
+        let tagged = serde_json::Value::Object(serde_json::Map::from_iter([(variant, payload)]));
+        return serde_json::from_value(tagged).map_err(|error| error.to_string());
+    }
+    Err("operation must use the generated enum envelope or include an op field".to_owned())
+}
+
+fn snake_to_pascal(value: &str) -> String {
+    value
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut characters = part.chars();
+            characters.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(characters).collect()
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1286,6 +1557,42 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "get_caption_presets",
+            "List the stable clean, social, and minimal caption compositions as resolved title fields.",
+            schema_object::<EmptyArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "add_styled_captions",
+            "Build transcript-timed burned-in captions using one stable preset and apply them as one revision-gated undo entry.",
+            schema_object::<StyledCaptionsArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        ),
+        Tool::new(
+            "get_qa_report",
+            "Run deterministic export-health checks for missing media, gaps, abrupt cuts, retimed audio, and caption readability.",
+            schema_object::<EmptyArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_delivery_variants",
+            "List the built-in 16:9, 9:16, and 1:1 delivery graphs and their exact output resolutions.",
+            schema_object::<EmptyArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_delivery_variant_storyboard",
+            "Render a real-compositor storyboard for a non-destructive delivery aspect using an explicit 0..=100 focal point. This is deterministic cover framing, not learned subject tracking.",
+            schema_object::<DeliveryStoryboardArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "request_analysis",
             "Queue selected content-addressed analysis jobs for one asset, or all four families when kinds is omitted.",
             schema_object::<RequestAnalysisArgs>(),
@@ -1311,7 +1618,7 @@ fn inspector_tools() -> Vec<Tool> {
         ),
         Tool::new(
             "apply_edit_plan",
-            "Atomically validate and apply an ordered array of generated OpenReel Operations as one undo entry, only when expected_revision still matches the inspected timeline.",
+            "Atomically validate and apply ordered OpenReel Operations as one undo entry, only when expected_revision matches. Accepts the generated enum envelope and compact objects such as {\"op\":\"split_clip\",\"clip\":1,\"at\":30}.",
             schema_object::<EditPlanArgs>(),
         )
         .with_annotations(
@@ -1753,7 +2060,11 @@ mod tests {
         VisualAssetResult,
     };
     use serde_json::json;
-    use std::{path::Path, time::Instant};
+    use std::{
+        path::Path,
+        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        time::Instant,
+    };
 
     struct NoopMedia;
 
@@ -1838,6 +2149,19 @@ mod tests {
             Err(MediaError::NotImplemented)
         }
 
+        fn thumbnail_for_document(
+            &self,
+            _document: Arc<Document>,
+            _t: TimeCode,
+            _max_w: u32,
+        ) -> Result<RgbaImage, MediaError> {
+            Ok(RgbaImage {
+                width: 2,
+                height: 2,
+                pixels: vec![0; 16],
+            })
+        }
+
         fn request_waveform(&self, _asset: MediaAsset) -> bool {
             false
         }
@@ -1894,6 +2218,105 @@ mod tests {
         };
         let media = Arc::new(NoopMedia);
         (Core::spawn(document).unwrap(), media.clone(), media)
+    }
+
+    struct CountingPlayback(AtomicUsize);
+
+    impl Playback for CountingPlayback {
+        fn set_document(&self, _doc: Arc<Document>) {
+            self.0.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+
+        fn request_frame(&self, _t: TimeCode) {}
+
+        fn frames(&self) -> crossbeam_channel::Receiver<(TimeCode, FrameTexture)> {
+            crossbeam_channel::never()
+        }
+
+        fn events(&self) -> crossbeam_channel::Receiver<MediaEvent> {
+            crossbeam_channel::never()
+        }
+
+        fn play(&self, _from: TimeCode) {}
+
+        fn pause(&self) {}
+
+        fn seek(&self, _to: TimeCode) {}
+
+        fn position(&self) -> TimeCode {
+            TimeCode::ZERO
+        }
+
+        fn output_peaks(&self) -> [f32; 2] {
+            [0.0; 2]
+        }
+    }
+
+    #[test]
+    fn isolated_handler_edits_and_renders_without_publishing_to_live_playback() {
+        let (core, _, analysis) = fixture();
+        let playback = Arc::new(CountingPlayback(AtomicUsize::new(0)));
+        let service = OpenReelMcp::configured(
+            core,
+            playback.clone(),
+            analysis,
+            ConfirmationBroker::default(),
+            false,
+        );
+        let proof = service.frame_at(TimeCode(1)).unwrap();
+        assert_eq!(proof.is_error, Some(false));
+        let edit = service.apply_operation(
+            "add_marker",
+            TimelineRevision::default(),
+            Operation::AddMarker {
+                marker: Marker {
+                    id: MarkerId(1),
+                    position: TimeCode(1),
+                    label: "Branch".to_owned(),
+                    color_token: 0,
+                },
+            },
+        );
+        assert_eq!(edit.is_error, Some(false));
+        assert_eq!(playback.0.load(AtomicOrdering::Relaxed), 0);
+    }
+
+    #[test]
+    fn m31_agent_tools_expose_captions_qa_and_delivery_proofs() {
+        let names = OpenReelMcp::tools()
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect::<Vec<_>>();
+        for name in [
+            "get_caption_presets",
+            "add_styled_captions",
+            "get_qa_report",
+            "get_delivery_variants",
+            "get_delivery_variant_storyboard",
+        ] {
+            assert!(names.iter().any(|candidate| candidate == name));
+        }
+
+        let (core, playback, analysis) = fixture();
+        let service = OpenReelMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let result = service
+            .delivery_variant_storyboard(DeliveryStoryboardArgs {
+                aspect: DeliveryAspect::Vertical,
+                focus_x_percent: 25,
+                focus_y_percent: 50,
+                storyboard: StoryboardArgs {
+                    range: None,
+                    frame_count: Some(2),
+                    max_width: Some(64),
+                },
+            })
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(
+            result.structured_content.unwrap()["delivery_variant"]["aspect"],
+            "vertical"
+        );
     }
 
     fn delete_request() -> CallToolRequestParams {
@@ -2103,6 +2526,28 @@ mod tests {
         assert!(schema.contains("AddTrack"));
         assert!(schema.contains("DeleteClip"));
         assert!(schema.contains("operations"));
+    }
+
+    #[test]
+    fn compact_agent_plan_operations_decode_without_a_rust_enum_envelope() {
+        let decoded = decode_plan_operation_value(json!({
+            "op": "split_clip",
+            "clip": 1,
+            "at": 30
+        }))
+        .unwrap();
+        assert_eq!(
+            decoded,
+            Operation::SplitClip {
+                clip: ClipId(1),
+                at: TimeCode(30),
+            }
+        );
+        let snake_envelope = decode_plan_operation_value(json!({"add_marker": {"marker": {
+            "id": 1, "position": 30, "label": "proof", "color_token": 0
+        }}}))
+        .unwrap();
+        assert!(matches!(snake_envelope, Operation::AddMarker { .. }));
     }
 
     #[test]

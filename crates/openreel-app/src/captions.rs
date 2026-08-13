@@ -1,9 +1,8 @@
 use std::collections::BTreeSet;
 
 use openreel_core::{
-    CaptionCue, ClipContent, Document, Operation, Rational, TITLE_FONT_SIZES, TimeCode,
-    TimelineTranscriptWord, Title, TitlePosition, Track, TrackId, TrackKind, TranscriptStatus,
-    caption_cues,
+    CaptionCue, CaptionPreset, ClipContent, Document, Operation, Rational, TimelineTranscriptWord,
+    TranscriptStatus, caption_cues, caption_title_operations as core_caption_title_operations,
 };
 
 use crate::{app::OpenReelApp, transcript_edit::dedup_linked_timeline_words};
@@ -76,60 +75,16 @@ pub(crate) fn caption_title_operations(
     document: &Document,
     cues: &[CaptionCue],
 ) -> Result<Vec<Operation>, String> {
-    if cues.is_empty() {
-        return Err("There are no caption cues to add".to_owned());
-    }
-    let track_id = document
-        .tracks
-        .iter()
-        .map(|track| track.id.0)
-        .max()
-        .unwrap_or(0)
-        .checked_add(1)
-        .map(TrackId)
-        .ok_or("Track id space is exhausted")?;
-    let font_size_token = TITLE_FONT_SIZES
-        .iter()
-        .min_by_key(|descriptor| descriptor.pixels_at_1080p)
-        .map(|descriptor| descriptor.token)
-        .ok_or("No title font sizes are registered")?;
-    let default_color_token = Title::default().color_token;
-    let mut operations = Vec::with_capacity(cues.len().saturating_add(1));
-    operations.push(Operation::AddTrack {
-        track: Track {
-            id: track_id,
-            kind: TrackKind::Video,
-            sync_lock: true,
-            clips: Vec::new(),
-        },
-    });
-    for cue in cues {
-        let duration = cue
-            .end
-            .checked_sub(cue.start)
-            .filter(|duration| *duration > TimeCode::ZERO)
-            .ok_or("Caption cue duration must be positive")?;
-        operations.push(Operation::AddTitle {
-            track: track_id,
-            at: cue.start,
-            duration,
-            title: Title {
-                text: cue.text.clone(),
-                font_size_token,
-                color_token: default_color_token,
-                position: TitlePosition::LowerThird,
-                background_scrim: true,
-                fade_in_frames: TimeCode::ZERO,
-                fade_out_frames: TimeCode::ZERO,
-            },
-        });
-    }
-    Ok(operations)
+    core_caption_title_operations(document, cues, CaptionPreset::Clean)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use openreel_core::{AssetId, ClipId, Command, Core, Event, TrackKind, apply_batch, srt, vtt};
+    use openreel_core::{
+        AssetId, ClipId, Command, Core, Event, TimeCode, TitlePosition, Track, TrackId, TrackKind,
+        apply_batch, srt, vtt,
+    };
 
     use super::*;
 

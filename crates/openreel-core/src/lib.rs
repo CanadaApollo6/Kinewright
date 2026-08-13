@@ -3,11 +3,13 @@
 mod actor;
 mod agent;
 mod captions;
+mod delivery;
 mod effect;
 mod journal;
 mod media;
 mod model;
 mod operation;
+mod qa;
 mod time;
 mod title;
 mod transcript_edit;
@@ -18,7 +20,13 @@ pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,
 };
-pub use captions::{CaptionCue, caption_cues, srt, vtt};
+pub use captions::{
+    CaptionCue, CaptionPlanError, caption_cues, caption_title_operations, dedup_timeline_words,
+    srt, vtt,
+};
+pub use delivery::{
+    DeliveryAspect, DeliveryVariant, DeliveryVariantError, document_for_delivery_variant,
+};
 pub use effect::{
     EFFECT_DESCRIPTORS, EffectDescriptor, EffectParameterDescriptor, EffectUniform,
     effect_descriptor,
@@ -39,14 +47,15 @@ pub use model::{
     TrackKind, Transition, clip_effective_fps,
 };
 pub use operation::{ApplyOp, BatchError, OpError, Operation, apply_batch};
+pub use qa::{QaIssue, QaReport, QaSeverity, qa_document};
 pub use time::{
     FrameRounding, Rational, TimeCode, TimeMappingError, map_frames, map_frames_with_rounding,
     map_source_range_to_project, speed_scaled_fps,
 };
 pub use title::{
-    TITLE_COLORS, TITLE_FONT_SIZES, TITLE_PARAMETER_DESCRIPTORS, Title, TitleColorDescriptor,
-    TitleFontSizeDescriptor, TitleParameterDescriptor, TitleParameterKind, TitlePosition,
-    title_color, title_font_size, title_parameter_descriptor, title_parameter_value,
+    CaptionPreset, TITLE_COLORS, TITLE_FONT_SIZES, TITLE_PARAMETER_DESCRIPTORS, Title,
+    TitleColorDescriptor, TitleFontSizeDescriptor, TitleParameterDescriptor, TitleParameterKind,
+    TitlePosition, title_color, title_font_size, title_parameter_descriptor, title_parameter_value,
 };
 pub use transcript_edit::{
     TranscriptCutRange, is_filler_word, silence_cut_margin_frames, transcript_cut_ranges,

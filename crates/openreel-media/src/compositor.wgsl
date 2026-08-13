@@ -12,9 +12,9 @@ struct LayerParams {
     crop_right: f32,
     crop_top: f32,
     crop_bottom: f32,
-    _padding_0: f32,
-    _padding_1: f32,
-    _padding_2: f32,
+    reframe_aspect: f32,
+    reframe_focus_x: f32,
+    reframe_focus_y: f32,
 };
 
 @group(0) @binding(0) var layer_texture: texture_2d<f32>;
@@ -50,7 +50,29 @@ fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let sampled = textureSample(layer_texture, layer_sampler, input.uv);
+    var sample_uv = input.uv;
+    if params.reframe_aspect > 0.0 {
+        let dimensions = vec2<f32>(textureDimensions(layer_texture));
+        let source_aspect = dimensions.x / max(dimensions.y, 1.0);
+        if source_aspect > params.reframe_aspect {
+            let visible_width = params.reframe_aspect / source_aspect;
+            let left = clamp(
+                params.reframe_focus_x - visible_width * 0.5,
+                0.0,
+                1.0 - visible_width,
+            );
+            sample_uv.x = left + input.uv.x * visible_width;
+        } else if source_aspect < params.reframe_aspect {
+            let visible_height = source_aspect / params.reframe_aspect;
+            let top = clamp(
+                params.reframe_focus_y - visible_height * 0.5,
+                0.0,
+                1.0 - visible_height,
+            );
+            sample_uv.y = top + input.uv.y * visible_height;
+        }
+    }
+    let sampled = textureSample(layer_texture, layer_sampler, sample_uv);
     var rgb = sampled.rgb + vec3<f32>(params.brightness);
     rgb = (rgb - vec3<f32>(0.5)) * params.contrast + vec3<f32>(0.5);
     let luminance = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));

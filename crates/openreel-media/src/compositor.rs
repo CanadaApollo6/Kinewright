@@ -85,6 +85,9 @@ struct LayerParams {
     crop_right: f32,
     crop_top: f32,
     crop_bottom: f32,
+    reframe_aspect: f32,
+    reframe_focus_x: f32,
+    reframe_focus_y: f32,
 }
 
 impl Default for LayerParams {
@@ -103,6 +106,9 @@ impl Default for LayerParams {
             crop_right: 0.0,
             crop_top: 0.0,
             crop_bottom: 0.0,
+            reframe_aspect: 0.0,
+            reframe_focus_x: 0.5,
+            reframe_focus_y: 0.5,
         }
     }
 }
@@ -441,9 +447,9 @@ impl LayerParams {
             self.crop_right,
             self.crop_top,
             self.crop_bottom,
-            0.0,
-            0.0,
-            0.0,
+            self.reframe_aspect,
+            self.reframe_focus_x,
+            self.reframe_focus_y,
         ];
         let mut bytes = [0_u8; UNIFORM_BYTES];
         for (index, value) in values.into_iter().enumerate() {
@@ -479,6 +485,9 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                 EffectUniform::CropRight => params.crop_right += value / 100.0,
                 EffectUniform::CropTop => params.crop_top += value / 100.0,
                 EffectUniform::CropBottom => params.crop_bottom += value / 100.0,
+                EffectUniform::ReframeAspect => params.reframe_aspect = value / 10_000.0,
+                EffectUniform::ReframeFocusX => params.reframe_focus_x = value / 100.0,
+                EffectUniform::ReframeFocusY => params.reframe_focus_y = value / 100.0,
             }
         }
     }
@@ -486,6 +495,8 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
     params.crop_right = params.crop_right.clamp(0.0, 0.45);
     params.crop_top = params.crop_top.clamp(0.0, 0.45);
     params.crop_bottom = params.crop_bottom.clamp(0.0, 0.45);
+    params.reframe_focus_x = params.reframe_focus_x.clamp(0.0, 1.0);
+    params.reframe_focus_y = params.reframe_focus_y.clamp(0.0, 1.0);
     params
 }
 
@@ -555,6 +566,21 @@ mod tests {
                 ("right_percent".to_owned(), ParamValue::Integer(right)),
                 ("top_percent".to_owned(), ParamValue::Integer(top)),
                 ("bottom_percent".to_owned(), ParamValue::Integer(bottom)),
+            ]),
+        }
+    }
+
+    fn reframe(id: u64, aspect_basis_points: i64, focus_x: i64, focus_y: i64) -> Effect {
+        Effect {
+            id: EffectId(id),
+            name: "reframe".to_owned(),
+            parameters: BTreeMap::from([
+                (
+                    "target_aspect_basis_points".to_owned(),
+                    ParamValue::Integer(aspect_basis_points),
+                ),
+                ("focus_x_percent".to_owned(), ParamValue::Integer(focus_x)),
+                ("focus_y_percent".to_owned(), ParamValue::Integer(focus_y)),
             ]),
         }
     }
@@ -674,6 +700,48 @@ mod tests {
         for y in 2..8 {
             assert_pixel_close(pixel(&output, 4, y), [255, 0, 0, 255], 2);
         }
+    }
+
+    #[test]
+    fn reframe_cover_crop_tracks_an_explicit_horizontal_focal_point() {
+        let Some(compositor) = fallback() else {
+            eprintln!("skipped: no usable wgpu adapter in this environment");
+            return;
+        };
+        let mut pixels = Vec::new();
+        for _y in 0..4 {
+            for x in 0..12 {
+                let color = if x < 4 {
+                    [255, 0, 0, 255]
+                } else if x < 8 {
+                    [0, 255, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                };
+                pixels.extend_from_slice(&color);
+            }
+        }
+        let input = FrameTexture {
+            width: 12,
+            height: 4,
+            rgba: Arc::new(pixels),
+        };
+        let left = reframe(1, 10_000, 0, 50);
+        let right = reframe(2, 10_000, 100, 50);
+        let render = |effect: &Effect| {
+            compositor
+                .render(
+                    (4, 4),
+                    &[CompositorLayer {
+                        frame: &input,
+                        effects: std::slice::from_ref(effect),
+                        transition: TransitionRenderParams::default(),
+                    }],
+                )
+                .unwrap()
+        };
+        assert_pixel_close(pixel(&render(&left), 2, 2), [255, 0, 0, 255], 4);
+        assert_pixel_close(pixel(&render(&right), 2, 2), [0, 0, 255, 255], 4);
     }
 
     #[test]

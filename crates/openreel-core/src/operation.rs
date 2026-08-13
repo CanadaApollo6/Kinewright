@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AssetId, Clip, ClipContent, ClipId, Document, Effect, EffectId, FreezeFrame, LinkId,
-    MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, ParamValue, TimeCode, TimeMappingError,
-    Title, TitleParameterKind, TitlePosition, Track, TrackId, TrackKind, Transition,
-    map_source_range_to_project, title_parameter_descriptor,
+    AssetId, CaptionPreset, Clip, ClipContent, ClipId, Document, Effect, EffectId, FreezeFrame,
+    LinkId, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, ParamValue, TimeCode,
+    TimeMappingError, Title, TitleParameterKind, TitlePosition, Track, TrackId, TrackKind,
+    Transition, map_source_range_to_project, title_parameter_descriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -333,6 +333,8 @@ pub enum OpError {
     },
     #[error("title text exceeds the maximum length of {maximum} characters")]
     TitleTextTooLong { maximum: usize },
+    #[error("title clip {clip} does not match its {preset:?} caption preset fields")]
+    CaptionPresetMismatch { clip: ClipId, preset: CaptionPreset },
     #[error("title fade {name:?} ({frames} frames) exceeds clip {clip} duration {duration}")]
     TitleFadeTooLong {
         clip: ClipId,
@@ -1121,6 +1123,7 @@ fn set_title_param(
                     max: i64::from(u8::MAX),
                     actual: value,
                 })?;
+            title.caption_preset = None;
         }
         ("color_token", ParamValue::Integer(value)) => {
             title.color_token = u8::try_from(value).map_err(|_| OpError::TitleParamOutOfRange {
@@ -1129,13 +1132,35 @@ fn set_title_param(
                 max: i64::from(u8::MAX),
                 actual: value,
             })?;
+            title.caption_preset = None;
         }
         ("position", ParamValue::Text(value)) => {
             title.position = value.parse().map_err(|()| OpError::InvalidTitleParamType {
                 name: name.to_owned(),
             })?;
+            title.caption_preset = None;
         }
-        ("background_scrim", ParamValue::Boolean(value)) => title.background_scrim = value,
+        ("caption_preset", ParamValue::Text(value)) => {
+            if value == "none" {
+                title.caption_preset = None;
+            } else {
+                let preset = value.parse::<CaptionPreset>().map_err(|()| {
+                    OpError::InvalidTitleParamType {
+                        name: name.to_owned(),
+                    }
+                })?;
+                let resolved = preset.title(title.text.clone());
+                title.font_size_token = resolved.font_size_token;
+                title.color_token = resolved.color_token;
+                title.position = resolved.position;
+                title.background_scrim = resolved.background_scrim;
+                title.caption_preset = Some(preset);
+            }
+        }
+        ("background_scrim", ParamValue::Boolean(value)) => {
+            title.background_scrim = value;
+            title.caption_preset = None;
+        }
         ("fade_in_frames", ParamValue::Integer(value)) => {
             title.fade_in_frames = TimeCode(value);
         }
@@ -1482,6 +1507,13 @@ fn validate_title_parameter(name: &str, value: &ParamValue) -> Result<(), OpErro
                 });
             }
         }
+        (TitleParameterKind::CaptionPreset, ParamValue::Text(preset)) => {
+            if preset != "none" && preset.parse::<CaptionPreset>().is_err() {
+                return Err(OpError::InvalidTitleParamType {
+                    name: name.to_owned(),
+                });
+            }
+        }
         _ => {
             return Err(OpError::InvalidTitleParamType {
                 name: name.to_owned(),
@@ -1496,6 +1528,16 @@ fn validate_title(clip: ClipId, title: &Title, duration: TimeCode) -> Result<(),
         let value = crate::title_parameter_value(title, descriptor.name)
             .expect("every title descriptor has a typed value");
         validate_title_parameter(descriptor.name, &value)?;
+    }
+    if let Some(preset) = title.caption_preset {
+        let resolved = preset.title("");
+        if title.font_size_token != resolved.font_size_token
+            || title.color_token != resolved.color_token
+            || title.position != resolved.position
+            || title.background_scrim != resolved.background_scrim
+        {
+            return Err(OpError::CaptionPresetMismatch { clip, preset });
+        }
     }
     for (name, frames) in [
         ("fade_in_frames", title.fade_in_frames),

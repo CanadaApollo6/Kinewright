@@ -3,9 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use openreel_agent::{
-    ClaudeCodeDriver, ConfirmationBroker, ConfirmationRequest, CursorAcpDriver, McpServer,
-};
+use openreel_agent::{ClaudeCodeDriver, CursorAcpDriver};
 use openreel_core::{
     AgentDriver, Analysis, AssetId, ClipId, Core, Document, Event, MarkerId, Playback, TimeCode,
     TimelineRevision,
@@ -23,9 +21,6 @@ pub(crate) struct ProjectSession {
     pub(crate) name: String,
     pub(crate) core: Core,
     pub(crate) core_events: crossbeam_channel::Receiver<Event>,
-    pub(crate) mcp_server: Option<McpServer>,
-    pub(crate) confirmations: Option<ConfirmationBroker>,
-    pub(crate) pending_confirmations: Vec<ConfirmationRequest>,
     pub(crate) document: Arc<Document>,
     pub(crate) revision: TimelineRevision,
     pub(crate) project_path: Option<PathBuf>,
@@ -58,22 +53,12 @@ impl ProjectSession {
         playback: &Arc<dyn Playback>,
         analysis: &Arc<dyn Analysis>,
     ) -> Result<Self, String> {
+        let name = name.into();
         let core = Core::spawn(document.clone()).map_err(|error| error.to_string())?;
         let core_events = core.subscribe().map_err(|error| error.to_string())?;
-        let mut chat = vec![ChatEntry::Text(
+        let chat = vec![ChatEntry::Text(
             "Drop a clip anywhere (or /import), then describe your edit.".to_owned(),
         )];
-        let mcp_server =
-            match McpServer::start(core.clone(), Arc::clone(playback), Arc::clone(analysis)) {
-                Ok(server) => Some(server),
-                Err(error) => {
-                    chat.push(ChatEntry::Text(format!(
-                        "Could not start the OpenReel agent server: {error}"
-                    )));
-                    None
-                }
-            };
-        let confirmations = mcp_server.as_ref().map(McpServer::confirmations);
         let agent_harness = if ClaudeCodeDriver.detect().is_some() {
             AgentHarnessChoice::ClaudeCode
         } else if CursorAcpDriver.detect().is_some() {
@@ -88,20 +73,26 @@ impl ProjectSession {
         } else {
             Recovery::start_attached(&core, project_path.as_deref())
         };
+        let document = Arc::new(document);
         Ok(Self {
             id,
-            name: name.into(),
+            name,
             core,
             core_events,
-            mcp_server,
-            confirmations,
-            pending_confirmations: Vec::new(),
-            document: Arc::new(document),
+            document: Arc::clone(&document),
             revision: TimelineRevision::default(),
             project_path,
             saved_document: None,
             recovery,
-            threads: vec![AgentThread::new("Thread 1", agent_harness, chat)],
+            threads: vec![AgentThread::new(
+                "Thread 1",
+                agent_harness,
+                chat,
+                TimelineRevision::default(),
+                &document,
+                playback,
+                analysis,
+            )?],
             active_thread: 0,
             next_thread_number: 2,
             pending_timeline_adds: Vec::new(),
@@ -137,11 +128,11 @@ impl ProjectSession {
             thread.session = None;
             thread.events = None;
             thread.running = false;
+            if let Some(confirmations) = &thread.confirmations {
+                confirmations.reject_all(reason);
+            }
+            thread.pending_confirmations.clear();
         }
-        if let Some(confirmations) = &self.confirmations {
-            confirmations.reject_all(reason);
-        }
-        self.pending_confirmations.clear();
     }
 }
 

@@ -856,6 +856,7 @@ assets:
                     background_scrim: false,
                     fade_in_frames: TimeCode(6),
                     fade_out_frames: TimeCode(9),
+                    caption_preset: None,
                 }),
                 timeline_start: TimeCode(30),
                 effects: Vec::new(),
