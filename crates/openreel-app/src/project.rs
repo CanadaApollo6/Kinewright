@@ -8,6 +8,7 @@ use openreel_agent::{
 };
 use openreel_core::{
     AgentDriver, Analysis, AssetId, ClipId, Core, Document, Event, MarkerId, Playback, TimeCode,
+    TimelineRevision,
 };
 
 use crate::{
@@ -26,6 +27,7 @@ pub(crate) struct ProjectSession {
     pub(crate) confirmations: Option<ConfirmationBroker>,
     pub(crate) pending_confirmations: Vec<ConfirmationRequest>,
     pub(crate) document: Arc<Document>,
+    pub(crate) revision: TimelineRevision,
     pub(crate) project_path: Option<PathBuf>,
     pub(crate) saved_document: Option<Arc<Document>>,
     pub(crate) recovery: Recovery,
@@ -95,6 +97,7 @@ impl ProjectSession {
             confirmations,
             pending_confirmations: Vec::new(),
             document: Arc::new(document),
+            revision: TimelineRevision::default(),
             project_path,
             saved_document: None,
             recovery,

@@ -167,6 +167,7 @@ pub enum TranscriptStatus {
     },
     Ready(Arc<AssetTranscript>),
     NoSpeech,
+    Cancelled,
     Failed(String),
 }
 
@@ -224,6 +225,7 @@ pub enum SilenceStatus {
     Analyzing,
     Ready(Arc<AssetSilences>),
     NoAudio,
+    Cancelled,
     Failed(String),
 }
 
@@ -261,6 +263,7 @@ pub enum SceneStatus {
     Analyzing,
     Ready(Arc<AssetSceneChanges>),
     NoVideo,
+    Cancelled,
     Failed(String),
 }
 
@@ -292,6 +295,102 @@ pub struct TimelineSceneChange {
     pub source_frame: TimeCode,
     pub project_frame: TimeCode,
     pub confidence_basis_points: u16,
+}
+
+/// One locally detected rhythmic onset in an asset's exact source-frame grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BeatMarker {
+    pub source_frame: TimeCode,
+    /// Relative onset strength from 0.00% through 100.00%.
+    pub strength_basis_points: u16,
+}
+
+/// Derived, reproducible rhythmic analysis for one audio-capable asset.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AssetBeats {
+    pub asset: AssetId,
+    pub content_sha256: String,
+    pub source_fps: Rational,
+    pub source_frames: TimeCode,
+    /// Robust interval estimate in thousandths of a beat per minute.
+    pub estimated_bpm_milli: u32,
+    pub beats: Vec<BeatMarker>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeatStatus {
+    NotRequested,
+    Queued,
+    Hashing,
+    Analyzing { progress_percent: Option<u8> },
+    Ready(Arc<AssetBeats>),
+    NoAudio,
+    Cancelled,
+    Failed(String),
+}
+
+impl BeatStatus {
+    #[must_use]
+    pub const fn is_running(&self) -> bool {
+        matches!(self, Self::Queued | Self::Hashing | Self::Analyzing { .. })
+    }
+}
+
+/// One source beat mapped through a real-time media clip onto project frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TimelineBeat {
+    pub asset: AssetId,
+    pub track: TrackId,
+    pub clip: ClipId,
+    pub source_frame: TimeCode,
+    pub project_frame: TimeCode,
+    pub strength_basis_points: u16,
+    pub estimated_bpm_milli: u32,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisKind {
+    Transcript,
+    Silence,
+    Scene,
+    Beat,
+}
+
+impl AnalysisKind {
+    pub const ALL: [Self; 4] = [Self::Transcript, Self::Silence, Self::Scene, Self::Beat];
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisPhase {
+    NotRequested,
+    Queued,
+    Hashing,
+    Downloading,
+    Analyzing,
+    Ready,
+    Unavailable,
+    Cancelled,
+    Failed,
+}
+
+/// Provider-neutral lifecycle record for one derived-media job.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct AnalysisJobStatus {
+    pub asset: AssetId,
+    pub kind: AnalysisKind,
+    pub phase: AnalysisPhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -383,12 +482,189 @@ pub trait Analysis: Send + Sync {
         range: Option<std::ops::Range<TimeCode>>,
         minimum_confidence_basis_points: u16,
     ) -> Result<Vec<TimelineSceneChange>, MediaError>;
+    /// Queue deterministic beat/onset analysis without blocking the caller.
+    fn request_beat_detection(&self, _asset: MediaAsset) {}
+    /// Return the latest beat-analysis state for an asset.
+    fn beat_status(&self, _asset: &MediaAsset) -> BeatStatus {
+        BeatStatus::NotRequested
+    }
+    /// Return detected beats mapped into project time.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when timeline/source frame mapping fails.
+    fn timeline_beats(
+        &self,
+        _document: &Document,
+        _range: Option<std::ops::Range<TimeCode>>,
+        _minimum_strength_basis_points: u16,
+    ) -> Result<Vec<TimelineBeat>, MediaError> {
+        Ok(Vec::new())
+    }
+    /// Return a uniform lifecycle view over every analysis family.
+    fn analysis_jobs(&self, asset: &MediaAsset) -> Vec<AnalysisJobStatus> {
+        analysis_job_statuses(self, asset)
+    }
+    /// Cooperatively cancel queued or running work. Repeated cancellation is harmless.
+    fn cancel_analysis(&self, _asset: &MediaAsset, _kind: AnalysisKind) -> bool {
+        false
+    }
     /// Queue a content-addressed waveform extraction without blocking the caller.
     fn request_waveform(&self, asset: MediaAsset) -> bool;
     /// Queue one source-frame thumbnail without blocking the caller.
     fn request_thumbnail(&self, asset: MediaAsset, source_at: TimeCode, max_width: u32) -> bool;
     /// Bounded stream of ready waveform and thumbnail data.
     fn visual_asset_results(&self) -> Receiver<VisualAssetResult>;
+}
+
+fn analysis_job_statuses<A: Analysis + ?Sized>(
+    analysis: &A,
+    asset: &MediaAsset,
+) -> Vec<AnalysisJobStatus> {
+    vec![
+        transcript_job_status(asset.id, analysis.transcript_status(asset)),
+        silence_job_status(asset.id, analysis.silence_status(asset)),
+        scene_job_status(asset.id, analysis.scene_status(asset)),
+        beat_job_status(asset.id, analysis.beat_status(asset)),
+    ]
+}
+
+fn job(
+    asset: AssetId,
+    kind: AnalysisKind,
+    phase: AnalysisPhase,
+    progress_percent: Option<u8>,
+    error: Option<String>,
+) -> AnalysisJobStatus {
+    AnalysisJobStatus {
+        asset,
+        kind,
+        phase,
+        progress_percent,
+        error,
+    }
+}
+
+fn transcript_job_status(asset: AssetId, status: TranscriptStatus) -> AnalysisJobStatus {
+    match status {
+        TranscriptStatus::NotRequested => job(
+            asset,
+            AnalysisKind::Transcript,
+            AnalysisPhase::NotRequested,
+            None,
+            None,
+        ),
+        TranscriptStatus::Queued => job(
+            asset,
+            AnalysisKind::Transcript,
+            AnalysisPhase::Queued,
+            Some(0),
+            None,
+        ),
+        TranscriptStatus::Hashing => job(
+            asset,
+            AnalysisKind::Transcript,
+            AnalysisPhase::Hashing,
+            None,
+            None,
+        ),
+        TranscriptStatus::DownloadingModel {
+            downloaded_bytes,
+            total_bytes,
+        } => job(
+            asset,
+            AnalysisKind::Transcript,
+            AnalysisPhase::Downloading,
+            total_bytes.and_then(|total| percent(downloaded_bytes, total)),
+            None,
+        ),
+        TranscriptStatus::Transcribing { progress_percent } => job(
+            asset,
+            AnalysisKind::Transcript,
+            AnalysisPhase::Analyzing,
+            Some(progress_percent),
+            None,
+        ),
+        TranscriptStatus::Ready(_) => job(
+            asset,
+            AnalysisKind::Transcript,
+            AnalysisPhase::Ready,
+            Some(100),
+            None,
+        ),
+        TranscriptStatus::NoSpeech => job(
+            asset,
+            AnalysisKind::Transcript,
+            AnalysisPhase::Unavailable,
+            Some(100),
+            None,
+        ),
+        TranscriptStatus::Cancelled => job(
+            asset,
+            AnalysisKind::Transcript,
+            AnalysisPhase::Cancelled,
+            None,
+            None,
+        ),
+        TranscriptStatus::Failed(error) => job(
+            asset,
+            AnalysisKind::Transcript,
+            AnalysisPhase::Failed,
+            None,
+            Some(error),
+        ),
+    }
+}
+
+fn silence_job_status(asset: AssetId, status: SilenceStatus) -> AnalysisJobStatus {
+    let (phase, progress, error) = match status {
+        SilenceStatus::NotRequested => (AnalysisPhase::NotRequested, None, None),
+        SilenceStatus::Queued => (AnalysisPhase::Queued, Some(0), None),
+        SilenceStatus::Hashing => (AnalysisPhase::Hashing, None, None),
+        SilenceStatus::Analyzing => (AnalysisPhase::Analyzing, None, None),
+        SilenceStatus::Ready(_) => (AnalysisPhase::Ready, Some(100), None),
+        SilenceStatus::NoAudio => (AnalysisPhase::Unavailable, Some(100), None),
+        SilenceStatus::Cancelled => (AnalysisPhase::Cancelled, None, None),
+        SilenceStatus::Failed(error) => (AnalysisPhase::Failed, None, Some(error)),
+    };
+    job(asset, AnalysisKind::Silence, phase, progress, error)
+}
+
+fn scene_job_status(asset: AssetId, status: SceneStatus) -> AnalysisJobStatus {
+    let (phase, progress, error) = match status {
+        SceneStatus::NotRequested => (AnalysisPhase::NotRequested, None, None),
+        SceneStatus::Queued => (AnalysisPhase::Queued, Some(0), None),
+        SceneStatus::Hashing => (AnalysisPhase::Hashing, None, None),
+        SceneStatus::Analyzing => (AnalysisPhase::Analyzing, None, None),
+        SceneStatus::Ready(_) => (AnalysisPhase::Ready, Some(100), None),
+        SceneStatus::NoVideo => (AnalysisPhase::Unavailable, Some(100), None),
+        SceneStatus::Cancelled => (AnalysisPhase::Cancelled, None, None),
+        SceneStatus::Failed(error) => (AnalysisPhase::Failed, None, Some(error)),
+    };
+    job(asset, AnalysisKind::Scene, phase, progress, error)
+}
+
+fn beat_job_status(asset: AssetId, status: BeatStatus) -> AnalysisJobStatus {
+    let (phase, progress, error) = match status {
+        BeatStatus::NotRequested => (AnalysisPhase::NotRequested, None, None),
+        BeatStatus::Queued => (AnalysisPhase::Queued, Some(0), None),
+        BeatStatus::Hashing => (AnalysisPhase::Hashing, None, None),
+        BeatStatus::Analyzing { progress_percent } => {
+            (AnalysisPhase::Analyzing, progress_percent, None)
+        }
+        BeatStatus::Ready(_) => (AnalysisPhase::Ready, Some(100), None),
+        BeatStatus::NoAudio => (AnalysisPhase::Unavailable, Some(100), None),
+        BeatStatus::Cancelled => (AnalysisPhase::Cancelled, None, None),
+        BeatStatus::Failed(error) => (AnalysisPhase::Failed, None, Some(error)),
+    };
+    job(asset, AnalysisKind::Beat, phase, progress, error)
+}
+
+fn percent(value: u64, total: u64) -> Option<u8> {
+    if total == 0 {
+        return None;
+    }
+    Some(u8::try_from(value.saturating_mul(100).saturating_div(total).min(100)).unwrap_or(100))
 }
 
 pub trait Export: Send + Sync {

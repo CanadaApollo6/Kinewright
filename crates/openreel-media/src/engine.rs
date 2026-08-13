@@ -10,10 +10,10 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use openreel_core::{
-    Analysis, AssetId, Document, Export, ExportSettings, FrameTexture, MediaAsset, MediaError,
-    MediaEvent, Playback, PlaybackState, ProgressSink, Rational, RgbaImage, SceneStatus,
-    SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TranscriptStatus, VisualAssetResult,
+    Analysis, AnalysisKind, AssetId, BeatStatus, Document, Export, ExportSettings, FrameTexture,
+    MediaAsset, MediaError, MediaEvent, Playback, PlaybackState, ProgressSink, Rational, RgbaImage,
+    SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan,
+    TimelineTranscriptWord, TranscriptStatus, VisualAssetResult,
 };
 
 use crate::{
@@ -21,10 +21,9 @@ use crate::{
     audio::{AudioRuntime, MeterState},
     clock::samples_to_frame,
     compositor::GpuContext,
-    decode::{probe_path, thumbnail},
+    decode::probe_path,
     derived::{DerivedAnalysisConfig, DerivedAnalysisService},
     render::{DecodeStrategy, FrameRenderer, PREVIEW_MAX_WIDTH, RenderScale},
-    timeline_source_at,
     transcript::{TranscriptService, default_data_dir},
 };
 
@@ -342,6 +341,32 @@ impl Analysis for FfmpegMediaEngine {
             .timeline_scenes(document, range, minimum_confidence_basis_points)
     }
 
+    fn request_beat_detection(&self, asset: MediaAsset) {
+        self.derived_analysis.request_beats(asset);
+    }
+
+    fn beat_status(&self, asset: &MediaAsset) -> BeatStatus {
+        self.derived_analysis.beat_status(&asset.path)
+    }
+
+    fn timeline_beats(
+        &self,
+        document: &Document,
+        range: Option<std::ops::Range<TimeCode>>,
+        minimum_strength_basis_points: u16,
+    ) -> Result<Vec<TimelineBeat>, MediaError> {
+        self.derived_analysis
+            .timeline_beats(document, range, minimum_strength_basis_points)
+    }
+
+    fn cancel_analysis(&self, asset: &MediaAsset, kind: AnalysisKind) -> bool {
+        if kind == AnalysisKind::Transcript {
+            self.transcripts.cancel(&asset.path)
+        } else {
+            self.derived_analysis.cancel(&asset.path, kind)
+        }
+    }
+
     fn thumbnail_at(&self, at: TimeCode, max_width: u32) -> Result<RgbaImage, MediaError> {
         let (reply, response) = bounded(1);
         self.control_tx
@@ -384,13 +409,6 @@ impl Export for FfmpegMediaEngine {
             .clone();
         crate::export::export_document(&document, out, &settings, &progress, self.gpu.clone())
     }
-}
-
-#[derive(Clone)]
-struct ActiveMedia {
-    path: PathBuf,
-    source_fps: Rational,
-    source_at: TimeCode,
 }
 
 struct Worker {
@@ -471,13 +489,16 @@ impl Worker {
                 max_width,
                 reply,
             } => {
-                let result = active_media_at(&self.document, at).and_then(|active| {
-                    if let Some(active) = active {
-                        thumbnail(&active.path, active.source_fps, active.source_at, max_width)
-                    } else {
-                        Ok(black_image(self.document.resolution, max_width))
-                    }
-                });
+                let scale = RenderScale::Proxy { max_width };
+                let resolution = scale.output_resolution(self.document.resolution);
+                let result = self
+                    .renderer
+                    .render(&self.document, at, resolution, scale, DecodeStrategy::Seek)
+                    .map(|frame| RgbaImage {
+                        width: frame.width,
+                        height: frame.height,
+                        pixels: (*frame.rgba).clone(),
+                    });
                 let _ = reply.send(result);
             }
         }
@@ -629,45 +650,6 @@ impl Worker {
 
     fn emit(&self, event: MediaEvent) {
         send_latest(&self.events_tx, &self.events_drop_rx, event);
-    }
-}
-
-fn active_media_at(
-    document: &Document,
-    project_at: TimeCode,
-) -> Result<Option<ActiveMedia>, MediaError> {
-    let Some(source) = timeline_source_at(document, project_at)? else {
-        return Ok(None);
-    };
-    let asset = document.asset(source.asset).ok_or_else(|| {
-        MediaError::Backend(format!("timeline asset {} disappeared", source.asset))
-    })?;
-    Ok(Some(ActiveMedia {
-        path: asset.path.clone(),
-        source_fps: asset.fps,
-        source_at: source.source_at,
-    }))
-}
-
-fn black_image(resolution: (u32, u32), max_width: u32) -> RgbaImage {
-    let width = resolution.0.min(max_width.max(1)).max(1);
-    let height = u32::try_from(
-        u64::from(resolution.1).saturating_mul(u64::from(width)) / u64::from(resolution.0.max(1)),
-    )
-    .unwrap_or(resolution.1)
-    .max(1);
-    let pixel_count = usize::try_from(width)
-        .unwrap_or_default()
-        .saturating_mul(usize::try_from(height).unwrap_or_default())
-        .saturating_mul(4);
-    let mut pixels = vec![0; pixel_count];
-    for alpha in pixels.iter_mut().skip(3).step_by(4) {
-        *alpha = 255;
-    }
-    RgbaImage {
-        width,
-        height,
-        pixels,
     }
 }
 

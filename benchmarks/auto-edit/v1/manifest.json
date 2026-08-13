@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "openreel-auto-edit-v1",
+  "title": "OpenReel Auto-Edit Benchmark v1",
+  "runner": "cargo run -p openreel-agent --bin openreel-eval",
+  "implementation": "crates/openreel-agent/src/bin/openreel-eval.rs",
+  "fixture_provenance": {
+    "policy": "Generated locally; no private footage or downloaded evaluation corpus.",
+    "video": "Pinned OpenReel FFmpeg generates test patterns, solid colors, and sine audio.",
+    "speech": "Windows SAPI creates local speech fixtures from checked-in text and SSML.",
+    "media_cache": "Derived transcript, silence, and scene data are content-addressed by SHA-256.",
+    "time_base": "All scoring uses exact integer source or project frames."
+  },
+  "reporting": {
+    "trace_format": "environment-stamped JSONL",
+    "required_metrics": [
+      "pass_rate",
+      "assertion_rate",
+      "turns",
+      "tool_calls",
+      "input_tokens",
+      "output_tokens",
+      "cost_usd",
+      "wall_time_ms",
+      "operations_applied",
+      "failure_categories"
+    ],
+    "optional_metrics": ["human_first_pass_acceptance"]
+  },
+  "tasks": [
+    {
+      "id": "e1",
+      "name": "split-and-delete",
+      "fixture": "fixture_e1",
+      "prompt": "Split the first clip at frame 30, then delete the second clip as it existed before any edits.",
+      "assertions": ["clip_count", "exact_source_clips", "gapless", "required_tool_usage", "undo_integrity"],
+      "budget": {"turns": 1, "tool_calls": 16, "operations": 4, "tokens": 30000, "cost_usd": 2.0, "wall_time_ms": 300000, "undos": 2}
+    },
+    {
+      "id": "e2",
+      "name": "silence-gap removal",
+      "fixture": "fixture_e2",
+      "prompt": "Remove every silent gap at least 20 source frames long. Keep all spoken content and butt the remaining clips together.",
+      "assertions": ["timeline_non_empty", "gapless", "words_retained", "no_silence_at_least", "duration_bounds", "required_tool_usage", "undo_integrity"],
+      "budget": {"turns": 1, "tool_calls": 16, "operations": 12, "tokens": 30000, "cost_usd": 2.0, "wall_time_ms": 1500000, "undos": 12}
+    },
+    {
+      "id": "e3",
+      "name": "filler-word removal",
+      "fixture": "fixture_e3",
+      "prompt": "Use the transcript to remove the filler words. Preserve all other spoken words and close the gaps.",
+      "assertions": ["timeline_non_empty", "gapless", "words_retained", "words_absent", "required_tool_usage", "undo_integrity"],
+      "budget": {"turns": 1, "tool_calls": 16, "operations": 12, "tokens": 30000, "cost_usd": 2.0, "wall_time_ms": 1500000, "undos": 8}
+    },
+    {
+      "id": "e4",
+      "name": "scene-cut",
+      "fixture": "fixture_e4",
+      "prompt": "Split the clip at every detected scene change with confidence at least 1000 basis points.",
+      "assertions": ["timeline_non_empty", "gapless", "scene_changes_are_cuts", "required_tool_usage", "undo_integrity"],
+      "budget": {"turns": 1, "tool_calls": 16, "operations": 10, "tokens": 30000, "cost_usd": 2.0, "wall_time_ms": 300000, "undos": 8}
+    },
+    {
+      "id": "e5",
+      "name": "effect-and-transition",
+      "fixture": "fixture_e5",
+      "prompt": "Brighten the second clip by 20 percent and add a 12-frame crossfade into it.",
+      "assertions": ["clip_count", "asset_order", "gapless", "effect_on_asset", "transition_on_asset", "required_tool_usage", "undo_integrity"],
+      "budget": {"turns": 1, "tool_calls": 16, "operations": 5, "tokens": 30000, "cost_usd": 2.0, "wall_time_ms": 300000, "undos": 4}
+    },
+    {
+      "id": "e6",
+      "name": "ordinal-resolution stress",
+      "fixture": "fixture_e6",
+      "prompt": "Resolve all ordinals against the initial timeline: split the first clip at frame 30, delete the second clip, close the resulting timeline gap, then brighten the third clip by 15 percent.",
+      "assertions": ["asset_order", "asset_absent", "effect_on_asset", "gapless", "required_tool_usage", "undo_integrity"],
+      "budget": {"turns": 1, "tool_calls": 16, "operations": 6, "tokens": 30000, "cost_usd": 2.0, "wall_time_ms": 300000, "undos": 5}
+    },
+    {
+      "id": "e7",
+      "name": "flagship rough cut",
+      "fixture": "fixture_e7",
+      "prompt": "Assemble a rough cut from the media pool. Use take-A's content first, then take-C, then take-D. Do not use take-B or take-E. Cut dead air at least 20 source frames long and remove recognized filler words. Butt every resulting clip together with no gaps. The brief is explicit; do not choose alternate takes.",
+      "assertions": ["timeline_non_empty", "asset_order", "asset_absent", "gapless", "words_retained", "words_absent", "no_silence_at_least", "duration_bounds", "required_tool_usage", "undo_integrity"],
+      "budget": {"turns": 1, "tool_calls": 36, "operations": 30, "tokens": 70000, "cost_usd": 2.5, "wall_time_ms": 2400000, "undos": 30}
+    }
+  ]
+}

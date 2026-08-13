@@ -2,13 +2,13 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     thread,
     time::SystemTime,
 };
 
 use crossbeam_channel::Receiver;
-use openreel_core::MediaError;
+use openreel_core::{ExportCancellation, MediaError};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::sha256::sha256_file;
@@ -84,6 +84,44 @@ impl<S: Clone> StatusReporter<S> {
             .ok()
             .and_then(|states| states.get(path).cloned())
             .unwrap_or(default)
+    }
+}
+
+/// Cooperative cancellation tokens for one analysis family, keyed by media path.
+#[derive(Clone, Default)]
+pub(crate) struct CancellationRegistry {
+    active: Arc<Mutex<HashMap<PathBuf, ExportCancellation>>>,
+}
+
+impl CancellationRegistry {
+    /// Start one job unless the same asset is already queued or running.
+    pub(crate) fn start(&self, path: &Path) -> Option<ExportCancellation> {
+        let mut active = self.active.lock().ok()?;
+        if active.contains_key(path) {
+            return None;
+        }
+        let cancellation = ExportCancellation::default();
+        active.insert(path.to_path_buf(), cancellation.clone());
+        Some(cancellation)
+    }
+
+    pub(crate) fn cancel(&self, path: &Path) -> bool {
+        self.active.lock().ok().is_some_and(|active| {
+            active.get(path).is_some_and(|cancellation| {
+                cancellation.cancel();
+                true
+            })
+        })
+    }
+
+    pub(crate) fn finish(&self, path: &Path, cancellation: &ExportCancellation) {
+        if let Ok(mut active) = self.active.lock()
+            && active
+                .get(path)
+                .is_some_and(|current| current == cancellation)
+        {
+            active.remove(path);
+        }
     }
 }
 

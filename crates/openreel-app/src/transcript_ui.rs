@@ -153,6 +153,12 @@ impl OpenReelApp {
             TranscriptStatus::NoSpeech => {
                 ui.label("No speech found.");
             }
+            TranscriptStatus::Cancelled => {
+                ui.label("Transcription cancelled.");
+                if ui.button("Retry").clicked() {
+                    self.analysis.request_transcription(asset);
+                }
+            }
             TranscriptStatus::Failed(error) => {
                 ui.colored_label(
                     color::STATUS_DANGER,

@@ -590,7 +590,8 @@ impl OpenReelApp {
     fn request_asset_analysis(&self, asset: MediaAsset) {
         self.analysis.request_transcription(asset.clone());
         self.analysis.request_silence_detection(asset.clone());
-        self.analysis.request_scene_detection(asset);
+        self.analysis.request_scene_detection(asset.clone());
+        self.analysis.request_beat_detection(asset);
     }
 
     pub(crate) fn undo(&mut self) {
@@ -664,6 +665,7 @@ impl OpenReelApp {
             match event {
                 Event::DocumentChanged {
                     doc,
+                    revision,
                     last_op,
                     journal_command,
                 } => {
@@ -719,6 +721,7 @@ impl OpenReelApp {
                         }
                     }
                     self.projects[project_index].document = Arc::clone(&doc);
+                    self.projects[project_index].revision = revision;
                     self.projects[project_index].transcript_selection = None;
                     if self.projects[project_index]
                         .selected_clip
@@ -796,6 +799,15 @@ impl OpenReelApp {
                         format!("Edit plan rejected in {name}: {error}"),
                     );
                 }
+                Event::RevisionConflict { expected, actual } => {
+                    let name = &self.projects[project_index].name;
+                    self.record_error(
+                        "Operations",
+                        format!(
+                            "Stale edit rejected in {name}: expected timeline revision {expected}, current revision is {actual}"
+                        ),
+                    );
+                }
                 Event::QueryResult(_) => {}
             }
         }
@@ -804,6 +816,7 @@ impl OpenReelApp {
             project.document.media_pool.iter().any(|asset| {
                 self.analysis.silence_status(asset).is_running()
                     || self.analysis.scene_status(asset).is_running()
+                    || self.analysis.beat_status(asset).is_running()
             })
         }) {
             ctx.request_repaint_after(Duration::from_millis(100));

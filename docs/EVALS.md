@@ -12,6 +12,8 @@ cargo run -p openreel-agent --bin openreel-eval
 
 Results are written as timestamped, environment-stamped JSONL under `target/evals/`. A full live suite is intentionally expensive and must not be placed in CI.
 
+The versioned public contract and first machine-readable baseline live under [`benchmarks/auto-edit/v1`](../benchmarks/auto-edit/v1/README.md). The baseline preserves the real 6/7 task result and leaves human first-pass acceptance unset.
+
 ## Seed suite
 
 | Eval | Rationale | USD ceiling |

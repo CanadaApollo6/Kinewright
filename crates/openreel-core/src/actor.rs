@@ -1,14 +1,54 @@
 use std::{sync::Arc, thread};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{BatchError, Clip, ClipId, Document, JournalCommand, OpError, Operation, apply_batch};
+
+/// Monotonic identity for one authoritative runtime timeline state.
+///
+/// Revisions belong to a running [`Core`] actor and are deliberately not part
+/// of the serialized project document. Opening a project starts a new lineage
+/// at revision zero.
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(transparent)]
+pub struct TimelineRevision(pub u64);
+
+impl std::fmt::Display for TimelineRevision {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Do(Operation),
     DoBatch(Vec<Operation>),
+    /// Apply one operation only if the caller planned it against the current revision.
+    DoIfRevision {
+        expected: TimelineRevision,
+        operation: Operation,
+    },
+    /// Apply one atomic batch only if the caller planned it against the current revision.
+    DoBatchIfRevision {
+        expected: TimelineRevision,
+        operations: Vec<Operation>,
+    },
     Undo,
     Redo,
     Query(Query),
@@ -17,6 +57,7 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Query {
     Document,
+    Snapshot,
     Clip(ClipId),
     OpLog,
 }
@@ -24,6 +65,10 @@ pub enum Query {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryResult {
     Document(Arc<Document>),
+    Snapshot {
+        revision: TimelineRevision,
+        document: Arc<Document>,
+    },
     Clip(Option<Clip>),
     OpLog(Arc<Vec<Operation>>),
 }
@@ -32,6 +77,7 @@ pub enum QueryResult {
 pub enum Event {
     DocumentChanged {
         doc: Arc<Document>,
+        revision: TimelineRevision,
         last_op: Option<Operation>,
         /// Exact accepted history command. `None` is reserved for the initial
         /// snapshot sent to a new subscriber.
@@ -44,6 +90,10 @@ pub enum Event {
     BatchRejected {
         operations: Vec<Operation>,
         error: BatchError,
+    },
+    RevisionConflict {
+        expected: TimelineRevision,
+        actual: TimelineRevision,
     },
     QueryResult(QueryResult),
 }
@@ -136,6 +186,7 @@ struct HistoryEntry {
 
 struct CoreState {
     document: Arc<Document>,
+    revision: TimelineRevision,
     undo: Vec<HistoryEntry>,
     redo: Vec<HistoryEntry>,
     op_log: Vec<Operation>,
@@ -145,6 +196,7 @@ impl CoreState {
     fn new(document: Document) -> Self {
         Self {
             document: Arc::new(document),
+            revision: TimelineRevision::default(),
             undo: Vec::new(),
             redo: Vec::new(),
             op_log: Vec::new(),
@@ -162,6 +214,7 @@ impl CoreState {
         self.redo.clear();
         self.op_log.push(operation);
         self.document = Arc::new(after);
+        self.increment_revision();
         Ok(Arc::clone(&self.document))
     }
 
@@ -176,6 +229,7 @@ impl CoreState {
         self.redo.clear();
         self.op_log.extend(operations);
         self.document = Arc::new(after);
+        self.increment_revision();
         Ok(Arc::clone(&self.document))
     }
 
@@ -186,6 +240,7 @@ impl CoreState {
                 operations: entry.operations,
             });
             self.document = entry.document;
+            self.increment_revision();
         }
         Arc::clone(&self.document)
     }
@@ -197,6 +252,7 @@ impl CoreState {
                 operations: entry.operations,
             });
             self.document = entry.document;
+            self.increment_revision();
         }
         Arc::clone(&self.document)
     }
@@ -204,9 +260,22 @@ impl CoreState {
     fn query(&self, query: &Query) -> QueryResult {
         match query {
             Query::Document => QueryResult::Document(Arc::clone(&self.document)),
+            Query::Snapshot => QueryResult::Snapshot {
+                revision: self.revision,
+                document: Arc::clone(&self.document),
+            },
             Query::Clip(id) => QueryResult::Clip(self.document.clip(*id).cloned()),
             Query::OpLog => QueryResult::OpLog(Arc::new(self.op_log.clone())),
         }
+    }
+
+    fn increment_revision(&mut self) {
+        self.revision = TimelineRevision(
+            self.revision
+                .0
+                .checked_add(1)
+                .expect("timeline revision overflowed"),
+        );
     }
 }
 
@@ -218,6 +287,7 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
                 if subscriber
                     .send(Event::DocumentChanged {
                         doc: Arc::clone(&state.document),
+                        revision: state.revision,
                         last_op: None,
                         journal_command: None,
                     })
@@ -241,36 +311,70 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
 
 fn execute_command(state: &mut CoreState, command: Command) -> Event {
     match command {
-        Command::Do(operation) => match state.do_operation(operation.clone()) {
-            Ok(doc) => Event::DocumentChanged {
+        Command::Do(operation) => execute_operation(state, operation),
+        Command::DoBatch(operations) => execute_batch(state, operations),
+        Command::DoIfRevision {
+            expected,
+            operation,
+        } => revision_conflict(state, expected)
+            .unwrap_or_else(|| execute_operation(state, operation)),
+        Command::DoBatchIfRevision {
+            expected,
+            operations,
+        } => revision_conflict(state, expected).unwrap_or_else(|| execute_batch(state, operations)),
+        Command::Undo => {
+            let doc = state.undo();
+            Event::DocumentChanged {
                 doc,
-                last_op: Some(operation.clone()),
-                journal_command: Some(JournalCommand::Do(operation)),
-            },
-            Err(error) => Event::OpRejected {
-                op: operation,
-                error,
-            },
-        },
-        Command::DoBatch(operations) => match state.do_batch(operations.clone()) {
-            Ok(doc) => Event::DocumentChanged {
-                doc,
+                revision: state.revision,
                 last_op: None,
-                journal_command: Some(JournalCommand::DoBatch(operations)),
-            },
-            Err(error) => Event::BatchRejected { operations, error },
-        },
-        Command::Undo => Event::DocumentChanged {
-            doc: state.undo(),
-            last_op: None,
-            journal_command: Some(JournalCommand::Undo),
-        },
-        Command::Redo => Event::DocumentChanged {
-            doc: state.redo(),
-            last_op: None,
-            journal_command: Some(JournalCommand::Redo),
-        },
+                journal_command: Some(JournalCommand::Undo),
+            }
+        }
+        Command::Redo => {
+            let doc = state.redo();
+            Event::DocumentChanged {
+                doc,
+                revision: state.revision,
+                last_op: None,
+                journal_command: Some(JournalCommand::Redo),
+            }
+        }
         Command::Query(query) => Event::QueryResult(state.query(&query)),
+    }
+}
+
+fn revision_conflict(state: &CoreState, expected: TimelineRevision) -> Option<Event> {
+    (expected != state.revision).then_some(Event::RevisionConflict {
+        expected,
+        actual: state.revision,
+    })
+}
+
+fn execute_operation(state: &mut CoreState, operation: Operation) -> Event {
+    match state.do_operation(operation.clone()) {
+        Ok(doc) => Event::DocumentChanged {
+            doc,
+            revision: state.revision,
+            last_op: Some(operation.clone()),
+            journal_command: Some(JournalCommand::Do(operation)),
+        },
+        Err(error) => Event::OpRejected {
+            op: operation,
+            error,
+        },
+    }
+}
+
+fn execute_batch(state: &mut CoreState, operations: Vec<Operation>) -> Event {
+    match state.do_batch(operations.clone()) {
+        Ok(doc) => Event::DocumentChanged {
+            doc,
+            revision: state.revision,
+            last_op: None,
+            journal_command: Some(JournalCommand::DoBatch(operations)),
+        },
+        Err(error) => Event::BatchRejected { operations, error },
     }
 }
 
@@ -374,6 +478,112 @@ mod tests {
     }
 
     #[test]
+    fn revision_preconditions_reject_stale_work_without_touching_history() {
+        let core = Core::spawn(Document::default()).unwrap();
+        let Event::QueryResult(QueryResult::Snapshot {
+            revision: initial_revision,
+            document: initial_document,
+        }) = core.request(Command::Query(Query::Snapshot)).unwrap()
+        else {
+            panic!("expected revisioned snapshot");
+        };
+        assert_eq!(initial_revision, TimelineRevision(0));
+
+        let accepted = core
+            .request(Command::DoIfRevision {
+                expected: initial_revision,
+                operation: Operation::AddAsset { asset: asset(1) },
+            })
+            .unwrap();
+        assert!(matches!(
+            accepted,
+            Event::DocumentChanged {
+                revision: TimelineRevision(1),
+                ..
+            }
+        ));
+
+        let stale = core
+            .request(Command::DoBatchIfRevision {
+                expected: initial_revision,
+                operations: vec![Operation::AddAsset { asset: asset(2) }],
+            })
+            .unwrap();
+        assert_eq!(
+            stale,
+            Event::RevisionConflict {
+                expected: TimelineRevision(0),
+                actual: TimelineRevision(1),
+            }
+        );
+
+        let Event::QueryResult(QueryResult::Snapshot { revision, document }) =
+            core.request(Command::Query(Query::Snapshot)).unwrap()
+        else {
+            panic!("expected revisioned snapshot");
+        };
+        assert_eq!(revision, TimelineRevision(1));
+        assert_eq!(&*initial_document, &Document::default());
+        assert!(document.asset(AssetId(1)).is_some());
+        assert!(document.asset(AssetId(2)).is_none());
+
+        let Event::QueryResult(QueryResult::OpLog(log)) =
+            core.request(Command::Query(Query::OpLog)).unwrap()
+        else {
+            panic!("expected operation log");
+        };
+        assert_eq!(log.len(), 1);
+    }
+
+    #[test]
+    fn accepted_batches_and_real_history_moves_increment_revision_once() {
+        let core = Core::spawn(Document::default()).unwrap();
+        let accepted = core
+            .request(Command::DoBatchIfRevision {
+                expected: TimelineRevision(0),
+                operations: vec![
+                    Operation::AddAsset { asset: asset(1) },
+                    Operation::AddTrack {
+                        track: Track {
+                            id: TrackId(1),
+                            kind: TrackKind::Video,
+                            sync_lock: true,
+                            clips: Vec::new(),
+                        },
+                    },
+                ],
+            })
+            .unwrap();
+        assert!(matches!(
+            accepted,
+            Event::DocumentChanged {
+                revision: TimelineRevision(1),
+                ..
+            }
+        ));
+
+        let undone = core.request(Command::Undo).unwrap();
+        assert!(matches!(
+            undone,
+            Event::DocumentChanged {
+                revision: TimelineRevision(2),
+                ref doc,
+                ..
+            } if **doc == Document::default()
+        ));
+
+        let no_op_undo = core.request(Command::Undo).unwrap();
+        assert!(matches!(
+            no_op_undo,
+            Event::DocumentChanged {
+                revision: TimelineRevision(2),
+                journal_command: Some(JournalCommand::Undo),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn batch_broadcasts_once_appends_each_op_and_undoes_as_one_snapshot() {
         let core = Core::spawn(Document::default()).unwrap();
         let events = core.subscribe().unwrap();
@@ -393,6 +603,7 @@ mod tests {
         core.send(Command::DoBatch(operations.clone())).unwrap();
         let Event::DocumentChanged {
             doc,
+            revision: TimelineRevision(1),
             last_op: None,
             journal_command: Some(JournalCommand::DoBatch(journaled)),
         } = events.recv_timeout(Duration::from_secs(1)).unwrap()

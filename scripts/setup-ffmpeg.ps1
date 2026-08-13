@@ -114,29 +114,39 @@ with urllib.request.urlopen(request, timeout=60) as source, open(sys.argv[2], 'w
     Remove-Item -LiteralPath $archive -Force
 }
 
-foreach ($toolRoot in @($pkgconfRoot, $libclangRoot)) {
-    if (Test-Path -LiteralPath $toolRoot) {
-        Remove-Item -LiteralPath $toolRoot -Recurse -Force
-    }
-}
-
-Write-Host "Installing pkgconf $PkgconfVersion under third_party..."
-& $python.Source -m pip install --disable-pip-version-check --no-deps --no-cache-dir --target $pkgconfRoot "pkgconf==$PkgconfVersion"
-if ($LASTEXITCODE -ne 0) {
-    throw 'pkgconf installation failed.'
-}
-
-Write-Host "Installing libclang $LibclangVersion under third_party..."
-& $python.Source -m pip install --disable-pip-version-check --no-deps --no-cache-dir --target $libclangRoot "libclang==$LibclangVersion"
-if ($LASTEXITCODE -ne 0) {
-    throw 'libclang installation failed.'
-}
-
 $pkgConfig = Join-Path $pkgconfRoot 'pkgconf\.bin\pkgconf.exe'
+$libclang = Get-ChildItem -LiteralPath $libclangRoot -Filter 'libclang.dll' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+
+if (-not (Test-Path -LiteralPath $pkgConfig)) {
+    if (Test-Path -LiteralPath $pkgconfRoot) {
+        Remove-Item -LiteralPath $pkgconfRoot -Recurse -Force
+    }
+    Write-Host "Installing pkgconf $PkgconfVersion under third_party..."
+    & $python.Source -m pip install --disable-pip-version-check --no-deps --no-cache-dir --target $pkgconfRoot "pkgconf==$PkgconfVersion"
+    if ($LASTEXITCODE -ne 0) {
+        throw 'pkgconf installation failed.'
+    }
+} else {
+    Write-Host "Using existing pkgconf under third_party."
+}
+
+if (-not $libclang) {
+    if (Test-Path -LiteralPath $libclangRoot) {
+        Remove-Item -LiteralPath $libclangRoot -Recurse -Force
+    }
+    Write-Host "Installing libclang $LibclangVersion under third_party..."
+    & $python.Source -m pip install --disable-pip-version-check --no-deps --no-cache-dir --target $libclangRoot "libclang==$LibclangVersion"
+    if ($LASTEXITCODE -ne 0) {
+        throw 'libclang installation failed.'
+    }
+    $libclang = Get-ChildItem -LiteralPath $libclangRoot -Filter 'libclang.dll' -Recurse | Select-Object -First 1
+} else {
+    Write-Host "Using existing libclang under third_party."
+}
+
 $pkgConfigBin = Split-Path -Parent $pkgConfig
 $pkgConfigPath = Join-Path $ffmpegRoot 'lib\pkgconfig'
 $ffmpegBin = Join-Path $ffmpegRoot 'bin'
-$libclang = Get-ChildItem -LiteralPath $libclangRoot -Filter 'libclang.dll' -Recurse | Select-Object -First 1
 
 foreach ($required in @(
     (Join-Path $ffmpegRoot 'include\libavcodec\avcodec.h'),

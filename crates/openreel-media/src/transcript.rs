@@ -21,7 +21,7 @@ use whisper_rs::{
 
 use crate::{
     audio::decode_audio_range,
-    derived_cache::{JsonCache, StatusReporter, cache_root, spawn_worker},
+    derived_cache::{CancellationRegistry, JsonCache, StatusReporter, cache_root, spawn_worker},
     sha256::sha256_file,
 };
 
@@ -38,19 +38,30 @@ pub const WHISPER_MODEL_SHA256: &str =
 pub const WHISPER_MODEL_LICENSE: &str = "MIT";
 
 pub(crate) struct TranscriptService {
-    jobs: Sender<MediaAsset>,
+    jobs: Sender<TranscriptJob>,
     states: StatusReporter<TranscriptStatus>,
+    cancellations: CancellationRegistry,
+}
+
+struct TranscriptJob {
+    asset: MediaAsset,
+    cancellation: ExportCancellation,
 }
 
 impl TranscriptService {
     pub(crate) fn new(data_dir: PathBuf) -> Result<Self, MediaError> {
         let (jobs, jobs_rx) = unbounded();
         let states = StatusReporter::new();
-        let mut worker = TranscriptWorker::new(data_dir, states.clone());
-        spawn_worker("openreel-transcript", "transcript", jobs_rx, move |asset| {
-            worker.handle(&asset)
+        let cancellations = CancellationRegistry::default();
+        let mut worker = TranscriptWorker::new(data_dir, states.clone(), cancellations.clone());
+        spawn_worker("openreel-transcript", "transcript", jobs_rx, move |job| {
+            worker.handle(&job)
         })?;
-        Ok(Self { jobs, states })
+        Ok(Self {
+            jobs,
+            states,
+            cancellations,
+        })
     }
 
     pub(crate) fn request(&self, asset: MediaAsset) {
@@ -72,9 +83,20 @@ impl TranscriptService {
         if !should_queue {
             return;
         }
+        let Some(cancellation) = self.cancellations.start(&asset.path) else {
+            return;
+        };
         self.update(&asset.path, TranscriptStatus::Queued);
         let path = asset.path.clone();
-        if self.jobs.send(asset).is_err() {
+        if self
+            .jobs
+            .send(TranscriptJob {
+                asset,
+                cancellation: cancellation.clone(),
+            })
+            .is_err()
+        {
+            self.cancellations.finish(&path, &cancellation);
             self.update(
                 &path,
                 TranscriptStatus::Failed("transcript worker stopped".to_owned()),
@@ -84,6 +106,14 @@ impl TranscriptService {
 
     pub(crate) fn status(&self, path: &Path) -> TranscriptStatus {
         self.states.get_or(path, TranscriptStatus::NotRequested)
+    }
+
+    pub(crate) fn cancel(&self, path: &Path) -> bool {
+        let cancelled = self.cancellations.cancel(path);
+        if cancelled {
+            self.update(path, TranscriptStatus::Cancelled);
+        }
+        cancelled
     }
 
     pub(crate) fn timeline_words(
@@ -107,35 +137,56 @@ struct TranscriptWorker {
     states: StatusReporter<TranscriptStatus>,
     store: TranscriptStore,
     model: Option<WhisperContext>,
+    cancellations: CancellationRegistry,
 }
 
 impl TranscriptWorker {
-    fn new(data_dir: PathBuf, states: StatusReporter<TranscriptStatus>) -> Self {
+    fn new(
+        data_dir: PathBuf,
+        states: StatusReporter<TranscriptStatus>,
+        cancellations: CancellationRegistry,
+    ) -> Self {
         Self {
             store: TranscriptStore::new(cache_root(&data_dir, "transcripts", CACHE_VERSION)),
             data_dir,
             states,
             model: None,
+            cancellations,
         }
     }
 
-    fn handle(&mut self, asset: &MediaAsset) -> bool {
-        if let Err(error) = self.transcribe_asset(asset) {
-            self.update(&asset.path, TranscriptStatus::Failed(error.to_string()));
+    fn handle(&mut self, job: &TranscriptJob) -> bool {
+        if let Err(error) = self.transcribe_asset(&job.asset, &job.cancellation) {
+            let status = if error == MediaError::Cancelled {
+                TranscriptStatus::Cancelled
+            } else {
+                TranscriptStatus::Failed(error.to_string())
+            };
+            self.update(&job.asset.path, status);
         }
+        self.cancellations
+            .finish(&job.asset.path, &job.cancellation);
         true
     }
 
-    fn transcribe_asset(&mut self, asset: &MediaAsset) -> Result<(), MediaError> {
+    fn transcribe_asset(
+        &mut self,
+        asset: &MediaAsset,
+        cancellation: &ExportCancellation,
+    ) -> Result<(), MediaError> {
+        cancelled(cancellation)?;
         self.update(&asset.path, TranscriptStatus::Hashing);
         let content_sha256 = sha256_file(&asset.path)?;
+        cancelled(cancellation)?;
         if let Some(cached) = self.store.load(&content_sha256, asset.id)? {
+            cancelled(cancellation)?;
             self.finish(&asset.path, cached);
             return Ok(());
         }
 
         if self.model.is_none() {
-            let model_path = ensure_model(&self.data_dir, &asset.path, &self.states)?;
+            let model_path = ensure_model(&self.data_dir, &asset.path, &self.states, cancellation)?;
+            cancelled(cancellation)?;
             let model_path = model_path.to_string_lossy();
             self.model = Some(
                 WhisperContext::new_with_params(
@@ -161,8 +212,9 @@ impl TranscriptWorker {
             asset.duration,
             WHISPER_SAMPLE_RATE,
             1,
-            &ExportCancellation::default(),
+            cancellation,
         )?;
+        cancelled(cancellation)?;
         let context = self
             .model
             .as_ref()
@@ -173,8 +225,11 @@ impl TranscriptWorker {
             asset,
             content_sha256,
             self.states.clone(),
+            cancellation,
         )?;
+        cancelled(cancellation)?;
         self.store.save(&transcript)?;
+        cancelled(cancellation)?;
         self.finish(&asset.path, transcript);
         Ok(())
     }
@@ -198,6 +253,7 @@ fn run_whisper(
     asset: &MediaAsset,
     content_sha256: String,
     states: StatusReporter<TranscriptStatus>,
+    cancellation: &ExportCancellation,
 ) -> Result<AssetTranscript, MediaError> {
     let mut state = context
         .create_state()
@@ -220,7 +276,11 @@ fn run_whisper(
     params.set_split_on_word(true);
     params.set_max_len(1);
     let progress_path = asset.path.clone();
+    let progress_cancellation = cancellation.clone();
     params.set_progress_callback_safe(move |progress: i32| {
+        if progress_cancellation.is_cancelled() {
+            return;
+        }
         let clamped = progress.clamp(0, 100);
         states.update(
             &progress_path,
@@ -229,9 +289,18 @@ fn run_whisper(
             },
         );
     });
-    state
-        .full(params, samples)
-        .map_err(|error| MediaError::Backend(format!("Whisper inference failed: {error}")))?;
+    let abort_cancellation = cancellation.clone();
+    params.set_abort_callback_safe(move || abort_cancellation.is_cancelled());
+    if let Err(error) = state.full(params, samples) {
+        return if cancellation.is_cancelled() {
+            Err(MediaError::Cancelled)
+        } else {
+            Err(MediaError::Backend(format!(
+                "Whisper inference failed: {error}"
+            )))
+        };
+    }
+    cancelled(cancellation)?;
 
     let words = extract_words(
         &state.as_iter().collect::<Vec<_>>(),
@@ -590,10 +659,13 @@ fn ensure_model(
     data_dir: &Path,
     asset_path: &Path,
     states: &StatusReporter<TranscriptStatus>,
+    cancellation: &ExportCancellation,
 ) -> Result<PathBuf, MediaError> {
+    cancelled(cancellation)?;
     let model_dir = data_dir.join("models").join("whisper");
     let model_path = model_dir.join(WHISPER_MODEL_NAME);
     if model_path.is_file() && sha256_file(&model_path)? == WHISPER_MODEL_SHA256 {
+        cancelled(cancellation)?;
         return Ok(model_path);
     }
     fs::create_dir_all(&model_dir).map_err(|error| {
@@ -626,6 +698,10 @@ fn ensure_model(
     let mut buffer = vec![0_u8; 1024 * 1024];
     let mut downloaded = 0_u64;
     loop {
+        if cancellation.is_cancelled() {
+            let _ = fs::remove_file(&temporary);
+            return Err(MediaError::Cancelled);
+        }
         let count = response.read(&mut buffer).map_err(|error| {
             MediaError::Backend(format!("could not read model download: {error}"))
         })?;
@@ -646,6 +722,7 @@ fn ensure_model(
     }
     file.sync_all()
         .map_err(|error| MediaError::Backend(format!("could not flush model download: {error}")))?;
+    cancelled(cancellation)?;
     let actual = sha256_file(&temporary)?;
     if actual != WHISPER_MODEL_SHA256 {
         let _ = fs::remove_file(&temporary);
@@ -662,6 +739,14 @@ fn ensure_model(
         MediaError::Backend(format!("could not install Whisper model: {error}"))
     })?;
     Ok(model_path)
+}
+
+fn cancelled(cancellation: &ExportCancellation) -> Result<(), MediaError> {
+    if cancellation.is_cancelled() {
+        Err(MediaError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 #[must_use]

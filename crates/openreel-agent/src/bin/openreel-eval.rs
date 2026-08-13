@@ -984,6 +984,11 @@ fn wait_for_transcript_result(
                     "asset {label} produced no ASR speech"
                 )));
             }
+            TranscriptStatus::Cancelled => {
+                return Err(EvalError::Fixture(format!(
+                    "asset {label} transcription was cancelled"
+                )));
+            }
             TranscriptStatus::Failed(error) => return Err(EvalError::Fixture(error)),
             _ => {}
         }
@@ -1010,6 +1015,11 @@ fn wait_for_silences(
                     "asset {label} has no audio for silence analysis"
                 )));
             }
+            SilenceStatus::Cancelled => {
+                return Err(EvalError::Fixture(format!(
+                    "asset {label} silence analysis was cancelled"
+                )));
+            }
             SilenceStatus::Failed(error) => return Err(EvalError::Fixture(error)),
             _ => {}
         }
@@ -1034,6 +1044,11 @@ fn wait_for_scenes(
             SceneStatus::NoVideo => {
                 return Err(EvalError::Fixture(format!(
                     "asset {label} has no video for scene analysis"
+                )));
+            }
+            SceneStatus::Cancelled => {
+                return Err(EvalError::Fixture(format!(
+                    "asset {label} scene analysis was cancelled"
                 )));
             }
             SceneStatus::Failed(error) => return Err(EvalError::Fixture(error)),
@@ -1072,7 +1087,7 @@ fn render_evals_document(
     output_path: &Path,
 ) -> String {
     let mut document = String::from(
-        "# Agent evals\n\nOpenReel's Arc 2 editing competence suite runs only when `OPENREEL_EVAL=1` is explicitly set. It uses generated media, the real MCP server, and an installed subscription harness. CI covers the framework with a fake driver and spends nothing.\n\n## Run\n\n```powershell\n$env:OPENREEL_EVAL = '1'\ncargo run -p openreel-agent --bin openreel-eval\n# Optional: -- --harness codex\n```\n\nResults are written as timestamped, environment-stamped JSONL under `target/evals/`. A full live suite is intentionally expensive and must not be placed in CI.\n\n## Seed suite\n\n| Eval | Rationale | USD ceiling |\n|---|---|---:|\n",
+        "# Agent evals\n\nOpenReel's Arc 2 editing competence suite runs only when `OPENREEL_EVAL=1` is explicitly set. It uses generated media, the real MCP server, and an installed subscription harness. CI covers the framework with a fake driver and spends nothing.\n\n## Run\n\n```powershell\n$env:OPENREEL_EVAL = '1'\ncargo run -p openreel-agent --bin openreel-eval\n# Optional: -- --harness codex\n```\n\nResults are written as timestamped, environment-stamped JSONL under `target/evals/`. A full live suite is intentionally expensive and must not be placed in CI.\n\nThe versioned public contract and first machine-readable baseline live under [`benchmarks/auto-edit/v1`](../benchmarks/auto-edit/v1/README.md). A refreshed docs snapshot never overwrites that historical baseline.\n\n## Seed suite\n\n| Eval | Rationale | USD ceiling |\n|---|---|---:|\n",
     );
     for definition in definitions {
         let _ = writeln!(
@@ -1126,4 +1141,71 @@ fn render_evals_document(
         document.push_str("- None.\n");
     }
     document
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn published_v1_manifest_tracks_the_executable_seed_suite() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v1/manifest.json"
+        ))
+        .unwrap();
+        assert_eq!(manifest["schema_version"], 1);
+        assert_eq!(manifest["benchmark_id"], "openreel-auto-edit-v1");
+        let tasks = manifest["tasks"].as_array().unwrap();
+        let definitions = seed_suite();
+        assert_eq!(tasks.len(), definitions.len());
+        for (task, definition) in tasks.iter().zip(&definitions) {
+            assert_eq!(
+                task["id"].as_str(),
+                definition.name.split_whitespace().next()
+            );
+            assert_eq!(task["name"], definition.name[3..].to_owned());
+            assert_eq!(task["prompt"], definition.prompts[0]);
+            assert_eq!(task["budget"]["turns"], definition.budgets.max_turns);
+            assert_eq!(
+                task["budget"]["tool_calls"],
+                definition.budgets.max_tool_calls
+            );
+            assert_eq!(
+                task["budget"]["operations"],
+                definition.budgets.max_operations
+            );
+            assert_eq!(task["budget"]["tokens"], definition.budgets.max_tokens);
+            assert_eq!(
+                task["budget"]["wall_time_ms"],
+                u64::try_from(definition.budgets.max_wall_time.as_millis()).unwrap()
+            );
+            assert_eq!(task["budget"]["undos"], definition.budgets.max_undos);
+        }
+    }
+
+    #[test]
+    fn published_v1_baseline_reconciles_without_claiming_human_acceptance() {
+        let baseline: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v1/baseline.json"
+        ))
+        .unwrap();
+        let summary = &baseline["summary"];
+        let tasks = baseline["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 7);
+        assert_eq!(
+            tasks.iter().filter(|task| task["passed"] == true).count(),
+            usize::try_from(summary["tasks_passed"].as_u64().unwrap()).unwrap()
+        );
+        let passed_assertions: u64 = tasks
+            .iter()
+            .map(|task| task["assertions_passed"].as_u64().unwrap())
+            .sum();
+        let total_tokens: u64 = tasks
+            .iter()
+            .map(|task| task["tokens"].as_u64().unwrap())
+            .sum();
+        assert_eq!(passed_assertions, summary["assertions_passed"]);
+        assert_eq!(total_tokens, summary["total_tokens"]);
+        assert!(summary["human_first_pass_acceptance"].is_null());
+    }
 }

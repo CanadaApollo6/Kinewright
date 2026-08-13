@@ -2,21 +2,28 @@ use std::{borrow::Cow, fmt::Write, sync::Arc};
 
 use openreel_core::{
     EFFECT_DESCRIPTORS, Operation, TITLE_PARAMETER_DESCRIPTORS, TRANSITION_DESCRIPTORS,
+    TimelineRevision,
 };
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 11] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 17] = [
     "get_timeline_state",
     "get_clip_info",
     "get_frame_at",
+    "get_timeline_storyboard",
     "get_transcript",
     "get_timeline_transcript",
     "get_silences",
     "get_timeline_silences",
     "get_scene_changes",
     "get_timeline_scene_changes",
+    "get_beats",
+    "get_timeline_beats",
+    "get_analysis_status",
+    "request_analysis",
+    "cancel_analysis",
     "apply_edit_plan",
     "import_media",
 ];
@@ -25,6 +32,12 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 11] = [
 pub struct OperationToolDefinition {
     pub variant: String,
     pub tool: Tool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisionedOperation {
+    pub expected_revision: TimelineRevision,
+    pub operation: Operation,
 }
 
 #[derive(Debug, Error)]
@@ -65,7 +78,23 @@ pub fn operation_tools() -> Result<Vec<OperationToolDefinition>, SchemaError> {
         .collect()
 }
 
-pub fn decode_operation(tool_name: &str, arguments: JsonObject) -> Result<Operation, SchemaError> {
+pub fn decode_operation(
+    tool_name: &str,
+    mut arguments: JsonObject,
+) -> Result<RevisionedOperation, SchemaError> {
+    let expected_revision =
+        arguments
+            .remove("expected_revision")
+            .ok_or_else(|| SchemaError::InvalidArguments {
+                tool: tool_name.to_owned(),
+                error: "missing expected_revision from get_timeline_state".to_owned(),
+            })?;
+    let expected_revision = serde_json::from_value(expected_revision).map_err(|error| {
+        SchemaError::InvalidArguments {
+            tool: tool_name.to_owned(),
+            error: format!("invalid expected_revision: {error}"),
+        }
+    })?;
     let definition = operation_tools()?
         .into_iter()
         .find(|definition| definition.tool.name == tool_name)
@@ -74,10 +103,15 @@ pub fn decode_operation(tool_name: &str, arguments: JsonObject) -> Result<Operat
         definition.variant,
         Value::Object(arguments),
     )]));
-    serde_json::from_value(tagged).map_err(|error| SchemaError::InvalidArguments {
-        tool: tool_name.to_owned(),
-        error: error.to_string(),
-    })
+    serde_json::from_value(tagged)
+        .map(|operation| RevisionedOperation {
+            expected_revision,
+            operation,
+        })
+        .map_err(|error| SchemaError::InvalidArguments {
+            tool: tool_name.to_owned(),
+            error: error.to_string(),
+        })
 }
 
 /// Return every mutating and inspecting MCP tool name.
@@ -153,13 +187,34 @@ fn operation_tool(
         .iter()
         .next()
         .ok_or(SchemaError::InvalidVariant)?;
-    let mut input = input
+    let input = input
         .as_object()
         .cloned()
         .ok_or_else(|| SchemaError::InvalidInput(variant.clone()))?;
+    let operation_schema = Value::Object(input);
+    let mut revisioned_input = serde_json::Map::from_iter([
+        ("type".to_owned(), Value::String("object".to_owned())),
+        ("allOf".to_owned(), Value::Array(vec![operation_schema])),
+        (
+            "properties".to_owned(),
+            serde_json::json!({
+                "expected_revision": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "description": "Exact revision returned by get_timeline_state before planning this edit."
+                }
+            }),
+        ),
+        (
+            "required".to_owned(),
+            serde_json::json!(["expected_revision"]),
+        ),
+    ]);
     if let Some(definitions) = definitions {
-        input.insert("$defs".to_owned(), definitions.clone());
+        revisioned_input.insert("$defs".to_owned(), definitions.clone());
     }
+    let input = revisioned_input;
     let name = camel_to_snake(variant);
     let annotations = ToolAnnotations::new()
         .read_only(false)
@@ -170,7 +225,7 @@ fn operation_tool(
         .idempotent(name == "set_clip_audio")
         .open_world(false);
     let mut description = format!(
-        "Apply Operation::{variant} to the live timeline. All frame values are exact integers."
+        "Apply Operation::{variant} to the live timeline only at expected_revision from get_timeline_state. All frame values are exact integers."
     );
     if matches!(variant.as_str(), "AddEffect" | "SetEffectParam") {
         write!(description, " {}", effect_documentation())
@@ -449,16 +504,32 @@ mod tests {
     #[test]
     fn mutator_arguments_round_trip_through_the_generated_variant_tag() {
         let arguments = serde_json::from_value(serde_json::json!({
+            "expected_revision": 7,
             "clip": 9,
             "at": 30
         }))
         .unwrap();
         assert_eq!(
             decode_operation("split_clip", arguments).unwrap(),
-            Operation::SplitClip {
-                clip: ClipId(9),
-                at: TimeCode(30),
+            RevisionedOperation {
+                expected_revision: TimelineRevision(7),
+                operation: Operation::SplitClip {
+                    clip: ClipId(9),
+                    at: TimeCode(30),
+                },
             }
         );
+    }
+
+    #[test]
+    fn every_mutator_requires_a_revision_precondition() {
+        for definition in operation_tools().unwrap() {
+            assert_eq!(
+                definition.tool.input_schema["required"],
+                serde_json::json!(["expected_revision"]),
+                "{} omitted its revision contract",
+                definition.tool.name
+            );
+        }
     }
 }

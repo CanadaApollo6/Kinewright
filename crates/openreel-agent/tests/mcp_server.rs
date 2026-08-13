@@ -3,8 +3,9 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use openreel_agent::McpServer;
 use openreel_core::{
-    Analysis, AssetId, Clip, ClipId, Command, Core, Document, Event, Marker, MarkerId, MediaAsset,
-    MediaKind, Query, QueryResult, Rational, TimeCode, Track, TrackId, TrackKind,
+    Analysis, AssetId, Clip, ClipId, Command, Core, Document, Effect, EffectId, Event, Marker,
+    MarkerId, MediaAsset, MediaKind, ParamValue, Query, QueryResult, Rational, TimeCode, Track,
+    TrackId, TrackKind,
 };
 use openreel_media::{
     FfmpegMediaEngine,
@@ -28,7 +29,7 @@ async fn mutator_tool_applies_through_the_real_core_actor() {
     let result = client
         .call_tool(
             CallToolRequestParams::new("add_track").with_arguments(
-                json!({"track": {"id": 7, "kind": "Video", "clips": []}})
+                json!({"expected_revision": 0, "track": {"id": 7, "kind": "Video", "clips": []}})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -52,7 +53,7 @@ async fn mutator_tool_applies_through_the_real_core_actor() {
     let sync_lock = client
         .call_tool(
             CallToolRequestParams::new("set_track_sync_lock").with_arguments(
-                json!({"track": 7, "locked": false})
+                json!({"expected_revision": 1, "track": 7, "locked": false})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -80,6 +81,7 @@ async fn mutator_tool_applies_through_the_real_core_actor() {
         .call_tool(
             CallToolRequestParams::new("add_marker").with_arguments(
                 json!({
+                    "expected_revision": 2,
                     "marker": {
                         "id": 1,
                         "position": 0,
@@ -107,7 +109,7 @@ async fn mutator_tool_applies_through_the_real_core_actor() {
     let rejected = client
         .call_tool(
             CallToolRequestParams::new("add_track").with_arguments(
-                json!({"track": {"id": 7, "kind": "Video", "clips": []}})
+                json!({"expected_revision": 3, "track": {"id": 7, "kind": "Video", "clips": []}})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -138,10 +140,13 @@ async fn edit_plans_cross_the_real_mcp_server_atomically_with_one_confirmation()
             .unwrap();
 
     let applied = client
-        .call_tool(plan_request(json!([
-            {"AddTrack": {"track": {"id": 2, "kind": "Video", "clips": []}}},
-            {"MoveClip": {"clip": 1, "to_track": 2, "to": 0}}
-        ])))
+        .call_tool(plan_request(
+            0,
+            json!([
+                {"AddTrack": {"track": {"id": 2, "kind": "Video", "clips": []}}},
+                {"MoveClip": {"clip": 1, "to_track": 2, "to": 0}}
+            ]),
+        ))
         .await
         .unwrap();
     assert_eq!(applied.is_error, Some(false));
@@ -160,10 +165,13 @@ async fn edit_plans_cross_the_real_mcp_server_atomically_with_one_confirmation()
     assert_eq!(&*doc, &original);
 
     let rejected = client
-        .call_tool(plan_request(json!([
-            {"AddTrack": {"track": {"id": 2, "kind": "Video", "clips": []}}},
-            {"AddTrack": {"track": {"id": 2, "kind": "Video", "clips": []}}}
-        ])))
+        .call_tool(plan_request(
+            2,
+            json!([
+                {"AddTrack": {"track": {"id": 2, "kind": "Video", "clips": []}}},
+                {"AddTrack": {"track": {"id": 2, "kind": "Video", "clips": []}}}
+            ]),
+        ))
         .await
         .unwrap();
     assert_eq!(rejected.is_error, Some(true));
@@ -173,7 +181,7 @@ async fn edit_plans_cross_the_real_mcp_server_atomically_with_one_confirmation()
     assert_eq!(query_document(&core), original);
 
     let (approved, ()) = tokio::join!(
-        client.call_tool(plan_request(json!([{"RemoveTrack": {"track": 1}}]))),
+        client.call_tool(plan_request(2, json!([{"RemoveTrack": {"track": 1}}]))),
         resolve_plan_confirmation(confirmations.clone(), true),
     );
     let approved = approved.unwrap();
@@ -185,7 +193,7 @@ async fn edit_plans_cross_the_real_mcp_server_atomically_with_one_confirmation()
     assert_eq!(&*doc, &original);
 
     let (refused, ()) = tokio::join!(
-        client.call_tool(plan_request(json!([{"RemoveTrack": {"track": 1}}]))),
+        client.call_tool(plan_request(4, json!([{"RemoveTrack": {"track": 1}}]))),
         resolve_plan_confirmation(confirmations, false),
     );
     let refused = refused.unwrap();
@@ -216,7 +224,7 @@ async fn ripple_marker_position_renders_through_the_real_mcp_server() {
     let ripple = client
         .call_tool(
             CallToolRequestParams::new("ripple_insert_gap").with_arguments(
-                json!({"track": 1, "at": 30, "duration": 15})
+                json!({"expected_revision": 0, "track": 1, "at": 30, "duration": 15})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -248,7 +256,8 @@ async fn ripple_marker_position_renders_through_the_real_mcp_server() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn get_frame_at_returns_a_downscaled_png_for_generated_media() {
+#[allow(clippy::too_many_lines)]
+async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
     let generated = GeneratedMedia::ffmpeg(
         "m3",
         &[
@@ -278,7 +287,15 @@ async fn get_frame_at_returns_a_downscaled_png_for_generated_media() {
     );
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let asset = media.probe(generated.path()).unwrap();
-    let document = single_clip_document(asset);
+    let mut document = single_clip_document(asset);
+    document.tracks[0].clips[0].effects.push(Effect {
+        id: EffectId(1),
+        name: "opacity".to_owned(),
+        parameters: std::collections::BTreeMap::from([(
+            "percent".to_owned(),
+            ParamValue::Integer(0),
+        )]),
+    });
     let core = Core::spawn(document).unwrap();
     let server = McpServer::start(core, media.clone(), media).unwrap();
     let client =
@@ -306,6 +323,90 @@ async fn get_frame_at_returns_a_downscaled_png_for_generated_media() {
     let decoded = image::load_from_memory(&png).unwrap();
     assert_eq!((decoded.width(), decoded.height()), (320, 180));
     assert!(decoded.width() <= 512);
+    assert!(
+        decoded
+            .to_rgba8()
+            .pixels()
+            .all(|pixel| pixel.0 == [0, 0, 0, 255]),
+        "proof frames must use the compositor and include timeline effects"
+    );
+
+    let storyboard = client
+        .call_tool(
+            CallToolRequestParams::new("get_timeline_storyboard").with_arguments(
+                json!({"frame_count": 4, "max_width": 160})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(storyboard.is_error, Some(false));
+    let manifest = storyboard
+        .structured_content
+        .as_ref()
+        .expect("storyboard must publish a machine-readable manifest");
+    assert_eq!(manifest["timeline_revision"], 0);
+    assert_eq!(manifest["cells"][0]["project_frame"], 0);
+    assert_eq!(manifest["cells"][3]["project_frame"], 59);
+    let storyboard_image = storyboard
+        .content
+        .iter()
+        .find_map(|content| content.as_image())
+        .expect("storyboard must contain image content");
+    let png = BASE64.decode(&storyboard_image.data).unwrap();
+    let decoded = image::load_from_memory(&png).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (652, 90));
+
+    let requested = client
+        .call_tool(
+            CallToolRequestParams::new("request_analysis").with_arguments(
+                json!({"asset_id": 1, "kinds": ["beat"]})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(requested.is_error, Some(false));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = client
+            .call_tool(
+                CallToolRequestParams::new("get_analysis_status")
+                    .with_arguments(json!({"asset_id": 1}).as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap();
+        let jobs = status.structured_content.as_ref().unwrap()["jobs"]
+            .as_array()
+            .unwrap();
+        let beat = jobs
+            .iter()
+            .find(|job| job["kind"] == "beat")
+            .expect("uniform lifecycle must include beat analysis");
+        if beat["phase"] == "ready" {
+            break;
+        }
+        assert_ne!(beat["phase"], "failed", "beat job failed: {beat}");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "beat analysis did not finish: {beat}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let beats = client
+        .call_tool(
+            CallToolRequestParams::new("get_timeline_beats")
+                .with_arguments(json!({"min_strength": 0}).as_object().unwrap().clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(beats.is_error, Some(false));
+    assert!(beats.structured_content.as_ref().unwrap()["beats"].is_array());
 
     client.cancel().await.unwrap();
     server.shutdown();
@@ -349,11 +450,11 @@ fn edit_plan_document() -> Document {
     }
 }
 
-fn plan_request(operations: serde_json::Value) -> CallToolRequestParams {
-    CallToolRequestParams::new("apply_edit_plan").with_arguments(serde_json::Map::from_iter([(
-        "operations".to_owned(),
-        operations,
-    )]))
+fn plan_request(expected_revision: u64, operations: serde_json::Value) -> CallToolRequestParams {
+    CallToolRequestParams::new("apply_edit_plan").with_arguments(serde_json::Map::from_iter([
+        ("expected_revision".to_owned(), json!(expected_revision)),
+        ("operations".to_owned(), operations),
+    ]))
 }
 
 fn query_document(core: &Core) -> Document {

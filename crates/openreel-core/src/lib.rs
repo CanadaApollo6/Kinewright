@@ -13,7 +13,7 @@ mod title;
 mod transcript_edit;
 mod transition;
 
-pub use actor::{Command, Core, CoreDisconnected, Event, Query, QueryResult};
+pub use actor::{Command, Core, CoreDisconnected, Event, Query, QueryResult, TimelineRevision};
 pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,
@@ -25,10 +25,11 @@ pub use effect::{
 };
 pub use journal::JournalCommand;
 pub use media::{
-    Analysis, AssetSceneChanges, AssetSilences, AssetTranscript, Export, ExportCancellation,
+    Analysis, AnalysisJobStatus, AnalysisKind, AnalysisPhase, AssetBeats, AssetSceneChanges,
+    AssetSilences, AssetTranscript, BeatMarker, BeatStatus, Export, ExportCancellation,
     ExportProgress, ExportSettings, FrameTexture, MediaError, MediaEvent, Playback, PlaybackState,
     ProgressSink, RgbaImage, SceneChange, SceneStatus, SilenceSpan, SilenceStatus, ThumbnailFrame,
-    ThumbnailKey, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    ThumbnailKey, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
     TranscriptStatus, TranscriptWord, VisualAssetResult, VisualRequestKind, WaveformData,
     WaveformPeak,
 };

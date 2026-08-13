@@ -362,6 +362,7 @@ pub fn render_asset_transcript(asset: AssetId, status: &TranscriptStatus) -> Str
             format!("asset {asset} transcript status=transcribing progress={progress_percent}%")
         }
         TranscriptStatus::NoSpeech => format!("asset {asset} transcript: no speech found"),
+        TranscriptStatus::Cancelled => format!("asset {asset} transcript status=cancelled"),
         TranscriptStatus::Failed(error) => {
             format!("asset {asset} transcript status=failed error={error:?}")
         }
@@ -432,6 +433,7 @@ pub fn render_asset_silences(
         SilenceStatus::Hashing => format!("asset {asset} silences status=hashing"),
         SilenceStatus::Analyzing => format!("asset {asset} silences status=analyzing"),
         SilenceStatus::NoAudio => format!("asset {asset} silences: no audio stream"),
+        SilenceStatus::Cancelled => format!("asset {asset} silences status=cancelled"),
         SilenceStatus::Failed(error) => {
             format!("asset {asset} silences status=failed error={error:?}")
         }
@@ -571,6 +573,7 @@ pub fn render_asset_scene_changes(
         SceneStatus::Hashing => format!("asset {asset} scene changes status=hashing"),
         SceneStatus::Analyzing => format!("asset {asset} scene changes status=analyzing"),
         SceneStatus::NoVideo => format!("asset {asset} scene changes: no video stream"),
+        SceneStatus::Cancelled => format!("asset {asset} scene changes status=cancelled"),
         SceneStatus::Failed(error) => {
             format!("asset {asset} scene changes status=failed error={error:?}")
         }

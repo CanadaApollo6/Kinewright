@@ -7,10 +7,10 @@ use std::{
 
 use crossbeam_channel::{Sender, unbounded};
 use openreel_core::{
-    AssetSceneChanges, AssetSilences, Document, ExportCancellation, FrameRounding, MediaAsset,
-    MediaError, MediaKind, Rational, SceneChange, SceneStatus, SilenceSpan, SilenceStatus,
-    TimeCode, TimelineSceneChange, TimelineSilenceSpan, map_frames_with_rounding,
-    map_source_range_to_project,
+    AssetBeats, AssetSceneChanges, AssetSilences, BeatMarker, BeatStatus, Document,
+    ExportCancellation, FrameRounding, MediaAsset, MediaError, MediaKind, Rational, SceneChange,
+    SceneStatus, SilenceSpan, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange,
+    TimelineSilenceSpan, map_frames_with_rounding, map_source_range_to_project,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +18,9 @@ use crate::{
     audio::decode_audio_range,
     cache::FrameCache,
     decode::VideoDecoder,
-    derived_cache::{ContentHashes, JsonCache, StatusReporter, cache_root, spawn_worker},
+    derived_cache::{
+        CancellationRegistry, ContentHashes, JsonCache, StatusReporter, cache_root, spawn_worker,
+    },
 };
 
 const CACHE_VERSION: u32 = 1;
@@ -29,6 +31,8 @@ pub const DEFAULT_SILENCE_WINDOW_MILLISECONDS: u32 = 10;
 pub const DEFAULT_MINIMUM_SILENCE_FRAMES: i64 = 6;
 pub const DEFAULT_SCENE_PROXY_WIDTH: u32 = 320;
 pub const DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS: u16 = 1_000;
+pub const DEFAULT_BEAT_WINDOW_MILLISECONDS: u32 = 20;
+pub const DEFAULT_BEAT_MINIMUM_INTERVAL_MILLISECONDS: u32 = 180;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SilenceDetectionConfig {
@@ -58,16 +62,36 @@ impl Default for SceneDetectionConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeatDetectionConfig {
+    pub window_milliseconds: u32,
+    pub minimum_interval_milliseconds: u32,
+}
+
+impl Default for BeatDetectionConfig {
+    fn default() -> Self {
+        Self {
+            window_milliseconds: DEFAULT_BEAT_WINDOW_MILLISECONDS,
+            minimum_interval_milliseconds: DEFAULT_BEAT_MINIMUM_INTERVAL_MILLISECONDS,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DerivedAnalysisConfig {
     pub silence: SilenceDetectionConfig,
     pub scenes: SceneDetectionConfig,
+    pub beats: BeatDetectionConfig,
 }
 
 pub(crate) struct DerivedAnalysisService {
     jobs: Sender<Job>,
     silence_states: StatusReporter<SilenceStatus>,
     scene_states: StatusReporter<SceneStatus>,
+    beat_states: StatusReporter<BeatStatus>,
+    silence_cancellations: CancellationRegistry,
+    scene_cancellations: CancellationRegistry,
+    beat_cancellations: CancellationRegistry,
     config: DerivedAnalysisConfig,
 }
 
@@ -76,10 +100,18 @@ impl DerivedAnalysisService {
         let (jobs, jobs_rx) = unbounded();
         let silence_states = StatusReporter::new();
         let scene_states = StatusReporter::new();
+        let beat_states = StatusReporter::new();
+        let silence_cancellations = CancellationRegistry::default();
+        let scene_cancellations = CancellationRegistry::default();
+        let beat_cancellations = CancellationRegistry::default();
         let mut worker = DerivedAnalysisWorker::new(
             cache_root(data_dir, "derived-analysis", CACHE_VERSION),
             silence_states.clone(),
             scene_states.clone(),
+            beat_states.clone(),
+            silence_cancellations.clone(),
+            scene_cancellations.clone(),
+            beat_cancellations.clone(),
         );
         spawn_worker(
             "openreel-derived-analysis",
@@ -91,6 +123,10 @@ impl DerivedAnalysisService {
             jobs,
             silence_states,
             scene_states,
+            beat_states,
+            silence_cancellations,
+            scene_cancellations,
+            beat_cancellations,
             config,
         })
     }
@@ -114,14 +150,22 @@ impl DerivedAnalysisService {
         if !should_queue {
             return;
         }
+        let Some(cancellation) = self.silence_cancellations.start(&asset.path) else {
+            return;
+        };
         self.silence_states
             .update(&asset.path, SilenceStatus::Queued);
         let path = asset.path.clone();
         if self
             .jobs
-            .send(Job::Silences(asset, self.config.silence))
+            .send(Job::Silences(
+                asset,
+                self.config.silence,
+                cancellation.clone(),
+            ))
             .is_err()
         {
+            self.silence_cancellations.finish(&path, &cancellation);
             self.silence_states.update(
                 &path,
                 SilenceStatus::Failed("derived analysis worker stopped".to_owned()),
@@ -147,13 +191,17 @@ impl DerivedAnalysisService {
         if !should_queue {
             return;
         }
+        let Some(cancellation) = self.scene_cancellations.start(&asset.path) else {
+            return;
+        };
         self.scene_states.update(&asset.path, SceneStatus::Queued);
         let path = asset.path.clone();
         if self
             .jobs
-            .send(Job::Scenes(asset, self.config.scenes))
+            .send(Job::Scenes(asset, self.config.scenes, cancellation.clone()))
             .is_err()
         {
+            self.scene_cancellations.finish(&path, &cancellation);
             self.scene_states.update(
                 &path,
                 SceneStatus::Failed("derived analysis worker stopped".to_owned()),
@@ -168,6 +216,73 @@ impl DerivedAnalysisService {
 
     pub(crate) fn scene_status(&self, path: &Path) -> SceneStatus {
         self.scene_states.get_or(path, SceneStatus::NotRequested)
+    }
+
+    pub(crate) fn request_beats(&self, asset: MediaAsset) {
+        if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
+            self.beat_states.update(&asset.path, BeatStatus::NoAudio);
+            return;
+        }
+        let should_queue = self.beat_states.should_queue(&asset.path, |status| {
+            matches!(
+                status,
+                BeatStatus::Queued
+                    | BeatStatus::Hashing
+                    | BeatStatus::Analyzing { .. }
+                    | BeatStatus::Ready(_)
+                    | BeatStatus::NoAudio
+            )
+        });
+        if !should_queue {
+            return;
+        }
+        let Some(cancellation) = self.beat_cancellations.start(&asset.path) else {
+            return;
+        };
+        self.beat_states.update(&asset.path, BeatStatus::Queued);
+        let path = asset.path.clone();
+        if self
+            .jobs
+            .send(Job::Beats(asset, self.config.beats, cancellation.clone()))
+            .is_err()
+        {
+            self.beat_cancellations.finish(&path, &cancellation);
+            self.beat_states.update(
+                &path,
+                BeatStatus::Failed("derived analysis worker stopped".to_owned()),
+            );
+        }
+    }
+
+    pub(crate) fn beat_status(&self, path: &Path) -> BeatStatus {
+        self.beat_states.get_or(path, BeatStatus::NotRequested)
+    }
+
+    pub(crate) fn cancel(&self, path: &Path, kind: openreel_core::AnalysisKind) -> bool {
+        match kind {
+            openreel_core::AnalysisKind::Transcript => false,
+            openreel_core::AnalysisKind::Silence => {
+                let cancelled = self.silence_cancellations.cancel(path);
+                if cancelled {
+                    self.silence_states.update(path, SilenceStatus::Cancelled);
+                }
+                cancelled
+            }
+            openreel_core::AnalysisKind::Scene => {
+                let cancelled = self.scene_cancellations.cancel(path);
+                if cancelled {
+                    self.scene_states.update(path, SceneStatus::Cancelled);
+                }
+                cancelled
+            }
+            openreel_core::AnalysisKind::Beat => {
+                let cancelled = self.beat_cancellations.cancel(path);
+                if cancelled {
+                    self.beat_states.update(path, BeatStatus::Cancelled);
+                }
+                cancelled
+            }
+        }
     }
 
     pub(crate) fn timeline_silences(
@@ -197,17 +312,39 @@ impl DerivedAnalysisService {
             }
         })
     }
+
+    pub(crate) fn timeline_beats(
+        &self,
+        document: &Document,
+        range: Option<Range<TimeCode>>,
+        minimum_strength_basis_points: u16,
+    ) -> Result<Vec<TimelineBeat>, MediaError> {
+        map_timeline_beats(
+            document,
+            range,
+            minimum_strength_basis_points,
+            |asset| match self.beat_status(&asset.path) {
+                BeatStatus::Ready(beats) => Some(beats),
+                _ => None,
+            },
+        )
+    }
 }
 
 enum Job {
-    Silences(MediaAsset, SilenceDetectionConfig),
-    Scenes(MediaAsset, SceneDetectionConfig),
+    Silences(MediaAsset, SilenceDetectionConfig, ExportCancellation),
+    Scenes(MediaAsset, SceneDetectionConfig, ExportCancellation),
+    Beats(MediaAsset, BeatDetectionConfig, ExportCancellation),
 }
 
 struct DerivedAnalysisWorker {
     root: PathBuf,
     silence_states: StatusReporter<SilenceStatus>,
     scene_states: StatusReporter<SceneStatus>,
+    beat_states: StatusReporter<BeatStatus>,
+    silence_cancellations: CancellationRegistry,
+    scene_cancellations: CancellationRegistry,
+    beat_cancellations: CancellationRegistry,
     hashes: ContentHashes,
 }
 
@@ -216,28 +353,58 @@ impl DerivedAnalysisWorker {
         root: PathBuf,
         silence_states: StatusReporter<SilenceStatus>,
         scene_states: StatusReporter<SceneStatus>,
+        beat_states: StatusReporter<BeatStatus>,
+        silence_cancellations: CancellationRegistry,
+        scene_cancellations: CancellationRegistry,
+        beat_cancellations: CancellationRegistry,
     ) -> Self {
         Self {
             root,
             silence_states,
             scene_states,
+            beat_states,
+            silence_cancellations,
+            scene_cancellations,
+            beat_cancellations,
             hashes: ContentHashes::default(),
         }
     }
 
     fn handle(&mut self, job: Job) -> bool {
         match job {
-            Job::Silences(asset, config) => {
-                if let Err(error) = self.analyze_silences(&asset, config) {
-                    self.silence_states
-                        .update(&asset.path, SilenceStatus::Failed(error.to_string()));
+            Job::Silences(asset, config, cancellation) => {
+                if let Err(error) = self.analyze_silences(&asset, config, &cancellation) {
+                    let status = if error == MediaError::Cancelled {
+                        SilenceStatus::Cancelled
+                    } else {
+                        SilenceStatus::Failed(error.to_string())
+                    };
+                    self.silence_states.update(&asset.path, status);
                 }
+                self.silence_cancellations
+                    .finish(&asset.path, &cancellation);
             }
-            Job::Scenes(asset, config) => {
-                if let Err(error) = self.analyze_scenes(&asset, config) {
-                    self.scene_states
-                        .update(&asset.path, SceneStatus::Failed(error.to_string()));
+            Job::Scenes(asset, config, cancellation) => {
+                if let Err(error) = self.analyze_scenes(&asset, config, &cancellation) {
+                    let status = if error == MediaError::Cancelled {
+                        SceneStatus::Cancelled
+                    } else {
+                        SceneStatus::Failed(error.to_string())
+                    };
+                    self.scene_states.update(&asset.path, status);
                 }
+                self.scene_cancellations.finish(&asset.path, &cancellation);
+            }
+            Job::Beats(asset, config, cancellation) => {
+                if let Err(error) = self.analyze_beats(&asset, config, &cancellation) {
+                    let status = if error == MediaError::Cancelled {
+                        BeatStatus::Cancelled
+                    } else {
+                        BeatStatus::Failed(error.to_string())
+                    };
+                    self.beat_states.update(&asset.path, status);
+                }
+                self.beat_cancellations.finish(&asset.path, &cancellation);
             }
         }
         true
@@ -247,12 +414,18 @@ impl DerivedAnalysisWorker {
         &mut self,
         asset: &MediaAsset,
         config: SilenceDetectionConfig,
+        cancellation: &ExportCancellation,
     ) -> Result<(), MediaError> {
+        if cancellation.is_cancelled() {
+            return Err(MediaError::Cancelled);
+        }
         self.silence_states
             .update(&asset.path, SilenceStatus::Hashing);
         let hash = self.content_hash(&asset.path)?;
+        check_cancelled(cancellation)?;
         let store = SilenceStore::new(self.root.join("silences"), config);
         if let Some(mut cached) = store.load(&hash, asset.fps, asset.duration)? {
+            check_cancelled(cancellation)?;
             cached.asset = asset.id;
             self.silence_states
                 .update(&asset.path, SilenceStatus::Ready(Arc::new(cached)));
@@ -267,8 +440,11 @@ impl DerivedAnalysisWorker {
             asset.duration,
             ANALYSIS_SAMPLE_RATE,
             1,
-            &ExportCancellation::default(),
+            cancellation,
         )?;
+        if cancellation.is_cancelled() {
+            return Err(MediaError::Cancelled);
+        }
         let spans = detect_silences(
             &samples,
             ANALYSIS_SAMPLE_RATE,
@@ -286,7 +462,9 @@ impl DerivedAnalysisWorker {
             window_milliseconds: config.window_milliseconds,
             spans,
         };
+        check_cancelled(cancellation)?;
         store.save(&result)?;
+        check_cancelled(cancellation)?;
         self.silence_states
             .update(&asset.path, SilenceStatus::Ready(Arc::new(result)));
         Ok(())
@@ -296,11 +474,17 @@ impl DerivedAnalysisWorker {
         &mut self,
         asset: &MediaAsset,
         config: SceneDetectionConfig,
+        cancellation: &ExportCancellation,
     ) -> Result<(), MediaError> {
+        if cancellation.is_cancelled() {
+            return Err(MediaError::Cancelled);
+        }
         self.scene_states.update(&asset.path, SceneStatus::Hashing);
         let hash = self.content_hash(&asset.path)?;
+        check_cancelled(cancellation)?;
         let store = SceneStore::new(self.root.join("scenes"), config);
         if let Some(mut cached) = store.load(&hash, asset.fps, asset.duration)? {
+            check_cancelled(cancellation)?;
             cached.asset = asset.id;
             self.scene_states
                 .update(&asset.path, SceneStatus::Ready(Arc::new(cached)));
@@ -308,7 +492,8 @@ impl DerivedAnalysisWorker {
         }
         self.scene_states
             .update(&asset.path, SceneStatus::Analyzing);
-        let changes = detect_scene_changes(&asset.path, asset.fps, asset.duration, config)?;
+        let changes =
+            detect_scene_changes(&asset.path, asset.fps, asset.duration, config, cancellation)?;
         let result = AssetSceneChanges {
             asset: asset.id,
             content_sha256: hash,
@@ -317,14 +502,90 @@ impl DerivedAnalysisWorker {
             proxy_width: config.proxy_width,
             changes,
         };
+        check_cancelled(cancellation)?;
         store.save(&result)?;
+        check_cancelled(cancellation)?;
         self.scene_states
             .update(&asset.path, SceneStatus::Ready(Arc::new(result)));
         Ok(())
     }
 
+    fn analyze_beats(
+        &mut self,
+        asset: &MediaAsset,
+        config: BeatDetectionConfig,
+        cancellation: &ExportCancellation,
+    ) -> Result<(), MediaError> {
+        if cancellation.is_cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        self.beat_states.update(&asset.path, BeatStatus::Hashing);
+        let hash = self.content_hash(&asset.path)?;
+        check_cancelled(cancellation)?;
+        let store = BeatStore::new(self.root.join("beats"), config);
+        if let Some(mut cached) = store.load(&hash, asset.fps, asset.duration)? {
+            check_cancelled(cancellation)?;
+            cached.asset = asset.id;
+            self.beat_states
+                .update(&asset.path, BeatStatus::Ready(Arc::new(cached)));
+            return Ok(());
+        }
+        self.beat_states.update(
+            &asset.path,
+            BeatStatus::Analyzing {
+                progress_percent: Some(0),
+            },
+        );
+        let samples = decode_audio_range(
+            &asset.path,
+            asset.fps,
+            TimeCode::ZERO,
+            asset.duration,
+            ANALYSIS_SAMPLE_RATE,
+            1,
+            cancellation,
+        )?;
+        check_cancelled(cancellation)?;
+        self.beat_states.update(
+            &asset.path,
+            BeatStatus::Analyzing {
+                progress_percent: Some(75),
+            },
+        );
+        let (beats, estimated_bpm_milli) = detect_beats(
+            &samples,
+            ANALYSIS_SAMPLE_RATE,
+            asset.fps,
+            asset.duration,
+            config,
+            cancellation,
+        )?;
+        let result = AssetBeats {
+            asset: asset.id,
+            content_sha256: hash,
+            source_fps: asset.fps,
+            source_frames: asset.duration,
+            estimated_bpm_milli,
+            beats,
+        };
+        check_cancelled(cancellation)?;
+        store.save(&result)?;
+        check_cancelled(cancellation)?;
+        self.beat_states
+            .update(&asset.path, BeatStatus::Ready(Arc::new(result)));
+        Ok(())
+    }
+
     fn content_hash(&mut self, path: &Path) -> Result<String, MediaError> {
         self.hashes.get(path)
+    }
+}
+
+fn check_cancelled(cancellation: &ExportCancellation) -> Result<(), MediaError> {
+    if cancellation.is_cancelled() {
+        Err(MediaError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 
@@ -418,11 +679,158 @@ fn push_silence_span(
     Ok(())
 }
 
+// Energy windows and normalization are intentionally f64 so the same PCM input
+// produces stable markers across supported sample rates.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
+)]
+fn detect_beats(
+    samples: &[f32],
+    sample_rate: u32,
+    source_fps: Rational,
+    source_frames: TimeCode,
+    config: BeatDetectionConfig,
+    cancellation: &ExportCancellation,
+) -> Result<(Vec<BeatMarker>, u32), MediaError> {
+    const BASELINE_WINDOWS: usize = 8;
+    if config.window_milliseconds == 0 || config.minimum_interval_milliseconds == 0 {
+        return Err(MediaError::Backend(
+            "beat analysis windows and minimum interval must be positive".to_owned(),
+        ));
+    }
+    let window_samples = usize::try_from(
+        u64::from(sample_rate)
+            .saturating_mul(u64::from(config.window_milliseconds))
+            .div_ceil(1_000),
+    )
+    .unwrap_or(usize::MAX)
+    .max(1);
+    let mut energies = Vec::with_capacity(samples.len().div_ceil(window_samples));
+    for (index, window) in samples.chunks(window_samples).enumerate() {
+        if index % 64 == 0 && cancellation.is_cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        let square_sum = window
+            .iter()
+            .map(|sample| f64::from(*sample) * f64::from(*sample))
+            .sum::<f64>();
+        energies.push((square_sum / window.len().max(1) as f64).sqrt());
+    }
+    if energies.len() < 3 {
+        return Ok((Vec::new(), 0));
+    }
+
+    let novelty = energies
+        .iter()
+        .enumerate()
+        .map(|(index, energy)| {
+            let start = index.saturating_sub(BASELINE_WINDOWS);
+            let history = &energies[start..index];
+            let baseline = if history.is_empty() {
+                0.0
+            } else {
+                history.iter().sum::<f64>() / history.len() as f64
+            };
+            (energy - baseline).max(0.0)
+        })
+        .collect::<Vec<_>>();
+    let maximum = novelty.iter().copied().fold(0.0_f64, f64::max);
+    if maximum <= f64::EPSILON {
+        return Ok((Vec::new(), 0));
+    }
+    let threshold = (maximum * 0.12).max(0.002);
+    let minimum_windows = usize::try_from(
+        u64::from(config.minimum_interval_milliseconds)
+            .div_ceil(u64::from(config.window_milliseconds)),
+    )
+    .unwrap_or(usize::MAX)
+    .max(1);
+    let mut selected: Vec<usize> = Vec::new();
+    for index in 1..novelty.len().saturating_sub(1) {
+        let strength = novelty[index];
+        if strength < threshold || strength < novelty[index - 1] || strength < novelty[index + 1] {
+            continue;
+        }
+        if let Some(previous) = selected.last_mut()
+            && index.saturating_sub(*previous) < minimum_windows
+        {
+            if strength > novelty[*previous] {
+                *previous = index;
+            }
+            continue;
+        }
+        selected.push(index);
+    }
+
+    let sample_fps =
+        Rational::new(sample_rate, 1).map_err(|error| MediaError::Backend(error.to_string()))?;
+    let mut beats: Vec<BeatMarker> = Vec::with_capacity(selected.len());
+    for window_index in &selected {
+        let center_sample = window_index
+            .saturating_mul(window_samples)
+            .saturating_add(window_samples / 2);
+        let source_frame = map_frames_with_rounding(
+            TimeCode(i64::try_from(center_sample).unwrap_or(i64::MAX)),
+            sample_fps,
+            source_fps,
+            FrameRounding::Nearest,
+        )
+        .map_err(|error| MediaError::Backend(error.to_string()))?;
+        let source_frame = TimeCode(source_frame.0.clamp(0, source_frames.0.saturating_sub(1)));
+        let strength_basis_points =
+            u16::try_from(((novelty[*window_index] / maximum) * 10_000.0).round() as u64)
+                .unwrap_or(10_000)
+                .min(10_000);
+        if let Some(previous) = beats.last_mut()
+            && previous.source_frame == source_frame
+        {
+            previous.strength_basis_points =
+                previous.strength_basis_points.max(strength_basis_points);
+            continue;
+        }
+        beats.push(BeatMarker {
+            source_frame,
+            strength_basis_points,
+        });
+    }
+    Ok((
+        beats,
+        estimate_tempo_milli(&selected, window_samples, sample_rate),
+    ))
+}
+
+fn estimate_tempo_milli(selected: &[usize], window_samples: usize, sample_rate: u32) -> u32 {
+    let mut intervals = selected
+        .windows(2)
+        .filter_map(|pair| pair[1].checked_sub(pair[0]))
+        .map(|windows| windows.saturating_mul(window_samples))
+        .filter(|samples| *samples > 0)
+        .collect::<Vec<_>>();
+    if intervals.is_empty() {
+        return 0;
+    }
+    intervals.sort_unstable();
+    let median = intervals[intervals.len() / 2];
+    let numerator = u64::from(sample_rate).saturating_mul(60_000);
+    let mut bpm_milli = numerator.saturating_div(u64::try_from(median).unwrap_or(u64::MAX));
+    while bpm_milli > 0 && bpm_milli < 40_000 {
+        bpm_milli = bpm_milli.saturating_mul(2);
+    }
+    while bpm_milli > 240_000 {
+        bpm_milli = bpm_milli.saturating_div(2);
+    }
+    u32::try_from(bpm_milli).unwrap_or(u32::MAX)
+}
+
 fn detect_scene_changes(
     path: &Path,
     fps: Rational,
     duration: TimeCode,
     config: SceneDetectionConfig,
+    cancellation: &ExportCancellation,
 ) -> Result<Vec<SceneChange>, MediaError> {
     let proxy_width = config.proxy_width.clamp(32, 512);
     let mut decoder = VideoDecoder::open_scaled(path, fps, Some(proxy_width))?;
@@ -432,6 +840,9 @@ fn detect_scene_changes(
     let mut changes = Vec::new();
     let mut start = 0_i64;
     while start < duration.0 {
+        if cancellation.is_cancelled() {
+            return Err(MediaError::Cancelled);
+        }
         let end = start
             .saturating_add(SCENE_WINDOW_FRAMES - 1)
             .min(duration.0.saturating_sub(1));
@@ -441,6 +852,9 @@ fn detect_scene_changes(
             decoder.decode_window_sequential(TimeCode(start), TimeCode(end), &mut cache)?;
         }
         for frame_index in start..=end {
+            if cancellation.is_cancelled() {
+                return Err(MediaError::Cancelled);
+            }
             let frame = cache
                 .frame_at_or_before(TimeCode(frame_index))
                 .ok_or_else(|| {
@@ -696,6 +1110,74 @@ where
     Ok(mapped)
 }
 
+pub(crate) fn map_timeline_beats<F>(
+    document: &Document,
+    range: Option<Range<TimeCode>>,
+    minimum_strength_basis_points: u16,
+    mut beats_for: F,
+) -> Result<Vec<TimelineBeat>, MediaError>
+where
+    F: FnMut(&MediaAsset) -> Option<Arc<AssetBeats>>,
+{
+    let requested = validated_range(document, range, "timeline beat")?;
+    let mut analyses = BTreeMap::new();
+    let mut mapped = Vec::new();
+    for track in &document.tracks {
+        for clip in &track.clips {
+            if !clip.content.is_media() || clip.speed_percent != 100 {
+                continue;
+            }
+            let Some(asset) = document.asset(clip.asset) else {
+                continue;
+            };
+            let cached_beats = analyses.entry(asset.id).or_insert_with(|| beats_for(asset));
+            let Some(beats) = cached_beats else {
+                continue;
+            };
+            for beat in &beats.beats {
+                if beat.strength_basis_points < minimum_strength_basis_points
+                    || beat.source_frame < clip.source_range.start
+                    || beat.source_frame >= clip.source_range.end
+                {
+                    continue;
+                }
+                let offset = beat
+                    .source_frame
+                    .checked_sub(clip.source_range.start)
+                    .ok_or_else(|| MediaError::Backend("source position underflowed".to_owned()))?;
+                let project_frame = clip
+                    .timeline_start
+                    .checked_add(
+                        map_frames_with_rounding(
+                            offset,
+                            asset.fps,
+                            document.fps,
+                            FrameRounding::Nearest,
+                        )
+                        .map_err(|error| MediaError::Backend(error.to_string()))?,
+                    )
+                    .ok_or_else(|| {
+                        MediaError::Backend("timeline position overflowed".to_owned())
+                    })?;
+                if project_frame < requested.start || project_frame >= requested.end {
+                    continue;
+                }
+                mapped.push(TimelineBeat {
+                    asset: asset.id,
+                    track: track.id,
+                    clip: clip.id,
+                    source_frame: beat.source_frame,
+                    project_frame,
+                    strength_basis_points: beat.strength_basis_points,
+                    estimated_bpm_milli: beats.estimated_bpm_milli,
+                });
+            }
+        }
+    }
+    mapped.sort_by_key(|beat| (beat.project_frame, beat.track, beat.clip, beat.source_frame));
+    Ok(mapped)
+}
+
 fn validated_range(
     document: &Document,
     range: Option<Range<TimeCode>>,
@@ -825,6 +1307,65 @@ struct StoredScenes {
     scenes: AssetSceneChanges,
 }
 
+struct BeatStore {
+    cache: JsonCache,
+    config: BeatDetectionConfig,
+}
+
+impl BeatStore {
+    fn new(root: PathBuf, config: BeatDetectionConfig) -> Self {
+        Self {
+            cache: JsonCache::new(root, CACHE_VERSION, "beat"),
+            config,
+        }
+    }
+
+    fn path_for(&self, hash: &str) -> PathBuf {
+        self.cache.path_for(
+            hash,
+            &format!(
+                "-w{}-i{}",
+                self.config.window_milliseconds, self.config.minimum_interval_milliseconds
+            ),
+        )
+    }
+
+    fn load(
+        &self,
+        hash: &str,
+        fps: Rational,
+        frames: TimeCode,
+    ) -> Result<Option<AssetBeats>, MediaError> {
+        self.cache
+            .load(&self.path_for(hash), |stored: StoredBeats| {
+                let beats = stored.beats;
+                (beats.content_sha256 == hash
+                    && beats.source_fps == fps
+                    && beats.source_frames == frames
+                    && !beats.beats.iter().any(|beat| {
+                        beat.source_frame < TimeCode::ZERO
+                            || beat.source_frame >= frames
+                            || beat.strength_basis_points > 10_000
+                    }))
+                .then_some(beats)
+            })
+    }
+
+    fn save(&self, beats: &AssetBeats) -> Result<(), MediaError> {
+        self.cache.save(
+            &self.path_for(&beats.content_sha256),
+            &StoredBeats {
+                beats: beats.clone(),
+            },
+        )
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredBeats {
+    beats: AssetBeats,
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::PathBuf, process::Command};
@@ -853,6 +1394,23 @@ mod tests {
             .collect()
     }
 
+    #[allow(clippy::cast_possible_truncation)]
+    fn click_track(sample_rate: u32, bpm: u32, seconds: u32) -> Vec<f32> {
+        let interval = sample_rate.saturating_mul(60).saturating_div(bpm);
+        let click_length = sample_rate / 100;
+        (0..sample_rate.saturating_mul(seconds))
+            .map(|sample| {
+                if sample % interval < click_length {
+                    let phase = std::f64::consts::TAU * 1_000.0 * f64::from(sample)
+                        / f64::from(sample_rate);
+                    (phase.sin() * 0.9) as f32
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+
     #[test]
     fn silence_spans_are_exact_across_multiple_sample_rates() {
         let fps = Rational::new(30, 1).unwrap();
@@ -876,6 +1434,48 @@ mod tests {
                 "sample rate {sample_rate}: {spans:?}"
             );
         }
+    }
+
+    #[test]
+    fn beat_detector_finds_a_stable_one_hundred_twenty_bpm_click_track() {
+        let fps = Rational::new(30, 1).unwrap();
+        for sample_rate in [44_100, 48_000] {
+            let (beats, bpm_milli) = detect_beats(
+                &click_track(sample_rate, 120, 4),
+                sample_rate,
+                fps,
+                TimeCode(120),
+                BeatDetectionConfig::default(),
+                &ExportCancellation::default(),
+            )
+            .unwrap();
+            assert!(bpm_milli.abs_diff(120_000) <= 2_500, "{bpm_milli}");
+            assert!(beats.len() >= 6, "sample rate {sample_rate}: {beats:?}");
+            for (index, beat) in beats.iter().take(6).enumerate() {
+                let expected = i64::try_from(index + 1).unwrap() * 15;
+                assert!(
+                    beat.source_frame.0.abs_diff(expected) <= 1,
+                    "sample rate {sample_rate}: {beats:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn beat_detector_honors_pre_cancelled_work() {
+        let cancellation = ExportCancellation::default();
+        cancellation.cancel();
+        assert_eq!(
+            detect_beats(
+                &click_track(48_000, 120, 2),
+                48_000,
+                Rational::new(30, 1).unwrap(),
+                TimeCode(60),
+                BeatDetectionConfig::default(),
+                &cancellation,
+            ),
+            Err(MediaError::Cancelled)
+        );
     }
 
     #[test]
@@ -956,7 +1556,8 @@ mod tests {
     }
 
     #[test]
-    fn silence_and_scene_caches_round_trip_and_ignore_corruption() {
+    #[allow(clippy::too_many_lines)]
+    fn derived_caches_round_trip_and_ignore_corruption() {
         let directory = TempDirectory::new("derived-cache");
         let silence_store =
             SilenceStore::new(directory.path("silence"), SilenceDetectionConfig::default());
@@ -1031,6 +1632,35 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+
+        let beat_store = BeatStore::new(directory.path("beat"), BeatDetectionConfig::default());
+        let beats = AssetBeats {
+            asset: AssetId(3),
+            content_sha256: "c".repeat(64),
+            source_fps: Rational::new(30, 1).unwrap(),
+            source_frames: TimeCode(90),
+            estimated_bpm_milli: 120_000,
+            beats: vec![BeatMarker {
+                source_frame: TimeCode(15),
+                strength_basis_points: 9_000,
+            }],
+        };
+        beat_store.save(&beats).unwrap();
+        assert_eq!(
+            beat_store
+                .load(&beats.content_sha256, beats.source_fps, beats.source_frames)
+                .unwrap()
+                .unwrap()
+                .beats,
+            beats.beats
+        );
+        fs::write(beat_store.path_for(&beats.content_sha256), b"broken").unwrap();
+        assert!(
+            beat_store
+                .load(&beats.content_sha256, beats.source_fps, beats.source_frames)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1096,6 +1726,7 @@ mod tests {
             Rational::new(10, 1).unwrap(),
             TimeCode(30),
             SceneDetectionConfig::default(),
+            &ExportCancellation::default(),
         )
         .unwrap();
         let strong = changes
@@ -1115,6 +1746,7 @@ mod tests {
             Rational::new(10, 1).unwrap(),
             TimeCode(30),
             SceneDetectionConfig::default(),
+            &ExportCancellation::default(),
         )
         .unwrap();
         assert!(
@@ -1162,6 +1794,22 @@ mod tests {
             map_timeline_scene_changes(&document, None, 1_000, |_| Some(Arc::clone(&scenes)))
                 .unwrap();
         assert_eq!(mapped[0].project_frame, TimeCode(110));
+
+        let beats = Arc::new(AssetBeats {
+            asset: AssetId(1),
+            content_sha256: "fixture".to_owned(),
+            source_fps: Rational::new(24, 1).unwrap(),
+            source_frames: TimeCode(100),
+            estimated_bpm_milli: 120_000,
+            beats: vec![BeatMarker {
+                source_frame: TimeCode(18),
+                strength_basis_points: 9_000,
+            }],
+        });
+        let mapped =
+            map_timeline_beats(&document, None, 5_000, |_| Some(Arc::clone(&beats))).unwrap();
+        assert_eq!(mapped[0].project_frame, TimeCode(110));
+        assert_eq!(mapped[0].estimated_bpm_milli, 120_000);
     }
 
     fn fixture_document() -> Document {

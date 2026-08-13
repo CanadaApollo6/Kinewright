@@ -30,10 +30,11 @@ pub use cache::select_frame_for_position;
 pub use clock::{frame_to_samples, samples_to_frame};
 pub use compositor::{Compositor, CompositorLayer, GpuContext};
 pub use derived::{
-    DEFAULT_MINIMUM_SILENCE_FRAMES, DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS,
-    DEFAULT_SCENE_PROXY_WIDTH, DEFAULT_SILENCE_THRESHOLD_DBFS_HUNDREDTHS,
-    DEFAULT_SILENCE_WINDOW_MILLISECONDS, DerivedAnalysisConfig, SceneDetectionConfig,
-    SilenceDetectionConfig,
+    BeatDetectionConfig, DEFAULT_BEAT_MINIMUM_INTERVAL_MILLISECONDS,
+    DEFAULT_BEAT_WINDOW_MILLISECONDS, DEFAULT_MINIMUM_SILENCE_FRAMES,
+    DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS, DEFAULT_SCENE_PROXY_WIDTH,
+    DEFAULT_SILENCE_THRESHOLD_DBFS_HUNDREDTHS, DEFAULT_SILENCE_WINDOW_MILLISECONDS,
+    DerivedAnalysisConfig, SceneDetectionConfig, SilenceDetectionConfig,
 };
 pub use engine::FfmpegMediaEngine;
 pub use openreel_core::{

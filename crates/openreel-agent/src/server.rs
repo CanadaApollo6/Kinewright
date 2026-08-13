@@ -15,9 +15,10 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use openreel_core::{
-    Analysis, AssetId, ClipId, Command, Core, Document, Event, Operation, Playback, Query,
-    QueryResult, SceneStatus, SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, TranscriptStatus,
+    Analysis, AnalysisKind, AssetId, BeatStatus, ClipId, Command, Core, Document, Event, Operation,
+    Playback, Query, QueryResult, SceneStatus, SilenceStatus, TimeCode, TimelineBeat,
+    TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TranscriptStatus,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -46,9 +47,15 @@ use crate::{
 };
 
 const THUMBNAIL_MAX_WIDTH: u32 = 512;
+const STORYBOARD_DEFAULT_FRAMES: u8 = 9;
+const STORYBOARD_MAX_FRAMES: u8 = 16;
+const STORYBOARD_DEFAULT_CELL_WIDTH: u32 = 320;
+const STORYBOARD_COLUMNS: u32 = 4;
+const STORYBOARD_GUTTER: u32 = 4;
 const DEFAULT_CONFIRMATION_TIMEOUT: Duration = Duration::from_mins(1);
 const DEFAULT_MINIMUM_SILENCE_FRAMES: i64 = 6;
 const DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS: u16 = 1_000;
+const DEFAULT_BEAT_STRENGTH_BASIS_POINTS: u16 = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmationRequest {
@@ -325,12 +332,16 @@ impl OpenReelMcp {
         Ok(tools)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn call_blocking(&self, request: CallToolRequestParams) -> Result<CallToolResult, McpError> {
         let arguments = request.arguments.unwrap_or_default();
         match request.name.as_ref() {
             "get_timeline_state" => {
-                let document = self.document()?;
-                Ok(success_text(render_timeline_state(&document)))
+                let (revision, document) = self.snapshot()?;
+                Ok(success_text(format!(
+                    "timeline_revision={revision}\n{}",
+                    render_timeline_state(&document)
+                )))
             }
             "get_clip_info" => {
                 let args: ClipInfoArgs = decode_args("get_clip_info", arguments)?;
@@ -343,6 +354,10 @@ impl OpenReelMcp {
             "get_frame_at" => {
                 let args: FrameAtArgs = decode_args("get_frame_at", arguments)?;
                 self.frame_at(args.timecode)
+            }
+            "get_timeline_storyboard" => {
+                let args: StoryboardArgs = decode_args("get_timeline_storyboard", arguments)?;
+                self.timeline_storyboard(args)
             }
             "get_transcript" => {
                 let args: TranscriptArgs = decode_args("get_transcript", arguments)?;
@@ -370,54 +385,82 @@ impl OpenReelMcp {
                     decode_args("get_timeline_scene_changes", arguments)?;
                 self.timeline_scene_changes(args.range)
             }
+            "get_beats" => {
+                let args: BeatsArgs = decode_args("get_beats", arguments)?;
+                self.asset_beats(args.asset_id, args.min_strength)
+            }
+            "get_timeline_beats" => {
+                let args: TimelineBeatsArgs = decode_args("get_timeline_beats", arguments)?;
+                self.timeline_beats(args.range, args.min_strength)
+            }
+            "get_analysis_status" => {
+                let args: AnalysisStatusArgs = decode_args("get_analysis_status", arguments)?;
+                self.analysis_status(args.asset_id)
+            }
+            "request_analysis" => {
+                let args: RequestAnalysisArgs = decode_args("request_analysis", arguments)?;
+                self.request_analysis(args.asset_id, &args.kinds)
+            }
+            "cancel_analysis" => {
+                let args: CancelAnalysisArgs = decode_args("cancel_analysis", arguments)?;
+                self.cancel_analysis(args.asset_id, args.kind)
+            }
             "apply_edit_plan" => {
                 let args: EditPlanArgs = decode_args("apply_edit_plan", arguments)?;
-                self.apply_edit_plan(&args.operations)
+                self.apply_edit_plan(args.expected_revision, &args.operations)
             }
             "import_media" => {
                 let args: ImportMediaArgs = decode_args("import_media", arguments)?;
-                Ok(self.import_media(&args.path))
+                Ok(self.import_media(args.expected_revision, &args.path))
             }
             tool_name => {
-                let operation = decode_operation(tool_name, arguments)
+                let revisioned = decode_operation(tool_name, arguments)
                     .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
-                if let Some(description) = self.confirmation_description(&operation)?
+                let (actual_revision, document) = self.snapshot()?;
+                if revisioned.expected_revision != actual_revision {
+                    return Ok(revision_conflict_text(
+                        revisioned.expected_revision,
+                        actual_revision,
+                    ));
+                }
+                if let Some(description) =
+                    Self::confirmation_description(&document, &revisioned.operation)
                     && let Err(reason) = self.confirmations.confirm(tool_name, description)
                 {
                     return Ok(error_text(format!(
                         "refused destructive tool {tool_name}: {reason}"
                     )));
                 }
-                Ok(self.apply_operation(tool_name, operation))
+                Ok(self.apply_operation(
+                    tool_name,
+                    revisioned.expected_revision,
+                    revisioned.operation,
+                ))
             }
         }
     }
 
-    fn confirmation_description(&self, operation: &Operation) -> Result<Option<String>, McpError> {
+    fn confirmation_description(document: &Document, operation: &Operation) -> Option<String> {
         match operation {
-            Operation::DeleteClip { clip } | Operation::RippleDeleteClip { clip } => Ok(Some(
-                format!("The agent wants to delete clip {clip}. This edit can be undone."),
+            Operation::DeleteClip { clip } | Operation::RippleDeleteClip { clip } => Some(format!(
+                "The agent wants to delete clip {clip}. This edit can be undone."
             )),
             Operation::RemoveTrack { track } => {
-                let document = self.document()?;
-                let Some(track) = document
+                let track = document
                     .tracks
                     .iter()
-                    .find(|candidate| candidate.id == *track)
-                else {
-                    return Ok(None);
-                };
+                    .find(|candidate| candidate.id == *track)?;
                 if track.clips.is_empty() {
-                    Ok(None)
+                    None
                 } else {
-                    Ok(Some(format!(
+                    Some(format!(
                         "The agent wants to remove track {} and its {} clip(s). This edit can be undone.",
                         track.id,
                         track.clips.len()
-                    )))
+                    ))
                 }
             }
-            _ => Ok(None),
+            _ => None,
         }
     }
 
@@ -435,37 +478,80 @@ impl OpenReelMcp {
         }
     }
 
-    fn apply_operation(&self, tool_name: &str, operation: Operation) -> CallToolResult {
+    fn snapshot(&self) -> Result<(TimelineRevision, Arc<Document>), McpError> {
+        match self
+            .core
+            .request(Command::Query(Query::Snapshot))
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?
+        {
+            Event::QueryResult(QueryResult::Snapshot { revision, document }) => {
+                Ok((revision, document))
+            }
+            _ => Err(McpError::internal_error(
+                "Core returned the wrong snapshot query result",
+                None,
+            )),
+        }
+    }
+
+    fn apply_operation(
+        &self,
+        tool_name: &str,
+        expected_revision: TimelineRevision,
+        operation: Operation,
+    ) -> CallToolResult {
         let imported_asset = match &operation {
             Operation::AddAsset { asset } => Some(asset.clone()),
             _ => None,
         };
-        let before = self.document().ok();
-        match self.core.request(Command::Do(operation)) {
-            Ok(Event::DocumentChanged { doc, .. }) => {
+        let before = self.snapshot().ok();
+        match self.core.request(Command::DoIfRevision {
+            expected: expected_revision,
+            operation,
+        }) {
+            Ok(Event::DocumentChanged { doc, revision, .. }) => {
                 self.playback.set_document(Arc::clone(&doc));
                 if let Some(asset) = imported_asset {
                     self.request_asset_analysis(asset);
                 }
-                success_text(state_delta(tool_name, before.as_deref(), &doc))
+                success_text(state_delta(
+                    tool_name,
+                    before.as_ref().map(|(_, document)| document.as_ref()),
+                    &doc,
+                    revision,
+                ))
             }
             Ok(Event::OpRejected { error, .. }) => error_text(error.to_string()),
             Ok(Event::BatchRejected { error, .. }) => error_text(error.to_string()),
+            Ok(Event::RevisionConflict { expected, actual }) => {
+                revision_conflict_text(expected, actual)
+            }
             Ok(_) => error_text("Core returned the wrong operation result"),
             Err(error) => error_text(error.to_string()),
         }
     }
 
-    fn import_media(&self, path: &Path) -> CallToolResult {
+    fn import_media(&self, expected_revision: TimelineRevision, path: &Path) -> CallToolResult {
         let asset = match self.analysis.probe(path) {
             Ok(asset) => asset,
             Err(error) => return error_text(error.to_string()),
         };
-        self.apply_operation("import_media", Operation::AddAsset { asset })
+        self.apply_operation(
+            "import_media",
+            expected_revision,
+            Operation::AddAsset { asset },
+        )
     }
 
-    fn apply_edit_plan(&self, operations: &[Operation]) -> Result<CallToolResult, McpError> {
-        let before = self.document()?;
+    fn apply_edit_plan(
+        &self,
+        expected_revision: TimelineRevision,
+        operations: &[Operation],
+    ) -> Result<CallToolResult, McpError> {
+        let (actual_revision, before) = self.snapshot()?;
+        if expected_revision != actual_revision {
+            return Ok(revision_conflict_text(expected_revision, actual_revision));
+        }
         if let Some(description) = plan_confirmation_description(&before, operations)
             && let Err(reason) = self.confirmations.confirm("apply_edit_plan", description)
         {
@@ -482,10 +568,13 @@ impl OpenReelMcp {
             .collect::<Vec<_>>();
         let event = self
             .core
-            .request(Command::DoBatch(operations.to_vec()))
+            .request(Command::DoBatchIfRevision {
+                expected: expected_revision,
+                operations: operations.to_vec(),
+            })
             .map_err(|error| McpError::internal_error(error.to_string(), None))?;
         Ok(match event {
-            Event::DocumentChanged { doc, .. } => {
+            Event::DocumentChanged { doc, revision, .. } => {
                 self.playback.set_document(Arc::clone(&doc));
                 for asset in added_assets {
                     self.request_asset_analysis(asset);
@@ -496,12 +585,20 @@ impl OpenReelMcp {
                     render_plan_outcomes(
                         operations,
                         None,
-                        Some(state_delta("apply_edit_plan", Some(&before), &doc)),
+                        Some(state_delta(
+                            "apply_edit_plan",
+                            Some(&before),
+                            &doc,
+                            revision,
+                        )),
                     )
                 ))
             }
             Event::BatchRejected { error, .. } => {
                 error_text(render_plan_outcomes(operations, Some(&error), None))
+            }
+            Event::RevisionConflict { expected, actual } => {
+                revision_conflict_text(expected, actual)
             }
             _ => error_text("Core returned the wrong edit-plan result"),
         })
@@ -510,7 +607,8 @@ impl OpenReelMcp {
     fn request_asset_analysis(&self, asset: openreel_core::MediaAsset) {
         self.analysis.request_transcription(asset.clone());
         self.analysis.request_silence_detection(asset.clone());
-        self.analysis.request_scene_detection(asset);
+        self.analysis.request_scene_detection(asset.clone());
+        self.analysis.request_beat_detection(asset);
     }
 
     /// Deterministic completion feedback: the plan result itself reports how
@@ -577,15 +675,7 @@ impl OpenReelMcp {
             Ok(image) => image,
             Err(error) => return Ok(error_text(error.to_string())),
         };
-        let mut png = Vec::new();
-        PngEncoder::new(&mut png)
-            .write_image(
-                &image.pixels,
-                image.width,
-                image.height,
-                ColorType::Rgba8.into(),
-            )
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        let png = encode_png(&image)?;
         Ok(CallToolResult::success(vec![
             ContentBlock::text(format!(
                 "project frame {} ({}x{})",
@@ -593,6 +683,56 @@ impl OpenReelMcp {
             )),
             ContentBlock::image(BASE64.encode(png), "image/png"),
         ]))
+    }
+
+    fn timeline_storyboard(&self, args: StoryboardArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let range = validated_timeline_range(&document, args.range, "timeline storyboard")?;
+        let frame_count = args.frame_count.unwrap_or(STORYBOARD_DEFAULT_FRAMES);
+        if !(1..=STORYBOARD_MAX_FRAMES).contains(&frame_count) {
+            return Ok(error_text(format!(
+                "frame_count must be in 1..={STORYBOARD_MAX_FRAMES}"
+            )));
+        }
+        let max_width = args.max_width.unwrap_or(STORYBOARD_DEFAULT_CELL_WIDTH);
+        if !(64..=THUMBNAIL_MAX_WIDTH).contains(&max_width) {
+            return Ok(error_text(format!(
+                "max_width must be in 64..={THUMBNAIL_MAX_WIDTH}"
+            )));
+        }
+        let frames = storyboard_sample_frames(&range, frame_count);
+        self.playback.set_document(Arc::clone(&document));
+        let mut images = Vec::with_capacity(frames.len());
+        for frame in &frames {
+            match self.analysis.thumbnail_at(*frame, max_width) {
+                Ok(image) => images.push(image),
+                Err(error) => return Ok(error_text(error.to_string())),
+            }
+        }
+        let sheet = compose_contact_sheet(&images)?;
+        let png = encode_png(&sheet)?;
+        let cells = frames
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| {
+                serde_json::json!({
+                    "cell": index + 1,
+                    "project_frame": frame.0,
+                })
+            })
+            .collect::<Vec<_>>();
+        let manifest = serde_json::json!({
+            "timeline_revision": revision.0,
+            "range": {"start": range.start.0, "end": range.end.0},
+            "cells": cells,
+            "sheet": {"width": sheet.width, "height": sheet.height},
+        });
+        let mut result = CallToolResult::success(vec![
+            ContentBlock::text(format!("timeline storyboard {manifest}")),
+            ContentBlock::image(BASE64.encode(png), "image/png"),
+        ]);
+        result.structured_content = Some(manifest);
+        Ok(result)
     }
 
     fn asset_transcript(&self, asset_id: AssetId) -> Result<CallToolResult, McpError> {
@@ -662,6 +802,92 @@ impl OpenReelMcp {
         Ok(success_text(render_asset_scene_changes(
             asset_id, &status, minimum,
         )))
+    }
+
+    fn asset_beats(
+        &self,
+        asset_id: AssetId,
+        requested_minimum: Option<f64>,
+    ) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let Some(asset) = document.asset(asset_id) else {
+            return Ok(error_text(format!("asset {asset_id} does not exist")));
+        };
+        let minimum = match requested_minimum {
+            Some(value) => match percentage_to_basis_points(value, "min_strength") {
+                Ok(value) => value,
+                Err(error) => return Ok(error_text(error)),
+            },
+            None => DEFAULT_BEAT_STRENGTH_BASIS_POINTS,
+        };
+        let mut status = self.analysis.beat_status(asset);
+        if status == BeatStatus::NotRequested {
+            self.analysis.request_beat_detection(asset.clone());
+            status = self.analysis.beat_status(asset);
+        }
+        Ok(render_asset_beats(asset_id, &status, minimum))
+    }
+
+    fn analysis_status(&self, asset_id: AssetId) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let Some(asset) = document.asset(asset_id) else {
+            return Ok(error_text(format!("asset {asset_id} does not exist")));
+        };
+        let jobs = self.analysis.analysis_jobs(asset);
+        Ok(success_structured(
+            format!(
+                "asset {asset_id} analysis jobs {}",
+                serde_json::to_string(&jobs).unwrap_or_else(|_| "[]".to_owned())
+            ),
+            serde_json::json!({"asset_id": asset_id.0, "jobs": jobs}),
+        ))
+    }
+
+    fn request_analysis(
+        &self,
+        asset_id: AssetId,
+        requested: &[AnalysisKind],
+    ) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let Some(asset) = document.asset(asset_id).cloned() else {
+            return Ok(error_text(format!("asset {asset_id} does not exist")));
+        };
+        let kinds = if requested.is_empty() {
+            AnalysisKind::ALL.as_slice()
+        } else {
+            requested
+        };
+        for kind in kinds {
+            match kind {
+                AnalysisKind::Transcript => self.analysis.request_transcription(asset.clone()),
+                AnalysisKind::Silence => self.analysis.request_silence_detection(asset.clone()),
+                AnalysisKind::Scene => self.analysis.request_scene_detection(asset.clone()),
+                AnalysisKind::Beat => self.analysis.request_beat_detection(asset.clone()),
+            }
+        }
+        self.analysis_status(asset_id)
+    }
+
+    fn cancel_analysis(
+        &self,
+        asset_id: AssetId,
+        kind: AnalysisKind,
+    ) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let Some(asset) = document.asset(asset_id) else {
+            return Ok(error_text(format!("asset {asset_id} does not exist")));
+        };
+        let cancelled = self.analysis.cancel_analysis(asset, kind);
+        let jobs = self.analysis.analysis_jobs(asset);
+        Ok(success_structured(
+            format!("asset {asset_id} analysis kind={kind:?} cancelled={cancelled}"),
+            serde_json::json!({
+                "asset_id": asset_id.0,
+                "kind": kind,
+                "cancelled": cancelled,
+                "jobs": jobs,
+            }),
+        ))
     }
 
     fn timeline_transcript(
@@ -781,6 +1007,55 @@ impl OpenReelMcp {
         }
         Ok(success_text(rendered))
     }
+
+    fn timeline_beats(
+        &self,
+        requested: Option<TranscriptRangeArgs>,
+        requested_minimum: Option<f64>,
+    ) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let range = validated_timeline_range(&document, requested, "timeline beat")?;
+        let minimum = match requested_minimum {
+            Some(value) => match percentage_to_basis_points(value, "min_strength") {
+                Ok(value) => value,
+                Err(error) => return Ok(error_text(error)),
+            },
+            None => DEFAULT_BEAT_STRENGTH_BASIS_POINTS,
+        };
+        for asset in &document.media_pool {
+            if self.analysis.beat_status(asset) == BeatStatus::NotRequested {
+                self.analysis.request_beat_detection(asset.clone());
+            }
+        }
+        let beats: Vec<TimelineBeat> =
+            match self
+                .analysis
+                .timeline_beats(&document, Some(range.clone()), minimum)
+            {
+                Ok(beats) => beats,
+                Err(error) => return Ok(error_text(error.to_string())),
+            };
+        let pending = document
+            .media_pool
+            .iter()
+            .filter(|asset| {
+                !matches!(
+                    self.analysis.beat_status(asset),
+                    BeatStatus::Ready(_) | BeatStatus::NoAudio
+                )
+            })
+            .map(|asset| asset.id.0)
+            .collect::<Vec<_>>();
+        Ok(success_structured(
+            render_timeline_beats(&document, &range, &beats, &pending),
+            serde_json::json!({
+                "range": {"start": range.start.0, "end": range.end.0},
+                "minimum_strength_basis_points": minimum,
+                "beats": beats,
+                "pending_asset_ids": pending,
+            }),
+        ))
+    }
 }
 
 impl ServerHandler for OpenReelMcp {
@@ -788,7 +1063,7 @@ impl ServerHandler for OpenReelMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openreel", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-        "Inspect the timeline, transcript, silences, and scene changes before editing. Resolve ordinal targets against the initial timeline state. Frame values are exact project frames. Prefer one atomic apply_edit_plan after inspection instead of separate operation tools. Use add_title for first-class video-track titles and import_media for filesystem paths.",
+        "Inspect the timeline before editing and copy its timeline_revision into expected_revision on every mutation. Reinspect and re-plan after a revision conflict. Use the storyboard, transcript, silence, beat, and scene inspectors when relevant. Resolve ordinal targets against the inspected state. Frame values are exact project frames. Prefer one atomic apply_edit_plan after inspection instead of separate operation tools. Use add_title for first-class video-track titles and import_media for filesystem paths.",
             )
     }
 
@@ -838,7 +1113,22 @@ struct FrameAtArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct StoryboardArgs {
+    /// Optional half-open range in exact project frames. Omit for the full timeline.
+    #[serde(default)]
+    range: Option<TranscriptRangeArgs>,
+    /// Number of uniformly sampled cells. Defaults to 9 and is capped at 16.
+    #[serde(default)]
+    frame_count: Option<u8>,
+    /// Maximum width of each rendered cell. Defaults to 320 and is capped at 512.
+    #[serde(default)]
+    max_width: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ImportMediaArgs {
+    /// Exact revision returned by `get_timeline_state` before planning this import.
+    expected_revision: TimelineRevision,
     /// Absolute or working-directory-relative path on the user's machine.
     path: PathBuf,
 }
@@ -868,6 +1158,48 @@ struct SceneChangesArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct BeatsArgs {
+    /// Stable asset id shown by `get_timeline_state`.
+    asset_id: AssetId,
+    /// Optional onset-strength threshold from 0 through 100 percent. Defaults to 10.
+    #[serde(default)]
+    min_strength: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TimelineBeatsArgs {
+    /// Optional half-open range in exact project frames. Omit for the full timeline.
+    #[serde(default)]
+    range: Option<TranscriptRangeArgs>,
+    /// Optional onset-strength threshold from 0 through 100 percent. Defaults to 10.
+    #[serde(default)]
+    min_strength: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AnalysisStatusArgs {
+    /// Stable asset id shown by `get_timeline_state`.
+    asset_id: AssetId,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RequestAnalysisArgs {
+    /// Stable asset id shown by `get_timeline_state`.
+    asset_id: AssetId,
+    /// Analysis families to queue. Omit or pass an empty array to request all four.
+    #[serde(default)]
+    kinds: Vec<AnalysisKind>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CancelAnalysisArgs {
+    /// Stable asset id shown by `get_timeline_state`.
+    asset_id: AssetId,
+    /// Analysis family whose queued or running job should be cancelled.
+    kind: AnalysisKind,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct TimelineDerivedArgs {
     /// Optional half-open range in exact project frames. Omit for the full timeline.
     #[serde(default)]
@@ -876,6 +1208,8 @@ struct TimelineDerivedArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct EditPlanArgs {
+    /// Exact revision returned by `get_timeline_state` before planning this batch.
+    expected_revision: TimelineRevision,
     /// Ordered operations. Each item uses the generated Operation schema and sees prior effects.
     operations: Vec<Operation>,
 }
@@ -893,6 +1227,7 @@ struct TranscriptRangeArgs {
     end: TimeCode,
 }
 
+#[allow(clippy::too_many_lines)]
 fn inspector_tools() -> Vec<Tool> {
     let read_only = || {
         ToolAnnotations::new()
@@ -904,7 +1239,7 @@ fn inspector_tools() -> Vec<Tool> {
     vec![
         Tool::new(
             "get_timeline_state",
-            "Return the compact live project state: tracks and sync-lock flags, clips, ids, timeline/source ranges in frames and seconds, and assets.",
+            "Return the compact live project state and its exact timeline_revision. Every mutation must send that revision as expected_revision; inspect again after a conflict.",
             schema_object::<EmptyArgs>(),
         )
         .with_annotations(read_only()),
@@ -933,8 +1268,50 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "get_beats",
+            "Return cached rhythmic onsets, strength scores, and estimated tempo for one asset in exact source frames, or queue deterministic background analysis.",
+            schema_object::<BeatsArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_timeline_beats",
+            "Return rhythmic onsets mapped through clips to exact project frames, with structured data suitable for beat-aware cutting.",
+            schema_object::<TimelineBeatsArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_analysis_status",
+            "Return the uniform transcript, silence, scene, and beat job lifecycle for one asset without starting work.",
+            schema_object::<AnalysisStatusArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "request_analysis",
+            "Queue selected content-addressed analysis jobs for one asset, or all four families when kinds is omitted.",
+            schema_object::<RequestAnalysisArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(false),
+        ),
+        Tool::new(
+            "cancel_analysis",
+            "Cooperatively cancel one queued or running asset-analysis job and return the resulting lifecycle state.",
+            schema_object::<CancelAnalysisArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(false),
+        ),
+        Tool::new(
             "apply_edit_plan",
-            "Atomically validate and apply an ordered array of generated OpenReel Operations as one undo entry.",
+            "Atomically validate and apply an ordered array of generated OpenReel Operations as one undo entry, only when expected_revision still matches the inspected timeline.",
             schema_object::<EditPlanArgs>(),
         )
         .with_annotations(
@@ -957,6 +1334,12 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "get_timeline_storyboard",
+            "Render a bounded PNG contact sheet from the real timeline compositor with a cell-to-frame manifest and timeline revision. Use it to survey footage and as visual proof after editing.",
+            schema_object::<StoryboardArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "get_transcript",
             "Return one asset's word-timestamped transcript in exact source frames and seconds, or its background transcription status.",
             schema_object::<TranscriptArgs>(),
@@ -970,7 +1353,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "import_media",
-            "Probe a media path, then add the resulting asset metadata through Operation::AddAsset.",
+            "Probe a media path, then add the resulting asset metadata through Operation::AddAsset when expected_revision still matches.",
             schema_object::<ImportMediaArgs>(),
         )
         .with_annotations(
@@ -998,11 +1381,131 @@ fn success_text(text: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
 }
 
+fn success_structured(text: impl Into<String>, value: serde_json::Value) -> CallToolResult {
+    let mut result = success_text(text);
+    result.structured_content = Some(value);
+    result
+}
+
 fn error_text(text: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(text)])
 }
 
-fn state_delta(tool_name: &str, before: Option<&Document>, after: &Document) -> String {
+fn encode_png(image: &openreel_core::RgbaImage) -> Result<Vec<u8>, McpError> {
+    let mut png = Vec::new();
+    PngEncoder::new(&mut png)
+        .write_image(
+            &image.pixels,
+            image.width,
+            image.height,
+            ColorType::Rgba8.into(),
+        )
+        .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+    Ok(png)
+}
+
+fn storyboard_sample_frames(range: &std::ops::Range<TimeCode>, frame_count: u8) -> Vec<TimeCode> {
+    let count = usize::from(frame_count.max(1));
+    let inclusive_span = range.end.0.saturating_sub(range.start.0).saturating_sub(1);
+    if count == 1 {
+        return vec![TimeCode(range.start.0.saturating_add(inclusive_span / 2))];
+    }
+    let divisor = i128::try_from(count.saturating_sub(1)).unwrap_or(i128::MAX);
+    (0..count)
+        .map(|index| {
+            let numerator = i128::from(inclusive_span)
+                .saturating_mul(i128::try_from(index).unwrap_or(i128::MAX));
+            let offset = i64::try_from(numerator / divisor).unwrap_or(inclusive_span);
+            TimeCode(range.start.0.saturating_add(offset))
+        })
+        .collect()
+}
+
+fn compose_contact_sheet(
+    images: &[openreel_core::RgbaImage],
+) -> Result<openreel_core::RgbaImage, McpError> {
+    let cell_width = images.iter().map(|image| image.width).max().unwrap_or(1);
+    let cell_height = images.iter().map(|image| image.height).max().unwrap_or(1);
+    let count = u32::try_from(images.len()).unwrap_or(u32::MAX).max(1);
+    let columns = count.min(STORYBOARD_COLUMNS);
+    let rows = count.div_ceil(columns);
+    let width = cell_width
+        .checked_mul(columns)
+        .and_then(|value| {
+            value.checked_add(STORYBOARD_GUTTER.saturating_mul(columns.saturating_sub(1)))
+        })
+        .ok_or_else(|| McpError::internal_error("storyboard width overflowed", None))?;
+    let height = cell_height
+        .checked_mul(rows)
+        .and_then(|value| {
+            value.checked_add(STORYBOARD_GUTTER.saturating_mul(rows.saturating_sub(1)))
+        })
+        .ok_or_else(|| McpError::internal_error("storyboard height overflowed", None))?;
+    let byte_count = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| McpError::internal_error("storyboard allocation overflowed", None))?;
+    let mut pixels = vec![16_u8; byte_count];
+    for alpha in pixels.iter_mut().skip(3).step_by(4) {
+        *alpha = u8::MAX;
+    }
+    for (index, image) in images.iter().enumerate() {
+        let index = u32::try_from(index).unwrap_or(u32::MAX);
+        let column = index % columns;
+        let row = index / columns;
+        let x = column.saturating_mul(cell_width.saturating_add(STORYBOARD_GUTTER));
+        let y = row.saturating_mul(cell_height.saturating_add(STORYBOARD_GUTTER));
+        for source_y in 0..image.height {
+            let source_start = usize::try_from(source_y)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(usize::try_from(image.width).unwrap_or(usize::MAX))
+                .saturating_mul(4);
+            let source_len = usize::try_from(image.width)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(4);
+            let destination_start = usize::try_from(y.saturating_add(source_y))
+                .unwrap_or(usize::MAX)
+                .saturating_mul(usize::try_from(width).unwrap_or(usize::MAX))
+                .saturating_add(usize::try_from(x).unwrap_or(usize::MAX))
+                .saturating_mul(4);
+            let Some(source) = image
+                .pixels
+                .get(source_start..source_start.saturating_add(source_len))
+            else {
+                return Err(McpError::internal_error(
+                    "storyboard source image is truncated",
+                    None,
+                ));
+            };
+            let Some(destination) =
+                pixels.get_mut(destination_start..destination_start.saturating_add(source_len))
+            else {
+                return Err(McpError::internal_error(
+                    "storyboard destination image overflowed",
+                    None,
+                ));
+            };
+            destination.copy_from_slice(source);
+        }
+    }
+    Ok(openreel_core::RgbaImage {
+        width,
+        height,
+        pixels,
+    })
+}
+
+fn state_delta(
+    tool_name: &str,
+    before: Option<&Document>,
+    after: &Document,
+    revision: TimelineRevision,
+) -> String {
     let counts = |document: &Document| {
         (
             document.tracks.len(),
@@ -1018,15 +1521,21 @@ fn state_delta(tool_name: &str, before: Option<&Document>, after: &Document) -> 
     if let Some(before) = before {
         let (before_tracks, before_clips, before_assets) = counts(before);
         format!(
-            "applied {tool_name}; tracks {before_tracks}->{after_tracks}, clips {before_clips}->{after_clips}, assets {before_assets}->{after_assets}, duration {}f->{}f",
+            "applied {tool_name}; timeline_revision={revision}; tracks {before_tracks}->{after_tracks}, clips {before_clips}->{after_clips}, assets {before_assets}->{after_assets}, duration {}f->{}f",
             before.duration.0, after.duration.0
         )
     } else {
         format!(
-            "applied {tool_name}; tracks={after_tracks}, clips={after_clips}, assets={after_assets}, duration={}f",
+            "applied {tool_name}; timeline_revision={revision}; tracks={after_tracks}, clips={after_clips}, assets={after_assets}, duration={}f",
             after.duration.0
         )
     }
+}
+
+fn revision_conflict_text(expected: TimelineRevision, actual: TimelineRevision) -> CallToolResult {
+    error_text(format!(
+        "timeline revision conflict: expected {expected}, actual {actual}; call get_timeline_state and re-plan against the current revision"
+    ))
 }
 
 fn validated_timeline_range(
@@ -1052,10 +1561,104 @@ fn validated_timeline_range(
 // The validated 0..=100 percentage is intentionally rounded to integer basis points.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn confidence_to_basis_points(confidence: f64) -> Result<u16, String> {
-    if !confidence.is_finite() || !(0.0..=100.0).contains(&confidence) {
-        return Err("min_confidence must be between 0 and 100 percent".to_owned());
+    percentage_to_basis_points(confidence, "min_confidence")
+}
+
+// The validated 0..=100 percentage is intentionally rounded to integer basis points.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn percentage_to_basis_points(value: f64, field: &str) -> Result<u16, String> {
+    if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+        return Err(format!("{field} must be between 0 and 100 percent"));
     }
-    Ok((confidence * 100.0).round() as u16)
+    Ok((value * 100.0).round() as u16)
+}
+
+fn render_asset_beats(
+    asset: AssetId,
+    status: &BeatStatus,
+    minimum_strength_basis_points: u16,
+) -> CallToolResult {
+    match status {
+        BeatStatus::NotRequested => {
+            success_text(format!("asset {asset} beats status=not-requested"))
+        }
+        BeatStatus::Queued => success_text(format!("asset {asset} beats status=queued")),
+        BeatStatus::Hashing => success_text(format!("asset {asset} beats status=hashing")),
+        BeatStatus::Analyzing { progress_percent } => success_text(progress_percent.map_or_else(
+            || format!("asset {asset} beats status=analyzing"),
+            |progress| format!("asset {asset} beats status=analyzing progress={progress}%"),
+        )),
+        BeatStatus::NoAudio => success_text(format!("asset {asset} beats: no audio stream")),
+        BeatStatus::Cancelled => success_text(format!("asset {asset} beats status=cancelled")),
+        BeatStatus::Failed(error) => {
+            error_text(format!("asset {asset} beats status=failed error={error:?}"))
+        }
+        BeatStatus::Ready(beats) => {
+            let selected = beats
+                .beats
+                .iter()
+                .copied()
+                .filter(|beat| beat.strength_basis_points >= minimum_strength_basis_points)
+                .collect::<Vec<_>>();
+            let mut output = format!(
+                "asset {asset} beats fps={}/{} bpm={:.3} min_strength={:.2}% onsets={}\n",
+                beats.source_fps.numerator(),
+                beats.source_fps.denominator(),
+                f64::from(beats.estimated_bpm_milli) / 1_000.0,
+                f64::from(minimum_strength_basis_points) / 100.0,
+                selected.len()
+            );
+            for beat in &selected {
+                let _ = writeln!(
+                    output,
+                    "{}f strength={:.2}%",
+                    beat.source_frame.0,
+                    f64::from(beat.strength_basis_points) / 100.0
+                );
+            }
+            output.pop();
+            success_structured(
+                output,
+                serde_json::json!({
+                    "asset_id": asset.0,
+                    "source_fps": beats.source_fps,
+                    "estimated_bpm_milli": beats.estimated_bpm_milli,
+                    "minimum_strength_basis_points": minimum_strength_basis_points,
+                    "beats": selected,
+                }),
+            )
+        }
+    }
+}
+
+fn render_timeline_beats(
+    document: &Document,
+    range: &std::ops::Range<TimeCode>,
+    beats: &[TimelineBeat],
+    pending: &[u64],
+) -> String {
+    let mut output = format!(
+        "timeline beats range={}..{} fps={}/{} onsets={} pending_assets={pending:?}\n",
+        range.start.0,
+        range.end.0,
+        document.fps.numerator(),
+        document.fps.denominator(),
+        beats.len()
+    );
+    for beat in beats {
+        let _ = writeln!(
+            output,
+            "clip={} asset={} project={}f source={}f strength={:.2}% bpm={:.3}",
+            beat.clip,
+            beat.asset,
+            beat.project_frame.0,
+            beat.source_frame.0,
+            f64::from(beat.strength_basis_points) / 100.0,
+            f64::from(beat.estimated_bpm_milli) / 1_000.0,
+        );
+    }
+    output.pop();
+    output
 }
 
 fn plan_confirmation_description(document: &Document, operations: &[Operation]) -> Option<String> {
@@ -1294,12 +1897,17 @@ mod tests {
     }
 
     fn delete_request() -> CallToolRequestParams {
-        CallToolRequestParams::new("delete_clip")
-            .with_arguments(json!({"clip": 1}).as_object().unwrap().clone())
+        CallToolRequestParams::new("delete_clip").with_arguments(
+            json!({"expected_revision": 0, "clip": 1})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
     }
 
     fn plan_request(operations: serde_json::Value) -> CallToolRequestParams {
         CallToolRequestParams::new("apply_edit_plan").with_arguments(serde_json::Map::from_iter([
+            ("expected_revision".to_owned(), json!(0)),
             ("operations".to_owned(), operations),
         ]))
     }
@@ -1420,8 +2028,12 @@ mod tests {
     fn removing_a_nonempty_track_requires_confirmation() {
         let (core, playback, analysis) = fixture();
         let broker = ConfirmationBroker::with_timeout(Duration::from_secs(1));
-        let request = CallToolRequestParams::new("remove_track")
-            .with_arguments(json!({"track": 1}).as_object().unwrap().clone());
+        let request = CallToolRequestParams::new("remove_track").with_arguments(
+            json!({"expected_revision": 0, "track": 1})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
         let result = invoke_in_background(
             OpenReelMcp::new(core, playback, analysis, broker.clone()),
             request,
@@ -1440,11 +2052,13 @@ mod tests {
     fn ripple_delete_is_destructive_while_marker_and_title_edits_are_suggestions() {
         let (core, playback, analysis) = fixture();
         let service = OpenReelMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let document = service.document().unwrap();
         assert!(
-            service
-                .confirmation_description(&Operation::RippleDeleteClip { clip: ClipId(1) })
-                .unwrap()
-                .is_some()
+            OpenReelMcp::confirmation_description(
+                &document,
+                &Operation::RippleDeleteClip { clip: ClipId(1) },
+            )
+            .is_some()
         );
         for operation in [
             Operation::AddMarker {
@@ -1474,12 +2088,7 @@ mod tests {
                 value: ParamValue::Text("Title".to_owned()),
             },
         ] {
-            assert!(
-                service
-                    .confirmation_description(&operation)
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(OpenReelMcp::confirmation_description(&document, &operation).is_none());
         }
     }
 
@@ -1494,6 +2103,40 @@ mod tests {
         assert!(schema.contains("AddTrack"));
         assert!(schema.contains("DeleteClip"));
         assert!(schema.contains("operations"));
+    }
+
+    #[test]
+    fn storyboard_sampling_is_bounded_uniform_and_includes_visible_edges() {
+        assert_eq!(
+            storyboard_sample_frames(&(TimeCode(0)..TimeCode(10)), 4),
+            [TimeCode(0), TimeCode(3), TimeCode(6), TimeCode(9)]
+        );
+        assert_eq!(
+            storyboard_sample_frames(&(TimeCode(0)..TimeCode(10)), 1),
+            [TimeCode(4)]
+        );
+    }
+
+    #[test]
+    fn contact_sheet_preserves_cells_and_uses_a_dark_opaque_gutter() {
+        let red = openreel_core::RgbaImage {
+            width: 2,
+            height: 1,
+            pixels: vec![255, 0, 0, 255, 255, 0, 0, 255],
+        };
+        let blue = openreel_core::RgbaImage {
+            width: 2,
+            height: 1,
+            pixels: vec![0, 0, 255, 255, 0, 0, 255, 255],
+        };
+        let sheet = compose_contact_sheet(&[red, blue]).unwrap();
+        assert_eq!(sheet.width, 2 * 2 + STORYBOARD_GUTTER);
+        assert_eq!(sheet.height, 1);
+        assert_eq!(&sheet.pixels[..4], &[255, 0, 0, 255]);
+        let gutter = 2_usize * 4;
+        assert_eq!(&sheet.pixels[gutter..gutter + 4], &[16, 16, 16, 255]);
+        let blue_start = usize::try_from(2 + STORYBOARD_GUTTER).unwrap() * 4;
+        assert_eq!(&sheet.pixels[blue_start..blue_start + 4], &[0, 0, 255, 255]);
     }
 
     #[test]
