@@ -44,8 +44,8 @@ pub struct SessionConfig {
     pub max_turns: Option<u32>,
     /// Streamable HTTP endpoint for the live `OpenReel` MCP server.
     pub mcp_url: Option<String>,
-    /// Exact MCP tool names exposed to this harness session. `None` keeps the
-    /// complete compatibility catalog for third-party and legacy callers.
+    /// Exact MCP tool names exposed to this harness session. `None` uses the
+    /// standard compact `OpenReel` runtime.
     pub tool_names: Option<Vec<String>>,
 }
 

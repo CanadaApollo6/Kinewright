@@ -138,12 +138,12 @@ pub fn decode_operation(
         })
 }
 
-/// Return every mutating and inspecting MCP tool name.
+/// Return every operation and hand-written capability name in the internal registry.
 ///
 /// # Errors
 ///
 /// Returns a schema error when operation tool generation fails.
-pub fn all_tool_names() -> Result<Vec<String>, SchemaError> {
+pub fn capability_tool_names() -> Result<Vec<String>, SchemaError> {
     let mut names = operation_tools()?
         .into_iter()
         .map(|definition| definition.tool.name.into_owned())

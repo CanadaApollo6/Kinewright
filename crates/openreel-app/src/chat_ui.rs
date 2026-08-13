@@ -240,7 +240,7 @@ impl AgentThread {
         let name = name.into();
         let branch = TimelineBranch::new(name.clone(), base_revision, Arc::clone(base_document))
             .map_err(|error| error.to_string())?;
-        let mcp_server = match McpServer::start_isolated_compact_with_exporter(
+        let mcp_server = match McpServer::start_isolated_with_exporter(
             branch.core(),
             Arc::clone(playback),
             Arc::clone(analysis),
@@ -289,13 +289,9 @@ impl AgentThread {
         self.selected_operations.clear();
         let branch = TimelineBranch::new(self.name.clone(), base_revision, base_document)
             .map_err(|error| error.to_string())?;
-        let server = McpServer::start_isolated_compact_with_exporter(
-            branch.core(),
-            playback,
-            analysis,
-            exporter,
-        )
-        .map_err(|error| error.to_string())?;
+        let server =
+            McpServer::start_isolated_with_exporter(branch.core(), playback, analysis, exporter)
+                .map_err(|error| error.to_string())?;
         self.confirmations = Some(server.confirmations());
         self.mcp_server = Some(server);
         self.branch = branch;

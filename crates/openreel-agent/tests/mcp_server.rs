@@ -12,12 +12,15 @@ use openreel_media::{
     test_support::{GeneratedMedia, single_clip_document},
 };
 use rmcp::{
-    ServiceExt as _, model::CallToolRequestParams, transport::StreamableHttpClientTransport,
+    RoleClient, ServiceExt as _,
+    model::{CallToolRequestParams, CallToolResult},
+    service::RunningService,
+    transport::StreamableHttpClientTransport,
 };
 use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mutator_tool_applies_through_the_real_core_actor() {
+async fn compact_runtime_applies_a_plan_and_rejects_direct_internal_tools() {
     let core = Core::spawn(Document::default()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -26,7 +29,17 @@ async fn mutator_tool_applies_through_the_real_core_actor() {
             .await
             .unwrap();
 
-    let result = client
+    let tools = client.list_tools(None).await.unwrap().tools;
+    assert_eq!(tools.len(), 7);
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<Vec<_>>(),
+        openreel_agent::compact_tool_names()
+    );
+
+    let direct = client
         .call_tool(
             CallToolRequestParams::new("add_track").with_arguments(
                 json!({"expected_revision": 0, "track": {"id": 7, "kind": "Video", "clips": []}})
@@ -37,10 +50,39 @@ async fn mutator_tool_applies_through_the_real_core_actor() {
         )
         .await
         .unwrap();
+    assert_eq!(direct.is_error, Some(true));
+    assert!(
+        direct.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("internal capability")
+    );
+    assert!(query_document(&core).tracks.is_empty());
 
+    let prepared = prepare_plan(
+        &client,
+        0,
+        json!([
+            {"op": "add_track", "track": {"id": 7, "kind": "Video", "clips": []}},
+            {"op": "set_track_sync_lock", "track": 7, "locked": false},
+            {"op": "add_marker", "marker": {
+                "id": 1,
+                "position": 0,
+                "label": "Review",
+                "color_token": 0
+            }}
+        ]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false));
+    let result = client
+        .call_tool(commit_request(0, &prepared))
+        .await
+        .unwrap();
     assert_eq!(result.is_error, Some(false));
     let outcome = &result.content[0].as_text().unwrap().text;
-    assert!(outcome.contains("applied add_track"));
+    assert!(outcome.contains("op 1 add_track: applied"));
     assert!(outcome.contains("tracks 0->1"));
     let Event::QueryResult(QueryResult::Document(document)) =
         core.request(Command::Query(Query::Document)).unwrap()
@@ -48,20 +90,6 @@ async fn mutator_tool_applies_through_the_real_core_actor() {
         panic!("expected document query result");
     };
     assert_eq!(document.tracks[0].id, TrackId(7));
-    assert!(document.tracks[0].sync_lock);
-
-    let sync_lock = client
-        .call_tool(
-            CallToolRequestParams::new("set_track_sync_lock").with_arguments(
-                json!({"expected_revision": 1, "track": 7, "locked": false})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            ),
-        )
-        .await
-        .unwrap();
-    assert_eq!(sync_lock.is_error, Some(false));
     assert!(!query_document(&core).tracks[0].sync_lock);
 
     let timeline_state = client
@@ -77,50 +105,21 @@ async fn mutator_tool_applies_through_the_real_core_actor() {
             .contains("track 7 video sync_lock=false clips=0")
     );
 
-    let marker = client
-        .call_tool(
-            CallToolRequestParams::new("add_marker").with_arguments(
-                json!({
-                    "expected_revision": 2,
-                    "marker": {
-                        "id": 1,
-                        "position": 0,
-                        "label": "Review",
-                        "color_token": 0
-                    }
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
-        )
-        .await
-        .unwrap();
-    assert_eq!(marker.is_error, Some(false));
+    assert_eq!(query_document(&core).markers[0].id, MarkerId(1));
+
+    let rejected = prepare_plan(
+        &client,
+        1,
+        json!([{"op": "add_track", "track": {"id": 7, "kind": "Video", "clips": []}}]),
+    )
+    .await;
+    assert_eq!(rejected.is_error, Some(true));
     assert!(
-        marker.content[0]
+        rejected.content[0]
             .as_text()
             .unwrap()
             .text
-            .contains("applied add_marker")
-    );
-    assert_eq!(query_document(&core).markers[0].id, MarkerId(1));
-
-    let rejected = client
-        .call_tool(
-            CallToolRequestParams::new("add_track").with_arguments(
-                json!({"expected_revision": 3, "track": {"id": 7, "kind": "Video", "clips": []}})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            ),
-        )
-        .await
-        .unwrap();
-    assert_eq!(rejected.is_error, Some(true));
-    assert_eq!(
-        rejected.content[0].as_text().unwrap().text,
-        "track 7 occurs more than once"
+            .contains("track 7 occurs more than once")
     );
 
     client.cancel().await.unwrap();
@@ -139,14 +138,18 @@ async fn edit_plans_cross_the_real_mcp_server_atomically_with_one_confirmation()
             .await
             .unwrap();
 
+    let prepared = prepare_plan(
+        &client,
+        0,
+        json!([
+            {"op": "add_track", "track": {"id": 2, "kind": "Video", "clips": []}},
+            {"op": "move_clip", "clip": 1, "to_track": 2, "to": 0}
+        ]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false));
     let applied = client
-        .call_tool(plan_request(
-            0,
-            json!([
-                {"AddTrack": {"track": {"id": 2, "kind": "Video", "clips": []}}},
-                {"MoveClip": {"clip": 1, "to_track": 2, "to": 0}}
-            ]),
-        ))
+        .call_tool(commit_request(0, &prepared))
         .await
         .unwrap();
     assert_eq!(applied.is_error, Some(false));
@@ -164,24 +167,24 @@ async fn edit_plans_cross_the_real_mcp_server_atomically_with_one_confirmation()
     };
     assert_eq!(&*doc, &original);
 
-    let rejected = client
-        .call_tool(plan_request(
-            2,
-            json!([
-                {"AddTrack": {"track": {"id": 2, "kind": "Video", "clips": []}}},
-                {"AddTrack": {"track": {"id": 2, "kind": "Video", "clips": []}}}
-            ]),
-        ))
-        .await
-        .unwrap();
+    let rejected = prepare_plan(
+        &client,
+        2,
+        json!([
+            {"op": "add_track", "track": {"id": 2, "kind": "Video", "clips": []}},
+            {"op": "add_track", "track": {"id": 2, "kind": "Video", "clips": []}}
+        ]),
+    )
+    .await;
     assert_eq!(rejected.is_error, Some(true));
     let rejected_text = &rejected.content[0].as_text().unwrap().text;
-    assert!(rejected_text.contains("op 1 add_track: rolled back"));
-    assert!(rejected_text.contains("op 2 add_track: rejected"));
+    assert!(rejected_text.contains("edit plan is invalid"));
     assert_eq!(query_document(&core), original);
 
+    let destructive = prepare_plan(&client, 2, json!([{"op": "remove_track", "track": 1}])).await;
+    assert_eq!(destructive.is_error, Some(false));
     let (approved, ()) = tokio::join!(
-        client.call_tool(plan_request(2, json!([{"RemoveTrack": {"track": 1}}]))),
+        client.call_tool(commit_request(2, &destructive)),
         resolve_plan_confirmation(confirmations.clone(), true),
     );
     let approved = approved.unwrap();
@@ -192,8 +195,10 @@ async fn edit_plans_cross_the_real_mcp_server_atomically_with_one_confirmation()
     };
     assert_eq!(&*doc, &original);
 
+    let destructive = prepare_plan(&client, 4, json!([{"op": "remove_track", "track": 1}])).await;
+    assert_eq!(destructive.is_error, Some(false));
     let (refused, ()) = tokio::join!(
-        client.call_tool(plan_request(4, json!([{"RemoveTrack": {"track": 1}}]))),
+        client.call_tool(commit_request(4, &destructive)),
         resolve_plan_confirmation(confirmations, false),
     );
     let refused = refused.unwrap();
@@ -221,15 +226,15 @@ async fn ripple_marker_position_renders_through_the_real_mcp_server() {
             .await
             .unwrap();
 
+    let prepared = prepare_plan(
+        &client,
+        0,
+        json!([{"op": "ripple_insert_gap", "track": 1, "at": 30, "duration": 15}]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false));
     let ripple = client
-        .call_tool(
-            CallToolRequestParams::new("ripple_insert_gap").with_arguments(
-                json!({"expected_revision": 0, "track": 1, "at": 30, "duration": 15})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            ),
-        )
+        .call_tool(commit_request(0, &prepared))
         .await
         .unwrap();
     assert_eq!(ripple.is_error, Some(false));
@@ -315,13 +320,7 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
             .await
             .unwrap();
 
-    let result = client
-        .call_tool(
-            CallToolRequestParams::new("get_frame_at")
-                .with_arguments(json!({"timecode": 30}).as_object().unwrap().clone()),
-        )
-        .await
-        .unwrap();
+    let result = invoke_capability(&client, "get_frame_at", json!({"timecode": 30})).await;
 
     assert_eq!(result.is_error, Some(false));
     let image = result
@@ -343,17 +342,12 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
         "proof frames must use the compositor and include timeline effects"
     );
 
-    let storyboard = client
-        .call_tool(
-            CallToolRequestParams::new("get_timeline_storyboard").with_arguments(
-                json!({"frame_count": 4, "max_width": 160})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            ),
-        )
-        .await
-        .unwrap();
+    let storyboard = invoke_capability(
+        &client,
+        "get_timeline_storyboard",
+        json!({"frame_count": 4, "max_width": 160}),
+    )
+    .await;
     assert_eq!(storyboard.is_error, Some(false));
     let manifest = storyboard
         .structured_content
@@ -371,24 +365,19 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
     let decoded = image::load_from_memory(&png).unwrap();
     assert_eq!((decoded.width(), decoded.height()), (652, 90));
 
-    let tracking = client
-        .call_tool(
-            CallToolRequestParams::new("track_mask_region").with_arguments(
-                json!({
-                    "clip_id": 1,
-                    "effect_id": 2,
-                    "start_local_frame": 0,
-                    "end_local_frame": 11,
-                    "step_frames": 5,
-                    "max_width": 64
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
-        )
-        .await
-        .unwrap();
+    let tracking = invoke_capability(
+        &client,
+        "track_mask_region",
+        json!({
+            "clip_id": 1,
+            "effect_id": 2,
+            "start_local_frame": 0,
+            "end_local_frame": 11,
+            "step_frames": 5,
+            "max_width": 64
+        }),
+    )
+    .await;
     assert_eq!(tracking.is_error, Some(false));
     let tracking = tracking
         .structured_content
@@ -404,27 +393,17 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
         2
     );
 
-    let requested = client
-        .call_tool(
-            CallToolRequestParams::new("request_analysis").with_arguments(
-                json!({"asset_id": 1, "kinds": ["beat"]})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            ),
-        )
-        .await
-        .unwrap();
+    let requested = invoke_capability(
+        &client,
+        "request_analysis",
+        json!({"asset_id": 1, "kinds": ["beat"]}),
+    )
+    .await;
     assert_eq!(requested.is_error, Some(false));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let status = client
-            .call_tool(
-                CallToolRequestParams::new("get_analysis_status")
-                    .with_arguments(json!({"asset_id": 1}).as_object().unwrap().clone()),
-            )
-            .await
-            .unwrap();
+        let status =
+            invoke_capability(&client, "get_analysis_status", json!({"asset_id": 1})).await;
         let jobs = status.structured_content.as_ref().unwrap()["jobs"]
             .as_array()
             .unwrap();
@@ -443,13 +422,7 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    let beats = client
-        .call_tool(
-            CallToolRequestParams::new("get_timeline_beats")
-                .with_arguments(json!({"min_strength": 0}).as_object().unwrap().clone()),
-        )
-        .await
-        .unwrap();
+    let beats = invoke_capability(&client, "get_timeline_beats", json!({"min_strength": 0})).await;
     assert_eq!(beats.is_error, Some(false));
     assert!(beats.structured_content.as_ref().unwrap()["beats"].is_array());
 
@@ -497,11 +470,60 @@ fn edit_plan_document() -> Document {
     }
 }
 
-fn plan_request(expected_revision: u64, operations: serde_json::Value) -> CallToolRequestParams {
-    CallToolRequestParams::new("apply_edit_plan").with_arguments(serde_json::Map::from_iter([
-        ("expected_revision".to_owned(), json!(expected_revision)),
-        ("operations".to_owned(), operations),
-    ]))
+async fn invoke_capability(
+    client: &RunningService<RoleClient, ()>,
+    name: &str,
+    arguments: serde_json::Value,
+) -> CallToolResult {
+    client
+        .call_tool(
+            CallToolRequestParams::new("invoke_capability").with_arguments(
+                json!({"name": name, "arguments": arguments})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap()
+}
+
+async fn prepare_plan(
+    client: &RunningService<RoleClient, ()>,
+    expected_revision: u64,
+    operations: serde_json::Value,
+) -> CallToolResult {
+    client
+        .call_tool(
+            CallToolRequestParams::new("prepare_edit_plan").with_arguments(
+                json!({
+                    "expected_revision": expected_revision,
+                    "operations": operations
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap()
+}
+
+fn commit_request(expected_revision: u64, prepared: &CallToolResult) -> CallToolRequestParams {
+    let plan_id = prepared
+        .structured_content
+        .as_ref()
+        .expect("prepared plans must return structured content")["plan_id"]
+        .clone();
+    CallToolRequestParams::new("commit_edit_plan").with_arguments(
+        json!({
+            "plan_id": plan_id,
+            "expected_revision": expected_revision
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
 }
 
 fn query_document(core: &Core) -> Document {

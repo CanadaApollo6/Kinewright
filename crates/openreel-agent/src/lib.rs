@@ -25,10 +25,10 @@ pub use render::{
     render_asset_transcript, render_clip_info, render_timeline_state, render_timeline_transcript,
 };
 pub use runtime::{
-    CapabilityDescriptor, CapabilityKind, EditPlanPreview, PreparedPlanId, ToolSurface,
-    ToolSurfaceMetrics, compact_tool_names,
+    CapabilityDescriptor, CapabilityKind, EditPlanPreview, PreparedPlanId, ToolSurfaceMetrics,
+    compact_tool_names,
 };
-pub use schema::{all_tool_names, operation_tools};
+pub use schema::{capability_tool_names, operation_tools};
 pub use server::{ConfirmationBroker, ConfirmationRequest, McpServer, McpServerError};
 pub use silence::{
     shrink_silence_span_for_cutting, shrink_silence_span_for_cutting_with_transcript,

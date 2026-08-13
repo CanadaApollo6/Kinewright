@@ -21,8 +21,8 @@ use openreel_core::{
 use serde_json::{Value, json};
 
 use crate::{
+    compact_tool_names,
     protocol::{ClaudeProtocol, CodexProtocol},
-    schema::all_tool_names,
 };
 
 pub(crate) const OPENREEL_SYSTEM_PROMPT: &str = "You are OpenReel's video editing agent. Use only its MCP tools. Start with get_timeline_state and plan against its exact timeline_revision; after a conflict, inspect again instead of retrying stale work. Use search_capabilities, then get_capability, to load only the inspector, planner, proof, action, or edit-operation schema needed for this task. Run non-edit capabilities through invoke_capability. Build edits as ordered compact operations, validate them with prepare_edit_plan, inspect the returned before/after preview, and commit that opaque plan id at the same revision. Resolve ordinal targets and all clip ids before mutation. Prefer professional operations such as three_point_edit, slip_clip, roll_edit, slide_clip, replace_clip, and fit_to_fill over fragile reconstructions. Linked clips must be handled together in one atomic plan. Ripple operations affect the target and sync-locked tracks; use exactly one ripple delete for a linked group. Frame values are exact project-frame integers. Use markers for review suggestions unless an edit was requested. Verify committed work with the same evidence that motivated it, including a storyboard for visual composition and another silence inspection after dead-air removal. Continue correction plans until the requested result is verified, then answer briefly.";
@@ -156,7 +156,7 @@ struct ClaudeSession {
 
 impl ClaudeSession {
     fn spawn(executable: PathBuf, endpoint: &str, cfg: &SessionConfig) -> Result<Self, AgentError> {
-        let tool_allowlist = configured_tool_names(cfg)?
+        let tool_allowlist = configured_tool_names(cfg)
             .into_iter()
             .map(|name| format!("mcp__openreel__{name}"))
             .collect::<Vec<_>>()
@@ -289,7 +289,7 @@ impl CodexSession {
         endpoint: String,
         cfg: SessionConfig,
     ) -> Result<Self, AgentError> {
-        let tool_names = configured_tool_names(&cfg)?;
+        let tool_names = configured_tool_names(&cfg);
         let scratch_directory = create_codex_scratch_directory()?;
         let (model_catalog_directory, model_catalog_path) =
             match create_codex_direct_model_catalog(&target) {
@@ -332,11 +332,8 @@ impl CodexSession {
     }
 }
 
-fn configured_tool_names(cfg: &SessionConfig) -> Result<Vec<String>, AgentError> {
-    cfg.tool_names
-        .clone()
-        .map_or_else(all_tool_names, Ok)
-        .map_err(|error| AgentError::Harness(error.to_string()))
+fn configured_tool_names(cfg: &SessionConfig) -> Vec<String> {
+    cfg.tool_names.clone().unwrap_or_else(compact_tool_names)
 }
 
 impl AgentSession for CodexSession {
@@ -1041,7 +1038,11 @@ mod tests {
     }
 
     #[test]
-    fn session_tool_allowlist_replaces_the_full_compatibility_catalog() {
+    fn session_tool_allowlist_overrides_the_compact_runtime_default() {
+        assert_eq!(
+            configured_tool_names(&SessionConfig::default()),
+            compact_tool_names()
+        );
         let config = SessionConfig {
             tool_names: Some(vec![
                 "get_timeline_state".to_owned(),
@@ -1049,10 +1050,7 @@ mod tests {
             ]),
             ..SessionConfig::default()
         };
-        assert_eq!(
-            configured_tool_names(&config).unwrap(),
-            config.tool_names.unwrap()
-        );
+        assert_eq!(configured_tool_names(&config), config.tool_names.unwrap());
     }
 
     #[test]

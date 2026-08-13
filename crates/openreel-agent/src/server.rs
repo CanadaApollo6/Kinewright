@@ -50,8 +50,8 @@ use crate::{
         render_timeline_state, render_timeline_transcript,
     },
     runtime::{
-        CapabilityKind, PreparedPlanId, PreparedPlanStore, ToolSurface, ToolSurfaceMetrics,
-        capabilities, is_invocable_capability, search_capabilities,
+        CapabilityKind, PreparedPlanId, PreparedPlanStore, ToolSurfaceMetrics, capabilities,
+        is_invocable_capability, search_capabilities,
     },
     schema::{SchemaError, decode_operation, operation_tool_name, operation_tools, schema_object},
 };
@@ -254,28 +254,6 @@ impl McpServer {
             Some(exporter),
             ConfirmationBroker::default(),
             true,
-            ToolSurface::Full,
-        )
-    }
-
-    /// Start the compact agent-runtime surface for the live core and media engine.
-    ///
-    /// # Errors
-    ///
-    /// Returns an MCP server error when the listener or server thread cannot start.
-    pub fn start_compact(
-        core: Core,
-        playback: Arc<dyn Playback>,
-        analysis: Arc<dyn Analysis>,
-    ) -> Result<Self, McpServerError> {
-        Self::start_configured(
-            core,
-            playback,
-            analysis,
-            None,
-            ConfirmationBroker::default(),
-            true,
-            ToolSurface::Compact,
         )
     }
 
@@ -297,7 +275,6 @@ impl McpServer {
             None,
             ConfirmationBroker::default(),
             false,
-            ToolSurface::Full,
         )
     }
 
@@ -319,29 +296,6 @@ impl McpServer {
             Some(exporter),
             ConfirmationBroker::default(),
             false,
-            ToolSurface::Full,
-        )
-    }
-
-    /// Start a branch-scoped compact agent runtime with serial delivery exports.
-    ///
-    /// # Errors
-    ///
-    /// Returns an MCP server error when the listener, export worker, or server thread cannot start.
-    pub fn start_isolated_compact_with_exporter(
-        core: Core,
-        playback: Arc<dyn Playback>,
-        analysis: Arc<dyn Analysis>,
-        exporter: Arc<dyn Export>,
-    ) -> Result<Self, McpServerError> {
-        Self::start_configured(
-            core,
-            playback,
-            analysis,
-            Some(exporter),
-            ConfirmationBroker::default(),
-            false,
-            ToolSurface::Compact,
         )
     }
 
@@ -351,15 +305,7 @@ impl McpServer {
         analysis: Arc<dyn Analysis>,
         confirmations: ConfirmationBroker,
     ) -> Result<Self, McpServerError> {
-        Self::start_configured(
-            core,
-            playback,
-            analysis,
-            None,
-            confirmations,
-            true,
-            ToolSurface::Full,
-        )
+        Self::start_configured(core, playback, analysis, None, confirmations, true)
     }
 
     fn start_configured(
@@ -369,7 +315,6 @@ impl McpServer {
         exporter: Option<Arc<dyn Export>>,
         confirmations: ConfirmationBroker,
         publish_to_playback: bool,
-        tool_surface: ToolSurface,
     ) -> Result<Self, McpServerError> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .map_err(McpServerError::Bind)?;
@@ -380,8 +325,7 @@ impl McpServer {
         let endpoint = format!("http://{address}/mcp");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let export_queue = exporter.map(ExportQueue::new).transpose()?;
-        let tool_surface_metrics =
-            ToolSurfaceMetrics::measure(&OpenReelMcp::tools_for_surface(tool_surface)?);
+        let tool_surface_metrics = ToolSurfaceMetrics::measure(&OpenReelMcp::served_tools()?);
         let handler = OpenReelMcp::configured(
             core,
             playback,
@@ -389,7 +333,6 @@ impl McpServer {
             export_queue,
             confirmations.clone(),
             publish_to_playback,
-            tool_surface,
         );
         let server_thread = thread::Builder::new()
             .name("openreel-mcp".to_owned())
@@ -473,7 +416,6 @@ struct OpenReelMcp {
     export_queue: Option<ExportQueue>,
     confirmations: ConfirmationBroker,
     publish_to_playback: bool,
-    tool_surface: ToolSurface,
     prepared_plans: Arc<Mutex<PreparedPlanStore>>,
 }
 
@@ -485,15 +427,7 @@ impl OpenReelMcp {
         analysis: Arc<dyn Analysis>,
         confirmations: ConfirmationBroker,
     ) -> Self {
-        Self::configured(
-            core,
-            playback,
-            analysis,
-            None,
-            confirmations,
-            true,
-            ToolSurface::Full,
-        )
+        Self::configured(core, playback, analysis, None, confirmations, true)
     }
 
     fn configured(
@@ -503,7 +437,6 @@ impl OpenReelMcp {
         export_queue: Option<ExportQueue>,
         confirmations: ConfirmationBroker,
         publish_to_playback: bool,
-        tool_surface: ToolSurface,
     ) -> Self {
         Self {
             core,
@@ -512,12 +445,11 @@ impl OpenReelMcp {
             export_queue,
             confirmations,
             publish_to_playback,
-            tool_surface,
             prepared_plans: Arc::new(Mutex::new(PreparedPlanStore::default())),
         }
     }
 
-    fn full_tools() -> Result<Vec<Tool>, SchemaError> {
+    fn capability_tools() -> Result<Vec<Tool>, SchemaError> {
         let mut tools = operation_tools()?
             .into_iter()
             .map(|definition| definition.tool)
@@ -526,24 +458,29 @@ impl OpenReelMcp {
         Ok(tools)
     }
 
-    fn tools_for_surface(surface: ToolSurface) -> Result<Vec<Tool>, SchemaError> {
-        let tools = Self::full_tools()?;
-        Ok(match surface {
-            ToolSurface::Full => tools,
-            ToolSurface::Compact => tools
-                .into_iter()
-                .filter(|tool| crate::runtime::COMPACT_TOOL_NAMES.contains(&tool.name.as_ref()))
-                .collect(),
-        })
+    fn served_tools() -> Result<Vec<Tool>, SchemaError> {
+        Ok(Self::capability_tools()?
+            .into_iter()
+            .filter(|tool| crate::runtime::COMPACT_TOOL_NAMES.contains(&tool.name.as_ref()))
+            .collect())
     }
 
     #[cfg(test)]
     fn tools() -> Result<Vec<Tool>, SchemaError> {
-        Self::full_tools()
+        Self::capability_tools()
     }
 
-    fn served_tools(&self) -> Result<Vec<Tool>, SchemaError> {
-        Self::tools_for_surface(self.tool_surface)
+    fn call_exposed_blocking(
+        &self,
+        request: CallToolRequestParams,
+    ) -> Result<CallToolResult, McpError> {
+        if !crate::runtime::COMPACT_TOOL_NAMES.contains(&request.name.as_ref()) {
+            return Ok(error_text(format!(
+                "{} is an internal capability, not an MCP tool; use search_capabilities, get_capability, and invoke_capability or prepare_edit_plan",
+                request.name
+            )));
+        }
+        self.call_blocking(request)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -552,7 +489,7 @@ impl OpenReelMcp {
         match request.name.as_ref() {
             "search_capabilities" => {
                 let args: CapabilitySearchArgs = decode_args("search_capabilities", arguments)?;
-                let tools = Self::full_tools()
+                let tools = Self::capability_tools()
                     .map_err(|error| McpError::internal_error(error.to_string(), None))?;
                 let found = search_capabilities(
                     &tools,
@@ -570,7 +507,7 @@ impl OpenReelMcp {
             }
             "get_capability" => {
                 let args: CapabilityArgs = decode_args("get_capability", arguments)?;
-                let tools = Self::full_tools()
+                let tools = Self::capability_tools()
                     .map_err(|error| McpError::internal_error(error.to_string(), None))?;
                 let descriptor = capabilities(&tools)
                     .into_iter()
@@ -2641,17 +2578,11 @@ impl OpenReelMcp {
 
 impl ServerHandler for OpenReelMcp {
     fn get_info(&self) -> ServerInfo {
-        let instructions = match self.tool_surface {
-            ToolSurface::Compact => {
-                "Inspect with get_timeline_state. Use search_capabilities and get_capability to load only the exact inspector, planner, proof, or edit-operation schema needed. Invoke non-edit capabilities through invoke_capability. Submit ordered compact operations to prepare_edit_plan, inspect its deterministic preview, then commit the opaque plan id at the same timeline revision. Reinspect and re-plan after any revision conflict. Frame values are exact project frames."
-            }
-            ToolSurface::Full => {
-                "Inspect the timeline before editing and copy its timeline_revision into expected_revision on every mutation. Reinspect and re-plan after a revision conflict. Use the storyboard, transcript, silence, beat, and scene inspectors when relevant. Resolve ordinal targets against the inspected state. Frame values are exact project frames. Prefer one atomic apply_edit_plan after inspection instead of separate operation tools. Use add_title for first-class video-track titles and import_media for filesystem paths."
-            }
-        };
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openreel", env!("CARGO_PKG_VERSION")))
-            .with_instructions(instructions)
+            .with_instructions(
+                "Inspect with get_timeline_state. Use search_capabilities and get_capability to load only the exact inspector, planner, proof, or edit-operation schema needed. Invoke non-edit capabilities through invoke_capability. Submit ordered compact operations to prepare_edit_plan, inspect its deterministic preview, then commit the opaque plan id at the same timeline revision. Reinspect and re-plan after any revision conflict. Frame values are exact project frames.",
+            )
     }
 
     fn list_tools(
@@ -2659,15 +2590,14 @@ impl ServerHandler for OpenReelMcp {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        let result = self
-            .served_tools()
+        let result = Self::served_tools()
             .map(ListToolsResult::with_all_items)
             .map_err(|error| McpError::internal_error(error.to_string(), None));
         std::future::ready(result)
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.served_tools()
+        Self::served_tools()
             .ok()?
             .into_iter()
             .find(|tool| tool.name == name)
@@ -2680,7 +2610,7 @@ impl ServerHandler for OpenReelMcp {
     ) -> impl Future<Output = Result<CallToolResponse, McpError>> + Send + '_ {
         let service = self.clone();
         async move {
-            tokio::task::spawn_blocking(move || service.call_blocking(request))
+            tokio::task::spawn_blocking(move || service.call_exposed_blocking(request))
                 .await
                 .map_err(|error| McpError::internal_error(error.to_string(), None))?
                 .map(Into::into)
@@ -4542,7 +4472,6 @@ mod tests {
             None,
             ConfirmationBroker::default(),
             false,
-            ToolSurface::Full,
         );
         let proof = service.frame_at(TimeCode(1)).unwrap();
         assert_eq!(proof.is_error, Some(false));
@@ -4621,7 +4550,7 @@ mod tests {
             assert!(names.contains(name), "missing M34 tool {name}");
         }
 
-        let mut registered = crate::schema::all_tool_names().unwrap();
+        let mut registered = crate::schema::capability_tool_names().unwrap();
         registered.sort_unstable();
         let mut served = tools
             .into_iter()
@@ -4925,22 +4854,22 @@ mod tests {
     }
 
     #[test]
-    fn compact_surface_is_small_and_keeps_the_full_catalog_discoverable() {
-        let full = OpenReelMcp::tools_for_surface(ToolSurface::Full).unwrap();
-        let compact = OpenReelMcp::tools_for_surface(ToolSurface::Compact).unwrap();
-        let names = compact
+    fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
+        let registry = OpenReelMcp::capability_tools().unwrap();
+        let served = OpenReelMcp::served_tools().unwrap();
+        let names = served
             .iter()
             .map(|tool| tool.name.as_ref())
             .collect::<Vec<_>>();
         assert_eq!(names, crate::runtime::COMPACT_TOOL_NAMES);
 
-        let full_metrics = ToolSurfaceMetrics::measure(&full);
-        let compact_metrics = ToolSurfaceMetrics::measure(&compact);
-        println!("full={full_metrics:?} compact={compact_metrics:?}");
-        assert!(compact_metrics.tool_count < full_metrics.tool_count / 4);
-        assert!(compact_metrics.serialized_bytes < full_metrics.serialized_bytes / 4);
+        let registry_metrics = ToolSurfaceMetrics::measure(&registry);
+        let served_metrics = ToolSurfaceMetrics::measure(&served);
+        println!("registry={registry_metrics:?} served={served_metrics:?}");
+        assert!(served_metrics.tool_count < registry_metrics.tool_count / 4);
+        assert!(served_metrics.serialized_bytes < registry_metrics.serialized_bytes / 4);
 
-        let catalog = capabilities(&full);
+        let catalog = capabilities(&registry);
         assert!(
             catalog
                 .iter()
@@ -4963,7 +4892,6 @@ mod tests {
             None,
             ConfirmationBroker::default(),
             true,
-            ToolSurface::Compact,
         );
         let prepared = service
             .call_blocking(
@@ -5039,7 +4967,6 @@ mod tests {
             None,
             ConfirmationBroker::default(),
             true,
-            ToolSurface::Compact,
         );
         let opened = service
             .call_blocking(

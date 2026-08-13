@@ -21,7 +21,7 @@ The model searches a concise capability directory, opens only the exact schema
 it needs, invokes non-edit capabilities through one dispatcher, and submits
 timeline mutations as one compact plan. The requirements were:
 
-- preserve the full generated MCP catalog as a compatibility surface;
+- keep the generated capability registry internal and expose one runtime;
 - keep every mutation inside the existing validated Rust `Operation` model;
 - validate a complete plan before changing the live document;
 - bind prepared plans to an exact `TimelineRevision`;
@@ -43,21 +43,22 @@ capability directory  prepared-plan store
       |                 |
       +--------+--------+
                v
-    existing full MCP handlers
+    existing capability handlers
                |
                v
  deterministic Rust Operation core
 ```
 
-The transport remains MCP. The improvement is the model-facing runtime above
-it, not a new public wire protocol. Third-party clients can still request the
-full 85-tool catalog. Sessions launched by the OpenReel app and eval harness use
-the compact surface and an exact harness allowlist.
+The transport remains MCP because the supported agent harnesses understand it.
+There is no full-surface server mode. Every client sees the same seven tools and
+an exact harness allowlist. A direct MCP call to a known internal capability
+name is rejected; the capability must pass through the dispatcher or prepared-
+plan path.
 
 ## Capability loading
 
 `search_capabilities` returns names, kinds, and one-sentence summaries from the
-authoritative full catalog. `get_capability` returns the selected capability's
+authoritative internal registry. `get_capability` returns the selected capability's
 exact input schema and whether to use `invoke_capability` or place the operation
 inside `prepare_edit_plan`.
 
@@ -91,13 +92,15 @@ served by the runtime. The M36 regression test records:
 
 | Surface | Tools | Serialized metadata | Input schemas | Descriptions |
 |---|---:|---:|---:|---:|
-| Full compatibility | 85 | 585,247 B | 543,414 B | 27,949 B |
-| Compact session | 7 | 5,305 B | 3,171 B | 982 B |
+| Internal capability registry | 85 | 585,247 B | 543,414 B | 27,949 B |
+| Served MCP runtime | 7 | 5,305 B | 3,171 B | 982 B |
 
 That is a 99.1% reduction in initially advertised serialized tool metadata.
 It is not yet a claim of 99.1% fewer provider tokens. Providers transform,
-cache, and meter tool definitions differently. A controlled live full-versus-
-compact benchmark is the acceptance gate for model-token and latency savings.
+cache, and meter tool definitions differently. A controlled benchmark between
+the pre-M36 revision and the current runtime is the acceptance gate for model-
+token and latency savings; OpenReel does not retain an obsolete production mode
+only to run that comparison.
 
 ## Token telemetry
 
@@ -126,7 +129,7 @@ surface byte counts used for that session.
   dispatcher.
 - The authoritative Core actor still owns validation, confirmation, undo,
   journal, provenance, and document broadcasts.
-- Legacy full-surface sessions remain available for compatibility and testing.
+- Direct MCP calls to internal capability names fail closed.
 
 ## Deliberate limits and next proof gates
 
@@ -139,8 +142,8 @@ annotations for permission prompts.
 
 The next useful runtime steps are:
 
-1. run the M35 suite as a controlled full-versus-compact A/B and publish token,
-   latency, tool-call, correction, and acceptance deltas;
+1. run the M35 suite against the pre-M36 revision and current runtime and
+   publish token, latency, tool-call, correction, and acceptance deltas;
 2. add task-scoped capability packs and revision-delta observation;
 3. add content-addressed plan identities for durable replay across processes;
 4. benchmark native, Pi, Prime Agent, and other harness adapters against the

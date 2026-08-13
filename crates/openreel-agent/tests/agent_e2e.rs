@@ -77,9 +77,8 @@ fn claude_splits_then_deletes_via_the_live_mcp_server() {
     println!("ASSERT: clips are [1:0..30, 3:30..90]; clip 2 is deleted");
 
     let _ = core.request(Command::Undo).unwrap();
-    let _ = core.request(Command::Undo).unwrap();
     assert_eq!(&*query_document(&core), &original);
-    println!("ASSERT: two undo commands restore the original two-clip document");
+    println!("ASSERT: one undo restores the atomic edit plan");
 
     session.interrupt();
     server.shutdown();
@@ -152,9 +151,8 @@ fn codex_splits_then_deletes_via_the_live_mcp_server() {
     println!("ASSERT: clips are [1:0..30, 3:30..90]; clip 2 is deleted");
 
     let _ = core.request(Command::Undo).unwrap();
-    let _ = core.request(Command::Undo).unwrap();
     assert_eq!(&*query_document(&core), &original);
-    println!("ASSERT: two undo commands restore the original two-clip document");
+    println!("ASSERT: one undo restores the atomic edit plan");
 
     session.interrupt();
     server.shutdown();
@@ -508,9 +506,8 @@ fn cursor_splits_then_deletes_via_the_live_mcp_server() {
     println!("ASSERT: clips are [1:0..30, 3:30..90]; clip 2 is deleted");
 
     let _ = core.request(Command::Undo).unwrap();
-    let _ = core.request(Command::Undo).unwrap();
     assert_eq!(&*query_document(&core), &original);
-    println!("ASSERT: two undo commands restore the original two-clip document");
+    println!("ASSERT: one undo restores the atomic edit plan");
 
     session.interrupt();
     server.shutdown();

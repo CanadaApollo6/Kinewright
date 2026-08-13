@@ -478,7 +478,7 @@ pub fn run_eval_with_artifacts(
     let eval_started = Instant::now();
     let fixture = std::panic::catch_unwind(definition.fixture_builder)
         .map_err(|payload| EvalError::Fixture(panic_message(&payload)))??;
-    let server = McpServer::start_compact(
+    let server = McpServer::start(
         fixture.core.clone(),
         Arc::clone(&fixture.playback),
         Arc::clone(&fixture.analysis),

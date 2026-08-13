@@ -7,9 +7,9 @@ emit the normal `DocumentChanged` broadcast. The workspace pins `rmcp` at the ro
 
 OpenReel-owned sessions advertise a compact seven-tool runtime. Models inspect the current
 revision, discover capabilities by name and kind, load only the selected schema, invoke non-edit
-capabilities through one dispatcher, and prepare then commit timeline edits atomically. The full
-generated MCP catalog remains available as a compatibility surface. The exact contract and
-measured schema overhead are documented in [M36 - Agent runtime efficiency](M36-AGENT-RUNTIME-EFFICIENCY.md).
+capabilities through one dispatcher, and prepare then commit timeline edits atomically. The
+generated capability registry is internal and direct calls to its names are rejected. The exact
+contract and measured schema overhead are documented in [M36 - Agent runtime efficiency](M36-AGENT-RUNTIME-EFFICIENCY.md).
 
 Opening another project interrupts the current agent session, shuts down the old endpoint, and
 starts a new endpoint against the replacement Core actor. No filesystem or network handle is put
@@ -120,5 +120,5 @@ The live Claude and Codex subscription tests are ignored by behavior unless
 `OPENREEL_AGENT_TEST=1` is set. The Cursor acceptance test has its own
 `OPENREEL_CURSOR_AGENT_TEST=1` gate so it can be run alone. Each creates a two-clip project,
 launches the real installed CLI once, asks it to split clip 1 at frame 30 and delete clip 2, verifies
-the live document, then sends two undo commands and asserts that the original document is restored.
+the live document, then sends one undo command and asserts that the atomic plan is restored.
 CLI-independent workspace tests never launch a subscription harness.

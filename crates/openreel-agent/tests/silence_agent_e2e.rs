@@ -118,7 +118,7 @@ fn claude_removes_long_silences_with_one_atomic_plan() {
         "agent did not use a silence inspector: {tool_names:?}"
     );
     assert!(
-        tool_names.iter().any(|name| name == "apply_edit_plan"),
+        tool_names.iter().any(|name| name == "commit_edit_plan"),
         "agent did not submit an edit plan: {tool_names:?}"
     );
 

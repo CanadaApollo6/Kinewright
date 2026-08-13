@@ -1,8 +1,7 @@
 //! Harness-neutral agent runtime contracts.
 //!
-//! The public MCP server remains a compatibility surface. This module defines
-//! the smaller contract used by OpenReel-owned harness sessions: capability
-//! discovery, opaque prepared plans, and measurable tool-schema overhead.
+//! The MCP server exposes this compact contract. The complete editor capability
+//! registry remains internal for on-demand discovery and dispatch.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
@@ -34,13 +33,6 @@ const META_CAPABILITY_NAMES: [&str; 7] = [
     "commit_edit_plan",
     "discard_edit_plan",
 ];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolSurface {
-    Compact,
-    Full,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
