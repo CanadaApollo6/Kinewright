@@ -12,7 +12,34 @@ cargo run -p openreel-agent --bin openreel-eval
 
 Results are written as timestamped, environment-stamped JSONL under `target/evals/`. A full live suite is intentionally expensive and must not be placed in CI.
 
-The versioned public contract and first machine-readable baseline live under [`benchmarks/auto-edit/v1`](../benchmarks/auto-edit/v1/README.md). The baseline preserves the real 6/7 task result and leaves human first-pass acceptance unset.
+The exact-operation contract and first machine-readable baseline live under
+[`benchmarks/auto-edit/v1`](../benchmarks/auto-edit/v1/README.md). The baseline
+preserves the real 6/7 task result and leaves human first-pass acceptance unset.
+
+The finished-cut contract lives under
+[`benchmarks/auto-edit/v2`](../benchmarks/auto-edit/v2/README.md). It runs one
+full prompt-to-MP4 task and writes a machine report, immutable document, proof
+sheet, probed and hashed MP4, and a separate pending human-review record. Run it
+with:
+
+```powershell
+$env:OPENREEL_EVAL = '1'
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --suite finished-cut-v2 `
+  --harness codex
+```
+
+Human review is scored without running another agent:
+
+```powershell
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --score-review target/evals/<run>/human-review.json
+```
+
+The first v2 Codex baseline passed 30/30 machine assertions in 122.871 seconds
+and produced a probed 421-frame 1080x1920 MP4. Human acceptance remains unset;
+the proof sheet exposed a likely vertical caption-width issue that the next
+delivery gate must catch.
 
 ## Seed suite
 

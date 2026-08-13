@@ -215,6 +215,17 @@ The implemented contract, proof gates, and deliberate limits are recorded in
 The implemented contract, proof gates, and deliberate limits are recorded in
 [M34 - Creator leverage and delivery](M34-CREATOR-DELIVERY-VERIFICATION.md).
 
+### M35 - Finished-cut proof
+
+- a versioned, generated "footage in, finished MP4 out" benchmark;
+- immutable timeline snapshots, compositor proof sheets, SHA-256 identities,
+  and independent media probes;
+- machine brief and delivery scores kept separate from human taste;
+- a validated first-pass acceptance and six-axis review record.
+
+The artifact contract, acceptance boundary, and deliberate limits are recorded
+in [M35 - Finished-cut benchmark](M35-FINISHED-CUT-BENCHMARK.md).
+
 The published "footage in, finished cut out" benchmark should grow continuously
 through every milestone instead of waiting for a final automation pass. Its
 history is the scoreboard for both foundational work and Pillar B.

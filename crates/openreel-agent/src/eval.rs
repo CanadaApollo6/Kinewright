@@ -3,18 +3,20 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
+    fs,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use openreel_core::{
-    AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, AssetTranscript, Command, Core,
-    Document, Event, HarnessInfo, Operation, ParamValue, Playback, Query, QueryResult,
+    AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, AssetTranscript, CaptionMotion,
+    ClipContent, Command, Core, DeliveryConformanceReport, DeliveryProfile, Document, Event,
+    Export, ExportCancellation, HarnessInfo, Operation, ParamValue, Playback, Query, QueryResult,
     SessionConfig, SilenceSpan, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
-    map_source_range_to_project,
+    delivery_conformance, document_for_delivery_profile, map_source_range_to_project, qa_document,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{ConfirmationBroker, McpServer, shrink_silence_span_for_cutting_with_transcript};
@@ -63,7 +65,9 @@ pub struct EvalBudgets {
     pub max_tool_calls: u32,
     pub max_operations: u32,
     pub max_tokens: u64,
-    pub max_cost_usd: f64,
+    /// Optional because subscription harnesses may expose token counts without
+    /// exposing an attributable USD price.
+    pub max_cost_usd: Option<f64>,
     pub max_wall_time: Duration,
     pub max_undos: u32,
 }
@@ -75,6 +79,16 @@ pub struct EvalDefinition {
     pub prompts: &'static [&'static str],
     pub assertions: Vec<EvalAssertion>,
     pub budgets: EvalBudgets,
+    pub deliverable: Option<EvalDeliverableSpec>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvalDeliverableSpec {
+    pub profile: DeliveryProfile,
+    pub focus_x_percent: u8,
+    pub focus_y_percent: u8,
+    pub proof_frames: u8,
+    pub proof_cell_width: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +113,7 @@ pub enum EvalAssertion {
         alias: String,
     },
     Gapless,
+    MediaGapless,
     DurationBounds {
         bounds: String,
     },
@@ -130,6 +145,11 @@ pub enum EvalAssertion {
         asset_alias: String,
         transition_name: String,
     },
+    StyledCaptions {
+        minimum_cues: usize,
+        motion: CaptionMotion,
+    },
+    QaExportReady,
     UndoIntegrity,
 }
 
@@ -147,6 +167,7 @@ pub struct PreparedFixture {
     pub core: Core,
     pub playback: Arc<dyn Playback>,
     pub analysis: Arc<dyn Analysis>,
+    pub exporter: Arc<dyn Export>,
     pub context: FixtureContext,
     _resources: Vec<Box<dyn Send>>,
 }
@@ -164,7 +185,7 @@ impl PreparedFixture {
         resources: Vec<Box<dyn Send>>,
     ) -> Result<Self, EvalError>
     where
-        T: Playback + Analysis + 'static,
+        T: Playback + Analysis + Export + 'static,
     {
         original_document
             .validate()
@@ -173,12 +194,14 @@ impl PreparedFixture {
         let core = Core::spawn(original_document.clone())
             .map_err(|error| EvalError::Fixture(error.to_string()))?;
         let playback: Arc<dyn Playback> = media.clone();
-        let analysis: Arc<dyn Analysis> = media;
+        let analysis: Arc<dyn Analysis> = media.clone();
+        let exporter: Arc<dyn Export> = media;
         Ok(Self {
             original_document,
             core,
             playback,
             analysis,
+            exporter,
             context,
             _resources: resources,
         })
@@ -241,7 +264,80 @@ pub struct EvalResult {
     pub cost_usd: Option<f64>,
     pub wall_time_ms: u64,
     pub operations_applied: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deliverable: Option<EvalDeliverableResult>,
     pub execution_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EvalDeliverableResult {
+    pub profile: DeliveryProfile,
+    pub output_path: PathBuf,
+    pub document_path: PathBuf,
+    pub proof_path: PathBuf,
+    pub resolution: (u32, u32),
+    pub duration_frames: TimeCode,
+    pub conformance: Option<DeliveryConformanceReport>,
+    pub output_bytes: Option<u64>,
+    pub output_sha256: Option<String>,
+    pub exported_frames: Option<u64>,
+    pub probed_resolution: Option<(u32, u32)>,
+    pub probed_duration_frames: Option<TimeCode>,
+    pub proof_sample_frames: Vec<TimeCode>,
+    pub machine_passed: bool,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanReviewFile {
+    pub schema_version: u32,
+    pub benchmark_id: String,
+    pub run_id: String,
+    pub reviewer: Option<String>,
+    pub tasks: Vec<HumanTaskReview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanTaskReview {
+    pub task_id: String,
+    pub artifact_sha256: Option<String>,
+    pub accepted: Option<bool>,
+    pub ratings: HumanRatings,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanRatings {
+    pub story: Option<u8>,
+    pub pacing: Option<u8>,
+    pub visual_finish: Option<u8>,
+    pub audio_finish: Option<u8>,
+    pub captions: Option<u8>,
+    pub delivery_readiness: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HumanReviewSummary {
+    pub schema_version: u32,
+    pub benchmark_id: String,
+    pub run_id: String,
+    pub reviewer: Option<String>,
+    pub tasks_total: usize,
+    pub tasks_reviewed: usize,
+    pub tasks_pending: usize,
+    pub tasks_accepted: usize,
+    pub acceptance_rate: Option<f64>,
+    pub mean_ratings: HumanMeanRatings,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HumanMeanRatings {
+    pub story: Option<f64>,
+    pub pacing: Option<f64>,
+    pub visual_finish: Option<f64>,
+    pub audio_finish: Option<f64>,
+    pub captions: Option<f64>,
+    pub delivery_readiness: Option<f64>,
 }
 
 impl EvalResult {
@@ -259,6 +355,7 @@ impl EvalResult {
             cost_usd: None,
             wall_time_ms: 0,
             operations_applied: 0,
+            deliverable: None,
             execution_error: Some(error.to_string()),
         }
     }
@@ -340,6 +437,23 @@ pub fn run_eval(
     model: Option<&str>,
     working_directory: Option<&Path>,
 ) -> Result<EvalResult, EvalError> {
+    run_eval_with_artifacts(definition, driver, model, working_directory, None)
+}
+
+/// Execute one eval and, when requested by its definition, render a real
+/// delivery package before restoring the original timeline.
+///
+/// # Errors
+///
+/// Returns setup or observation failures. Delivery failures are retained as
+/// scored task failures so the run still produces reviewable evidence.
+pub fn run_eval_with_artifacts(
+    definition: &EvalDefinition,
+    driver: &dyn AgentDriver,
+    model: Option<&str>,
+    working_directory: Option<&Path>,
+    artifact_directory: Option<&Path>,
+) -> Result<EvalResult, EvalError> {
     let eval_started = Instant::now();
     let fixture = std::panic::catch_unwind(definition.fixture_builder)
         .map_err(|payload| EvalError::Fixture(panic_message(&payload)))??;
@@ -383,6 +497,27 @@ pub fn run_eval(
         .analysis
         .timeline_scene_changes(&final_document, None, 0)
         .map_err(|error| EvalError::Media(error.to_string()))?;
+    let deliverable = definition.deliverable.map(|spec| {
+        artifact_directory.map_or_else(
+            || {
+                failed_deliverable(
+                    spec,
+                    &final_document,
+                    Path::new("unavailable"),
+                    "the benchmark runner did not provide an artifact directory".to_owned(),
+                )
+            },
+            |directory| {
+                produce_deliverable(
+                    spec,
+                    &final_document,
+                    fixture.analysis.as_ref(),
+                    fixture.exporter.as_ref(),
+                    directory,
+                )
+            },
+        )
+    });
     let undo_steps_to_original = restore_original(
         &fixture.core,
         &fixture.original_document,
@@ -399,9 +534,524 @@ pub fn run_eval(
         operations,
         undo_steps_to_original,
     };
-    let result = evaluate(definition, &outcome);
+    let mut result = evaluate(definition, &outcome);
+    if let Some(deliverable) = deliverable {
+        result
+            .assertions
+            .extend(deliverable_assertions(&deliverable));
+        result.passed = result.assertions.iter().all(|assertion| assertion.passed);
+        result.deliverable = Some(deliverable);
+    }
     server.shutdown();
     Ok(result)
+}
+
+fn produce_deliverable(
+    spec: EvalDeliverableSpec,
+    document: &Document,
+    analysis: &dyn Analysis,
+    exporter: &dyn Export,
+    directory: &Path,
+) -> EvalDeliverableResult {
+    let mut result = deliverable_shell(spec, document, directory);
+    if let Err(error) = fs::create_dir_all(directory) {
+        result.errors.push(format!(
+            "could not create artifact directory {}: {error}",
+            directory.display()
+        ));
+        return finish_deliverable(result);
+    }
+    match serde_json::to_vec_pretty(document)
+        .map_err(|error| error.to_string())
+        .and_then(|json| fs::write(&result.document_path, json).map_err(|error| error.to_string()))
+    {
+        Ok(()) => {}
+        Err(error) => result.errors.push(format!(
+            "could not write final document {}: {error}",
+            result.document_path.display()
+        )),
+    }
+
+    let report = match delivery_conformance(
+        document,
+        spec.profile,
+        spec.focus_x_percent,
+        spec.focus_y_percent,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            result.errors.push(format!(
+                "delivery profile could not be materialized: {error}"
+            ));
+            return finish_deliverable(result);
+        }
+    };
+    result.resolution = report.resolution;
+    if !report.export_ready() {
+        result.errors.push(format!(
+            "delivery conformance reported {} blocking issue(s)",
+            report
+                .issues
+                .iter()
+                .filter(|issue| issue.severity == openreel_core::QaSeverity::Error)
+                .count()
+        ));
+    }
+    result.conformance = Some(report);
+
+    let delivery_document = match document_for_delivery_profile(
+        document,
+        spec.profile,
+        spec.focus_x_percent,
+        spec.focus_y_percent,
+    ) {
+        Ok(document) => Arc::new(document),
+        Err(error) => {
+            result
+                .errors
+                .push(format!("delivery document could not be built: {error}"));
+            return finish_deliverable(result);
+        }
+    };
+    match render_proof_sheet(
+        analysis,
+        &delivery_document,
+        spec.proof_frames,
+        spec.proof_cell_width,
+        &result.proof_path,
+    ) {
+        Ok(frames) => result.proof_sample_frames = frames,
+        Err(error) => result.errors.push(error),
+    }
+
+    if result
+        .conformance
+        .as_ref()
+        .is_some_and(DeliveryConformanceReport::export_ready)
+    {
+        export_and_probe(&mut result, spec, analysis, exporter, &delivery_document);
+    }
+    finish_deliverable(result)
+}
+
+fn export_and_probe(
+    result: &mut EvalDeliverableResult,
+    spec: EvalDeliverableSpec,
+    analysis: &dyn Analysis,
+    exporter: &dyn Export,
+    document: &Arc<Document>,
+) {
+    if result.output_path.exists() {
+        result.errors.push(format!(
+            "refusing to overwrite existing benchmark artifact {}",
+            result.output_path.display()
+        ));
+        return;
+    }
+    let settings = spec
+        .profile
+        .export_settings(document, ExportCancellation::default());
+    let (progress_tx, progress_rx) = crossbeam_channel::unbounded();
+    if let Err(error) = exporter.export_document(
+        Arc::clone(document),
+        &result.output_path,
+        settings,
+        progress_tx,
+    ) {
+        result.errors.push(format!("export failed: {error}"));
+        return;
+    }
+    result.exported_frames = progress_rx
+        .try_iter()
+        .last()
+        .map(|progress| progress.completed_frames);
+    let metadata = match fs::metadata(&result.output_path) {
+        Ok(metadata) if metadata.len() > 0 => metadata,
+        Ok(_) => {
+            result
+                .errors
+                .push("export backend produced an empty media file".to_owned());
+            return;
+        }
+        Err(error) => {
+            result.errors.push(format!(
+                "export backend returned success but {} is unavailable: {error}",
+                result.output_path.display()
+            ));
+            return;
+        }
+    };
+    result.output_bytes = Some(metadata.len());
+    match openreel_media::sha256_file(&result.output_path) {
+        Ok(hash) => result.output_sha256 = Some(hash),
+        Err(error) => result.errors.push(error.to_string()),
+    }
+    let asset = match analysis.probe(&result.output_path) {
+        Ok(asset) => asset,
+        Err(error) => {
+            result
+                .errors
+                .push(format!("export could not be probed: {error}"));
+            return;
+        }
+    };
+    result.probed_resolution = asset.resolution;
+    result.probed_duration_frames = Some(asset.duration);
+    if asset.resolution != Some(result.resolution) {
+        result.errors.push(format!(
+            "export probe raster {:?} does not match {:?}",
+            asset.resolution, result.resolution
+        ));
+    }
+    if asset.duration.0.abs_diff(result.duration_frames.0) > 1 {
+        result.errors.push(format!(
+            "export probe duration {} differs from timeline {} by more than one frame",
+            asset.duration.0, result.duration_frames.0
+        ));
+    }
+}
+
+fn failed_deliverable(
+    spec: EvalDeliverableSpec,
+    document: &Document,
+    directory: &Path,
+    error: String,
+) -> EvalDeliverableResult {
+    let mut result = deliverable_shell(spec, document, directory);
+    result.errors.push(error);
+    finish_deliverable(result)
+}
+
+fn deliverable_shell(
+    spec: EvalDeliverableSpec,
+    document: &Document,
+    directory: &Path,
+) -> EvalDeliverableResult {
+    EvalDeliverableResult {
+        profile: spec.profile,
+        output_path: directory.join(format!("finished.{}", spec.profile.container_extension())),
+        document_path: directory.join("final-document.json"),
+        proof_path: directory.join("proof.png"),
+        resolution: spec.profile.resolution(document.resolution),
+        duration_frames: document.duration,
+        conformance: None,
+        output_bytes: None,
+        output_sha256: None,
+        exported_frames: None,
+        probed_resolution: None,
+        probed_duration_frames: None,
+        proof_sample_frames: Vec::new(),
+        machine_passed: false,
+        errors: Vec::new(),
+    }
+}
+
+#[must_use]
+pub fn human_review_template(
+    benchmark_id: &str,
+    run_id: &str,
+    results: &[EvalResult],
+) -> HumanReviewFile {
+    let mut occurrences = BTreeMap::<&str, usize>::new();
+    let mut tasks = Vec::new();
+    for result in results {
+        let Some(deliverable) = result.deliverable.as_ref() else {
+            continue;
+        };
+        let base_task_id = result
+            .name
+            .split_whitespace()
+            .next()
+            .unwrap_or(&result.name);
+        let occurrence = occurrences.entry(base_task_id).or_default();
+        *occurrence += 1;
+        let task_id = if *occurrence == 1 {
+            base_task_id.to_owned()
+        } else {
+            format!("{base_task_id}-sample-{occurrence}")
+        };
+        tasks.push(HumanTaskReview {
+            task_id,
+            artifact_sha256: deliverable.output_sha256.clone(),
+            accepted: None,
+            ratings: HumanRatings::default(),
+            notes: None,
+        });
+    }
+
+    HumanReviewFile {
+        schema_version: 1,
+        benchmark_id: benchmark_id.to_owned(),
+        run_id: run_id.to_owned(),
+        reviewer: None,
+        tasks,
+    }
+}
+
+/// Validate a review and compute acceptance separately from machine scores.
+/// Pending tasks remain pending and never count as rejected or accepted.
+///
+/// # Errors
+///
+/// Returns an error for duplicate tasks, partial reviews, invalid digests, or
+/// ratings outside the inclusive 1..=5 scale.
+pub fn summarize_human_review(review: &HumanReviewFile) -> Result<HumanReviewSummary, EvalError> {
+    if review.schema_version != 1 {
+        return Err(EvalError::Output(format!(
+            "unsupported human-review schema version {}",
+            review.schema_version
+        )));
+    }
+    let mut task_ids = BTreeSet::new();
+    let mut reviewed = Vec::new();
+    for task in &review.tasks {
+        if task.task_id.trim().is_empty() || !task_ids.insert(task.task_id.as_str()) {
+            return Err(EvalError::Output(format!(
+                "human review contains an empty or duplicate task id {:?}",
+                task.task_id
+            )));
+        }
+        if let Some(hash) = &task.artifact_sha256
+            && (hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err(EvalError::Output(format!(
+                "task {} has an invalid artifact sha256",
+                task.task_id
+            )));
+        }
+        let rating_values = task.ratings.values();
+        let any_rating = rating_values.iter().any(Option::is_some);
+        match task.accepted {
+            None if any_rating => {
+                return Err(EvalError::Output(format!(
+                    "task {} has ratings but no acceptance decision",
+                    task.task_id
+                )));
+            }
+            None => {}
+            Some(_) if rating_values.iter().any(Option::is_none) => {
+                return Err(EvalError::Output(format!(
+                    "task {} must fill all six ratings when accepted is set",
+                    task.task_id
+                )));
+            }
+            Some(_) => {
+                if let Some(invalid) = rating_values
+                    .into_iter()
+                    .flatten()
+                    .find(|rating| !(1..=5).contains(rating))
+                {
+                    return Err(EvalError::Output(format!(
+                        "task {} rating {invalid} is outside 1..=5",
+                        task.task_id
+                    )));
+                }
+                reviewed.push(task);
+            }
+        }
+    }
+    let accepted = reviewed
+        .iter()
+        .filter(|task| task.accepted == Some(true))
+        .count();
+    let acceptance_rate = if reviewed.is_empty() {
+        None
+    } else {
+        let accepted = u32::try_from(accepted)
+            .map_err(|_| EvalError::Output("too many accepted human-review tasks".to_owned()))?;
+        let reviewed = u32::try_from(reviewed.len())
+            .map_err(|_| EvalError::Output("too many human-review tasks".to_owned()))?;
+        Some(f64::from(accepted) / f64::from(reviewed))
+    };
+    Ok(HumanReviewSummary {
+        schema_version: 1,
+        benchmark_id: review.benchmark_id.clone(),
+        run_id: review.run_id.clone(),
+        reviewer: review.reviewer.clone(),
+        tasks_total: review.tasks.len(),
+        tasks_reviewed: reviewed.len(),
+        tasks_pending: review.tasks.len().saturating_sub(reviewed.len()),
+        tasks_accepted: accepted,
+        acceptance_rate,
+        mean_ratings: HumanMeanRatings {
+            story: mean_rating(&reviewed, |ratings| ratings.story),
+            pacing: mean_rating(&reviewed, |ratings| ratings.pacing),
+            visual_finish: mean_rating(&reviewed, |ratings| ratings.visual_finish),
+            audio_finish: mean_rating(&reviewed, |ratings| ratings.audio_finish),
+            captions: mean_rating(&reviewed, |ratings| ratings.captions),
+            delivery_readiness: mean_rating(&reviewed, |ratings| ratings.delivery_readiness),
+        },
+    })
+}
+
+impl HumanRatings {
+    fn values(&self) -> [Option<u8>; 6] {
+        [
+            self.story,
+            self.pacing,
+            self.visual_finish,
+            self.audio_finish,
+            self.captions,
+            self.delivery_readiness,
+        ]
+    }
+}
+
+fn mean_rating(
+    reviewed: &[&HumanTaskReview],
+    select: impl Fn(&HumanRatings) -> Option<u8>,
+) -> Option<f64> {
+    if reviewed.is_empty() {
+        return None;
+    }
+    let sum = reviewed
+        .iter()
+        .filter_map(|task| select(&task.ratings))
+        .map(u32::from)
+        .try_fold(0_u32, u32::checked_add)?;
+    let count = u32::try_from(reviewed.len()).ok()?;
+    Some(f64::from(sum) / f64::from(count))
+}
+
+fn finish_deliverable(mut result: EvalDeliverableResult) -> EvalDeliverableResult {
+    result.machine_passed = result.errors.is_empty()
+        && result
+            .conformance
+            .as_ref()
+            .is_some_and(DeliveryConformanceReport::export_ready)
+        && result.output_bytes.is_some_and(|bytes| bytes > 0)
+        && result
+            .output_sha256
+            .as_ref()
+            .is_some_and(|hash| hash.len() == 64)
+        && result.probed_resolution == Some(result.resolution)
+        && result
+            .probed_duration_frames
+            .is_some_and(|duration| duration.0.abs_diff(result.duration_frames.0) <= 1)
+        && !result.proof_sample_frames.is_empty()
+        && result.proof_path.is_file()
+        && result.document_path.is_file();
+    result
+}
+
+fn deliverable_assertions(result: &EvalDeliverableResult) -> Vec<AssertionResult> {
+    let conformance_ready = result
+        .conformance
+        .as_ref()
+        .is_some_and(DeliveryConformanceReport::export_ready);
+    vec![
+        assertion_result(
+            "delivery conformance",
+            conformance_ready,
+            format!(
+                "profile={}, resolution={}x{}, ready={conformance_ready}",
+                result.profile.as_str(),
+                result.resolution.0,
+                result.resolution.1
+            ),
+        ),
+        assertion_result(
+            "rendered proof",
+            result.proof_path.is_file() && !result.proof_sample_frames.is_empty(),
+            format!(
+                "path={}, sampled_frames={:?}",
+                result.proof_path.display(),
+                result.proof_sample_frames
+            ),
+        ),
+        assertion_result(
+            "finished media artifact",
+            result.machine_passed,
+            format!(
+                "path={}, bytes={:?}, sha256={:?}, exported_frames={:?}, probed_resolution={:?}, probed_duration={:?}, errors={:?}",
+                result.output_path.display(),
+                result.output_bytes,
+                result.output_sha256,
+                result.exported_frames,
+                result.probed_resolution,
+                result.probed_duration_frames,
+                result.errors
+            ),
+        ),
+    ]
+}
+
+fn render_proof_sheet(
+    analysis: &dyn Analysis,
+    document: &Arc<Document>,
+    requested_frames: u8,
+    requested_width: u32,
+    output: &Path,
+) -> Result<Vec<TimeCode>, String> {
+    if document.duration <= TimeCode::ZERO {
+        return Err("cannot render proof frames for an empty timeline".to_owned());
+    }
+    let count = usize::from(requested_frames.clamp(1, 16));
+    let cell_width = requested_width.clamp(64, 512);
+    let frames = uniform_sample_frames(document.duration, count);
+    let mut cells = Vec::with_capacity(frames.len());
+    for frame in &frames {
+        let image = analysis
+            .thumbnail_for_document(Arc::clone(document), *frame, cell_width)
+            .map_err(|error| format!("proof frame {} failed: {error}", frame.0))?;
+        let image = image::RgbaImage::from_raw(image.width, image.height, image.pixels)
+            .ok_or_else(|| format!("proof frame {} returned truncated RGBA data", frame.0))?;
+        cells.push(image);
+    }
+    let mut columns = 1_usize;
+    while columns.saturating_mul(columns) < cells.len() {
+        columns = columns.saturating_add(1);
+    }
+    let rows = cells.len().div_ceil(columns);
+    let gutter = 4_u32;
+    let width = cells
+        .iter()
+        .map(image::GenericImageView::width)
+        .max()
+        .unwrap_or(cell_width);
+    let height = cells
+        .iter()
+        .map(image::GenericImageView::height)
+        .max()
+        .unwrap_or(1);
+    let sheet_width = u32::try_from(columns)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(width.saturating_add(gutter))
+        .saturating_sub(gutter);
+    let sheet_height = u32::try_from(rows)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(height.saturating_add(gutter))
+        .saturating_sub(gutter);
+    let mut sheet =
+        image::RgbaImage::from_pixel(sheet_width, sheet_height, image::Rgba([18, 20, 24, 255]));
+    for (index, cell) in cells.iter().enumerate() {
+        let column = u32::try_from(index % columns).unwrap_or(u32::MAX);
+        let row = u32::try_from(index / columns).unwrap_or(u32::MAX);
+        image::imageops::replace(
+            &mut sheet,
+            cell,
+            i64::from(column.saturating_mul(width.saturating_add(gutter))),
+            i64::from(row.saturating_mul(height.saturating_add(gutter))),
+        );
+    }
+    sheet
+        .save_with_format(output, image::ImageFormat::Png)
+        .map_err(|error| format!("could not write proof sheet {}: {error}", output.display()))?;
+    Ok(frames)
+}
+
+fn uniform_sample_frames(duration: TimeCode, count: usize) -> Vec<TimeCode> {
+    let last = duration.0.saturating_sub(1).max(0);
+    if count <= 1 {
+        return vec![TimeCode(last / 2)];
+    }
+    let denominator = i64::try_from(count.saturating_sub(1)).unwrap_or(i64::MAX);
+    (0..count)
+        .map(|index| {
+            let index = i64::try_from(index).unwrap_or(i64::MAX);
+            TimeCode(last.saturating_mul(index).saturating_div(denominator))
+        })
+        .collect()
 }
 
 fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
@@ -515,10 +1165,10 @@ where
                         Some(cost) if cost_is_complete => {
                             let total = metrics.cost_usd.get_or_insert(0.0);
                             *total += cost;
-                            if *total > budgets.max_cost_usd {
+                            if budgets.max_cost_usd.is_some_and(|maximum| *total > maximum) {
                                 metrics.errors.push(format!(
                                     "cost ceiling exceeded (${total:.4} > ${:.2})",
-                                    budgets.max_cost_usd
+                                    budgets.max_cost_usd.unwrap_or_default()
                                 ));
                                 metrics.interrupted = true;
                                 session.interrupt();
@@ -574,6 +1224,7 @@ pub fn evaluate(definition: &EvalDefinition, outcome: &EvalOutcome) -> EvalResul
         cost_usd: outcome.session.cost_usd,
         wall_time_ms: outcome.session.wall_time_ms,
         operations_applied: u32::try_from(outcome.operations.len()).unwrap_or(u32::MAX),
+        deliverable: None,
         execution_error: None,
     }
 }
@@ -613,7 +1264,8 @@ fn evaluate_assertion(
                     format!("unknown asset alias {alias:?}"),
                 );
             };
-            let present = timeline_clips(&outcome.final_document).any(|clip| clip.asset == *asset);
+            let present =
+                timeline_media_clips(&outcome.final_document).any(|clip| clip.asset == *asset);
             assertion_result(
                 "asset absent",
                 !present,
@@ -621,6 +1273,7 @@ fn evaluate_assertion(
             )
         }
         EvalAssertion::Gapless => evaluate_gapless(&outcome.final_document),
+        EvalAssertion::MediaGapless => evaluate_media_gapless(&outcome.final_document),
         EvalAssertion::DurationBounds { bounds } => {
             let Some((minimum, maximum)) = outcome.context.duration_bounds.get(bounds) else {
                 return assertion_result(
@@ -710,6 +1363,23 @@ fn evaluate_assertion(
             asset_alias,
             transition_name,
         } => evaluate_transition(asset_alias, transition_name, outcome),
+        EvalAssertion::StyledCaptions {
+            minimum_cues,
+            motion,
+        } => evaluate_styled_captions(*minimum_cues, *motion, outcome),
+        EvalAssertion::QaExportReady => {
+            let report = qa_document(&outcome.final_document);
+            assertion_result(
+                "technical QA",
+                report.export_ready(),
+                format!(
+                    "errors={}, warnings={}, info={}",
+                    report.count(openreel_core::QaSeverity::Error),
+                    report.count(openreel_core::QaSeverity::Warning),
+                    report.count(openreel_core::QaSeverity::Info)
+                ),
+            )
+        }
         EvalAssertion::UndoIntegrity => assertion_result(
             "undo integrity",
             outcome.undo_steps_to_original.is_some(),
@@ -772,14 +1442,21 @@ fn evaluate_budgets(budgets: &EvalBudgets, outcome: &EvalOutcome) -> Vec<Asserti
         ),
     ];
     let cost = outcome.session.cost_usd;
-    results.push(assertion_result(
-        "cost ceiling",
-        cost.is_some_and(|value| value <= budgets.max_cost_usd),
-        cost.map_or_else(
-            || "harness did not report USD cost".to_owned(),
-            |value| format!("${value:.4} <= ${:.2}", budgets.max_cost_usd),
+    let (cost_passed, cost_detail) = match (cost, budgets.max_cost_usd) {
+        (Some(value), Some(maximum)) => {
+            (value <= maximum, format!("${value:.4} <= ${maximum:.2}"))
+        }
+        (None, Some(_)) => (false, "harness did not report USD cost".to_owned()),
+        (Some(value), None) => (
+            true,
+            format!("${value:.4} reported; no portable USD ceiling is enforced"),
         ),
-    ));
+        (None, None) => (
+            true,
+            "subscription harness does not expose attributable USD cost; token and wall-time ceilings remain enforced".to_owned(),
+        ),
+    };
+    results.push(assertion_result("cost ceiling", cost_passed, cost_detail));
     results
 }
 
@@ -794,7 +1471,7 @@ fn evaluate_asset_order(
         .iter()
         .map(|(alias, asset)| (*asset, alias.as_str()))
         .collect::<BTreeMap<_, _>>();
-    let mut observed = timeline_clips(&outcome.final_document)
+    let mut observed = timeline_media_clips(&outcome.final_document)
         .map(|clip| {
             reverse.get(&clip.asset).map_or_else(
                 || format!("asset-{}", clip.asset.0),
@@ -863,6 +1540,68 @@ fn evaluate_gapless(document: &Document) -> AssertionResult {
     )
 }
 
+fn evaluate_media_gapless(document: &Document) -> AssertionResult {
+    let mut errors = Vec::new();
+    for track in &document.tracks {
+        let clips = track
+            .clips
+            .iter()
+            .filter(|clip| {
+                matches!(
+                    &clip.content,
+                    ClipContent::Media | ClipContent::Freeze { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some(first) = clips.first()
+            && first.timeline_start != TimeCode::ZERO
+        {
+            errors.push(format!(
+                "track {} media starts at frame {}",
+                track.id, first.timeline_start.0
+            ));
+        }
+        for adjacent in clips.windows(2) {
+            let Some(asset) = document.asset(adjacent[0].asset) else {
+                errors.push(format!("missing asset {}", adjacent[0].asset));
+                continue;
+            };
+            match map_source_range_to_project(
+                adjacent[0].source_range.clone(),
+                asset.fps,
+                document.fps,
+            )
+            .and_then(|duration| {
+                adjacent[0]
+                    .timeline_start
+                    .checked_add(duration)
+                    .ok_or(openreel_core::TimeMappingError::Overflow)
+            }) {
+                Ok(left_end) if left_end == adjacent[1].timeline_start => {}
+                Ok(left_end) => errors.push(format!(
+                    "track {} media gap/overlap between clips {} and {}: {} then {}",
+                    track.id,
+                    adjacent[0].id,
+                    adjacent[1].id,
+                    left_end.0,
+                    adjacent[1].timeline_start.0
+                )),
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+    }
+    assertion_result(
+        "primary media gapless",
+        errors.is_empty(),
+        if errors.is_empty() {
+            "all populated media tracks start at zero and are contiguous; caption gaps are allowed"
+                .to_owned()
+        } else {
+            errors.join("; ")
+        },
+    )
+}
+
 fn evaluate_source_clips(clips: &[ExpectedSourceClip], outcome: &EvalOutcome) -> AssertionResult {
     let reverse = outcome
         .context
@@ -870,7 +1609,7 @@ fn evaluate_source_clips(clips: &[ExpectedSourceClip], outcome: &EvalOutcome) ->
         .iter()
         .map(|(alias, asset)| (*asset, alias.as_str()))
         .collect::<BTreeMap<_, _>>();
-    let observed = timeline_clips(&outcome.final_document)
+    let observed = timeline_media_clips(&outcome.final_document)
         .map(|clip| ExpectedSourceClip {
             asset_alias: reverse.get(&clip.asset).map_or_else(
                 || format!("asset-{}", clip.asset.0),
@@ -951,7 +1690,7 @@ fn evaluate_scene_cuts(scene_set: &str, outcome: &EvalOutcome) -> AssertionResul
     let missing = scenes
         .iter()
         .filter(|(asset, source_frame)| {
-            !timeline_clips(&outcome.final_document)
+            !timeline_media_clips(&outcome.final_document)
                 .any(|clip| clip.asset == *asset && clip.source_range.start == *source_frame)
         })
         .copied()
@@ -959,7 +1698,7 @@ fn evaluate_scene_cuts(scene_set: &str, outcome: &EvalOutcome) -> AssertionResul
     let interior = scenes
         .iter()
         .filter(|(asset, source_frame)| {
-            timeline_clips(&outcome.final_document).any(|clip| {
+            timeline_media_clips(&outcome.final_document).any(|clip| {
                 clip.asset == *asset
                     && clip.source_range.start < *source_frame
                     && *source_frame < clip.source_range.end
@@ -987,7 +1726,7 @@ fn evaluate_effect(
             format!("unknown asset alias {asset_alias:?}"),
         );
     };
-    let matched = timeline_clips(&outcome.final_document)
+    let matched = timeline_media_clips(&outcome.final_document)
         .filter(|clip| clip.asset == *asset)
         .flat_map(|clip| &clip.effects)
         .any(|effect| {
@@ -1017,7 +1756,7 @@ fn evaluate_transition(
             format!("unknown asset alias {asset_alias:?}"),
         );
     };
-    let matched = timeline_clips(&outcome.final_document)
+    let matched = timeline_media_clips(&outcome.final_document)
         .filter(|clip| clip.asset == *asset)
         .any(|clip| {
             clip.transition_in
@@ -1031,6 +1770,50 @@ fn evaluate_transition(
     )
 }
 
+fn evaluate_styled_captions(
+    minimum_cues: usize,
+    motion: CaptionMotion,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let titles = timeline_clips(&outcome.final_document)
+        .filter(|clip| matches!(&clip.content, ClipContent::Title(_)))
+        .collect::<Vec<_>>();
+    let matching = titles
+        .iter()
+        .filter(|clip| match motion {
+            CaptionMotion::None => clip.effects.is_empty(),
+            CaptionMotion::Fade => has_animated_parameter(clip, "opacity", "percent"),
+            CaptionMotion::Pop => {
+                has_animated_parameter(clip, "opacity", "percent")
+                    && has_animated_parameter(clip, "transform", "scale_percent")
+            }
+            CaptionMotion::SlideUp => {
+                has_animated_parameter(clip, "opacity", "percent")
+                    && has_animated_parameter(clip, "transform", "y_percent")
+            }
+        })
+        .count();
+    assertion_result(
+        "styled captions",
+        titles.len() >= minimum_cues && matching >= minimum_cues,
+        format!(
+            "expected at least {minimum_cues} {} cues, observed {} title cues and {matching} matching motion curves",
+            motion.as_str(),
+            titles.len()
+        ),
+    )
+}
+
+fn has_animated_parameter(clip: &openreel_core::Clip, effect_name: &str, parameter: &str) -> bool {
+    clip.effects.iter().any(|effect| {
+        effect.name == effect_name
+            && effect
+                .keyframes
+                .get(parameter)
+                .is_some_and(|curve| !curve.keyframes.is_empty())
+    })
+}
+
 fn assertion_result(assertion: impl Into<String>, passed: bool, detail: String) -> AssertionResult {
     AssertionResult {
         assertion: assertion.into(),
@@ -1041,6 +1824,15 @@ fn assertion_result(assertion: impl Into<String>, passed: bool, detail: String) 
 
 fn timeline_clips(document: &Document) -> impl Iterator<Item = &openreel_core::Clip> {
     document.tracks.iter().flat_map(|track| &track.clips)
+}
+
+fn timeline_media_clips(document: &Document) -> impl Iterator<Item = &openreel_core::Clip> {
+    timeline_clips(document).filter(|clip| {
+        matches!(
+            &clip.content,
+            ClipContent::Media | ClipContent::Freeze { .. }
+        )
+    })
 }
 
 fn normalize_words<'a>(words: impl Iterator<Item = &'a str>) -> BTreeSet<String> {
@@ -1352,7 +2144,7 @@ mod tests {
             max_tool_calls: 4,
             max_operations: 3,
             max_tokens: 1_000,
-            max_cost_usd: 0.75,
+            max_cost_usd: Some(0.75),
             max_wall_time: Duration::from_secs(1),
             max_undos: 2,
         }
@@ -1521,6 +2313,7 @@ mod tests {
                 bounds: "padded-cut".to_owned(),
             }],
             budgets: budgets(),
+            deliverable: None,
         };
         let outcome = EvalOutcome {
             final_document,
@@ -1581,6 +2374,7 @@ mod tests {
                 EvalAssertion::UndoIntegrity,
             ],
             budgets: budgets(),
+            deliverable: None,
         };
         let outcome = EvalOutcome {
             final_document: document(),
@@ -1621,6 +2415,7 @@ mod tests {
             prompts: &["edit it"],
             assertions: Vec::new(),
             budgets: budgets(),
+            deliverable: None,
         };
         let mut result =
             EvalResult::execution_failure(&definition, &EvalError::Agent("deliberate".to_owned()));
@@ -1654,5 +2449,102 @@ mod tests {
     #[test]
     fn utc_timestamp_conversion_covers_the_milestone_date() {
         assert_eq!(format_utc_timestamp(1_786_291_200), "2026-08-09T16:00:00Z");
+    }
+
+    #[test]
+    fn human_review_stays_pending_until_a_complete_person_score_exists() {
+        let definition = EvalDefinition {
+            name: "f1 finished cut",
+            rationale: "review fixture",
+            fixture_builder: unused_fixture,
+            prompts: &["finish it"],
+            assertions: Vec::new(),
+            budgets: budgets(),
+            deliverable: None,
+        };
+        let mut result =
+            EvalResult::execution_failure(&definition, &EvalError::Agent("unused".to_owned()));
+        let mut deliverable = deliverable_shell(
+            EvalDeliverableSpec {
+                profile: DeliveryProfile::VerticalShort,
+                focus_x_percent: 50,
+                focus_y_percent: 50,
+                proof_frames: 9,
+                proof_cell_width: 240,
+            },
+            &document(),
+            Path::new("artifacts/f1"),
+        );
+        deliverable.output_sha256 = Some("a".repeat(64));
+        result.deliverable = Some(deliverable);
+
+        let sampled_review = human_review_template(
+            "finished-v2",
+            "run-sampled",
+            &[result.clone(), result.clone()],
+        );
+        assert_eq!(sampled_review.tasks[0].task_id, "f1");
+        assert_eq!(sampled_review.tasks[1].task_id, "f1-sample-2");
+
+        let mut review = human_review_template("finished-v2", "run-1", &[result]);
+        let pending = summarize_human_review(&review).unwrap();
+        assert_eq!(pending.tasks_reviewed, 0);
+        assert_eq!(pending.tasks_pending, 1);
+        assert_eq!(pending.acceptance_rate, None);
+
+        review.reviewer = Some("human".to_owned());
+        review.tasks[0].accepted = Some(true);
+        review.tasks[0].ratings = HumanRatings {
+            story: Some(4),
+            pacing: Some(3),
+            visual_finish: Some(5),
+            audio_finish: Some(4),
+            captions: Some(5),
+            delivery_readiness: Some(4),
+        };
+        let scored = summarize_human_review(&review).unwrap();
+        assert_eq!(scored.tasks_reviewed, 1);
+        assert_eq!(scored.tasks_accepted, 1);
+        assert_eq!(scored.acceptance_rate, Some(1.0));
+        assert_eq!(scored.mean_ratings.pacing, Some(3.0));
+    }
+
+    #[test]
+    fn human_review_rejects_partial_or_out_of_range_scores() {
+        let mut review = HumanReviewFile {
+            schema_version: 1,
+            benchmark_id: "finished-v2".to_owned(),
+            run_id: "run-1".to_owned(),
+            reviewer: None,
+            tasks: vec![HumanTaskReview {
+                task_id: "f1".to_owned(),
+                artifact_sha256: Some("b".repeat(64)),
+                accepted: Some(false),
+                ratings: HumanRatings {
+                    story: Some(0),
+                    ..HumanRatings::default()
+                },
+                notes: None,
+            }],
+        };
+        assert!(summarize_human_review(&review).is_err());
+        review.tasks[0].ratings = HumanRatings {
+            story: Some(1),
+            pacing: Some(2),
+            visual_finish: Some(3),
+            audio_finish: Some(4),
+            captions: Some(5),
+            delivery_readiness: Some(6),
+        };
+        assert!(summarize_human_review(&review).is_err());
+    }
+
+    #[test]
+    fn proof_sampling_is_uniform_and_includes_both_visible_edges() {
+        assert_eq!(
+            uniform_sample_frames(TimeCode(10), 4),
+            vec![TimeCode(0), TimeCode(3), TimeCode(6), TimeCode(9)]
+        );
+        assert_eq!(uniform_sample_frames(TimeCode(10), 1), vec![TimeCode(4)]);
     }
 }

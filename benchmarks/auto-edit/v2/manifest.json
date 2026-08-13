@@ -1,0 +1,86 @@
+{
+  "schema_version": 2,
+  "benchmark_id": "openreel-finished-cut-v2",
+  "title": "OpenReel Finished-Cut Benchmark v2",
+  "runner": "cargo run -p openreel-agent --bin openreel-eval -- --suite finished-cut-v2",
+  "implementation": "crates/openreel-agent/src/bin/openreel-eval.rs",
+  "fixture_provenance": {
+    "policy": "Generated locally; no private footage or downloaded evaluation corpus.",
+    "video": "Pinned OpenReel FFmpeg generates five visually distinct source takes.",
+    "speech": "Windows SAPI creates the checked-in scripted dialogue and pauses.",
+    "analysis": "Local Whisper plus content-addressed silence analysis provide evidence to every harness.",
+    "time_base": "All editing and scoring use exact integer source or project frames."
+  },
+  "score_layers": {
+    "machine": [
+      "editorial brief assertions",
+      "tool-use and resource budgets",
+      "technical QA and delivery conformance",
+      "real compositor proof sheet",
+      "real MP4 export, SHA-256, and media probe"
+    ],
+    "human": {
+      "acceptance": "A nullable first-pass accept/reject decision that is never inferred from machine assertions.",
+      "ratings": [
+        "story",
+        "pacing",
+        "visual_finish",
+        "audio_finish",
+        "captions",
+        "delivery_readiness"
+      ],
+      "scale": "1..=5"
+    }
+  },
+  "artifacts": [
+    "results.jsonl",
+    "machine-report.json",
+    "artifacts/<task>-sample-<n>/final-document.json",
+    "artifacts/<task>-sample-<n>/proof.png",
+    "artifacts/<task>-sample-<n>/finished.mp4",
+    "human-review.json",
+    "human-score.json after review scoring"
+  ],
+  "tasks": [
+    {
+      "id": "f1",
+      "name": "finished vertical story",
+      "fixture": "fixture_e7",
+      "prompt": "Create a finished vertical social cut from the media pool. Use take-A's content first, then take-C, then take-D. Do not use take-B or take-E. Remove every cuttable dead-air span at least 20 source frames long and every recognized filler word while preserving all other spoken content. Keep the selected media gapless. Then use add_styled_captions with the social preset and pop motion. Inspect a 9:16 delivery storyboard, run technical QA, and inspect vertical_short delivery conformance at a centered 50/50 focal point. Do not queue the export; the benchmark will render the exact verified timeline snapshot. Keep working until the inspectors confirm the brief.",
+      "delivery": {
+        "profile": "vertical_short",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 9,
+        "proof_cell_width": 240
+      },
+      "assertions": [
+        "timeline_non_empty",
+        "selected_asset_order",
+        "rejected_assets_absent",
+        "primary_media_gapless",
+        "selected_words_retained",
+        "filler_words_absent",
+        "long_silence_absent",
+        "duration_bounds",
+        "social_pop_captions",
+        "technical_qa",
+        "required_tool_usage",
+        "undo_integrity",
+        "delivery_conformance",
+        "rendered_proof",
+        "finished_media_artifact"
+      ],
+      "budget": {
+        "turns": 1,
+        "tool_calls": 64,
+        "operations": 80,
+        "tokens": 750000,
+        "cost_usd": null,
+        "cost_policy": "No portable USD ceiling: subscription harnesses may expose tokens without an attributable price.",
+        "wall_time_ms": 3000000,
+        "undos": 80
+      }
+    }
+  ]
+}

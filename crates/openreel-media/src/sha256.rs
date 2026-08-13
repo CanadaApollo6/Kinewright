@@ -194,7 +194,12 @@ impl Sha256 {
     }
 }
 
-pub(crate) fn sha256_file(path: &Path) -> Result<String, MediaError> {
+/// Stream a file through the repository's deterministic SHA-256 implementation.
+///
+/// # Errors
+///
+/// Returns a media error when the file cannot be opened or read completely.
+pub fn sha256_file(path: &Path) -> Result<String, MediaError> {
     let mut file = File::open(path).map_err(|error| {
         MediaError::Backend(format!("could not hash {}: {error}", path.display()))
     })?;

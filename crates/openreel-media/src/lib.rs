@@ -41,6 +41,7 @@ pub use engine::FfmpegMediaEngine;
 pub use openreel_core::{
     ThumbnailFrame, ThumbnailKey, VisualAssetResult, VisualRequestKind, WaveformData, WaveformPeak,
 };
+pub use sha256::sha256_file;
 pub use timeline::{
     TimelineAudioSegment, TimelineSource, TimelineTitleLayer, TimelineVideoLayer,
     TimelineVisualLayer, TransitionRenderParams, timeline_audio_segments, timeline_source_at,

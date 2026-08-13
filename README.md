@@ -32,7 +32,7 @@ OpenReel is a native Windows video editor written in Rust that is, at its core, 
 - Export to H.264/AAC mp4 with progress and cancellation
 - Agent editing with senses and plans: transcript, silence, and scene-change inspectors; atomic multi-operation edit plans with a **single undo entry** and one summarized confirmation for anything destructive; plan results self-report remaining dead air so the agent finishes the job
 - The agent has *eyes*: it can fetch actual frames from your timeline, not just metadata
-- **Measured agent competence**: a scored eval suite (`openreel-eval`) with pass-rate sampling and a [published, reproducible benchmark contract](benchmarks/auto-edit/v1/README.md) — see `docs/EVALS.md`
+- **Measured agent competence**: a scored eval suite (`openreel-eval`) with an [exact-operation baseline](benchmarks/auto-edit/v1/README.md) and a [finished-cut benchmark](benchmarks/auto-edit/v2/README.md) that renders, probes, hashes, and packages a real MP4 for separate human review — see `docs/EVALS.md`
 - Context-sensitive inspector panel (clips, titles, markers) driven by the same effect table that validates operations
 - Transcript panel with click-word-to-seek
 - Crash recovery from an operation journal
@@ -74,7 +74,7 @@ OpenReel runs a local MCP (Model Context Protocol) server inside the app and spa
 
 Claude Code and Codex sessions run with their built-in shell/file/web tools disabled or sandboxed away. Cursor receives only the per-project OpenReel MCP endpoint and starts in an empty scratch directory, but its ACP server may still expose Cursor-owned tools; the settings panel states this weaker boundary explicitly. Destructive OpenReel operations pause for your approval in the chat panel. Costs are surfaced when the harness reports them, and turns are capped per session.
 
-Details: [docs/agent-harnesses.md](docs/agent-harnesses.md) · [docs/MODEL-FIRST-EDITOR.md](docs/MODEL-FIRST-EDITOR.md) · [docs/TRANSCRIPTION.md](docs/TRANSCRIPTION.md)
+Details: [agent harnesses](docs/agent-harnesses.md) · [model-first editor](docs/MODEL-FIRST-EDITOR.md) · [current product position](docs/PRODUCT-POSITION-M35-2026-08.md) · [transcription](docs/TRANSCRIPTION.md)
 
 ## Architecture
 

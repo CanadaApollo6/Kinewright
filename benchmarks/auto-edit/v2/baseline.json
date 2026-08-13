@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "openreel-finished-cut-v2",
+  "suite_manifest": "benchmarks/auto-edit/v2/manifest.json",
+  "source_trace": {
+    "filename": "openreel-eval-20260813-043310-codex/results.jsonl",
+    "sha256": "fbf400cbd757ba2be92bf7491abd2e93a6561477f85a9c88a6083349d66a167a",
+    "note": "The raw trace and media package are generated local artifacts under target/evals and are intentionally not committed."
+  },
+  "environment": {
+    "timestamp_utc": "2026-08-13T04:33:10Z",
+    "harness": "codex",
+    "harness_version": "codex-cli 0.147.0",
+    "model": "harness-default",
+    "os": "windows",
+    "architecture": "x86_64",
+    "openreel_version": "0.1.0"
+  },
+  "machine_summary": {
+    "tasks_passed": 1,
+    "tasks_total": 1,
+    "assertions_passed": 30,
+    "assertions_total": 30,
+    "turns": 1,
+    "tool_calls": 24,
+    "input_tokens": 728076,
+    "output_tokens": 3235,
+    "total_tokens": 731311,
+    "cost_usd": null,
+    "wall_time_ms": 122871,
+    "operations_applied": 48
+  },
+  "deliverable": {
+    "profile": "vertical_short",
+    "resolution": [1080, 1920],
+    "duration_frames": 421,
+    "output_bytes": 6617816,
+    "output_sha256": "5a352c38a49ad1626936ba98efe38e9bf546682bc89cc58c95080125bcc3491d",
+    "probed_duration_frames": 421,
+    "probed_resolution": [1080, 1920],
+    "proof_sample_frames": [0, 52, 105, 157, 210, 262, 315, 367, 420]
+  },
+  "human_review": {
+    "first_pass_acceptance": null,
+    "ratings": null,
+    "observation": "The compositor proof suggests some captions exceed the vertical safe area. This is not silently converted into a human score."
+  }
+}

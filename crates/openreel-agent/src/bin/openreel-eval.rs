@@ -3,7 +3,7 @@ use std::{
     env,
     fmt::Write as _,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
     thread,
@@ -13,16 +13,18 @@ use std::{
 use openreel_agent::{
     ClaudeCodeDriver, CodexDriver, CursorAcpDriver,
     eval::{
-        EnvironmentStamp, EvalAssertion, EvalBudgets, EvalDefinition, EvalError, EvalResult,
-        ExpectedSourceClip, FixtureContext, PreparedFixture,
-        maximum_duration_after_expected_silence_cuts, render_jsonl, render_scoreboard, result_path,
-        run_eval,
+        EnvironmentStamp, EvalAssertion, EvalBudgets, EvalDefinition, EvalDeliverableSpec,
+        EvalError, EvalResult, ExpectedSourceClip, FixtureContext, HumanReviewFile,
+        PreparedFixture, human_review_template, maximum_duration_after_expected_silence_cuts,
+        render_jsonl, render_scoreboard, result_path, run_eval, run_eval_with_artifacts,
+        summarize_human_review,
     },
 };
 use openreel_core::{
     AgentDriver, Analysis, AssetSceneChanges, AssetSilences, AssetTranscript, AuthenticationStatus,
-    Clip, ClipId, Document, MediaAsset, Rational, SceneStatus, SilenceStatus, TimeCode, Track,
-    TrackId, TrackKind, TranscriptStatus, map_source_range_to_project,
+    CaptionMotion, Clip, ClipId, DeliveryProfile, Document, MediaAsset, Rational, SceneStatus,
+    SilenceStatus, TimeCode, Track, TrackId, TrackKind, TranscriptStatus,
+    map_source_range_to_project,
 };
 use openreel_media::{
     FfmpegMediaEngine,
@@ -46,22 +48,20 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<bool, EvalError> {
+    let options = Options::parse(env::args().skip(1))?;
+    if let Some(review_path) = &options.score_review {
+        return score_review_file(review_path).map(|()| true);
+    }
+    run_subscription_suite(&options)
+}
+
+fn run_subscription_suite(options: &Options) -> Result<bool, EvalError> {
     if env::var("OPENREEL_EVAL").as_deref() != Ok("1") {
         return Err(EvalError::Agent(
             "refusing to run a subscription eval; set OPENREEL_EVAL=1 explicitly".to_owned(),
         ));
     }
-    let options = Options::parse(env::args().skip(1))?;
-    let driver: Box<dyn AgentDriver> = match options.harness.as_str() {
-        "claude" | "claude-code" => Box::new(ClaudeCodeDriver),
-        "codex" => Box::new(CodexDriver),
-        "cursor" => Box::new(CursorAcpDriver),
-        other => {
-            return Err(EvalError::Agent(format!(
-                "unknown harness {other:?}; expected claude-code, codex, or cursor"
-            )));
-        }
-    };
+    let driver = eval_driver(&options.harness)?;
     let harness_info = driver
         .detect()
         .ok_or_else(|| EvalError::Agent(format!("{} is not installed", driver.id().0)))?;
@@ -76,26 +76,12 @@ fn run() -> Result<bool, EvalError> {
         &driver.id().0,
         options.model.as_deref(),
     );
-    let definitions = seed_suite();
-    let definitions = match &options.only {
-        Some(name) => {
-            let filtered: Vec<_> = definitions
-                .into_iter()
-                .filter(|definition| {
-                    definition.name == *name
-                        || definition.name.split_whitespace().next() == Some(name.as_str())
-                })
-                .collect();
-            if filtered.is_empty() {
-                return Err(EvalError::Agent(format!(
-                    "--only {name:?} matched no eval in the suite"
-                )));
-            }
-            filtered
-        }
-        None => definitions,
-    };
+    let (benchmark_id, definitions) = eval_suite(&options.suite)?;
+    let definitions = filter_definitions(definitions, options.only.as_deref())?;
     let working_directory = env::current_dir().ok();
+    let packaged_run = benchmark_id == "openreel-finished-cut-v2";
+    let run_id = run_identifier(&environment);
+    let run_directory = Path::new("target/evals").join(&run_id);
     let total_runs = definitions.len() * options.samples as usize;
     let mut results = Vec::with_capacity(total_runs);
     let mut run_number = 0_usize;
@@ -109,12 +95,29 @@ fn run() -> Result<bool, EvalError> {
                 options.samples,
                 definition.rationale
             );
-            let result = run_eval(
-                definition,
-                driver.as_ref(),
-                options.model.as_deref(),
-                working_directory.as_deref(),
-            )
+            let artifact_directory = packaged_run.then(|| {
+                run_directory.join("artifacts").join(format!(
+                    "{}-sample-{}",
+                    definition.name.split_whitespace().next().unwrap_or("task"),
+                    sample + 1
+                ))
+            });
+            let result = if packaged_run {
+                run_eval_with_artifacts(
+                    definition,
+                    driver.as_ref(),
+                    options.model.as_deref(),
+                    working_directory.as_deref(),
+                    artifact_directory.as_deref(),
+                )
+            } else {
+                run_eval(
+                    definition,
+                    driver.as_ref(),
+                    options.model.as_deref(),
+                    working_directory.as_deref(),
+                )
+            }
             .unwrap_or_else(|error| EvalResult::execution_failure(definition, &error));
             print_result_details(&result);
             results.push(result);
@@ -126,20 +129,127 @@ fn run() -> Result<bool, EvalError> {
     if options.samples > 1 {
         print_pass_rates(&definitions, &results, options.samples);
     }
+    let output_path = persist_results(
+        options,
+        benchmark_id,
+        &run_id,
+        &run_directory,
+        &environment,
+        &definitions,
+        &results,
+    )?;
+    println!("JSONL: {}", output_path.display());
+    Ok(results.iter().all(|result| result.passed))
+}
+
+fn eval_driver(harness: &str) -> Result<Box<dyn AgentDriver>, EvalError> {
+    match harness {
+        "claude" | "claude-code" => Ok(Box::new(ClaudeCodeDriver)),
+        "codex" => Ok(Box::new(CodexDriver)),
+        "cursor" => Ok(Box::new(CursorAcpDriver)),
+        other => Err(EvalError::Agent(format!(
+            "unknown harness {other:?}; expected claude-code, codex, or cursor"
+        ))),
+    }
+}
+
+fn eval_suite(suite: &str) -> Result<(&'static str, Vec<EvalDefinition>), EvalError> {
+    match suite {
+        "auto-edit-v1" | "v1" => Ok(("openreel-auto-edit-v1", seed_suite())),
+        "finished-cut-v2" | "v2" => Ok(("openreel-finished-cut-v2", finished_cut_suite())),
+        other => Err(EvalError::Agent(format!(
+            "unknown suite {other:?}; expected auto-edit-v1 or finished-cut-v2"
+        ))),
+    }
+}
+
+fn filter_definitions(
+    definitions: Vec<EvalDefinition>,
+    only: Option<&str>,
+) -> Result<Vec<EvalDefinition>, EvalError> {
+    let Some(name) = only else {
+        return Ok(definitions);
+    };
+    let filtered = definitions
+        .into_iter()
+        .filter(|definition| {
+            definition.name == name || definition.name.split_whitespace().next() == Some(name)
+        })
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        return Err(EvalError::Agent(format!(
+            "--only {name:?} matched no eval in the suite"
+        )));
+    }
+    Ok(filtered)
+}
+
+fn persist_results(
+    options: &Options,
+    benchmark_id: &str,
+    run_id: &str,
+    run_directory: &Path,
+    environment: &EnvironmentStamp,
+    definitions: &[EvalDefinition],
+    results: &[EvalResult],
+) -> Result<PathBuf, EvalError> {
     let output_root = Path::new("target/evals");
     fs::create_dir_all(output_root).map_err(|error| EvalError::Output(error.to_string()))?;
-    let output_path = result_path(output_root, &environment);
-    let jsonl = render_jsonl(&environment, &results)?;
-    fs::write(&output_path, jsonl).map_err(|error| EvalError::Output(error.to_string()))?;
+    let packaged_run = benchmark_id == "openreel-finished-cut-v2";
+    let output_path = if packaged_run {
+        fs::create_dir_all(run_directory).map_err(|error| EvalError::Output(error.to_string()))?;
+        run_directory.join("results.jsonl")
+    } else {
+        result_path(output_root, environment)
+    };
+    fs::write(&output_path, render_jsonl(environment, results)?)
+        .map_err(|error| EvalError::Output(error.to_string()))?;
     // A filtered or multi-sample run is a measurement exercise, not a new
     // baseline: docs/EVALS.md only records complete single-pass suites.
-    if options.only.is_none() && options.samples == 1 {
-        let docs = render_evals_document(&definitions, &environment, &results, &output_path);
+    if !packaged_run && options.only.is_none() && options.samples == 1 {
+        let docs = render_evals_document(definitions, environment, results, &output_path);
         fs::write("docs/EVALS.md", docs).map_err(|error| EvalError::Output(error.to_string()))?;
         println!("Docs: docs/EVALS.md");
     }
-    println!("JSONL: {}", output_path.display());
-    Ok(results.iter().all(|result| result.passed))
+    if packaged_run {
+        write_review_package(benchmark_id, run_id, run_directory, environment, results)?;
+    }
+    Ok(output_path)
+}
+
+fn write_review_package(
+    benchmark_id: &str,
+    run_id: &str,
+    run_directory: &Path,
+    environment: &EnvironmentStamp,
+    results: &[EvalResult],
+) -> Result<(), EvalError> {
+    let review = human_review_template(benchmark_id, run_id, results);
+    let review_path = run_directory.join("human-review.json");
+    let review_json =
+        serde_json::to_vec_pretty(&review).map_err(|error| EvalError::Output(error.to_string()))?;
+    fs::write(&review_path, review_json).map_err(|error| EvalError::Output(error.to_string()))?;
+    let machine_report = serde_json::json!({
+        "schema_version": 1,
+        "benchmark_id": benchmark_id,
+        "run_id": run_id,
+        "environment": environment,
+        "machine_passed": results.iter().all(|result| result.passed),
+        "results": results,
+        "human_review": {
+            "status": "pending",
+            "template": review_path,
+        },
+    });
+    fs::write(
+        run_directory.join("machine-report.json"),
+        serde_json::to_vec_pretty(&machine_report)
+            .map_err(|error| EvalError::Output(error.to_string()))?,
+    )
+    .map_err(|error| EvalError::Output(error.to_string()))?;
+    println!("Review: {}", review_path.display());
+    println!("Package: {}", run_directory.display());
+    Ok(())
 }
 
 struct Options {
@@ -147,6 +257,8 @@ struct Options {
     model: Option<String>,
     only: Option<String>,
     samples: u32,
+    suite: String,
+    score_review: Option<PathBuf>,
 }
 
 impl Options {
@@ -155,6 +267,8 @@ impl Options {
         let mut model = None;
         let mut only = None;
         let mut samples = 1_u32;
+        let mut suite = "auto-edit-v1".to_owned();
+        let mut score_review = None;
         let mut arguments = arguments.peekable();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -186,9 +300,19 @@ impl Options {
                             EvalError::Agent("--samples must be an integer in 1..=25".to_owned())
                         })?;
                 }
+                "--suite" => {
+                    suite = arguments
+                        .next()
+                        .ok_or_else(|| EvalError::Agent("--suite requires a value".to_owned()))?;
+                }
+                "--score-review" => {
+                    score_review = Some(PathBuf::from(arguments.next().ok_or_else(|| {
+                        EvalError::Agent("--score-review requires a JSON path".to_owned())
+                    })?));
+                }
                 "-h" | "--help" => {
                     println!(
-                        "Usage: OPENREEL_EVAL=1 cargo run -p openreel-agent --bin openreel-eval -- [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]"
+                        "Usage: OPENREEL_EVAL=1 cargo run -p openreel-agent --bin openreel-eval -- [--suite auto-edit-v1|finished-cut-v2] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p openreel-agent --bin openreel-eval -- --score-review PATH"
                     );
                     return Err(EvalError::Agent("help requested".to_owned()));
                 }
@@ -202,8 +326,44 @@ impl Options {
             model,
             only,
             samples,
+            suite,
+            score_review,
         })
     }
+}
+
+fn run_identifier(environment: &EnvironmentStamp) -> String {
+    result_path(Path::new(""), environment)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("openreel-eval-run")
+        .to_owned()
+}
+
+fn score_review_file(path: &Path) -> Result<(), EvalError> {
+    let bytes = fs::read(path).map_err(|error| {
+        EvalError::Output(format!("could not read review {}: {error}", path.display()))
+    })?;
+    let review: HumanReviewFile = serde_json::from_slice(&bytes).map_err(|error| {
+        EvalError::Output(format!(
+            "could not parse review {}: {error}",
+            path.display()
+        ))
+    })?;
+    let summary = summarize_human_review(&review)?;
+    let output = path.with_file_name("human-score.json");
+    fs::write(
+        &output,
+        serde_json::to_vec_pretty(&summary)
+            .map_err(|error| EvalError::Output(error.to_string()))?,
+    )
+    .map_err(|error| EvalError::Output(error.to_string()))?;
+    println!(
+        "Human review: {}/{} reviewed, {}/{} accepted",
+        summary.tasks_reviewed, summary.tasks_total, summary.tasks_accepted, summary.tasks_reviewed
+    );
+    println!("Score: {}", output.display());
+    Ok(())
 }
 
 fn print_pass_rates(definitions: &[EvalDefinition], results: &[EvalResult], samples: u32) {
@@ -273,6 +433,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
                 EvalAssertion::UndoIntegrity,
             ],
             budgets: standard_budget(4, 2),
+            deliverable: None,
         },
         EvalDefinition {
             name: "e2 silence-gap removal",
@@ -298,6 +459,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
                 EvalAssertion::UndoIntegrity,
             ],
             budgets: speech_budget(12, 12),
+            deliverable: None,
         },
         EvalDefinition {
             name: "e3 filler-word removal",
@@ -320,6 +482,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
                 EvalAssertion::UndoIntegrity,
             ],
             budgets: speech_budget(12, 8),
+            deliverable: None,
         },
         EvalDefinition {
             name: "e4 scene-cut",
@@ -339,6 +502,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
                 EvalAssertion::UndoIntegrity,
             ],
             budgets: standard_budget(10, 8),
+            deliverable: None,
         },
         EvalDefinition {
             name: "e5 effect-and-transition",
@@ -371,6 +535,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
                 EvalAssertion::UndoIntegrity,
             ],
             budgets: standard_budget(5, 4),
+            deliverable: None,
         },
         EvalDefinition {
             name: "e6 ordinal-resolution stress",
@@ -398,6 +563,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
                 EvalAssertion::UndoIntegrity,
             ],
             budgets: standard_budget(6, 5),
+            deliverable: None,
         },
         EvalDefinition {
             name: "e7 flagship rough cut",
@@ -447,8 +613,78 @@ fn seed_suite() -> Vec<EvalDefinition> {
                 EvalAssertion::UndoIntegrity,
             ],
             budgets: flagship_budget(),
+            deliverable: None,
         },
     ]
+}
+
+fn finished_cut_suite() -> Vec<EvalDefinition> {
+    vec![EvalDefinition {
+        name: "f1 finished vertical story",
+        rationale: "Measures footage selection, dialogue cleanup, styled captions, visual verification, technical QA, and a real delivery artifact as one first-cut workflow.",
+        fixture_builder: fixture_e7,
+        prompts: &[
+            "Create a finished vertical social cut from the media pool. Use take-A's content first, then take-C, then take-D. Do not use take-B or take-E. Remove every cuttable dead-air span at least 20 source frames long and every recognized filler word while preserving all other spoken content. Keep the selected media gapless. Then use add_styled_captions with the social preset and pop motion. Inspect a 9:16 delivery storyboard, run technical QA, and inspect vertical_short delivery conformance at a centered 50/50 focal point. Do not queue the export; the benchmark will render the exact verified timeline snapshot. Keep working until the inspectors confirm the brief.",
+        ],
+        assertions: vec![
+            EvalAssertion::TimelineNonEmpty,
+            EvalAssertion::AssetOrder {
+                aliases: aliases(&["take-A", "take-C", "take-D"]),
+                collapse_adjacent: true,
+            },
+            EvalAssertion::AssetAbsent {
+                alias: "take-B".to_owned(),
+            },
+            EvalAssertion::AssetAbsent {
+                alias: "take-E".to_owned(),
+            },
+            EvalAssertion::MediaGapless,
+            EvalAssertion::WordsRetained {
+                word_set: "take-A-content".to_owned(),
+            },
+            EvalAssertion::WordsRetained {
+                word_set: "take-C-content".to_owned(),
+            },
+            EvalAssertion::WordsRetained {
+                word_set: "take-D-content".to_owned(),
+            },
+            EvalAssertion::WordsAbsent {
+                word_set: "take-B-unique".to_owned(),
+            },
+            EvalAssertion::WordsAbsent {
+                word_set: "selected-fillers".to_owned(),
+            },
+            EvalAssertion::NoSilenceAtLeast {
+                source_frames: TimeCode(LONG_SILENCE_FRAMES),
+            },
+            EvalAssertion::DurationBounds {
+                bounds: "rough-cut".to_owned(),
+            },
+            EvalAssertion::StyledCaptions {
+                minimum_cues: 3,
+                motion: CaptionMotion::Pop,
+            },
+            EvalAssertion::QaExportReady,
+            required_all(&["get_timeline_state", "add_styled_captions"]),
+            required_any(&["get_transcript", "get_timeline_transcript"]),
+            required_any(&["get_silences", "get_timeline_silences"]),
+            required_any(&["apply_edit_plan", "add_clip"]),
+            required_all(&[
+                "get_delivery_variant_storyboard",
+                "get_qa_report",
+                "get_delivery_conformance",
+            ]),
+            EvalAssertion::UndoIntegrity,
+        ],
+        budgets: finished_cut_budget(),
+        deliverable: Some(EvalDeliverableSpec {
+            profile: DeliveryProfile::VerticalShort,
+            focus_x_percent: 50,
+            focus_y_percent: 50,
+            proof_frames: 9,
+            proof_cell_width: 240,
+        }),
+    }]
 }
 
 fn aliases(values: &[&str]) -> Vec<String> {
@@ -480,7 +716,7 @@ fn standard_budget(max_operations: u32, max_undos: u32) -> EvalBudgets {
         // first. The ceiling catches runaways, not positional billing
         // variance (observed: a correct $0.40-class e1 billed $1.67 as the
         // suite opener).
-        max_cost_usd: 2.00,
+        max_cost_usd: Some(2.00),
         max_wall_time: Duration::from_mins(5),
         max_undos,
     }
@@ -502,9 +738,25 @@ fn flagship_budget() -> EvalBudgets {
         // Calibrated from 20 live samples: correct runs cluster at ~$0.60-0.70
         // with one ~$2.00 cold-cache-priced outlier per batch. The ceiling
         // catches runaways, not billing variance.
-        max_cost_usd: 2.50,
+        max_cost_usd: Some(2.50),
         max_wall_time: Duration::from_mins(40),
         max_undos: 30,
+    }
+}
+
+fn finished_cut_budget() -> EvalBudgets {
+    EvalBudgets {
+        max_turns: 1,
+        max_tool_calls: 64,
+        max_operations: 80,
+        // Codex reports cumulative input across its tool loop. Two calibration
+        // runs used 553,648 and 731,311 tokens, so this is a measured upper
+        // guard rather than a single-response token assumption.
+        max_tokens: 750_000,
+        // Subscription Codex exposes tokens but no attributable USD cost.
+        max_cost_usd: None,
+        max_wall_time: Duration::from_mins(50),
+        max_undos: 80,
     }
 }
 
@@ -1094,10 +1346,14 @@ fn render_evals_document(
         "# Agent evals\n\nOpenReel's Arc 2 editing competence suite runs only when `OPENREEL_EVAL=1` is explicitly set. It uses generated media, the real MCP server, and an installed subscription harness. CI covers the framework with a fake driver and spends nothing.\n\n## Run\n\n```powershell\n$env:OPENREEL_EVAL = '1'\ncargo run -p openreel-agent --bin openreel-eval\n# Optional: -- --harness codex\n```\n\nResults are written as timestamped, environment-stamped JSONL under `target/evals/`. A full live suite is intentionally expensive and must not be placed in CI.\n\nThe versioned public contract and first machine-readable baseline live under [`benchmarks/auto-edit/v1`](../benchmarks/auto-edit/v1/README.md). A refreshed docs snapshot never overwrites that historical baseline.\n\n## Seed suite\n\n| Eval | Rationale | USD ceiling |\n|---|---|---:|\n",
     );
     for definition in definitions {
+        let cost_ceiling = definition
+            .budgets
+            .max_cost_usd
+            .map_or_else(|| "n/a".to_owned(), |cost| format!("${cost:.2}"));
         let _ = writeln!(
             document,
-            "| {} | {} | ${:.2} |",
-            definition.name, definition.rationale, definition.budgets.max_cost_usd
+            "| {} | {} | {cost_ceiling} |",
+            definition.name, definition.rationale
         );
     }
     document.push_str("\n## Baseline snapshot\n\n");
@@ -1180,6 +1436,10 @@ mod tests {
             );
             assert_eq!(task["budget"]["tokens"], definition.budgets.max_tokens);
             assert_eq!(
+                task["budget"]["cost_usd"].as_f64(),
+                definition.budgets.max_cost_usd
+            );
+            assert_eq!(
                 task["budget"]["wall_time_ms"],
                 u64::try_from(definition.budgets.max_wall_time.as_millis()).unwrap()
             );
@@ -1211,5 +1471,71 @@ mod tests {
         assert_eq!(passed_assertions, summary["assertions_passed"]);
         assert_eq!(total_tokens, summary["total_tokens"]);
         assert!(summary["human_first_pass_acceptance"].is_null());
+    }
+
+    #[test]
+    fn published_v2_manifest_tracks_the_finished_cut_suite() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v2/manifest.json"
+        ))
+        .unwrap();
+        assert_eq!(manifest["schema_version"], 2);
+        assert_eq!(manifest["benchmark_id"], "openreel-finished-cut-v2");
+        let tasks = manifest["tasks"].as_array().unwrap();
+        let definitions = finished_cut_suite();
+        assert_eq!(tasks.len(), definitions.len());
+        for (task, definition) in tasks.iter().zip(&definitions) {
+            let deliverable = definition.deliverable.unwrap();
+            assert_eq!(
+                task["id"].as_str(),
+                definition.name.split_whitespace().next()
+            );
+            assert_eq!(task["prompt"], definition.prompts[0]);
+            assert_eq!(task["delivery"]["profile"], deliverable.profile.as_str());
+            assert_eq!(task["delivery"]["proof_frames"], deliverable.proof_frames);
+            assert_eq!(task["budget"]["turns"], definition.budgets.max_turns);
+            assert_eq!(
+                task["budget"]["tool_calls"],
+                definition.budgets.max_tool_calls
+            );
+            assert_eq!(
+                task["budget"]["operations"],
+                definition.budgets.max_operations
+            );
+            assert_eq!(task["budget"]["tokens"], definition.budgets.max_tokens);
+            assert_eq!(
+                task["budget"]["cost_usd"].as_f64(),
+                definition.budgets.max_cost_usd
+            );
+            assert_eq!(
+                task["budget"]["wall_time_ms"],
+                u64::try_from(definition.budgets.max_wall_time.as_millis()).unwrap()
+            );
+            assert_eq!(task["budget"]["undos"], definition.budgets.max_undos);
+        }
+    }
+
+    #[test]
+    fn published_v2_baseline_keeps_machine_and_human_results_separate() {
+        let baseline: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v2/baseline.json"
+        ))
+        .unwrap();
+        let machine = &baseline["machine_summary"];
+        let deliverable = &baseline["deliverable"];
+        assert_eq!(machine["tasks_passed"], machine["tasks_total"]);
+        assert_eq!(machine["assertions_passed"], machine["assertions_total"]);
+        assert_eq!(
+            machine["input_tokens"].as_u64().unwrap() + machine["output_tokens"].as_u64().unwrap(),
+            machine["total_tokens"]
+        );
+        assert_eq!(
+            deliverable["duration_frames"],
+            deliverable["probed_duration_frames"]
+        );
+        assert_eq!(deliverable["resolution"], deliverable["probed_resolution"]);
+        assert_eq!(deliverable["output_sha256"].as_str().unwrap().len(), 64);
+        assert!(baseline["human_review"]["first_pass_acceptance"].is_null());
+        assert!(baseline["human_review"]["ratings"].is_null());
     }
 }
