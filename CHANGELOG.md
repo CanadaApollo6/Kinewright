@@ -16,9 +16,13 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   retranscribes the rendered MP4 with a 15% word-error-rate ceiling, and keeps
   SHA-bound human acceptance separate. Agents can inspect and atomically
   correct caption cues, while dialogue assembly exposes natural-pause
-  retention and filler-boundary padding. English eval transcription is hinted
-  explicitly, and a broken `whisper-rs` safe abort callback was removed after
-  it intermittently aborted healthy Windows inference.
+  retention and filler-boundary padding while coalescing overlapping cleanup
+  cuts instead of emitting silent micro-clips. Batched transcript reads and one
+  compact editorial-readiness proof reduce repeated model context; silence
+  thresholds apply after transcript protection and cut margins. English eval
+  transcription is hinted explicitly, and a broken `whisper-rs` safe abort
+  callback was removed after it intermittently aborted healthy Windows
+  inference.
 - M37 finished-cut preparation: titles and captions now use one exact Inter-
   measured layout across preview, export, delivery conformance, and QA. Type
   scales from the short edge, wraps inside an 8% safe area, adapts only when it

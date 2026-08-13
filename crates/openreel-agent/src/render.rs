@@ -667,22 +667,17 @@ pub fn render_timeline_silences(
     range: std::ops::Range<TimeCode>,
     spans: &[TimelineSilenceSpan],
     transcripts: &BTreeMap<AssetId, Arc<AssetTranscript>>,
+    minimum_source_frames: TimeCode,
 ) -> String {
-    let spans = spans
-        .iter()
-        .flat_map(|span| {
-            clamped_timeline_silences(
-                document,
-                *span,
-                transcripts.get(&span.asset).map(Arc::as_ref),
-            )
-        })
+    let spans = cuttable_timeline_silences(document, spans, transcripts, minimum_source_frames)
+        .into_iter()
         .filter(|span| span.project_end > range.start && span.project_start < range.end)
         .collect::<Vec<_>>();
     let mut output = format!(
-        "timeline silences range={}..{} spans={}\n",
+        "timeline silences range={}..{} min_duration={} spans={}\n",
         frame_and_seconds(range.start, document.fps),
         frame_and_seconds(range.end, document.fps),
+        minimum_source_frames.0,
         spans.len()
     );
     for span in &spans {
@@ -702,6 +697,29 @@ pub fn render_timeline_silences(
     }
     output.pop();
     output
+}
+
+#[must_use]
+pub fn cuttable_timeline_silences(
+    document: &Document,
+    spans: &[TimelineSilenceSpan],
+    transcripts: &BTreeMap<AssetId, Arc<AssetTranscript>>,
+    minimum_source_frames: TimeCode,
+) -> Vec<TimelineSilenceSpan> {
+    let minimum = minimum_source_frames.0.max(1);
+    let mut cuttable = spans
+        .iter()
+        .flat_map(|span| {
+            clamped_timeline_silences(
+                document,
+                *span,
+                transcripts.get(&span.asset).map(Arc::as_ref),
+            )
+        })
+        .filter(|span| span.source_end.0.saturating_sub(span.source_start.0) >= minimum)
+        .collect::<Vec<_>>();
+    cuttable.sort_by_key(|span| (span.project_start, span.track, span.clip, span.source_start));
+    cuttable
 }
 
 fn clamped_timeline_silences(
@@ -1275,9 +1293,19 @@ clip=10 asset=4 project=9f/0.300s..15f/0.500s source=39f/1.300s..45f/1.500s "um"
             TimeCode(0)..TimeCode(90),
             &spans,
             &BTreeMap::new(),
+            TimeCode(6),
         );
-        let expected = r"timeline silences range=0f/0.000s..90f/3.000s spans=1
+        let expected = r"timeline silences range=0f/0.000s..90f/3.000s min_duration=6 spans=1
 clip=10 asset=4 project=6f/0.200s..30f/1.000s source=36f/1.200s..60f/2.000s";
         assert_eq!(rendered, expected);
+
+        let filtered = render_timeline_silences(
+            &fixture(),
+            TimeCode(0)..TimeCode(90),
+            &spans,
+            &BTreeMap::new(),
+            TimeCode(25),
+        );
+        assert!(filtered.ends_with("min_duration=25 spans=0"));
     }
 }

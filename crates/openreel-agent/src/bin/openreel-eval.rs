@@ -736,7 +736,7 @@ fn editorial_cut_suite() -> Vec<EvalDefinition> {
         rationale: "Measures coherent take selection, natural dialogue cleanup, exact authored captions, independent post-render speech verification, visual review, technical QA, and a real vertical delivery artifact.",
         fixture_builder: fixture_editorial_story,
         prompts: &[
-            "Create a finished vertical social story about a neighborhood garden from the five takes. Choose the three takes that form this factual arc: the empty lot collected weeds and rainwater; neighbors turned it into food-growing space by building raised beds and planting tomatoes, herbs, and peppers; the Saturday market now supplies fresh produce to dozens of local families. Reject every flub or factually wrong alternate. Use plan_dialogue_assembly to preserve the clean spoken content in story order, remove all audible um sounds with 3 source frames of filler padding, remove raw dead air at least 20 source frames long, and retain 6 source frames of natural pause across every silence cut. Keep the real-time A/V source dialogue audible without duplicating it onto an audio track. Add social captions with pop motion. The exact intended caption wording, excluding fillers, is: 'Last spring this empty lot collected weeds and rainwater. Neighbors decided it could feed families instead. Over three weekends volunteers built raised beds. Then they planted tomatoes herbs and peppers. Now the Saturday market supplies fresh produce to dozens of local families.' Inspect every generated cue with get_captions and use plan_caption_corrections plus prepare_edit_plan and commit_edit_plan if any cue differs from those intended words. Confirm zero cuttable timeline silences remain, inspect a 9:16 delivery storyboard, run technical QA, and inspect vertical_short delivery conformance at a centered 50/50 focal point. Do not queue export; the benchmark renders and independently transcribes the exact verified snapshot. Keep working until every inspector confirms the brief.",
+            "Create a finished vertical social story about a neighborhood garden from the five takes. Batch capability discovery and schema opening. Inspect all five takes in one get_transcripts call. Choose the three takes that form this factual arc: the empty lot collected weeds and rainwater; neighbors turned it into food-growing space by building raised beds and planting tomatoes, herbs, and peppers; the Saturday market now supplies fresh produce to dozens of local families. Reject every flub or factually wrong alternate. Use plan_dialogue_assembly to preserve the clean spoken content in story order, remove all audible um sounds with 3 source frames of filler padding, remove raw dead air at least 20 source frames long, and retain 6 source frames of natural pause across every silence cut. Keep the real-time A/V source dialogue audible without duplicating it onto an audio track. Add social captions with pop motion. The exact intended caption wording, excluding fillers, is: 'Last spring this empty lot collected weeds and rainwater. Neighbors decided it could feed families instead. Over three weekends volunteers built raised beds. Then they planted tomatoes herbs and peppers. Now the Saturday market supplies fresh produce to dozens of local families.' Inspect every generated cue with get_captions and use plan_caption_corrections plus prepare_edit_plan and commit_edit_plan if any cue differs from those intended words. Finish with one get_editorial_readiness call using vertical_short, minimum 20 source frames, centered 50/50 focus, nine storyboard frames, and 240-pixel cells. Do not queue export; the benchmark renders and independently transcribes the exact verified snapshot. Keep working until readiness is true.",
         ],
         assertions: vec![
             EvalAssertion::TimelineNonEmpty,
@@ -786,13 +786,11 @@ fn editorial_cut_suite() -> Vec<EvalDefinition> {
             EvalAssertion::QaExportReady,
             required_all(&[
                 "get_timeline_state",
+                "get_transcripts",
                 "plan_dialogue_assembly",
                 "add_styled_captions",
                 "get_captions",
-                "get_timeline_silences",
-                "get_delivery_variant_storyboard",
-                "get_qa_report",
-                "get_delivery_conformance",
+                "get_editorial_readiness",
             ]),
             required_any(&["commit_edit_plan", "apply_edit_plan"]),
             EvalAssertion::UndoIntegrity,

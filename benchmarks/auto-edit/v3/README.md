@@ -19,6 +19,11 @@ Machine scoring now distinguishes:
 - hard silence removal from configurable natural pause retention;
 - a technically valid MP4 from a human-acceptable first cut.
 
+The agent reads all source transcripts through one batched capability and
+finishes with one compact editorial-readiness proof. That proof owns silence,
+QA, delivery, and storyboard verification so repeated context is not the price
+of being thorough.
+
 Run preparation and ordinary tests spend no model quota. A subscription-backed
 run remains explicit:
 

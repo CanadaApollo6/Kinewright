@@ -14,7 +14,7 @@ use openreel_core::{
     AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, AssetTranscript, CaptionMotion,
     ClipContent, Command, Core, DeliveryConformanceReport, DeliveryProfile, Document, Event,
     Export, ExportCancellation, HarnessInfo, MediaKind, Operation, ParamValue, Playback, Query,
-    QueryResult, SessionConfig, SilenceSpan, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
+    QueryResult, SessionConfig, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
     TranscriptStatus, delivery_conformance, document_for_delivery_profile,
     map_source_range_to_project, qa_document,
 };
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ConfirmationBroker, McpServer, compact_tool_names,
+    ConfirmationBroker, McpServer, compact_tool_names, render::cuttable_timeline_silences,
     shrink_silence_span_for_cutting_with_transcript,
 };
 
@@ -1554,33 +1554,18 @@ fn evaluate_assertion(
         EvalAssertion::WordsAbsent { word_set } => evaluate_word_set(word_set, outcome, false),
         EvalAssertion::CaptionWordsExact { word_set } => evaluate_caption_words(word_set, outcome),
         EvalAssertion::NoSilenceAtLeast { source_frames } => {
-            let remaining = outcome
-                .remaining_silences
-                .iter()
-                .filter(|span| {
-                    span.source_end.0.saturating_sub(span.source_start.0) >= source_frames.0
-                })
-                .flat_map(|span| {
-                    let source_fps = outcome
-                        .final_document
-                        .asset(span.asset)
-                        .map_or(outcome.final_document.fps, |asset| asset.fps);
-                    let transcript = outcome.context.transcripts.get(&span.asset);
-                    shrink_silence_span_for_cutting_with_transcript(
-                        SilenceSpan {
-                            source_start: span.source_start,
-                            source_end: span.source_end,
-                        },
-                        source_fps,
-                        transcript.map(|transcript| transcript.words.as_slice()),
-                    )
-                })
-                .count();
+            let remaining = cuttable_timeline_silences(
+                &outcome.final_document,
+                &outcome.remaining_silences,
+                &outcome.context.transcripts,
+                *source_frames,
+            )
+            .len();
             assertion_result(
                 "long silence absent",
                 remaining == 0,
                 format!(
-                    "observed {remaining} cuttable silence spans from raw spans at least {} source frames",
+                    "observed {remaining} transcript-safe cuttable silence spans at least {} source frames",
                     source_frames.0
                 ),
             )

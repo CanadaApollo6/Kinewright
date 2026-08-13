@@ -58,7 +58,18 @@ It never mutates the timeline by itself.
   filler so the audible onset or tail is not stranded.
 
 Both values are included in the returned evidence. The model still chooses the
-story and takes; OpenReel owns the frame arithmetic.
+story and takes; OpenReel owns the frame arithmetic. Cleanup cuts separated by
+no more than the requested retained pause are coalesced. This prevents tiny
+silent islands between overlapping filler and detector cuts while preserving
+the requested pause around the complete cleanup region.
+
+`get_transcripts` inspects up to 32 ordered assets in one response. The final
+`get_editorial_readiness` proof combines transcript-safe silence clearance,
+technical QA, delivery conformance, and a real delivery-profile storyboard.
+This replaces nine repeated transcript/proof round trips in the benchmark's
+common path. Silence duration is measured after transcript protection and the
+cut margin, so a deliberately retained six-frame pause cannot fail a 20-frame
+dead-air gate merely because it came from a longer raw detector span.
 
 ## Transcription reliability found during preparation
 

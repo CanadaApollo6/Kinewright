@@ -23,8 +23,9 @@ use openreel_core::{
     SyncGroupId, ThreePointMode, TimeCode, TimelineBeat, TimelineBeatAnalysisState,
     TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TrackId,
     TranscriptStatus, animated_caption_operations, apply_batch, beat_pacing_plan, caption_cues,
-    dedup_timeline_words, delivery_conformance, document_for_delivery_variant, is_filler_word,
-    map_source_range_to_project, music_fit_plan, plan_speaker_multicam, qa_document,
+    dedup_timeline_words, delivery_conformance, document_for_delivery_profile,
+    document_for_delivery_variant, is_filler_word, map_source_range_to_project, music_fit_plan,
+    plan_speaker_multicam, qa_document,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -46,9 +47,9 @@ use tokio::sync::oneshot;
 use crate::{
     export_queue::{ExportJobId, ExportQueue, ExportQueueError, QueueExportRequest},
     render::{
-        render_asset_scene_changes, render_asset_silences, render_asset_transcript,
-        render_clip_info, render_timeline_scene_changes, render_timeline_silences,
-        render_timeline_state, render_timeline_transcript,
+        cuttable_timeline_silences, render_asset_scene_changes, render_asset_silences,
+        render_asset_transcript, render_clip_info, render_timeline_scene_changes,
+        render_timeline_silences, render_timeline_state, render_timeline_transcript,
     },
     runtime::{
         CapabilityDescriptor, CapabilityKind, PreparedPlanId, PreparedPlanStore,
@@ -634,6 +635,10 @@ impl OpenReelMcp {
                 let args: TranscriptArgs = decode_args("get_transcript", arguments)?;
                 self.asset_transcript(args.asset_id)
             }
+            "get_transcripts" => {
+                let args: TranscriptsArgs = decode_args("get_transcripts", arguments)?;
+                self.asset_transcripts(&args.asset_ids)
+            }
             "get_timeline_transcript" => {
                 let args: TimelineTranscriptArgs =
                     decode_args("get_timeline_transcript", arguments)?;
@@ -644,8 +649,8 @@ impl OpenReelMcp {
                 self.asset_silences(args.asset_id, args.min_duration_frames)
             }
             "get_timeline_silences" => {
-                let args: TimelineDerivedArgs = decode_args("get_timeline_silences", arguments)?;
-                self.timeline_silences(args.range)
+                let args: TimelineSilencesArgs = decode_args("get_timeline_silences", arguments)?;
+                self.timeline_silences(args.range, args.min_duration_frames)
             }
             "get_scene_changes" => {
                 let args: SceneChangesArgs = decode_args("get_scene_changes", arguments)?;
@@ -721,6 +726,11 @@ impl OpenReelMcp {
                 let args: DeliveryStoryboardArgs =
                     decode_args("get_delivery_variant_storyboard", arguments)?;
                 self.delivery_variant_storyboard(args)
+            }
+            "get_editorial_readiness" => {
+                let args: EditorialReadinessArgs =
+                    decode_args("get_editorial_readiness", arguments)?;
+                self.editorial_readiness(&args)
             }
             "request_analysis" => {
                 let args: RequestAnalysisArgs = decode_args("request_analysis", arguments)?;
@@ -1230,6 +1240,164 @@ impl OpenReelMcp {
                 .map_err(|error| McpError::internal_error(error.to_string(), None))?,
             structured,
         ))
+    }
+
+    fn editorial_readiness(
+        &self,
+        args: &EditorialReadinessArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let minimum = args.min_silence_source_frames.unwrap_or(TimeCode(20));
+        if minimum <= TimeCode::ZERO {
+            return Ok(error_text("min_silence_source_frames must be positive"));
+        }
+        if args.focus_x_percent > 100 || args.focus_y_percent > 100 {
+            return Ok(error_text("delivery focus percentages must be in 0..=100"));
+        }
+        let (revision, document) = self.snapshot()?;
+        let (cuttable, pending_silence_assets) =
+            self.editorial_silence_evidence(&document, minimum)?;
+        let qa = qa_document(&document);
+        let conformance = match delivery_conformance(
+            &document,
+            args.profile,
+            args.focus_x_percent,
+            args.focus_y_percent,
+        ) {
+            Ok(report) => report,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let mut storyboard = self.editorial_readiness_storyboard(revision, &document, args)?;
+        if storyboard.is_error == Some(true) {
+            return Ok(storyboard);
+        }
+        let qa_errors = qa.count(openreel_core::QaSeverity::Error);
+        let conformance_errors = conformance
+            .issues
+            .iter()
+            .filter(|issue| issue.severity == openreel_core::QaSeverity::Error)
+            .count();
+        let ready = pending_silence_assets.is_empty()
+            && cuttable.is_empty()
+            && qa_errors == 0
+            && conformance_errors == 0;
+        let cuttable_json = cuttable
+            .iter()
+            .map(|span| {
+                serde_json::json!({
+                    "asset_id": span.asset,
+                    "track_id": span.track,
+                    "clip_id": span.clip,
+                    "source_start": span.source_start,
+                    "source_end": span.source_end,
+                    "project_start": span.project_start,
+                    "project_end": span.project_end,
+                })
+            })
+            .collect::<Vec<_>>();
+        let structured = serde_json::json!({
+            "timeline_revision": revision,
+            "ready": ready,
+            "silence": {
+                "minimum_source_frames": minimum,
+                "cuttable_count": cuttable.len(),
+                "spans": cuttable_json,
+                "pending_asset_ids": pending_silence_assets,
+            },
+            "qa": {
+                "export_ready": qa.export_ready(),
+                "error_count": qa_errors,
+                "warning_count": qa.count(openreel_core::QaSeverity::Warning),
+                "blocking_issues": qa.issues.iter().filter(|issue| issue.severity == openreel_core::QaSeverity::Error).collect::<Vec<_>>(),
+            },
+            "delivery": {
+                "profile": args.profile,
+                "export_ready": conformance.export_ready(),
+                "resolution": conformance.resolution,
+                "error_count": conformance_errors,
+                "blocking_issues": conformance.issues.iter().filter(|issue| issue.severity == openreel_core::QaSeverity::Error).collect::<Vec<_>>(),
+            },
+            "storyboard": storyboard.structured_content,
+        });
+        let summary = serde_json::to_string(&structured)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        let mut result = CallToolResult::success(vec![ContentBlock::text(summary)]);
+        result.content.append(&mut storyboard.content);
+        result.structured_content = Some(structured);
+        Ok(result)
+    }
+
+    fn editorial_silence_evidence(
+        &self,
+        document: &Document,
+        minimum: TimeCode,
+    ) -> Result<(Vec<TimelineSilenceSpan>, Vec<AssetId>), McpError> {
+        let transcripts = document
+            .media_pool
+            .iter()
+            .filter_map(|asset| match self.analysis.transcript_status(asset) {
+                TranscriptStatus::Ready(transcript) => Some((asset.id, transcript)),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let pending = document
+            .media_pool
+            .iter()
+            .filter(|asset| {
+                !matches!(
+                    self.analysis.silence_status(asset),
+                    SilenceStatus::Ready(_) | SilenceStatus::NoAudio
+                )
+            })
+            .map(|asset| asset.id)
+            .collect::<Vec<_>>();
+        let spans = self
+            .analysis
+            .timeline_silences(document, None, minimum)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        Ok((
+            cuttable_timeline_silences(document, &spans, &transcripts, minimum),
+            pending,
+        ))
+    }
+
+    fn editorial_readiness_storyboard(
+        &self,
+        revision: TimelineRevision,
+        document: &Document,
+        args: &EditorialReadinessArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let document = match document_for_delivery_profile(
+            document,
+            args.profile,
+            args.focus_x_percent,
+            args.focus_y_percent,
+        ) {
+            Ok(document) => Arc::new(document),
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        self.storyboard_for_document(
+            revision,
+            &document,
+            StoryboardArgs {
+                range: args
+                    .storyboard
+                    .range
+                    .as_ref()
+                    .map(|range| TranscriptRangeArgs {
+                        start: range.start,
+                        end: range.end,
+                    }),
+                frame_count: args.storyboard.frame_count,
+                max_width: args.storyboard.max_width,
+            },
+            "editorial readiness storyboard",
+            Some(serde_json::json!({
+                "profile": args.profile,
+                "focus_x_percent": args.focus_x_percent,
+                "focus_y_percent": args.focus_y_percent,
+                "resolution": {"width": document.resolution.0, "height": document.resolution.1},
+            })),
+        )
     }
 
     fn queue_export(&self, args: QueueExportArgs) -> Result<CallToolResult, McpError> {
@@ -2215,6 +2383,30 @@ impl OpenReelMcp {
         Ok(success_text(render_asset_transcript(asset_id, &status)))
     }
 
+    fn asset_transcripts(&self, asset_ids: &[AssetId]) -> Result<CallToolResult, McpError> {
+        if asset_ids.is_empty() || asset_ids.len() > 32 {
+            return Ok(error_text("get_transcripts requires 1..=32 asset_ids"));
+        }
+        let unique = asset_ids.iter().copied().collect::<BTreeSet<_>>();
+        if unique.len() != asset_ids.len() {
+            return Ok(error_text("get_transcripts asset_ids must be unique"));
+        }
+        let document = self.document()?;
+        let mut rendered = Vec::with_capacity(asset_ids.len());
+        for asset_id in asset_ids {
+            let Some(asset) = document.asset(*asset_id) else {
+                return Ok(error_text(format!("asset {asset_id} does not exist")));
+            };
+            let mut status = self.analysis.transcript_status(asset);
+            if status == TranscriptStatus::NotRequested {
+                self.analysis.request_transcription(asset.clone());
+                status = self.analysis.transcript_status(asset);
+            }
+            rendered.push(render_asset_transcript(*asset_id, &status));
+        }
+        Ok(success_text(rendered.join("\n")))
+    }
+
     fn asset_silences(
         &self,
         asset_id: AssetId,
@@ -2401,9 +2593,14 @@ impl OpenReelMcp {
     fn timeline_silences(
         &self,
         requested: Option<TranscriptRangeArgs>,
+        requested_minimum: Option<TimeCode>,
     ) -> Result<CallToolResult, McpError> {
         let document = self.document()?;
         let range = validated_timeline_range(&document, requested, "timeline silence")?;
+        let minimum = requested_minimum.unwrap_or(TimeCode(DEFAULT_MINIMUM_SILENCE_FRAMES));
+        if minimum <= TimeCode::ZERO {
+            return Ok(error_text("min_duration_frames must be positive"));
+        }
         for asset in &document.media_pool {
             if self.analysis.silence_status(asset) == SilenceStatus::NotRequested {
                 self.analysis.request_silence_detection(asset.clone());
@@ -2417,15 +2614,16 @@ impl OpenReelMcp {
                 _ => None,
             })
             .collect::<BTreeMap<_, _>>();
-        let spans: Vec<TimelineSilenceSpan> = match self.analysis.timeline_silences(
-            &document,
-            Some(range.clone()),
-            TimeCode(DEFAULT_MINIMUM_SILENCE_FRAMES),
-        ) {
-            Ok(spans) => spans,
-            Err(error) => return Ok(error_text(error.to_string())),
-        };
-        let mut rendered = render_timeline_silences(&document, range, &spans, &transcripts);
+        let spans: Vec<TimelineSilenceSpan> =
+            match self
+                .analysis
+                .timeline_silences(&document, Some(range.clone()), minimum)
+            {
+                Ok(spans) => spans,
+                Err(error) => return Ok(error_text(error.to_string())),
+            };
+        let mut rendered =
+            render_timeline_silences(&document, range, &spans, &transcripts, minimum);
         for asset in &document.media_pool {
             let status = self.analysis.silence_status(asset);
             if !matches!(status, SilenceStatus::Ready(_) | SilenceStatus::NoAudio) {
@@ -2433,7 +2631,7 @@ impl OpenReelMcp {
                 rendered.push_str(&render_asset_silences(
                     asset.id,
                     &status,
-                    TimeCode(DEFAULT_MINIMUM_SILENCE_FRAMES),
+                    minimum,
                     transcripts.get(&asset.id).map(Arc::as_ref),
                 ));
             }
@@ -3134,6 +3332,21 @@ struct DeliveryStoryboardArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct EditorialReadinessArgs {
+    /// Stable delivery contract to verify and preview.
+    profile: DeliveryProfile,
+    /// Minimum transcript-safe cuttable silence in source frames. Defaults to 20.
+    #[serde(default)]
+    min_silence_source_frames: Option<TimeCode>,
+    #[serde(default = "default_delivery_focus")]
+    focus_x_percent: u8,
+    #[serde(default = "default_delivery_focus")]
+    focus_y_percent: u8,
+    #[serde(flatten)]
+    storyboard: StoryboardArgs,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct TrackReframeArgs {
     /// Stable media clip id containing the reframe effect.
     clip_id: ClipId,
@@ -3446,6 +3659,16 @@ struct TimelineDerivedArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct TimelineSilencesArgs {
+    /// Optional half-open range in exact project frames. Omit for the full timeline.
+    #[serde(default)]
+    range: Option<TranscriptRangeArgs>,
+    /// Minimum transcript-safe cuttable span in source frames. Defaults to 6.
+    #[serde(default)]
+    min_duration_frames: Option<TimeCode>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct EditPlanArgs {
     /// Exact revision returned by `get_timeline_state` before planning this batch.
     expected_revision: TimelineRevision,
@@ -3522,6 +3745,12 @@ struct TimelineTranscriptArgs {
 struct TranscriptRangeArgs {
     start: TimeCode,
     end: TimeCode,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TranscriptsArgs {
+    /// Stable asset ids to inspect together, in response order. Maximum 32.
+    asset_ids: Vec<AssetId>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3608,8 +3837,8 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_timeline_silences",
-            "Return cached silence spans mapped through clips to exact project frames and seconds. For safe cutting, reported spans are clamped in source space against cached transcribed words plus a 100 ms fps-aware margin before project mapping; when no transcript is cached, the existing fixed 100 ms margin is used. Cached detector spans remain unchanged.",
-            schema_object::<TimelineDerivedArgs>(),
+            "Return cached silence spans mapped through clips to exact project frames and seconds, filtered by a caller-selected final cuttable duration. Transcript protection and the 100 ms fps-aware margin are applied before the duration gate.",
+            schema_object::<TimelineSilencesArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -3757,6 +3986,12 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "get_editorial_readiness",
+            "Run the common final editorial proof in one compact call: transcript-safe silence clearance, technical QA, delivery conformance, and a real delivery-profile storyboard. Returns blocking details without repeating non-blocking issues.",
+            schema_object::<EditorialReadinessArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "request_analysis",
             "Queue selected content-addressed analysis jobs for one asset, or all four families when kinds is omitted.",
             schema_object::<RequestAnalysisArgs>(),
@@ -3844,6 +4079,12 @@ fn inspector_tools() -> Vec<Tool> {
             "get_transcript",
             "Return one asset's word-timestamped transcript in exact source frames and seconds, or its background transcription status.",
             schema_object::<TranscriptArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_transcripts",
+            "Return transcripts for up to 32 assets in one ordered response, avoiding repeated model round trips while preserving exact source-frame word timestamps.",
+            schema_object::<TranscriptsArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -3958,7 +4199,11 @@ fn dialogue_keep_ranges(
     let mut merged = Vec::<std::ops::Range<TimeCode>>::new();
     for cut in cuts {
         if let Some(previous) = merged.last_mut()
-            && cut.start <= previous.end
+            && cut.start.0
+                <= previous
+                    .end
+                    .0
+                    .saturating_add(retained_pause_source_frames.0)
         {
             previous.end = previous.end.max(cut.end);
         } else {
@@ -5086,11 +5331,13 @@ mod tests {
         for name in [
             "get_caption_presets",
             "get_captions",
+            "get_transcripts",
             "plan_caption_corrections",
             "add_styled_captions",
             "get_qa_report",
             "get_delivery_variants",
             "get_delivery_variant_storyboard",
+            "get_editorial_readiness",
         ] {
             assert!(names.iter().any(|candidate| candidate == name));
         }
@@ -5114,6 +5361,22 @@ mod tests {
             result.structured_content.unwrap()["delivery_variant"]["aspect"],
             "vertical"
         );
+
+        let readiness = service
+            .editorial_readiness(&EditorialReadinessArgs {
+                profile: DeliveryProfile::VerticalShort,
+                min_silence_source_frames: Some(TimeCode(20)),
+                focus_x_percent: 50,
+                focus_y_percent: 50,
+                storyboard: StoryboardArgs {
+                    range: None,
+                    frame_count: Some(2),
+                    max_width: Some(64),
+                },
+            })
+            .unwrap();
+        assert_eq!(readiness.is_error, Some(false));
+        assert_eq!(readiness.structured_content.unwrap()["ready"], false);
     }
 
     #[test]
@@ -5944,11 +6207,7 @@ mod tests {
                 TimeCode(6),
                 TimeCode(3),
             ),
-            vec![
-                TimeCode(0)..TimeCode(23),
-                TimeCode(67)..TimeCode(72),
-                TimeCode(85)..TimeCode(120),
-            ]
+            vec![TimeCode(0)..TimeCode(23), TimeCode(85)..TimeCode(120),]
         );
     }
 
