@@ -15,15 +15,16 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use openreel_core::{
-    Analysis, AnalysisKind, AssetId, AutomationCurve, BeatStatus, CaptionMotion, CaptionPreset,
-    ClipContent, ClipId, Command, Core, DeliveryAspect, DeliveryProfile, DeliveryVariant, Document,
-    EffectId, Event, Export, ExportCancellation, Keyframe, KeyframeInterpolation, MediaKind,
-    Operation, Playback, Query, QueryResult, SceneStatus, SilenceStatus, SpeakerAngleAssignment,
-    SpeakerMulticamSettings, SyncGroupId, ThreePointMode, TimeCode, TimelineBeat,
-    TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, TrackId, TranscriptStatus, animated_caption_operations,
-    beat_pacing_plan, caption_cues, dedup_timeline_words, delivery_conformance,
-    document_for_delivery_variant, music_fit_plan, plan_speaker_multicam, qa_document,
+    Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AutomationCurve, BeatStatus,
+    CaptionCue, CaptionMotion, CaptionPreset, ClipContent, ClipId, Command, Core, DeliveryAspect,
+    DeliveryProfile, DeliveryVariant, Document, EffectId, Event, Export, ExportCancellation,
+    Keyframe, KeyframeInterpolation, MediaAsset, MediaKind, Operation, Playback, Query,
+    QueryResult, SceneStatus, SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings,
+    SyncGroupId, ThreePointMode, TimeCode, TimelineBeat, TimelineBeatAnalysisState,
+    TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TrackId,
+    TranscriptStatus, animated_caption_operations, apply_batch, beat_pacing_plan, caption_cues,
+    dedup_timeline_words, delivery_conformance, document_for_delivery_variant, is_filler_word,
+    map_source_range_to_project, music_fit_plan, plan_speaker_multicam, qa_document,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -50,8 +51,8 @@ use crate::{
         render_timeline_state, render_timeline_transcript,
     },
     runtime::{
-        CapabilityKind, PreparedPlanId, PreparedPlanStore, ToolSurfaceMetrics, capabilities,
-        is_invocable_capability, search_capabilities,
+        CapabilityDescriptor, CapabilityKind, PreparedPlanId, PreparedPlanStore,
+        ToolSurfaceMetrics, capabilities, is_invocable_capability, search_capabilities,
     },
     schema::{SchemaError, decode_operation, operation_tool_name, operation_tools, schema_object},
 };
@@ -491,17 +492,12 @@ impl OpenReelMcp {
                 let args: CapabilitySearchArgs = decode_args("search_capabilities", arguments)?;
                 let tools = Self::capability_tools()
                     .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-                let found = search_capabilities(
-                    &tools,
-                    args.query.as_deref(),
-                    &args.kinds,
-                    usize::from(args.limit.unwrap_or(20)),
-                );
+                let found = search_capability_queries(&tools, &args);
                 Ok(success_structured(
                     format!("found {} matching OpenReel capabilities", found.len()),
                     serde_json::json!({
                         "capabilities": found,
-                        "next": "Call get_capability with one exact name before invoking it or using an edit operation in prepare_edit_plan."
+                        "next": "Call get_capability once with the exact names needed before invoking them or using edit operations in prepare_edit_plan."
                     }),
                 ))
             }
@@ -509,25 +505,7 @@ impl OpenReelMcp {
                 let args: CapabilityArgs = decode_args("get_capability", arguments)?;
                 let tools = Self::capability_tools()
                     .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-                let descriptor = capabilities(&tools)
-                    .into_iter()
-                    .find(|candidate| candidate.name == args.name);
-                let tool = tools.into_iter().find(|tool| tool.name == args.name);
-                Ok(match (descriptor, tool) {
-                    (Some(descriptor), Some(tool)) => success_structured(
-                        format!("opened capability {}", descriptor.name),
-                        serde_json::json!({
-                            "capability": descriptor,
-                            "input_schema": tool.input_schema,
-                            "invocation": if is_invocable_capability(&args.name) {
-                                "invoke_capability"
-                            } else {
-                                "prepare_edit_plan"
-                            }
-                        }),
-                    ),
-                    _ => error_text(format!("unknown OpenReel capability {}", args.name)),
-                })
+                Ok(open_capabilities(&tools, args))
             }
             "invoke_capability" => {
                 let args: InvokeCapabilityArgs = decode_args("invoke_capability", arguments)?;
@@ -685,6 +663,11 @@ impl OpenReelMcp {
             "get_timeline_beats" => {
                 let args: TimelineBeatsArgs = decode_args("get_timeline_beats", arguments)?;
                 self.timeline_beats(args.range, args.min_strength)
+            }
+            "plan_dialogue_assembly" => {
+                let args: DialogueAssemblyPlanArgs =
+                    decode_args("plan_dialogue_assembly", arguments)?;
+                self.plan_dialogue_assembly(&args)
             }
             "plan_beat_pacing" => {
                 let args: BeatPacingPlanArgs = decode_args("plan_beat_pacing", arguments)?;
@@ -986,7 +969,8 @@ impl OpenReelMcp {
             .timeline_transcript(&document, None)
             .map_err(|error| McpError::internal_error(error.to_string(), None))?;
         let words = dedup_timeline_words(words);
-        let cues = caption_cues(&words, document.fps);
+        let mut cues = caption_cues(&words, document.fps);
+        clamp_caption_cues_to_duration(&mut cues, document.duration);
         let operations = match animated_caption_operations(&document, &cues, preset, motion) {
             Ok(operations) => operations,
             Err(error) => return Ok(error_text(error.to_string())),
@@ -2376,6 +2360,133 @@ impl OpenReelMcp {
         ))
     }
 
+    fn plan_dialogue_assembly(
+        &self,
+        args: &DialogueAssemblyPlanArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        if args.asset_ids.is_empty() {
+            return Ok(error_text(
+                "dialogue assembly requires at least one ordered asset id",
+            ));
+        }
+        if document
+            .tracks
+            .iter()
+            .all(|track| track.id != args.target_track_id)
+        {
+            return Ok(error_text(format!(
+                "target track {} does not exist",
+                args.target_track_id
+            )));
+        }
+        let minimum = args.minimum_silence_source_frames.unwrap_or(TimeCode(20));
+        if minimum <= TimeCode::ZERO {
+            return Ok(error_text("minimum_silence_source_frames must be positive"));
+        }
+        let remove_fillers = args.remove_fillers.unwrap_or(true);
+        let mut at = args.timeline_start.unwrap_or(TimeCode::ZERO);
+        if at < TimeCode::ZERO {
+            return Ok(error_text("timeline_start must be non-negative"));
+        }
+        let mut operations = Vec::new();
+        let mut selections = Vec::new();
+        for asset_id in &args.asset_ids {
+            let Some(asset) = document.asset(*asset_id).cloned() else {
+                return Ok(error_text(format!("asset {asset_id} does not exist")));
+            };
+            let (transcript, silences) = match self.ready_dialogue_analysis(&asset, minimum) {
+                Ok(analysis) => analysis,
+                Err(result) => return Ok(result),
+            };
+            let ranges =
+                dialogue_keep_ranges(&asset, &transcript, &silences, minimum, remove_fillers);
+            if ranges.is_empty() {
+                return Ok(error_text(format!(
+                    "asset {asset_id} has no source frames left after dialogue cleanup"
+                )));
+            }
+            for source in &ranges {
+                operations.push(Operation::AddClip {
+                    track: args.target_track_id,
+                    asset: *asset_id,
+                    at,
+                    source: source.clone(),
+                });
+                let duration = map_source_range_to_project(source.clone(), asset.fps, document.fps)
+                    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+                at = at.checked_add(duration).ok_or_else(|| {
+                    McpError::internal_error("dialogue assembly overflowed", None)
+                })?;
+            }
+            selections.push(serde_json::json!({
+                "asset_id": asset_id,
+                "kept_source_ranges": ranges,
+            }));
+        }
+
+        let mut candidate = document.as_ref().clone();
+        if let Err(error) = apply_batch(&mut candidate, &operations) {
+            return Ok(error_text(format!(
+                "dialogue assembly does not fit the current target track: {error}"
+            )));
+        }
+        let structured = serde_json::json!({
+            "timeline_revision": revision,
+            "selections": selections,
+            "resulting_range": {
+                "start": args.timeline_start.unwrap_or(TimeCode::ZERO),
+                "end": at,
+            },
+            "prepare_edit_plan": {
+                "expected_revision": revision,
+                "operations": operations,
+            },
+        });
+        Ok(success_structured(
+            format!(
+                "planned {} gapless dialogue clip(s) from {} ordered asset(s); pass prepare_edit_plan through unchanged",
+                operations.len(),
+                args.asset_ids.len()
+            ),
+            structured,
+        ))
+    }
+
+    fn ready_dialogue_analysis(
+        &self,
+        asset: &MediaAsset,
+        minimum: TimeCode,
+    ) -> Result<(Arc<AssetTranscript>, Arc<AssetSilences>), CallToolResult> {
+        let transcript = match self.analysis.transcript_status(asset) {
+            TranscriptStatus::Ready(transcript) => transcript,
+            status => {
+                if status == TranscriptStatus::NotRequested {
+                    self.analysis.request_transcription(asset.clone());
+                }
+                return Err(error_text(format!(
+                    "asset {} transcript is not ready: {}",
+                    asset.id,
+                    render_asset_transcript(asset.id, &status)
+                )));
+            }
+        };
+        let silences = match self.analysis.silence_status(asset) {
+            SilenceStatus::Ready(silences) => silences,
+            status => {
+                if status == SilenceStatus::NotRequested {
+                    self.analysis.request_silence_detection(asset.clone());
+                }
+                return Err(error_text(format!(
+                    "asset {} silence analysis is not ready: {}",
+                    asset.id,
+                    render_asset_silences(asset.id, &status, minimum, Some(transcript.as_ref()),)
+                )));
+            }
+        };
+        Ok((transcript, silences))
+    }
+
     fn plan_beat_pacing(&self, args: BeatPacingPlanArgs) -> Result<CallToolResult, McpError> {
         let (revision, document) = self.snapshot()?;
         let minimum_strength = match args.min_strength {
@@ -2581,7 +2692,7 @@ impl ServerHandler for OpenReelMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openreel", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Inspect with get_timeline_state. Use search_capabilities and get_capability to load only the exact inspector, planner, proof, or edit-operation schema needed. Invoke non-edit capabilities through invoke_capability. Submit ordered compact operations to prepare_edit_plan, inspect its deterministic preview, then commit the opaque plan id at the same timeline revision. Reinspect and re-plan after any revision conflict. Frame values are exact project frames.",
+                "Inspect with get_timeline_state. Use batched search_capabilities queries and one batched get_capability call to load only the exact inspector, planner, proof, or edit-operation schemas needed. Invoke non-edit capabilities through invoke_capability. Submit ordered compact operations to prepare_edit_plan, inspect its deterministic preview, then commit the opaque plan id at the same timeline revision. Reinspect and re-plan after any revision conflict. Frame values are exact project frames.",
             )
     }
 
@@ -2620,21 +2731,28 @@ impl ServerHandler for OpenReelMcp {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CapabilitySearchArgs {
-    /// Optional case-insensitive text matched against names and one-line summaries.
+    /// One optional case-insensitive query matched against names and one-line summaries.
     #[serde(default)]
     query: Option<String>,
+    /// Additional independent queries to run in the same call. Results are de-duplicated.
+    #[serde(default)]
+    queries: Vec<String>,
     /// Optional capability kinds. Omit or send an empty list to search every kind.
     #[serde(default)]
     kinds: Vec<CapabilityKind>,
-    /// Maximum results. Defaults to 20 and is clamped to 1..=100.
+    /// Maximum combined results. Defaults to 12 and is clamped to 1..=100.
     #[serde(default)]
     limit: Option<u8>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CapabilityArgs {
-    /// Exact capability name returned by `search_capabilities`.
-    name: String,
+    /// One exact capability name returned by `search_capabilities`.
+    #[serde(default)]
+    name: Option<String>,
+    /// Additional exact capability names to open in this same call.
+    #[serde(default)]
+    names: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2665,6 +2783,106 @@ struct CommitEditPlanArgs {
 struct DiscardEditPlanArgs {
     /// Opaque server-local id returned by `prepare_edit_plan`.
     plan_id: PreparedPlanId,
+}
+
+fn search_capability_queries(
+    tools: &[Tool],
+    args: &CapabilitySearchArgs,
+) -> Vec<CapabilityDescriptor> {
+    let limit = usize::from(args.limit.unwrap_or(12)).clamp(1, 100);
+    let queries = args
+        .query
+        .iter()
+        .chain(&args.queries)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .collect::<Vec<_>>();
+    if queries.is_empty() {
+        return search_capabilities(tools, None, &args.kinds, limit);
+    }
+    let mut found = Vec::new();
+    let mut names = BTreeSet::new();
+    for query in queries {
+        for capability in search_capabilities(tools, Some(query), &args.kinds, 100) {
+            if names.insert(capability.name.clone()) {
+                found.push(capability);
+                if found.len() == limit {
+                    return found;
+                }
+            }
+        }
+    }
+    found
+}
+
+fn open_capabilities(tools: &[Tool], args: CapabilityArgs) -> CallToolResult {
+    let mut requested = Vec::new();
+    if let Some(name) = args.name {
+        requested.push(name);
+    }
+    requested.extend(args.names);
+    let mut seen = BTreeSet::new();
+    requested = requested
+        .into_iter()
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty() && seen.insert(name.clone()))
+        .collect();
+    if requested.is_empty() {
+        return error_text("get_capability requires name or names");
+    }
+    if requested.len() > 16 {
+        return error_text("get_capability accepts at most 16 names per call");
+    }
+
+    let descriptors = capabilities(tools)
+        .into_iter()
+        .map(|descriptor| (descriptor.name.clone(), descriptor))
+        .collect::<BTreeMap<_, _>>();
+    let unknown = requested
+        .iter()
+        .filter(|name| !descriptors.contains_key(name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        return error_text(format!(
+            "unknown OpenReel capabilities: {}",
+            unknown.join(", ")
+        ));
+    }
+
+    let opened = requested
+        .iter()
+        .map(|name| {
+            let descriptor = &descriptors[name];
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name.as_str())
+                .expect("a descriptor is built from a matching tool");
+            serde_json::json!({
+                "capability": descriptor,
+                "input_schema": tool.input_schema,
+                "invocation": if is_invocable_capability(name) {
+                    "invoke_capability"
+                } else {
+                    "prepare_edit_plan"
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    if opened.len() == 1 {
+        return success_structured(
+            format!("opened capability {}", requested[0]),
+            opened
+                .into_iter()
+                .next()
+                .expect("one capability was opened"),
+        );
+    }
+    success_structured(
+        format!("opened {} capabilities in one batch", opened.len()),
+        serde_json::json!({"capabilities": opened}),
+    )
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2913,6 +3131,23 @@ struct BeatPacingPlanArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct DialogueAssemblyPlanArgs {
+    /// Existing media track that receives the gapless assembly.
+    target_track_id: TrackId,
+    /// Ordered audio/video asset ids whose spoken content should be preserved.
+    asset_ids: Vec<AssetId>,
+    /// Project-frame insertion point. Defaults to zero.
+    #[serde(default)]
+    timeline_start: Option<TimeCode>,
+    /// Raw detector spans at least this long are safely removed. Defaults to 20 source frames.
+    #[serde(default)]
+    minimum_silence_source_frames: Option<TimeCode>,
+    /// Remove conservative recognized hesitation words such as um and uh. Defaults to true.
+    #[serde(default)]
+    remove_fillers: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct MusicFitPlanArgs {
     /// Existing audio-capable target track.
     track_id: TrackId,
@@ -3095,13 +3330,13 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "search_capabilities",
-            "Search the full OpenReel editing, perception, proof, and delivery catalog without loading every tool schema into model context.",
+            "Search the full OpenReel editing, perception, proof, and delivery catalog without loading every tool schema into model context. Batch independent terms with queries.",
             schema_object::<CapabilitySearchArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
             "get_capability",
-            "Open the exact description and input schema for one discovered capability only when the current task needs it.",
+            "Open exact descriptions and input schemas for one or more discovered capabilities. Batch all known names needed for the current workflow.",
             schema_object::<CapabilityArgs>(),
         )
         .with_annotations(read_only()),
@@ -3187,6 +3422,12 @@ fn inspector_tools() -> Vec<Tool> {
             "get_timeline_beats",
             "Return rhythmic onsets mapped through clips to exact project frames, with structured data suitable for beat-aware cutting.",
             schema_object::<TimelineBeatsArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "plan_dialogue_assembly",
+            "Build an exact, gapless AddClip plan from ordered dialogue assets using ready transcripts and raw silence analysis. It safely removes every qualifying detector span and optional conservative filler words without making the model calculate source boundaries.",
+            schema_object::<DialogueAssemblyPlanArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -3411,6 +3652,75 @@ fn decode_args<T: for<'de> Deserialize<'de>>(
 ) -> Result<T, McpError> {
     serde_json::from_value(serde_json::Value::Object(arguments))
         .map_err(|error| McpError::invalid_params(format!("{tool_name}: {error}"), None))
+}
+
+fn clamp_caption_cues_to_duration(cues: &mut Vec<CaptionCue>, duration: TimeCode) {
+    for cue in &mut *cues {
+        cue.end = cue.end.min(duration);
+    }
+    cues.retain(|cue| cue.start < duration && cue.end > cue.start);
+}
+
+fn dialogue_keep_ranges(
+    asset: &MediaAsset,
+    transcript: &AssetTranscript,
+    silences: &AssetSilences,
+    minimum_silence_source_frames: TimeCode,
+    remove_fillers: bool,
+) -> Vec<std::ops::Range<TimeCode>> {
+    let mut cuts = silences
+        .spans
+        .iter()
+        .filter(|span| {
+            span.source_end.0.saturating_sub(span.source_start.0) >= minimum_silence_source_frames.0
+        })
+        .flat_map(|span| {
+            crate::silence::shrink_silence_span_for_cutting_with_transcript(
+                *span,
+                asset.fps,
+                Some(&transcript.words),
+            )
+        })
+        .map(|span| span.source_start..span.source_end)
+        .collect::<Vec<_>>();
+    if remove_fillers {
+        cuts.extend(
+            transcript
+                .words
+                .iter()
+                .filter(|word| is_filler_word(&word.text))
+                .map(|word| word.source_start..word.source_end),
+        );
+    }
+    for cut in &mut cuts {
+        cut.start = cut.start.clamp(TimeCode::ZERO, asset.duration);
+        cut.end = cut.end.clamp(TimeCode::ZERO, asset.duration);
+    }
+    cuts.retain(|cut| cut.end > cut.start);
+    cuts.sort_by_key(|cut| (cut.start, cut.end));
+
+    let mut merged = Vec::<std::ops::Range<TimeCode>>::new();
+    for cut in cuts {
+        if let Some(previous) = merged.last_mut()
+            && cut.start <= previous.end
+        {
+            previous.end = previous.end.max(cut.end);
+        } else {
+            merged.push(cut);
+        }
+    }
+    let mut kept = Vec::new();
+    let mut cursor = TimeCode::ZERO;
+    for cut in merged {
+        if cut.start > cursor {
+            kept.push(cursor..cut.start);
+        }
+        cursor = cursor.max(cut.end);
+    }
+    if cursor < asset.duration {
+        kept.push(cursor..asset.duration);
+    }
+    kept
 }
 
 fn success_text(text: impl Into<String>) -> CallToolResult {
@@ -4270,9 +4580,9 @@ mod tests {
     use super::*;
     use openreel_core::{
         AssetId, AssetTranscript, Clip, FrameTexture, Marker, MarkerId, MediaAsset, MediaError,
-        MediaEvent, MediaKind, ParamValue, Rational, RgbaImage, SceneStatus, SilenceStatus,
-        TimelineSceneChange, TimelineSilenceSpan, Title, Track, TrackId, TrackKind, TranscriptWord,
-        VisualAssetResult,
+        MediaEvent, MediaKind, ParamValue, Rational, RgbaImage, SceneStatus, SilenceSpan,
+        SilenceStatus, TimelineSceneChange, TimelineSilenceSpan, Title, Track, TrackId, TrackKind,
+        TranscriptWord, VisualAssetResult,
     };
     use serde_json::json;
     use std::{
@@ -5128,6 +5438,115 @@ mod tests {
 
         let rendered = render_plan_outcomes(&operations, None, None);
         assert_eq!(rendered, "applied 48 operations atomically (add_marker=48)");
+    }
+
+    #[test]
+    fn capability_discovery_batches_queries_and_schema_opens() {
+        let tools = OpenReelMcp::tools().unwrap();
+        let found = search_capability_queries(
+            &tools,
+            &CapabilitySearchArgs {
+                query: None,
+                queries: vec!["dialogue assembly".to_owned(), "styled captions".to_owned()],
+                kinds: Vec::new(),
+                limit: None,
+            },
+        );
+        assert!(
+            found
+                .iter()
+                .any(|capability| capability.name == "plan_dialogue_assembly")
+        );
+        assert!(
+            found
+                .iter()
+                .any(|capability| capability.name == "add_styled_captions")
+        );
+
+        let opened = open_capabilities(
+            &tools,
+            CapabilityArgs {
+                name: Some("plan_dialogue_assembly".to_owned()),
+                names: vec![
+                    "add_styled_captions".to_owned(),
+                    "plan_dialogue_assembly".to_owned(),
+                ],
+            },
+        );
+        assert_eq!(opened.is_error, Some(false));
+        let structured = opened.structured_content.unwrap();
+        assert_eq!(structured["capabilities"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn dialogue_keep_ranges_remove_qualified_silence_and_fillers() {
+        let fps = Rational::new(30, 1).unwrap();
+        let asset = MediaAsset {
+            id: AssetId(1),
+            path: "dialogue.mp4".into(),
+            name: "dialogue".to_owned(),
+            duration: TimeCode(120),
+            fps,
+            kind: MediaKind::AudioVideo,
+            resolution: Some((320, 180)),
+        };
+        let transcript = AssetTranscript {
+            asset: asset.id,
+            content_sha256: "fixture".to_owned(),
+            source_fps: fps,
+            words: vec![
+                TranscriptWord {
+                    text: "Keep".to_owned(),
+                    source_start: TimeCode(4),
+                    source_end: TimeCode(15),
+                    speaker: None,
+                },
+                TranscriptWord {
+                    text: "Um,".to_owned(),
+                    source_start: TimeCode(75),
+                    source_end: TimeCode(82),
+                    speaker: None,
+                },
+                TranscriptWord {
+                    text: "going".to_owned(),
+                    source_start: TimeCode(90),
+                    source_end: TimeCode(105),
+                    speaker: None,
+                },
+            ],
+        };
+        let silences = AssetSilences {
+            asset: asset.id,
+            content_sha256: "fixture".to_owned(),
+            source_fps: fps,
+            source_frames: asset.duration,
+            threshold_dbfs_hundredths: -4_000,
+            window_milliseconds: 20,
+            spans: vec![SilenceSpan {
+                source_start: TimeCode(20),
+                source_end: TimeCode(70),
+            }],
+        };
+
+        assert_eq!(
+            dialogue_keep_ranges(&asset, &transcript, &silences, TimeCode(20), true),
+            vec![
+                TimeCode(0)..TimeCode(20),
+                TimeCode(70)..TimeCode(75),
+                TimeCode(82)..TimeCode(120),
+            ]
+        );
+    }
+
+    #[test]
+    fn caption_hold_is_clamped_to_the_media_timeline() {
+        let mut cues = vec![CaptionCue {
+            start: TimeCode(90),
+            end: TimeCode(115),
+            text: "last line".to_owned(),
+        }];
+        clamp_caption_cues_to_duration(&mut cues, TimeCode(100));
+        assert_eq!(cues[0].end, TimeCode(100));
     }
 
     #[test]

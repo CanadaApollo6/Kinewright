@@ -13,8 +13,8 @@ The next run must satisfy all of these gates:
 1. pass the original M35 editorial, transcript, proof, QA, delivery, and undo
    assertions;
 2. pass the new `vertical_short` animated-caption safe-area assertion;
-3. retain a populated timeline audio track and independently prove that the
-   exported artifact contains both video and audio streams;
+3. retain at least one real-time audio-bearing media clip and independently
+   prove that the exported artifact contains both video and audio streams;
 4. export and independently probe the exact 1080x1920 timeline snapshot;
 5. retain the MP4 SHA-256, proof sheet, final document, JSONL telemetry, and
    human-review template as one immutable artifact set;
@@ -71,8 +71,10 @@ The check evaluates transform parameters and every automation keyframe. It is
 not a screenshot heuristic and does not depend on a selected proof frame.
 
 The benchmark also fails before artifact acceptance when the timeline has no
-populated audio track. After export, its independent probe must classify the
-MP4 as audio-video. This catches both editorial audio omission and mux failures;
+real-time media clip backed by an audio or audio-video asset. Video-track A/V
+clips already feed OpenReel's mixer; requiring a duplicate audio-track copy
+would double the mix. After export, the independent probe must classify the MP4
+as audio-video. This catches both editorial audio omission and mux failures;
 human review remains responsible for mix quality.
 
 ## Runtime context reductions
@@ -91,6 +93,15 @@ Two additional reductions are included because the M35 task exercises both:
 
 These are deterministic response-byte reductions. They are not presented as a
 provider-token claim until the live rerun reports provider telemetry.
+
+The first live attempt also exposed discovery churn and unreliable manual
+source-boundary arithmetic. M37 now lets agents batch independent catalog
+queries and open up to 16 exact capability schemas in one call. The new
+`plan_dialogue_assembly` capability converts ordered assets, ready transcripts,
+and raw silence analysis into one validated gapless `AddClip` plan. It applies
+the same speech-safe silence rules as the benchmark and can remove conservative
+filler words, leaving the model to make editorial choices instead of copying
+frame math between tools.
 
 ## Verification before the paid run
 

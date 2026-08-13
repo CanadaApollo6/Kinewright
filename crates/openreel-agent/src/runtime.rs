@@ -128,8 +128,16 @@ pub fn search_capabilities(
         .filter(|capability| {
             query.is_none_or(|query| {
                 let query = query.to_ascii_lowercase();
-                capability.name.to_ascii_lowercase().contains(&query)
-                    || capability.summary.to_ascii_lowercase().contains(&query)
+                let haystack = format!(
+                    "{} {}",
+                    capability
+                        .name
+                        .to_ascii_lowercase()
+                        .replace(['_', '-'], " "),
+                    capability.summary.to_ascii_lowercase()
+                );
+                haystack.contains(&query)
+                    || query.split_whitespace().all(|term| haystack.contains(term))
             })
         })
         .take(limit.clamp(1, 100))

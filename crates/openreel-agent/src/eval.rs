@@ -1918,16 +1918,22 @@ fn evaluate_caption_safe_area(profile: DeliveryProfile, outcome: &EvalOutcome) -
 }
 
 fn evaluate_audio_present(document: &Document) -> AssertionResult {
-    let audio_clips = document
+    let audible_clips = document
         .tracks
         .iter()
-        .filter(|track| track.kind == openreel_core::TrackKind::Audio)
-        .map(|track| track.clips.len())
-        .sum::<usize>();
+        .flat_map(|track| &track.clips)
+        .filter(|clip| {
+            clip.content.is_media()
+                && clip.speed_percent == 100
+                && document.asset(clip.asset).is_some_and(|asset| {
+                    matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo)
+                })
+        })
+        .count();
     assertion_result(
         "timeline audio present",
-        audio_clips > 0,
-        format!("populated audio clips={audio_clips}"),
+        audible_clips > 0,
+        format!("real-time audio-bearing media clips={audible_clips}"),
     )
 }
 
@@ -2590,20 +2596,14 @@ mod tests {
     }
 
     #[test]
-    fn audio_presence_requires_a_populated_audio_track() {
+    fn audio_presence_follows_the_real_mixer_contract() {
         let mut with_audio = document();
         assert!(!evaluate_audio_present(&with_audio).passed);
         with_audio.media_pool[0].kind = MediaKind::AudioVideo;
-        let mut audio_clip = with_audio.tracks[0].clips[0].clone();
-        audio_clip.id = ClipId(2);
-        with_audio.tracks.push(Track {
-            id: TrackId(2),
-            kind: TrackKind::Audio,
-            sync_lock: true,
-            clips: vec![audio_clip],
-        });
-
         assert!(evaluate_audio_present(&with_audio).passed);
+
+        with_audio.tracks[0].clips[0].speed_percent = 200;
+        assert!(!evaluate_audio_present(&with_audio).passed);
     }
 
     #[test]

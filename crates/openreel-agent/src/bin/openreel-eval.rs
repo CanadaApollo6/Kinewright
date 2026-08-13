@@ -639,7 +639,7 @@ fn finished_cut_suite() -> Vec<EvalDefinition> {
         rationale: "Measures footage selection, dialogue cleanup, styled captions, visual verification, technical QA, and a real delivery artifact as one first-cut workflow.",
         fixture_builder: fixture_e7,
         prompts: &[
-            "Create a finished vertical social cut from the media pool. Use take-A's content first, then take-C, then take-D. Do not use take-B or take-E. Remove every cuttable dead-air span at least 20 source frames long and every recognized filler word while preserving all other spoken content. Keep the selected media gapless. Then use add_styled_captions with the social preset and pop motion. Inspect a 9:16 delivery storyboard, run technical QA, and inspect vertical_short delivery conformance at a centered 50/50 focal point. Do not queue the export; the benchmark will render the exact verified timeline snapshot. Keep working until the inspectors confirm the brief.",
+            "Create a finished vertical social cut from the media pool. Use take-A's content first, then take-C, then take-D. Do not use take-B or take-E. Prefer plan_dialogue_assembly to calculate a gapless track-1 assembly that removes every raw dead-air span at least 20 source frames long and every conservative recognized filler word while preserving all other spoken content. Keep each selected real-time A/V clip's source dialogue audible; video-track A/V clips already feed the mixer, so do not duplicate them onto an audio track. Then use add_styled_captions with the social preset and pop motion. Inspect the final timeline silences and keep correcting until zero cuttable spans remain. Inspect a 9:16 delivery storyboard, run technical QA, and inspect vertical_short delivery conformance at a centered 50/50 focal point. Do not queue the export; the benchmark will render the exact verified timeline snapshot. Keep working until every inspector confirms the brief.",
         ],
         assertions: vec![
             EvalAssertion::TimelineNonEmpty,
@@ -684,9 +684,21 @@ fn finished_cut_suite() -> Vec<EvalDefinition> {
             },
             EvalAssertion::AudioPresent,
             EvalAssertion::QaExportReady,
-            required_all(&["get_timeline_state", "add_styled_captions"]),
-            required_any(&["get_transcript", "get_timeline_transcript"]),
-            required_any(&["get_silences", "get_timeline_silences"]),
+            required_all(&[
+                "get_timeline_state",
+                "plan_dialogue_assembly",
+                "add_styled_captions",
+            ]),
+            required_any(&[
+                "plan_dialogue_assembly",
+                "get_transcript",
+                "get_timeline_transcript",
+            ]),
+            required_any(&[
+                "plan_dialogue_assembly",
+                "get_silences",
+                "get_timeline_silences",
+            ]),
             required_any(&["commit_edit_plan", "apply_edit_plan", "add_clip"]),
             required_all(&[
                 "get_delivery_variant_storyboard",

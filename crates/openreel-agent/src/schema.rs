@@ -8,7 +8,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 41] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 42] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -32,6 +32,7 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 41] = [
     "get_timeline_scene_changes",
     "get_beats",
     "get_timeline_beats",
+    "plan_dialogue_assembly",
     "plan_beat_pacing",
     "plan_music_fit",
     "get_analysis_status",

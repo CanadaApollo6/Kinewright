@@ -2,8 +2,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CaptionPreset, ClipContent, ClipId, Document, Effect, ParamValue, TimeCode, TitlePixelBounds,
-    TrackId, TrackKind, title_layout,
+    CaptionPreset, ClipContent, ClipId, Document, Effect, MediaKind, ParamValue, TimeCode,
+    TitlePixelBounds, TrackId, title_layout,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -76,12 +76,16 @@ pub fn qa_document(document: &Document) -> QaReport {
         }
     }
 
-    let mut has_audio_track = false;
+    let mut has_audible_media = false;
     for track in &document.tracks {
-        has_audio_track |= track.kind == TrackKind::Audio && !track.clips.is_empty();
         let mut previous_end = TimeCode::ZERO;
         let mut previous_was_media = false;
         for clip in &track.clips {
+            has_audible_media |= matches!(clip.content, ClipContent::Media)
+                && clip.speed_percent == 100
+                && document.asset(clip.asset).is_some_and(|asset| {
+                    matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo)
+                });
             let duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
             let end = TimeCode(clip.timeline_start.0.saturating_add(duration.0));
             if clip.timeline_start > previous_end {
@@ -205,11 +209,11 @@ pub fn qa_document(document: &Document) -> QaReport {
             previous_was_media = matches!(clip.content, ClipContent::Media);
         }
     }
-    if document.duration > TimeCode::ZERO && !has_audio_track {
+    if document.duration > TimeCode::ZERO && !has_audible_media {
         issues.push(issue(
             QaSeverity::Info,
-            "no_audio_track",
-            "The timeline has no populated audio track.",
+            "no_audible_media",
+            "The timeline has no real-time media clip with an audio stream.",
             None,
             None,
             None,
@@ -364,7 +368,7 @@ fn issue(
 #[cfg(test)]
 mod tests {
     use crate::{
-        CaptionCue, CaptionMotion, Clip, MediaAsset, MediaKind, Rational, Title, Track,
+        CaptionCue, CaptionMotion, Clip, MediaAsset, MediaKind, Rational, Title, Track, TrackKind,
         animated_caption_operations, apply_batch,
     };
 
