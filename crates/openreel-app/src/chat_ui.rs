@@ -9,6 +9,7 @@ use eframe::egui;
 use openreel_agent::{
     BranchApplyOutcome, CODEX_SANDBOX_NOTICE, CURSOR_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver,
     ConfirmationBroker, ConfirmationRequest, CursorAcpDriver, McpServer, TimelineBranch,
+    compact_tool_names,
 };
 use openreel_core::{
     AgentDriver, AgentEvent, AgentSession, Analysis, AuthenticationStatus, Command, Document,
@@ -92,7 +93,9 @@ pub(crate) enum ChatEntry {
     },
     Cost {
         input_tokens: u64,
+        cached_input_tokens: Option<u64>,
         output_tokens: u64,
+        reasoning_output_tokens: Option<u64>,
     },
     /// A watchable diff: one applied agent edit with its changed span.
     EditCard {
@@ -122,26 +125,38 @@ enum BranchReviewAction {
 /// readout is noise; the per-thread Stop control remains available instead.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct UsageAccumulator {
-    pub(crate) input_tokens: u64,
-    pub(crate) output_tokens: u64,
+    pub(crate) input: u64,
+    pub(crate) cached_input: u64,
+    pub(crate) output: u64,
+    pub(crate) reasoning_output: u64,
 }
 
 impl UsageAccumulator {
     pub(crate) fn record(&mut self, event: &AgentEvent) {
         if let AgentEvent::Cost {
             input_tokens,
+            cached_input_tokens,
             output_tokens,
+            reasoning_output_tokens,
             ..
         } = event
         {
-            self.input_tokens = self.input_tokens.saturating_add(*input_tokens);
-            self.output_tokens = self.output_tokens.saturating_add(*output_tokens);
+            self.input = self.input.saturating_add(*input_tokens);
+            self.cached_input = self
+                .cached_input
+                .saturating_add(cached_input_tokens.unwrap_or(0));
+            self.output = self.output.saturating_add(*output_tokens);
+            self.reasoning_output = self
+                .reasoning_output
+                .saturating_add(reasoning_output_tokens.unwrap_or(0));
         }
     }
 
     pub(crate) fn reset_usage(&mut self) {
-        self.input_tokens = 0;
-        self.output_tokens = 0;
+        self.input = 0;
+        self.cached_input = 0;
+        self.output = 0;
+        self.reasoning_output = 0;
     }
 }
 
@@ -225,7 +240,7 @@ impl AgentThread {
         let name = name.into();
         let branch = TimelineBranch::new(name.clone(), base_revision, Arc::clone(base_document))
             .map_err(|error| error.to_string())?;
-        let mcp_server = match McpServer::start_isolated_with_exporter(
+        let mcp_server = match McpServer::start_isolated_compact_with_exporter(
             branch.core(),
             Arc::clone(playback),
             Arc::clone(analysis),
@@ -274,9 +289,13 @@ impl AgentThread {
         self.selected_operations.clear();
         let branch = TimelineBranch::new(self.name.clone(), base_revision, base_document)
             .map_err(|error| error.to_string())?;
-        let server =
-            McpServer::start_isolated_with_exporter(branch.core(), playback, analysis, exporter)
-                .map_err(|error| error.to_string())?;
+        let server = McpServer::start_isolated_compact_with_exporter(
+            branch.core(),
+            playback,
+            analysis,
+            exporter,
+        )
+        .map_err(|error| error.to_string())?;
         self.confirmations = Some(server.confirmations());
         self.mcp_server = Some(server);
         self.branch = branch;
@@ -400,6 +419,7 @@ impl OpenReelApp {
                 // always available, so sessions run without a turn ceiling.
                 max_turns: None,
                 mcp_url: Some(endpoint),
+                tool_names: Some(compact_tool_names()),
             };
             let session = match harness {
                 AgentHarnessChoice::ClaudeCode => ClaudeCodeDriver.start_session(config),
@@ -842,13 +862,17 @@ impl OpenReelApp {
                 }
                 AgentEvent::Cost {
                     input_tokens,
+                    cached_input_tokens,
                     output_tokens,
+                    reasoning_output_tokens,
                     ..
                 } => self.projects[project_index].threads[thread_index]
                     .chat
                     .push(ChatEntry::Cost {
                         input_tokens,
+                        cached_input_tokens,
                         output_tokens,
+                        reasoning_output_tokens,
                     }),
                 AgentEvent::Done => {
                     let thread = &mut self.projects[project_index].threads[thread_index];
@@ -2042,12 +2066,16 @@ impl OpenReelApp {
                     }
                 }
                 let usage = &self.projects[project_index].threads[active_thread].usage;
-                if usage.input_tokens > 0 || usage.output_tokens > 0 {
+                if usage.input > 0 || usage.output > 0 {
+                    let cache = (usage.cached_input > 0)
+                        .then(|| format!(" · {} cached", usage.cached_input));
                     ui.colored_label(
                         color::TEXT_MUTED,
                         egui::RichText::new(format!(
-                            "{} in / {} out",
-                            usage.input_tokens, usage.output_tokens
+                            "{} in / {} out{}",
+                            usage.input,
+                            usage.output,
+                            cache.as_deref().unwrap_or_default()
                         ))
                         .size(type_size::MICRO),
                     );
@@ -2251,12 +2279,22 @@ fn render_stream_entry(
         }
         ChatEntry::Cost {
             input_tokens,
+            cached_input_tokens,
             output_tokens,
+            reasoning_output_tokens,
         } => {
+            let cache = cached_input_tokens
+                .filter(|tokens| *tokens > 0)
+                .map(|tokens| format!(" / {tokens} cached input"))
+                .unwrap_or_default();
+            let reasoning = reasoning_output_tokens
+                .filter(|tokens| *tokens > 0)
+                .map(|tokens| format!(" / {tokens} reasoning"))
+                .unwrap_or_default();
             ui.colored_label(
                 color::TEXT_MUTED,
                 egui::RichText::new(format!(
-                    "{input_tokens} input / {output_tokens} output tokens"
+                    "{input_tokens} input{cache} / {output_tokens} output{reasoning} tokens"
                 ))
                 .size(type_size::MICRO),
             );
@@ -2484,29 +2522,42 @@ mod tests {
         let events = [
             AgentEvent::Cost {
                 input_tokens: 100,
+                cached_input_tokens: Some(80),
+                cache_creation_input_tokens: Some(5),
                 output_tokens: 20,
+                reasoning_output_tokens: Some(12),
                 cost_usd: Some(0.02),
             },
             AgentEvent::Text("not a cost".to_owned()),
             AgentEvent::Cost {
                 input_tokens: 50,
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
                 output_tokens: 10,
+                reasoning_output_tokens: None,
                 cost_usd: None,
             },
             AgentEvent::Cost {
                 input_tokens: 75,
+                cached_input_tokens: Some(60),
+                cache_creation_input_tokens: Some(3),
                 output_tokens: 15,
+                reasoning_output_tokens: Some(7),
                 cost_usd: Some(0.03),
             },
         ];
         for event in &events {
             usage.record(event);
         }
-        assert_eq!(usage.input_tokens, 225);
-        assert_eq!(usage.output_tokens, 45);
+        assert_eq!(usage.input, 225);
+        assert_eq!(usage.cached_input, 140);
+        assert_eq!(usage.output, 45);
+        assert_eq!(usage.reasoning_output, 19);
         usage.reset_usage();
-        assert_eq!(usage.input_tokens, 0);
-        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.input, 0);
+        assert_eq!(usage.cached_input, 0);
+        assert_eq!(usage.output, 0);
+        assert_eq!(usage.reasoning_output, 0);
     }
 
     #[test]

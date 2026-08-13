@@ -44,6 +44,9 @@ pub struct SessionConfig {
     pub max_turns: Option<u32>,
     /// Streamable HTTP endpoint for the live `OpenReel` MCP server.
     pub mcp_url: Option<String>,
+    /// Exact MCP tool names exposed to this harness session. `None` keeps the
+    /// complete compatibility catalog for third-party and legacy callers.
+    pub tool_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,8 +62,16 @@ pub enum AgentEvent {
         result: String,
     },
     Cost {
+        /// Provider-reported total input tokens. For providers that report
+        /// cache reads separately, adapters normalize those reads into this total.
         input_tokens: u64,
+        /// Input tokens served from a provider prompt cache, when exposed.
+        cached_input_tokens: Option<u64>,
+        /// Input tokens written to a provider prompt cache, when exposed.
+        cache_creation_input_tokens: Option<u64>,
         output_tokens: u64,
+        /// Reasoning tokens included in `output_tokens`, when exposed.
+        reasoning_output_tokens: Option<u64>,
         cost_usd: Option<f64>,
     },
     Done,

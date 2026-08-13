@@ -67,14 +67,14 @@ cargo run -p openreel-app
 
 ## How the agent works
 
-OpenReel runs a local MCP (Model Context Protocol) server inside the app and spawns your agent CLI as a subprocess pointed at it. The agent gets two tool families:
+OpenReel runs a local MCP (Model Context Protocol) server inside the app and spawns your agent CLI as a subprocess pointed at it. OpenReel-owned sessions start with seven compact runtime tools, then discover and load exact capabilities on demand. The complete generated MCP catalog remains available for compatibility. Capabilities fall into two families:
 
 1. **Mutators** — one tool per edit operation (`split_clip`, `trim_clip`, `add_effect`, …), auto-generated from the same operation definitions the GUI uses.
 2. **Inspectors** — read-only views: a compact timeline description, individual frames as images, and word-timestamped transcripts.
 
 Claude Code and Codex sessions run with their built-in shell/file/web tools disabled or sandboxed away. Cursor receives only the per-project OpenReel MCP endpoint and starts in an empty scratch directory, but its ACP server may still expose Cursor-owned tools; the settings panel states this weaker boundary explicitly. Destructive OpenReel operations pause for your approval in the chat panel. Costs are surfaced when the harness reports them, and turns are capped per session.
 
-Details: [agent harnesses](docs/agent-harnesses.md) · [model-first editor](docs/MODEL-FIRST-EDITOR.md) · [current product position](docs/PRODUCT-POSITION-M35-2026-08.md) · [transcription](docs/TRANSCRIPTION.md)
+Details: [agent harnesses](docs/agent-harnesses.md) · [M36 agent runtime efficiency](docs/M36-AGENT-RUNTIME-EFFICIENCY.md) · [model-first editor](docs/MODEL-FIRST-EDITOR.md) · [current product position](docs/PRODUCT-POSITION-M35-2026-08.md) · [transcription](docs/TRANSCRIPTION.md)
 
 ## Architecture
 

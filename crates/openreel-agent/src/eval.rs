@@ -19,7 +19,10 @@ use openreel_core::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ConfirmationBroker, McpServer, shrink_silence_span_for_cutting_with_transcript};
+use crate::{
+    ConfirmationBroker, McpServer, compact_tool_names,
+    shrink_silence_span_for_cutting_with_transcript,
+};
 
 /// Compute the upper duration bound after cutting every qualifying reported
 /// silence. Each cut receives one project-frame boundary-rounding allowance.
@@ -213,7 +216,11 @@ pub struct SessionMetrics {
     pub turns: u32,
     pub tool_calls: BTreeMap<String, u32>,
     pub input_tokens: u64,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
     pub output_tokens: u64,
+    pub reasoning_output_tokens: Option<u64>,
+    pub tool_surface: crate::ToolSurfaceMetrics,
     pub cost_usd: Option<f64>,
     pub wall_time_ms: u64,
     pub errors: Vec<String>,
@@ -229,6 +236,12 @@ impl SessionMetrics {
     #[must_use]
     pub const fn total_tokens(&self) -> u64 {
         self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    #[must_use]
+    pub fn uncached_input_tokens(&self) -> Option<u64> {
+        self.cached_input_tokens
+            .map(|cached| self.input_tokens.saturating_sub(cached))
     }
 }
 
@@ -260,7 +273,11 @@ pub struct EvalResult {
     pub turns: u32,
     pub tool_calls: BTreeMap<String, u32>,
     pub input_tokens: u64,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
     pub output_tokens: u64,
+    pub reasoning_output_tokens: Option<u64>,
+    pub tool_surface: crate::ToolSurfaceMetrics,
     pub cost_usd: Option<f64>,
     pub wall_time_ms: u64,
     pub operations_applied: u32,
@@ -351,7 +368,11 @@ impl EvalResult {
             turns: 0,
             tool_calls: BTreeMap::new(),
             input_tokens: 0,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
             output_tokens: 0,
+            reasoning_output_tokens: None,
+            tool_surface: crate::ToolSurfaceMetrics::default(),
             cost_usd: None,
             wall_time_ms: 0,
             operations_applied: 0,
@@ -457,7 +478,7 @@ pub fn run_eval_with_artifacts(
     let eval_started = Instant::now();
     let fixture = std::panic::catch_unwind(definition.fixture_builder)
         .map_err(|payload| EvalError::Fixture(panic_message(&payload)))??;
-    let server = McpServer::start(
+    let server = McpServer::start_compact(
         fixture.core.clone(),
         Arc::clone(&fixture.playback),
         Arc::clone(&fixture.analysis),
@@ -471,6 +492,7 @@ pub fn run_eval_with_artifacts(
         service_tier: None,
         max_turns: Some(definition.budgets.max_tool_calls.saturating_add(2)),
         mcp_url: Some(server.endpoint().to_owned()),
+        tool_names: Some(compact_tool_names()),
     };
     let mut session = collect_session(
         driver,
@@ -480,6 +502,7 @@ pub fn run_eval_with_artifacts(
         Some(&confirmations),
         || query_operations(&fixture.core).map(|operations| operations.len()),
     )?;
+    session.tool_surface = server.tool_surface_metrics();
     let final_document = query_document(&fixture.core)?;
     let operations = query_operations(&fixture.core)?;
     let final_words = fixture
@@ -1090,9 +1113,13 @@ where
     let events = session.events();
     let mut metrics = SessionMetrics {
         cost_usd: Some(0.0),
+        cached_input_tokens: Some(0),
+        cache_creation_input_tokens: Some(0),
+        reasoning_output_tokens: Some(0),
         ..SessionMetrics::default()
     };
     let mut cost_is_complete = true;
+    let mut saw_usage = false;
     for prompt in prompts {
         if metrics.turns >= budgets.max_turns {
             metrics.errors.push(format!(
@@ -1156,11 +1183,27 @@ where
                 }
                 Ok(AgentEvent::Cost {
                     input_tokens,
+                    cached_input_tokens,
+                    cache_creation_input_tokens,
                     output_tokens,
+                    reasoning_output_tokens,
                     cost_usd,
                 }) => {
+                    saw_usage = true;
                     metrics.input_tokens = metrics.input_tokens.saturating_add(input_tokens);
+                    accumulate_optional_tokens(
+                        &mut metrics.cached_input_tokens,
+                        cached_input_tokens,
+                    );
+                    accumulate_optional_tokens(
+                        &mut metrics.cache_creation_input_tokens,
+                        cache_creation_input_tokens,
+                    );
                     metrics.output_tokens = metrics.output_tokens.saturating_add(output_tokens);
+                    accumulate_optional_tokens(
+                        &mut metrics.reasoning_output_tokens,
+                        reasoning_output_tokens,
+                    );
                     match cost_usd {
                         Some(cost) if cost_is_complete => {
                             let total = metrics.cost_usd.get_or_insert(0.0);
@@ -1198,9 +1241,22 @@ where
             break;
         }
     }
+    if !saw_usage {
+        metrics.cached_input_tokens = None;
+        metrics.cache_creation_input_tokens = None;
+        metrics.reasoning_output_tokens = None;
+    }
     metrics.wall_time_ms = duration_millis(started.elapsed());
     session.interrupt();
     Ok(metrics)
+}
+
+fn accumulate_optional_tokens(total: &mut Option<u64>, reported: Option<u64>) {
+    match (total.as_mut(), reported) {
+        (Some(total), Some(reported)) => *total = total.saturating_add(reported),
+        (_, None) => *total = None,
+        (None, Some(_)) => {}
+    }
 }
 
 #[must_use]
@@ -1220,7 +1276,11 @@ pub fn evaluate(definition: &EvalDefinition, outcome: &EvalOutcome) -> EvalResul
         turns: outcome.session.turns,
         tool_calls: outcome.session.tool_calls.clone(),
         input_tokens: outcome.session.input_tokens,
+        cached_input_tokens: outcome.session.cached_input_tokens,
+        cache_creation_input_tokens: outcome.session.cache_creation_input_tokens,
         output_tokens: outcome.session.output_tokens,
+        reasoning_output_tokens: outcome.session.reasoning_output_tokens,
+        tool_surface: outcome.session.tool_surface,
         cost_usd: outcome.session.cost_usd,
         wall_time_ms: outcome.session.wall_time_ms,
         operations_applied: u32::try_from(outcome.operations.len()).unwrap_or(u32::MAX),
@@ -1909,7 +1969,11 @@ pub struct SuiteTotals {
     pub turns: u32,
     pub tool_calls: u32,
     pub input_tokens: u64,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
     pub output_tokens: u64,
+    pub reasoning_output_tokens: Option<u64>,
+    pub tool_schema_bytes: u64,
     pub cost_usd: Option<f64>,
     pub wall_time_ms: u64,
     pub operations_applied: u32,
@@ -1926,7 +1990,22 @@ impl SuiteTotals {
             turns: results.iter().map(|result| result.turns).sum(),
             tool_calls: results.iter().map(EvalResult::tool_call_count).sum(),
             input_tokens: results.iter().map(|result| result.input_tokens).sum(),
+            cached_input_tokens: sum_reported_tokens(
+                results.iter().map(|result| result.cached_input_tokens),
+            ),
+            cache_creation_input_tokens: sum_reported_tokens(
+                results
+                    .iter()
+                    .map(|result| result.cache_creation_input_tokens),
+            ),
             output_tokens: results.iter().map(|result| result.output_tokens).sum(),
+            reasoning_output_tokens: sum_reported_tokens(
+                results.iter().map(|result| result.reasoning_output_tokens),
+            ),
+            tool_schema_bytes: results
+                .iter()
+                .map(|result| result.tool_surface.serialized_bytes)
+                .sum(),
             cost_usd: all_costs_reported
                 .then(|| results.iter().filter_map(|result| result.cost_usd).sum()),
             wall_time_ms: results.iter().map(|result| result.wall_time_ms).sum(),
@@ -1935,27 +2014,40 @@ impl SuiteTotals {
     }
 }
 
+fn sum_reported_tokens(mut values: impl Iterator<Item = Option<u64>>) -> Option<u64> {
+    values.try_fold(0_u64, |total, value| {
+        value.map(|value| total.saturating_add(value))
+    })
+}
+
 /// Render the same compact Markdown scoreboard used on stdout and in `docs/EVALS.md`.
 #[must_use]
 pub fn render_scoreboard(results: &[EvalResult]) -> String {
     let mut output = String::from(
-        "| Eval | Pass | Assertions | Turns | Tools | Tokens | USD | Wall | Ops |\n\
-         |---|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "| Eval | Pass | Assertions | Turns | Tools | Tokens | Cached in | Reasoning | Schema | USD | Wall | Ops |\n\
+         |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
     );
     for result in results {
         let status = if result.passed { "PASS" } else { "FAIL" };
         let usd = result
             .cost_usd
             .map_or_else(|| "n/a".to_owned(), |cost| format!("${cost:.4}"));
+        let cached = result
+            .cached_input_tokens
+            .map_or_else(|| "n/a".to_owned(), |tokens| tokens.to_string());
+        let reasoning = result
+            .reasoning_output_tokens
+            .map_or_else(|| "n/a".to_owned(), |tokens| tokens.to_string());
         let _ = writeln!(
             output,
-            "| {} | {status} | {}/{} | {} | {} | {} | {usd} | {} | {} |",
+            "| {} | {status} | {}/{} | {} | {} | {} | {cached} | {reasoning} | {} B | {usd} | {} | {} |",
             result.name,
             result.passed_assertion_count(),
             result.assertions.len(),
             result.turns,
             result.tool_call_count(),
             result.total_tokens(),
+            result.tool_surface.serialized_bytes,
             format_millis(result.wall_time_ms),
             result.operations_applied,
         );
@@ -1965,6 +2057,12 @@ pub fn render_scoreboard(results: &[EvalResult]) -> String {
     let usd = totals
         .cost_usd
         .map_or_else(|| "n/a".to_owned(), |cost| format!("${cost:.4}"));
+    let cached = totals
+        .cached_input_tokens
+        .map_or_else(|| "n/a".to_owned(), |tokens| tokens.to_string());
+    let reasoning = totals
+        .reasoning_output_tokens
+        .map_or_else(|| "n/a".to_owned(), |tokens| tokens.to_string());
     let assertion_passes = results
         .iter()
         .map(EvalResult::passed_assertion_count)
@@ -1975,10 +2073,11 @@ pub fn render_scoreboard(results: &[EvalResult]) -> String {
         .sum::<usize>();
     let _ = writeln!(
         output,
-        "| **TOTAL** | **{status}** | **{assertion_passes}/{assertion_total}** | **{}** | **{}** | **{}** | **{usd}** | **{}** | **{}** |",
+        "| **TOTAL** | **{status}** | **{assertion_passes}/{assertion_total}** | **{}** | **{}** | **{}** | **{cached}** | **{reasoning}** | **{} B** | **{usd}** | **{}** | **{}** |",
         totals.turns,
         totals.tool_calls,
         totals.input_tokens.saturating_add(totals.output_tokens),
+        totals.tool_schema_bytes,
         format_millis(totals.wall_time_ms),
         totals.operations_applied,
     );
@@ -2208,7 +2307,10 @@ mod tests {
                 },
                 AgentEvent::Cost {
                     input_tokens: 120,
+                    cached_input_tokens: Some(100),
+                    cache_creation_input_tokens: Some(4),
                     output_tokens: 30,
+                    reasoning_output_tokens: Some(12),
                     cost_usd: Some(0.04),
                 },
                 AgentEvent::Done,
@@ -2226,6 +2328,8 @@ mod tests {
         assert_eq!(metrics.turns, 1);
         assert_eq!(metrics.tool_call_count(), 2);
         assert_eq!(metrics.total_tokens(), 150);
+        assert_eq!(metrics.uncached_input_tokens(), Some(20));
+        assert_eq!(metrics.reasoning_output_tokens, Some(12));
         assert_eq!(metrics.cost_usd, Some(0.04));
         assert!(metrics.errors.is_empty());
     }
@@ -2295,6 +2399,9 @@ mod tests {
             || Ok(0),
         )
         .unwrap();
+        assert_eq!(session.cached_input_tokens, None);
+        assert_eq!(session.cache_creation_input_tokens, None);
+        assert_eq!(session.reasoning_output_tokens, None);
         let mut final_document = document();
         final_document.media_pool[0].duration = TimeCode(100);
         final_document.tracks[0].clips[0].source_range.end = maximum;
@@ -2389,7 +2496,16 @@ mod tests {
                     ("get_timeline_state".to_owned(), 1),
                 ]),
                 input_tokens: 100,
+                cached_input_tokens: Some(80),
+                cache_creation_input_tokens: Some(5),
                 output_tokens: 20,
+                reasoning_output_tokens: Some(10),
+                tool_surface: crate::ToolSurfaceMetrics {
+                    tool_count: 7,
+                    serialized_bytes: 2_048,
+                    input_schema_bytes: 1_024,
+                    description_bytes: 512,
+                },
                 cost_usd: Some(0.03),
                 wall_time_ms: 10,
                 errors: Vec::new(),

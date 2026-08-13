@@ -226,6 +226,18 @@ The implemented contract, proof gates, and deliberate limits are recorded in
 The artifact contract, acceptance boundary, and deliberate limits are recorded
 in [M35 - Finished-cut benchmark](M35-FINISHED-CUT-BENCHMARK.md).
 
+### M36 - Agent runtime efficiency
+
+- a seven-tool session surface with on-demand capability discovery;
+- exact schemas loaded only for the capability a task needs;
+- revision-bound prepared edit plans validated before one atomic commit;
+- provider-aware cache and reasoning token telemetry;
+- measured tool-surface bytes in every eval result.
+
+The runtime contract, measured 99.1% initial schema reduction, safety boundary,
+and remaining live A/B proof gate are recorded in
+[M36 - Agent runtime efficiency](M36-AGENT-RUNTIME-EFFICIENCY.md).
+
 The published "footage in, finished cut out" benchmark should grow continuously
 through every milestone instead of waiting for a final automation pass. Its
 history is the scoreboard for both foundational work and Pillar B.

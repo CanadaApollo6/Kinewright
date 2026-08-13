@@ -48,13 +48,14 @@ impl ClaudeProtocol {
                         .get("name")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown");
-                    let name = display_tool_name(raw_name);
+                    let input = block.get("input").unwrap_or(&Value::Null);
+                    let name = display_tool_call_name(raw_name, input);
                     if !id.is_empty() {
                         self.tool_names.insert(id.to_owned(), name.clone());
                     }
                     events.push(AgentEvent::ToolCall {
                         name,
-                        arguments: compact_json(block.get("input").unwrap_or(&Value::Null)),
+                        arguments: compact_json(input),
                     });
                 }
                 _ => {}
@@ -94,15 +95,34 @@ fn parse_claude_result(value: &Value, events: &mut Vec<AgentEvent>) {
         events.push(AgentEvent::Text(format!("Claude error: {result}")));
     }
     let usage = value.get("usage").unwrap_or(&Value::Null);
-    let input_tokens = token_value(usage, "input_tokens", "inputTokens")
+    let direct_input_tokens = token_value(usage, "input_tokens", "inputTokens")
         .or_else(|| model_usage_total(value, "inputTokens"))
         .unwrap_or(0);
+    let cached_input_tokens = token_value(usage, "cache_read_input_tokens", "cacheReadInputTokens")
+        .or_else(|| model_usage_total(value, "cacheReadInputTokens"));
+    let cache_creation_input_tokens = token_value(
+        usage,
+        "cache_creation_input_tokens",
+        "cacheCreationInputTokens",
+    )
+    .or_else(|| model_usage_total(value, "cacheCreationInputTokens"));
+    let input_tokens = direct_input_tokens
+        .saturating_add(cached_input_tokens.unwrap_or(0))
+        .saturating_add(cache_creation_input_tokens.unwrap_or(0));
     let output_tokens = token_value(usage, "output_tokens", "outputTokens")
         .or_else(|| model_usage_total(value, "outputTokens"))
         .unwrap_or(0);
     events.push(AgentEvent::Cost {
         input_tokens,
+        cached_input_tokens,
+        cache_creation_input_tokens,
         output_tokens,
+        reasoning_output_tokens: token_value(
+            usage,
+            "reasoning_output_tokens",
+            "reasoningOutputTokens",
+        )
+        .or_else(|| model_usage_total(value, "reasoningOutputTokens")),
         cost_usd: value.get("total_cost_usd").and_then(Value::as_f64),
     });
     events.push(AgentEvent::Done);
@@ -113,12 +133,11 @@ fn model_usage_total(value: &Value, key: &str) -> Option<u64> {
         .get("modelUsage")
         .or_else(|| value.get("model_usage"))?
         .as_object()?;
-    Some(
-        usage
-            .values()
-            .filter_map(|model| model.get(key).and_then(Value::as_u64))
-            .sum(),
-    )
+    let values = usage
+        .values()
+        .filter_map(|model| model.get(key).and_then(Value::as_u64))
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.into_iter().sum())
 }
 
 #[derive(Default)]
@@ -138,7 +157,30 @@ impl CodexProtocol {
                 let usage = value.get("usage").unwrap_or(&Value::Null);
                 events.push(AgentEvent::Cost {
                     input_tokens: token_value(usage, "input_tokens", "inputTokens").unwrap_or(0),
+                    cached_input_tokens: token_value(
+                        usage,
+                        "cached_input_tokens",
+                        "cachedInputTokens",
+                    )
+                    .or_else(|| nested_token_value(usage, "input_tokens_details", "cached_tokens"))
+                    .or_else(|| nested_token_value(usage, "inputTokensDetails", "cachedTokens")),
+                    cache_creation_input_tokens: token_value(
+                        usage,
+                        "cache_write_input_tokens",
+                        "cacheWriteInputTokens",
+                    ),
                     output_tokens: token_value(usage, "output_tokens", "outputTokens").unwrap_or(0),
+                    reasoning_output_tokens: token_value(
+                        usage,
+                        "reasoning_output_tokens",
+                        "reasoningOutputTokens",
+                    )
+                    .or_else(|| {
+                        nested_token_value(usage, "output_tokens_details", "reasoning_tokens")
+                    })
+                    .or_else(|| {
+                        nested_token_value(usage, "outputTokensDetails", "reasoningTokens")
+                    }),
                     cost_usd: value
                         .get("cost_usd")
                         .or_else(|| usage.get("cost_usd"))
@@ -177,19 +219,19 @@ impl CodexProtocol {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
-                let name = item
-                    .get("tool")
-                    .and_then(Value::as_str)
-                    .map_or_else(|| "tool".to_owned(), display_tool_name);
+                let arguments = item
+                    .get("arguments")
+                    .or_else(|| item.get("input"))
+                    .unwrap_or(&Value::Null);
+                let name = item.get("tool").and_then(Value::as_str).map_or_else(
+                    || "tool".to_owned(),
+                    |name| display_tool_call_name(name, arguments),
+                );
                 self.tool_names.insert(id.clone(), name.clone());
                 if self.announced.insert(id.clone()) {
                     events.push(AgentEvent::ToolCall {
                         name: name.clone(),
-                        arguments: compact_json(
-                            item.get("arguments")
-                                .or_else(|| item.get("input"))
-                                .unwrap_or(&Value::Null),
-                        ),
+                        arguments: compact_json(arguments),
                     });
                 }
                 if value.get("type").and_then(Value::as_str) == Some("item.completed") {
@@ -244,10 +286,26 @@ fn token_value(value: &Value, snake: &str, camel: &str) -> Option<u64> {
         .and_then(Value::as_u64)
 }
 
+fn nested_token_value(value: &Value, object: &str, field: &str) -> Option<u64> {
+    value.get(object)?.get(field)?.as_u64()
+}
+
 fn display_tool_name(name: &str) -> String {
     name.strip_prefix("mcp__openreel__")
         .unwrap_or(name)
         .to_owned()
+}
+
+fn display_tool_call_name(name: &str, arguments: &Value) -> String {
+    let display = display_tool_name(name);
+    if display == "invoke_capability" {
+        arguments
+            .get("name")
+            .and_then(Value::as_str)
+            .map_or(display, str::to_owned)
+    } else {
+        display
+    }
 }
 
 fn content_text(value: &Value) -> String {
@@ -294,7 +352,10 @@ mod tests {
         }));
         assert!(events.contains(&AgentEvent::Cost {
             input_tokens: 120,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
             output_tokens: 34,
+            reasoning_output_tokens: None,
             cost_usd: Some(0.0042),
         }));
         assert_eq!(events.last(), Some(&AgentEvent::Done));
@@ -321,7 +382,10 @@ mod tests {
         )));
         assert!(events.contains(&AgentEvent::Cost {
             input_tokens: 3,
+            cached_input_tokens: Some(0),
+            cache_creation_input_tokens: Some(0),
             output_tokens: 3,
+            reasoning_output_tokens: Some(0),
             cost_usd: None,
         }));
         assert_eq!(events.last(), Some(&AgentEvent::Done));
@@ -331,5 +395,41 @@ mod tests {
     fn malformed_protocol_lines_report_driver_errors() {
         assert!(ClaudeProtocol::default().parse_line("not-json").is_err());
         assert!(CodexProtocol::default().parse_line("{").is_err());
+    }
+
+    #[test]
+    fn claude_usage_normalizes_cache_reads_and_writes_into_total_input() {
+        let events = ClaudeProtocol::default()
+            .parse_line(
+                r#"{"type":"result","is_error":false,"modelUsage":{"claude":{"inputTokens":20,"cacheReadInputTokens":80,"cacheCreationInputTokens":10,"outputTokens":12}},"total_cost_usd":0.01}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            events[0],
+            AgentEvent::Cost {
+                input_tokens: 110,
+                cached_input_tokens: Some(80),
+                cache_creation_input_tokens: Some(10),
+                output_tokens: 12,
+                reasoning_output_tokens: None,
+                cost_usd: Some(0.01),
+            }
+        );
+    }
+
+    #[test]
+    fn compact_dispatch_reports_the_underlying_capability_name() {
+        let events = CodexProtocol::default()
+            .parse_line(
+                r#"{"type":"item.started","item":{"id":"tool-1","type":"mcp_tool_call","tool":"mcp__openreel__invoke_capability","arguments":{"name":"get_timeline_transcript","arguments":{}}}}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            events,
+            vec![AgentEvent::ToolCall {
+                name: "get_timeline_transcript".to_owned(),
+                arguments: r#"{"arguments":{},"name":"get_timeline_transcript"}"#.to_owned(),
+            }]
+        );
     }
 }

@@ -58,6 +58,7 @@ fn claude_removes_long_silences_with_one_atomic_plan() {
             service_tier: None,
             max_turns: Some(8),
             mcp_url: Some(server.endpoint().to_owned()),
+            tool_names: None,
         })
         .expect("the gated test requires an installed, authenticated Claude Code CLI");
     let events = session.events();

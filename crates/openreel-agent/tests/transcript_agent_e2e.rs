@@ -48,6 +48,7 @@ fn one_agent_message_removes_the_transcribed_filler_word() {
             service_tier: None,
             max_turns: Some(10),
             mcp_url: Some(server.endpoint().to_owned()),
+            tool_names: None,
         })
         .expect("the gated test requires an installed, authenticated Claude Code CLI");
     let events = session.events();

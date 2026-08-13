@@ -699,16 +699,22 @@ fn translate_update(
                 .and_then(Value::as_str)
                 .unwrap_or("cursor-tool")
                 .to_owned();
-            let name = update
+            let raw_name = update
                 .get("title")
                 .and_then(Value::as_str)
                 .or_else(|| update.get("kind").and_then(Value::as_str))
-                .unwrap_or("Cursor tool")
-                .to_owned();
-            let arguments = update
-                .get("rawInput")
-                .filter(|value| !value.is_null())
-                .map_or_else(|| "{}".to_owned(), Value::to_string);
+                .unwrap_or("Cursor tool");
+            let raw_input = update.get("rawInput").filter(|value| !value.is_null());
+            let name = if raw_name.ends_with("invoke_capability") {
+                raw_input
+                    .and_then(|value| value.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(raw_name)
+                    .to_owned()
+            } else {
+                raw_name.to_owned()
+            };
+            let arguments = raw_input.map_or_else(|| "{}".to_owned(), Value::to_string);
             tool_names.insert(id, name.clone());
             let _ = events.send(AgentEvent::ToolCall { name, arguments });
         }

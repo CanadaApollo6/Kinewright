@@ -33,6 +33,7 @@ fn claude_splits_then_deletes_via_the_live_mcp_server() {
             service_tier: None,
             max_turns: Some(8),
             mcp_url: Some(server.endpoint().to_owned()),
+            tool_names: None,
         })
         .expect("the gated test requires an installed, authenticated Claude Code CLI");
     let events = session.events();
@@ -104,6 +105,7 @@ fn codex_splits_then_deletes_via_the_live_mcp_server() {
             service_tier: None,
             max_turns: Some(2),
             mcp_url: Some(server.endpoint().to_owned()),
+            tool_names: None,
         })
         .expect("the gated test requires Codex CLI 0.147.0+ with a subscription login");
     let events = session.events();
@@ -185,6 +187,7 @@ fn codex_edits_an_isolated_branch_then_one_merge_publishes_it() {
             service_tier: None,
             max_turns: Some(2),
             mcp_url: Some(server.endpoint().to_owned()),
+            tool_names: None,
         })
         .expect("the gated test requires Codex CLI 0.147.0+ with a subscription login");
     let events = session.events();
@@ -268,6 +271,7 @@ fn codex_uses_m32_source_and_catalog_primitives_on_an_isolated_branch() {
             service_tier: None,
             max_turns: Some(2),
             mcp_url: Some(server.endpoint().to_owned()),
+            tool_names: None,
         })
         .expect("the gated test requires Codex CLI 0.147.0+ with a subscription login");
     let events = session.events();
@@ -353,6 +357,7 @@ fn codex_builds_m33_visual_automation_and_an_audio_bus_on_an_isolated_branch() {
             service_tier: None,
             max_turns: Some(2),
             mcp_url: Some(server.endpoint().to_owned()),
+            tool_names: None,
         })
         .expect("the gated test requires Codex CLI 0.147.0+ with a subscription login");
     let events = session.events();
@@ -453,6 +458,7 @@ fn cursor_splits_then_deletes_via_the_live_mcp_server() {
             service_tier: None,
             max_turns: Some(2),
             mcp_url: Some(server.endpoint().to_owned()),
+            tool_names: None,
         })
         .expect("the gated test requires an installed, authenticated Cursor Agent CLI");
     eprintln!("CURSOR TEST: ACP session ready");

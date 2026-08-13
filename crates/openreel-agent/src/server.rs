@@ -49,6 +49,10 @@ use crate::{
         render_clip_info, render_timeline_scene_changes, render_timeline_silences,
         render_timeline_state, render_timeline_transcript,
     },
+    runtime::{
+        CapabilityKind, PreparedPlanId, PreparedPlanStore, ToolSurface, ToolSurfaceMetrics,
+        capabilities, is_invocable_capability, search_capabilities,
+    },
     schema::{SchemaError, decode_operation, operation_tool_name, operation_tools, schema_object},
 };
 
@@ -206,11 +210,14 @@ pub enum McpServerError {
     Thread(#[source] std::io::Error),
     #[error("could not start the OpenReel export queue: {0}")]
     ExportQueue(#[from] ExportQueueError),
+    #[error("could not build the OpenReel tool surface: {0}")]
+    Schema(#[from] SchemaError),
 }
 
 pub struct McpServer {
     endpoint: String,
     confirmations: ConfirmationBroker,
+    tool_surface_metrics: ToolSurfaceMetrics,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -247,6 +254,28 @@ impl McpServer {
             Some(exporter),
             ConfirmationBroker::default(),
             true,
+            ToolSurface::Full,
+        )
+    }
+
+    /// Start the compact agent-runtime surface for the live core and media engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns an MCP server error when the listener or server thread cannot start.
+    pub fn start_compact(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+    ) -> Result<Self, McpServerError> {
+        Self::start_configured(
+            core,
+            playback,
+            analysis,
+            None,
+            ConfirmationBroker::default(),
+            true,
+            ToolSurface::Compact,
         )
     }
 
@@ -268,6 +297,7 @@ impl McpServer {
             None,
             ConfirmationBroker::default(),
             false,
+            ToolSurface::Full,
         )
     }
 
@@ -289,6 +319,29 @@ impl McpServer {
             Some(exporter),
             ConfirmationBroker::default(),
             false,
+            ToolSurface::Full,
+        )
+    }
+
+    /// Start a branch-scoped compact agent runtime with serial delivery exports.
+    ///
+    /// # Errors
+    ///
+    /// Returns an MCP server error when the listener, export worker, or server thread cannot start.
+    pub fn start_isolated_compact_with_exporter(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        exporter: Arc<dyn Export>,
+    ) -> Result<Self, McpServerError> {
+        Self::start_configured(
+            core,
+            playback,
+            analysis,
+            Some(exporter),
+            ConfirmationBroker::default(),
+            false,
+            ToolSurface::Compact,
         )
     }
 
@@ -298,7 +351,15 @@ impl McpServer {
         analysis: Arc<dyn Analysis>,
         confirmations: ConfirmationBroker,
     ) -> Result<Self, McpServerError> {
-        Self::start_configured(core, playback, analysis, None, confirmations, true)
+        Self::start_configured(
+            core,
+            playback,
+            analysis,
+            None,
+            confirmations,
+            true,
+            ToolSurface::Full,
+        )
     }
 
     fn start_configured(
@@ -308,6 +369,7 @@ impl McpServer {
         exporter: Option<Arc<dyn Export>>,
         confirmations: ConfirmationBroker,
         publish_to_playback: bool,
+        tool_surface: ToolSurface,
     ) -> Result<Self, McpServerError> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .map_err(McpServerError::Bind)?;
@@ -318,6 +380,8 @@ impl McpServer {
         let endpoint = format!("http://{address}/mcp");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let export_queue = exporter.map(ExportQueue::new).transpose()?;
+        let tool_surface_metrics =
+            ToolSurfaceMetrics::measure(&OpenReelMcp::tools_for_surface(tool_surface)?);
         let handler = OpenReelMcp::configured(
             core,
             playback,
@@ -325,6 +389,7 @@ impl McpServer {
             export_queue,
             confirmations.clone(),
             publish_to_playback,
+            tool_surface,
         );
         let server_thread = thread::Builder::new()
             .name("openreel-mcp".to_owned())
@@ -333,6 +398,7 @@ impl McpServer {
         Ok(Self {
             endpoint,
             confirmations,
+            tool_surface_metrics,
             shutdown: Some(shutdown),
             thread: Some(server_thread),
         })
@@ -346,6 +412,11 @@ impl McpServer {
     #[must_use]
     pub fn confirmations(&self) -> ConfirmationBroker {
         self.confirmations.clone()
+    }
+
+    #[must_use]
+    pub const fn tool_surface_metrics(&self) -> ToolSurfaceMetrics {
+        self.tool_surface_metrics
     }
 
     pub fn shutdown(mut self) {
@@ -402,6 +473,8 @@ struct OpenReelMcp {
     export_queue: Option<ExportQueue>,
     confirmations: ConfirmationBroker,
     publish_to_playback: bool,
+    tool_surface: ToolSurface,
+    prepared_plans: Arc<Mutex<PreparedPlanStore>>,
 }
 
 impl OpenReelMcp {
@@ -412,7 +485,15 @@ impl OpenReelMcp {
         analysis: Arc<dyn Analysis>,
         confirmations: ConfirmationBroker,
     ) -> Self {
-        Self::configured(core, playback, analysis, None, confirmations, true)
+        Self::configured(
+            core,
+            playback,
+            analysis,
+            None,
+            confirmations,
+            true,
+            ToolSurface::Full,
+        )
     }
 
     fn configured(
@@ -422,6 +503,7 @@ impl OpenReelMcp {
         export_queue: Option<ExportQueue>,
         confirmations: ConfirmationBroker,
         publish_to_playback: bool,
+        tool_surface: ToolSurface,
     ) -> Self {
         Self {
             core,
@@ -430,10 +512,12 @@ impl OpenReelMcp {
             export_queue,
             confirmations,
             publish_to_playback,
+            tool_surface,
+            prepared_plans: Arc::new(Mutex::new(PreparedPlanStore::default())),
         }
     }
 
-    fn tools() -> Result<Vec<Tool>, SchemaError> {
+    fn full_tools() -> Result<Vec<Tool>, SchemaError> {
         let mut tools = operation_tools()?
             .into_iter()
             .map(|definition| definition.tool)
@@ -442,10 +526,152 @@ impl OpenReelMcp {
         Ok(tools)
     }
 
+    fn tools_for_surface(surface: ToolSurface) -> Result<Vec<Tool>, SchemaError> {
+        let tools = Self::full_tools()?;
+        Ok(match surface {
+            ToolSurface::Full => tools,
+            ToolSurface::Compact => tools
+                .into_iter()
+                .filter(|tool| crate::runtime::COMPACT_TOOL_NAMES.contains(&tool.name.as_ref()))
+                .collect(),
+        })
+    }
+
+    #[cfg(test)]
+    fn tools() -> Result<Vec<Tool>, SchemaError> {
+        Self::full_tools()
+    }
+
+    fn served_tools(&self) -> Result<Vec<Tool>, SchemaError> {
+        Self::tools_for_surface(self.tool_surface)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn call_blocking(&self, request: CallToolRequestParams) -> Result<CallToolResult, McpError> {
         let arguments = request.arguments.unwrap_or_default();
         match request.name.as_ref() {
+            "search_capabilities" => {
+                let args: CapabilitySearchArgs = decode_args("search_capabilities", arguments)?;
+                let tools = Self::full_tools()
+                    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+                let found = search_capabilities(
+                    &tools,
+                    args.query.as_deref(),
+                    &args.kinds,
+                    usize::from(args.limit.unwrap_or(20)),
+                );
+                Ok(success_structured(
+                    format!("found {} matching OpenReel capabilities", found.len()),
+                    serde_json::json!({
+                        "capabilities": found,
+                        "next": "Call get_capability with one exact name before invoking it or using an edit operation in prepare_edit_plan."
+                    }),
+                ))
+            }
+            "get_capability" => {
+                let args: CapabilityArgs = decode_args("get_capability", arguments)?;
+                let tools = Self::full_tools()
+                    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+                let descriptor = capabilities(&tools)
+                    .into_iter()
+                    .find(|candidate| candidate.name == args.name);
+                let tool = tools.into_iter().find(|tool| tool.name == args.name);
+                Ok(match (descriptor, tool) {
+                    (Some(descriptor), Some(tool)) => success_structured(
+                        format!("opened capability {}", descriptor.name),
+                        serde_json::json!({
+                            "capability": descriptor,
+                            "input_schema": tool.input_schema,
+                            "invocation": if is_invocable_capability(&args.name) {
+                                "invoke_capability"
+                            } else {
+                                "prepare_edit_plan"
+                            }
+                        }),
+                    ),
+                    _ => error_text(format!("unknown OpenReel capability {}", args.name)),
+                })
+            }
+            "invoke_capability" => {
+                let args: InvokeCapabilityArgs = decode_args("invoke_capability", arguments)?;
+                if !is_invocable_capability(&args.name) {
+                    return Ok(error_text(format!(
+                        "capability {} cannot be invoked through the compact dispatcher; edit operations must be prepared and committed atomically",
+                        args.name
+                    )));
+                }
+                let serde_json::Value::Object(arguments) = args.arguments else {
+                    return Ok(error_text("capability arguments must be a JSON object"));
+                };
+                self.call_blocking(CallToolRequestParams::new(args.name).with_arguments(arguments))
+            }
+            "prepare_edit_plan" => {
+                let args: PrepareEditPlanArgs = decode_args("prepare_edit_plan", arguments)?;
+                let (actual_revision, document) = self.snapshot()?;
+                let plan = self
+                    .prepared_plans
+                    .lock()
+                    .map_err(|_| McpError::internal_error("prepared plan store stopped", None))?
+                    .prepare(
+                        args.expected_revision,
+                        actual_revision,
+                        &document,
+                        args.operations,
+                    );
+                Ok(match plan {
+                    Ok(plan) => success_structured(
+                        format!(
+                            "prepared edit plan {}; review its preview, then commit it at timeline revision {}",
+                            plan.id, plan.expected_revision
+                        ),
+                        serde_json::json!({
+                            "plan_id": plan.id,
+                            "preview": plan.preview,
+                        }),
+                    ),
+                    Err(error) => error_text(error.to_string()),
+                })
+            }
+            "commit_edit_plan" => {
+                let args: CommitEditPlanArgs = decode_args("commit_edit_plan", arguments)?;
+                let plan = {
+                    let mut plans = self.prepared_plans.lock().map_err(|_| {
+                        McpError::internal_error("prepared plan store stopped", None)
+                    })?;
+                    let Some(plan) = plans.get(args.plan_id) else {
+                        return Ok(error_text(format!(
+                            "prepared edit plan {} is missing or expired; prepare it again against the current timeline revision",
+                            args.plan_id
+                        )));
+                    };
+                    if args.expected_revision != plan.expected_revision {
+                        return Ok(error_text(format!(
+                            "prepared edit plan {} belongs to timeline revision {}, not {}",
+                            args.plan_id, plan.expected_revision, args.expected_revision
+                        )));
+                    }
+                    plans
+                        .take(args.plan_id)
+                        .expect("prepared plan was just read")
+                };
+                self.apply_edit_plan(args.expected_revision, &plan.operations)
+            }
+            "discard_edit_plan" => {
+                let args: DiscardEditPlanArgs = decode_args("discard_edit_plan", arguments)?;
+                let discarded = self
+                    .prepared_plans
+                    .lock()
+                    .map_err(|_| McpError::internal_error("prepared plan store stopped", None))?
+                    .discard(args.plan_id);
+                Ok(if discarded {
+                    success_text(format!("discarded prepared edit plan {}", args.plan_id))
+                } else {
+                    error_text(format!(
+                        "prepared edit plan {} is missing or expired",
+                        args.plan_id
+                    ))
+                })
+            }
             "get_timeline_state" => {
                 let (revision, document) = self.snapshot()?;
                 Ok(success_text(format!(
@@ -2415,11 +2641,17 @@ impl OpenReelMcp {
 
 impl ServerHandler for OpenReelMcp {
     fn get_info(&self) -> ServerInfo {
+        let instructions = match self.tool_surface {
+            ToolSurface::Compact => {
+                "Inspect with get_timeline_state. Use search_capabilities and get_capability to load only the exact inspector, planner, proof, or edit-operation schema needed. Invoke non-edit capabilities through invoke_capability. Submit ordered compact operations to prepare_edit_plan, inspect its deterministic preview, then commit the opaque plan id at the same timeline revision. Reinspect and re-plan after any revision conflict. Frame values are exact project frames."
+            }
+            ToolSurface::Full => {
+                "Inspect the timeline before editing and copy its timeline_revision into expected_revision on every mutation. Reinspect and re-plan after a revision conflict. Use the storyboard, transcript, silence, beat, and scene inspectors when relevant. Resolve ordinal targets against the inspected state. Frame values are exact project frames. Prefer one atomic apply_edit_plan after inspection instead of separate operation tools. Use add_title for first-class video-track titles and import_media for filesystem paths."
+            }
+        };
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openreel", env!("CARGO_PKG_VERSION")))
-            .with_instructions(
-        "Inspect the timeline before editing and copy its timeline_revision into expected_revision on every mutation. Reinspect and re-plan after a revision conflict. Use the storyboard, transcript, silence, beat, and scene inspectors when relevant. Resolve ordinal targets against the inspected state. Frame values are exact project frames. Prefer one atomic apply_edit_plan after inspection instead of separate operation tools. Use add_title for first-class video-track titles and import_media for filesystem paths.",
-            )
+            .with_instructions(instructions)
     }
 
     fn list_tools(
@@ -2427,14 +2659,15 @@ impl ServerHandler for OpenReelMcp {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        let result = Self::tools()
+        let result = self
+            .served_tools()
             .map(ListToolsResult::with_all_items)
             .map_err(|error| McpError::internal_error(error.to_string(), None));
         std::future::ready(result)
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        Self::tools()
+        self.served_tools()
             .ok()?
             .into_iter()
             .find(|tool| tool.name == name)
@@ -2453,6 +2686,55 @@ impl ServerHandler for OpenReelMcp {
                 .map(Into::into)
         }
     }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CapabilitySearchArgs {
+    /// Optional case-insensitive text matched against names and one-line summaries.
+    #[serde(default)]
+    query: Option<String>,
+    /// Optional capability kinds. Omit or send an empty list to search every kind.
+    #[serde(default)]
+    kinds: Vec<CapabilityKind>,
+    /// Maximum results. Defaults to 20 and is clamped to 1..=100.
+    #[serde(default)]
+    limit: Option<u8>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CapabilityArgs {
+    /// Exact capability name returned by `search_capabilities`.
+    name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct InvokeCapabilityArgs {
+    /// Exact non-edit capability name opened with `get_capability`.
+    name: String,
+    /// Arguments matching the schema returned by `get_capability`.
+    arguments: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PrepareEditPlanArgs {
+    /// Exact revision returned by `get_timeline_state` before planning.
+    expected_revision: TimelineRevision,
+    /// Ordered compact operations such as `{"op":"split_clip","clip":1,"at":30}`.
+    operations: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CommitEditPlanArgs {
+    /// Opaque server-local id returned by `prepare_edit_plan`.
+    plan_id: PreparedPlanId,
+    /// The same exact revision used to prepare the plan.
+    expected_revision: TimelineRevision,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DiscardEditPlanArgs {
+    /// Opaque server-local id returned by `prepare_edit_plan`.
+    plan_id: PreparedPlanId,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2881,6 +3163,66 @@ fn inspector_tools() -> Vec<Tool> {
             schema_object::<EmptyArgs>(),
         )
         .with_annotations(read_only()),
+        Tool::new(
+            "search_capabilities",
+            "Search the full OpenReel editing, perception, proof, and delivery catalog without loading every tool schema into model context.",
+            schema_object::<CapabilitySearchArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_capability",
+            "Open the exact description and input schema for one discovered capability only when the current task needs it.",
+            schema_object::<CapabilityArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "invoke_capability",
+            "Invoke one discovered non-edit capability with arguments matching the schema returned by get_capability. Timeline edit operations must use prepare_edit_plan and commit_edit_plan.",
+            schema_object::<InvokeCapabilityArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(false)
+                .open_world(false),
+        ),
+        Tool::new(
+            "prepare_edit_plan",
+            "Decode and atomically validate ordered compact edit operations against one exact timeline revision. Returns an opaque plan id and deterministic before/after preview without changing the timeline.",
+            schema_object::<PrepareEditPlanArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        ),
+        Tool::new(
+            "commit_edit_plan",
+            "Commit one previously prepared plan as a single revision-gated undo entry. Stale, missing, invalid, or unconfirmed destructive plans are rejected.",
+            schema_object::<CommitEditPlanArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(false)
+                .open_world(false),
+        ),
+        Tool::new(
+            "discard_edit_plan",
+            "Discard one opaque prepared plan without changing the timeline.",
+            schema_object::<DiscardEditPlanArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(false),
+        ),
         Tool::new(
             "get_silences",
             "Return cached windowed-RMS silence spans for one asset in exact source frames and seconds, or background analysis status. For safe cutting, reported spans are clamped against cached transcribed words plus a 100 ms fps-aware margin; when no transcript is cached, the existing fixed 100 ms margin is used. Cached detector spans remain unchanged.",
@@ -4200,6 +4542,7 @@ mod tests {
             None,
             ConfirmationBroker::default(),
             false,
+            ToolSurface::Full,
         );
         let proof = service.frame_at(TimeCode(1)).unwrap();
         assert_eq!(proof.is_error, Some(false));
@@ -4579,6 +4922,162 @@ mod tests {
         assert!(schema.contains("AddTrack"));
         assert!(schema.contains("DeleteClip"));
         assert!(schema.contains("operations"));
+    }
+
+    #[test]
+    fn compact_surface_is_small_and_keeps_the_full_catalog_discoverable() {
+        let full = OpenReelMcp::tools_for_surface(ToolSurface::Full).unwrap();
+        let compact = OpenReelMcp::tools_for_surface(ToolSurface::Compact).unwrap();
+        let names = compact
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(names, crate::runtime::COMPACT_TOOL_NAMES);
+
+        let full_metrics = ToolSurfaceMetrics::measure(&full);
+        let compact_metrics = ToolSurfaceMetrics::measure(&compact);
+        println!("full={full_metrics:?} compact={compact_metrics:?}");
+        assert!(compact_metrics.tool_count < full_metrics.tool_count / 4);
+        assert!(compact_metrics.serialized_bytes < full_metrics.serialized_bytes / 4);
+
+        let catalog = capabilities(&full);
+        assert!(
+            catalog
+                .iter()
+                .any(|capability| capability.name == "split_clip")
+        );
+        assert!(
+            catalog
+                .iter()
+                .any(|capability| capability.name == "get_timeline_storyboard")
+        );
+    }
+
+    #[test]
+    fn compact_prepare_and_commit_is_revision_gated_and_atomic() {
+        let (core, playback, analysis) = fixture();
+        let service = OpenReelMcp::configured(
+            core.clone(),
+            playback,
+            analysis,
+            None,
+            ConfirmationBroker::default(),
+            true,
+            ToolSurface::Compact,
+        );
+        let prepared = service
+            .call_blocking(
+                CallToolRequestParams::new("prepare_edit_plan").with_arguments(
+                    json!({
+                        "expected_revision": 0,
+                        "operations": [{"op": "split_clip", "clip": 1, "at": 30}]
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(prepared.is_error, Some(false));
+        let prepared = prepared.structured_content.unwrap();
+        assert_eq!(prepared["preview"]["operation_count"], 1);
+        assert_eq!(prepared["preview"]["before_clips"], 1);
+        assert_eq!(prepared["preview"]["after_clips"], 2);
+
+        let Event::QueryResult(QueryResult::Document(before_commit)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected document query result");
+        };
+        assert_eq!(before_commit.tracks[0].clips.len(), 1);
+
+        let committed = service
+            .call_blocking(
+                CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                    json!({
+                        "plan_id": prepared["plan_id"],
+                        "expected_revision": 0
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(committed.is_error, Some(false));
+        let Event::QueryResult(QueryResult::Snapshot { revision, document }) =
+            core.request(Command::Query(Query::Snapshot)).unwrap()
+        else {
+            panic!("expected snapshot query result");
+        };
+        assert_eq!(revision, TimelineRevision(1));
+        assert_eq!(document.tracks[0].clips.len(), 2);
+
+        let duplicate = service
+            .call_blocking(
+                CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                    json!({
+                        "plan_id": prepared["plan_id"],
+                        "expected_revision": 0
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(duplicate.is_error, Some(true));
+    }
+
+    #[test]
+    fn compact_capability_dispatcher_opens_and_invokes_existing_inspectors() {
+        let (core, playback, analysis) = fixture();
+        let service = OpenReelMcp::configured(
+            core,
+            playback,
+            analysis,
+            None,
+            ConfirmationBroker::default(),
+            true,
+            ToolSurface::Compact,
+        );
+        let opened = service
+            .call_blocking(
+                CallToolRequestParams::new("get_capability").with_arguments(
+                    json!({"name": "get_clip_info"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(opened.is_error, Some(false));
+        assert_eq!(
+            opened.structured_content.unwrap()["invocation"],
+            "invoke_capability"
+        );
+
+        let invoked = service
+            .call_blocking(
+                CallToolRequestParams::new("invoke_capability").with_arguments(
+                    json!({
+                        "name": "get_clip_info",
+                        "arguments": {"clip_id": 1}
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(invoked.is_error, Some(false));
+        assert!(
+            invoked.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("clip 1")
+        );
     }
 
     #[test]

@@ -9,6 +9,14 @@ All notable changes to OpenReel are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Added
+- M36 compact agent runtime: OpenReel-owned Claude, Codex, Cursor, and eval
+  sessions now advertise seven stable tools instead of the complete catalog,
+  discover exact capability schemas on demand, validate revision-bound edit
+  plans before one atomic commit, and retain the full 85-tool MCP surface for
+  compatibility. Eval and chat telemetry now distinguish cached input,
+  cache-creation input, and reasoning output when providers report them and
+  record exact tool-schema bytes; the initial serialized surface falls from
+  585,247 bytes to 5,305 bytes (99.1%)
 - Operation-based core: every mutation is a validated, pure `Operation` through
   a single Core actor; snapshot undo/redo; append-only operation log
 - A/V playback with the audio device callback as master clock; exact

@@ -25,7 +25,7 @@ use crate::{
     schema::all_tool_names,
 };
 
-pub(crate) const OPENREEL_SYSTEM_PROMPT: &str = "You are OpenReel's video editing agent. Inspect the live timeline before editing and copy its timeline_revision into expected_revision on every mutation. If a mutation reports a revision conflict, inspect the current timeline again and re-plan; never retry a stale plan blindly. Use the storyboard, transcript, silence, beat, scene-change, source, and media-search inspectors when relevant. Resolve ordinal references such as first, second, and last against that inspected timeline state, and decide all target clip ids before mutation unless the user explicitly says otherwise. Prefer one atomic apply_edit_plan containing the complete ordered edit over separate operation tool calls. Use three_point_edit, slip_clip, roll_edit, slide_clip, replace_clip, and fit_to_fill for professional editorial intent instead of reconstructing those semantics from fragile low-level steps. Link enforcement is orchestration, not core behavior: moving, trimming, or deleting one linked clip requires the same atomic plan to edit every member reported in its link group. Ripple edits always shift the edited track plus every other track reported as sync_lock=true; tracks with sync_lock=false stay fixed, while project markers at or after the ripple point always shift regardless of sync locks. A clip that starts before the ripple point is neither shifted nor trimmed. For ripple delete, the ripple point is the deleted clip's pre-edit end; when deleting a linked group, use regular delete_clip operations for companion members and exactly one ripple_delete_clip so the cross-track shift happens once. Titles are first-class video-track clips: use add_title to create one and set_title_param to change its declarative style, position, text, or frame-based fades. When asked to review footage, prefer placing markers as suggestions over changing the edit unless the user asks for an edit. Use only the OpenReel MCP tools. All edit time values are exact integer project frames; use the reported fps to convert seconds. After applying a plan, verify the result with the SAME inspectors that motivated it, including a storyboard when visual composition matters. If the user asked for dead air to be removed, re-run the silence inspector on the edited timeline and submit a follow-up plan when long silences remain. Every apply_edit_plan result ends with the count of cuttable silence spans remaining on the timeline: when the user asked for silence or dead-air removal, keep submitting follow-up plans until that count reports zero. Do not declare the task done until the inspectors confirm it. Then answer briefly.";
+pub(crate) const OPENREEL_SYSTEM_PROMPT: &str = "You are OpenReel's video editing agent. Use only its MCP tools. Start with get_timeline_state and plan against its exact timeline_revision; after a conflict, inspect again instead of retrying stale work. Use search_capabilities, then get_capability, to load only the inspector, planner, proof, action, or edit-operation schema needed for this task. Run non-edit capabilities through invoke_capability. Build edits as ordered compact operations, validate them with prepare_edit_plan, inspect the returned before/after preview, and commit that opaque plan id at the same revision. Resolve ordinal targets and all clip ids before mutation. Prefer professional operations such as three_point_edit, slip_clip, roll_edit, slide_clip, replace_clip, and fit_to_fill over fragile reconstructions. Linked clips must be handled together in one atomic plan. Ripple operations affect the target and sync-locked tracks; use exactly one ripple delete for a linked group. Frame values are exact project-frame integers. Use markers for review suggestions unless an edit was requested. Verify committed work with the same evidence that motivated it, including a storyboard for visual composition and another silence inspection after dead-air removal. Continue correction plans until the requested result is verified, then answer briefly.";
 const MINIMUM_CODEX_VERSION: (u64, u64, u64) = (0, 147, 0);
 const CODEX_DISABLED_FEATURES: &[&str] = &[
     "shell_tool",
@@ -156,8 +156,7 @@ struct ClaudeSession {
 
 impl ClaudeSession {
     fn spawn(executable: PathBuf, endpoint: &str, cfg: &SessionConfig) -> Result<Self, AgentError> {
-        let tool_allowlist = all_tool_names()
-            .map_err(|error| AgentError::Harness(error.to_string()))?
+        let tool_allowlist = configured_tool_names(cfg)?
             .into_iter()
             .map(|name| format!("mcp__openreel__{name}"))
             .collect::<Vec<_>>()
@@ -290,8 +289,7 @@ impl CodexSession {
         endpoint: String,
         cfg: SessionConfig,
     ) -> Result<Self, AgentError> {
-        let tool_names =
-            all_tool_names().map_err(|error| AgentError::Harness(error.to_string()))?;
+        let tool_names = configured_tool_names(&cfg)?;
         let scratch_directory = create_codex_scratch_directory()?;
         let (model_catalog_directory, model_catalog_path) =
             match create_codex_direct_model_catalog(&target) {
@@ -332,6 +330,13 @@ impl CodexSession {
             let _ = child.wait();
         }
     }
+}
+
+fn configured_tool_names(cfg: &SessionConfig) -> Result<Vec<String>, AgentError> {
+    cfg.tool_names
+        .clone()
+        .map_or_else(all_tool_names, Ok)
+        .map_err(|error| AgentError::Harness(error.to_string()))
 }
 
 impl AgentSession for CodexSession {
@@ -1036,6 +1041,21 @@ mod tests {
     }
 
     #[test]
+    fn session_tool_allowlist_replaces_the_full_compatibility_catalog() {
+        let config = SessionConfig {
+            tool_names: Some(vec![
+                "get_timeline_state".to_owned(),
+                "prepare_edit_plan".to_owned(),
+            ]),
+            ..SessionConfig::default()
+        };
+        assert_eq!(
+            configured_tool_names(&config).unwrap(),
+            config.tool_names.unwrap()
+        );
+    }
+
+    #[test]
     fn codex_requires_the_policy_controls_added_by_0_147() {
         assert!(codex_version_is_supported("codex-cli 0.147.0"));
         assert!(codex_version_is_supported("codex-cli 0.148.1-beta.2"));
@@ -1211,6 +1231,7 @@ mod tests {
         assert!(prompt.contains("2. delete the second clip"));
         assert!(prompt.contains("Current user request:\nundo that deletion"));
         assert!(prompt.contains("The live timeline is authoritative"));
-        assert!(prompt.contains("use add_title to create one and set_title_param"));
+        assert!(prompt.contains("prepare_edit_plan"));
+        assert!(prompt.contains("commit that opaque plan id"));
     }
 }

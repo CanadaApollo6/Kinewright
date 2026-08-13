@@ -5,6 +5,12 @@ OpenReel owns one `rmcp` Streamable HTTP server inside the app process. It binds
 same live Core actor used by the UI. Mutators therefore enter the normal snapshot undo stack and
 emit the normal `DocumentChanged` broadcast. The workspace pins `rmcp` at the root.
 
+OpenReel-owned sessions advertise a compact seven-tool runtime. Models inspect the current
+revision, discover capabilities by name and kind, load only the selected schema, invoke non-edit
+capabilities through one dispatcher, and prepare then commit timeline edits atomically. The full
+generated MCP catalog remains available as a compatibility surface. The exact contract and
+measured schema overhead are documented in [M36 - Agent runtime efficiency](M36-AGENT-RUNTIME-EFFICIENCY.md).
+
 Opening another project interrupts the current agent session, shuts down the old endpoint, and
 starts a new endpoint against the replacement Core actor. No filesystem or network handle is put
 in `openreel-core`.
@@ -72,7 +78,10 @@ enforces the configured number of user turns, and `interrupt` kills the active c
 0.147.0 JSONL includes `thread.started`, `turn.started`, `item.started` and `item.completed` for
 `mcp_tool_call`, `item.completed` for `agent_message` or `error`, and `turn.completed` with token
 usage. These map to `ToolCall`, `ToolResult`, `Text`/`Error`, `Cost`, and `Done`. Codex subscription
-JSONL reports tokens but not a dollar price, so `cost_usd` is normally absent.
+JSONL reports total, cached, output, and reasoning token categories but not a dollar price, so
+`cost_usd` is normally absent. Categories omitted by a provider stay unavailable instead of being
+reported as zero. Claude cache-read and cache-creation usage is normalized into the same event
+contract, and eval output records both those categories and the advertised tool-surface bytes.
 
 ## Cursor
 
