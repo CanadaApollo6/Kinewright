@@ -36,10 +36,11 @@ cargo run -p openreel-agent --bin openreel-eval -- `
   --score-review target/evals/<run>/human-review.json
 ```
 
-The first v2 Codex baseline passed 30/30 machine assertions in 122.871 seconds
-and produced a probed 421-frame 1080x1920 MP4. Human acceptance remains unset;
-the proof sheet exposed a likely vertical caption-width issue that the next
-delivery gate must catch.
+The current v2 Codex baseline passed 32/32 machine assertions in 108.126 seconds
+with 18 tool calls and 234,924 reported tokens. It produced an independently
+probed 421-frame 1080x1920 audio-video MP4. This is 67.9% fewer tokens than the
+first passing v2 sample. Human acceptance remains unset until a person watches
+the SHA-bound artifact with audio.
 
 ## Seed suite
 

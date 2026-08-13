@@ -15,7 +15,12 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   cannot fit, and reserves the largest built-in caption motion. Unsafe animated
   captions block delivery and the finished-cut benchmark now asserts vertical
   containment plus timeline/export audio presence. Generated-caption state and
-  successful bulk-plan responses are compacted to reduce repeated model context
+  successful bulk-plan responses are compacted to reduce repeated model
+  context. Capability queries and schema opens can be batched, and the new
+  transcript/silence-backed dialogue assembly planner removes model-side frame
+  arithmetic. The resulting Codex sample passes 32/32 machine assertions with
+  234,924 tokens, 67.9% below the prior passing baseline; SHA-bound human review
+  remains pending
 - M36 compact agent runtime: OpenReel-owned Claude, Codex, Cursor, and eval
   sessions expose seven stable tools instead of the complete catalog,
   discover exact capability schemas on demand, validate revision-bound edit

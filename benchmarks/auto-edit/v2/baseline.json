@@ -3,12 +3,12 @@
   "benchmark_id": "openreel-finished-cut-v2",
   "suite_manifest": "benchmarks/auto-edit/v2/manifest.json",
   "source_trace": {
-    "filename": "openreel-eval-20260813-043310-codex/results.jsonl",
-    "sha256": "fbf400cbd757ba2be92bf7491abd2e93a6561477f85a9c88a6083349d66a167a",
+    "filename": "openreel-eval-20260813-063929-codex/results.jsonl",
+    "sha256": "724cc42ec56c848c2549f945a9a89cff35df8b8d81bb50c885efc84a017ef731",
     "note": "The raw trace and media package are generated local artifacts under target/evals and are intentionally not committed."
   },
   "environment": {
-    "timestamp_utc": "2026-08-13T04:33:10Z",
+    "timestamp_utc": "2026-08-13T06:39:29Z",
     "harness": "codex",
     "harness_version": "codex-cli 0.147.0",
     "model": "harness-default",
@@ -19,23 +19,25 @@
   "machine_summary": {
     "tasks_passed": 1,
     "tasks_total": 1,
-    "assertions_passed": 30,
-    "assertions_total": 30,
+    "assertions_passed": 32,
+    "assertions_total": 32,
     "turns": 1,
-    "tool_calls": 24,
-    "input_tokens": 728076,
-    "output_tokens": 3235,
-    "total_tokens": 731311,
+    "tool_calls": 18,
+    "input_tokens": 232447,
+    "cached_input_tokens": 165120,
+    "output_tokens": 2477,
+    "reasoning_output_tokens": 459,
+    "total_tokens": 234924,
     "cost_usd": null,
-    "wall_time_ms": 122871,
-    "operations_applied": 48
+    "wall_time_ms": 108126,
+    "operations_applied": 28
   },
   "deliverable": {
     "profile": "vertical_short",
     "resolution": [1080, 1920],
     "duration_frames": 421,
-    "output_bytes": 6617816,
-    "output_sha256": "5a352c38a49ad1626936ba98efe38e9bf546682bc89cc58c95080125bcc3491d",
+    "output_bytes": 6486073,
+    "output_sha256": "2b03c1487fe069bb29a0e33d51c14f73221874623c1331c3640d6b5c3757eaa5",
     "probed_duration_frames": 421,
     "probed_resolution": [1080, 1920],
     "proof_sample_frames": [0, 52, 105, 157, 210, 262, 315, 367, 420]
@@ -43,6 +45,6 @@
   "human_review": {
     "first_pass_acceptance": null,
     "ratings": null,
-    "observation": "The compositor proof suggests some captions exceed the vertical safe area. This is not silently converted into a human score."
+    "observation": "Machine assertions and an agent inspection of the proof are green. A person has not watched the SHA-bound MP4 with audio, so acceptance remains pending."
   }
 }

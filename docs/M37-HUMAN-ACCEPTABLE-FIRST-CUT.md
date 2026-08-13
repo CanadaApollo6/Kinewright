@@ -3,8 +3,8 @@
 M37 prepares a controlled rerun of the exact M35 finished-cut task. It closes
 the visible caption overflow found in the first artifact, adds a machine gate
 for the defect, and removes repeated runtime text that would otherwise inflate
-the model context. The subscription-backed run remains a separate,
-approval-gated action.
+the model context. The approved subscription-backed run is complete; human
+watch-through remains pending.
 
 ## Acceptance target
 
@@ -91,8 +91,8 @@ Two additional reductions are included because the M35 task exercises both:
   rejected operation and rollback boundary remain visible. The M35 48-operation
   success shape becomes one result line.
 
-These are deterministic response-byte reductions. They are not presented as a
-provider-token claim until the live rerun reports provider telemetry.
+These deterministic response-byte reductions are now reflected in the live
+provider telemetry reported below.
 
 The first live attempt also exposed discovery churn and unreliable manual
 source-boundary arithmetic. M37 now lets agents batch independent catalog
@@ -135,6 +135,27 @@ No model override is supplied, matching the harness-default shape of the first
 Codex baseline. The run writes its packaged artifact set under `target/evals`.
 The result is not accepted until the generated MP4 is watched with audio and
 the SHA-bound human review is completed.
+
+## Live Codex result
+
+The approved sample on commit `83ab8cd` passed all 32 machine assertions in one
+turn. It made 18 tool calls, applied 28 operations, and completed in 108.126
+seconds. Provider telemetry reported 232,447 input tokens, of which 165,120
+were cached, plus 2,477 output tokens and 459 reasoning tokens. The benchmark's
+portable total is 234,924 tokens.
+
+Against the M35 passing baseline, this is:
+
+- 496,387 fewer total tokens, a 67.9% reduction;
+- 6 fewer tool calls, a 25.0% reduction;
+- 20 fewer applied operations, a 41.7% reduction; and
+- 14.745 seconds faster, a 12.0% reduction.
+
+The independent artifact probe found 421 frames at 1080x1920 with both video
+and audio streams. The MP4 is 6,486,073 bytes with SHA-256
+`2b03c1487fe069bb29a0e33d51c14f73221874623c1331c3640d6b5c3757eaa5`.
+The packaged `human-review.json` remains unscored and `accepted` remains
+`null`; the machine result is not presented as human acceptance.
 
 ## Tradeoffs and revisit points
 
