@@ -3233,7 +3233,7 @@ fn inspector_tools() -> Vec<Tool> {
         ),
         Tool::new(
             "get_qa_report",
-            "Run deterministic export-health checks for missing media, gaps, abrupt cuts, retimed audio, and caption readability.",
+            "Run deterministic export-health checks for missing media, gaps, abrupt cuts, retimed audio, caption readability, and animated title safe-area containment.",
             schema_object::<EmptyArgs>(),
         )
         .with_annotations(read_only()),
@@ -4215,24 +4215,43 @@ fn render_plan_outcomes(
         _ => None,
     };
     let mut output = String::new();
-    for (index, operation) in operations.iter().enumerate() {
-        let number = index + 1;
-        let outcome = match (error, failed) {
-            (None, _) => "applied".to_owned(),
-            (Some(openreel_core::BatchError::Empty), _) => "not run: empty plan".to_owned(),
-            (Some(openreel_core::BatchError::OperationFailed { error, .. }), Some(failed))
-                if number == failed =>
-            {
-                format!("rejected: {error}")
-            }
-            (Some(_), Some(failed)) if number < failed => "rolled back".to_owned(),
-            _ => "not run".to_owned(),
-        };
+    if error.is_none() && operations.len() > 8 {
+        let mut counts = BTreeMap::new();
+        for operation in operations {
+            *counts
+                .entry(operation_tool_name(operation))
+                .or_insert(0_usize) += 1;
+        }
+        let breakdown = counts
+            .into_iter()
+            .map(|(name, count)| format!("{name}={count}"))
+            .collect::<Vec<_>>()
+            .join(",");
         let _ = writeln!(
             output,
-            "op {number} {}: {outcome}",
-            operation_tool_name(operation)
+            "applied {} operations atomically ({breakdown})",
+            operations.len()
         );
+    } else {
+        for (index, operation) in operations.iter().enumerate() {
+            let number = index + 1;
+            let outcome = match (error, failed) {
+                (None, _) => "applied".to_owned(),
+                (Some(openreel_core::BatchError::Empty), _) => "not run: empty plan".to_owned(),
+                (Some(openreel_core::BatchError::OperationFailed { error, .. }), Some(failed))
+                    if number == failed =>
+                {
+                    format!("rejected: {error}")
+                }
+                (Some(_), Some(failed)) if number < failed => "rolled back".to_owned(),
+                _ => "not run".to_owned(),
+            };
+            let _ = writeln!(
+                output,
+                "op {number} {}: {outcome}",
+                operation_tool_name(operation)
+            );
+        }
     }
     if let Some(error) = error {
         let _ = writeln!(output, "plan rejected atomically: {error}");
@@ -5092,6 +5111,23 @@ mod tests {
             panic!("expected undo result");
         };
         assert_eq!(&*doc, &*original);
+    }
+
+    #[test]
+    fn successful_bulk_plan_outcomes_are_counted_instead_of_repeated() {
+        let operations = (1..=48)
+            .map(|id| Operation::AddMarker {
+                marker: Marker {
+                    id: MarkerId(id),
+                    position: TimeCode(i64::try_from(id).unwrap()),
+                    label: String::new(),
+                    color_token: 0,
+                },
+            })
+            .collect::<Vec<_>>();
+
+        let rendered = render_plan_outcomes(&operations, None, None);
+        assert_eq!(rendered, "applied 48 operations atomically (add_marker=48)");
     }
 
     #[test]

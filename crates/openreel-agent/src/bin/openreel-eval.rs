@@ -679,6 +679,10 @@ fn finished_cut_suite() -> Vec<EvalDefinition> {
                 minimum_cues: 3,
                 motion: CaptionMotion::Pop,
             },
+            EvalAssertion::CaptionSafeArea {
+                profile: DeliveryProfile::VerticalShort,
+            },
+            EvalAssertion::AudioPresent,
             EvalAssertion::QaExportReady,
             required_all(&["get_timeline_state", "add_styled_captions"]),
             required_any(&["get_transcript", "get_timeline_transcript"]),
@@ -698,6 +702,7 @@ fn finished_cut_suite() -> Vec<EvalDefinition> {
             focus_y_percent: 50,
             proof_frames: 9,
             proof_cell_width: 240,
+            require_audio: true,
         }),
     }]
 }

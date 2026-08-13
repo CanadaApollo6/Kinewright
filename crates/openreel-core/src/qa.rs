@@ -1,7 +1,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{CaptionPreset, ClipContent, ClipId, Document, TimeCode, TrackId, TrackKind};
+use crate::{
+    CaptionPreset, ClipContent, ClipId, Document, Effect, ParamValue, TimeCode, TitlePixelBounds,
+    TrackId, TrackKind, title_layout,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -119,9 +122,54 @@ pub fn qa_document(document: &Document) -> QaReport {
                     Some(clip.timeline_start..end),
                 ));
             }
-            if let ClipContent::Title(title) = &clip.content
-                && let Some(preset) = title.caption_preset
-            {
+            if let ClipContent::Title(title) = &clip.content {
+                let layout = title_layout(title, document.resolution);
+                if layout.is_none() {
+                    issues.push(issue(
+                        QaSeverity::Error,
+                        "title_layout_unavailable",
+                        format!(
+                            "Title clip {} cannot fit the {}x{} delivery safe area.",
+                            clip.id, document.resolution.0, document.resolution.1
+                        ),
+                        Some(track.id),
+                        Some(clip.id),
+                        Some(clip.timeline_start..end),
+                    ));
+                }
+                let Some(preset) = title.caption_preset else {
+                    previous_end = end.max(previous_end);
+                    previous_was_media = false;
+                    continue;
+                };
+                if let Some(layout) = layout {
+                    let animated = transformed_title_bounds(
+                        layout.visual_bounds,
+                        &clip.effects,
+                        document.resolution,
+                    );
+                    if !layout.safe_bounds.contains(animated) {
+                        issues.push(issue(
+                            QaSeverity::Error,
+                            "caption_outside_safe_area",
+                            format!(
+                                "Caption clip {} reaches [{},{}..{},{}] outside delivery safe area [{},{}..{},{}].",
+                                clip.id,
+                                animated.left,
+                                animated.top,
+                                animated.right,
+                                animated.bottom,
+                                layout.safe_bounds.left,
+                                layout.safe_bounds.top,
+                                layout.safe_bounds.right,
+                                layout.safe_bounds.bottom,
+                            ),
+                            Some(track.id),
+                            Some(clip.id),
+                            Some(clip.timeline_start..end),
+                        ));
+                    }
+                }
                 let maximum = match preset {
                     CaptionPreset::Social => 32,
                     CaptionPreset::Clean | CaptionPreset::Minimal => 42,
@@ -173,6 +221,128 @@ pub fn qa_document(document: &Document) -> QaReport {
     }
 }
 
+#[allow(clippy::similar_names)]
+fn transformed_title_bounds(
+    bounds: TitlePixelBounds,
+    effects: &[Effect],
+    resolution: (u32, u32),
+) -> TitlePixelBounds {
+    let mut scale_percent = 100_i64;
+    let mut minimum_x_percent = 0_i64;
+    let mut maximum_x_percent = 0_i64;
+    let mut minimum_y_percent = 0_i64;
+    let mut maximum_y_percent = 0_i64;
+    for effect in effects.iter().filter(|effect| effect.name == "transform") {
+        let (_, maximum_scale) = parameter_range(effect, "scale_percent", 100);
+        scale_percent = ceil_div(scale_percent.saturating_mul(maximum_scale.max(1)), 100);
+        let (minimum_x, maximum_x) = parameter_range(effect, "x_percent", 0);
+        minimum_x_percent = minimum_x_percent.saturating_add(minimum_x);
+        maximum_x_percent = maximum_x_percent.saturating_add(maximum_x);
+        let (minimum_y, maximum_y) = parameter_range(effect, "y_percent", 0);
+        minimum_y_percent = minimum_y_percent.saturating_add(minimum_y);
+        maximum_y_percent = maximum_y_percent.saturating_add(maximum_y);
+    }
+    let center_x = i64::from(resolution.0) / 2;
+    let center_y = i64::from(resolution.1) / 2;
+    TitlePixelBounds {
+        left: saturating_i32(transform_floor(
+            i64::from(bounds.left),
+            center_x,
+            scale_percent,
+            minimum_x_percent,
+            i64::from(resolution.0),
+        )),
+        top: saturating_i32(transform_floor(
+            i64::from(bounds.top),
+            center_y,
+            scale_percent,
+            maximum_y_percent.saturating_neg(),
+            i64::from(resolution.1),
+        )),
+        right: saturating_i32(transform_ceil(
+            i64::from(bounds.right),
+            center_x,
+            scale_percent,
+            maximum_x_percent,
+            i64::from(resolution.0),
+        )),
+        bottom: saturating_i32(transform_ceil(
+            i64::from(bounds.bottom),
+            center_y,
+            scale_percent,
+            minimum_y_percent.saturating_neg(),
+            i64::from(resolution.1),
+        )),
+    }
+}
+
+fn parameter_range(effect: &Effect, name: &str, default: i64) -> (i64, i64) {
+    let base = effect
+        .parameters
+        .get(name)
+        .and_then(|value| match value {
+            ParamValue::Integer(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(default);
+    effect.keyframes.get(name).map_or((base, base), |curve| {
+        curve
+            .keyframes
+            .iter()
+            .map(|keyframe| keyframe.value)
+            .fold((base, base), |(minimum, maximum), value| {
+                (minimum.min(value), maximum.max(value))
+            })
+    })
+}
+
+fn transform_floor(
+    value: i64,
+    center: i64,
+    scale_percent: i64,
+    offset_percent: i64,
+    extent: i64,
+) -> i64 {
+    center
+        .saturating_add(
+            value
+                .saturating_sub(center)
+                .saturating_mul(scale_percent)
+                .div_euclid(100),
+        )
+        .saturating_add(extent.saturating_mul(offset_percent).div_euclid(100))
+}
+
+fn transform_ceil(
+    value: i64,
+    center: i64,
+    scale_percent: i64,
+    offset_percent: i64,
+    extent: i64,
+) -> i64 {
+    center
+        .saturating_add(ceil_div(
+            value.saturating_sub(center).saturating_mul(scale_percent),
+            100,
+        ))
+        .saturating_add(ceil_div(extent.saturating_mul(offset_percent), 100))
+}
+
+fn ceil_div(numerator: i64, denominator: i64) -> i64 {
+    numerator
+        .saturating_neg()
+        .div_euclid(denominator)
+        .saturating_neg()
+}
+
+fn saturating_i32(value: i64) -> i32 {
+    i32::try_from(value).unwrap_or(if value.is_negative() {
+        i32::MIN
+    } else {
+        i32::MAX
+    })
+}
+
 fn issue(
     severity: QaSeverity,
     code: &str,
@@ -193,7 +363,10 @@ fn issue(
 
 #[cfg(test)]
 mod tests {
-    use crate::{Clip, MediaAsset, MediaKind, Rational, Title, Track};
+    use crate::{
+        CaptionCue, CaptionMotion, Clip, MediaAsset, MediaKind, Rational, Title, Track,
+        animated_caption_operations, apply_batch,
+    };
 
     use super::*;
 
@@ -262,6 +435,78 @@ mod tests {
         ] {
             assert!(report.issues.iter().any(|issue| issue.code == code));
         }
+        assert!(!report.export_ready());
+    }
+
+    #[test]
+    fn every_caption_preset_and_builtin_motion_stays_inside_vertical_safe_area() {
+        for preset in CaptionPreset::ALL {
+            for motion in CaptionMotion::ALL {
+                let mut document = Document {
+                    resolution: (1_080, 1_920),
+                    ..Document::default()
+                };
+                let operations = animated_caption_operations(
+                    &document,
+                    &[CaptionCue {
+                        start: TimeCode::ZERO,
+                        end: TimeCode(30),
+                        text: "A readable delivery-aware caption with motion".to_owned(),
+                    }],
+                    preset,
+                    motion,
+                )
+                .unwrap();
+                apply_batch(&mut document, &operations).unwrap();
+                let report = qa_document(&document);
+
+                assert!(
+                    !report
+                        .issues
+                        .iter()
+                        .any(|issue| issue.code == "caption_outside_safe_area"),
+                    "preset={preset:?}, motion={motion:?}, issues={:?}",
+                    report.issues
+                );
+                assert!(report.export_ready());
+            }
+        }
+    }
+
+    #[test]
+    fn qa_blocks_a_caption_transform_that_leaves_the_safe_area() {
+        let mut document = Document {
+            resolution: (1_080, 1_920),
+            ..Document::default()
+        };
+        let operations = animated_caption_operations(
+            &document,
+            &[CaptionCue {
+                start: TimeCode::ZERO,
+                end: TimeCode(30),
+                text: "Moved off screen".to_owned(),
+            }],
+            CaptionPreset::Social,
+            CaptionMotion::Pop,
+        )
+        .unwrap();
+        apply_batch(&mut document, &operations).unwrap();
+        let transform = document.tracks[0].clips[0]
+            .effects
+            .iter_mut()
+            .find(|effect| effect.name == "transform")
+            .unwrap();
+        transform
+            .parameters
+            .insert("x_percent".to_owned(), ParamValue::Integer(100));
+
+        let report = qa_document(&document);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "caption_outside_safe_area")
+        );
         assert!(!report.export_ready());
     }
 }

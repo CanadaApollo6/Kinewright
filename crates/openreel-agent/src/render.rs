@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+    sync::Arc,
+};
 
 use openreel_core::{
     AssetId, AssetTranscript, ClipContent, ClipId, Document, Effect, FrameRounding, LinkId,
@@ -53,6 +57,66 @@ pub fn render_timeline_state(document: &Document) -> String {
             track.sync_lock,
             track.clips.len()
         );
+        let caption_clips = track
+            .clips
+            .iter()
+            .filter(|clip| {
+                matches!(
+                    &clip.content,
+                    ClipContent::Title(title) if title.caption_preset.is_some()
+                )
+            })
+            .collect::<Vec<_>>();
+        if !caption_clips.is_empty() {
+            let clip_ids = caption_clips
+                .iter()
+                .map(|clip| clip.id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let presets = caption_clips
+                .iter()
+                .filter_map(|clip| match &clip.content {
+                    ClipContent::Title(title) => title.caption_preset,
+                    _ => None,
+                })
+                .map(openreel_core::CaptionPreset::as_str)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(",");
+            let motions = caption_clips
+                .iter()
+                .map(|clip| caption_motion_name(&clip.effects))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(",");
+            let start = caption_clips
+                .iter()
+                .map(|clip| clip.timeline_start)
+                .min()
+                .unwrap_or(TimeCode::ZERO);
+            let end = caption_clips
+                .iter()
+                .filter_map(|clip| {
+                    document
+                        .clip_duration(clip)
+                        .ok()
+                        .and_then(|duration| clip.timeline_start.checked_add(duration))
+                })
+                .max()
+                .unwrap_or(start);
+            let _ = writeln!(
+                output,
+                "  captions cues={} clip_ids={} timeline={}..{} presets={} motions={}",
+                caption_clips.len(),
+                clip_ids,
+                frame_and_seconds(start, document.fps),
+                frame_and_seconds(end, document.fps),
+                presets,
+                motions,
+            );
+        }
         for clip in &track.clips {
             if let ClipContent::Freeze(freeze) = &clip.content {
                 let duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
@@ -78,6 +142,9 @@ pub fn render_timeline_state(document: &Document) -> String {
                 continue;
             }
             if let ClipContent::Title(title) = &clip.content {
+                if title.caption_preset.is_some() {
+                    continue;
+                }
                 let duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
                 let end = clip
                     .timeline_start
@@ -158,6 +225,19 @@ pub fn render_timeline_state(document: &Document) -> String {
         output.pop();
     }
     output
+}
+
+fn caption_motion_name(effects: &[Effect]) -> &'static str {
+    let has_opacity = effects.iter().any(|effect| effect.name == "opacity");
+    for effect in effects.iter().filter(|effect| effect.name == "transform") {
+        if effect.keyframes.contains_key("scale_percent") {
+            return "pop";
+        }
+        if effect.keyframes.contains_key("y_percent") {
+            return "slide_up";
+        }
+    }
+    if has_opacity { "fade" } else { "none" }
 }
 
 fn render_links_and_markers(output: &mut String, document: &Document) {
@@ -819,9 +899,10 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
     use openreel_core::{
-        AssetId, AssetSilences, AssetTranscript, Clip, Effect, EffectId, LinkId, Marker, MarkerId,
-        MediaAsset, MediaKind, ParamValue, SilenceSpan, TimelineTranscriptWord, Track, TrackId,
-        TranscriptStatus, Transition,
+        AssetId, AssetSilences, AssetTranscript, CaptionCue, CaptionMotion, CaptionPreset, Clip,
+        Effect, EffectId, LinkId, Marker, MarkerId, MediaAsset, MediaKind, ParamValue, SilenceSpan,
+        TimelineTranscriptWord, Track, TrackId, TranscriptStatus, Transition,
+        animated_caption_operations, apply_batch,
     };
 
     use super::*;
@@ -911,6 +992,36 @@ markers:
 assets:
   asset 4 "interview.mp4" kind=AudioVideo duration=300f/10.000s fps=30/1 size=1920x1080 path="fixtures/interview.mp4""#;
         assert_eq!(render_timeline_state(&fixture()), expected);
+    }
+
+    #[test]
+    fn timeline_state_collapses_generated_caption_tracks() {
+        let mut document = Document::default();
+        let cues = (0..12)
+            .map(|index| CaptionCue {
+                start: TimeCode(index * 30),
+                end: TimeCode(index * 30 + 30),
+                text: format!("Caption number {index} should not repeat in state"),
+            })
+            .collect::<Vec<_>>();
+        let operations = animated_caption_operations(
+            &document,
+            &cues,
+            CaptionPreset::Social,
+            CaptionMotion::Pop,
+        )
+        .unwrap();
+        apply_batch(&mut document, &operations).unwrap();
+
+        let rendered = render_timeline_state(&document);
+        assert!(rendered.contains("captions cues=12 clip_ids=1,2,3,4,5,6,7,8,9,10,11,12"));
+        assert!(rendered.contains("presets=social motions=pop"));
+        assert!(!rendered.contains("Caption number"));
+        assert!(
+            rendered.len() < 600,
+            "caption state grew to {} bytes",
+            rendered.len()
+        );
     }
 
     #[test]

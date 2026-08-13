@@ -86,9 +86,11 @@ decorative per-marker colors are not allowed.
 ### Title presentation token indices
 
 Title project data stores stable indices rather than raw presentation values.
-Font-size index `0` is Small (40 px at 1080 lines), `1` is Standard (64 px),
-and `2` is Display (96 px). The media renderer scales these sizes with output
-height. Color index `0` resolves to `text-primary`, `1` to `text-secondary`,
+Font-size index `0` is Small (40 px at a 1080 px short edge), `1` is Standard
+(64 px), and `2` is Display (96 px). The shared title layout scales these sizes
+with the output short edge, wraps captions against an 8% delivery-safe inset,
+and adapts down only when the block cannot fit. Color index `0` resolves to
+`text-primary`, `1` to `text-secondary`,
 and `2` to `accent`. Title scrims use `media-shadow` at 72%. Inter is the only
 title family in M14; its embedded bytes are shared with the media renderer.
 

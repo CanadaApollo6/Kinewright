@@ -1,0 +1,139 @@
+# M37 - Human-acceptable first cut
+
+M37 prepares a controlled rerun of the exact M35 finished-cut task. It closes
+the visible caption overflow found in the first artifact, adds a machine gate
+for the defect, and removes repeated runtime text that would otherwise inflate
+the model context. The subscription-backed run remains a separate,
+approval-gated action.
+
+## Acceptance target
+
+The next run must satisfy all of these gates:
+
+1. pass the original M35 editorial, transcript, proof, QA, delivery, and undo
+   assertions;
+2. pass the new `vertical_short` animated-caption safe-area assertion;
+3. retain a populated timeline audio track and independently prove that the
+   exported artifact contains both video and audio streams;
+4. export and independently probe the exact 1080x1920 timeline snapshot;
+5. retain the MP4 SHA-256, proof sheet, final document, JSONL telemetry, and
+   human-review template as one immutable artifact set;
+6. improve materially on the 731,311-token, 24-call, 122.871-second M35 Codex
+   baseline without weakening the brief; and
+7. receive a human watch-through and explicit acceptance score. Machine green
+   is necessary, not sufficient.
+
+## Shared layout contract
+
+```text
+Title project data + delivery raster
+                |
+                v
+ exact Inter measurement and wrapping
+                |
+       +--------+---------+
+       |                  |
+       v                  v
+preview/export raster   deterministic QA
+       |                  |
+       +--------+---------+
+                v
+      delivery conformance + eval assertion
+```
+
+`openreel-core::title_layout` is now the single composition contract. It:
+
+- scales font tokens from the output short edge, so 1080x1920 no longer turns a
+  96 px social caption into a 171 px caption;
+- measures the embedded Inter font exactly and wraps at word boundaries, with
+  deterministic hard wrapping for a word wider than the safe line;
+- uses an 8% delivery-safe inset and adapts the font downward only when the
+  wrapped block still cannot fit;
+- reserves the full 110% pop scale and 15% slide-up translation used by the
+  built-in caption motions; and
+- returns the same lines, font size, line height, and pixel bounds consumed by
+  the renderer and QA.
+
+The media renderer no longer owns separate positioning math. Preview and export
+already share that renderer. Delivery conformance materializes the target
+raster before running QA, so the assertion checks the pixels the target profile
+will actually render.
+
+## Failure behavior
+
+QA emits a blocking `caption_outside_safe_area` issue when the complete
+transform envelope leaves the safe bounds. A title that cannot fit even at the
+minimum size emits blocking `title_layout_unavailable`. Delivery conformance
+therefore refuses the artifact before export, and the benchmark independently
+records a failed `delivery caption safe area` assertion.
+
+The check evaluates transform parameters and every automation keyframe. It is
+not a screenshot heuristic and does not depend on a selected proof frame.
+
+The benchmark also fails before artifact acceptance when the timeline has no
+populated audio track. After export, its independent probe must classify the
+MP4 as audio-video. This catches both editorial audio omission and mux failures;
+human review remains responsible for mix quality.
+
+## Runtime context reductions
+
+Two additional reductions are included because the M35 task exercises both:
+
+- `get_timeline_state` collapses a generated caption track into one line with
+  cue count, clip ids, range, preset, and motion. Cue text and full keyframe
+  curves remain available through the existing per-clip inspector rather than
+  repeating on every state read. A 12-cue regression fixture is capped below
+  600 rendered bytes.
+- successful plans larger than eight operations return one atomic count and an
+  operation-type breakdown. Failures retain per-operation status so the exact
+  rejected operation and rollback boundary remain visible. The M35 48-operation
+  success shape becomes one result line.
+
+These are deterministic response-byte reductions. They are not presented as a
+provider-token claim until the live rerun reports provider telemetry.
+
+## Verification before the paid run
+
+Preparation is complete only when these local gates pass in one FFmpeg-enabled
+PowerShell process:
+
+```powershell
+& .\scripts\setup-ffmpeg.ps1
+cargo fmt --all -- --check
+cargo build --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Coverage includes every caption preset and built-in motion on vertical output,
+an intentionally unsafe transform, exact rendered-pixel containment, compact
+caption state, compact bulk success reporting, delivery conformance, and the
+new benchmark assertion.
+
+## Approval-gated benchmark command
+
+Do not run this as part of ordinary tests. After explicit user approval, run:
+
+```powershell
+& .\scripts\setup-ffmpeg.ps1
+$env:OPENREEL_EVAL = '1'
+cargo run -p openreel-agent --bin openreel-eval -- --suite finished-cut-v2 --harness codex --only f1 --samples 1
+```
+
+No model override is supplied, matching the harness-default shape of the first
+Codex baseline. The run writes its packaged artifact set under `target/evals`.
+The result is not accepted until the generated MP4 is watched with audio and
+the SHA-bound human review is completed.
+
+## Tradeoffs and revisit points
+
+- The 8% inset is a general delivery-safe contract, not a per-platform UI map.
+  Add named platform overlays only with published targets and regression media.
+- Adaptive shrink guarantees containment but cannot guarantee attractive
+  typography for arbitrarily long titles. Caption generation should keep its
+  readability limits; QA continues to warn on overly long or brief cues.
+- The compact timeline summary intentionally omits generated cue text. If
+  correction workflows need bulk caption text, add a paginated caption
+  inspector instead of expanding the always-on project state again.
+- M37 fixes the known visual escape. It does not pre-score pacing, taste, audio
+  quality, or publishability. The human acceptance gate remains the authority.

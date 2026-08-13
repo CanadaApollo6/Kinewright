@@ -73,8 +73,9 @@ pub use time::{
 };
 pub use title::{
     CaptionPreset, TITLE_COLORS, TITLE_FONT_SIZES, TITLE_PARAMETER_DESCRIPTORS, Title,
-    TitleColorDescriptor, TitleFontSizeDescriptor, TitleParameterDescriptor, TitleParameterKind,
-    TitlePosition, title_color, title_font_size, title_parameter_descriptor, title_parameter_value,
+    TitleColorDescriptor, TitleFontSizeDescriptor, TitleLayout, TitleParameterDescriptor,
+    TitleParameterKind, TitlePixelBounds, TitlePosition, title_color, title_font_bytes,
+    title_font_size, title_layout, title_parameter_descriptor, title_parameter_value,
 };
 pub use transcript_edit::{
     TranscriptCutRange, is_filler_word, silence_cut_margin_frames, transcript_cut_ranges,

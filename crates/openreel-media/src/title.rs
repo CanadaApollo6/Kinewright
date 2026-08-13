@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use ab_glyph::{Font, FontArc, PxScale, PxScaleFont, ScaleFont, point};
-use openreel_core::{FrameTexture, MediaError, Title, TitlePosition, title_color, title_font_size};
+use openreel_core::{FrameTexture, MediaError, Title, title_color, title_font_bytes, title_layout};
 
-const INTER_BYTES: &[u8] = include_bytes!("../../openreel-app/assets/fonts/Inter-Variable.ttf");
-const REFERENCE_HEIGHT: f32 = 1080.0;
 const SCRIM_COLOR: [u8; 4] = [0x05, 0x07, 0x0A, 184];
 
 pub(crate) struct TitleRasterizer {
@@ -13,7 +11,7 @@ pub(crate) struct TitleRasterizer {
 
 impl TitleRasterizer {
     pub(crate) fn new() -> Self {
-        let font = FontArc::try_from_slice(INTER_BYTES)
+        let font = FontArc::try_from_slice(title_font_bytes())
             .expect("the embedded Inter font must remain a valid OpenType font");
         Self { font }
     }
@@ -36,52 +34,40 @@ impl TitleRasterizer {
                 "title output resolution must be non-zero".to_owned(),
             ));
         }
-        let size = title_font_size(title.font_size_token)
-            .ok_or_else(|| MediaError::Backend("title font-size token is invalid".to_owned()))?;
         let color = title_color(title.color_token)
             .ok_or_else(|| MediaError::Backend("title color token is invalid".to_owned()))?;
-        let px = (f32::from(size.pixels_at_1080p) * height as f32 / REFERENCE_HEIGHT)
-            .round()
-            .max(8.0);
+        let layout = title_layout(title, resolution)
+            .ok_or_else(|| MediaError::Backend("title cannot fit its safe area".to_owned()))?;
+        let px = layout.font_pixels as f32;
         let scale = PxScale::from(px);
         let scaled = self.font.as_scaled(scale);
-        let line_height = (scaled.ascent() - scaled.descent() + scaled.line_gap()).ceil();
-        let lines = title.text.split('\n').collect::<Vec<_>>();
-        let line_widths = lines
+        let line_height = layout.line_height_pixels as f32;
+        let line_widths = layout
+            .lines
             .iter()
-            .map(|line| line_width(&scaled, line))
+            .map(|line| line_width(&scaled, line.as_str()))
             .collect::<Vec<_>>();
-        let block_width = line_widths.iter().copied().fold(0.0_f32, f32::max);
-        let block_height = line_height * lines.len().max(1) as f32;
-        let center_y = match title.position {
-            TitlePosition::Top => height as f32 * 0.18,
-            TitlePosition::Center => height as f32 * 0.50,
-            TitlePosition::LowerThird => height as f32 * 0.78,
-        };
-        let block_left = (width as f32 - block_width) * 0.5;
-        let block_top = center_y - block_height * 0.5;
+        let block_top = layout.text_bounds.top as f32;
         let pixel_count = usize::try_from(width)
             .unwrap_or(usize::MAX)
             .saturating_mul(usize::try_from(height).unwrap_or(usize::MAX));
         let mut rgba = vec![0_u8; pixel_count.saturating_mul(4)];
 
         if title.background_scrim && !title.text.is_empty() {
-            let horizontal_padding = (px * 0.55).round() as i32;
-            let vertical_padding = (px * 0.28).round() as i32;
             fill_rect(
                 &mut rgba,
                 resolution,
                 (
-                    block_left.floor() as i32 - horizontal_padding,
-                    block_top.floor() as i32 - vertical_padding,
-                    (block_left + block_width).ceil() as i32 + horizontal_padding,
-                    (block_top + block_height).ceil() as i32 + vertical_padding,
+                    layout.visual_bounds.left,
+                    layout.visual_bounds.top,
+                    layout.visual_bounds.right,
+                    layout.visual_bounds.bottom,
                 ),
                 SCRIM_COLOR,
             );
         }
 
-        for (line_index, line) in lines.iter().enumerate() {
+        for (line_index, line) in layout.lines.iter().enumerate() {
             let mut cursor_x = (width as f32 - line_widths[line_index]) * 0.5;
             let baseline = block_top + line_index as f32 * line_height + scaled.ascent();
             let mut previous = None;
@@ -182,6 +168,7 @@ fn blend_pixel(destination: &mut [u8], source: [u8; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openreel_core::CaptionPreset;
 
     #[test]
     fn same_title_rasterizes_to_identical_pixels() {
@@ -194,5 +181,35 @@ mod tests {
         let second = rasterizer.rasterize(&title, (320, 180)).unwrap();
         assert_eq!(first.rgba, second.rgba);
         assert!(first.rgba.chunks_exact(4).any(|pixel| pixel[3] > 0));
+    }
+
+    #[test]
+    fn vertical_social_caption_pixels_stay_inside_shared_safe_bounds() {
+        let rasterizer = TitleRasterizer::new();
+        let title = CaptionPreset::Social
+            .title("This finished vertical caption wraps inside the delivery safe area");
+        let resolution = (1_080, 1_920);
+        let layout = title_layout(&title, resolution).unwrap();
+        let frame = rasterizer.rasterize(&title, resolution).unwrap();
+        let mut rendered = openreel_core::TitlePixelBounds {
+            left: i32::MAX,
+            top: i32::MAX,
+            right: i32::MIN,
+            bottom: i32::MIN,
+        };
+        for (index, pixel) in frame.rgba.chunks_exact(4).enumerate() {
+            if pixel[3] == 0 {
+                continue;
+            }
+            let x = i32::try_from(index % usize::try_from(resolution.0).unwrap()).unwrap();
+            let y = i32::try_from(index / usize::try_from(resolution.0).unwrap()).unwrap();
+            rendered.left = rendered.left.min(x);
+            rendered.top = rendered.top.min(y);
+            rendered.right = rendered.right.max(x.saturating_add(1));
+            rendered.bottom = rendered.bottom.max(y.saturating_add(1));
+        }
+
+        assert!(layout.lines.len() > 1);
+        assert!(layout.safe_bounds.contains(rendered));
     }
 }

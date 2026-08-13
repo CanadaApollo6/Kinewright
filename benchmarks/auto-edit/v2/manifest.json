@@ -52,7 +52,8 @@
         "focus_x_percent": 50,
         "focus_y_percent": 50,
         "proof_frames": 9,
-        "proof_cell_width": 240
+        "proof_cell_width": 240,
+        "require_audio": true
       },
       "assertions": [
         "timeline_non_empty",
@@ -64,6 +65,8 @@
         "long_silence_absent",
         "duration_bounds",
         "social_pop_captions",
+        "vertical_caption_safe_area",
+        "timeline_and_exported_audio_present",
         "technical_qa",
         "required_tool_usage",
         "undo_integrity",

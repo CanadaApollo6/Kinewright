@@ -74,7 +74,7 @@ OpenReel runs a local MCP (Model Context Protocol) server inside the app and spa
 
 Claude Code and Codex sessions run with their built-in shell/file/web tools disabled or sandboxed away. Cursor receives only the per-project OpenReel MCP endpoint and starts in an empty scratch directory, but its ACP server may still expose Cursor-owned tools; the settings panel states this weaker boundary explicitly. Destructive OpenReel operations pause for your approval in the chat panel. Costs are surfaced when the harness reports them, and turns are capped per session.
 
-Details: [agent harnesses](docs/agent-harnesses.md) · [M36 agent runtime efficiency](docs/M36-AGENT-RUNTIME-EFFICIENCY.md) · [model-first editor](docs/MODEL-FIRST-EDITOR.md) · [current product position](docs/PRODUCT-POSITION-M35-2026-08.md) · [transcription](docs/TRANSCRIPTION.md)
+Details: [agent harnesses](docs/agent-harnesses.md) · [M36 agent runtime efficiency](docs/M36-AGENT-RUNTIME-EFFICIENCY.md) · [M37 human-acceptable first cut](docs/M37-HUMAN-ACCEPTABLE-FIRST-CUT.md) · [model-first editor](docs/MODEL-FIRST-EDITOR.md) · [current product position](docs/PRODUCT-POSITION-M35-2026-08.md) · [transcription](docs/TRANSCRIPTION.md)
 
 ## Architecture
 

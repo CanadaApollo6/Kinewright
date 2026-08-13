@@ -2970,6 +2970,7 @@ dependencies = [
 name = "openreel-core"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "crossbeam-channel",
  "proptest",
  "schemars",

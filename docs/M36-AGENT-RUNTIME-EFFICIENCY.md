@@ -1,9 +1,9 @@
 # M36 - Agent runtime efficiency
 
 M36 gives OpenReel-owned agent sessions a small, task-shaped editing contract
-without removing the complete MCP API. It targets the repeated tool-schema cost
-and coordination risk created by advertising every editor capability on every
-model turn.
+while keeping the complete capability catalog internal. It targets the repeated
+tool-schema cost and coordination risk created by advertising every editor
+capability on every model turn.
 
 ## Outcome and requirements
 

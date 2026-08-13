@@ -238,6 +238,20 @@ The runtime contract, measured 99.1% initial schema reduction, safety boundary,
 and remaining live A/B proof gate are recorded in
 [M36 - Agent runtime efficiency](M36-AGENT-RUNTIME-EFFICIENCY.md).
 
+### M37 - Human-acceptable first-cut gate
+
+- one delivery-aware title layout shared by preview, export, and QA;
+- short-edge type scaling, deterministic wrapping, adaptive fit, and explicit
+  safe areas that reserve the built-in caption motion envelope;
+- a blocking delivery assertion for animated caption containment;
+- timeline and independently probed artifact audio-presence gates;
+- compact generated-caption state and counted bulk-plan outcomes;
+- an approval-gated rerun of the exact M35 finished-cut task.
+
+The implemented preparation, remaining human acceptance boundary, benchmark
+command, and rollback criteria are recorded in
+[M37 - Human-acceptable first cut](M37-HUMAN-ACCEPTABLE-FIRST-CUT.md).
+
 The published "footage in, finished cut out" benchmark should grow continuously
 through every milestone instead of waiting for a final automation pass. Its
 history is the scoreboard for both foundational work and Pillar B.

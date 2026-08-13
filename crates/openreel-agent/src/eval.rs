@@ -12,8 +12,8 @@ use std::{
 use openreel_core::{
     AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, AssetTranscript, CaptionMotion,
     ClipContent, Command, Core, DeliveryConformanceReport, DeliveryProfile, Document, Event,
-    Export, ExportCancellation, HarnessInfo, Operation, ParamValue, Playback, Query, QueryResult,
-    SessionConfig, SilenceSpan, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
+    Export, ExportCancellation, HarnessInfo, MediaKind, Operation, ParamValue, Playback, Query,
+    QueryResult, SessionConfig, SilenceSpan, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
     delivery_conformance, document_for_delivery_profile, map_source_range_to_project, qa_document,
 };
 use serde::{Deserialize, Serialize};
@@ -92,6 +92,7 @@ pub struct EvalDeliverableSpec {
     pub focus_y_percent: u8,
     pub proof_frames: u8,
     pub proof_cell_width: u32,
+    pub require_audio: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +153,10 @@ pub enum EvalAssertion {
         minimum_cues: usize,
         motion: CaptionMotion,
     },
+    CaptionSafeArea {
+        profile: DeliveryProfile,
+    },
+    AudioPresent,
     QaExportReady,
     UndoIntegrity,
 }
@@ -300,6 +305,7 @@ pub struct EvalDeliverableResult {
     pub exported_frames: Option<u64>,
     pub probed_resolution: Option<(u32, u32)>,
     pub probed_duration_frames: Option<TimeCode>,
+    pub probed_media_kind: Option<MediaKind>,
     pub proof_sample_frames: Vec<TimeCode>,
     pub machine_passed: bool,
     pub errors: Vec<String>,
@@ -720,6 +726,7 @@ fn export_and_probe(
     };
     result.probed_resolution = asset.resolution;
     result.probed_duration_frames = Some(asset.duration);
+    result.probed_media_kind = Some(asset.kind);
     if asset.resolution != Some(result.resolution) {
         result.errors.push(format!(
             "export probe raster {:?} does not match {:?}",
@@ -730,6 +737,12 @@ fn export_and_probe(
         result.errors.push(format!(
             "export probe duration {} differs from timeline {} by more than one frame",
             asset.duration.0, result.duration_frames.0
+        ));
+    }
+    if spec.require_audio && asset.kind != MediaKind::AudioVideo {
+        result.errors.push(format!(
+            "export probe found {:?}; finished cut requires video with an audio stream",
+            asset.kind
         ));
     }
 }
@@ -763,6 +776,7 @@ fn deliverable_shell(
         exported_frames: None,
         probed_resolution: None,
         probed_duration_frames: None,
+        probed_media_kind: None,
         proof_sample_frames: Vec::new(),
         machine_passed: false,
         errors: Vec::new(),
@@ -951,6 +965,7 @@ fn finish_deliverable(mut result: EvalDeliverableResult) -> EvalDeliverableResul
         && result
             .probed_duration_frames
             .is_some_and(|duration| duration.0.abs_diff(result.duration_frames.0) <= 1)
+        && result.probed_media_kind.is_some()
         && !result.proof_sample_frames.is_empty()
         && result.proof_path.is_file()
         && result.document_path.is_file();
@@ -986,13 +1001,14 @@ fn deliverable_assertions(result: &EvalDeliverableResult) -> Vec<AssertionResult
             "finished media artifact",
             result.machine_passed,
             format!(
-                "path={}, bytes={:?}, sha256={:?}, exported_frames={:?}, probed_resolution={:?}, probed_duration={:?}, errors={:?}",
+                "path={}, bytes={:?}, sha256={:?}, exported_frames={:?}, probed_resolution={:?}, probed_duration={:?}, probed_kind={:?}, errors={:?}",
                 result.output_path.display(),
                 result.output_bytes,
                 result.output_sha256,
                 result.exported_frames,
                 result.probed_resolution,
                 result.probed_duration_frames,
+                result.probed_media_kind,
                 result.errors
             ),
         ),
@@ -1427,6 +1443,8 @@ fn evaluate_assertion(
             minimum_cues,
             motion,
         } => evaluate_styled_captions(*minimum_cues, *motion, outcome),
+        EvalAssertion::CaptionSafeArea { profile } => evaluate_caption_safe_area(*profile, outcome),
+        EvalAssertion::AudioPresent => evaluate_audio_present(&outcome.final_document),
         EvalAssertion::QaExportReady => {
             let report = qa_document(&outcome.final_document);
             assertion_result(
@@ -1861,6 +1879,55 @@ fn evaluate_styled_captions(
             motion.as_str(),
             titles.len()
         ),
+    )
+}
+
+fn evaluate_caption_safe_area(profile: DeliveryProfile, outcome: &EvalOutcome) -> AssertionResult {
+    match delivery_conformance(&outcome.final_document, profile, 50, 50) {
+        Ok(report) => {
+            let violations = report
+                .issues
+                .iter()
+                .filter(|issue| {
+                    matches!(
+                        issue.code.as_str(),
+                        "caption_outside_safe_area" | "title_layout_unavailable"
+                    )
+                })
+                .count();
+            assertion_result(
+                "delivery caption safe area",
+                violations == 0,
+                format!(
+                    "profile={}, raster={}x{}, violations={violations}",
+                    profile.as_str(),
+                    report.resolution.0,
+                    report.resolution.1
+                ),
+            )
+        }
+        Err(error) => assertion_result(
+            "delivery caption safe area",
+            false,
+            format!(
+                "profile={} could not be materialized: {error}",
+                profile.as_str()
+            ),
+        ),
+    }
+}
+
+fn evaluate_audio_present(document: &Document) -> AssertionResult {
+    let audio_clips = document
+        .tracks
+        .iter()
+        .filter(|track| track.kind == openreel_core::TrackKind::Audio)
+        .map(|track| track.clips.len())
+        .sum::<usize>();
+    assertion_result(
+        "timeline audio present",
+        audio_clips > 0,
+        format!("populated audio clips={audio_clips}"),
     )
 }
 
@@ -2523,6 +2590,23 @@ mod tests {
     }
 
     #[test]
+    fn audio_presence_requires_a_populated_audio_track() {
+        let mut with_audio = document();
+        assert!(!evaluate_audio_present(&with_audio).passed);
+        with_audio.media_pool[0].kind = MediaKind::AudioVideo;
+        let mut audio_clip = with_audio.tracks[0].clips[0].clone();
+        audio_clip.id = ClipId(2);
+        with_audio.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![audio_clip],
+        });
+
+        assert!(evaluate_audio_present(&with_audio).passed);
+    }
+
+    #[test]
     fn scoreboard_and_jsonl_have_stable_machine_readable_shapes() {
         let definition = EvalDefinition {
             name: "fake-eval",
@@ -2587,6 +2671,7 @@ mod tests {
                 focus_y_percent: 50,
                 proof_frames: 9,
                 proof_cell_width: 240,
+                require_audio: true,
             },
             &document(),
             Path::new("artifacts/f1"),

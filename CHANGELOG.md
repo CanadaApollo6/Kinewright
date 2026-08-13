@@ -9,6 +9,13 @@ All notable changes to OpenReel are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Added
+- M37 finished-cut preparation: titles and captions now use one exact Inter-
+  measured layout across preview, export, delivery conformance, and QA. Type
+  scales from the short edge, wraps inside an 8% safe area, adapts only when it
+  cannot fit, and reserves the largest built-in caption motion. Unsafe animated
+  captions block delivery and the finished-cut benchmark now asserts vertical
+  containment plus timeline/export audio presence. Generated-caption state and
+  successful bulk-plan responses are compacted to reduce repeated model context
 - M36 compact agent runtime: OpenReel-owned Claude, Codex, Cursor, and eval
   sessions expose seven stable tools instead of the complete catalog,
   discover exact capability schemas on demand, validate revision-bound edit
