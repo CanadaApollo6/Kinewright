@@ -6,6 +6,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
+    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -14,7 +15,8 @@ use openreel_core::{
     ClipContent, Command, Core, DeliveryConformanceReport, DeliveryProfile, Document, Event,
     Export, ExportCancellation, HarnessInfo, MediaKind, Operation, ParamValue, Playback, Query,
     QueryResult, SessionConfig, SilenceSpan, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
-    delivery_conformance, document_for_delivery_profile, map_source_range_to_project, qa_document,
+    TranscriptStatus, delivery_conformance, document_for_delivery_profile,
+    map_source_range_to_project, qa_document,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -93,6 +95,8 @@ pub struct EvalDeliverableSpec {
     pub proof_frames: u8,
     pub proof_cell_width: u32,
     pub require_audio: bool,
+    pub expected_transcript_word_set: Option<&'static str>,
+    pub maximum_word_error_rate_basis_points: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +132,9 @@ pub enum EvalAssertion {
         word_set: String,
     },
     WordsAbsent {
+        word_set: String,
+    },
+    CaptionWordsExact {
         word_set: String,
     },
     NoSilenceAtLeast {
@@ -306,9 +313,23 @@ pub struct EvalDeliverableResult {
     pub probed_resolution: Option<(u32, u32)>,
     pub probed_duration_frames: Option<TimeCode>,
     pub probed_media_kind: Option<MediaKind>,
+    pub rendered_transcript_required: bool,
+    pub rendered_transcript: Option<RenderedTranscriptVerification>,
     pub proof_sample_frames: Vec<TimeCode>,
     pub machine_passed: bool,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderedTranscriptVerification {
+    pub expected_words: Vec<String>,
+    pub observed_words: Vec<String>,
+    pub missing_words: Vec<String>,
+    pub unexpected_words: Vec<String>,
+    pub edit_distance: usize,
+    pub word_error_rate_basis_points: u16,
+    pub maximum_word_error_rate_basis_points: u16,
+    pub passed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -543,6 +564,7 @@ pub fn run_eval_with_artifacts(
                     &final_document,
                     fixture.analysis.as_ref(),
                     fixture.exporter.as_ref(),
+                    &fixture.context,
                     directory,
                 )
             },
@@ -581,6 +603,7 @@ fn produce_deliverable(
     document: &Document,
     analysis: &dyn Analysis,
     exporter: &dyn Export,
+    context: &FixtureContext,
     directory: &Path,
 ) -> EvalDeliverableResult {
     let mut result = deliverable_shell(spec, document, directory);
@@ -659,9 +682,41 @@ fn produce_deliverable(
         .as_ref()
         .is_some_and(DeliveryConformanceReport::export_ready)
     {
-        export_and_probe(&mut result, spec, analysis, exporter, &delivery_document);
+        let expected_words = rendered_transcript_expectation(spec, context, &mut result);
+        export_and_probe(
+            &mut result,
+            spec,
+            analysis,
+            exporter,
+            &delivery_document,
+            expected_words,
+            spec.maximum_word_error_rate_basis_points,
+        );
     }
     finish_deliverable(result)
+}
+
+fn rendered_transcript_expectation<'a>(
+    spec: EvalDeliverableSpec,
+    context: &'a FixtureContext,
+    result: &mut EvalDeliverableResult,
+) -> Option<&'a [String]> {
+    let expected = spec
+        .expected_transcript_word_set
+        .and_then(|word_set| context.word_sets.get(word_set).map(Vec::as_slice));
+    if spec.expected_transcript_word_set.is_some() && expected.is_none() {
+        result.errors.push(format!(
+            "unknown rendered transcript word set {:?}",
+            spec.expected_transcript_word_set
+        ));
+    }
+    if spec.maximum_word_error_rate_basis_points > 10_000 {
+        result.errors.push(format!(
+            "maximum rendered transcript word error rate must be at most 10000 basis points, got {}",
+            spec.maximum_word_error_rate_basis_points
+        ));
+    }
+    expected
 }
 
 fn export_and_probe(
@@ -670,6 +725,8 @@ fn export_and_probe(
     analysis: &dyn Analysis,
     exporter: &dyn Export,
     document: &Arc<Document>,
+    expected_transcript_words: Option<&[String]>,
+    maximum_word_error_rate_basis_points: u16,
 ) {
     if result.output_path.exists() {
         result.errors.push(format!(
@@ -746,6 +803,81 @@ fn export_and_probe(
             asset.kind
         ));
     }
+    if let Some(expected_words) = expected_transcript_words {
+        match verify_rendered_transcript(
+            analysis,
+            &asset,
+            expected_words,
+            maximum_word_error_rate_basis_points,
+        ) {
+            Ok(verification) => {
+                if !verification.passed {
+                    result.errors.push(format!(
+                        "rendered transcript exceeds its authored-ground-truth error ceiling: wer_bp={}, maximum_bp={}, missing={:?}, unexpected={:?}",
+                        verification.word_error_rate_basis_points,
+                        verification.maximum_word_error_rate_basis_points,
+                        verification.missing_words,
+                        verification.unexpected_words
+                    ));
+                }
+                result.rendered_transcript = Some(verification);
+            }
+            Err(error) => result.errors.push(error),
+        }
+    }
+}
+
+fn verify_rendered_transcript(
+    analysis: &dyn Analysis,
+    asset: &openreel_core::MediaAsset,
+    expected_words: &[String],
+    maximum_word_error_rate_basis_points: u16,
+) -> Result<RenderedTranscriptVerification, String> {
+    analysis.request_transcription_with_language(asset.clone(), Some("en"));
+    let deadline = Instant::now() + Duration::from_mins(20);
+    let transcript = loop {
+        match analysis.transcript_status(asset) {
+            TranscriptStatus::Ready(transcript) => break transcript,
+            TranscriptStatus::NoSpeech => {
+                return Err("post-render transcription found no speech".to_owned());
+            }
+            TranscriptStatus::Cancelled => {
+                return Err("post-render transcription was cancelled".to_owned());
+            }
+            TranscriptStatus::Failed(error) => {
+                return Err(format!("post-render transcription failed: {error}"));
+            }
+            TranscriptStatus::NotRequested
+            | TranscriptStatus::Queued
+            | TranscriptStatus::Hashing
+            | TranscriptStatus::DownloadingModel { .. }
+            | TranscriptStatus::Transcribing { .. } => {}
+        }
+        if Instant::now() >= deadline {
+            return Err("post-render transcription timed out after twenty minutes".to_owned());
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    let expected_words = normalize_word_sequence(expected_words.iter().map(String::as_str));
+    if expected_words.is_empty() {
+        return Err("rendered transcript ground truth contains no words".to_owned());
+    }
+    let observed_words =
+        normalize_word_sequence(transcript.words.iter().map(|word| word.text.as_str()));
+    let (missing_words, unexpected_words) = word_sequence_delta(&expected_words, &observed_words);
+    let edit_distance = word_sequence_edit_distance(&expected_words, &observed_words);
+    let word_error_rate_basis_points =
+        word_error_rate_basis_points(edit_distance, expected_words.len());
+    Ok(RenderedTranscriptVerification {
+        passed: word_error_rate_basis_points <= maximum_word_error_rate_basis_points,
+        expected_words,
+        observed_words,
+        missing_words,
+        unexpected_words,
+        edit_distance,
+        word_error_rate_basis_points,
+        maximum_word_error_rate_basis_points,
+    })
 }
 
 fn failed_deliverable(
@@ -778,6 +910,8 @@ fn deliverable_shell(
         probed_resolution: None,
         probed_duration_frames: None,
         probed_media_kind: None,
+        rendered_transcript_required: spec.expected_transcript_word_set.is_some(),
+        rendered_transcript: None,
         proof_sample_frames: Vec::new(),
         machine_passed: false,
         errors: Vec::new(),
@@ -998,7 +1132,7 @@ fn deliverable_assertions(result: &EvalDeliverableResult) -> Vec<AssertionResult
         .conformance
         .as_ref()
         .is_some_and(DeliveryConformanceReport::export_ready);
-    vec![
+    let mut assertions = vec![
         assertion_result(
             "delivery conformance",
             conformance_ready,
@@ -1033,7 +1167,34 @@ fn deliverable_assertions(result: &EvalDeliverableResult) -> Vec<AssertionResult
                 result.errors
             ),
         ),
-    ]
+    ];
+    if result.rendered_transcript_required {
+        assertions.push(match &result.rendered_transcript {
+            Some(verification) => assertion_result(
+                "rendered dialogue accuracy",
+                verification.passed,
+                format!(
+                    "expected={:?}, observed={:?}, edit_distance={}, wer_bp={}, maximum_bp={}, missing={:?}, unexpected={:?}",
+                    verification.expected_words,
+                    verification.observed_words,
+                    verification.edit_distance,
+                    verification.word_error_rate_basis_points,
+                    verification.maximum_word_error_rate_basis_points,
+                    verification.missing_words,
+                    verification.unexpected_words
+                ),
+            ),
+            None => assertion_result(
+                "rendered dialogue accuracy",
+                false,
+                format!(
+                    "required post-render transcription is unavailable; errors={:?}",
+                    result.errors
+                ),
+            ),
+        });
+    }
+    assertions
 }
 
 fn render_proof_sheet(
@@ -1391,6 +1552,7 @@ fn evaluate_assertion(
         EvalAssertion::ExactSourceClips { clips } => evaluate_source_clips(clips, outcome),
         EvalAssertion::WordsRetained { word_set } => evaluate_word_set(word_set, outcome, true),
         EvalAssertion::WordsAbsent { word_set } => evaluate_word_set(word_set, outcome, false),
+        EvalAssertion::CaptionWordsExact { word_set } => evaluate_caption_words(word_set, outcome),
         EvalAssertion::NoSilenceAtLeast { source_frames } => {
             let remaining = outcome
                 .remaining_silences
@@ -1771,6 +1933,35 @@ fn evaluate_word_set(word_set: &str, outcome: &EvalOutcome, retained: bool) -> A
     )
 }
 
+fn evaluate_caption_words(word_set: &str, outcome: &EvalOutcome) -> AssertionResult {
+    let Some(expected) = outcome.context.word_sets.get(word_set) else {
+        return assertion_result(
+            "caption words exact",
+            false,
+            format!("unknown authored word set {word_set:?}"),
+        );
+    };
+    let mut captions = timeline_clips(&outcome.final_document)
+        .filter_map(|clip| match &clip.content {
+            ClipContent::Title(title) if title.caption_preset.is_some() => {
+                Some((clip.timeline_start, clip.id, title.text.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    captions.sort_by_key(|(start, clip, _)| (*start, *clip));
+    let observed = normalize_word_sequence(captions.iter().map(|(_, _, text)| *text));
+    let expected = normalize_word_sequence(expected.iter().map(String::as_str));
+    let (missing, unexpected) = word_sequence_delta(&expected, &observed);
+    assertion_result(
+        "caption words exact",
+        observed == expected,
+        format!(
+            "authored_set={word_set:?}, expected={expected:?}, observed={observed:?}, missing={missing:?}, unexpected={unexpected:?}"
+        ),
+    )
+}
+
 fn evaluate_scene_cuts(scene_set: &str, outcome: &EvalOutcome) -> AssertionResult {
     let Some(scenes) = outcome.context.scene_sets.get(scene_set) else {
         return assertion_result(
@@ -1999,6 +2190,79 @@ fn normalize_words<'a>(words: impl Iterator<Item = &'a str>) -> BTreeSet<String>
         })
         .filter(|word| !word.is_empty())
         .collect()
+}
+
+fn normalize_word_sequence<'a>(words: impl Iterator<Item = &'a str>) -> Vec<String> {
+    words
+        .flat_map(str::split_whitespace)
+        .map(|word| {
+            word.chars()
+                .filter(|character| character.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+fn word_sequence_delta(expected: &[String], observed: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut expected_counts = BTreeMap::<&str, usize>::new();
+    let mut observed_counts = BTreeMap::<&str, usize>::new();
+    for word in expected {
+        *expected_counts.entry(word).or_default() += 1;
+    }
+    for word in observed {
+        *observed_counts.entry(word).or_default() += 1;
+    }
+    let missing = expected_counts
+        .iter()
+        .flat_map(|(word, count)| {
+            let observed = observed_counts.get(word).copied().unwrap_or(0);
+            std::iter::repeat_n((*word).to_owned(), count.saturating_sub(observed))
+        })
+        .collect();
+    let unexpected = observed_counts
+        .iter()
+        .flat_map(|(word, count)| {
+            let expected = expected_counts.get(word).copied().unwrap_or(0);
+            std::iter::repeat_n((*word).to_owned(), count.saturating_sub(expected))
+        })
+        .collect();
+    (missing, unexpected)
+}
+
+fn word_sequence_edit_distance(expected: &[String], observed: &[String]) -> usize {
+    let mut previous = (0..=observed.len()).collect::<Vec<_>>();
+    let mut current = vec![0; observed.len() + 1];
+    for (expected_index, expected_word) in expected.iter().enumerate() {
+        current[0] = expected_index + 1;
+        for (observed_index, observed_word) in observed.iter().enumerate() {
+            let substitution = previous[observed_index]
+                .saturating_add(usize::from(expected_word != observed_word));
+            let deletion = previous[observed_index + 1].saturating_add(1);
+            let insertion = current[observed_index].saturating_add(1);
+            current[observed_index + 1] = substitution.min(deletion).min(insertion);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[observed.len()]
+}
+
+fn word_error_rate_basis_points(edit_distance: usize, expected_words: usize) -> u16 {
+    if expected_words == 0 {
+        return u16::MAX;
+    }
+    let numerator = u64::try_from(edit_distance)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(10_000);
+    let denominator = u64::try_from(expected_words).unwrap_or(u64::MAX);
+    u16::try_from(
+        numerator
+            .saturating_add(denominator.saturating_sub(1))
+            .checked_div(denominator)
+            .unwrap_or(u64::MAX),
+    )
+    .unwrap_or(u16::MAX)
 }
 
 fn query_document(core: &Core) -> Result<Arc<Document>, EvalError> {
@@ -2267,8 +2531,8 @@ mod tests {
 
     use crossbeam_channel::{Receiver, Sender, unbounded};
     use openreel_core::{
-        AgentError, AgentSession, AssetSilences, AuthenticationStatus, Clip, ClipId, HarnessId,
-        MediaAsset, MediaKind, Rational, SilenceSpan, Track, TrackId, TrackKind,
+        AgentError, AgentSession, AssetSilences, AuthenticationStatus, CaptionPreset, Clip, ClipId,
+        HarnessId, MediaAsset, MediaKind, Rational, SilenceSpan, Track, TrackId, TrackKind,
     };
 
     use super::*;
@@ -2628,6 +2892,96 @@ mod tests {
     }
 
     #[test]
+    fn exact_caption_words_catch_the_m37_material_error() {
+        let mut final_document = document();
+        final_document.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![Clip {
+                id: ClipId(2),
+                asset: AssetId::default(),
+                source_range: TimeCode::ZERO..TimeCode(30),
+                content: ClipContent::Title(CaptionPreset::Social.title("Map Steady the Exped")),
+                timeline_start: TimeCode::ZERO,
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
+            }],
+        });
+        let mut context = FixtureContext::default();
+        context.word_sets.insert(
+            "authored".to_owned(),
+            normalize_word_sequence(["River map steadies the expedition"].into_iter()),
+        );
+        let mut outcome = EvalOutcome {
+            final_document,
+            final_words: Vec::new(),
+            remaining_silences: Vec::new(),
+            remaining_scenes: Vec::new(),
+            context,
+            session: SessionMetrics::default(),
+            operations: Vec::new(),
+            undo_steps_to_original: None,
+        };
+
+        let rejected = evaluate_caption_words("authored", &outcome);
+        assert!(!rejected.passed);
+        assert!(rejected.detail.contains("expedition"));
+        let ClipContent::Title(title) = &mut outcome.final_document.tracks[1].clips[0].content
+        else {
+            panic!("caption fixture should be a title");
+        };
+        title.text = "River map steadies the expedition".to_owned();
+        assert!(evaluate_caption_words("authored", &outcome).passed);
+    }
+
+    #[test]
+    fn rendered_dialogue_wer_uses_ordered_edits_and_rounds_up() {
+        let expected = normalize_word_sequence(["river map steadies the expedition"].into_iter());
+        let one_substitution =
+            normalize_word_sequence(["river map steadies an expedition"].into_iter());
+        let reordered = normalize_word_sequence(["map river steadies the expedition"].into_iter());
+
+        assert_eq!(word_sequence_edit_distance(&expected, &one_substitution), 1);
+        assert_eq!(word_error_rate_basis_points(1, expected.len()), 2_000);
+        assert_eq!(word_sequence_edit_distance(&expected, &reordered), 2);
+        assert_eq!(word_error_rate_basis_points(1, 3), 3_334);
+    }
+
+    #[test]
+    fn required_rendered_transcript_has_an_explicit_failure_assertion() {
+        let mut deliverable = deliverable_shell(
+            EvalDeliverableSpec {
+                profile: DeliveryProfile::VerticalShort,
+                focus_x_percent: 50,
+                focus_y_percent: 50,
+                proof_frames: 9,
+                proof_cell_width: 240,
+                require_audio: true,
+                expected_transcript_word_set: Some("authored"),
+                maximum_word_error_rate_basis_points: 1_500,
+            },
+            &document(),
+            Path::new("artifacts/f2"),
+        );
+        deliverable
+            .errors
+            .push("post-render transcription failed deliberately".to_owned());
+        let assertions = deliverable_assertions(&deliverable);
+        let rendered = assertions
+            .iter()
+            .find(|assertion| assertion.assertion == "rendered dialogue accuracy")
+            .expect("required rendered transcript assertion");
+        assert!(!rendered.passed);
+        assert!(rendered.detail.contains("unavailable"));
+    }
+
+    #[test]
     fn scoreboard_and_jsonl_have_stable_machine_readable_shapes() {
         let definition = EvalDefinition {
             name: "fake-eval",
@@ -2693,6 +3047,8 @@ mod tests {
                 proof_frames: 9,
                 proof_cell_width: 240,
                 require_audio: true,
+                expected_transcript_word_set: None,
+                maximum_word_error_rate_basis_points: 0,
             },
             &document(),
             Path::new("artifacts/f1"),

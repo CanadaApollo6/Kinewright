@@ -43,6 +43,28 @@ first passing v2 sample. The SHA-bound human review rejected it with a 2.25/5
 mean after finding retained audible fillers, inaccurate captions, awkward cuts,
 unclear story assembly, and no visual narrative in the synthetic fixture.
 
+The editorial-truth contract lives under
+[`benchmarks/auto-edit/v3`](../benchmarks/auto-edit/v3/README.md). It replaces
+the rejected fixture with one coherent five-take story and scores take order,
+recognized filler removal, exact authored captions, and a fresh transcription
+of the finished MP4. The rendered dialogue must remain within a 15% ordered
+word error rate. Run three independent samples with:
+
+```powershell
+& .\scripts\setup-ffmpeg.ps1
+$env:OPENREEL_EVAL = '1'
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --suite editorial-cut-v3 `
+  --harness codex `
+  --only f2 `
+  --samples 3
+```
+
+V3 has no published baseline yet. A baseline is not machine green alone: all
+three samples must pass the machine contract, then a person must accept at
+least two SHA-bound outputs with an overall mean of at least 3.5 and no review
+dimension below 3.0.
+
 ## Seed suite
 
 | Eval | Rationale | USD ceiling |

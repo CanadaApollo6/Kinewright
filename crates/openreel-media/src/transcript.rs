@@ -45,6 +45,7 @@ pub(crate) struct TranscriptService {
 
 struct TranscriptJob {
     asset: MediaAsset,
+    language: Option<String>,
     cancellation: ExportCancellation,
 }
 
@@ -64,7 +65,7 @@ impl TranscriptService {
         })
     }
 
-    pub(crate) fn request(&self, asset: MediaAsset) {
+    pub(crate) fn request(&self, asset: MediaAsset, language: Option<String>) {
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
             self.update(&asset.path, TranscriptStatus::NoSpeech);
             return;
@@ -92,6 +93,7 @@ impl TranscriptService {
             .jobs
             .send(TranscriptJob {
                 asset,
+                language,
                 cancellation: cancellation.clone(),
             })
             .is_err()
@@ -156,7 +158,9 @@ impl TranscriptWorker {
     }
 
     fn handle(&mut self, job: &TranscriptJob) -> bool {
-        if let Err(error) = self.transcribe_asset(&job.asset, &job.cancellation) {
+        if let Err(error) =
+            self.transcribe_asset(&job.asset, job.language.as_deref(), &job.cancellation)
+        {
             let status = if error == MediaError::Cancelled {
                 TranscriptStatus::Cancelled
             } else {
@@ -172,6 +176,7 @@ impl TranscriptWorker {
     fn transcribe_asset(
         &mut self,
         asset: &MediaAsset,
+        language: Option<&str>,
         cancellation: &ExportCancellation,
     ) -> Result<(), MediaError> {
         cancelled(cancellation)?;
@@ -187,16 +192,7 @@ impl TranscriptWorker {
         if self.model.is_none() {
             let model_path = ensure_model(&self.data_dir, &asset.path, &self.states, cancellation)?;
             cancelled(cancellation)?;
-            let model_path = model_path.to_string_lossy();
-            self.model = Some(
-                WhisperContext::new_with_params(
-                    model_path.as_ref(),
-                    WhisperContextParameters::default(),
-                )
-                .map_err(|error| {
-                    MediaError::Backend(format!("could not load Whisper model: {error}"))
-                })?,
-            );
+            self.model = Some(load_whisper_context(&model_path)?);
         }
 
         self.update(
@@ -226,6 +222,7 @@ impl TranscriptWorker {
             content_sha256,
             self.states.clone(),
             cancellation,
+            language,
         )?;
         cancelled(cancellation)?;
         self.store.save(&transcript)?;
@@ -254,6 +251,7 @@ fn run_whisper(
     content_sha256: String,
     states: StatusReporter<TranscriptStatus>,
     cancellation: &ExportCancellation,
+    language: Option<&str>,
 ) -> Result<AssetTranscript, MediaError> {
     let mut state = context
         .create_state()
@@ -267,7 +265,7 @@ fn run_whisper(
         .min(8);
     params.set_n_threads(i32::try_from(threads).unwrap_or(4));
     params.set_translate(false);
-    params.set_language(None);
+    params.set_language(language);
     params.set_print_special(false);
     params.set_print_progress(false);
     params.set_print_realtime(false);
@@ -289,8 +287,10 @@ fn run_whisper(
             },
         );
     });
-    let abort_cancellation = cancellation.clone();
-    params.set_abort_callback_safe(move || abort_cancellation.is_cancelled());
+    // whisper-rs 0.16's safe abort wrapper instantiates its C trampoline with
+    // a pointer type different from the erased closure it stores. On Windows
+    // this spuriously aborts healthy graphs. Cancellation remains checked
+    // immediately before and after the synchronous inference boundary.
     if let Err(error) = state.full(params, samples) {
         return if cancellation.is_cancelled() {
             Err(MediaError::Cancelled)
@@ -313,6 +313,12 @@ fn run_whisper(
         source_fps: asset.fps,
         words,
     })
+}
+
+fn load_whisper_context(model_path: &Path) -> Result<WhisperContext, MediaError> {
+    let model_path = model_path.to_string_lossy();
+    WhisperContext::new_with_params(model_path.as_ref(), WhisperContextParameters::default())
+        .map_err(|error| MediaError::Backend(format!("could not load Whisper model: {error}")))
 }
 
 fn extract_words(

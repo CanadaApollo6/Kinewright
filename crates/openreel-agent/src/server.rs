@@ -18,7 +18,7 @@ use openreel_core::{
     Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AutomationCurve, BeatStatus,
     CaptionCue, CaptionMotion, CaptionPreset, ClipContent, ClipId, Command, Core, DeliveryAspect,
     DeliveryProfile, DeliveryVariant, Document, EffectId, Event, Export, ExportCancellation,
-    Keyframe, KeyframeInterpolation, MediaAsset, MediaKind, Operation, Playback, Query,
+    Keyframe, KeyframeInterpolation, MediaAsset, MediaKind, Operation, ParamValue, Playback, Query,
     QueryResult, SceneStatus, SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings,
     SyncGroupId, ThreePointMode, TimeCode, TimelineBeat, TimelineBeatAnalysisState,
     TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TrackId,
@@ -687,6 +687,15 @@ impl OpenReelMcp {
                 self.analysis_status(args.asset_id)
             }
             "get_caption_presets" => Ok(Self::caption_presets()),
+            "get_captions" => {
+                let args: CaptionListArgs = decode_args("get_captions", arguments)?;
+                self.captions(args)
+            }
+            "plan_caption_corrections" => {
+                let args: CaptionCorrectionPlanArgs =
+                    decode_args("plan_caption_corrections", arguments)?;
+                self.plan_caption_corrections(args)
+            }
             "add_styled_captions" => {
                 let args: StyledCaptionsArgs = decode_args("add_styled_captions", arguments)?;
                 self.add_styled_captions(args.expected_revision, args.preset, args.motion)
@@ -952,6 +961,161 @@ impl OpenReelMcp {
             serde_json::to_string_pretty(&presets)
                 .unwrap_or_else(|error| format!("could not serialize presets: {error}")),
         )
+    }
+
+    fn captions(&self, args: CaptionListArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let range = args.range.map(|range| range.start..range.end);
+        if let Some(range) = &range
+            && (range.start < TimeCode::ZERO
+                || range.end <= range.start
+                || range.end > document.duration)
+        {
+            return Ok(error_text(format!(
+                "caption range {}..{} is outside project range 0..{}",
+                range.start.0, range.end.0, document.duration.0
+            )));
+        }
+        let offset = args.offset.unwrap_or(0);
+        let limit = args.limit.unwrap_or(50).clamp(1, 200);
+        let mut captions = Vec::new();
+        for track in &document.tracks {
+            for clip in &track.clips {
+                let ClipContent::Title(title) = &clip.content else {
+                    continue;
+                };
+                let Some(preset) = title.caption_preset else {
+                    continue;
+                };
+                let Ok(duration) = document.clip_duration(clip) else {
+                    continue;
+                };
+                let Some(end) = clip.timeline_start.checked_add(duration) else {
+                    continue;
+                };
+                if range.as_ref().is_some_and(|requested| {
+                    end <= requested.start || clip.timeline_start >= requested.end
+                }) {
+                    continue;
+                }
+                captions.push((track.id, clip, title, preset, end));
+            }
+        }
+        captions.sort_by_key(|(_, clip, _, _, _)| (clip.timeline_start, clip.id));
+        let total = captions.len();
+        let page = captions
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(track, clip, title, preset, end)| {
+                serde_json::json!({
+                    "clip_id": clip.id,
+                    "track_id": track,
+                    "start_frame": clip.timeline_start,
+                    "end_frame": end,
+                    "text": title.text,
+                    "preset": preset,
+                })
+            })
+            .collect::<Vec<_>>();
+        let next_offset = (offset + page.len() < total).then_some(offset + page.len());
+        let mut rendered = format!(
+            "timeline_revision={revision} captions_total={total} offset={offset} returned={} next_offset={next_offset:?}",
+            page.len()
+        );
+        for caption in &page {
+            let _ = write!(
+                rendered,
+                "\nclip={} track={} range={}..{} preset={} text={:?}",
+                caption["clip_id"],
+                caption["track_id"],
+                caption["start_frame"],
+                caption["end_frame"],
+                caption["preset"].as_str().unwrap_or("unknown"),
+                caption["text"].as_str().unwrap_or_default(),
+            );
+        }
+        Ok(success_structured(
+            rendered,
+            serde_json::json!({
+                "timeline_revision": revision,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "next_offset": next_offset,
+                "captions": page,
+            }),
+        ))
+    }
+
+    fn plan_caption_corrections(
+        &self,
+        args: CaptionCorrectionPlanArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        if args.expected_revision != revision {
+            return Ok(revision_conflict_text(args.expected_revision, revision));
+        }
+        if args.corrections.is_empty() || args.corrections.len() > 100 {
+            return Ok(error_text(
+                "caption correction plan requires between 1 and 100 corrections",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        let mut operations = Vec::with_capacity(args.corrections.len());
+        for correction in args.corrections {
+            if !seen.insert(correction.clip_id) {
+                return Ok(error_text(format!(
+                    "caption clip {} appears more than once",
+                    correction.clip_id
+                )));
+            }
+            if correction.text.trim().is_empty() {
+                return Ok(error_text(format!(
+                    "caption clip {} replacement text is empty",
+                    correction.clip_id
+                )));
+            }
+            let Some(clip) = document.clip(correction.clip_id) else {
+                return Ok(error_text(format!(
+                    "caption clip {} does not exist",
+                    correction.clip_id
+                )));
+            };
+            if !matches!(
+                &clip.content,
+                ClipContent::Title(title) if title.caption_preset.is_some()
+            ) {
+                return Ok(error_text(format!(
+                    "clip {} is not a generated caption",
+                    correction.clip_id
+                )));
+            }
+            operations.push(Operation::SetTitleParam {
+                clip: correction.clip_id,
+                name: "text".to_owned(),
+                value: ParamValue::Text(correction.text),
+            });
+        }
+        let mut candidate = document.as_ref().clone();
+        if let Err(error) = apply_batch(&mut candidate, &operations) {
+            return Ok(error_text(format!(
+                "caption corrections are invalid: {error}"
+            )));
+        }
+        Ok(success_structured(
+            format!(
+                "planned {} caption correction(s); pass prepare_edit_plan through unchanged",
+                operations.len()
+            ),
+            serde_json::json!({
+                "timeline_revision": revision,
+                "prepare_edit_plan": {
+                    "expected_revision": revision,
+                    "operations": operations,
+                },
+            }),
+        ))
     }
 
     fn add_styled_captions(
@@ -2385,6 +2549,10 @@ impl OpenReelMcp {
             return Ok(error_text("minimum_silence_source_frames must be positive"));
         }
         let remove_fillers = args.remove_fillers.unwrap_or(true);
+        let (retained_pause, filler_padding) = match dialogue_pacing_settings(args) {
+            Ok(settings) => settings,
+            Err(error) => return Ok(error_text(error)),
+        };
         let mut at = args.timeline_start.unwrap_or(TimeCode::ZERO);
         if at < TimeCode::ZERO {
             return Ok(error_text("timeline_start must be non-negative"));
@@ -2399,8 +2567,15 @@ impl OpenReelMcp {
                 Ok(analysis) => analysis,
                 Err(result) => return Ok(result),
             };
-            let ranges =
-                dialogue_keep_ranges(&asset, &transcript, &silences, minimum, remove_fillers);
+            let ranges = dialogue_keep_ranges(
+                &asset,
+                &transcript,
+                &silences,
+                minimum,
+                remove_fillers,
+                retained_pause,
+                filler_padding,
+            );
             if ranges.is_empty() {
                 return Ok(error_text(format!(
                     "asset {asset_id} has no source frames left after dialogue cleanup"
@@ -2433,6 +2608,8 @@ impl OpenReelMcp {
         }
         let structured = serde_json::json!({
             "timeline_revision": revision,
+            "retained_pause_source_frames": retained_pause,
+            "filler_padding_source_frames": filler_padding,
             "selections": selections,
             "resulting_range": {
                 "start": args.timeline_start.unwrap_or(TimeCode::ZERO),
@@ -3145,6 +3322,12 @@ struct DialogueAssemblyPlanArgs {
     /// Remove conservative recognized hesitation words such as um and uh. Defaults to true.
     #[serde(default)]
     remove_fillers: Option<bool>,
+    /// Total detector silence retained across each internal cut for natural pacing. Defaults to zero.
+    #[serde(default)]
+    retained_pause_source_frames: Option<TimeCode>,
+    /// Extra source frames removed on each side of a recognized filler boundary. Defaults to zero.
+    #[serde(default)]
+    filler_padding_source_frames: Option<TimeCode>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -3224,6 +3407,35 @@ struct StyledCaptionsArgs {
     /// Renderer-native motion composition. Defaults to none.
     #[serde(default)]
     motion: CaptionMotion,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CaptionListArgs {
+    /// Optional half-open project-frame range. Omit for every generated caption.
+    #[serde(default)]
+    range: Option<TranscriptRangeArgs>,
+    /// Zero-based caption offset. Defaults to zero.
+    #[serde(default)]
+    offset: Option<usize>,
+    /// Page size. Defaults to 50 and is capped at 200.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CaptionCorrection {
+    /// Generated caption clip id returned by `get_captions`.
+    clip_id: ClipId,
+    /// Complete replacement caption text.
+    text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CaptionCorrectionPlanArgs {
+    /// Exact revision returned by `get_captions`.
+    expected_revision: TimelineRevision,
+    /// Atomic caption text replacements. Clip ids must be unique.
+    corrections: Vec<CaptionCorrection>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -3426,7 +3638,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "plan_dialogue_assembly",
-            "Build an exact, gapless AddClip plan from ordered dialogue assets using ready transcripts and raw silence analysis. It safely removes every qualifying detector span and optional conservative filler words without making the model calculate source boundaries.",
+            "Build an exact, gapless AddClip plan from ordered dialogue assets using ready transcripts and raw silence analysis. It removes qualifying detector spans and optional conservative filler words without model-side frame arithmetic, with explicit natural-pause retention and filler-boundary padding controls.",
             schema_object::<DialogueAssemblyPlanArgs>(),
         )
         .with_annotations(read_only()),
@@ -3458,6 +3670,18 @@ fn inspector_tools() -> Vec<Tool> {
             "get_caption_presets",
             "List the stable clean, social, and minimal caption compositions as resolved title fields.",
             schema_object::<EmptyArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_captions",
+            "Return generated caption text, clip ids, presets, and exact project ranges in a bounded page so transcription can be reviewed without expanding routine timeline state.",
+            schema_object::<CaptionListArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "plan_caption_corrections",
+            "Build one validated revision-bound SetTitleParam plan for up to 100 generated-caption text corrections. The timeline is unchanged until the returned plan is prepared and committed.",
+            schema_object::<CaptionCorrectionPlanArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -3661,12 +3885,27 @@ fn clamp_caption_cues_to_duration(cues: &mut Vec<CaptionCue>, duration: TimeCode
     cues.retain(|cue| cue.start < duration && cue.end > cue.start);
 }
 
+fn dialogue_pacing_settings(
+    args: &DialogueAssemblyPlanArgs,
+) -> Result<(TimeCode, TimeCode), &'static str> {
+    let retained = args.retained_pause_source_frames.unwrap_or(TimeCode::ZERO);
+    let padding = args.filler_padding_source_frames.unwrap_or(TimeCode::ZERO);
+    if retained < TimeCode::ZERO || padding < TimeCode::ZERO {
+        return Err(
+            "retained_pause_source_frames and filler_padding_source_frames must be non-negative",
+        );
+    }
+    Ok((retained, padding))
+}
+
 fn dialogue_keep_ranges(
     asset: &MediaAsset,
     transcript: &AssetTranscript,
     silences: &AssetSilences,
     minimum_silence_source_frames: TimeCode,
     remove_fillers: bool,
+    retained_pause_source_frames: TimeCode,
+    filler_padding_source_frames: TimeCode,
 ) -> Vec<std::ops::Range<TimeCode>> {
     let mut cuts = silences
         .spans
@@ -3681,7 +3920,13 @@ fn dialogue_keep_ranges(
                 Some(&transcript.words),
             )
         })
-        .map(|span| span.source_start..span.source_end)
+        .filter_map(|span| {
+            let before = retained_pause_source_frames.0 / 2;
+            let after = retained_pause_source_frames.0.saturating_sub(before);
+            let start = TimeCode(span.source_start.0.saturating_add(before));
+            let end = TimeCode(span.source_end.0.saturating_sub(after));
+            (end > start).then_some(start..end)
+        })
         .collect::<Vec<_>>();
     if remove_fillers {
         cuts.extend(
@@ -3689,7 +3934,18 @@ fn dialogue_keep_ranges(
                 .words
                 .iter()
                 .filter(|word| is_filler_word(&word.text))
-                .map(|word| word.source_start..word.source_end),
+                .map(|word| {
+                    TimeCode(
+                        word.source_start
+                            .0
+                            .saturating_sub(filler_padding_source_frames.0),
+                    )
+                        ..TimeCode(
+                            word.source_end
+                                .0
+                                .saturating_add(filler_padding_source_frames.0),
+                        )
+                }),
         );
     }
     for cut in &mut cuts {
@@ -4829,6 +5085,8 @@ mod tests {
             .collect::<Vec<_>>();
         for name in [
             "get_caption_presets",
+            "get_captions",
+            "plan_caption_corrections",
             "add_styled_captions",
             "get_qa_report",
             "get_delivery_variants",
@@ -4856,6 +5114,100 @@ mod tests {
             result.structured_content.unwrap()["delivery_variant"]["aspect"],
             "vertical"
         );
+    }
+
+    #[test]
+    fn caption_inspection_and_correction_planning_are_compact_and_revision_bound() {
+        let (core, playback, analysis) = fixture();
+        let operations = vec![
+            Operation::AddTrack {
+                track: Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: Vec::new(),
+                },
+            },
+            Operation::AddTitle {
+                track: TrackId(2),
+                at: TimeCode::ZERO,
+                duration: TimeCode(30),
+                title: CaptionPreset::Social.title("Map Steady the Exped"),
+            },
+        ];
+        let event = core
+            .request(Command::DoBatchIfRevision {
+                expected: TimelineRevision::default(),
+                operations,
+            })
+            .unwrap();
+        let Event::DocumentChanged { revision, .. } = event else {
+            panic!("caption fixture should apply");
+        };
+        let service = OpenReelMcp::new(core, playback, analysis, ConfirmationBroker::default());
+
+        let page = service
+            .captions(CaptionListArgs {
+                range: None,
+                offset: None,
+                limit: Some(1),
+            })
+            .unwrap();
+        assert_eq!(page.is_error, Some(false));
+        let page = page.structured_content.unwrap();
+        assert_eq!(page["total"], 1);
+        assert_eq!(page["captions"][0]["clip_id"], 2);
+        assert_eq!(page["captions"][0]["text"], "Map Steady the Exped");
+
+        let plan = service
+            .plan_caption_corrections(CaptionCorrectionPlanArgs {
+                expected_revision: revision,
+                corrections: vec![CaptionCorrection {
+                    clip_id: ClipId(2),
+                    text: "River map steadies the expedition".to_owned(),
+                }],
+            })
+            .unwrap();
+        assert_eq!(plan.is_error, Some(false));
+        let plan = plan.structured_content.unwrap();
+        assert_eq!(plan["timeline_revision"], revision.0);
+        assert_eq!(
+            plan["prepare_edit_plan"]["operations"][0]["SetTitleParam"]["value"],
+            "River map steadies the expedition"
+        );
+
+        let unchanged = service
+            .captions(CaptionListArgs {
+                range: None,
+                offset: None,
+                limit: None,
+            })
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(unchanged["captions"][0]["text"], "Map Steady the Exped");
+
+        let stale = service
+            .plan_caption_corrections(CaptionCorrectionPlanArgs {
+                expected_revision: TimelineRevision::default(),
+                corrections: vec![CaptionCorrection {
+                    clip_id: ClipId(2),
+                    text: "River map steadies the expedition".to_owned(),
+                }],
+            })
+            .unwrap();
+        assert_eq!(stale.is_error, Some(true));
+
+        let media_clip = service
+            .plan_caption_corrections(CaptionCorrectionPlanArgs {
+                expected_revision: revision,
+                corrections: vec![CaptionCorrection {
+                    clip_id: ClipId(1),
+                    text: "Not a caption".to_owned(),
+                }],
+            })
+            .unwrap();
+        assert_eq!(media_clip.is_error, Some(true));
     }
 
     #[test]
@@ -5529,11 +5881,73 @@ mod tests {
         };
 
         assert_eq!(
-            dialogue_keep_ranges(&asset, &transcript, &silences, TimeCode(20), true),
+            dialogue_keep_ranges(
+                &asset,
+                &transcript,
+                &silences,
+                TimeCode(20),
+                true,
+                TimeCode::ZERO,
+                TimeCode::ZERO,
+            ),
             vec![
                 TimeCode(0)..TimeCode(20),
                 TimeCode(70)..TimeCode(75),
                 TimeCode(82)..TimeCode(120),
+            ]
+        );
+    }
+
+    #[test]
+    fn dialogue_keep_ranges_retain_pause_and_pad_fillers() {
+        let fps = Rational::new(30, 1).unwrap();
+        let asset = MediaAsset {
+            id: AssetId(1),
+            path: "dialogue.mp4".into(),
+            name: "dialogue".to_owned(),
+            duration: TimeCode(120),
+            fps,
+            kind: MediaKind::AudioVideo,
+            resolution: Some((320, 180)),
+        };
+        let transcript = AssetTranscript {
+            asset: asset.id,
+            content_sha256: "fixture".to_owned(),
+            source_fps: fps,
+            words: vec![TranscriptWord {
+                text: "Um".to_owned(),
+                source_start: TimeCode(75),
+                source_end: TimeCode(82),
+                speaker: None,
+            }],
+        };
+        let silences = AssetSilences {
+            asset: asset.id,
+            content_sha256: "fixture".to_owned(),
+            source_fps: fps,
+            source_frames: asset.duration,
+            threshold_dbfs_hundredths: -4_000,
+            window_milliseconds: 20,
+            spans: vec![SilenceSpan {
+                source_start: TimeCode(20),
+                source_end: TimeCode(70),
+            }],
+        };
+
+        assert_eq!(
+            dialogue_keep_ranges(
+                &asset,
+                &transcript,
+                &silences,
+                TimeCode(20),
+                true,
+                TimeCode(6),
+                TimeCode(3),
+            ),
+            vec![
+                TimeCode(0)..TimeCode(23),
+                TimeCode(67)..TimeCode(72),
+                TimeCode(85)..TimeCode(120),
             ]
         );
     }

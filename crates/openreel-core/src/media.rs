@@ -458,6 +458,11 @@ pub trait Analysis: Send + Sync {
     /// Queue derived speech recognition without blocking the caller. Repeated
     /// requests for the same asset are coalesced by the implementation.
     fn request_transcription(&self, asset: MediaAsset);
+    /// Queue speech recognition with an optional ISO 639-1 language hint.
+    /// Backends that do not support hints fall back to ordinary transcription.
+    fn request_transcription_with_language(&self, asset: MediaAsset, _language: Option<&str>) {
+        self.request_transcription(asset);
+    }
     /// Return the latest state for an asset's derived transcript.
     ///
     /// Takes the full asset, not just its id: asset ids are per-document, so

@@ -30,6 +30,7 @@ use openreel_media::{
     FfmpegMediaEngine,
     test_support::{GeneratedMedia, SpeechClip, joined_words, normalized_words, test_engine},
 };
+use serde::Deserialize;
 
 const FPS: u32 = 30;
 const LONG_SILENCE_FRAMES: i64 = 20;
@@ -79,7 +80,7 @@ fn run_subscription_suite(options: &Options) -> Result<bool, EvalError> {
     let (benchmark_id, definitions) = eval_suite(&options.suite)?;
     let definitions = filter_definitions(definitions, options.only.as_deref())?;
     let working_directory = env::current_dir().ok();
-    let packaged_run = benchmark_id == "openreel-finished-cut-v2";
+    let packaged_run = is_packaged_benchmark(benchmark_id);
     let run_id = run_identifier(&environment);
     let run_directory = Path::new("target/evals").join(&run_id);
     let total_runs = definitions.len() * options.samples as usize;
@@ -157,10 +158,18 @@ fn eval_suite(suite: &str) -> Result<(&'static str, Vec<EvalDefinition>), EvalEr
     match suite {
         "auto-edit-v1" | "v1" => Ok(("openreel-auto-edit-v1", seed_suite())),
         "finished-cut-v2" | "v2" => Ok(("openreel-finished-cut-v2", finished_cut_suite())),
+        "editorial-cut-v3" | "v3" => Ok(("openreel-editorial-cut-v3", editorial_cut_suite())),
         other => Err(EvalError::Agent(format!(
-            "unknown suite {other:?}; expected auto-edit-v1 or finished-cut-v2"
+            "unknown suite {other:?}; expected auto-edit-v1, finished-cut-v2, or editorial-cut-v3"
         ))),
     }
+}
+
+fn is_packaged_benchmark(benchmark_id: &str) -> bool {
+    matches!(
+        benchmark_id,
+        "openreel-finished-cut-v2" | "openreel-editorial-cut-v3"
+    )
 }
 
 fn filter_definitions(
@@ -195,7 +204,7 @@ fn persist_results(
 ) -> Result<PathBuf, EvalError> {
     let output_root = Path::new("target/evals");
     fs::create_dir_all(output_root).map_err(|error| EvalError::Output(error.to_string()))?;
-    let packaged_run = benchmark_id == "openreel-finished-cut-v2";
+    let packaged_run = is_packaged_benchmark(benchmark_id);
     let output_path = if packaged_run {
         fs::create_dir_all(run_directory).map_err(|error| EvalError::Output(error.to_string()))?;
         run_directory.join("results.jsonl")
@@ -312,7 +321,7 @@ impl Options {
                 }
                 "-h" | "--help" => {
                     println!(
-                        "Usage: OPENREEL_EVAL=1 cargo run -p openreel-agent --bin openreel-eval -- [--suite auto-edit-v1|finished-cut-v2] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p openreel-agent --bin openreel-eval -- --score-review PATH"
+                        "Usage: OPENREEL_EVAL=1 cargo run -p openreel-agent --bin openreel-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p openreel-agent --bin openreel-eval -- --score-review PATH"
                     );
                     return Err(EvalError::Agent("help requested".to_owned()));
                 }
@@ -715,6 +724,89 @@ fn finished_cut_suite() -> Vec<EvalDefinition> {
             proof_frames: 9,
             proof_cell_width: 240,
             require_audio: true,
+            expected_transcript_word_set: None,
+            maximum_word_error_rate_basis_points: 0,
+        }),
+    }]
+}
+
+fn editorial_cut_suite() -> Vec<EvalDefinition> {
+    vec![EvalDefinition {
+        name: "f2 coherent neighborhood garden story",
+        rationale: "Measures coherent take selection, natural dialogue cleanup, exact authored captions, independent post-render speech verification, visual review, technical QA, and a real vertical delivery artifact.",
+        fixture_builder: fixture_editorial_story,
+        prompts: &[
+            "Create a finished vertical social story about a neighborhood garden from the five takes. Choose the three takes that form this factual arc: the empty lot collected weeds and rainwater; neighbors turned it into food-growing space by building raised beds and planting tomatoes, herbs, and peppers; the Saturday market now supplies fresh produce to dozens of local families. Reject every flub or factually wrong alternate. Use plan_dialogue_assembly to preserve the clean spoken content in story order, remove all audible um sounds with 3 source frames of filler padding, remove raw dead air at least 20 source frames long, and retain 6 source frames of natural pause across every silence cut. Keep the real-time A/V source dialogue audible without duplicating it onto an audio track. Add social captions with pop motion. The exact intended caption wording, excluding fillers, is: 'Last spring this empty lot collected weeds and rainwater. Neighbors decided it could feed families instead. Over three weekends volunteers built raised beds. Then they planted tomatoes herbs and peppers. Now the Saturday market supplies fresh produce to dozens of local families.' Inspect every generated cue with get_captions and use plan_caption_corrections plus prepare_edit_plan and commit_edit_plan if any cue differs from those intended words. Confirm zero cuttable timeline silences remain, inspect a 9:16 delivery storyboard, run technical QA, and inspect vertical_short delivery conformance at a centered 50/50 focal point. Do not queue export; the benchmark renders and independently transcribes the exact verified snapshot. Keep working until every inspector confirms the brief.",
+        ],
+        assertions: vec![
+            EvalAssertion::TimelineNonEmpty,
+            EvalAssertion::AssetOrder {
+                aliases: aliases(&["take-01", "take-03", "take-04"]),
+                collapse_adjacent: true,
+            },
+            EvalAssertion::AssetAbsent {
+                alias: "take-02".to_owned(),
+            },
+            EvalAssertion::AssetAbsent {
+                alias: "take-05".to_owned(),
+            },
+            EvalAssertion::MediaGapless,
+            EvalAssertion::WordsRetained {
+                word_set: "take-01-recognized-content".to_owned(),
+            },
+            EvalAssertion::WordsRetained {
+                word_set: "take-03-recognized-content".to_owned(),
+            },
+            EvalAssertion::WordsRetained {
+                word_set: "take-04-recognized-content".to_owned(),
+            },
+            EvalAssertion::WordsAbsent {
+                word_set: "selected-recognized-fillers".to_owned(),
+            },
+            EvalAssertion::WordsAbsent {
+                word_set: "authored-exclusions".to_owned(),
+            },
+            EvalAssertion::NoSilenceAtLeast {
+                source_frames: TimeCode(LONG_SILENCE_FRAMES),
+            },
+            EvalAssertion::DurationBounds {
+                bounds: "editorial-cut".to_owned(),
+            },
+            EvalAssertion::StyledCaptions {
+                minimum_cues: 5,
+                motion: CaptionMotion::Pop,
+            },
+            EvalAssertion::CaptionWordsExact {
+                word_set: "authored-dialogue".to_owned(),
+            },
+            EvalAssertion::CaptionSafeArea {
+                profile: DeliveryProfile::VerticalShort,
+            },
+            EvalAssertion::AudioPresent,
+            EvalAssertion::QaExportReady,
+            required_all(&[
+                "get_timeline_state",
+                "plan_dialogue_assembly",
+                "add_styled_captions",
+                "get_captions",
+                "get_timeline_silences",
+                "get_delivery_variant_storyboard",
+                "get_qa_report",
+                "get_delivery_conformance",
+            ]),
+            required_any(&["commit_edit_plan", "apply_edit_plan"]),
+            EvalAssertion::UndoIntegrity,
+        ],
+        budgets: editorial_cut_budget(),
+        deliverable: Some(EvalDeliverableSpec {
+            profile: DeliveryProfile::VerticalShort,
+            focus_x_percent: 50,
+            focus_y_percent: 50,
+            proof_frames: 9,
+            proof_cell_width: 240,
+            require_audio: true,
+            expected_transcript_word_set: Some("authored-dialogue"),
+            maximum_word_error_rate_basis_points: 1_500,
         }),
     }]
 }
@@ -786,6 +878,18 @@ fn finished_cut_budget() -> EvalBudgets {
         // guard rather than a single-response token assumption.
         max_tokens: 750_000,
         // Subscription Codex exposes tokens but no attributable USD cost.
+        max_cost_usd: None,
+        max_wall_time: Duration::from_mins(50),
+        max_undos: 80,
+    }
+}
+
+fn editorial_cut_budget() -> EvalBudgets {
+    EvalBudgets {
+        max_turns: 1,
+        max_tool_calls: 48,
+        max_operations: 80,
+        max_tokens: 500_000,
         max_cost_usd: None,
         max_wall_time: Duration::from_mins(50),
         max_undos: 80,
@@ -1060,6 +1164,268 @@ fn fixture_e7() -> Result<PreparedFixture, EvalError> {
         .insert("rough-cut".to_owned(), (minimum, maximum));
     let document = empty_timeline_document(assets);
     PreparedFixture::new(document, media, context, resources)
+}
+
+#[derive(Debug, Deserialize)]
+struct EditorialGroundTruth {
+    schema_version: u32,
+    story_id: String,
+    expected_take_order: Vec<String>,
+    expected_dialogue: String,
+    excluded_words: Vec<String>,
+    takes: Vec<EditorialTake>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EditorialTake {
+    id: String,
+    role: String,
+    visual: String,
+    accepted: bool,
+    ssml: String,
+}
+
+#[allow(clippy::too_many_lines)]
+fn fixture_editorial_story() -> Result<PreparedFixture, EvalError> {
+    let truth: EditorialGroundTruth = serde_json::from_str(include_str!(
+        "../../../../benchmarks/auto-edit/v3/ground-truth.json"
+    ))
+    .map_err(|error| EvalError::Fixture(format!("invalid v3 ground truth: {error}")))?;
+    if truth.schema_version != 1 || truth.story_id.trim().is_empty() {
+        return Err(EvalError::Fixture(
+            "v3 ground truth has an unsupported schema or empty story id".to_owned(),
+        ));
+    }
+    let accepted_order = truth
+        .takes
+        .iter()
+        .filter(|take| take.accepted)
+        .map(|take| take.id.as_str())
+        .collect::<Vec<_>>();
+    if accepted_order
+        != truth
+            .expected_take_order
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    {
+        return Err(EvalError::Fixture(
+            "v3 accepted takes do not match expected_take_order".to_owned(),
+        ));
+    }
+
+    let media = eval_engine();
+    let mut resources: Vec<Box<dyn Send>> = Vec::new();
+    let mut assets = Vec::new();
+    for (index, take) in truth.takes.iter().enumerate() {
+        let environment_name = format!("OPENREEL_EVAL_EDITORIAL_TAKE_{}_AUDIO", index + 1);
+        let generated = documentary_speech(
+            &take.id,
+            &take.ssml,
+            &take.visual,
+            &take.role,
+            &environment_name,
+        )?;
+        let asset = probe_named(&media, generated.path(), &take.id)?;
+        media.request_transcription_with_language(asset.clone(), Some("en"));
+        media.request_silence_detection(asset.clone());
+        assets.push(asset);
+        resources.push(Box::new(generated));
+    }
+
+    let mut transcripts = BTreeMap::new();
+    let mut silences = BTreeMap::new();
+    for asset in &assets {
+        transcripts.insert(asset.id, wait_for_transcript_result(media.as_ref(), asset)?);
+        silences.insert(asset.id, wait_for_silences(media.as_ref(), asset)?);
+    }
+    let mut context = FixtureContext::default();
+    for (take, asset) in truth.takes.iter().zip(&assets) {
+        context.asset_aliases.insert(take.id.clone(), asset.id);
+    }
+    context.transcripts.extend(
+        transcripts
+            .iter()
+            .map(|(asset, transcript)| (*asset, Arc::clone(transcript))),
+    );
+    let mut selected_fillers = BTreeSet::new();
+    for take_id in &truth.expected_take_order {
+        let asset_id = *context.asset_aliases.get(take_id).ok_or_else(|| {
+            EvalError::Fixture(format!("v3 expected take {take_id:?} does not exist"))
+        })?;
+        let recognized = normalized_words(&joined_words(&transcripts[&asset_id]));
+        let (fillers, spoken_words) = partition_fillers(&recognized);
+        if spoken_words.is_empty() {
+            return Err(EvalError::Fixture(format!(
+                "v3 accepted take {take_id:?} ASR produced no content words"
+            )));
+        }
+        selected_fillers.extend(fillers);
+        context
+            .word_sets
+            .insert(format!("{take_id}-recognized-content"), spoken_words);
+    }
+    let required_fillers = BTreeSet::from(["um".to_owned()]);
+    if !required_fillers.is_subset(&selected_fillers) {
+        return Err(EvalError::Fixture(format!(
+            "v3 source ASR must recognize the authored filler before it can be scored; observed {selected_fillers:?}"
+        )));
+    }
+    context.word_sets.insert(
+        "selected-recognized-fillers".to_owned(),
+        selected_fillers.into_iter().collect(),
+    );
+    let authored_dialogue = normalized_words(&truth.expected_dialogue);
+    if authored_dialogue.is_empty() || truth.excluded_words.is_empty() {
+        return Err(EvalError::Fixture(
+            "v3 authored dialogue and exclusions must be non-empty".to_owned(),
+        ));
+    }
+    context
+        .word_sets
+        .insert("authored-dialogue".to_owned(), authored_dialogue);
+    context
+        .word_sets
+        .insert("authored-exclusions".to_owned(), truth.excluded_words);
+
+    let selected_assets = truth
+        .expected_take_order
+        .iter()
+        .map(|take| {
+            let asset_id = context.asset_aliases.get(take).ok_or_else(|| {
+                EvalError::Fixture(format!("v3 expected take {take:?} does not exist"))
+            })?;
+            assets
+                .iter()
+                .find(|asset| asset.id == *asset_id)
+                .ok_or_else(|| EvalError::Fixture(format!("v3 asset {asset_id} is missing")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let maximum = TimeCode(
+        selected_assets
+            .iter()
+            .map(|asset| asset.duration.0)
+            .fold(0_i64, i64::saturating_add),
+    );
+    let minimum = TimeCode(maximum.0.saturating_mul(45) / 100);
+    context
+        .duration_bounds
+        .insert("editorial-cut".to_owned(), (minimum, maximum));
+    let mut document = empty_timeline_document(assets);
+    document.resolution = (360, 640);
+    PreparedFixture::new(document, media, context, resources)
+}
+
+fn documentary_speech(
+    label: &str,
+    speech: &str,
+    visual: &str,
+    role: &str,
+    audio_override_env: &str,
+) -> Result<GeneratedMedia, EvalError> {
+    let speech_clip = SpeechClip::ssml(label, speech, audio_override_env);
+    let input = speech_clip.mp4.to_string_lossy().into_owned();
+    let video_source = documentary_visual(visual, role)?;
+    Ok(GeneratedMedia::ffmpeg(
+        &format!("editorial-{label}"),
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            &video_source,
+            "-i",
+            &input,
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            "-shortest",
+        ],
+        "mp4",
+    ))
+}
+
+fn documentary_visual(visual: &str, role: &str) -> Result<String, EvalError> {
+    const FONT: &str = "crates/openreel-app/assets/fonts/Inter-SemiBold.ttf";
+    let label = match role {
+        "opening" => "THE EMPTY LOT",
+        "opening_alternate" => "RETAKE",
+        "community_action" => "NEIGHBORS BUILD",
+        "result" => "SATURDAY MARKET",
+        "result_alternate" => "TUESDAY?",
+        _ => "COMMUNITY GARDEN",
+    };
+    let scene = match visual {
+        "empty_lot" => concat!(
+            "color=c=0x8CB9D9:size=360x640:rate=30,",
+            "drawbox=x=0:y=360:w=360:h=280:color=0x76553D:t=fill,",
+            "drawbox=x=72:y=330:w=8:h=55:color=0x456B3A:t=fill,",
+            "drawbox=x=178:y=342:w=7:h=43:color=0x456B3A:t=fill,",
+            "drawbox=x=284:y=326:w=9:h=59:color=0x456B3A:t=fill,",
+            "drawbox=x=25:y=110:w=5:h=145:color=white@0.25:t=fill,",
+            "drawbox=x=105:y=70:w=5:h=160:color=white@0.25:t=fill,",
+            "drawbox=x=220:y=95:w=5:h=150:color=white@0.25:t=fill,",
+            "drawbox=x=315:y=55:w=5:h=165:color=white@0.25:t=fill"
+        ),
+        "empty_lot_retake" => concat!(
+            "color=c=0x87929B:size=360x640:rate=30,",
+            "drawbox=x=0:y=310:w=360:h=330:color=0x3F454A:t=fill,",
+            "drawbox=x=45:y=390:w=110:h=8:color=white@0.75:t=fill,",
+            "drawbox=x=205:y=390:w=110:h=8:color=white@0.75:t=fill,",
+            "drawbox=x=45:y=520:w=110:h=8:color=white@0.75:t=fill,",
+            "drawbox=x=205:y=520:w=110:h=8:color=white@0.75:t=fill,",
+            "drawbox=x=22:y=22:w=316:h=84:color=0xA52A2A@0.92:t=fill"
+        ),
+        "garden_build" => concat!(
+            "color=c=0x95C7E5:size=360x640:rate=30,",
+            "drawbox=x=0:y=365:w=360:h=275:color=0x78A85B:t=fill,",
+            "drawbox=x=35:y=390:w=125:h=72:color=0x8A5A3B:t=fill,",
+            "drawbox=x=200:y=390:w=125:h=72:color=0x8A5A3B:t=fill,",
+            "drawbox=x=55:y=402:w=85:h=42:color=0x3E2C22:t=fill,",
+            "drawbox=x=220:y=402:w=85:h=42:color=0x3E2C22:t=fill,",
+            "drawbox=x=77:y=365:w=7:h=40:color=0x2F7D32:t=fill,",
+            "drawbox=x=112:y=358:w=7:h=47:color=0x2F7D32:t=fill,",
+            "drawbox=x=242:y=362:w=7:h=43:color=0x2F7D32:t=fill,",
+            "drawbox=x=278:y=354:w=7:h=51:color=0x2F7D32:t=fill,",
+            "drawbox=x=80:y=245:w=42:h=95:color=0x325A74:t=fill,",
+            "drawbox=x=238:y=245:w=42:h=95:color=0xC86B3C:t=fill"
+        ),
+        "market_result" => concat!(
+            "color=c=0xA7D1E8:size=360x640:rate=30,",
+            "drawbox=x=0:y=430:w=360:h=210:color=0x6FA45A:t=fill,",
+            "drawbox=x=28:y=300:w=132:h=155:color=0xF1E4C8:t=fill,",
+            "drawbox=x=200:y=300:w=132:h=155:color=0xF1E4C8:t=fill,",
+            "drawbox=x=20:y=275:w=148:h=45:color=0xD85C4A:t=fill,",
+            "drawbox=x=192:y=275:w=148:h=45:color=0xE2B447:t=fill,",
+            "drawbox=x=50:y=390:w=86:h=48:color=0x8A5A3B:t=fill,",
+            "drawbox=x=224:y=390:w=86:h=48:color=0x8A5A3B:t=fill,",
+            "drawbox=x=61:y=400:w=14:h=14:color=0xD84A3A:t=fill,",
+            "drawbox=x=84:y=400:w=14:h=14:color=0xE9B949:t=fill,",
+            "drawbox=x=236:y=400:w=14:h=14:color=0x4F8F42:t=fill,",
+            "drawbox=x=260:y=400:w=14:h=14:color=0xD84A3A:t=fill"
+        ),
+        "market_wrong_day" => concat!(
+            "color=c=0xA7D1E8:size=360x640:rate=30,",
+            "drawbox=x=0:y=430:w=360:h=210:color=0x6FA45A:t=fill,",
+            "drawbox=x=28:y=300:w=304:h=155:color=0xD8D8D8:t=fill,",
+            "drawbox=x=20:y=275:w=320:h=45:color=0x7A7A7A:t=fill,",
+            "drawbox=x=22:y=22:w=316:h=84:color=0xA52A2A@0.92:t=fill"
+        ),
+        _ => {
+            return Err(EvalError::Fixture(format!(
+                "unknown v3 visual scene {visual:?}"
+            )));
+        }
+    };
+    Ok(format!(
+        "{scene},drawtext=fontfile={FONT}:text='{label}':x=(w-text_w)/2:y=48:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=12,noise=alls=2:allf=t"
+    ))
 }
 
 fn fixture_distinct_timeline(
@@ -1544,6 +1910,105 @@ mod tests {
                 u64::try_from(definition.budgets.max_wall_time.as_millis()).unwrap()
             );
             assert_eq!(task["budget"]["undos"], definition.budgets.max_undos);
+        }
+    }
+
+    #[test]
+    fn published_v3_manifest_tracks_the_editorial_suite_and_ground_truth() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v3/manifest.json"
+        ))
+        .unwrap();
+        assert_eq!(manifest["schema_version"], 3);
+        assert_eq!(manifest["benchmark_id"], "openreel-editorial-cut-v3");
+        let definitions = editorial_cut_suite();
+        assert_eq!(definitions.len(), 1);
+        let definition = &definitions[0];
+        let task = &manifest["tasks"][0];
+        assert_eq!(
+            task["id"].as_str(),
+            definition.name.split_whitespace().next()
+        );
+        assert_eq!(task["prompt"], definition.prompts[0]);
+        let deliverable = definition.deliverable.unwrap();
+        assert_eq!(deliverable.profile, DeliveryProfile::VerticalShort);
+        assert_eq!(
+            deliverable.expected_transcript_word_set,
+            Some("authored-dialogue")
+        );
+        assert_eq!(deliverable.maximum_word_error_rate_basis_points, 1_500);
+        assert_eq!(task["delivery"]["profile"], deliverable.profile.as_str());
+        assert_eq!(task["delivery"]["proof_frames"], deliverable.proof_frames);
+        assert_eq!(
+            task["delivery"]["maximum_word_error_rate_basis_points"],
+            deliverable.maximum_word_error_rate_basis_points
+        );
+        assert_eq!(task["budget"]["turns"], definition.budgets.max_turns);
+        assert_eq!(
+            task["budget"]["tool_calls"],
+            definition.budgets.max_tool_calls
+        );
+        assert_eq!(
+            task["budget"]["operations"],
+            definition.budgets.max_operations
+        );
+        assert_eq!(task["budget"]["tokens"], definition.budgets.max_tokens);
+        assert_eq!(
+            task["budget"]["wall_time_ms"],
+            u64::try_from(definition.budgets.max_wall_time.as_millis()).unwrap()
+        );
+        assert_eq!(task["budget"]["undos"], definition.budgets.max_undos);
+        assert!(
+            task["machine_assertions"]
+                .as_array()
+                .is_some_and(|assertions| assertions.len() >= 15)
+        );
+
+        let truth: EditorialGroundTruth = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v3/ground-truth.json"
+        ))
+        .unwrap();
+        assert_eq!(truth.schema_version, 1);
+        assert_eq!(truth.takes.len(), 5);
+        assert_eq!(truth.expected_take_order, ["take-01", "take-03", "take-04"]);
+        assert_eq!(truth.takes.iter().filter(|take| take.accepted).count(), 3);
+    }
+
+    #[test]
+    fn v3_visual_scenes_render_with_the_pinned_ffmpeg() {
+        for (index, (visual, role)) in [
+            ("empty_lot", "opening"),
+            ("empty_lot_retake", "opening_alternate"),
+            ("garden_build", "community_action"),
+            ("market_result", "result"),
+            ("market_wrong_day", "result_alternate"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let source = documentary_visual(visual, role).unwrap();
+            let generated = GeneratedMedia::ffmpeg(
+                &format!("v3-scene-{index}"),
+                &["-f", "lavfi", "-i", &source, "-t", "0.1", "-c:v", "libx264"],
+                "mp4",
+            );
+            assert!(generated.path().metadata().unwrap().len() > 0);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires local Windows SAPI speech generation and Whisper analysis"]
+    fn v3_fixture_builds_with_authored_and_recognized_truth() {
+        let fixture = fixture_editorial_story().unwrap();
+        assert_eq!(fixture.original_document.media_pool.len(), 5);
+        assert_eq!(fixture.original_document.resolution, (360, 640));
+        assert_eq!(fixture.context.asset_aliases.len(), 5);
+        assert_eq!(
+            fixture.context.word_sets["selected-recognized-fillers"],
+            ["um"]
+        );
+        for take in ["take-01", "take-03", "take-04"] {
+            assert!(!fixture.context.word_sets[&format!("{take}-recognized-content")].is_empty());
         }
     }
 

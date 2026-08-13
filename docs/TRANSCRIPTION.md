@@ -24,3 +24,14 @@ After the first verified model download, transcription and cache reuse are
 offline. Only explicit media import/project-open scheduling can start a
 transcription job; ordinary playback and inspector calls do not download a
 model unless they request a missing transcript.
+
+Callers that know the source language can provide an explicit language hint.
+The editorial benchmark uses `en` so independent output verification does not
+spend work on language detection; ordinary application transcription keeps
+Whisper's multilingual auto-detection.
+
+OpenReel does not install `whisper-rs` 0.16's safe abort callback. Its erased
+closure wrapper can be invoked through the wrong concrete pointer type and was
+observed to abort healthy Windows inference. Cancellation remains checked
+before and after synchronous inference and before cache publication. A request
+made during inference therefore becomes terminal at the next safe boundary.

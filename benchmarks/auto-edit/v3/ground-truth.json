@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "story_id": "neighborhood-garden",
+  "expected_take_order": ["take-01", "take-03", "take-04"],
+  "expected_dialogue": "Last spring this empty lot collected weeds and rainwater. Neighbors decided it could feed families instead. Over three weekends volunteers built raised beds. Then they planted tomatoes herbs and peppers. Now the Saturday market supplies fresh produce to dozens of local families.",
+  "excluded_words": ["um", "parking", "cars", "sorry", "tuesday", "fourteen"],
+  "takes": [
+    {
+      "id": "take-01",
+      "role": "opening",
+      "visual": "empty_lot",
+      "accepted": true,
+      "ssml": "<speak version='1.0' xml:lang='en-US'>Last spring, this empty lot collected weeds and rainwater.<break time='900ms'/>Um. Um. Neighbors decided it could feed families instead.</speak>"
+    },
+    {
+      "id": "take-02",
+      "role": "opening_alternate",
+      "visual": "empty_lot_retake",
+      "accepted": false,
+      "ssml": "<speak version='1.0' xml:lang='en-US'>Last spring, this parking lot collected cars and rainwater.<break time='700ms'/>Sorry, that is wrong. Let me start again.</speak>"
+    },
+    {
+      "id": "take-03",
+      "role": "community_action",
+      "visual": "garden_build",
+      "accepted": true,
+      "ssml": "<speak version='1.0' xml:lang='en-US'>Over three weekends, volunteers built raised beds.<break time='950ms'/>Um. Um. Then they planted tomatoes, herbs, and peppers.</speak>"
+    },
+    {
+      "id": "take-04",
+      "role": "result",
+      "visual": "market_result",
+      "accepted": true,
+      "ssml": "<speak version='1.0' xml:lang='en-US'>Now the Saturday market supplies fresh produce to dozens of local families.</speak>"
+    },
+    {
+      "id": "take-05",
+      "role": "result_alternate",
+      "visual": "market_wrong_day",
+      "accepted": false,
+      "ssml": "<speak version='1.0' xml:lang='en-US'>Now the Tuesday market supplies fresh produce to fourteen local families.</speak>"
+    }
+  ]
+}

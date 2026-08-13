@@ -291,7 +291,11 @@ impl Analysis for FfmpegMediaEngine {
     }
 
     fn request_transcription(&self, asset: MediaAsset) {
-        self.transcripts.request(asset);
+        self.transcripts.request(asset, None);
+    }
+
+    fn request_transcription_with_language(&self, asset: MediaAsset, language: Option<&str>) {
+        self.transcripts.request(asset, language.map(str::to_owned));
     }
 
     fn transcript_status(&self, asset: &MediaAsset) -> TranscriptStatus {

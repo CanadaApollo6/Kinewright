@@ -252,6 +252,21 @@ The implemented preparation, rejected 2.25/5 human result, benchmark command,
 and resulting evaluator gaps are recorded in
 [M37 - Human-acceptable first cut](M37-HUMAN-ACCEPTABLE-FIRST-CUT.md).
 
+### M38 - Editorial truth
+
+- replace the incoherent generated fixture with one authored story, explicit
+  good and bad takes, and semantically distinct visual scenes;
+- score exact authored captions instead of merely checking that captions exist;
+- transcribe the finished MP4 independently and enforce a bounded ordered word
+  error rate rather than trusting the source transcript used for editing;
+- expose bounded caption inspection and atomic correction planning;
+- make natural-pause retention and filler-boundary padding explicit dialogue
+  assembly controls;
+- keep the three-sample machine gate separate from SHA-bound human acceptance.
+
+The contract and its honest synthetic-footage limits are recorded in
+[M38 - Editorial truth](M38-EDITORIAL-TRUTH.md).
+
 The published "footage in, finished cut out" benchmark should grow continuously
 through every milestone instead of waiting for a final automation pass. Its
 history is the scoreboard for both foundational work and Pillar B.

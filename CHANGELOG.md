@@ -9,6 +9,16 @@ All notable changes to OpenReel are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Added
+- M38 editorial truth benchmark: a new locally generated five-take garden
+  story replaces the incoherent color-bar fixture with accepted and rejected
+  facts, exact authored captions, and semantically distinct vertical scenes.
+  Machine scoring now removes recognized fillers, compares captions exactly,
+  retranscribes the rendered MP4 with a 15% word-error-rate ceiling, and keeps
+  SHA-bound human acceptance separate. Agents can inspect and atomically
+  correct caption cues, while dialogue assembly exposes natural-pause
+  retention and filler-boundary padding. English eval transcription is hinted
+  explicitly, and a broken `whisper-rs` safe abort callback was removed after
+  it intermittently aborted healthy Windows inference.
 - M37 finished-cut preparation: titles and captions now use one exact Inter-
   measured layout across preview, export, delivery conformance, and QA. Type
   scales from the short edge, wraps inside an 8% safe area, adapts only when it
