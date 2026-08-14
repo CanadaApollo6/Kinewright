@@ -267,6 +267,29 @@ and resulting evaluator gaps are recorded in
 The contract and its honest synthetic-footage limits are recorded in
 [M38 - Editorial truth](M38-EDITORIAL-TRUTH.md).
 
+### M39 - Dialogue pacing
+
+- acoustically measured sentence-boundary pauses;
+- filler-bridge caps that preserve already-natural rhythm;
+- deterministic sentence-coherent caption grouping;
+- a measured 31.9% token reduction without changing dialogue timing.
+
+The implementation, accepted pacing correction, and remaining SHA-bound human
+gate are recorded in [M39 - Dialogue pacing](M39-DIALOGUE-PACING.md).
+
+### M40 - Generalization Gauntlet
+
+- immutable licensed fixture packs with explicit acquisition and offline hash
+  verification;
+- unfamiliar interview/documentary, event/multicam, and music-montage tasks;
+- source-enveloped dialogue assembly for answers inside long recordings;
+- machine scoring for objective editorial facts and separate SHA-bound human
+  scoring for taste.
+
+The first executable real-interview family, full exit contract, and remaining
+families are recorded in
+[M40 - Generalization Gauntlet](M40-GENERALIZATION-GAUNTLET.md).
+
 The published "footage in, finished cut out" benchmark should grow continuously
 through every milestone instead of waiting for a final automation pass. Its
 history is the scoreboard for both foundational work and Pillar B.

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "pack_id": "m40-interview-v1",
+  "title": "M40 real interview fixture pack",
+  "description": "A pinned public-domain talking-head interview used to measure OpenReel on unfamiliar, naturally recorded speech and video.",
+  "assets": [
+    {
+      "id": "helen-hill-interview-480p",
+      "file_name": "helen-hill-interview-480p.webm",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/6/6d/HelenHillInterview.theora.ogv/HelenHillInterview.theora.ogv.480p.vp9.webm",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:HelenHillInterview.theora.ogv",
+      "bytes": 9294247,
+      "sha256": "cc860fe89cdd7e1d653a55fa7458636e4b9d980915d50dedb7ba86d1d86c8656",
+      "license": {
+        "spdx_id": "LicenseRef-Public-Domain",
+        "name": "Public domain dedication by the copyright holder",
+        "url": "https://commons.wikimedia.org/wiki/Template:PD-self",
+        "attribution": "Interview with filmmaker Helen Hill, recorded by Dan Streible on March 27, 2006; public-domain source hosted by Wikimedia Commons. OpenReel uses Wikimedia's 480p VP9 transcode."
+      }
+    }
+  ]
+}

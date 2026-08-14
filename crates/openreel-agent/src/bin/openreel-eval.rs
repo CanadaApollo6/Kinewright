@@ -19,6 +19,7 @@ use openreel_agent::{
         render_jsonl, render_scoreboard, result_path, run_eval, run_eval_with_artifacts,
         summarize_human_review,
     },
+    fixture_pack::{FixturePackManifest, fixture_cache_root},
 };
 use openreel_core::{
     AgentDriver, Analysis, AssetSceneChanges, AssetSilences, AssetTranscript, AuthenticationStatus,
@@ -50,6 +51,35 @@ fn main() -> ExitCode {
 
 fn run() -> Result<bool, EvalError> {
     let options = Options::parse(env::args().skip(1))?;
+    if let Some(manifest_path) = &options.prepare_fixtures {
+        let manifest = FixturePackManifest::load(manifest_path)
+            .map_err(|error| EvalError::Fixture(error.to_string()))?;
+        let report = manifest
+            .prepare(&fixture_cache_root())
+            .map_err(|error| EvalError::Fixture(error.to_string()))?;
+        println!(
+            "Prepared fixture pack {} at {} (downloaded={}, already_present={})",
+            report.pack_id,
+            report.cache_root.display(),
+            report.downloaded.len(),
+            report.already_present.len()
+        );
+        return Ok(true);
+    }
+    if let Some(manifest_path) = &options.verify_fixtures {
+        let manifest = FixturePackManifest::load(manifest_path)
+            .map_err(|error| EvalError::Fixture(error.to_string()))?;
+        let report = manifest
+            .verify(&fixture_cache_root())
+            .map_err(|error| EvalError::Fixture(error.to_string()))?;
+        println!(
+            "Verified fixture pack {} at {} (assets={})",
+            report.pack_id,
+            report.cache_root.display(),
+            report.already_present.len()
+        );
+        return Ok(true);
+    }
     if let Some(review_path) = &options.score_review {
         return score_review_file(review_path).map(|()| true);
     }
@@ -160,8 +190,9 @@ fn eval_suite(suite: &str) -> Result<(&'static str, Vec<EvalDefinition>), EvalEr
         "finished-cut-v2" | "v2" => Ok(("openreel-finished-cut-v2", finished_cut_suite())),
         "editorial-cut-v3" | "v3" => Ok(("openreel-editorial-cut-v3", editorial_cut_suite())),
         "dialogue-pacing-v4" | "v4" => Ok(("openreel-dialogue-pacing-v4", dialogue_pacing_suite())),
+        "generalization-v5" | "v5" => Ok(("openreel-generalization-v5", generalization_suite())),
         other => Err(EvalError::Agent(format!(
-            "unknown suite {other:?}; expected auto-edit-v1, finished-cut-v2, editorial-cut-v3, or dialogue-pacing-v4"
+            "unknown suite {other:?}; expected auto-edit-v1, finished-cut-v2, editorial-cut-v3, dialogue-pacing-v4, or generalization-v5"
         ))),
     }
 }
@@ -169,7 +200,10 @@ fn eval_suite(suite: &str) -> Result<(&'static str, Vec<EvalDefinition>), EvalEr
 fn is_packaged_benchmark(benchmark_id: &str) -> bool {
     matches!(
         benchmark_id,
-        "openreel-finished-cut-v2" | "openreel-editorial-cut-v3" | "openreel-dialogue-pacing-v4"
+        "openreel-finished-cut-v2"
+            | "openreel-editorial-cut-v3"
+            | "openreel-dialogue-pacing-v4"
+            | "openreel-generalization-v5"
     )
 }
 
@@ -269,6 +303,8 @@ struct Options {
     samples: u32,
     suite: String,
     score_review: Option<PathBuf>,
+    prepare_fixtures: Option<PathBuf>,
+    verify_fixtures: Option<PathBuf>,
 }
 
 impl Options {
@@ -279,6 +315,8 @@ impl Options {
         let mut samples = 1_u32;
         let mut suite = "auto-edit-v1".to_owned();
         let mut score_review = None;
+        let mut prepare_fixtures = None;
+        let mut verify_fixtures = None;
         let mut arguments = arguments.peekable();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -320,9 +358,23 @@ impl Options {
                         EvalError::Agent("--score-review requires a JSON path".to_owned())
                     })?));
                 }
+                "--prepare-fixtures" => {
+                    prepare_fixtures = Some(PathBuf::from(arguments.next().ok_or_else(|| {
+                        EvalError::Agent(
+                            "--prepare-fixtures requires a fixture-pack manifest path".to_owned(),
+                        )
+                    })?));
+                }
+                "--verify-fixtures" => {
+                    verify_fixtures = Some(PathBuf::from(arguments.next().ok_or_else(|| {
+                        EvalError::Agent(
+                            "--verify-fixtures requires a fixture-pack manifest path".to_owned(),
+                        )
+                    })?));
+                }
                 "-h" | "--help" => {
                     println!(
-                        "Usage: OPENREEL_EVAL=1 cargo run -p openreel-agent --bin openreel-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3|dialogue-pacing-v4] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p openreel-agent --bin openreel-eval -- --score-review PATH"
+                        "Usage: OPENREEL_EVAL=1 cargo run -p openreel-agent --bin openreel-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3|dialogue-pacing-v4|generalization-v5] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p openreel-agent --bin openreel-eval -- --prepare-fixtures MANIFEST\n       cargo run -p openreel-agent --bin openreel-eval -- --verify-fixtures MANIFEST\n       cargo run -p openreel-agent --bin openreel-eval -- --score-review PATH"
                     );
                     return Err(EvalError::Agent("help requested".to_owned()));
                 }
@@ -331,6 +383,20 @@ impl Options {
                 }
             }
         }
+        let exclusive_actions = [
+            score_review.is_some(),
+            prepare_fixtures.is_some(),
+            verify_fixtures.is_some(),
+        ]
+        .into_iter()
+        .filter(|selected| *selected)
+        .count();
+        if exclusive_actions > 1 {
+            return Err(EvalError::Agent(
+                "--score-review, --prepare-fixtures, and --verify-fixtures are mutually exclusive"
+                    .to_owned(),
+            ));
+        }
         Ok(Self {
             harness,
             model,
@@ -338,6 +404,8 @@ impl Options {
             samples,
             suite,
             score_review,
+            prepare_fixtures,
+            verify_fixtures,
         })
     }
 }
@@ -844,6 +912,75 @@ fn dialogue_pacing_suite() -> Vec<EvalDefinition> {
     definitions
 }
 
+fn generalization_suite() -> Vec<EvalDefinition> {
+    vec![EvalDefinition {
+        name: "g1 real interview recovery story",
+        rationale: "Measures whether the agent can find, clean, caption, frame, and deliver one coherent story from pinned public-domain interview footage it has not seen in the synthetic benchmarks.",
+        fixture_builder: fixture_real_interview_story,
+        prompts: &[
+            "Create a finished vertical social interview cut from interview-raw. Open exactly these four capability schemas in one get_capability call: get_transcript, plan_dialogue_assembly, add_styled_captions, and get_editorial_readiness. Inspect the full source transcript. Build only Helen Hill's coherent first-person story about recovering her films after Hurricane Katrina: begin with her thought starting 'recently I was living in New Orleans' and end after 'Hurricane Katrina films.' Exclude the interview questions, Columbia and South Carolina setup, symposium and festival explanation, and the later Dan Streible discussion. Use plan_dialogue_assembly with one source range around that answer, remove conservative fillers and raw dead air of at least 20 source frames, retain 8 source frames around ordinary silence cuts, inspect its prepared plan preview, and commit that exact plan. Keep the real A/V source dialogue audible without duplicating it onto an audio track. Add social preset captions with pop motion from the final timeline transcript; do not paraphrase or invent wording. Finish with one get_editorial_readiness call using vertical_short, centered 50/50 focus, nine storyboard frames, 240-pixel cells, and a 20-source-frame silence threshold. Do not queue export; the benchmark renders and independently transcribes the verified snapshot. Keep working until readiness is true.",
+        ],
+        assertions: vec![
+            EvalAssertion::TimelineNonEmpty,
+            EvalAssertion::AssetOrder {
+                aliases: aliases(&["interview-raw"]),
+                collapse_adjacent: true,
+            },
+            EvalAssertion::MediaGapless,
+            EvalAssertion::WordsRetained {
+                word_set: "recovery-required".to_owned(),
+            },
+            EvalAssertion::WordsAbsent {
+                word_set: "off-story-exclusions".to_owned(),
+            },
+            EvalAssertion::DurationBounds {
+                bounds: "recovery-story".to_owned(),
+            },
+            EvalAssertion::StyledCaptions {
+                minimum_cues: 4,
+                motion: CaptionMotion::Pop,
+            },
+            EvalAssertion::CaptionWordsExact {
+                word_set: "recovery-dialogue".to_owned(),
+            },
+            EvalAssertion::CaptionSentencesCoherent,
+            EvalAssertion::CaptionSafeArea {
+                profile: DeliveryProfile::VerticalShort,
+            },
+            EvalAssertion::AudioPresent,
+            EvalAssertion::QaExportReady,
+            required_all(&[
+                "get_timeline_state",
+                "get_transcript",
+                "plan_dialogue_assembly",
+                "add_styled_captions",
+                "get_editorial_readiness",
+                "commit_edit_plan",
+            ]),
+            EvalAssertion::UndoIntegrity,
+        ],
+        budgets: EvalBudgets {
+            max_turns: 1,
+            max_tool_calls: 20,
+            max_operations: 80,
+            max_tokens: 300_000,
+            max_cost_usd: None,
+            max_wall_time: Duration::from_mins(50),
+            max_undos: 80,
+        },
+        deliverable: Some(EvalDeliverableSpec {
+            profile: DeliveryProfile::VerticalShort,
+            focus_x_percent: 50,
+            focus_y_percent: 50,
+            proof_frames: 9,
+            proof_cell_width: 240,
+            require_audio: true,
+            expected_transcript_word_set: Some("recovery-dialogue"),
+            maximum_word_error_rate_basis_points: 2_000,
+        }),
+    }]
+}
+
 fn aliases(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
@@ -1216,6 +1353,117 @@ struct EditorialTake {
     visual: String,
     accepted: bool,
     ssml: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RealInterviewGroundTruth {
+    schema_version: u32,
+    story_id: String,
+    asset_id: String,
+    source_story_range: GroundTruthRange,
+    duration_bounds_project_frames: GroundTruthDurationBounds,
+    required_terms: Vec<String>,
+    excluded_terms: Vec<String>,
+    expected_dialogue: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct GroundTruthRange {
+    start: i64,
+    end: i64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct GroundTruthDurationBounds {
+    minimum: i64,
+    maximum: i64,
+}
+
+fn fixture_real_interview_story() -> Result<PreparedFixture, EvalError> {
+    let truth: RealInterviewGroundTruth = serde_json::from_str(include_str!(
+        "../../../../benchmarks/auto-edit/v5/ground-truth.json"
+    ))
+    .map_err(|error| EvalError::Fixture(format!("invalid v5 ground truth: {error}")))?;
+    if truth.schema_version != 1
+        || truth.story_id.trim().is_empty()
+        || truth.source_story_range.start < 0
+        || truth.source_story_range.start >= truth.source_story_range.end
+        || truth.duration_bounds_project_frames.minimum < 0
+        || truth.duration_bounds_project_frames.minimum
+            >= truth.duration_bounds_project_frames.maximum
+        || truth.required_terms.is_empty()
+        || truth.excluded_terms.is_empty()
+    {
+        return Err(EvalError::Fixture(
+            "v5 ground truth has an invalid schema, identifier, range, or word set".to_owned(),
+        ));
+    }
+    let pack = FixturePackManifest::from_json(include_str!(
+        "../../../../benchmarks/auto-edit/v5/fixture-pack.json"
+    ))
+    .map_err(|error| EvalError::Fixture(error.to_string()))?;
+    let path = pack
+        .verified_asset(&fixture_cache_root(), &truth.asset_id)
+        .map_err(|error| EvalError::Fixture(error.to_string()))?;
+    let media = eval_engine();
+    let asset = probe_named(&media, &path, "interview-raw")?;
+    if truth.source_story_range.end > asset.duration.0 {
+        return Err(EvalError::Fixture(format!(
+            "v5 story range ends at {}, beyond asset duration {}",
+            truth.source_story_range.end, asset.duration.0
+        )));
+    }
+    media.request_transcription_with_language(asset.clone(), Some("en"));
+    media.request_silence_detection(asset.clone());
+    let transcript = wait_for_transcript_result(media.as_ref(), &asset)?;
+    let _silences = wait_for_silences(media.as_ref(), &asset)?;
+    let observed_story = transcript
+        .words
+        .iter()
+        .filter(|word| {
+            word.source_start.0 >= truth.source_story_range.start
+                && word.source_end.0 <= truth.source_story_range.end
+        })
+        .map(|word| word.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let expected_dialogue = truth
+        .expected_dialogue
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let expected_normalized = normalized_words(&truth.expected_dialogue);
+    let observed_dialogue = normalized_words(&observed_story);
+    if observed_dialogue != expected_normalized {
+        return Err(EvalError::Fixture(format!(
+            "v5 pinned source transcript no longer matches ground truth: expected {expected_normalized:?}, observed {observed_dialogue:?}"
+        )));
+    }
+
+    let mut context = FixtureContext::default();
+    context
+        .asset_aliases
+        .insert("interview-raw".to_owned(), asset.id);
+    context.transcripts.insert(asset.id, transcript);
+    context
+        .word_sets
+        .insert("recovery-required".to_owned(), truth.required_terms);
+    context
+        .word_sets
+        .insert("off-story-exclusions".to_owned(), truth.excluded_terms);
+    context
+        .word_sets
+        .insert("recovery-dialogue".to_owned(), expected_dialogue);
+    context.duration_bounds.insert(
+        "recovery-story".to_owned(),
+        (
+            TimeCode(truth.duration_bounds_project_frames.minimum),
+            TimeCode(truth.duration_bounds_project_frames.maximum),
+        ),
+    );
+    let mut document = empty_timeline_document(vec![asset]);
+    document.resolution = (720, 1280);
+    PreparedFixture::new(document, media, context, Vec::new())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1686,7 +1934,16 @@ fn wait_for_transcript_result(
     let label = asset.id;
     loop {
         let status = media.transcript_status(asset);
-        let summary = format!("{status:?}");
+        let summary = match &status {
+            TranscriptStatus::Ready(transcript) => format!(
+                "Ready(words={}, source_fps={}/{}, sha256={}...)",
+                transcript.words.len(),
+                transcript.source_fps.numerator(),
+                transcript.source_fps.denominator(),
+                transcript.content_sha256.get(..12).unwrap_or("invalid")
+            ),
+            other => format!("{other:?}"),
+        };
         if summary != previous {
             println!("  ASR {label}: {summary}");
             previous = summary;
@@ -2115,6 +2372,56 @@ mod tests {
     }
 
     #[test]
+    fn published_v5_manifest_tracks_the_real_interview_suite_and_fixture_pack() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v5/manifest.json"
+        ))
+        .unwrap();
+        assert_eq!(manifest["schema_version"], 5);
+        assert_eq!(manifest["benchmark_id"], "openreel-generalization-v5");
+        assert_eq!(manifest["status"], "in_progress");
+        let definitions = generalization_suite();
+        assert_eq!(definitions.len(), 1);
+        let definition = &definitions[0];
+        let task = &manifest["tasks"][0];
+        assert_eq!(
+            task["id"].as_str(),
+            definition.name.split_whitespace().next()
+        );
+        assert_eq!(task["prompt"], definition.prompts[0]);
+        let deliverable = definition.deliverable.unwrap();
+        assert_eq!(deliverable.profile, DeliveryProfile::VerticalShort);
+        assert_eq!(
+            deliverable.expected_transcript_word_set,
+            Some("recovery-dialogue")
+        );
+        assert_eq!(deliverable.maximum_word_error_rate_basis_points, 2_000);
+        assert_eq!(
+            task["budget"]["tool_calls"],
+            definition.budgets.max_tool_calls
+        );
+        assert_eq!(task["budget"]["tokens"], definition.budgets.max_tokens);
+
+        let pack = FixturePackManifest::from_json(include_str!(
+            "../../../../benchmarks/auto-edit/v5/fixture-pack.json"
+        ))
+        .unwrap();
+        assert_eq!(pack.pack_id, "m40-interview-v1");
+        assert_eq!(pack.assets.len(), 1);
+        assert_eq!(pack.assets[0].bytes, 9_294_247);
+        assert_eq!(pack.assets[0].sha256.len(), 64);
+
+        let truth: RealInterviewGroundTruth = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v5/ground-truth.json"
+        ))
+        .unwrap();
+        assert_eq!(truth.schema_version, 1);
+        assert_eq!(truth.source_story_range.start, 1_682);
+        assert_eq!(truth.source_story_range.end, 2_548);
+        assert_eq!(truth.required_terms.len(), 19);
+    }
+
+    #[test]
     fn v3_visual_scenes_render_with_the_pinned_ffmpeg() {
         for (index, (visual, role)) in [
             ("empty_lot", "opening"),
@@ -2194,6 +2501,20 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the explicitly prepared M40 fixture pack and Whisper analysis"]
+    fn v5_fixture_builds_from_verified_real_media() {
+        let fixture = fixture_real_interview_story().unwrap();
+        assert_eq!(fixture.original_document.media_pool.len(), 1);
+        assert_eq!(fixture.original_document.resolution, (720, 1280));
+        assert_eq!(fixture.context.asset_aliases.len(), 1);
+        assert_eq!(fixture.context.word_sets["recovery-required"].len(), 19);
+        assert_eq!(fixture.context.word_sets["off-story-exclusions"].len(), 7);
+        assert!(fixture.context.word_sets["recovery-dialogue"].len() > 60);
+        assert!(fixture.context.word_sets["recovery-dialogue"].contains(&"8".to_owned()));
+        assert!(fixture.context.word_sets["recovery-dialogue"].contains(&"12".to_owned()));
+    }
+
+    #[test]
     fn published_v2_baseline_keeps_machine_and_human_results_separate() {
         let baseline: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../benchmarks/auto-edit/v2/baseline.json"
@@ -2239,7 +2560,7 @@ mod tests {
             [33, 15, 23, 16]
         );
         assert_eq!(machine["tool_calls"], 24);
-        assert_eq!(machine["mean_total_tokens"], 108_296.3333);
+        assert_eq!(machine["mean_total_tokens"], 108_296.333_3);
         let samples = baseline["samples"].as_array().unwrap();
         assert_eq!(
             samples

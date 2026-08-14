@@ -6,6 +6,7 @@ mod cursor;
 mod drivers;
 pub mod eval;
 pub mod export_queue;
+pub mod fixture_pack;
 mod models;
 mod pacing;
 mod protocol;

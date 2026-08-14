@@ -1,0 +1,85 @@
+{
+  "schema_version": 5,
+  "benchmark_id": "openreel-generalization-v5",
+  "title": "OpenReel Generalization Gauntlet v5",
+  "status": "in_progress",
+  "runner": "cargo run -p openreel-agent --bin openreel-eval -- --suite generalization-v5",
+  "implementation": "crates/openreel-agent/src/bin/openreel-eval.rs",
+  "fixture_pack": "benchmarks/auto-edit/v5/fixture-pack.json",
+  "fixture_provenance": {
+    "policy": "Every downloaded byte must have an explicit redistribution license, source page, immutable byte count, and SHA-256. Acquisition is an explicit command; benchmark execution is offline and refuses missing or changed media.",
+    "interview": "The first task uses Dan Streible's 2006 interview with filmmaker Helen Hill, dedicated to the public domain and hosted by Wikimedia Commons.",
+    "analysis": "Pinned local Whisper and FFmpeg analyze the source. Timeline assertions, independent post-render transcription, technical QA, and a separate human rubric score the result.",
+    "time_base": "Source and project edits remain exact integer frames."
+  },
+  "score_layers": {
+    "machine": [
+      "story inclusion and off-topic exclusion",
+      "dialogue duration and gapless media assembly",
+      "caption word sequence and sentence grouping",
+      "technical QA, delivery framing proof, audio, and MP4 identity",
+      "tool-use, token, operation, and wall-time budgets"
+    ],
+    "human": {
+      "acceptance": "Would the reviewer publish or deliver this exact artifact without another edit?",
+      "ratings": ["story", "pacing", "visual_finish", "audio_finish", "captions", "delivery_readiness"],
+      "scale": "1..=5 in 0.5-point increments",
+      "note": "Machine assertions do not claim to score taste, emotional coherence, shot quality, or professional finish."
+    }
+  },
+  "milestone_exit": {
+    "required_task_families": ["interview_documentary", "event_multicam", "music_montage"],
+    "samples_per_family": 3,
+    "minimum_machine_passes_per_family": 3,
+    "minimum_human_accepts_per_family": 2,
+    "minimum_mean_human_rating": 4.0,
+    "maximum_material_caption_errors": 0,
+    "note": "V5 remains in progress until all three checked-in families and their human-bound artifacts satisfy this gate."
+  },
+  "tasks": [
+    {
+      "id": "g1",
+      "family": "interview_documentary",
+      "name": "real interview recovery story",
+      "fixture": "fixture_real_interview_story",
+      "fixture_pack": "benchmarks/auto-edit/v5/fixture-pack.json",
+      "ground_truth": "benchmarks/auto-edit/v5/ground-truth.json",
+      "prompt": "Create a finished vertical social interview cut from interview-raw. Open exactly these four capability schemas in one get_capability call: get_transcript, plan_dialogue_assembly, add_styled_captions, and get_editorial_readiness. Inspect the full source transcript. Build only Helen Hill's coherent first-person story about recovering her films after Hurricane Katrina: begin with her thought starting 'recently I was living in New Orleans' and end after 'Hurricane Katrina films.' Exclude the interview questions, Columbia and South Carolina setup, symposium and festival explanation, and the later Dan Streible discussion. Use plan_dialogue_assembly with one source range around that answer, remove conservative fillers and raw dead air of at least 20 source frames, retain 8 source frames around ordinary silence cuts, inspect its prepared plan preview, and commit that exact plan. Keep the real A/V source dialogue audible without duplicating it onto an audio track. Add social preset captions with pop motion from the final timeline transcript; do not paraphrase or invent wording. Finish with one get_editorial_readiness call using vertical_short, centered 50/50 focus, nine storyboard frames, 240-pixel cells, and a 20-source-frame silence threshold. Do not queue export; the benchmark renders and independently transcribes the verified snapshot. Keep working until readiness is true.",
+      "delivery": {
+        "profile": "vertical_short",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 9,
+        "proof_cell_width": 240,
+        "require_audio": true,
+        "expected_transcript_word_set": "recovery-dialogue",
+        "maximum_word_error_rate_basis_points": 2000
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 20,
+        "operations": 80,
+        "tokens": 300000,
+        "cost_usd": null,
+        "wall_time_ms": 3000000,
+        "undos": 80
+      },
+      "machine_assertions": [
+        "timeline non-empty",
+        "only the interview source is used",
+        "primary media is gapless",
+        "required recovery-story facts retained",
+        "off-story interview sections absent",
+        "duration bounds",
+        "styled sentence-coherent captions with exact source words",
+        "vertical delivery caption safe area",
+        "timeline audio present",
+        "technical QA export ready",
+        "required capability evidence",
+        "undo integrity",
+        "independently probed MP4 identity",
+        "independent post-render transcript at or below 20% ordered word error rate"
+      ]
+    }
+  ]
+}

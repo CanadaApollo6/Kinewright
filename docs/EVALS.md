@@ -91,22 +91,43 @@ cargo run -p openreel-agent --bin openreel-eval -- `
 
 Set `OPENREEL_EVAL_TRACE=1` for a bounded stderr trace of agent text, tool
 arguments, and tool results while diagnosing a model loop. The v4 harness
-fails fast after 24 tool calls or 350,000 reported tokens; the corrected
-machine path uses 11 calls and averages 159,109 tokens.
+fails fast after 24 tool calls or 350,000 reported tokens; the current
+machine path uses 8 calls and averages 108,296 tokens.
 
 M39 requires a 3/3 machine pass before human review. Its human gate is at
 least two accepted SHA-bound artifacts, a 4.0/5 overall mean, 4.5/5 pacing,
 3.5/5 in every other dimension, and zero audible fillers or material caption
-errors. The corrected Codex machine baseline passes 3/3 samples and 99/99
+errors. The corrected Codex machine baseline passes 3/3 samples and 102/102
 assertions. All samples produce 585-frame cuts with acoustic sentence gaps of
 33, 15, 23, and 16 frames, no cuttable silence, exact authored captions, and a
-4.77% rendered word error rate. Each uses exactly 11 tool calls; reported
-tokens range from 158,076 to 160,022 and average 159,109. Mean usage is 36.1%
-below the superseded 249,112-token baseline after deterministic planner handles
-and a shared pacing/readiness invariant removed the model repair loop. Two
-SHA-distinct caption variants were produced and are recorded in
+4.77% rendered word error rate. Each uses exactly 8 tool calls; reported
+tokens range from 107,900 to 108,597 and average 108,296. Mean usage is 56.5%
+below the superseded 249,112-token baseline after deterministic planner handles,
+a shared pacing/readiness invariant, and deterministic sentence-coherent
+caption grouping removed the model repair loop. All three samples produced one
+byte-identical artifact recorded in
 [`benchmarks/auto-edit/v4/baseline.json`](../benchmarks/auto-edit/v4/baseline.json).
-Both still require SHA-bound human review, so M39 is not complete.
+It still requires a formal SHA-bound human rubric, so M39 is not complete.
+
+The in-progress real-footage generalization contract lives under
+[`benchmarks/auto-edit/v5`](../benchmarks/auto-edit/v5/README.md). Its fixture
+pack records exact download URLs, source pages, licenses, lengths, and SHA-256
+identities. Downloads are explicit; verification and benchmark runs are
+offline. Prepare and verify the first public-domain interview pack with:
+
+```powershell
+& .\scripts\setup-ffmpeg.ps1
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --prepare-fixtures benchmarks/auto-edit/v5/fixture-pack.json
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --verify-fixtures benchmarks/auto-edit/v5/fixture-pack.json
+```
+
+Task `g1` asks the agent to isolate and finish one coherent Hurricane Katrina
+film-recovery story from a naturally recorded two-minute interview. It is the
+first non-synthetic fixture in the published benchmark. M40 remains incomplete
+until interview/documentary, event/multicam, and music-montage families each
+pass three model samples and their separate human gate.
 
 ## Seed suite
 

@@ -2826,10 +2826,8 @@ impl OpenReelMcp {
         args: &DialogueAssemblyPlanArgs,
     ) -> Result<CallToolResult, McpError> {
         let (revision, document) = self.snapshot()?;
-        if args.asset_ids.is_empty() {
-            return Ok(error_text(
-                "dialogue assembly requires at least one ordered asset id",
-            ));
+        if let Err(error) = validate_dialogue_assembly_assets(args) {
+            return Ok(error_text(error));
         }
         let target_track = args.target_track_id;
         if document.tracks.iter().all(|track| track.id != target_track) {
@@ -2852,9 +2850,13 @@ impl OpenReelMcp {
         }
         let mut operations = Vec::new();
         let mut selections = Vec::new();
-        for asset_id in &args.asset_ids {
+        for (index, asset_id) in args.asset_ids.iter().enumerate() {
             let Some(asset) = document.asset(*asset_id).cloned() else {
                 return Ok(error_text(format!("asset {asset_id} does not exist")));
+            };
+            let source_range = match dialogue_source_range(args, index, &asset) {
+                Ok(range) => range,
+                Err(error) => return Ok(error_text(error)),
             };
             let (transcript, silences) = match self.ready_dialogue_analysis(&asset, minimum) {
                 Ok(analysis) => analysis,
@@ -2867,6 +2869,7 @@ impl OpenReelMcp {
                 minimum,
                 remove_fillers,
                 pacing,
+                source_range,
             );
             if ranges.is_empty() {
                 return Ok(error_text(format!(
@@ -3636,6 +3639,9 @@ struct DialogueAssemblyPlanArgs {
     target_track_id: TrackId,
     /// Ordered audio/video asset ids whose spoken content should be preserved.
     asset_ids: Vec<AssetId>,
+    /// Optional source-frame envelope for each ordered asset. When present, its length must match `asset_ids`. Cleanup never includes media outside an envelope.
+    #[serde(default)]
+    source_ranges: Option<Vec<TranscriptRangeArgs>>,
     /// Project-frame insertion point. Defaults to zero.
     #[serde(default)]
     timeline_start: Option<TimeCode>,
@@ -4284,6 +4290,41 @@ struct DialoguePacingSettings {
     maximum_filler_bridge_pause: Option<TimeCode>,
 }
 
+fn validate_dialogue_assembly_assets(args: &DialogueAssemblyPlanArgs) -> Result<(), &'static str> {
+    if args.asset_ids.is_empty() {
+        return Err("dialogue assembly requires at least one ordered asset id");
+    }
+    if args
+        .source_ranges
+        .as_ref()
+        .is_some_and(|ranges| ranges.len() != args.asset_ids.len())
+    {
+        return Err("dialogue assembly source_ranges must match asset_ids length");
+    }
+    Ok(())
+}
+
+fn dialogue_source_range(
+    args: &DialogueAssemblyPlanArgs,
+    index: usize,
+    asset: &MediaAsset,
+) -> Result<std::ops::Range<TimeCode>, String> {
+    let source_range = args.source_ranges.as_ref().map_or_else(
+        || TimeCode::ZERO..asset.duration,
+        |ranges| ranges[index].start..ranges[index].end,
+    );
+    if source_range.start < TimeCode::ZERO
+        || source_range.end > asset.duration
+        || source_range.start >= source_range.end
+    {
+        return Err(format!(
+            "asset {} source range {}..{} must be non-empty and within 0..{}",
+            asset.id, source_range.start.0, source_range.end.0, asset.duration.0
+        ));
+    }
+    Ok(source_range)
+}
+
 fn dialogue_pacing_settings(
     args: &DialogueAssemblyPlanArgs,
 ) -> Result<DialoguePacingSettings, &'static str> {
@@ -4514,6 +4555,7 @@ fn dialogue_keep_ranges(
     minimum_silence_source_frames: TimeCode,
     remove_fillers: bool,
     pacing: DialoguePacingSettings,
+    source_range: std::ops::Range<TimeCode>,
 ) -> Vec<std::ops::Range<TimeCode>> {
     let bridges = if remove_fillers {
         dialogue_filler_bridges(
@@ -4566,8 +4608,8 @@ fn dialogue_keep_ranges(
         );
     }
     for cut in &mut cuts {
-        cut.start = cut.start.clamp(TimeCode::ZERO, asset.duration);
-        cut.end = cut.end.clamp(TimeCode::ZERO, asset.duration);
+        cut.start = cut.start.clamp(source_range.start, source_range.end);
+        cut.end = cut.end.clamp(source_range.start, source_range.end);
     }
     cuts.retain(|cut| cut.end > cut.start);
     let mut merged = merge_dialogue_cuts(cuts, pacing.retained_pause);
@@ -4578,15 +4620,15 @@ fn dialogue_keep_ranges(
     );
     let exact = merge_dialogue_cuts(merged, TimeCode::ZERO);
     let mut kept = Vec::new();
-    let mut cursor = TimeCode::ZERO;
+    let mut cursor = source_range.start;
     for cut in exact {
         if cut.start > cursor {
             kept.push(cursor..cut.start);
         }
         cursor = cursor.max(cut.end);
     }
-    if cursor < asset.duration {
-        kept.push(cursor..asset.duration);
+    if cursor < source_range.end {
+        kept.push(cursor..source_range.end);
     }
     kept
 }
@@ -6673,6 +6715,7 @@ mod tests {
                     filler_padding: TimeCode::ZERO,
                     maximum_filler_bridge_pause: None,
                 },
+                TimeCode::ZERO..asset.duration,
             ),
             vec![
                 TimeCode(0)..TimeCode(20),
@@ -6730,8 +6773,67 @@ mod tests {
                     filler_padding: TimeCode(3),
                     maximum_filler_bridge_pause: None,
                 },
+                TimeCode::ZERO..asset.duration,
             ),
             vec![TimeCode(0)..TimeCode(23), TimeCode(85)..TimeCode(120),]
+        );
+    }
+
+    #[test]
+    fn dialogue_keep_ranges_never_escape_the_requested_source_envelope() {
+        let fps = Rational::new(30, 1).unwrap();
+        let asset = MediaAsset {
+            id: AssetId(1),
+            path: "dialogue.mp4".into(),
+            name: "dialogue".to_owned(),
+            duration: TimeCode(120),
+            fps,
+            kind: MediaKind::AudioVideo,
+            resolution: Some((320, 180)),
+        };
+        let transcript = AssetTranscript {
+            asset: asset.id,
+            content_sha256: "fixture".to_owned(),
+            source_fps: fps,
+            words: vec![TranscriptWord {
+                text: "Um".to_owned(),
+                source_start: TimeCode(75),
+                source_end: TimeCode(82),
+                speaker: None,
+            }],
+        };
+        let silences = AssetSilences {
+            asset: asset.id,
+            content_sha256: "fixture".to_owned(),
+            source_fps: fps,
+            source_frames: asset.duration,
+            threshold_dbfs_hundredths: -4_000,
+            window_milliseconds: 20,
+            spans: vec![SilenceSpan {
+                source_start: TimeCode(20),
+                source_end: TimeCode(70),
+            }],
+        };
+
+        assert_eq!(
+            dialogue_keep_ranges(
+                &asset,
+                &transcript,
+                &silences,
+                TimeCode(20),
+                true,
+                DialoguePacingSettings {
+                    retained_pause: TimeCode::ZERO,
+                    filler_padding: TimeCode::ZERO,
+                    maximum_filler_bridge_pause: None,
+                },
+                TimeCode(10)..TimeCode(100),
+            ),
+            vec![
+                TimeCode(10)..TimeCode(20),
+                TimeCode(70)..TimeCode(75),
+                TimeCode(82)..TimeCode(100),
+            ]
         );
     }
 
@@ -6822,6 +6924,7 @@ mod tests {
                     filler_padding: TimeCode(3),
                     maximum_filler_bridge_pause: Some(TimeCode(12)),
                 },
+                TimeCode::ZERO..asset.duration,
             ),
             vec![TimeCode(0)..TimeCode(19), TimeCode(46)..TimeCode(120)]
         );
