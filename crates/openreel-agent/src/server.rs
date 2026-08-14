@@ -46,6 +46,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     export_queue::{ExportJobId, ExportQueue, ExportQueueError, QueueExportRequest},
+    pacing::{DialoguePacingGap, dialogue_pacing_gaps},
     render::{
         cuttable_timeline_silences, render_asset_scene_changes, render_asset_silences,
         render_asset_transcript, render_clip_info, render_timeline_scene_changes,
@@ -2604,8 +2605,8 @@ impl OpenReelMcp {
             }),
             "dialogue pacing",
         )?;
-        let minimum = args.minimum_pause_frames.unwrap_or(TimeCode(9));
-        let maximum = args.maximum_pause_frames.unwrap_or(TimeCode(15));
+        let minimum = args.minimum_pause_frames.unwrap_or(TimeCode(10));
+        let maximum = args.maximum_pause_frames.unwrap_or(TimeCode(40));
         let capitalization_minimum = args
             .capitalization_boundary_minimum_frames
             .unwrap_or(TimeCode(4));
@@ -2615,9 +2616,23 @@ impl OpenReelMcp {
                 "dialogue pacing requires 0 <= minimum_pause_frames <= maximum_pause_frames and a non-negative capitalization boundary minimum",
             ));
         }
-        for asset in &document.media_pool {
+        let referenced_assets = document
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .filter(|clip| clip.content.is_media())
+            .map(|clip| clip.asset)
+            .collect::<BTreeSet<_>>();
+        for asset in document
+            .media_pool
+            .iter()
+            .filter(|asset| referenced_assets.contains(&asset.id))
+        {
             if self.analysis.transcript_status(asset) == TranscriptStatus::NotRequested {
                 self.analysis.request_transcription(asset.clone());
+            }
+            if self.analysis.silence_status(asset) == SilenceStatus::NotRequested {
+                self.analysis.request_silence_detection(asset.clone());
             }
         }
         let words = match self
@@ -2627,48 +2642,35 @@ impl OpenReelMcp {
             Ok(words) => dedup_timeline_words(words),
             Err(error) => return Ok(error_text(error.to_string())),
         };
-        let pacing = dialogue_pacing_gaps(&words, minimum, maximum, capitalization_minimum);
-        let short = pacing.iter().filter(|gap| gap.status == "short").count();
-        let long = pacing.iter().filter(|gap| gap.status == "long").count();
-        let target = pacing.len().saturating_sub(short).saturating_sub(long);
-        let ready = short == 0 && long == 0;
-        let mut rendered = format!(
-            "dialogue pacing range={}..{} boundaries={} target={} short={} long={} ready={ready}",
-            range.start.0,
-            range.end.0,
-            pacing.len(),
-            target,
-            short,
-            long,
-        );
-        for gap in &pacing {
-            let _ = write!(
-                rendered,
-                "\n{}..{} gap={} status={} {:?} -> {:?} reason={}",
-                gap.previous_end.0,
-                gap.next_start.0,
-                gap.pause_frames.0,
-                gap.status,
-                gap.previous_word,
-                gap.next_word,
-                gap.reason,
-            );
-        }
-        Ok(success_structured(
-            rendered,
-            serde_json::json!({
-                "range": {"start": range.start.0, "end": range.end.0},
-                "target_pause_frames": {"minimum": minimum.0, "maximum": maximum.0},
-                "capitalization_boundary_minimum_frames": capitalization_minimum.0,
-                "summary": {
-                    "boundaries": pacing.len(),
-                    "target": target,
-                    "short": short,
-                    "long": long,
-                    "ready": ready,
-                },
-                "gaps": pacing,
-            }),
+        let silences =
+            match self
+                .analysis
+                .timeline_silences(&document, Some(range.clone()), TimeCode(1))
+            {
+                Ok(silences) => silences,
+                Err(error) => return Ok(error_text(error.to_string())),
+            };
+        let pending_acoustic_assets = document
+            .media_pool
+            .iter()
+            .filter(|asset| referenced_assets.contains(&asset.id))
+            .filter(|asset| {
+                !matches!(
+                    self.analysis.silence_status(asset),
+                    SilenceStatus::Ready(_) | SilenceStatus::NoAudio
+                )
+            })
+            .map(|asset| asset.id.0)
+            .collect::<Vec<_>>();
+        let pacing =
+            dialogue_pacing_gaps(&words, &silences, minimum, maximum, capitalization_minimum);
+        Ok(dialogue_pacing_result(
+            range,
+            minimum,
+            maximum,
+            capitalization_minimum,
+            &pacing,
+            &pending_acoustic_assets,
         ))
     }
 
@@ -2873,7 +2875,8 @@ impl OpenReelMcp {
                     McpError::internal_error("dialogue assembly overflowed", None)
                 })?;
             }
-            selections.push(dialogue_selection(*asset_id, &ranges, &transcript, pacing));
+            let selection = dialogue_selection(&ranges, &transcript, &silences, pacing);
+            selections.push(selection);
         }
 
         let mut candidate = document.as_ref().clone();
@@ -3828,10 +3831,10 @@ struct DialoguePacingArgs {
     /// Optional half-open range in exact project frames. Omit for the full timeline.
     #[serde(default)]
     range: Option<TranscriptRangeArgs>,
-    /// Shortest acceptable pause at a detected sentence boundary. Defaults to 9 project frames.
+    /// Shortest acceptable acoustic pause at a detected sentence boundary. Defaults to 10 project frames.
     #[serde(default)]
     minimum_pause_frames: Option<TimeCode>,
-    /// Longest acceptable pause at a detected sentence boundary. Defaults to 15 project frames.
+    /// Longest acceptable acoustic pause at a detected sentence boundary. Defaults to 40 project frames.
     #[serde(default)]
     maximum_pause_frames: Option<TimeCode>,
     /// Minimum word gap for an uppercase next word to count as a sentence boundary. Defaults to 4 project frames.
@@ -4193,7 +4196,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_dialogue_pacing",
-            "Measure compact sentence-boundary word gaps on the audible timeline and classify each as short, target, or long. Boundaries use punctuation, asset or speaker changes, and pause-backed capitalization so agents can verify rhythm instead of guessing from clip edges.",
+            "Measure sentence-boundary pauses from mapped acoustic silence and classify each as short, target, or long, with transcript timing as an explicit fallback while silence analysis is unavailable. Boundaries use punctuation, asset or speaker changes, and pause-backed capitalization so agents can verify the rhythm viewers hear instead of guessing from clip edges.",
             schema_object::<DialoguePacingArgs>(),
         )
         .with_annotations(read_only()),
@@ -4230,86 +4233,6 @@ fn clamp_caption_cues_to_duration(cues: &mut Vec<CaptionCue>, duration: TimeCode
     cues.retain(|cue| cue.start < duration && cue.end > cue.start);
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-struct DialoguePacingGap {
-    previous_word: String,
-    next_word: String,
-    previous_end: TimeCode,
-    next_start: TimeCode,
-    pause_frames: TimeCode,
-    status: &'static str,
-    reason: String,
-}
-
-fn dialogue_pacing_gaps(
-    words: &[TimelineTranscriptWord],
-    minimum_pause_frames: TimeCode,
-    maximum_pause_frames: TimeCode,
-    capitalization_boundary_minimum_frames: TimeCode,
-) -> Vec<DialoguePacingGap> {
-    let audible = words
-        .iter()
-        .filter(|word| !is_filler_word(&word.text))
-        .collect::<Vec<_>>();
-    audible
-        .windows(2)
-        .filter_map(|pair| {
-            let previous = pair[0];
-            let next = pair[1];
-            let pause_frames =
-                TimeCode(next.project_start.0.saturating_sub(previous.project_end.0));
-            let mut reasons = Vec::new();
-            if previous.asset != next.asset {
-                reasons.push("asset_change");
-            }
-            if previous.speaker.is_some()
-                && next.speaker.is_some()
-                && previous.speaker != next.speaker
-            {
-                reasons.push("speaker_change");
-            }
-            if word_ends_sentence(&previous.text) {
-                reasons.push("terminal_punctuation");
-            }
-            if pause_frames >= capitalization_boundary_minimum_frames
-                && word_starts_uppercase(&next.text)
-            {
-                reasons.push("pause_backed_capitalization");
-            }
-            if reasons.is_empty() {
-                return None;
-            }
-            let status = if pause_frames < minimum_pause_frames {
-                "short"
-            } else if pause_frames > maximum_pause_frames {
-                "long"
-            } else {
-                "target"
-            };
-            Some(DialoguePacingGap {
-                previous_word: previous.text.clone(),
-                next_word: next.text.clone(),
-                previous_end: previous.project_end,
-                next_start: next.project_start,
-                pause_frames,
-                status,
-                reason: reasons.join("+"),
-            })
-        })
-        .collect()
-}
-
-fn word_ends_sentence(text: &str) -> bool {
-    text.trim_end_matches(['\"', '\'', ')', ']', '}'])
-        .ends_with(['.', '!', '?'])
-}
-
-fn word_starts_uppercase(text: &str) -> bool {
-    text.chars()
-        .find(|character| character.is_alphabetic())
-        .is_some_and(char::is_uppercase)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DialoguePacingSettings {
     retained_pause: TimeCode,
@@ -4339,16 +4262,82 @@ fn dialogue_pacing_settings(
 }
 
 fn dialogue_selection(
-    asset_id: AssetId,
     ranges: &[std::ops::Range<TimeCode>],
     transcript: &AssetTranscript,
+    silences: &AssetSilences,
     pacing: DialoguePacingSettings,
 ) -> serde_json::Value {
     serde_json::json!({
-        "asset_id": asset_id,
+        "asset_id": transcript.asset,
         "kept_source_ranges": ranges,
-        "filler_bridges": dialogue_filler_bridges(transcript, pacing.filler_bridge_pause),
+        "filler_bridges": dialogue_filler_bridges(
+            transcript,
+            silences,
+            pacing.filler_bridge_pause,
+        ),
     })
+}
+
+fn dialogue_pacing_result(
+    range: std::ops::Range<TimeCode>,
+    minimum: TimeCode,
+    maximum: TimeCode,
+    capitalization_minimum: TimeCode,
+    pacing: &[DialoguePacingGap],
+    pending_acoustic_assets: &[u64],
+) -> CallToolResult {
+    let short = pacing.iter().filter(|gap| gap.status == "short").count();
+    let long = pacing.iter().filter(|gap| gap.status == "long").count();
+    let target = pacing.len().saturating_sub(short).saturating_sub(long);
+    let acoustic = pacing
+        .iter()
+        .filter(|gap| gap.measurement == "acoustic_silence")
+        .count();
+    let ready = pending_acoustic_assets.is_empty() && short == 0 && long == 0;
+    let mut rendered = format!(
+        "dialogue pacing range={}..{} boundaries={} acoustic={} target={} short={} long={} pending_acoustic_assets={:?} ready={ready}",
+        range.start.0,
+        range.end.0,
+        pacing.len(),
+        acoustic,
+        target,
+        short,
+        long,
+        pending_acoustic_assets,
+    );
+    for gap in pacing {
+        let _ = write!(
+            rendered,
+            "\n{}..{} gap={} transcript_gap={} measurement={} status={} {:?} -> {:?} reason={}",
+            gap.previous_end.0,
+            gap.next_start.0,
+            gap.pause_frames.0,
+            gap.transcript_pause_frames.0,
+            gap.measurement,
+            gap.status,
+            gap.previous_word,
+            gap.next_word,
+            gap.reason,
+        );
+    }
+    success_structured(
+        rendered,
+        serde_json::json!({
+            "range": {"start": range.start.0, "end": range.end.0},
+            "target_pause_frames": {"minimum": minimum.0, "maximum": maximum.0},
+            "capitalization_boundary_minimum_frames": capitalization_minimum.0,
+            "summary": {
+                "boundaries": pacing.len(),
+                "target": target,
+                "short": short,
+                "long": long,
+                "acoustic": acoustic,
+                "pending_acoustic_asset_ids": pending_acoustic_assets,
+                "ready": ready,
+            },
+            "gaps": pacing,
+        }),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -4361,10 +4350,12 @@ struct DialogueFillerBridge {
     cut_end: TimeCode,
     requested_pause_source_frames: TimeCode,
     retained_pause_source_frames: TimeCode,
+    measurement: &'static str,
 }
 
 fn dialogue_filler_bridges(
     transcript: &AssetTranscript,
+    silences: &AssetSilences,
     requested_pause: Option<TimeCode>,
 ) -> Vec<DialogueFillerBridge> {
     let Some(requested_pause) = requested_pause else {
@@ -4397,8 +4388,41 @@ fn dialogue_filler_bridges(
         {
             continue;
         }
-        let left_available = first.source_start.0.saturating_sub(previous.source_end.0);
-        let right_available = next.source_start.0.saturating_sub(last.source_end.0);
+        let left_silence = silences
+            .spans
+            .iter()
+            .filter(|span| {
+                span.source_start < first.source_start && span.source_end >= first.source_start
+            })
+            .min_by_key(|span| span.source_start);
+        let right_silence = silences
+            .spans
+            .iter()
+            .filter(|span| {
+                span.source_start <= last.source_end && span.source_end > last.source_end
+            })
+            .max_by_key(|span| span.source_end);
+        let (bridge_start, bridge_end, left_available, right_available, measurement) =
+            if let (Some(left_silence), Some(right_silence)) = (left_silence, right_silence) {
+                (
+                    left_silence.source_start,
+                    right_silence.source_end,
+                    first
+                        .source_start
+                        .0
+                        .saturating_sub(left_silence.source_start.0),
+                    right_silence.source_end.0.saturating_sub(last.source_end.0),
+                    "acoustic_silence",
+                )
+            } else {
+                (
+                    previous.source_end,
+                    next.source_start,
+                    first.source_start.0.saturating_sub(previous.source_end.0),
+                    next.source_start.0.saturating_sub(last.source_end.0),
+                    "transcript_bounds",
+                )
+            };
         let requested = requested_pause.0;
         let mut left = (requested / 2).min(left_available);
         let mut right = requested.saturating_sub(left).min(right_available);
@@ -4408,20 +4432,21 @@ fn dialogue_filler_bridges(
         remaining = remaining.saturating_sub(left_extra);
         let right_extra = right_available.saturating_sub(right).min(remaining);
         right = right.saturating_add(right_extra);
-        let cut_start = TimeCode(previous.source_end.0.saturating_add(left));
-        let cut_end = TimeCode(next.source_start.0.saturating_sub(right));
+        let cut_start = TimeCode(bridge_start.0.saturating_add(left));
+        let cut_end = TimeCode(bridge_end.0.saturating_sub(right));
         if cut_end <= cut_start {
             continue;
         }
         bridges.push(DialogueFillerBridge {
             previous_word: previous.text.clone(),
             next_word: next.text.clone(),
-            source_start: previous.source_end,
-            source_end: next.source_start,
+            source_start: bridge_start,
+            source_end: bridge_end,
             cut_start,
             cut_end,
             requested_pause_source_frames: requested_pause,
             retained_pause_source_frames: TimeCode(left.saturating_add(right)),
+            measurement,
         });
     }
     bridges
@@ -4436,7 +4461,7 @@ fn dialogue_keep_ranges(
     pacing: DialoguePacingSettings,
 ) -> Vec<std::ops::Range<TimeCode>> {
     let bridges = if remove_fillers {
-        dialogue_filler_bridges(transcript, pacing.filler_bridge_pause)
+        dialogue_filler_bridges(transcript, silences, pacing.filler_bridge_pause)
     } else {
         Vec::new()
     };
@@ -6638,11 +6663,12 @@ mod tests {
             ],
         };
 
-        let bridges = dialogue_filler_bridges(&transcript, Some(TimeCode(12)));
+        let bridges = dialogue_filler_bridges(&transcript, &silences, Some(TimeCode(12)));
         assert_eq!(bridges.len(), 1);
         assert_eq!(bridges[0].cut_start, TimeCode(21));
         assert_eq!(bridges[0].cut_end, TimeCode(44));
         assert_eq!(bridges[0].retained_pause_source_frames, TimeCode(12));
+        assert_eq!(bridges[0].measurement, "acoustic_silence");
         assert_eq!(
             dialogue_keep_ranges(
                 &asset,
@@ -6658,6 +6684,70 @@ mod tests {
             ),
             vec![TimeCode(0)..TimeCode(21), TimeCode(44)..TimeCode(120)]
         );
+    }
+
+    #[test]
+    fn dialogue_filler_bridge_uses_acoustic_edges_when_asr_endpoints_are_late() {
+        let fps = Rational::new(30, 1).unwrap();
+        let transcript = AssetTranscript {
+            asset: AssetId(1),
+            content_sha256: "fixture".to_owned(),
+            source_fps: fps,
+            words: vec![
+                TranscriptWord {
+                    text: "rain".to_owned(),
+                    source_start: TimeCode(128),
+                    source_end: TimeCode(141),
+                    speaker: None,
+                },
+                TranscriptWord {
+                    text: "um".to_owned(),
+                    source_start: TimeCode(162),
+                    source_end: TimeCode(184),
+                    speaker: None,
+                },
+                TranscriptWord {
+                    text: "um".to_owned(),
+                    source_start: TimeCode(197),
+                    source_end: TimeCode(219),
+                    speaker: None,
+                },
+                TranscriptWord {
+                    text: "Neighbors".to_owned(),
+                    source_start: TimeCode(233),
+                    source_end: TimeCode(245),
+                    speaker: None,
+                },
+            ],
+        };
+        let silences = AssetSilences {
+            asset: AssetId(1),
+            content_sha256: "fixture".to_owned(),
+            source_fps: fps,
+            source_frames: TimeCode(331),
+            threshold_dbfs_hundredths: -3_500,
+            window_milliseconds: 10,
+            spans: vec![
+                SilenceSpan {
+                    source_start: TimeCode(108),
+                    source_end: TimeCode(162),
+                },
+                SilenceSpan {
+                    source_start: TimeCode(205),
+                    source_end: TimeCode(234),
+                },
+            ],
+        };
+
+        let bridges = dialogue_filler_bridges(&transcript, &silences, Some(TimeCode(12)));
+
+        assert_eq!(bridges.len(), 1);
+        assert_eq!(bridges[0].source_start, TimeCode(108));
+        assert_eq!(bridges[0].source_end, TimeCode(234));
+        assert_eq!(bridges[0].cut_start, TimeCode(114));
+        assert_eq!(bridges[0].cut_end, TimeCode(228));
+        assert_eq!(bridges[0].retained_pause_source_frames, TimeCode(12));
+        assert_eq!(bridges[0].measurement, "acoustic_silence");
     }
 
     #[test]
@@ -6685,7 +6775,7 @@ mod tests {
             word("continues", 3, 440, 458),
         ];
 
-        let gaps = dialogue_pacing_gaps(&words, TimeCode(9), TimeCode(15), TimeCode(4));
+        let gaps = dialogue_pacing_gaps(&words, &[], TimeCode(9), TimeCode(15), TimeCode(4));
         assert_eq!(gaps.len(), 4);
         assert_eq!(gaps[0].status, "target");
         assert_eq!(gaps[0].reason, "pause_backed_capitalization");

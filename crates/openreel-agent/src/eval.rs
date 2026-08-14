@@ -16,14 +16,14 @@ use openreel_core::{
     Export, ExportCancellation, HarnessInfo, MediaKind, Operation, ParamValue, Playback, Query,
     QueryResult, SessionConfig, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
     TimelineTranscriptWord, TranscriptStatus, dedup_timeline_words, delivery_conformance,
-    document_for_delivery_profile, is_filler_word, map_source_range_to_project, qa_document,
+    document_for_delivery_profile, map_source_range_to_project, qa_document,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ConfirmationBroker, McpServer, compact_tool_names, render::cuttable_timeline_silences,
-    shrink_silence_span_for_cutting_with_transcript,
+    ConfirmationBroker, McpServer, compact_tool_names, pacing::dialogue_pacing_gaps,
+    render::cuttable_timeline_silences, shrink_silence_span_for_cutting_with_transcript,
 };
 
 /// Compute the upper duration bound after cutting every qualifying reported
@@ -1586,6 +1586,7 @@ fn evaluate_assertion(
             capitalization_boundary_minimum_frames,
         } => evaluate_dialogue_pause_bounds(
             &outcome.final_timeline_words,
+            &outcome.remaining_silences,
             *minimum_project_frames,
             *maximum_project_frames,
             *capitalization_boundary_minimum_frames,
@@ -1894,46 +1895,35 @@ fn evaluate_source_clips(clips: &[ExpectedSourceClip], outcome: &EvalOutcome) ->
 
 fn evaluate_dialogue_pause_bounds(
     words: &[TimelineTranscriptWord],
+    silences: &[TimelineSilenceSpan],
     minimum: TimeCode,
     maximum: TimeCode,
     capitalization_minimum: TimeCode,
 ) -> AssertionResult {
-    let audible = words
-        .iter()
-        .filter(|word| !is_filler_word(&word.text))
-        .collect::<Vec<_>>();
-    let boundaries = audible
-        .windows(2)
-        .filter_map(|pair| {
-            let previous = pair[0];
-            let next = pair[1];
-            let pause = TimeCode(next.project_start.0.saturating_sub(previous.project_end.0));
-            let punctuated = eval_word_ends_sentence(&previous.text);
-            let asset_change = previous.asset != next.asset;
-            let speaker_change = previous.speaker.is_some()
-                && next.speaker.is_some()
-                && previous.speaker != next.speaker;
-            let capitalized = pause >= capitalization_minimum
-                && next
-                    .text
-                    .chars()
-                    .find(|character| character.is_alphabetic())
-                    .is_some_and(char::is_uppercase);
-            (punctuated || asset_change || speaker_change || capitalized).then_some((
-                previous.text.as_str(),
-                next.text.as_str(),
-                pause,
-            ))
-        })
-        .collect::<Vec<_>>();
+    let boundaries =
+        dialogue_pacing_gaps(words, silences, minimum, maximum, capitalization_minimum);
     let violations = boundaries
         .iter()
-        .filter(|(_, _, pause)| *pause < minimum || *pause > maximum)
-        .map(|(previous, next, pause)| format!("{previous:?}->{next:?}={}", pause.0))
+        .filter(|gap| gap.status != "target")
+        .map(|gap| {
+            format!(
+                "{:?}->{:?}={} ({}, transcript={})",
+                gap.previous_word,
+                gap.next_word,
+                gap.pause_frames.0,
+                gap.measurement,
+                gap.transcript_pause_frames.0,
+            )
+        })
         .collect::<Vec<_>>();
     let observed = boundaries
         .iter()
-        .map(|(previous, next, pause)| format!("{previous:?}->{next:?}={}", pause.0))
+        .map(|gap| {
+            format!(
+                "{:?}->{:?}={} ({})",
+                gap.previous_word, gap.next_word, gap.pause_frames.0, gap.measurement,
+            )
+        })
         .collect::<Vec<_>>();
     assertion_result(
         "dialogue sentence pacing",
@@ -1942,15 +1932,6 @@ fn evaluate_dialogue_pause_bounds(
             "expected every detected boundary in {}..={} project frames; observed={observed:?}, violations={violations:?}",
             minimum.0, maximum.0,
         ),
-    )
-}
-
-fn eval_word_ends_sentence(text: &str) -> bool {
-    matches!(
-        text.trim_end_matches(['\"', '\'', ')', ']', '}'])
-            .chars()
-            .next_back(),
-        Some('.' | '!' | '?')
     )
 }
 
@@ -2983,7 +2964,7 @@ mod tests {
         ];
 
         let rejected =
-            evaluate_dialogue_pause_bounds(&words, TimeCode(9), TimeCode(15), TimeCode(4));
+            evaluate_dialogue_pause_bounds(&words, &[], TimeCode(9), TimeCode(15), TimeCode(4));
         assert!(!rejected.passed);
         assert!(rejected.detail.contains("beds"));
         assert!(rejected.detail.contains("=7"));

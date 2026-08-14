@@ -73,9 +73,11 @@ were identical. M38 passes its full machine-and-human exit contract.
 The dialogue-pacing contract lives under
 [`benchmarks/auto-edit/v4`](../benchmarks/auto-edit/v4/README.md). It preserves
 the accepted v3 story and output assertions, then independently requires every
-detected sentence-boundary gap to land between 9 and 15 project frames. The
+detected acoustic sentence pause to land between 10 and 40 project frames. The
 agent can normalize the pause across removed filler runs and inspect the final
-rhythm without receiving the evaluator's result. Run it with:
+rhythm without receiving the evaluator's result. Transcript timing is used
+only as an explicit fallback while acoustic analysis is unavailable. Run it
+with:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
@@ -90,14 +92,20 @@ cargo run -p openreel-agent --bin openreel-eval -- `
 M39 requires a 3/3 machine pass before human review. Its human gate is at
 least two accepted SHA-bound artifacts, a 4.0/5 overall mean, 4.5/5 pacing,
 3.5/5 in every other dimension, and zero audible fillers or material caption
-errors. The current Codex machine baseline passes 3/3 samples and 99/99
-assertions. All three artifacts are byte-identical, 607 frames long, and have
-four independently measured 12-frame sentence gaps. Samples used 16-17 tool
-calls and 242,265-258,873 reported tokens, averaging 249,112. A protocol fix
-removed redundant capability discovery and cut mean usage 11.9% from the first
-v4 run without changing the artifact. The exact record lives in
+errors. The historical Codex machine baseline passed 3/3 samples and 99/99
+assertions under the superseded transcript-only pacing metric. All three
+artifacts are byte-identical and 607 frames long. A post-review acoustic audit
+found that the reported four 12-frame gaps were actually about 47, 9, 31, and
+13 frames; the reviewer called out only the first two as pacing defects.
+Samples used
+16-17 tool calls and 242,265-258,873 reported tokens, averaging 249,112. A
+protocol fix removed redundant capability discovery and cut mean usage 11.9%
+from the first v4 run without changing the artifact. The historical record
+lives in
 [`benchmarks/auto-edit/v4/baseline.json`](../benchmarks/auto-edit/v4/baseline.json).
-Human review remains pending, so M39 is not complete.
+Qualitative review called the pacing a major improvement and identified the two
+opening defects, but no formal v4 rubric has been submitted. A fresh corrected
+run and SHA-bound review are required, so M39 is not complete.
 
 ## Seed suite
 

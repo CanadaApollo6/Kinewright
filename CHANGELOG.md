@@ -12,15 +12,18 @@ The initial development cycle (milestones M0–M7), building the editor end to e
 - M39 dialogue pacing: dialogue assembly can now normalize the total clean
   pause retained across a removed filler run without preserving filler audio,
   while a compact read-only pacing inspector reports sentence boundaries and
-  short/target/long gaps. The evaluator independently derives those boundaries
-  from final timeline words and the immutable v4 benchmark requires every gap
-  to land between 9 and 15 project frames. The published Codex machine baseline
-  passes 3/3 samples and 99/99 assertions, producing four exact 12-frame
-  sentence gaps in one deterministic 607-frame artifact. Exact capability names
+  short/target/long gaps. Human review exposed that Whisper word endpoints had
+  made the original 12-frame metric disagree with rendered pauses of roughly
+  47 and 9 frames. Planning and evaluation now use mapped acoustic silence at
+  a speech-oriented -35 dBFS threshold, with transcript bounds as an explicit
+  fallback, and the calibrated 10-to-40-frame contract preserves later natural
+  pauses. The historical Codex baseline passed 3/3 samples and 99/99 assertions
+  under the superseded transcript-only scorer. Exact capability names
   in an edit request now bypass redundant discovery, reducing the published M39
-  mean from 282,716 to 249,112 tokens without changing that artifact. The human
-  exit target rises from M38's accepted 4/5 pacing score to 4.5/5; human review
-  is pending and remains separate from machine success.
+  mean from 282,716 to 249,112 tokens without changing that artifact.
+  Qualitative review called pacing much better but identified the two opening
+  defects; a fresh machine run and formal SHA-bound human review remain
+  required for M39's 4.5/5 pacing exit target.
 - M38 editorial truth benchmark: a new locally generated five-take garden
   story replaces the incoherent color-bar fixture with accepted and rejected
   facts, exact authored captions, and semantically distinct vertical scenes.

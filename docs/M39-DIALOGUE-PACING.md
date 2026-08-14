@@ -25,16 +25,27 @@ between clean dialogue, the planner:
 The option is additive. Existing callers that omit it retain the v3 behavior.
 
 `get_dialogue_pacing` is a compact read-only inspector over final timeline
-words. It recognizes boundaries from terminal punctuation, asset changes,
-speaker changes, and pause-backed capitalization. It reports every boundary's
-word pair, project-frame gap, reason, and short/target/long classification.
+words and mapped acoustic silence. It recognizes boundaries from terminal
+punctuation, asset changes, speaker changes, and pause-backed capitalization.
+It reports every boundary's word pair, acoustic pause, transcript-only gap,
+measurement source, reason, and short/target/long classification. Transcript
+timing is an explicit fallback while acoustic analysis is unavailable.
+
+Human review of the first v4 artifact exposed a measurement defect. Its four
+transcript gaps were all reported as 12 frames, but the rendered opening
+contained about 47 frames of silence at the first transition and only about 9
+at the second. The two later transitions felt natural. Filler-bridge planning
+now retains pause from detected acoustic edges, and the default speech-silence
+threshold is -35 dBFS so the measured endpoints better match what is audible.
 
 ## Independent scoring
 
-The v4 evaluator calculates the same boundary facts from its final timeline
-word snapshot rather than trusting the planner or inspector response. Its new
-`DialoguePauseBounds` assertion fails if any detected sentence gap falls
-outside 9 through 15 project frames.
+The v4 evaluator calculates the same boundary facts from mapped final-timeline
+silence rather than trusting the planner or inspector response. Its
+`DialoguePauseBounds` assertion fails if any detected acoustic pause falls
+outside 10 through 40 project frames. That calibrated range rejects the two
+reviewed opening defects without rejecting the later natural pauses; it is a
+quality bound, not a request to make every sentence break identical.
 
 The published contract is
 [`benchmarks/auto-edit/v4`](../benchmarks/auto-edit/v4/README.md). It preserves
@@ -51,5 +62,7 @@ dimension.
 - Pacing is at least 4.5/5 and every other dimension is at least 3.5/5.
 - No audible filler or material caption error remains.
 
-Machine success does not complete M39. Human review remains authoritative for
-whether the normalized pauses actually feel natural.
+The original 3/3 machine baseline is retained as historical evidence, but its
+transcript-only pacing assertion is no longer considered valid. A fresh run is
+required after this correction. Machine success does not complete M39; human
+review remains authoritative for whether the normalized pauses feel natural.

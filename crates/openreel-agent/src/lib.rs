@@ -7,6 +7,7 @@ mod drivers;
 pub mod eval;
 pub mod export_queue;
 mod models;
+mod pacing;
 mod protocol;
 mod render;
 mod runtime;

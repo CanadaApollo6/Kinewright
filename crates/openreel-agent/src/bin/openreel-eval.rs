@@ -817,13 +817,13 @@ fn dialogue_pacing_suite() -> Vec<EvalDefinition> {
     definition.rationale = "Measures coherent editorial assembly plus explicit, independently scored sentence-boundary rhythm after filler removal.";
     definition.fixture_builder = fixture_dialogue_pacing_story;
     definition.prompts = &[
-        "Create a finished vertical social story about a neighborhood garden from the five takes. Batch-load the exact named capabilities in this brief in one get_capability call, and search only for a need that remains unnamed. Inspect all five takes in one get_transcripts call. Choose the three takes that form this factual arc: the empty lot collected weeds and rainwater; neighbors turned it into food-growing space by building raised beds and planting tomatoes, herbs, and peppers; the Saturday market now supplies fresh produce to dozens of local families. Reject every flub or factually wrong alternate. Use plan_dialogue_assembly to preserve the clean spoken content in story order, remove all audible um sounds with 3 source frames of filler padding, remove raw dead air at least 20 source frames long, retain 6 source frames around ordinary silence cuts, and normalize every removed filler bridge to exactly 12 source frames of sentence pause. Keep the real-time A/V source dialogue audible without duplicating it onto an audio track. Use add_styled_captions with the social preset and pop motion. The exact intended caption wording, excluding fillers, is: 'Last spring this empty lot collected weeds and rainwater. Neighbors decided it could feed families instead. Over three weekends volunteers built raised beds. Then they planted tomatoes herbs and peppers. Now the Saturday market supplies fresh produce to dozens of local families.' Inspect every generated cue with get_captions and use plan_caption_corrections plus prepare_edit_plan and commit_edit_plan if any cue differs from those intended words. Verify get_dialogue_pacing with a 9-to-15-project-frame target and a 4-frame capitalization boundary minimum. Finish with one get_editorial_readiness call using vertical_short, minimum 20 source frames, centered 50/50 focus, nine storyboard frames, and 240-pixel cells. Do not queue export; the benchmark renders and independently transcribes the exact verified snapshot. Keep working until both pacing and readiness are true.",
+        "Create a finished vertical social story about a neighborhood garden from the five takes. Batch-load the exact named capabilities in this brief in one get_capability call, and search only for a need that remains unnamed. Inspect all five takes in one get_transcripts call. Choose the three takes that form this factual arc: the empty lot collected weeds and rainwater; neighbors turned it into food-growing space by building raised beds and planting tomatoes, herbs, and peppers; the Saturday market now supplies fresh produce to dozens of local families. Reject every flub or factually wrong alternate. Use plan_dialogue_assembly to preserve the clean spoken content in story order, remove all audible um sounds with 3 source frames of filler padding, remove raw dead air at least 20 source frames long, retain 6 source frames around ordinary silence cuts, and normalize every removed filler bridge to exactly 12 source frames of sentence pause. Keep the real-time A/V source dialogue audible without duplicating it onto an audio track. Use add_styled_captions with the social preset and pop motion. The exact intended caption wording, excluding fillers, is: 'Last spring this empty lot collected weeds and rainwater. Neighbors decided it could feed families instead. Over three weekends volunteers built raised beds. Then they planted tomatoes herbs and peppers. Now the Saturday market supplies fresh produce to dozens of local families.' Inspect every generated cue with get_captions and use plan_caption_corrections plus prepare_edit_plan and commit_edit_plan if any cue differs from those intended words. Verify get_dialogue_pacing with a 10-to-40-project-frame acoustic target and a 4-frame capitalization boundary minimum. Finish with one get_editorial_readiness call using vertical_short, minimum 20 source frames, centered 50/50 focus, nine storyboard frames, and 240-pixel cells. Do not queue export; the benchmark renders and independently transcribes the exact verified snapshot. Keep working until both pacing and readiness are true.",
     ];
     definition.assertions.insert(
         12,
         EvalAssertion::DialoguePauseBounds {
-            minimum_project_frames: TimeCode(9),
-            maximum_project_frames: TimeCode(15),
+            minimum_project_frames: TimeCode(10),
+            maximum_project_frames: TimeCode(40),
             capitalization_boundary_minimum_frames: TimeCode(4),
         },
     );
@@ -2068,8 +2068,8 @@ mod tests {
         assert!(definition.assertions.iter().any(|assertion| matches!(
             assertion,
             EvalAssertion::DialoguePauseBounds {
-                minimum_project_frames: TimeCode(9),
-                maximum_project_frames: TimeCode(15),
+                minimum_project_frames: TimeCode(10),
+                maximum_project_frames: TimeCode(40),
                 capitalization_boundary_minimum_frames: TimeCode(4),
             }
         )));

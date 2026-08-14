@@ -33,7 +33,7 @@ OpenReel is a native Windows video editor written in Rust that is, at its core, 
 - Agent editing with senses and plans: transcript, silence, and scene-change inspectors; atomic multi-operation edit plans with a **single undo entry** and one summarized confirmation for anything destructive; plan results self-report remaining dead air so the agent finishes the job
 - The agent has *eyes*: it can fetch actual frames from your timeline, not just metadata
 - **Measured agent competence**: a scored eval suite (`openreel-eval`) with an [exact-operation baseline](benchmarks/auto-edit/v1/README.md) and a [finished-cut benchmark](benchmarks/auto-edit/v2/README.md) that renders, probes, hashes, and packages a real MP4 for separate human review — see `docs/EVALS.md`
-- The [editorial-truth benchmark](benchmarks/auto-edit/v3/README.md) independently checks rendered speech and exact authored captions; [dialogue-pacing v4](benchmarks/auto-edit/v4/README.md) adds independently measured sentence rhythm before separate human review
+- The [editorial-truth benchmark](benchmarks/auto-edit/v3/README.md) independently checks rendered speech and exact authored captions; [dialogue-pacing v4](benchmarks/auto-edit/v4/README.md) adds acoustically measured sentence rhythm before separate human review
 - Context-sensitive inspector panel (clips, titles, markers) driven by the same effect table that validates operations
 - Transcript panel with click-word-to-seek
 - Crash recovery from an operation journal

@@ -26,7 +26,9 @@ use crate::{
 const CACHE_VERSION: u32 = 1;
 const ANALYSIS_SAMPLE_RATE: u32 = 48_000;
 const SCENE_WINDOW_FRAMES: i64 = 32;
-pub const DEFAULT_SILENCE_THRESHOLD_DBFS_HUNDREDTHS: i32 = -4_000;
+/// Speech-oriented silence threshold. -35 dBFS tracks perceived dialogue
+/// onsets and offsets more closely than the previous -40 dBFS threshold.
+pub const DEFAULT_SILENCE_THRESHOLD_DBFS_HUNDREDTHS: i32 = -3_500;
 pub const DEFAULT_SILENCE_WINDOW_MILLISECONDS: u32 = 10;
 pub const DEFAULT_MINIMUM_SILENCE_FRAMES: i64 = 6;
 pub const DEFAULT_SCENE_PROXY_WIDTH: u32 = 320;
