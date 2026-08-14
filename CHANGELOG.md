@@ -9,8 +9,9 @@ All notable changes to OpenReel are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Added
-- M39 dialogue pacing: dialogue assembly can now normalize the total clean
-  pause retained across a removed filler run without preserving filler audio,
+- M39 dialogue pacing: dialogue assembly can now cap the total clean acoustic
+  pause retained across a removed filler run without shortening an already
+  natural bridge or preserving filler audio,
   while a compact read-only pacing inspector reports sentence boundaries and
   short/target/long gaps. Human review exposed that Whisper word endpoints had
   made the original 12-frame metric disagree with rendered pauses of roughly

@@ -2889,7 +2889,7 @@ impl OpenReelMcp {
             "timeline_revision": revision,
             "retained_pause_source_frames": pacing.retained_pause,
             "filler_padding_source_frames": pacing.filler_padding,
-            "filler_bridge_pause_source_frames": pacing.filler_bridge_pause,
+            "maximum_filler_bridge_pause_source_frames": pacing.maximum_filler_bridge_pause,
             "selections": selections,
             "resulting_range": {
                 "start": args.timeline_start.unwrap_or(TimeCode::ZERO),
@@ -3623,9 +3623,9 @@ struct DialogueAssemblyPlanArgs {
     /// Extra source frames removed on each side of a recognized filler boundary. Defaults to zero.
     #[serde(default)]
     filler_padding_source_frames: Option<TimeCode>,
-    /// Exact total pause retained between non-filler words bracketing a removed filler run. Use this to normalize sentence rhythm; omit to preserve the legacy detector-driven behavior.
+    /// Maximum acoustic pause retained between non-filler words bracketing a removed filler run. Longer pauses are trimmed to this cap; shorter natural pauses are preserved.
     #[serde(default)]
-    filler_bridge_pause_source_frames: Option<TimeCode>,
+    maximum_filler_bridge_pause_source_frames: Option<TimeCode>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -4237,7 +4237,7 @@ fn clamp_caption_cues_to_duration(cues: &mut Vec<CaptionCue>, duration: TimeCode
 struct DialoguePacingSettings {
     retained_pause: TimeCode,
     filler_padding: TimeCode,
-    filler_bridge_pause: Option<TimeCode>,
+    maximum_filler_bridge_pause: Option<TimeCode>,
 }
 
 fn dialogue_pacing_settings(
@@ -4245,19 +4245,19 @@ fn dialogue_pacing_settings(
 ) -> Result<DialoguePacingSettings, &'static str> {
     let retained = args.retained_pause_source_frames.unwrap_or(TimeCode::ZERO);
     let padding = args.filler_padding_source_frames.unwrap_or(TimeCode::ZERO);
-    let filler_bridge_pause = args.filler_bridge_pause_source_frames;
+    let maximum_filler_bridge_pause = args.maximum_filler_bridge_pause_source_frames;
     if retained < TimeCode::ZERO
         || padding < TimeCode::ZERO
-        || filler_bridge_pause.is_some_and(|pause| pause < TimeCode::ZERO)
+        || maximum_filler_bridge_pause.is_some_and(|pause| pause < TimeCode::ZERO)
     {
         return Err(
-            "retained_pause_source_frames, filler_padding_source_frames, and filler_bridge_pause_source_frames must be non-negative",
+            "retained_pause_source_frames, filler_padding_source_frames, and maximum_filler_bridge_pause_source_frames must be non-negative",
         );
     }
     Ok(DialoguePacingSettings {
         retained_pause: retained,
         filler_padding: padding,
-        filler_bridge_pause,
+        maximum_filler_bridge_pause,
     })
 }
 
@@ -4273,7 +4273,7 @@ fn dialogue_selection(
         "filler_bridges": dialogue_filler_bridges(
             transcript,
             silences,
-            pacing.filler_bridge_pause,
+            pacing.maximum_filler_bridge_pause,
         ),
     })
 }
@@ -4348,7 +4348,8 @@ struct DialogueFillerBridge {
     source_end: TimeCode,
     cut_start: TimeCode,
     cut_end: TimeCode,
-    requested_pause_source_frames: TimeCode,
+    available_pause_source_frames: TimeCode,
+    maximum_pause_source_frames: TimeCode,
     retained_pause_source_frames: TimeCode,
     measurement: &'static str,
 }
@@ -4356,9 +4357,9 @@ struct DialogueFillerBridge {
 fn dialogue_filler_bridges(
     transcript: &AssetTranscript,
     silences: &AssetSilences,
-    requested_pause: Option<TimeCode>,
+    maximum_pause: Option<TimeCode>,
 ) -> Vec<DialogueFillerBridge> {
-    let Some(requested_pause) = requested_pause else {
+    let Some(maximum_pause) = maximum_pause else {
         return Vec::new();
     };
     let mut bridges = Vec::new();
@@ -4423,7 +4424,8 @@ fn dialogue_filler_bridges(
                     "transcript_bounds",
                 )
             };
-        let requested = requested_pause.0;
+        let available = left_available.saturating_add(right_available);
+        let requested = maximum_pause.0;
         let mut left = (requested / 2).min(left_available);
         let mut right = requested.saturating_sub(left).min(right_available);
         let mut remaining = requested.saturating_sub(left).saturating_sub(right);
@@ -4444,7 +4446,8 @@ fn dialogue_filler_bridges(
             source_end: bridge_end,
             cut_start,
             cut_end,
-            requested_pause_source_frames: requested_pause,
+            available_pause_source_frames: TimeCode(available),
+            maximum_pause_source_frames: maximum_pause,
             retained_pause_source_frames: TimeCode(left.saturating_add(right)),
             measurement,
         });
@@ -4461,7 +4464,7 @@ fn dialogue_keep_ranges(
     pacing: DialoguePacingSettings,
 ) -> Vec<std::ops::Range<TimeCode>> {
     let bridges = if remove_fillers {
-        dialogue_filler_bridges(transcript, silences, pacing.filler_bridge_pause)
+        dialogue_filler_bridges(transcript, silences, pacing.maximum_filler_bridge_pause)
     } else {
         Vec::new()
     };
@@ -6537,7 +6540,7 @@ mod tests {
                 DialoguePacingSettings {
                     retained_pause: TimeCode::ZERO,
                     filler_padding: TimeCode::ZERO,
-                    filler_bridge_pause: None,
+                    maximum_filler_bridge_pause: None,
                 },
             ),
             vec![
@@ -6594,7 +6597,7 @@ mod tests {
                 DialoguePacingSettings {
                     retained_pause: TimeCode(6),
                     filler_padding: TimeCode(3),
-                    filler_bridge_pause: None,
+                    maximum_filler_bridge_pause: None,
                 },
             ),
             vec![TimeCode(0)..TimeCode(23), TimeCode(85)..TimeCode(120),]
@@ -6602,7 +6605,7 @@ mod tests {
     }
 
     #[test]
-    fn dialogue_filler_bridge_normalizes_sentence_pause_exactly() {
+    fn dialogue_filler_bridge_caps_long_pauses_and_preserves_shorter_ones() {
         let fps = Rational::new(30, 1).unwrap();
         let asset = MediaAsset {
             id: AssetId(1),
@@ -6669,6 +6672,11 @@ mod tests {
         assert_eq!(bridges[0].cut_end, TimeCode(44));
         assert_eq!(bridges[0].retained_pause_source_frames, TimeCode(12));
         assert_eq!(bridges[0].measurement, "acoustic_silence");
+        let preserved = dialogue_filler_bridges(&transcript, &silences, Some(TimeCode(30)));
+        assert_eq!(preserved[0].available_pause_source_frames, TimeCode(25));
+        assert_eq!(preserved[0].retained_pause_source_frames, TimeCode(25));
+        assert_eq!(preserved[0].cut_start, TimeCode(25));
+        assert_eq!(preserved[0].cut_end, TimeCode(35));
         assert_eq!(
             dialogue_keep_ranges(
                 &asset,
@@ -6679,7 +6687,7 @@ mod tests {
                 DialoguePacingSettings {
                     retained_pause: TimeCode(6),
                     filler_padding: TimeCode(3),
-                    filler_bridge_pause: Some(TimeCode(12)),
+                    maximum_filler_bridge_pause: Some(TimeCode(12)),
                 },
             ),
             vec![TimeCode(0)..TimeCode(21), TimeCode(44)..TimeCode(120)]

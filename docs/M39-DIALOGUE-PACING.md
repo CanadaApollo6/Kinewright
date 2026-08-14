@@ -13,14 +13,15 @@ the accepted v3 benchmark or claim to solve general editorial rhythm.
 ## Agent-facing changes
 
 `plan_dialogue_assembly` now accepts an optional
-`filler_bridge_pause_source_frames` value. When a run of filler words sits
+`maximum_filler_bridge_pause_source_frames` value. When a run of filler words sits
 between clean dialogue, the planner:
 
 1. protects the full bridge from ordinary silence and filler cuts;
 2. removes the entire filler run with one central cut;
-3. retains the requested total clean pause, split across the adjacent speech;
-4. reports the source range, actual retained pause, and whether the request had
-   to be constrained by available clean audio.
+3. caps excessive acoustic silence without shortening a natural pause already
+   below the cap;
+4. reports the available pause, configured maximum, retained pause, acoustic
+   source range, and measurement mode.
 
 The option is additive. Existing callers that omit it retain the v3 behavior.
 
@@ -50,7 +51,10 @@ quality bound, not a request to make every sentence break identical.
 The published contract is
 [`benchmarks/auto-edit/v4`](../benchmarks/auto-edit/v4/README.md). It preserves
 the v3 fixture, story, caption, render, and delivery assertions while asking
-the agent to normalize removed filler bridges to 12 source frames. The human
+the agent to cap removed filler bridges at 31 acoustic source frames and retain
+9 frames around ordinary silence cuts. Source-ASR words located wholly inside
+detected silence are excluded from timestamp-proxy assertions because the
+independent rendered transcript is authoritative for audible content. The human
 target rises to 4.5/5 for pacing, 4.0/5 overall, and 3.5/5 for every other
 dimension.
 
@@ -65,4 +69,4 @@ dimension.
 The original 3/3 machine baseline is retained as historical evidence, but its
 transcript-only pacing assertion is no longer considered valid. A fresh run is
 required after this correction. Machine success does not complete M39; human
-review remains authoritative for whether the normalized pauses feel natural.
+review remains authoritative for whether the bounded pauses feel natural.

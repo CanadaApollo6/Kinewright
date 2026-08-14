@@ -817,7 +817,7 @@ fn dialogue_pacing_suite() -> Vec<EvalDefinition> {
     definition.rationale = "Measures coherent editorial assembly plus explicit, independently scored sentence-boundary rhythm after filler removal.";
     definition.fixture_builder = fixture_dialogue_pacing_story;
     definition.prompts = &[
-        "Create a finished vertical social story about a neighborhood garden from the five takes. Batch-load the exact named capabilities in this brief in one get_capability call, and search only for a need that remains unnamed. Inspect all five takes in one get_transcripts call. Choose the three takes that form this factual arc: the empty lot collected weeds and rainwater; neighbors turned it into food-growing space by building raised beds and planting tomatoes, herbs, and peppers; the Saturday market now supplies fresh produce to dozens of local families. Reject every flub or factually wrong alternate. Use plan_dialogue_assembly to preserve the clean spoken content in story order, remove all audible um sounds with 3 source frames of filler padding, remove raw dead air at least 20 source frames long, retain 6 source frames around ordinary silence cuts, and normalize every removed filler bridge to exactly 12 source frames of sentence pause. Keep the real-time A/V source dialogue audible without duplicating it onto an audio track. Use add_styled_captions with the social preset and pop motion. The exact intended caption wording, excluding fillers, is: 'Last spring this empty lot collected weeds and rainwater. Neighbors decided it could feed families instead. Over three weekends volunteers built raised beds. Then they planted tomatoes herbs and peppers. Now the Saturday market supplies fresh produce to dozens of local families.' Inspect every generated cue with get_captions and use plan_caption_corrections plus prepare_edit_plan and commit_edit_plan if any cue differs from those intended words. Verify get_dialogue_pacing with a 10-to-40-project-frame acoustic target and a 4-frame capitalization boundary minimum. Finish with one get_editorial_readiness call using vertical_short, minimum 20 source frames, centered 50/50 focus, nine storyboard frames, and 240-pixel cells. Do not queue export; the benchmark renders and independently transcribes the exact verified snapshot. Keep working until both pacing and readiness are true.",
+        "Create a finished vertical social story about a neighborhood garden from the five takes. Batch-load the exact named capabilities in this brief in one get_capability call, and search only for a need that remains unnamed. Inspect all five takes in one get_transcripts call. Choose the three takes that form this factual arc: the empty lot collected weeds and rainwater; neighbors turned it into food-growing space by building raised beds and planting tomatoes, herbs, and peppers; the Saturday market now supplies fresh produce to dozens of local families. Reject every flub or factually wrong alternate. Use plan_dialogue_assembly to preserve the clean spoken content in story order, remove all audible um sounds with 3 source frames of filler padding, remove raw dead air at least 20 source frames long, retain 9 source frames around ordinary silence cuts, and cap acoustic pauses around removed filler bridges at 31 source frames without shortening a bridge that is already below that cap. Keep the real-time A/V source dialogue audible without duplicating it onto an audio track. Use add_styled_captions with the social preset and pop motion. The exact intended caption wording, excluding fillers, is: 'Last spring this empty lot collected weeds and rainwater. Neighbors decided it could feed families instead. Over three weekends volunteers built raised beds. Then they planted tomatoes herbs and peppers. Now the Saturday market supplies fresh produce to dozens of local families.' Inspect every generated cue with get_captions and use plan_caption_corrections plus prepare_edit_plan and commit_edit_plan if any cue differs from those intended words. Verify get_dialogue_pacing with a 10-to-40-project-frame acoustic target and a 4-frame capitalization boundary minimum. Finish with one get_editorial_readiness call using vertical_short, minimum 20 source frames, centered 50/50 focus, nine storyboard frames, and 240-pixel cells. Do not queue export; the benchmark renders and independently transcribes the exact verified snapshot. Keep working until both pacing and readiness are true.",
     ];
     definition.assertions.insert(
         12,
@@ -1295,7 +1295,11 @@ fn fixture_editorial_story_from(
                 "{benchmark_version} expected take {take_id:?} does not exist"
             ))
         })?;
-        let recognized = normalized_words(&joined_words(&transcripts[&asset_id]));
+        let recognized = if benchmark_version == "v4" {
+            acoustically_scorable_words(&transcripts[&asset_id], &silences[&asset_id])
+        } else {
+            normalized_words(&joined_words(&transcripts[&asset_id]))
+        };
         let (fillers, spoken_words) = partition_fillers(&recognized);
         if spoken_words.is_empty() {
             return Err(EvalError::Fixture(format!(
@@ -1772,6 +1776,22 @@ fn silence_frames(silences: &AssetSilences, minimum_frames: i64) -> i64 {
         .fold(0_i64, i64::saturating_add)
 }
 
+fn acoustically_scorable_words(
+    transcript: &AssetTranscript,
+    silences: &AssetSilences,
+) -> Vec<String> {
+    transcript
+        .words
+        .iter()
+        .filter(|word| {
+            !silences.spans.iter().any(|span| {
+                span.source_start <= word.source_start && span.source_end >= word.source_end
+            })
+        })
+        .flat_map(|word| normalized_words(&word.text))
+        .collect()
+}
+
 fn partition_fillers(words: &[String]) -> (Vec<String>, Vec<String>) {
     words.iter().cloned().partition(|word| is_filler(word))
 }
@@ -2104,6 +2124,47 @@ mod tests {
             );
             assert!(generated.path().metadata().unwrap().len() > 0);
         }
+    }
+
+    #[test]
+    fn acoustic_word_scoring_ignores_asr_words_fully_inside_detected_silence() {
+        let fps = Rational::new(30, 1).unwrap();
+        let transcript = AssetTranscript {
+            asset: openreel_core::AssetId(1),
+            content_sha256: "fixture".to_owned(),
+            source_fps: fps,
+            words: vec![
+                openreel_core::TranscriptWord {
+                    text: "audible".to_owned(),
+                    source_start: TimeCode(10),
+                    source_end: TimeCode(20),
+                    speaker: None,
+                },
+                openreel_core::TranscriptWord {
+                    text: "late".to_owned(),
+                    source_start: TimeCode(30),
+                    source_end: TimeCode(40),
+                    speaker: None,
+                },
+            ],
+        };
+        let silences = AssetSilences {
+            asset: transcript.asset,
+            content_sha256: "fixture".to_owned(),
+            source_fps: fps,
+            source_frames: TimeCode(60),
+            threshold_dbfs_hundredths: -3_500,
+            window_milliseconds: 10,
+            spans: vec![openreel_core::SilenceSpan {
+                source_start: TimeCode(25),
+                source_end: TimeCode(45),
+            }],
+        };
+
+        assert_eq!(
+            acoustically_scorable_words(&transcript, &silences),
+            ["audible"]
+        );
     }
 
     #[test]

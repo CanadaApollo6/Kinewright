@@ -74,7 +74,7 @@ The dialogue-pacing contract lives under
 [`benchmarks/auto-edit/v4`](../benchmarks/auto-edit/v4/README.md). It preserves
 the accepted v3 story and output assertions, then independently requires every
 detected acoustic sentence pause to land between 10 and 40 project frames. The
-agent can normalize the pause across removed filler runs and inspect the final
+agent can cap excessive pause across removed filler runs and inspect the final
 rhythm without receiving the evaluator's result. Transcript timing is used
 only as an explicit fallback while acoustic analysis is unavailable. Run it
 with:

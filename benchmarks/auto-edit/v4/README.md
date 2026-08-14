@@ -9,7 +9,8 @@ less consistent.
 The fixture and editorial truth are unchanged from v3. Keeping that successful
 artifact contract stable isolates the pacing change. V4 adds:
 
-- exact pause retention across consecutive removed filler words;
+- acoustic upper bounds across consecutive removed filler words without
+  shortening already-natural pauses;
 - a compact `get_dialogue_pacing` inspector that reports sentence boundaries,
   acoustic pauses, transcript fallbacks, reasons, and short/target/long status;
 - an evaluator-owned assertion requiring every detected acoustic sentence
@@ -17,10 +18,13 @@ artifact contract stable isolates the pacing change. V4 adds:
 - a higher human gate: pacing at least 4.5/5, overall mean at least 4.0/5, and
   every other dimension at least 3.5/5.
 
-The model is asked for a 12-source-frame bridge where fillers are removed. The
-planner removes the whole filler run atomically and divides the retained pause
-across its two clean speech boundaries without preserving filler audio. The
-independent evaluator measures mapped acoustic silence, not planner claims.
+The model is asked to cap filler bridges at 31 acoustic source frames and retain
+9 source frames around ordinary silence cuts. The planner removes a filler run
+atomically, trims only silence beyond the cap, and does not preserve filler
+audio. Source words whose ASR timestamps sit wholly inside detected silence are
+excluded from timestamp-proxy retention assertions; the independent rendered
+transcript remains authoritative for audible words. The pacing evaluator
+measures mapped acoustic silence, not planner claims.
 
 Run three subscription-backed samples with:
 
