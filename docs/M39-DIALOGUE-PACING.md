@@ -77,7 +77,9 @@ dimension.
 - Pacing is at least 4.5/5 and every other dimension is at least 3.5/5.
 - No audible filler or material caption error remains.
 
-The original 3/3 machine baseline is retained as historical evidence, but its
-transcript-only pacing assertion is no longer considered valid. A fresh run is
-required after this correction. Machine success does not complete M39; human
-review remains authoritative for whether the bounded pauses feel natural.
+The corrected baseline passes 3/3 samples and 99/99 assertions with identical
+33, 15, 23, and 16-frame acoustic gaps. Every sample uses 11 tool calls and the
+mean reported token count is 159,109, down 36.1% from the superseded 249,112
+mean. The run produced two valid SHA-distinct caption variants. Machine success
+does not complete M39; both variants remain pending human review, which is
+authoritative for whether the bounded pauses feel natural.

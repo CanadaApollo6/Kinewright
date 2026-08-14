@@ -38,16 +38,19 @@ cargo run -p openreel-agent --bin openreel-eval -- `
   --samples 3
 ```
 
-The published Codex machine baseline on revision `6e22f3a` passed all three
-samples and all 99 assertions under the original transcript-only metric. Every
-sample produced the same 607-frame MP4 and a 4.77% independent rendered-dialogue
-word error rate. Samples used 16-17 tool calls and 242,265-258,873 reported
-tokens, averaging 249,112. Human timestamp review later showed that the four
-reported 12-frame gaps were not acoustic measurements: the opening rendered at
-roughly 47 frames followed by roughly 9, while the later pauses felt natural.
-That baseline remains in [`baseline.json`](baseline.json) as historical and
-token-regression evidence, but it no longer satisfies the corrected pacing
-contract. A fresh benchmark run is required.
+The corrected Codex machine baseline on revision `5f6cfea` passes all three
+samples and all 99 assertions. Every sample independently produces the same
+585-frame dialogue timing, four acoustically measured sentence gaps of 33, 15,
+23, and 16 project frames, no cuttable 20-frame silence, and a 4.77%
+independent rendered-dialogue word error rate. Each sample uses exactly 11 tool
+calls and 158,076-160,022 reported tokens, averaging 159,109. That is 36.1%
+below the superseded 249,112-token mean while satisfying the stronger acoustic
+contract.
+
+The run produced two SHA-distinct MP4s because the third agent chose a
+different valid caption-correction grouping. Both variants pass exact caption,
+safe-area, render, and delivery assertions. The full record and both hashes are
+in [`baseline.json`](baseline.json); both remain pending human review.
 
 The checked-in [regression evidence](token-regression.json) and
 [portable technical report](../../../docs/reports/m39-token-regression/report.html)
@@ -59,10 +62,10 @@ accepted by a person, mean human rating is at least 4.0, pacing is at least
 4.5, no other dimension falls below 3.5, and no material caption error or
 audible filler survives.
 
-Qualitative review called the pacing a major improvement and identified the two
-opening defects above, but no formal v4 rubric has been submitted. A fresh
-machine run and SHA-bound human review are required. A machine pass alone does
-not complete M39.
+Qualitative review of the superseded artifact called the pacing a major
+improvement and identified its two opening defects. The corrected machine run
+is complete, but neither new SHA has a formal v4 rubric yet. A machine pass
+alone does not complete M39.
 
 This is still a synthetic motion-graphic fixture. It can isolate dialogue
 editing and narrative correctness, but it cannot establish professional shot

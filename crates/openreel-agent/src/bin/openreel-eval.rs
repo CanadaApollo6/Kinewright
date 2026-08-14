@@ -2228,7 +2228,16 @@ mod tests {
                 .iter()
                 .map(|boundary| boundary["gap_project_frames"].as_i64().unwrap())
                 .collect::<Vec<_>>(),
-            [12, 12, 12, 12]
+            [33, 15, 23, 16]
+        );
+        assert_eq!(machine["tool_calls"], 33);
+        assert_eq!(machine["mean_total_tokens"], 159_109.0);
+        assert_eq!(
+            baseline["deliverable"]["unique_artifacts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
         );
         assert_eq!(baseline["human_review"]["status"], "pending");
         assert_eq!(baseline["benchmark_status"], "pending_human_review");

@@ -91,26 +91,22 @@ cargo run -p openreel-agent --bin openreel-eval -- `
 
 Set `OPENREEL_EVAL_TRACE=1` for a bounded stderr trace of agent text, tool
 arguments, and tool results while diagnosing a model loop. The v4 harness
-fails fast after 24 tool calls or 350,000 reported tokens; the accepted
-historical path needed 16-17 calls and averaged 249,112 tokens.
+fails fast after 24 tool calls or 350,000 reported tokens; the corrected
+machine path uses 11 calls and averages 159,109 tokens.
 
 M39 requires a 3/3 machine pass before human review. Its human gate is at
 least two accepted SHA-bound artifacts, a 4.0/5 overall mean, 4.5/5 pacing,
 3.5/5 in every other dimension, and zero audible fillers or material caption
-errors. The historical Codex machine baseline passed 3/3 samples and 99/99
-assertions under the superseded transcript-only pacing metric. All three
-artifacts are byte-identical and 607 frames long. A post-review acoustic audit
-found that the reported four 12-frame gaps were actually about 47, 9, 31, and
-13 frames; the reviewer called out only the first two as pacing defects.
-Samples used
-16-17 tool calls and 242,265-258,873 reported tokens, averaging 249,112. A
-protocol fix removed redundant capability discovery and cut mean usage 11.9%
-from the first v4 run without changing the artifact. The historical record
-lives in
+errors. The corrected Codex machine baseline passes 3/3 samples and 99/99
+assertions. All samples produce 585-frame cuts with acoustic sentence gaps of
+33, 15, 23, and 16 frames, no cuttable silence, exact authored captions, and a
+4.77% rendered word error rate. Each uses exactly 11 tool calls; reported
+tokens range from 158,076 to 160,022 and average 159,109. Mean usage is 36.1%
+below the superseded 249,112-token baseline after deterministic planner handles
+and a shared pacing/readiness invariant removed the model repair loop. Two
+SHA-distinct caption variants were produced and are recorded in
 [`benchmarks/auto-edit/v4/baseline.json`](../benchmarks/auto-edit/v4/baseline.json).
-Qualitative review called the pacing a major improvement and identified the two
-opening defects, but no formal v4 rubric has been submitted. A fresh corrected
-run and SHA-bound review are required, so M39 is not complete.
+Both still require SHA-bound human review, so M39 is not complete.
 
 ## Seed suite
 

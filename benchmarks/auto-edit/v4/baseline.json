@@ -3,19 +3,19 @@
   "benchmark_id": "openreel-dialogue-pacing-v4",
   "suite_manifest": "benchmarks/auto-edit/v4/manifest.json",
   "source_trace": {
-    "filename": "openreel-eval-20260814-054517-codex/results.jsonl",
-    "sha256": "5757bc8de68f0f9467b3bcc52f10dd22e0bff617d991d247ac52c6ebe9bcf943",
+    "filename": "openreel-eval-20260814-155650-codex/results.jsonl",
+    "sha256": "703c80bb44101e5554c75b0354fddd82670d88d4a6ef371ced17ac82c6c41563",
     "note": "The raw trace and media package are generated local artifacts under target/evals and are intentionally not committed."
   },
   "environment": {
-    "timestamp_utc": "2026-08-14T05:45:17Z",
+    "timestamp_utc": "2026-08-14T15:56:50Z",
     "harness": "codex",
     "harness_version": "codex-cli 0.147.0",
     "model": "harness-default",
     "os": "windows",
     "architecture": "x86_64",
     "openreel_version": "0.1.0",
-    "openreel_revision": "6e22f3a7e3abc823d6159788a2936736b15f33ed"
+    "openreel_revision": "5f6cfea46f529fe73c702573bad95484673d62fa"
   },
   "machine_summary": {
     "samples_passed": 3,
@@ -23,17 +23,18 @@
     "assertions_passed": 99,
     "assertions_total": 99,
     "turns": 3,
-    "tool_calls": 49,
-    "input_tokens": 740076,
-    "cached_input_tokens": 626944,
-    "output_tokens": 7259,
-    "reasoning_output_tokens": 1492,
-    "total_tokens": 747335,
-    "mean_total_tokens": 249111.6667,
+    "tool_calls": 33,
+    "input_tokens": 473449,
+    "cached_input_tokens": 393216,
+    "uncached_input_tokens": 80233,
+    "output_tokens": 3878,
+    "reasoning_output_tokens": 819,
+    "total_tokens": 477327,
+    "mean_total_tokens": 159109.0,
     "cost_usd": null,
-    "wall_time_ms": 294015,
-    "mean_wall_time_ms": 98005.0,
-    "operations_applied": 105
+    "wall_time_ms": 210113,
+    "mean_wall_time_ms": 70037.6667,
+    "operations_applied": 115
   },
   "samples": [
     {
@@ -42,17 +43,19 @@
       "assertions_passed": 33,
       "assertions_total": 33,
       "turns": 1,
-      "tool_calls": 17,
-      "input_tokens": 256467,
-      "cached_input_tokens": 212992,
-      "output_tokens": 2406,
-      "reasoning_output_tokens": 442,
-      "total_tokens": 258873,
-      "wall_time_ms": 99334,
-      "operations_applied": 35,
-      "sentence_boundary_gaps_project_frames": [12, 12, 12, 12],
+      "tool_calls": 11,
+      "input_tokens": 158593,
+      "cached_input_tokens": 135424,
+      "uncached_input_tokens": 23169,
+      "output_tokens": 1429,
+      "reasoning_output_tokens": 323,
+      "total_tokens": 160022,
+      "wall_time_ms": 77753,
+      "operations_applied": 37,
+      "sentence_boundary_gaps_project_frames": [33, 15, 23, 16],
       "rendered_word_error_rate_basis_points": 477,
-      "output_sha256": "39ebb79feb96915c845343b043d8879cc2756412f42180f7469936c329327162"
+      "output_bytes": 3887105,
+      "output_sha256": "22d1e97131743ec071473b60d6c2b33d489a6be77917f60464fcaa4887dde207"
     },
     {
       "id": "f3-sample-2",
@@ -60,17 +63,19 @@
       "assertions_passed": 33,
       "assertions_total": 33,
       "turns": 1,
-      "tool_calls": 16,
-      "input_tokens": 240023,
-      "cached_input_tokens": 197888,
-      "output_tokens": 2242,
-      "reasoning_output_tokens": 377,
-      "total_tokens": 242265,
-      "wall_time_ms": 89370,
-      "operations_applied": 35,
-      "sentence_boundary_gaps_project_frames": [12, 12, 12, 12],
+      "tool_calls": 11,
+      "input_tokens": 156916,
+      "cached_input_tokens": 122368,
+      "uncached_input_tokens": 34548,
+      "output_tokens": 1160,
+      "reasoning_output_tokens": 299,
+      "total_tokens": 158076,
+      "wall_time_ms": 51557,
+      "operations_applied": 37,
+      "sentence_boundary_gaps_project_frames": [33, 15, 23, 16],
       "rendered_word_error_rate_basis_points": 477,
-      "output_sha256": "39ebb79feb96915c845343b043d8879cc2756412f42180f7469936c329327162"
+      "output_bytes": 3887105,
+      "output_sha256": "22d1e97131743ec071473b60d6c2b33d489a6be77917f60464fcaa4887dde207"
     },
     {
       "id": "f3-sample-3",
@@ -78,38 +83,50 @@
       "assertions_passed": 33,
       "assertions_total": 33,
       "turns": 1,
-      "tool_calls": 16,
-      "input_tokens": 243586,
-      "cached_input_tokens": 216064,
-      "output_tokens": 2611,
-      "reasoning_output_tokens": 673,
-      "total_tokens": 246197,
-      "wall_time_ms": 105311,
-      "operations_applied": 35,
-      "sentence_boundary_gaps_project_frames": [12, 12, 12, 12],
+      "tool_calls": 11,
+      "input_tokens": 157940,
+      "cached_input_tokens": 135424,
+      "uncached_input_tokens": 22516,
+      "output_tokens": 1289,
+      "reasoning_output_tokens": 197,
+      "total_tokens": 159229,
+      "wall_time_ms": 80803,
+      "operations_applied": 41,
+      "sentence_boundary_gaps_project_frames": [33, 15, 23, 16],
       "rendered_word_error_rate_basis_points": 477,
-      "output_sha256": "39ebb79feb96915c845343b043d8879cc2756412f42180f7469936c329327162"
+      "output_bytes": 3822784,
+      "output_sha256": "34392f10be1564b69810e01f7f2886ab885055c9b1e2cad9941803b0cf17e36a"
     }
   ],
   "deliverable": {
     "profile": "vertical_short",
     "resolution": [1080, 1920],
-    "duration_frames": 607,
-    "output_bytes": 3928765,
-    "output_sha256": "39ebb79feb96915c845343b043d8879cc2756412f42180f7469936c329327162",
+    "duration_frames": 585,
+    "unique_artifacts": [
+      {
+        "sample_ids": ["f3-sample-1", "f3-sample-2"],
+        "output_bytes": 3887105,
+        "output_sha256": "22d1e97131743ec071473b60d6c2b33d489a6be77917f60464fcaa4887dde207"
+      },
+      {
+        "sample_ids": ["f3-sample-3"],
+        "output_bytes": 3822784,
+        "output_sha256": "34392f10be1564b69810e01f7f2886ab885055c9b1e2cad9941803b0cf17e36a"
+      }
+    ],
     "sentence_boundaries": [
-      {"previous_word": "rain", "next_word": "Neighbors", "gap_project_frames": 12},
-      {"previous_word": "instead", "next_word": "Over", "gap_project_frames": 12},
-      {"previous_word": "beds", "next_word": "Then", "gap_project_frames": 12},
-      {"previous_word": "peppers.", "next_word": "Now", "gap_project_frames": 12}
+      {"previous_word": "and", "next_word": "Neighbors", "gap_project_frames": 33},
+      {"previous_word": "instead", "next_word": "Over", "gap_project_frames": 15},
+      {"previous_word": "built", "next_word": "Then", "gap_project_frames": 23},
+      {"previous_word": "peppers.", "next_word": "Now", "gap_project_frames": 16}
     ],
     "rendered_word_error_rate_basis_points": 477,
-    "proof_sample_frames": [0, 75, 151, 227, 303, 378, 454, 530, 606]
+    "proof_sample_frames": [0, 73, 146, 219, 292, 365, 438, 511, 584]
   },
   "human_review": {
     "status": "pending",
-    "review_template": "target/evals/openreel-eval-20260814-054517-codex/human-review.json",
-    "unique_artifacts": 1,
+    "review_template": "target/evals/openreel-eval-20260814-155650-codex/human-review.json",
+    "unique_artifacts": 2,
     "required_sample_acceptances": 2,
     "required_mean_rating": 4.0,
     "required_pacing_rating": 4.5,
