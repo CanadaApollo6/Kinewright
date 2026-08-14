@@ -1,5 +1,9 @@
 [CmdletBinding()]
-param()
+param(
+    [ValidateRange(0.1, 1024)]
+    [double]$BuildCacheLimitGiB = 6,
+    [switch]$SkipBuildCachePrune
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -16,6 +20,10 @@ $ffmpegRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'ffmpeg'))
 $pkgconfRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'pkgconf'))
 $libclangRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'libclang'))
 $archive = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'ffmpeg.zip'))
+
+if (-not $SkipBuildCachePrune) {
+    & (Join-Path $PSScriptRoot 'clean-build-cache.ps1') -MaximumGiB $BuildCacheLimitGiB
+}
 
 foreach ($path in @($ffmpegRoot, $pkgconfRoot, $libclangRoot, $archive)) {
     if (-not $path.StartsWith($thirdParty, [System.StringComparison]::OrdinalIgnoreCase)) {

@@ -44,6 +44,24 @@ Use `-WhatIf` to inspect the exact directories first. The script removes only
 known regenerable build-cache directories and preserves `target/evals` and
 `target/eval-fixtures`.
 
+This cleanup is also automatic. Every `setup-ffmpeg.ps1` invocation measures
+the known Cargo build directories and prunes them once they reach 6 GiB. Eval
+runs, fixture media, and other benchmark artifacts do not count toward that
+limit and are never removed. Change the threshold for one invocation with
+`-BuildCacheLimitGiB`, or use `-SkipBuildCachePrune` when deliberately retaining
+a large diagnostic build:
+
+```powershell
+& .\scripts\setup-ffmpeg.ps1 -BuildCacheLimitGiB 6
+& .\scripts\setup-ffmpeg.ps1 -SkipBuildCachePrune
+```
+
+The standalone cleaner supports the same size gate:
+
+```powershell
+.\scripts\clean-build-cache.ps1 -MaximumGiB 6
+```
+
 The script downloads this exact shared GPL build:
 
 - Provider: System233 FFmpeg MSVC Prebuilt
