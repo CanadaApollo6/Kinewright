@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
-use ab_glyph::{Font, FontArc, PxScale, PxScaleFont, ScaleFont, point};
+use ab_glyph::{Font, FontArc, OutlinedGlyph, PxScale, PxScaleFont, ScaleFont, point};
 use openreel_core::{FrameTexture, MediaError, Title, title_color, title_font_bytes, title_layout};
 
 const SCRIM_COLOR: [u8; 4] = [0x05, 0x07, 0x0A, 184];
+const CAPTION_OUTLINE_COLOR: [u8; 4] = [0x05, 0x07, 0x0A, 224];
 
 pub(crate) struct TitleRasterizer {
     font: FontArc,
@@ -78,26 +79,27 @@ impl TitleRasterizer {
                 }
                 let glyph = id.with_scale_and_position(scale, point(cursor_x, baseline));
                 if let Some(outlined) = self.font.outline_glyph(glyph) {
-                    let bounds = outlined.px_bounds();
-                    outlined.draw(|x, y, coverage| {
-                        let pixel_x = bounds.min.x.floor() as i32 + x as i32;
-                        let pixel_y = bounds.min.y.floor() as i32 + y as i32;
-                        if pixel_x >= 0
-                            && pixel_y >= 0
-                            && pixel_x < width as i32
-                            && pixel_y < height as i32
-                        {
-                            let offset = (usize::try_from(pixel_y).unwrap()
-                                * usize::try_from(width).unwrap()
-                                + usize::try_from(pixel_x).unwrap())
-                                * 4;
-                            let alpha = (coverage * f32::from(color.rgba[3])).round() as u8;
-                            blend_pixel(
-                                &mut rgba[offset..offset + 4],
-                                [color.rgba[0], color.rgba[1], color.rgba[2], alpha],
-                            );
-                        }
-                    });
+                    if title.caption_preset.is_some() && !title.background_scrim {
+                        let radius =
+                            i32::try_from((layout.font_pixels / 32).clamp(2, 4)).unwrap_or(2);
+                        draw_glyph(
+                            &mut rgba,
+                            resolution,
+                            &outlined,
+                            CAPTION_OUTLINE_COLOR,
+                            &[
+                                (-radius, -radius),
+                                (0, -radius),
+                                (radius, -radius),
+                                (-radius, 0),
+                                (radius, 0),
+                                (-radius, radius),
+                                (0, radius),
+                                (radius, radius),
+                            ],
+                        );
+                    }
+                    draw_glyph(&mut rgba, resolution, &outlined, color.rgba, &[(0, 0)]);
                 }
                 cursor_x += scaled.h_advance(id);
                 previous = Some(id);
@@ -109,6 +111,43 @@ impl TitleRasterizer {
             height,
             rgba: Arc::new(rgba),
         })
+    }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
+fn draw_glyph(
+    rgba: &mut [u8],
+    resolution: (u32, u32),
+    glyph: &OutlinedGlyph,
+    color: [u8; 4],
+    offsets: &[(i32, i32)],
+) {
+    let bounds = glyph.px_bounds();
+    for &(offset_x, offset_y) in offsets {
+        glyph.draw(|x, y, coverage| {
+            let pixel_x = bounds.min.x.floor() as i32 + x as i32 + offset_x;
+            let pixel_y = bounds.min.y.floor() as i32 + y as i32 + offset_y;
+            if pixel_x >= 0
+                && pixel_y >= 0
+                && pixel_x < resolution.0 as i32
+                && pixel_y < resolution.1 as i32
+            {
+                let offset = (usize::try_from(pixel_y).unwrap()
+                    * usize::try_from(resolution.0).unwrap()
+                    + usize::try_from(pixel_x).unwrap())
+                    * 4;
+                let alpha = (coverage * f32::from(color[3])).round() as u8;
+                blend_pixel(
+                    &mut rgba[offset..offset + 4],
+                    [color[0], color[1], color[2], alpha],
+                );
+            }
+        });
     }
 }
 

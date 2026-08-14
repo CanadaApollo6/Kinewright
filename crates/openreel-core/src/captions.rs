@@ -7,10 +7,10 @@ use thiserror::Error;
 use crate::{
     AutomationCurve, CaptionPreset, ClipId, Document, Effect, EffectId, Keyframe,
     KeyframeInterpolation, Operation, ParamValue, Rational, TimeCode, TimelineTranscriptWord,
-    Track, TrackId, TrackKind,
+    TitlePosition, Track, TrackId, TrackKind,
 };
 
-const MAX_CAPTION_CHARACTERS: usize = 42;
+const MAX_CAPTION_CHARACTERS: usize = 48;
 
 /// One half-open caption interval in project frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +104,25 @@ pub fn animated_caption_operations(
     preset: CaptionPreset,
     motion: CaptionMotion,
 ) -> Result<Vec<Operation>, CaptionPlanError> {
+    animated_caption_operations_at(document, cues, preset, motion, None)
+}
+
+/// Build one atomic caption track with an optional placement override.
+///
+/// This keeps the stable preset's typography while allowing a model to move
+/// captions away from a known subject without rewriting title parameters cue
+/// by cue.
+///
+/// # Errors
+///
+/// Returns an error for empty/invalid cues or exhausted track/clip ids.
+pub fn animated_caption_operations_at(
+    document: &Document,
+    cues: &[CaptionCue],
+    preset: CaptionPreset,
+    motion: CaptionMotion,
+    position: Option<TitlePosition>,
+) -> Result<Vec<Operation>, CaptionPlanError> {
     if cues.is_empty() {
         return Err(CaptionPlanError::NoCues);
     }
@@ -149,11 +168,15 @@ pub fn animated_caption_operations(
             .checked_sub(cue.start)
             .filter(|duration| *duration > TimeCode::ZERO)
             .ok_or(CaptionPlanError::InvalidCueDuration)?;
+        let mut title = preset.title(cue.text.clone());
+        if let Some(position) = position {
+            title.position = position;
+        }
         operations.push(Operation::AddTitle {
             track: track_id,
             at: cue.start,
             duration,
-            title: preset.title(cue.text.clone()),
+            title,
         });
         let clip = first_clip_id
             .checked_add(u64::try_from(index).unwrap_or(u64::MAX))
@@ -259,46 +282,42 @@ fn dedup_keyframes<const N: usize>(keyframes: [Keyframe; N]) -> AutomationCurve 
 #[must_use]
 pub fn caption_cues(words: &[TimelineTranscriptWord], project_fps: Rational) -> Vec<CaptionCue> {
     let hold = half_second_frames(project_fps);
+    let mut words = words
+        .iter()
+        .filter_map(|word| {
+            let text = word.text.trim();
+            (!text.is_empty() && word.project_end > word.project_start).then(|| CaptionWord {
+                text: text.to_owned(),
+                start: word.project_start,
+                end: word.project_end,
+                asset: word.asset,
+                clip: word.clip,
+                speaker: word.speaker.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    infer_sentence_punctuation(&mut words);
+
     let mut cues = Vec::new();
-    let mut current_words = Vec::new();
-    let mut current_start = TimeCode::ZERO;
-    let mut current_end = TimeCode::ZERO;
-    let mut previous_end = None;
-
-    for word in words {
-        let text = word.text.trim();
-        if text.is_empty() || word.project_end <= word.project_start {
-            continue;
+    let mut segment = Vec::new();
+    for word in &words {
+        let break_before = segment.last().is_some_and(|previous: &&CaptionWord| {
+            word.start.0.saturating_sub(previous.end.0) > hold.0
+                || word.asset != previous.asset
+                || word.clip != previous.clip
+                || word.speaker != previous.speaker
+        });
+        if break_before {
+            push_semantic_cues(&mut cues, &segment);
+            segment.clear();
         }
-
-        let gap_break = previous_end
-            .is_some_and(|end: TimeCode| word.project_start.0.saturating_sub(end.0) > hold.0);
-        let length_break = !current_words.is_empty()
-            && current_words
-                .iter()
-                .map(|word: &&str| word.chars().count())
-                .sum::<usize>()
-                .saturating_add(current_words.len())
-                .saturating_add(text.chars().count())
-                > MAX_CAPTION_CHARACTERS;
-
-        if !current_words.is_empty() && (gap_break || length_break) {
-            push_cue(&mut cues, &mut current_words, current_start, current_end);
-        }
-        if current_words.is_empty() {
-            current_start = word.project_start;
-        }
-        current_end = word.project_end;
-        current_words.push(text);
-        previous_end = Some(word.project_end);
-
-        if ends_sentence(text) {
-            push_cue(&mut cues, &mut current_words, current_start, current_end);
+        segment.push(word);
+        if ends_sentence(&word.text) {
+            push_semantic_cues(&mut cues, &segment);
+            segment.clear();
         }
     }
-    if !current_words.is_empty() {
-        push_cue(&mut cues, &mut current_words, current_start, current_end);
-    }
+    push_semantic_cues(&mut cues, &segment);
 
     for index in 0..cues.len() {
         let held_end = TimeCode(cues[index].end.0.saturating_add(hold.0));
@@ -393,22 +412,23 @@ pub fn authored_caption_cues(
     for (&sentence_end, &cue_end) in sentence_ends.iter().zip(&sentence_cue_ends) {
         final_boundaries[cue_start] = sentence_start;
         final_boundaries[cue_end] = sentence_end;
-        let raw_start = cue_start
-            .checked_sub(1)
-            .map_or(0, |index| raw_boundaries[index]);
-        let raw_end = raw_boundaries[cue_end - 1];
-        if raw_start == sentence_start && raw_end == sentence_end {
-            final_boundaries[(cue_start + 1)..cue_end]
-                .copy_from_slice(&raw_boundaries[cue_start..(cue_end - 1)]);
-        } else {
-            let cue_count = cue_end - cue_start;
-            let word_count = sentence_end - sentence_start;
-            let quotient = word_count / cue_count;
-            let remainder = word_count % cue_count;
-            for offset in 1..cue_count {
-                final_boundaries[cue_start + offset] =
-                    sentence_start + quotient * offset + remainder.min(offset);
-            }
+        let cue_count = cue_end - cue_start;
+        let word_count = sentence_end - sentence_start;
+        let mut targets = Vec::with_capacity(cue_count);
+        for offset in 1..cue_count {
+            let minimum = offset;
+            let maximum = word_count.saturating_sub(cue_count - offset);
+            targets.push(
+                raw_boundaries[cue_start + offset - 1]
+                    .saturating_sub(sentence_start)
+                    .clamp(minimum, maximum),
+            );
+        }
+        targets.push(word_count);
+        let semantic =
+            semantic_boundaries(&words[sentence_start..sentence_end], cue_count, &targets)?;
+        for (offset, boundary) in semantic.into_iter().enumerate().skip(1) {
+            final_boundaries[cue_start + offset] = sentence_start + boundary;
         }
         sentence_start = sentence_end;
         cue_start = cue_end;
@@ -506,15 +526,284 @@ fn half_second_frames(fps: Rational) -> TimeCode {
     TimeCode(i64::try_from(rounded).unwrap_or(i64::MAX))
 }
 
-fn push_cue(cues: &mut Vec<CaptionCue>, words: &mut Vec<&str>, start: TimeCode, end: TimeCode) {
-    if end > start {
-        cues.push(CaptionCue {
-            start,
-            end,
-            text: words.join(" "),
-        });
+#[derive(Debug, Clone)]
+struct CaptionWord {
+    text: String,
+    start: TimeCode,
+    end: TimeCode,
+    asset: crate::AssetId,
+    clip: ClipId,
+    speaker: Option<String>,
+}
+
+fn infer_sentence_punctuation(words: &mut [CaptionWord]) {
+    for index in 1..words.len() {
+        let (left, right) = words.split_at_mut(index);
+        let previous = &mut left[index - 1];
+        let next = &right[0];
+        if ends_sentence(&previous.text) {
+            continue;
+        }
+        let source_change = previous.asset != next.asset
+            || previous.clip != next.clip
+            || previous.speaker != next.speaker;
+        let gap = next.start.0.saturating_sub(previous.end.0);
+        let likely_start = starts_with_uppercase(&next.text)
+            && (gap >= 4 || source_change)
+            && likely_sentence_starter(&next.text);
+        if source_change || likely_start {
+            previous.text.push('.');
+        }
     }
-    words.clear();
+}
+
+fn push_semantic_cues(cues: &mut Vec<CaptionCue>, words: &[&CaptionWord]) {
+    let mut start = 0;
+    while start < words.len() {
+        let mut farthest = start + 1;
+        while farthest < words.len()
+            && phrase_characters(
+                words[start..=farthest]
+                    .iter()
+                    .map(|word| word.text.as_str()),
+            ) <= MAX_CAPTION_CHARACTERS
+        {
+            farthest += 1;
+        }
+        let end = if farthest == words.len() {
+            farthest
+        } else {
+            let search_start = (start + 1).max(farthest.saturating_sub(4));
+            (search_start..=farthest)
+                .min_by_key(|&candidate| {
+                    let characters = phrase_characters(
+                        words[start..candidate]
+                            .iter()
+                            .map(|word| word.text.as_str()),
+                    );
+                    let short_penalty = usize::from(characters < 12) * 120;
+                    boundary_penalty(&words[candidate - 1].text, &words[candidate].text)
+                        .saturating_add(farthest.saturating_sub(candidate) * 8)
+                        .saturating_add(short_penalty)
+                })
+                .unwrap_or(farthest)
+        };
+        let first = words[start];
+        let last = words[end - 1];
+        cues.push(CaptionCue {
+            start: first.start,
+            end: last.end,
+            text: words[start..end]
+                .iter()
+                .map(|word| word.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+        });
+        start = end;
+    }
+}
+
+fn semantic_boundaries(
+    words: &[&str],
+    cue_count: usize,
+    targets: &[usize],
+) -> Result<Vec<usize>, CaptionPlanError> {
+    if cue_count == 0 || words.len() < cue_count || targets.len() != cue_count {
+        return Err(CaptionPlanError::AuthoredScriptAlignment);
+    }
+    let width = words.len() + 1;
+    let unreachable = u64::MAX / 4;
+    let mut costs = vec![unreachable; (cue_count + 1) * width];
+    let mut parents = vec![usize::MAX; (cue_count + 1) * width];
+    costs[0] = 0;
+    let total_characters = phrase_characters(words.iter().copied());
+    let ideal = total_characters.div_ceil(cue_count);
+
+    for used in 1..=cue_count {
+        let minimum_end = used;
+        let maximum_end = words.len().saturating_sub(cue_count - used);
+        for end in minimum_end..=maximum_end {
+            for start in (used - 1)..end {
+                let previous = costs[(used - 1) * width + start];
+                if previous == unreachable {
+                    continue;
+                }
+                let characters = phrase_characters(words[start..end].iter().copied());
+                let over = characters.saturating_sub(MAX_CAPTION_CHARACTERS) as u64;
+                let ragged = characters.abs_diff(ideal) as u64;
+                let target_distance = end.abs_diff(targets[used - 1]) as u64;
+                let boundary = if end == words.len() {
+                    0
+                } else {
+                    boundary_penalty(words[end - 1], words[end]) as u64
+                };
+                let cost = previous
+                    .saturating_add(over.saturating_mul(over).saturating_mul(500))
+                    .saturating_add(ragged.saturating_mul(ragged))
+                    .saturating_add(target_distance.saturating_mul(12))
+                    .saturating_add(boundary);
+                let slot = used * width + end;
+                if cost < costs[slot] {
+                    costs[slot] = cost;
+                    parents[slot] = start;
+                }
+            }
+        }
+    }
+
+    if costs[cue_count * width + words.len()] == unreachable {
+        return Err(CaptionPlanError::AuthoredScriptAlignment);
+    }
+    let mut boundaries = vec![0; cue_count + 1];
+    boundaries[cue_count] = words.len();
+    let mut end = words.len();
+    for used in (1..=cue_count).rev() {
+        let start = parents[used * width + end];
+        if start == usize::MAX {
+            return Err(CaptionPlanError::AuthoredScriptAlignment);
+        }
+        boundaries[used - 1] = start;
+        end = start;
+    }
+    Ok(boundaries)
+}
+
+fn phrase_characters<'a>(words: impl Iterator<Item = &'a str>) -> usize {
+    let (characters, count) = words.fold((0_usize, 0_usize), |(characters, count), word| {
+        (characters + word.chars().count(), count + 1)
+    });
+    characters.saturating_add(count.saturating_sub(1))
+}
+
+fn boundary_penalty(previous: &str, next: &str) -> usize {
+    if ends_sentence(previous) || ends_clause(previous) {
+        return 0;
+    }
+    if is_bound_phrase(previous, next) {
+        return 4_000;
+    }
+    if is_dangling_end(previous) {
+        return 4_000;
+    }
+    if is_dangling_start(next) {
+        return 4_000;
+    }
+    if is_connective(next) {
+        return 1_000;
+    }
+    256
+}
+
+fn ends_clause(text: &str) -> bool {
+    matches!(
+        text.trim_end_matches(['\'', '"', ')', ']', '}'])
+            .chars()
+            .next_back(),
+        Some(',' | ';' | ':')
+    )
+}
+
+fn normalized_token(text: &str) -> String {
+    text.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_dangling_end(text: &str) -> bool {
+    matches!(
+        normalized_token(text).as_str(),
+        "a" | "an"
+            | "the"
+            | "and"
+            | "or"
+            | "but"
+            | "of"
+            | "to"
+            | "in"
+            | "on"
+            | "at"
+            | "for"
+            | "from"
+            | "with"
+            | "my"
+            | "your"
+            | "their"
+            | "our"
+            | "its"
+            | "that"
+            | "these"
+            | "those"
+            | "this"
+            | "where"
+    )
+}
+
+fn is_dangling_start(text: &str) -> bool {
+    matches!(
+        normalized_token(text).as_str(),
+        "of" | "to" | "in" | "on" | "at" | "for" | "from" | "with"
+    )
+}
+
+fn is_bound_phrase(previous: &str, next: &str) -> bool {
+    if ends_sentence(previous) || ends_clause(previous) {
+        return false;
+    }
+    let previous_normalized = normalized_token(previous);
+    let next_normalized = normalized_token(next);
+    let proper_name = starts_with_uppercase(previous)
+        && starts_with_uppercase(next)
+        && !ends_sentence(previous)
+        && !ends_clause(previous);
+    proper_name
+        || matches!(
+            previous_normalized.as_str(),
+            "i" | "ive"
+                | "im"
+                | "you"
+                | "youre"
+                | "he"
+                | "hes"
+                | "she"
+                | "shes"
+                | "it"
+                | "its"
+                | "we"
+                | "were"
+                | "they"
+                | "theyre"
+                | "very"
+                | "recently"
+                | "especially"
+                | "maybe"
+                | "just"
+                | "even"
+        )
+        || matches!(
+            (previous_normalized.as_str(), next_normalized.as_str()),
+            ("super", "8") | ("home", "movies")
+        )
+}
+
+fn is_connective(text: &str) -> bool {
+    matches!(
+        normalized_token(text).as_str(),
+        "and" | "but" | "so" | "because" | "while" | "when" | "where" | "then"
+    )
+}
+
+fn starts_with_uppercase(text: &str) -> bool {
+    text.chars()
+        .find(|character| character.is_alphabetic())
+        .is_some_and(char::is_uppercase)
+}
+
+fn likely_sentence_starter(text: &str) -> bool {
+    matches!(
+        normalized_token(text).as_str(),
+        "and" | "but" | "so" | "then" | "they" | "meanwhile" | "however"
+    )
 }
 
 fn ends_sentence(text: &str) -> bool {
@@ -610,17 +899,17 @@ mod tests {
     }
 
     #[test]
-    fn forty_two_character_limit_breaks_before_the_overflowing_word() {
+    fn forty_eight_character_limit_breaks_before_the_overflowing_word() {
         let fps = Rational::new(30, 1).unwrap();
         let words = [
             word("12345678901234567890", 0, 2),
-            word("123456789012345678901", 3, 5),
+            word("123456789012345678901234567", 3, 5),
             word("x", 6, 8),
         ];
         assert_eq!(
             caption_cues(&words, fps),
             vec![
-                cue(0, 6, "12345678901234567890 123456789012345678901"),
+                cue(0, 6, "12345678901234567890 123456789012345678901234567"),
                 cue(6, 23, "x"),
             ]
         );
@@ -732,10 +1021,10 @@ mod tests {
             vec![
                 "Last spring this empty lot collected weeds and rainwater.",
                 "Neighbors decided it could feed families instead.",
-                "Over three weekends volunteers",
-                "built raised beds.",
-                "Then they planted tomatoes herbs and",
-                "peppers.",
+                "Over three weekends",
+                "volunteers built raised beds.",
+                "Then they planted tomatoes",
+                "herbs and peppers.",
                 "Now the Saturday market supplies fresh",
                 "produce to dozens of local families.",
             ]
@@ -745,11 +1034,123 @@ mod tests {
     }
 
     #[test]
+    fn authored_interview_captions_keep_names_and_syntax_together() {
+        let generated_text = [
+            "But recently I was living in New",
+            "Orleans and my house flooded",
+            "and a lot of my films and especially",
+            "my recently shot Super 8 home movies",
+            "and I've been cleaning them",
+            "They deteriorated very quickly in that",
+            "short you know two weeks where they",
+            "were submerged in those floodwaters",
+            "And I've been cleaning them",
+            "and they look deteriorated",
+            "and old even though they're just",
+            "you know maybe 12 months old",
+            "So I'm going to be screening just",
+            "a selection of some of that cleaned",
+            "flood damage by Hurricane Katrina films",
+        ];
+        let generated = generated_text
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let start = i64::try_from(index).unwrap() * 30;
+                cue(start, start + 30, text)
+            })
+            .collect::<Vec<_>>();
+        let script = concat!(
+            "But recently I was living in New Orleans, and my house flooded, and a lot of my films, and especially my recently shot Super 8 home movies, and I've been cleaning them. ",
+            "They deteriorated very quickly in that short, you know, two weeks where they were submerged in those floodwaters. ",
+            "And I've been cleaning them, and they look deteriorated and old even though they're just, you know, maybe 12 months old. ",
+            "So I'm going to be screening just a selection of some of that cleaned flood damage by Hurricane Katrina films."
+        );
+
+        let authored = authored_caption_cues(&generated, script).unwrap();
+        for pair in authored.windows(2) {
+            let previous = pair[0].text.split_whitespace().next_back().unwrap();
+            let next = pair[1].text.split_whitespace().next().unwrap();
+            assert!(
+                !is_bound_phrase(previous, next),
+                "split bound phrase across cues: {:?} / {:?}",
+                pair[0].text,
+                pair[1].text
+            );
+            assert!(
+                !is_dangling_end(previous),
+                "left dangling syntax at cue end: {:?}",
+                pair[0].text
+            );
+            assert!(
+                !is_dangling_start(next),
+                "started a cue with attached syntax: {:?}",
+                pair[1].text
+            );
+        }
+        assert_eq!(
+            authored
+                .iter()
+                .map(|cue| cue.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            script
+        );
+    }
+
+    #[test]
     fn authored_script_rejects_more_sentences_than_timing_cues() {
         let generated = [cue(0, 30, "one two")];
         assert_eq!(
             authored_caption_cues(&generated, "One. Two."),
             Err(CaptionPlanError::AuthoredScriptAlignment)
+        );
+    }
+
+    #[test]
+    fn raw_cues_avoid_dangling_connectives_at_character_breaks() {
+        let fps = Rational::new(30, 1).unwrap();
+        let words = [
+            word("Recently", 0, 3),
+            word("I", 4, 5),
+            word("was", 6, 8),
+            word("living", 9, 12),
+            word("in", 13, 14),
+            word("New", 15, 17),
+            word("Orleans", 18, 21),
+            word("and", 22, 24),
+            word("my", 25, 27),
+            word("house", 28, 31),
+            word("flooded.", 32, 36),
+        ];
+
+        let cues = caption_cues(&words, fps);
+        assert_eq!(
+            cues.iter().map(|cue| cue.text.as_str()).collect::<Vec<_>>(),
+            vec![
+                "Recently I was living in New Orleans",
+                "and my house flooded."
+            ]
+        );
+    }
+
+    #[test]
+    fn transcript_capitalization_restores_audible_sentence_punctuation() {
+        let fps = Rational::new(30, 1).unwrap();
+        let words = [
+            word("I've", 0, 3),
+            word("been", 4, 7),
+            word("cleaning", 8, 12),
+            word("They", 16, 19),
+            word("deteriorated", 20, 26),
+        ];
+
+        assert_eq!(
+            caption_cues(&words, fps)
+                .iter()
+                .map(|cue| cue.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["I've been cleaning.", "They deteriorated"]
         );
     }
 

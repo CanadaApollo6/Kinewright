@@ -44,7 +44,7 @@
       "fixture": "fixture_real_interview_story",
       "fixture_pack": "benchmarks/auto-edit/v5/fixture-pack.json",
       "ground_truth": "benchmarks/auto-edit/v5/ground-truth.json",
-      "prompt": "Create a finished vertical social interview cut from interview-raw. Open exactly these four capability schemas in one get_capability call: get_transcript, plan_dialogue_assembly, add_styled_captions, and get_editorial_readiness. Inspect the full source transcript. Build only Helen Hill's coherent first-person story about recovering her films after Hurricane Katrina: begin with her thought starting 'recently I was living in New Orleans' and end after 'Hurricane Katrina films.' Exclude the interview questions, Columbia and South Carolina setup, symposium and festival explanation, and the later Dan Streible discussion. Use plan_dialogue_assembly with one source range around that answer, remove conservative fillers and raw dead air of at least 20 source frames, retain 8 source frames around ordinary silence cuts, inspect its prepared plan preview, and commit that exact plan. Keep the real A/V source dialogue audible without duplicating it onto an audio track. Add social preset captions with pop motion from the final timeline transcript; do not paraphrase or invent wording. Finish with one get_editorial_readiness call using vertical_short, centered 50/50 focus, nine storyboard frames, 240-pixel cells, and a 20-source-frame silence threshold. Do not queue export; the benchmark renders and independently transcribes the verified snapshot. Keep working until readiness is true.",
+      "prompt": "Create a finished vertical social interview cut from interview-raw. Open exactly these four capability schemas in one get_capability call: get_transcript, plan_dialogue_assembly, add_styled_captions, and get_editorial_readiness. Inspect the full source transcript. Build only Helen Hill's coherent first-person story about recovering her films after Hurricane Katrina: begin with her thought starting 'recently I was living in New Orleans' and end after 'Hurricane Katrina films.' Exclude the interview questions, Columbia and South Carolina setup, symposium and festival explanation, the next speaker's response, and the later Dan Streible discussion. Use plan_dialogue_assembly with exactly one half-open source range from frame 1682 through 2547 exclusive, remove conservative fillers and raw dead air of at least 20 source frames, retain 8 source frames around ordinary silence cuts, inspect its prepared plan preview, and commit that exact plan. Do not extend the source range: speech after frame 2547 belongs to the interviewer. Keep the real A/V source dialogue audible without duplicating it onto an audio track. Add social preset captions with pop motion and intent=verbatim, subject_y_percent=50, and this corrected exact script: 'But recently I was living in New Orleans, and my house flooded, and a lot of my films, and especially my recently shot Super 8 home movies, and I've been cleaning them. They deteriorated very quickly in that short, you know, two weeks where they were submerged in those floodwaters. And I've been cleaning them, and they look deteriorated and old even though they're just, you know, maybe 12 months old. So I'm going to be screening just a selection of some of that cleaned flood damage by Hurricane Katrina films.' Preserve that wording exactly; do not silently paraphrase it. Finish with one get_editorial_readiness call using vertical_short, centered 50/50 focus, nine storyboard frames, 240-pixel cells, and a 20-source-frame silence threshold. Do not queue export; the benchmark renders and independently transcribes the verified snapshot. Keep working until readiness is true.",
       "delivery": {
         "profile": "vertical_short",
         "focus_x_percent": 50,
@@ -53,7 +53,8 @@
         "proof_cell_width": 240,
         "require_audio": true,
         "expected_transcript_word_set": "recovery-dialogue",
-        "maximum_word_error_rate_basis_points": 2000
+        "maximum_word_error_rate_basis_points": 0,
+        "maximum_caption_word_error_rate_basis_points": 0
       },
       "budget": {
         "turns": 1,
@@ -67,18 +68,21 @@
       "machine_assertions": [
         "timeline non-empty",
         "only the interview source is used",
+        "the exact source answer ends before the next speaker",
         "primary media is gapless",
         "required recovery-story facts retained",
         "off-story interview sections absent",
         "duration bounds",
         "styled sentence-coherent captions with exact source words",
+        "face-safe lower-third or top caption placement with high-contrast neutral styling",
         "vertical delivery caption safe area",
         "timeline audio present",
         "technical QA export ready",
         "required capability evidence",
         "undo integrity",
         "independently probed MP4 identity",
-        "independent post-render transcript at or below 20% ordered word error rate"
+        "independent post-render transcript with zero ordered word errors",
+        "rendered caption words agree exactly with rendered speech"
       ]
     }
   ]

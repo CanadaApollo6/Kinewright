@@ -4,7 +4,7 @@
   "asset_id": "helen-hill-interview-480p",
   "source_story_range": {
     "start": 1682,
-    "end": 2548
+    "end": 2547
   },
   "duration_bounds_project_frames": {
     "minimum": 970,
@@ -40,5 +40,6 @@
     "dan",
     "usc"
   ],
-  "expected_dialogue": "Recently I was living in New Orleans and my house flooded and of my films and especially my recently shot Super 8 home movies and I've been cleaning. They deteriorated very quickly in that short, you know, two weeks where they were submerged in those flood waters. And I been cleaning them and they look deteriorated and old even though they're just, you know, maybe 12 months. So I'm going to be screening just a selection of some of that cleaned flood damage by Hurricane Katrina films."
+  "source_asr_dialogue": "Recently I was living in New Orleans and my house flooded and of my films and especially my recently shot Super 8 home movies and I've been cleaning. They deteriorated very quickly in that short, you know, two weeks where they were submerged in those flood waters. And I been cleaning them and they look deteriorated and old even though they're just, you know, maybe 12 months. So I'm going to be screening just a selection of some of that cleaned flood damage by Hurricane Katrina films.",
+  "expected_dialogue": "But recently I was living in New Orleans, and my house flooded, and a lot of my films, and especially my recently shot Super 8 home movies, and I've been cleaning them. They deteriorated very quickly in that short, you know, two weeks where they were submerged in those floodwaters. And I've been cleaning them, and they look deteriorated and old even though they're just, you know, maybe 12 months old. So I'm going to be screening just a selection of some of that cleaned flood damage by Hurricane Katrina films."
 }

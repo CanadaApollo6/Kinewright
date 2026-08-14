@@ -215,7 +215,7 @@ impl CaptionPreset {
     pub fn title(self, text: impl Into<String>) -> Title {
         let (font_size_token, color_token, position, background_scrim) = match self {
             Self::Clean => (0, 0, TitlePosition::LowerThird, true),
-            Self::Social => (2, 2, TitlePosition::Center, true),
+            Self::Social => (2, 0, TitlePosition::LowerThird, false),
             Self::Minimal => (0, 0, TitlePosition::LowerThird, false),
         };
         Title {
@@ -228,6 +228,19 @@ impl CaptionPreset {
             fade_out_frames: TimeCode::ZERO,
             caption_preset: Some(self),
         }
+    }
+}
+
+#[cfg(test)]
+mod caption_preset_tests {
+    use super::*;
+
+    #[test]
+    fn social_captions_default_away_from_centered_subjects() {
+        let title = CaptionPreset::Social.title("Readable social caption");
+        assert_eq!(title.position, TitlePosition::LowerThird);
+        assert_eq!(title.color_token, 0);
+        assert!(!title.background_scrim);
     }
 }
 

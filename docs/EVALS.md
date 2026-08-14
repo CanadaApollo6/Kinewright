@@ -132,7 +132,11 @@ pass three model samples and their separate human gate.
 The first corrected interview preflight is published at
 `benchmarks/auto-edit/v5/baseline.json`: 1/1 sample, 25/25 assertions, 7 tool
 calls, 108,701 total tokens, and 9.20% independent rendered-speech WER. Human
-review remains pending, and this single run does not satisfy the family gate.
+review rejected it: story 5.0, pacing 5.0, visual finish 3.0, audio finish 5.0,
+captions 2.5, and delivery readiness 3.0. The caption failure now has hard
+regressions for text intent, semantic grouping, subject-safe presentation, and
+caption agreement with independently transcribed rendered speech. This single
+run does not satisfy the family gate.
 
 ## Seed suite
 

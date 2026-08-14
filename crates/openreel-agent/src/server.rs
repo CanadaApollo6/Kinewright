@@ -21,11 +21,12 @@ use openreel_core::{
     Keyframe, KeyframeInterpolation, MediaAsset, MediaKind, Operation, ParamValue, Playback, Query,
     QueryResult, SceneStatus, SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings,
     SyncGroupId, ThreePointMode, TimeCode, TimelineBeat, TimelineBeatAnalysisState,
-    TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TrackId,
-    TranscriptStatus, animated_caption_operations, authored_caption_cues, beat_pacing_plan,
-    caption_cues, dedup_timeline_words, delivery_conformance, document_for_delivery_profile,
-    document_for_delivery_variant, is_filler_word, map_source_range_to_project, music_fit_plan,
-    plan_speaker_multicam, qa_document,
+    TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TitlePosition, TrackId, TranscriptStatus, animated_caption_operations_at,
+    authored_caption_cues, beat_pacing_plan, caption_cues, dedup_timeline_words,
+    delivery_conformance, document_for_delivery_profile, document_for_delivery_variant,
+    is_filler_word, map_source_range_to_project, music_fit_plan, plan_speaker_multicam,
+    qa_document,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -708,12 +709,7 @@ impl OpenReelMcp {
             }
             "add_styled_captions" => {
                 let args: StyledCaptionsArgs = decode_args("add_styled_captions", arguments)?;
-                self.add_styled_captions(
-                    args.expected_revision,
-                    args.preset,
-                    args.motion,
-                    args.script.as_deref(),
-                )
+                self.add_styled_captions(&args)
             }
             "get_qa_report" => Ok(self.qa_report()?),
             "get_delivery_variants" => Ok(Self::delivery_variants()),
@@ -1141,17 +1137,21 @@ impl OpenReelMcp {
         ))
     }
 
-    fn add_styled_captions(
-        &self,
-        expected_revision: TimelineRevision,
-        preset: CaptionPreset,
-        motion: CaptionMotion,
-        script: Option<&str>,
-    ) -> Result<CallToolResult, McpError> {
+    fn add_styled_captions(&self, args: &StyledCaptionsArgs) -> Result<CallToolResult, McpError> {
+        let expected_revision = args.expected_revision;
         let (actual_revision, document) = self.snapshot()?;
         if expected_revision != actual_revision {
             return Ok(revision_conflict_text(expected_revision, actual_revision));
         }
+        if args.intent == CaptionIntent::EditedReadable && args.script.is_none() {
+            return Ok(error_text(
+                "edited_readable captions require an explicit authored script",
+            ));
+        }
+        let position = match caption_position(args.position, args.subject_y_percent) {
+            Ok(position) => Some(position),
+            Err(error) => return Ok(error_text(error)),
+        };
         let words = self
             .analysis
             .timeline_transcript(&document, None)
@@ -1159,13 +1159,19 @@ impl OpenReelMcp {
         let words = dedup_timeline_words(words);
         let mut cues = caption_cues(&words, document.fps);
         clamp_caption_cues_to_duration(&mut cues, document.duration);
-        if let Some(script) = script {
+        if let Some(script) = args.script.as_deref() {
             cues = match authored_caption_cues(&cues, script) {
                 Ok(cues) => cues,
                 Err(error) => return Ok(error_text(error.to_string())),
             };
         }
-        let operations = match animated_caption_operations(&document, &cues, preset, motion) {
+        let operations = match animated_caption_operations_at(
+            &document,
+            &cues,
+            args.preset,
+            args.motion,
+            position,
+        ) {
             Ok(operations) => operations,
             Err(error) => return Ok(error_text(error.to_string())),
         };
@@ -3739,10 +3745,49 @@ struct StyledCaptionsArgs {
     /// Renderer-native motion composition. Defaults to none.
     #[serde(default)]
     motion: CaptionMotion,
-    /// Optional exact authored wording. Punctuation becomes a hard cue-grouping
-    /// boundary while generated transcript timing remains unchanged.
+    /// Text contract for the delivered captions. Verbatim is the default and
+    /// means every audible word must be represented. Edited-readable permits
+    /// intentional omissions or rewrites and requires `script`.
+    #[serde(default)]
+    intent: CaptionIntent,
+    /// Optional authored wording. In verbatim mode this is a corrected exact
+    /// transcript; in edited-readable mode it is the explicit delivery copy.
+    /// Punctuation becomes a hard cue-grouping boundary while generated
+    /// transcript timing remains unchanged.
     #[serde(default)]
     script: Option<String>,
+    /// Explicit caption placement. Omit for automatic subject-safe placement.
+    #[serde(default)]
+    position: Option<TitlePosition>,
+    /// Optional vertical subject center from 0 (top) to 100 (bottom). Automatic
+    /// placement uses the opposite safe region and defaults to lower third when
+    /// no subject position is supplied.
+    #[serde(default)]
+    subject_y_percent: Option<u8>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum CaptionIntent {
+    #[default]
+    Verbatim,
+    EditedReadable,
+}
+
+fn caption_position(
+    explicit: Option<TitlePosition>,
+    subject_y_percent: Option<u8>,
+) -> Result<TitlePosition, &'static str> {
+    if subject_y_percent.is_some_and(|value| value > 100) {
+        return Err("caption subject_y_percent must be between 0 and 100");
+    }
+    Ok(explicit.unwrap_or_else(|| {
+        if subject_y_percent.is_some_and(|subject_y| subject_y >= 60) {
+            TitlePosition::Top
+        } else {
+            TitlePosition::LowerThird
+        }
+    }))
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -4066,7 +4111,7 @@ fn inspector_tools() -> Vec<Tool> {
         ),
         Tool::new(
             "add_styled_captions",
-            "Build transcript-timed burned-in captions using one stable preset plus optional motion and exact authored script. Script punctuation makes sentence grouping deterministic without a correction round trip. Applies as one revision-gated undo entry.",
+            "Build transcript-timed burned-in captions with an explicit verbatim or edited-readable text contract, semantic phrase grouping, optional corrected script, and automatic subject-safe top/lower-third placement. Applies as one revision-gated undo entry.",
             schema_object::<StyledCaptionsArgs>(),
         )
         .with_annotations(
@@ -6583,6 +6628,20 @@ mod tests {
         let serialized = serde_json::to_string(&structured).unwrap();
         assert!(serialized.contains("script"));
         assert!(serialized.contains("Punctuation becomes a hard cue-grouping"));
+    }
+
+    #[test]
+    fn caption_position_avoids_the_subject_and_honors_explicit_direction() {
+        assert_eq!(
+            caption_position(None, Some(50)),
+            Ok(TitlePosition::LowerThird)
+        );
+        assert_eq!(caption_position(None, Some(75)), Ok(TitlePosition::Top));
+        assert_eq!(
+            caption_position(Some(TitlePosition::Top), Some(20)),
+            Ok(TitlePosition::Top)
+        );
+        assert!(caption_position(None, Some(101)).is_err());
     }
 
     #[test]

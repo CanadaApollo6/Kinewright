@@ -24,7 +24,7 @@ use openreel_agent::{
 use openreel_core::{
     AgentDriver, Analysis, AssetSceneChanges, AssetSilences, AssetTranscript, AuthenticationStatus,
     CaptionMotion, Clip, ClipId, DeliveryProfile, Document, MediaAsset, Rational, SceneStatus,
-    SilenceStatus, TimeCode, Track, TrackId, TrackKind, TranscriptStatus,
+    SilenceStatus, TimeCode, TitlePosition, Track, TrackId, TrackKind, TranscriptStatus,
     map_source_range_to_project,
 };
 use openreel_media::{
@@ -795,6 +795,7 @@ fn finished_cut_suite() -> Vec<EvalDefinition> {
             require_audio: true,
             expected_transcript_word_set: None,
             maximum_word_error_rate_basis_points: 0,
+            maximum_caption_word_error_rate_basis_points: None,
         }),
     }]
 }
@@ -874,6 +875,7 @@ fn editorial_cut_suite() -> Vec<EvalDefinition> {
             require_audio: true,
             expected_transcript_word_set: Some("authored-dialogue"),
             maximum_word_error_rate_basis_points: 1_500,
+            maximum_caption_word_error_rate_basis_points: None,
         }),
     }]
 }
@@ -918,13 +920,20 @@ fn generalization_suite() -> Vec<EvalDefinition> {
         rationale: "Measures whether the agent can find, clean, caption, frame, and deliver one coherent story from pinned public-domain interview footage it has not seen in the synthetic benchmarks.",
         fixture_builder: fixture_real_interview_story,
         prompts: &[
-            "Create a finished vertical social interview cut from interview-raw. Open exactly these four capability schemas in one get_capability call: get_transcript, plan_dialogue_assembly, add_styled_captions, and get_editorial_readiness. Inspect the full source transcript. Build only Helen Hill's coherent first-person story about recovering her films after Hurricane Katrina: begin with her thought starting 'recently I was living in New Orleans' and end after 'Hurricane Katrina films.' Exclude the interview questions, Columbia and South Carolina setup, symposium and festival explanation, and the later Dan Streible discussion. Use plan_dialogue_assembly with one source range around that answer, remove conservative fillers and raw dead air of at least 20 source frames, retain 8 source frames around ordinary silence cuts, inspect its prepared plan preview, and commit that exact plan. Keep the real A/V source dialogue audible without duplicating it onto an audio track. Add social preset captions with pop motion from the final timeline transcript; do not paraphrase or invent wording. Finish with one get_editorial_readiness call using vertical_short, centered 50/50 focus, nine storyboard frames, 240-pixel cells, and a 20-source-frame silence threshold. Do not queue export; the benchmark renders and independently transcribes the verified snapshot. Keep working until readiness is true.",
+            "Create a finished vertical social interview cut from interview-raw. Open exactly these four capability schemas in one get_capability call: get_transcript, plan_dialogue_assembly, add_styled_captions, and get_editorial_readiness. Inspect the full source transcript. Build only Helen Hill's coherent first-person story about recovering her films after Hurricane Katrina: begin with her thought starting 'recently I was living in New Orleans' and end after 'Hurricane Katrina films.' Exclude the interview questions, Columbia and South Carolina setup, symposium and festival explanation, the next speaker's response, and the later Dan Streible discussion. Use plan_dialogue_assembly with exactly one half-open source range from frame 1682 through 2547 exclusive, remove conservative fillers and raw dead air of at least 20 source frames, retain 8 source frames around ordinary silence cuts, inspect its prepared plan preview, and commit that exact plan. Do not extend the source range: speech after frame 2547 belongs to the interviewer. Keep the real A/V source dialogue audible without duplicating it onto an audio track. Add social preset captions with pop motion and intent=verbatim, subject_y_percent=50, and this corrected exact script: 'But recently I was living in New Orleans, and my house flooded, and a lot of my films, and especially my recently shot Super 8 home movies, and I've been cleaning them. They deteriorated very quickly in that short, you know, two weeks where they were submerged in those floodwaters. And I've been cleaning them, and they look deteriorated and old even though they're just, you know, maybe 12 months old. So I'm going to be screening just a selection of some of that cleaned flood damage by Hurricane Katrina films.' Preserve that wording exactly; do not silently paraphrase it. Finish with one get_editorial_readiness call using vertical_short, centered 50/50 focus, nine storyboard frames, 240-pixel cells, and a 20-source-frame silence threshold. Do not queue export; the benchmark renders and independently transcribes the verified snapshot. Keep working until readiness is true.",
         ],
         assertions: vec![
             EvalAssertion::TimelineNonEmpty,
             EvalAssertion::AssetOrder {
                 aliases: aliases(&["interview-raw"]),
                 collapse_adjacent: true,
+            },
+            EvalAssertion::ExactSourceClips {
+                clips: vec![ExpectedSourceClip {
+                    asset_alias: "interview-raw".to_owned(),
+                    source_start: TimeCode(1_682),
+                    source_end: TimeCode(2_547),
+                }],
             },
             EvalAssertion::MediaGapless,
             EvalAssertion::WordsRetained {
@@ -939,6 +948,11 @@ fn generalization_suite() -> Vec<EvalDefinition> {
             EvalAssertion::StyledCaptions {
                 minimum_cues: 4,
                 motion: CaptionMotion::Pop,
+            },
+            EvalAssertion::CaptionPresentation {
+                allowed_positions: vec![TitlePosition::LowerThird, TitlePosition::Top],
+                color_token: 0,
+                background_scrim: false,
             },
             EvalAssertion::CaptionWordsExact {
                 word_set: "recovery-dialogue".to_owned(),
@@ -976,7 +990,8 @@ fn generalization_suite() -> Vec<EvalDefinition> {
             proof_cell_width: 240,
             require_audio: true,
             expected_transcript_word_set: Some("recovery-dialogue"),
-            maximum_word_error_rate_basis_points: 2_000,
+            maximum_word_error_rate_basis_points: 0,
+            maximum_caption_word_error_rate_basis_points: Some(0),
         }),
     }]
 }
@@ -1364,6 +1379,7 @@ struct RealInterviewGroundTruth {
     duration_bounds_project_frames: GroundTruthDurationBounds,
     required_terms: Vec<String>,
     excluded_terms: Vec<String>,
+    source_asr_dialogue: String,
     expected_dialogue: String,
 }
 
@@ -1432,7 +1448,7 @@ fn fixture_real_interview_story() -> Result<PreparedFixture, EvalError> {
         .split_whitespace()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let expected_normalized = normalized_words(&truth.expected_dialogue);
+    let expected_normalized = normalized_words(&truth.source_asr_dialogue);
     let observed_dialogue = normalized_words(&observed_story);
     if observed_dialogue != expected_normalized {
         return Err(EvalError::Fixture(format!(
@@ -2395,7 +2411,28 @@ mod tests {
             deliverable.expected_transcript_word_set,
             Some("recovery-dialogue")
         );
-        assert_eq!(deliverable.maximum_word_error_rate_basis_points, 2_000);
+        assert_eq!(deliverable.maximum_word_error_rate_basis_points, 0);
+        assert_eq!(
+            deliverable.maximum_caption_word_error_rate_basis_points,
+            Some(0)
+        );
+        assert!(definition.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::ExactSourceClips { clips }
+                if clips == &[ExpectedSourceClip {
+                    asset_alias: "interview-raw".to_owned(),
+                    source_start: TimeCode(1_682),
+                    source_end: TimeCode(2_547),
+                }]
+        )));
+        assert!(definition.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::CaptionPresentation {
+                allowed_positions,
+                color_token: 0,
+                background_scrim: false,
+            } if allowed_positions == &[TitlePosition::LowerThird, TitlePosition::Top]
+        )));
         assert_eq!(
             task["budget"]["tool_calls"],
             definition.budgets.max_tool_calls
@@ -2417,8 +2454,9 @@ mod tests {
         .unwrap();
         assert_eq!(truth.schema_version, 1);
         assert_eq!(truth.source_story_range.start, 1_682);
-        assert_eq!(truth.source_story_range.end, 2_548);
+        assert_eq!(truth.source_story_range.end, 2_547);
         assert_eq!(truth.required_terms.len(), 19);
+        assert_ne!(truth.source_asr_dialogue, truth.expected_dialogue);
     }
 
     #[test]

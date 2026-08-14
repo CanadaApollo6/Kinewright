@@ -70,9 +70,17 @@ An earlier preflight exposed a scorer bug: numeric transcript tokens such as
 edit retained them. The expected-word builder now preserves those tokens, and
 that invalid failure is not included in the baseline.
 
-Human review is pending. The source is a low-resolution 3:2 close-up, so the
-vertical crop is necessarily tight; machine success does not assert that its
-framing, pacing, or finish are publishable.
+Human review rejected the artifact with story 5.0, pacing 5.0, visual finish
+3.0, audio finish 5.0, captions 2.5, and delivery readiness 3.0. The edit and
+audio were publishable, but centered blue captions obscured the subject,
+omitted words, lacked punctuation, and grouped phrases illogically.
+
+That rejection now has executable regression coverage. The task supplies a
+corrected verbatim script, requires subject-safe neutral caption presentation,
+scores semantic phrase boundaries and the exact answer endpoint, and requires
+burned-in caption words to match independently transcribed rendered speech with
+zero word errors. The source is a low-resolution 3:2
+close-up, so the vertical crop remains necessarily tight.
 
 V5 is intentionally marked `in_progress`. M40 does not pass on one interview.
 It exits only after event/multicam and music-montage tasks are also executable,

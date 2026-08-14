@@ -15,8 +15,8 @@ use openreel_core::{
     ClipContent, Command, Core, DeliveryConformanceReport, DeliveryProfile, Document, Event,
     Export, ExportCancellation, HarnessInfo, MediaKind, Operation, ParamValue, Playback, Query,
     QueryResult, SessionConfig, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, TranscriptStatus, dedup_timeline_words, delivery_conformance,
-    document_for_delivery_profile, map_source_range_to_project, qa_document,
+    TimelineTranscriptWord, TitlePosition, TranscriptStatus, dedup_timeline_words,
+    delivery_conformance, document_for_delivery_profile, map_source_range_to_project, qa_document,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -97,6 +97,7 @@ pub struct EvalDeliverableSpec {
     pub require_audio: bool,
     pub expected_transcript_word_set: Option<&'static str>,
     pub maximum_word_error_rate_basis_points: u16,
+    pub maximum_caption_word_error_rate_basis_points: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +139,11 @@ pub enum EvalAssertion {
         word_set: String,
     },
     CaptionSentencesCoherent,
+    CaptionPresentation {
+        allowed_positions: Vec<TitlePosition>,
+        color_token: u8,
+        background_scrim: bool,
+    },
     NoSilenceAtLeast {
         source_frames: TimeCode,
     },
@@ -322,6 +328,8 @@ pub struct EvalDeliverableResult {
     pub probed_media_kind: Option<MediaKind>,
     pub rendered_transcript_required: bool,
     pub rendered_transcript: Option<RenderedTranscriptVerification>,
+    pub rendered_caption_alignment_required: bool,
+    pub rendered_caption_alignment: Option<RenderedTranscriptVerification>,
     pub proof_sample_frames: Vec<TimeCode>,
     pub machine_passed: bool,
     pub errors: Vec<String>,
@@ -701,7 +709,6 @@ fn produce_deliverable(
             exporter,
             &delivery_document,
             expected_words,
-            spec.maximum_word_error_rate_basis_points,
         );
     }
     finish_deliverable(result)
@@ -727,6 +734,15 @@ fn rendered_transcript_expectation<'a>(
             spec.maximum_word_error_rate_basis_points
         ));
     }
+    if spec
+        .maximum_caption_word_error_rate_basis_points
+        .is_some_and(|maximum| maximum > 10_000)
+    {
+        result.errors.push(format!(
+            "maximum rendered caption word error rate must be at most 10000 basis points, got {:?}",
+            spec.maximum_caption_word_error_rate_basis_points
+        ));
+    }
     expected
 }
 
@@ -737,7 +753,6 @@ fn export_and_probe(
     exporter: &dyn Export,
     document: &Arc<Document>,
     expected_transcript_words: Option<&[String]>,
-    maximum_word_error_rate_basis_points: u16,
 ) {
     if result.output_path.exists() {
         result.errors.push(format!(
@@ -815,26 +830,59 @@ fn export_and_probe(
         ));
     }
     if let Some(expected_words) = expected_transcript_words {
-        match verify_rendered_transcript(
+        verify_rendered_delivery_transcript(
+            result,
+            spec,
             analysis,
             &asset,
+            document,
             expected_words,
-            maximum_word_error_rate_basis_points,
-        ) {
-            Ok(verification) => {
-                if !verification.passed {
+        );
+    }
+}
+
+fn verify_rendered_delivery_transcript(
+    result: &mut EvalDeliverableResult,
+    spec: EvalDeliverableSpec,
+    analysis: &dyn Analysis,
+    asset: &openreel_core::MediaAsset,
+    document: &Document,
+    expected_words: &[String],
+) {
+    match verify_rendered_transcript(
+        analysis,
+        asset,
+        expected_words,
+        spec.maximum_word_error_rate_basis_points,
+    ) {
+        Ok(verification) => {
+            if !verification.passed {
+                result.errors.push(format!(
+                    "rendered transcript exceeds its authored-ground-truth error ceiling: wer_bp={}, maximum_bp={}, missing={:?}, unexpected={:?}",
+                    verification.word_error_rate_basis_points,
+                    verification.maximum_word_error_rate_basis_points,
+                    verification.missing_words,
+                    verification.unexpected_words
+                ));
+            }
+            if let Some(maximum) = spec.maximum_caption_word_error_rate_basis_points {
+                let caption_words = ordered_caption_words(document);
+                let alignment =
+                    verify_word_sequences(&verification.observed_words, &caption_words, maximum);
+                if !alignment.passed {
                     result.errors.push(format!(
-                        "rendered transcript exceeds its authored-ground-truth error ceiling: wer_bp={}, maximum_bp={}, missing={:?}, unexpected={:?}",
-                        verification.word_error_rate_basis_points,
-                        verification.maximum_word_error_rate_basis_points,
-                        verification.missing_words,
-                        verification.unexpected_words
+                        "rendered captions disagree with rendered audio: wer_bp={}, maximum_bp={}, missing={:?}, unexpected={:?}",
+                        alignment.word_error_rate_basis_points,
+                        alignment.maximum_word_error_rate_basis_points,
+                        alignment.missing_words,
+                        alignment.unexpected_words
                     ));
                 }
-                result.rendered_transcript = Some(verification);
+                result.rendered_caption_alignment = Some(alignment);
             }
-            Err(error) => result.errors.push(error),
+            result.rendered_transcript = Some(verification);
         }
+        Err(error) => result.errors.push(error),
     }
 }
 
@@ -869,17 +917,30 @@ fn verify_rendered_transcript(
         }
         thread::sleep(Duration::from_millis(100));
     };
-    let expected_words = normalize_word_sequence(expected_words.iter().map(String::as_str));
-    if expected_words.is_empty() {
+    if normalize_word_sequence(expected_words.iter().map(String::as_str)).is_empty() {
         return Err("rendered transcript ground truth contains no words".to_owned());
     }
     let observed_words =
         normalize_word_sequence(transcript.words.iter().map(|word| word.text.as_str()));
+    Ok(verify_word_sequences(
+        expected_words,
+        &observed_words,
+        maximum_word_error_rate_basis_points,
+    ))
+}
+
+fn verify_word_sequences(
+    expected_words: &[String],
+    observed_words: &[String],
+    maximum_word_error_rate_basis_points: u16,
+) -> RenderedTranscriptVerification {
+    let expected_words = normalize_word_sequence(expected_words.iter().map(String::as_str));
+    let observed_words = normalize_word_sequence(observed_words.iter().map(String::as_str));
     let (missing_words, unexpected_words) = word_sequence_delta(&expected_words, &observed_words);
     let edit_distance = word_sequence_edit_distance(&expected_words, &observed_words);
     let word_error_rate_basis_points =
         word_error_rate_basis_points(edit_distance, expected_words.len());
-    Ok(RenderedTranscriptVerification {
+    RenderedTranscriptVerification {
         passed: word_error_rate_basis_points <= maximum_word_error_rate_basis_points,
         expected_words,
         observed_words,
@@ -888,7 +949,20 @@ fn verify_rendered_transcript(
         edit_distance,
         word_error_rate_basis_points,
         maximum_word_error_rate_basis_points,
-    })
+    }
+}
+
+fn ordered_caption_words(document: &Document) -> Vec<String> {
+    let mut captions = timeline_clips(document)
+        .filter_map(|clip| match &clip.content {
+            ClipContent::Title(title) if title.caption_preset.is_some() => {
+                Some((clip.timeline_start, clip.id, title.text.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    captions.sort_by_key(|(start, clip, _)| (*start, *clip));
+    normalize_word_sequence(captions.into_iter().map(|(_, _, text)| text))
 }
 
 fn failed_deliverable(
@@ -923,6 +997,10 @@ fn deliverable_shell(
         probed_media_kind: None,
         rendered_transcript_required: spec.expected_transcript_word_set.is_some(),
         rendered_transcript: None,
+        rendered_caption_alignment_required: spec
+            .maximum_caption_word_error_rate_basis_points
+            .is_some(),
+        rendered_caption_alignment: None,
         proof_sample_frames: Vec::new(),
         machine_passed: false,
         errors: Vec::new(),
@@ -1132,6 +1210,16 @@ fn finish_deliverable(mut result: EvalDeliverableResult) -> EvalDeliverableResul
             .probed_duration_frames
             .is_some_and(|duration| duration.0.abs_diff(result.duration_frames.0) <= 1)
         && result.probed_media_kind.is_some()
+        && (!result.rendered_transcript_required
+            || result
+                .rendered_transcript
+                .as_ref()
+                .is_some_and(|verification| verification.passed))
+        && (!result.rendered_caption_alignment_required
+            || result
+                .rendered_caption_alignment
+                .as_ref()
+                .is_some_and(|verification| verification.passed))
         && !result.proof_sample_frames.is_empty()
         && result.proof_path.is_file()
         && result.document_path.is_file();
@@ -1200,6 +1288,32 @@ fn deliverable_assertions(result: &EvalDeliverableResult) -> Vec<AssertionResult
                 false,
                 format!(
                     "required post-render transcription is unavailable; errors={:?}",
+                    result.errors
+                ),
+            ),
+        });
+    }
+    if result.rendered_caption_alignment_required {
+        assertions.push(match &result.rendered_caption_alignment {
+            Some(verification) => assertion_result(
+                "rendered caption/audio agreement",
+                verification.passed,
+                format!(
+                    "audio={:?}, captions={:?}, edit_distance={}, wer_bp={}, maximum_bp={}, missing_from_captions={:?}, unexpected_in_captions={:?}",
+                    verification.expected_words,
+                    verification.observed_words,
+                    verification.edit_distance,
+                    verification.word_error_rate_basis_points,
+                    verification.maximum_word_error_rate_basis_points,
+                    verification.missing_words,
+                    verification.unexpected_words
+                ),
+            ),
+            None => assertion_result(
+                "rendered caption/audio agreement",
+                false,
+                format!(
+                    "required rendered caption/audio comparison is unavailable; errors={:?}",
                     result.errors
                 ),
             ),
@@ -1589,6 +1703,16 @@ fn evaluate_assertion(
         EvalAssertion::WordsAbsent { word_set } => evaluate_word_set(word_set, outcome, false),
         EvalAssertion::CaptionWordsExact { word_set } => evaluate_caption_words(word_set, outcome),
         EvalAssertion::CaptionSentencesCoherent => evaluate_caption_sentences(outcome),
+        EvalAssertion::CaptionPresentation {
+            allowed_positions,
+            color_token,
+            background_scrim,
+        } => evaluate_caption_presentation(
+            allowed_positions,
+            *color_token,
+            *background_scrim,
+            outcome,
+        ),
         EvalAssertion::NoSilenceAtLeast { source_frames } => {
             let remaining = cuttable_timeline_silences(
                 &outcome.final_document,
@@ -2048,19 +2172,100 @@ fn evaluate_caption_sentences(outcome: &EvalOutcome) -> AssertionResult {
     captions.sort_by_key(|(start, clip, _)| (*start, *clip));
     let crossovers = captions
         .iter()
-        .filter(|(_, _, text)| caption_contains_sentence_crossover(text))
+        .filter(|(_, _, text)| {
+            caption_contains_sentence_crossover(text)
+                || caption_contains_capitalized_sentence_crossover(text)
+        })
         .map(|(_, clip, text)| format!("clip {}: {text:?}", clip.0))
         .collect::<Vec<_>>();
+    let dangling = captions
+        .iter()
+        .filter(|(_, _, text)| caption_ends_with_dangling_word(text))
+        .map(|(_, clip, text)| format!("clip {}: {text:?}", clip.0))
+        .collect::<Vec<_>>();
+    let semantic_splits = captions
+        .windows(2)
+        .filter(|pair| caption_boundary_breaks_phrase(pair[0].2, pair[1].2))
+        .map(|pair| {
+            format!(
+                "clips {} -> {}: {:?} / {:?}",
+                pair[0].1.0, pair[1].1.0, pair[0].2, pair[1].2
+            )
+        })
+        .collect::<Vec<_>>();
+    let missing_punctuation = captions
+        .windows(2)
+        .filter(|pair| {
+            caption_starts_likely_sentence(pair[1].2) && !caption_ends_sentence(pair[0].2)
+        })
+        .map(|pair| {
+            format!(
+                "clips {} -> {}: {:?} / {:?}",
+                pair[0].1.0, pair[1].1.0, pair[0].2, pair[1].2
+            )
+        })
+        .collect::<Vec<_>>();
+    let final_punctuated = captions
+        .last()
+        .is_some_and(|(_, _, text)| caption_ends_sentence(text));
+    let passed = crossovers.is_empty()
+        && dangling.is_empty()
+        && semantic_splits.is_empty()
+        && missing_punctuation.is_empty()
+        && final_punctuated;
     assertion_result(
         "caption sentence grouping",
-        crossovers.is_empty(),
-        if crossovers.is_empty() {
+        passed,
+        if passed {
             format!(
-                "{} caption cues keep sentence boundaries between cues",
+                "{} caption cues preserve punctuation and semantic phrase boundaries",
                 captions.len()
             )
         } else {
-            format!("sentence crossovers={crossovers:?}")
+            format!(
+                "sentence_crossovers={crossovers:?}, dangling_endings={dangling:?}, semantic_splits={semantic_splits:?}, missing_punctuation={missing_punctuation:?}, final_punctuated={final_punctuated}"
+            )
+        },
+    )
+}
+
+fn evaluate_caption_presentation(
+    allowed_positions: &[TitlePosition],
+    color_token: u8,
+    background_scrim: bool,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let violations = timeline_clips(&outcome.final_document)
+        .filter_map(|clip| match &clip.content {
+            ClipContent::Title(title) if title.caption_preset.is_some() => (!allowed_positions
+                .contains(&title.position)
+                || title.color_token != color_token
+                || title.background_scrim != background_scrim)
+                .then(|| {
+                    format!(
+                        "clip {} position={} color_token={} scrim={}",
+                        clip.id.0,
+                        title.position.as_str(),
+                        title.color_token,
+                        title.background_scrim
+                    )
+                }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assertion_result(
+        "caption presentation",
+        violations.is_empty(),
+        if violations.is_empty() {
+            format!(
+                "all captions use positions={:?}, color_token={color_token}, scrim={background_scrim}",
+                allowed_positions
+                    .iter()
+                    .map(|position| position.as_str())
+                    .collect::<Vec<_>>()
+            )
+        } else {
+            format!("violations={violations:?}")
         },
     )
 }
@@ -2079,6 +2284,140 @@ fn caption_contains_sentence_crossover(text: &str) -> bool {
             });
             matches!(without_closers.chars().next_back(), Some('.' | '!' | '?'))
         })
+}
+
+fn caption_contains_capitalized_sentence_crossover(text: &str) -> bool {
+    text.split_whitespace()
+        .skip(1)
+        .any(caption_starts_likely_sentence)
+}
+
+fn caption_starts_likely_sentence(text: &str) -> bool {
+    let word = text
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|character: char| !character.is_ascii_alphanumeric());
+    let starts_uppercase = word
+        .chars()
+        .find(|character| character.is_alphabetic())
+        .is_some_and(char::is_uppercase);
+    starts_uppercase
+        && matches!(
+            word.to_ascii_lowercase().as_str(),
+            "and" | "but" | "so" | "then" | "they" | "meanwhile" | "however"
+        )
+}
+
+fn caption_ends_sentence(text: &str) -> bool {
+    let without_closers = text.trim_end_matches(|character| {
+        matches!(
+            character,
+            '\'' | '"' | ')' | ']' | '}' | '\u{2019}' | '\u{201d}'
+        )
+    });
+    matches!(without_closers.chars().next_back(), Some('.' | '!' | '?'))
+}
+
+fn caption_ends_with_dangling_word(text: &str) -> bool {
+    let word = text
+        .split_whitespace()
+        .next_back()
+        .unwrap_or_default()
+        .trim_matches(|character: char| !character.is_ascii_alphanumeric())
+        .to_ascii_lowercase();
+    matches!(
+        word.as_str(),
+        "a" | "an"
+            | "the"
+            | "and"
+            | "or"
+            | "but"
+            | "of"
+            | "to"
+            | "in"
+            | "on"
+            | "at"
+            | "for"
+            | "from"
+            | "with"
+            | "my"
+            | "your"
+            | "their"
+            | "our"
+            | "its"
+    )
+}
+
+fn caption_boundary_breaks_phrase(previous: &str, next: &str) -> bool {
+    let previous_word = previous.split_whitespace().next_back().unwrap_or_default();
+    let next_word = next.split_whitespace().next().unwrap_or_default();
+    if caption_ends_sentence(previous) || caption_ends_clause(previous_word) {
+        return false;
+    }
+    let previous_normalized = normalize_caption_word(previous_word);
+    let next_normalized = normalize_caption_word(next_word);
+    let proper_name = starts_with_uppercase(previous_word) && starts_with_uppercase(next_word);
+    proper_name
+        || caption_ends_with_dangling_word(previous)
+        || matches!(
+            next_normalized.as_str(),
+            "of" | "to" | "in" | "on" | "at" | "for" | "from" | "with"
+        )
+        || matches!(
+            previous_normalized.as_str(),
+            "i" | "ive"
+                | "im"
+                | "you"
+                | "youre"
+                | "he"
+                | "hes"
+                | "she"
+                | "shes"
+                | "it"
+                | "its"
+                | "we"
+                | "were"
+                | "they"
+                | "theyre"
+                | "very"
+                | "recently"
+                | "especially"
+                | "maybe"
+                | "just"
+                | "even"
+                | "that"
+                | "these"
+                | "those"
+                | "this"
+                | "where"
+        )
+        || matches!(
+            (previous_normalized.as_str(), next_normalized.as_str()),
+            ("super", "8") | ("home", "movies")
+        )
+}
+
+fn caption_ends_clause(text: &str) -> bool {
+    matches!(
+        text.trim_end_matches(['\'', '"', ')', ']', '}'])
+            .chars()
+            .next_back(),
+        Some(',' | ';' | ':')
+    )
+}
+
+fn normalize_caption_word(text: &str) -> String {
+    text.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn starts_with_uppercase(text: &str) -> bool {
+    text.chars()
+        .find(|character| character.is_alphabetic())
+        .is_some_and(char::is_uppercase)
 }
 
 fn evaluate_scene_cuts(scene_set: &str, outcome: &EvalOutcome) -> AssertionResult {
@@ -3139,6 +3478,7 @@ mod tests {
                 require_audio: true,
                 expected_transcript_word_set: Some("authored"),
                 maximum_word_error_rate_basis_points: 1_500,
+                maximum_caption_word_error_rate_basis_points: None,
             },
             &document(),
             Path::new("artifacts/f2"),
@@ -3153,6 +3493,41 @@ mod tests {
             .expect("required rendered transcript assertion");
         assert!(!rendered.passed);
         assert!(rendered.detail.contains("unavailable"));
+    }
+
+    #[test]
+    fn rendered_caption_alignment_detects_words_missing_from_the_screen() {
+        let expected = "river map steadies the expedition"
+            .split_whitespace()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        let observed = "map steady the exped"
+            .split_whitespace()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        let verification = verify_word_sequences(&expected, &observed, 500);
+        assert!(!verification.passed);
+        assert!(verification.word_error_rate_basis_points > 500);
+        assert!(!verification.missing_words.is_empty());
+    }
+
+    #[test]
+    fn caption_sentence_checks_reject_the_first_interview_attempt_failures() {
+        assert!(caption_contains_capitalized_sentence_crossover(
+            "movies and I've been cleaning They"
+        ));
+        assert!(caption_ends_with_dangling_word(
+            "But recently I was living in New Orleans and"
+        ));
+        assert!(caption_starts_likely_sentence(
+            "And I've been cleaning them"
+        ));
+        assert!(!caption_ends_sentence("submerged in those floodwaters"));
+        assert!(caption_boundary_breaks_phrase(
+            "But recently I was living in New",
+            "Orleans, and my house flooded,"
+        ));
+        assert!(caption_boundary_breaks_phrase("and a lot", "of my films,"));
     }
 
     #[test]
@@ -3223,6 +3598,7 @@ mod tests {
                 require_audio: true,
                 expected_transcript_word_set: None,
                 maximum_word_error_rate_basis_points: 0,
+                maximum_caption_word_error_rate_basis_points: None,
             },
             &document(),
             Path::new("artifacts/f1"),

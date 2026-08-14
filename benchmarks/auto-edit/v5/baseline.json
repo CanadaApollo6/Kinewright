@@ -81,9 +81,20 @@
     "output_sha256": "0aa88e6fc3761867734d282403acdf505061cab38e997b4fde2610ef5aed9ccc"
   },
   "human_review": {
-    "status": "pending",
+    "status": "reviewed_rejected",
     "review_template": "target/evals/openreel-eval-20260814-172557-codex/human-review.json",
-    "note": "The low-resolution 3:2 talking-head source produces a tight portrait crop. Machine checks do not decide whether its pacing, framing, or finish are publishable."
+    "reviewer": "Riel St Amand",
+    "accepted": false,
+    "overall_mean_rating": 3.9166666666666665,
+    "ratings": {
+      "story": 5.0,
+      "pacing": 5.0,
+      "visual_finish": 3.0,
+      "audio_finish": 5.0,
+      "captions": 2.5,
+      "delivery_readiness": 3.0
+    },
+    "note": "The story selection, continuous single-shot treatment, pacing, and audio were publishable. Center-screen blue captions with a dark scrim obscured the subject; captions also omitted spoken words, lacked sentence punctuation, and grouped phrases illogically. The exact artifact failed delivery readiness because of captions."
   },
   "benchmark_status": "in_progress"
 }

@@ -72,14 +72,27 @@ vertical MP4 is 1,038 frames, and independent post-render transcription measured
 
 The checked-in `benchmarks/auto-edit/v5/baseline.json` binds those results to
 the fixture, implementation revision, trace hash, proof hash, and output hash.
-Human review is still pending. This is one preflight for one family, not the
-three-sample interview gate and not completion of M40.
+Human review rejected that exact artifact despite its machine pass: story 5.0,
+pacing 5.0, visual finish 3.0, audio finish 5.0, captions 2.5, and delivery
+readiness 3.0. The single-shot story and audio were publishable. Centered blue
+captions obscured the subject, omitted words, lacked punctuation, and grouped
+phrases illogically. This is one preflight for one family, not the three-sample
+interview gate and not completion of M40.
 
 The first attempt found an evaluator defect rather than an editing regression:
 the expected-caption builder discarded numeric transcript tokens while the
 rendered edit correctly retained `8` and `12`. The scorer now builds exact
 caption expectations from the authored whitespace-token sequence. The invalid
 failure is preserved in local run artifacts but excluded from the baseline.
+
+The rejection also closed the machine/human gap. Caption generation now has an
+explicit verbatim versus edited-readable contract, semantic phrase grouping,
+corrected-script support, subject-aware top/lower-third placement, and a neutral
+high-contrast social preset. V5 now separately verifies caption presentation,
+semantic phrase boundaries, the exact answer endpoint, and the delivered
+caption words against independently transcribed rendered speech with zero word
+errors tolerated, rather than accepting a caption sequence that only matches
+stale ASR.
 
 ## Product capability found by the benchmark
 
