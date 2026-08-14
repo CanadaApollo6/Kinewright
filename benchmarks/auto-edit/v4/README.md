@@ -38,19 +38,26 @@ cargo run -p openreel-agent --bin openreel-eval -- `
   --samples 3
 ```
 
-The corrected Codex machine baseline on revision `5f6cfea` passes all three
-samples and all 99 assertions. Every sample independently produces the same
+The current Codex machine baseline on revision `283e704` passes all three
+samples and all 102 assertions. Every sample independently produces the same
 585-frame dialogue timing, four acoustically measured sentence gaps of 33, 15,
 23, and 16 project frames, no cuttable 20-frame silence, and a 4.77%
-independent rendered-dialogue word error rate. Each sample uses exactly 11 tool
-calls and 158,076-160,022 reported tokens, averaging 159,109. That is 36.1%
-below the superseded 249,112-token mean while satisfying the stronger acoustic
-contract.
+independent rendered-dialogue word error rate.
 
-The run produced two SHA-distinct MP4s because the third agent chose a
-different valid caption-correction grouping. Both variants pass exact caption,
-safe-area, render, and delivery assertions. The full record and both hashes are
-in [`baseline.json`](baseline.json); both remain pending human review.
+Exact authored wording now goes directly into `add_styled_captions`. Script
+punctuation is a hard grouping boundary, and the evaluator rejects any cue
+that ends one sentence and begins another. This removes the caption inspection,
+manual correction plan, and second commit. Every sample uses exactly 8 tool
+calls and 107,900-108,597 reported tokens, averaging 108,296. That is 31.9%
+below the prior 159,109-token baseline and 56.5% below the superseded
+249,112-token mean.
+
+All three agents now produce one byte-identical MP4, rather than two caption-
+dependent variants. The full record, single hash, and exact cue grouping are in
+[`baseline.json`](baseline.json). A side-by-side qualitative review of the
+previous run preferred Sample 3 because its grouping respected sentence
+structure; that finding is now a deterministic product rule and machine
+assertion. The new SHA remains pending a formal human rubric.
 
 The checked-in [regression evidence](token-regression.json) and
 [portable technical report](../../../docs/reports/m39-token-regression/report.html)
@@ -64,8 +71,8 @@ audible filler survives.
 
 Qualitative review of the superseded artifact called the pacing a major
 improvement and identified its two opening defects. The corrected machine run
-is complete, but neither new SHA has a formal v4 rubric yet. A machine pass
-alone does not complete M39.
+is complete, but the current SHA does not yet have a formal v4 rubric. A
+machine pass alone does not complete M39.
 
 This is still a synthetic motion-graphic fixture. It can isolate dialogue
 editing and narrative correctness, but it cannot establish professional shot

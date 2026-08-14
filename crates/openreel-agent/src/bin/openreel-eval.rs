@@ -2227,8 +2227,8 @@ mod tests {
         let machine = &baseline["machine_summary"];
         assert_eq!(machine["samples_passed"], 3);
         assert_eq!(machine["samples_total"], 3);
-        assert_eq!(machine["assertions_passed"], 99);
-        assert_eq!(machine["assertions_total"], 99);
+        assert_eq!(machine["assertions_passed"], 102);
+        assert_eq!(machine["assertions_total"], 102);
         assert_eq!(
             baseline["deliverable"]["sentence_boundaries"]
                 .as_array()
@@ -2238,14 +2238,48 @@ mod tests {
                 .collect::<Vec<_>>(),
             [33, 15, 23, 16]
         );
-        assert_eq!(machine["tool_calls"], 33);
-        assert_eq!(machine["mean_total_tokens"], 159_109.0);
+        assert_eq!(machine["tool_calls"], 24);
+        assert_eq!(machine["mean_total_tokens"], 108_296.3333);
+        let samples = baseline["samples"].as_array().unwrap();
+        assert_eq!(
+            samples
+                .iter()
+                .map(|sample| sample["total_tokens"].as_u64().unwrap())
+                .sum::<u64>(),
+            machine["total_tokens"].as_u64().unwrap()
+        );
+        assert_eq!(
+            samples
+                .iter()
+                .map(|sample| sample["tool_calls"].as_u64().unwrap())
+                .sum::<u64>(),
+            machine["tool_calls"].as_u64().unwrap()
+        );
+        let artifact_hash = samples[0]["output_sha256"].as_str().unwrap();
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample["output_sha256"] == artifact_hash)
+        );
         assert_eq!(
             baseline["deliverable"]["unique_artifacts"]
                 .as_array()
                 .unwrap()
                 .len(),
-            2
+            1
+        );
+        assert!(
+            baseline["deliverable"]["caption_cues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|cue| {
+                    let words = cue.as_str().unwrap().split_whitespace().collect::<Vec<_>>();
+                    words
+                        .iter()
+                        .take(words.len().saturating_sub(1))
+                        .all(|word| !word.ends_with(['.', '!', '?']))
+                })
         );
         assert_eq!(baseline["human_review"]["status"], "pending");
         assert_eq!(baseline["benchmark_status"], "pending_human_review");
