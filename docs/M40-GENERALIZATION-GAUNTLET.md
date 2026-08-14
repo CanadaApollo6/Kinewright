@@ -163,7 +163,8 @@ preserve continuous program audio can skip irrelevant dead-air analysis while
 still running technical QA, delivery conformance, and the real storyboard.
 The final trace ends with editorial readiness `true`. Human acceptance of the
 SHA-bound event artifact remains pending, and one passing sample is not the
-three-sample family gate.
+three-sample family gate. The machine result and immutable hashes are recorded
+in `benchmarks/auto-edit/v5/event-multicam-baseline.json`.
 
 ## Commands
 

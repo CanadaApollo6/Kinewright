@@ -3010,6 +3010,26 @@ mod tests {
     }
 
     #[test]
+    fn published_v5_event_baseline_records_machine_success_and_pending_human_review() {
+        let baseline: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v5/event-multicam-baseline.json"
+        ))
+        .unwrap();
+        assert_eq!(baseline["benchmark_id"], "openreel-generalization-v5");
+        assert_eq!(baseline["scope"]["status"], "event_multicam_preflight");
+        assert_eq!(baseline["machine_summary"]["samples_passed"], 1);
+        assert_eq!(baseline["machine_summary"]["assertions_passed"], 23);
+        assert_eq!(baseline["machine_summary"]["assertions_total"], 23);
+        assert_eq!(baseline["machine_summary"]["tool_calls"], 20);
+        assert_eq!(baseline["machine_summary"]["tool_call_budget"], 24);
+        assert_eq!(baseline["deliverable"]["video_shots"], 5);
+        assert_eq!(baseline["deliverable"]["program_audio_clips"], 1);
+        assert_eq!(baseline["deliverable"]["tracked_reframe_clips"], 5);
+        assert_eq!(baseline["human_review"]["status"], "pending");
+        assert_eq!(baseline["benchmark_status"], "in_progress");
+    }
+
+    #[test]
     fn v3_visual_scenes_render_with_the_pinned_ffmpeg() {
         for (index, (visual, role)) in [
             ("empty_lot", "opening"),
