@@ -3146,7 +3146,7 @@ impl ServerHandler for OpenReelMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openreel", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Inspect with get_timeline_state. Use batched search_capabilities queries and one batched get_capability call to load only the exact inspector, planner, proof, or edit-operation schemas needed. Invoke non-edit capabilities through invoke_capability. Submit ordered compact operations to prepare_edit_plan, inspect its deterministic preview, then commit the opaque plan id at the same timeline revision. Reinspect and re-plan after any revision conflict. Frame values are exact project frames.",
+                "Inspect with get_timeline_state. Open names already in the user request with one batched get_capability call; search only unnamed needs or after a miss. Load only needed schemas. Invoke non-edit capabilities through invoke_capability. Submit compact ordered operations to prepare_edit_plan, inspect its preview, then commit the plan id at the same revision. Reinspect after conflicts. Frames are exact project integers.",
             )
     }
 
@@ -3201,7 +3201,7 @@ struct CapabilitySearchArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CapabilityArgs {
-    /// One exact capability name returned by `search_capabilities`.
+    /// Exact name from the user request or search results; no search required.
     #[serde(default)]
     name: Option<String>,
     /// Additional exact capability names to open in this same call.
@@ -3869,13 +3869,13 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "search_capabilities",
-            "Search the full OpenReel editing, perception, proof, and delivery catalog without loading every tool schema into model context. Batch independent terms with queries.",
+            "Search only unnamed editing, perception, proof, or delivery needs. Skip exact names in the user request; batch independent terms.",
             schema_object::<CapabilitySearchArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
             "get_capability",
-            "Open exact descriptions and input schemas for one or more discovered capabilities. Batch all known names needed for the current workflow.",
+            "Open schemas for exact names from the user request or search results. Batch all workflow names; no prior search is required.",
             schema_object::<CapabilityArgs>(),
         )
         .with_annotations(read_only()),
@@ -6419,6 +6419,37 @@ mod tests {
         assert_eq!(opened.is_error, Some(false));
         let structured = opened.structured_content.unwrap();
         assert_eq!(structured["capabilities"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn dialogue_pacing_adds_a_bounded_capability_payload() {
+        let tools = OpenReelMcp::tools().unwrap();
+        let shared = [
+            "get_transcripts",
+            "plan_dialogue_assembly",
+            "add_styled_captions",
+            "get_captions",
+            "plan_caption_corrections",
+            "get_editorial_readiness",
+        ];
+        let open = |names: &[&str]| {
+            open_capabilities(
+                &tools,
+                CapabilityArgs {
+                    name: None,
+                    names: names.iter().map(ToString::to_string).collect(),
+                },
+            )
+        };
+        let v3_bytes = serde_json::to_vec(&open(&shared)).unwrap().len();
+        let mut v4 = shared.to_vec();
+        v4.push("get_dialogue_pacing");
+        let v4_bytes = serde_json::to_vec(&open(&v4)).unwrap().len();
+
+        println!("dialogue capability payload: v3={v3_bytes} B v4={v4_bytes} B");
+        assert!(v4_bytes > v3_bytes);
+        assert!(v4_bytes - v3_bytes < 2_500);
+        assert!(v4_bytes < 20_000);
     }
 
     #[test]
