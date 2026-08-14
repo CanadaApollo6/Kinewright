@@ -259,6 +259,22 @@ impl PreparedPlanStore {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        self.prepare_operations(expected_revision, actual_revision, document, operations)
+    }
+
+    pub(crate) fn prepare_operations(
+        &mut self,
+        expected_revision: TimelineRevision,
+        actual_revision: TimelineRevision,
+        document: &Document,
+        operations: Vec<Operation>,
+    ) -> Result<PreparedEditPlan, PreparePlanError> {
+        if expected_revision != actual_revision {
+            return Err(PreparePlanError::RevisionConflict {
+                expected: expected_revision,
+                actual: actual_revision,
+            });
+        }
         let mut candidate = document.clone();
         apply_batch(&mut candidate, &operations).map_err(PreparePlanError::InvalidPlan)?;
         let id = PreparedPlanId(self.next_id);
@@ -390,7 +406,7 @@ pub(crate) enum PreparePlanError {
 mod tests {
     use std::sync::Arc;
 
-    use openreel_core::{ClipId, TimeCode};
+    use openreel_core::{ClipId, Marker, MarkerId, TimeCode};
     use rmcp::model::JsonObject;
     use serde_json::json;
 
@@ -478,5 +494,32 @@ mod tests {
             .unwrap();
         assert_eq!(store.take(plan.id).unwrap().id, plan.id);
         assert!(store.take(plan.id).is_none());
+    }
+
+    #[test]
+    fn prepared_plan_store_accepts_server_built_operations_without_json_round_trip() {
+        let document = Document::default();
+        let operation = Operation::AddMarker {
+            marker: Marker {
+                id: MarkerId(1),
+                position: TimeCode::ZERO,
+                label: "Review".to_owned(),
+                color_token: 0,
+            },
+        };
+        let mut store = PreparedPlanStore::default();
+
+        let plan = store
+            .prepare_operations(
+                TimelineRevision::default(),
+                TimelineRevision::default(),
+                &document,
+                vec![operation.clone()],
+            )
+            .unwrap();
+
+        assert_eq!(plan.operations, vec![operation]);
+        assert_eq!(plan.preview.operation_count, 1);
+        assert_eq!(store.get(plan.id).unwrap().id, plan.id);
     }
 }

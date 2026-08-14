@@ -25,6 +25,14 @@ between clean dialogue, the planner:
 
 The option is additive. Existing callers that omit it retain the v3 behavior.
 
+The deterministic dialogue and caption-correction planners now validate their
+operations server-side and return an opaque `prepared_edit_plan` handle. The
+agent inspects the compact preview and sends the handle straight to
+`commit_edit_plan`; it no longer has to copy a large operation array through a
+second planning call. Commit remains the revision and confirmation boundary.
+This specifically removes a lossy, token-heavy loop observed during the
+acoustic benchmark correction.
+
 `get_dialogue_pacing` is a compact read-only inspector over final timeline
 words and mapped acoustic silence. It recognizes boundaries from terminal
 punctuation, asset changes, speaker changes, and pause-backed capitalization.

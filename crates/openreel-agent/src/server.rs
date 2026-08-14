@@ -22,7 +22,7 @@ use openreel_core::{
     QueryResult, SceneStatus, SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings,
     SyncGroupId, ThreePointMode, TimeCode, TimelineBeat, TimelineBeatAnalysisState,
     TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TrackId,
-    TranscriptStatus, animated_caption_operations, apply_batch, beat_pacing_plan, caption_cues,
+    TranscriptStatus, animated_caption_operations, beat_pacing_plan, caption_cues,
     dedup_timeline_words, delivery_conformance, document_for_delivery_profile,
     document_for_delivery_variant, is_filler_word, map_source_range_to_project, music_fit_plan,
     plan_speaker_multicam, qa_document,
@@ -53,7 +53,7 @@ use crate::{
         render_timeline_silences, render_timeline_state, render_timeline_transcript,
     },
     runtime::{
-        CapabilityDescriptor, CapabilityKind, PreparedPlanId, PreparedPlanStore,
+        CapabilityDescriptor, CapabilityKind, PreparedEditPlan, PreparedPlanId, PreparedPlanStore,
         ToolSurfaceMetrics, capabilities, is_invocable_capability, search_capabilities,
     },
     schema::{SchemaError, decode_operation, operation_tool_name, operation_tools, schema_object},
@@ -1112,22 +1112,25 @@ impl OpenReelMcp {
                 value: ParamValue::Text(correction.text),
             });
         }
-        let mut candidate = document.as_ref().clone();
-        if let Err(error) = apply_batch(&mut candidate, &operations) {
-            return Ok(error_text(format!(
-                "caption corrections are invalid: {error}"
-            )));
-        }
+        let plan = match self.prepare_operations(revision, &document, operations) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "caption corrections are invalid: {error}"
+                )));
+            }
+        };
         Ok(success_structured(
             format!(
-                "planned {} caption correction(s); pass prepare_edit_plan through unchanged",
-                operations.len()
+                "prepared {} caption correction(s) as edit plan {}; inspect the preview, then commit it at timeline revision {revision}",
+                plan.preview.operation_count, plan.id,
             ),
             serde_json::json!({
                 "timeline_revision": revision,
-                "prepare_edit_plan": {
+                "prepared_edit_plan": {
+                    "plan_id": plan.id,
                     "expected_revision": revision,
-                    "operations": operations,
+                    "preview": plan.preview,
                 },
             }),
         ))
@@ -2816,14 +2819,10 @@ impl OpenReelMcp {
                 "dialogue assembly requires at least one ordered asset id",
             ));
         }
-        if document
-            .tracks
-            .iter()
-            .all(|track| track.id != args.target_track_id)
-        {
+        let target_track = args.target_track_id;
+        if document.tracks.iter().all(|track| track.id != target_track) {
             return Ok(error_text(format!(
-                "target track {} does not exist",
-                args.target_track_id
+                "target track {target_track} does not exist"
             )));
         }
         let minimum = args.minimum_silence_source_frames.unwrap_or(TimeCode(20));
@@ -2864,7 +2863,7 @@ impl OpenReelMcp {
             }
             for source in &ranges {
                 operations.push(Operation::AddClip {
-                    track: args.target_track_id,
+                    track: target_track,
                     asset: *asset_id,
                     at,
                     source: source.clone(),
@@ -2879,12 +2878,14 @@ impl OpenReelMcp {
             selections.push(selection);
         }
 
-        let mut candidate = document.as_ref().clone();
-        if let Err(error) = apply_batch(&mut candidate, &operations) {
-            return Ok(error_text(format!(
-                "dialogue assembly does not fit the current target track: {error}"
-            )));
-        }
+        let plan = match self.prepare_operations(revision, &document, operations) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "dialogue assembly does not fit the current target track: {error}"
+                )));
+            }
+        };
         let structured = serde_json::json!({
             "timeline_revision": revision,
             "retained_pause_source_frames": pacing.retained_pause,
@@ -2895,19 +2896,34 @@ impl OpenReelMcp {
                 "start": args.timeline_start.unwrap_or(TimeCode::ZERO),
                 "end": at,
             },
-            "prepare_edit_plan": {
+            "prepared_edit_plan": {
+                "plan_id": plan.id,
                 "expected_revision": revision,
-                "operations": operations,
+                "preview": plan.preview,
             },
         });
         Ok(success_structured(
             format!(
-                "planned {} gapless dialogue clip(s) from {} ordered asset(s); pass prepare_edit_plan through unchanged",
-                operations.len(),
-                args.asset_ids.len()
+                "prepared {} gapless dialogue clip(s) from {} ordered asset(s) as edit plan {}; inspect the preview, then commit it at timeline revision {revision}",
+                plan.preview.operation_count,
+                args.asset_ids.len(),
+                plan.id,
             ),
             structured,
         ))
+    }
+
+    fn prepare_operations(
+        &self,
+        revision: TimelineRevision,
+        document: &Document,
+        operations: Vec<Operation>,
+    ) -> Result<PreparedEditPlan, String> {
+        self.prepared_plans
+            .lock()
+            .map_err(|_| "prepared plan store stopped".to_owned())?
+            .prepare_operations(revision, revision, document, operations)
+            .map_err(|error| error.to_string())
     }
 
     fn ready_dialogue_analysis(
@@ -3149,7 +3165,7 @@ impl ServerHandler for OpenReelMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openreel", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Inspect with get_timeline_state. Open names already in the user request with one batched get_capability call; search only unnamed needs or after a miss. Load only needed schemas. Invoke non-edit capabilities through invoke_capability. Submit compact ordered operations to prepare_edit_plan, inspect its preview, then commit the plan id at the same revision. Reinspect after conflicts. Frames are exact project integers.",
+                "Inspect with get_timeline_state. Open names already in the user request with one batched get_capability call; search only unnamed needs or after a miss. Load only needed schemas. Invoke capabilities through invoke_capability. When a planner returns prepared_edit_plan, inspect its preview and commit that plan id directly. Use prepare_edit_plan only for model-authored operations. Reinspect after revision conflicts. Frames are exact project integers.",
             )
     }
 
@@ -3968,10 +3984,16 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "plan_dialogue_assembly",
-            "Build an exact, gapless AddClip plan from ordered dialogue assets using ready transcripts and raw silence analysis. It removes qualifying detector spans and optional conservative filler words without model-side frame arithmetic, with explicit natural-pause retention and filler-boundary padding controls.",
+            "Build and validate an exact, gapless AddClip plan from ordered dialogue assets using ready transcripts and raw silence analysis. It removes qualifying detector spans and optional conservative filler words without model-side frame arithmetic, then returns an opaque plan id ready for commit_edit_plan.",
             schema_object::<DialogueAssemblyPlanArgs>(),
         )
-        .with_annotations(read_only()),
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(true)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        ),
         Tool::new(
             "plan_beat_pacing",
             "Build a deterministic, revision-gated SplitClip plan from fully analyzed timeline beats. Selected beats are inspectable in ascending order and operations are safely ordered newest-first; the timeline is not changed until apply_edit_plan.",
@@ -4010,10 +4032,16 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "plan_caption_corrections",
-            "Build one validated revision-bound SetTitleParam plan for up to 100 generated-caption text corrections. The timeline is unchanged until the returned plan is prepared and committed.",
+            "Build and validate one revision-bound SetTitleParam plan for up to 100 generated-caption text corrections. Returns an opaque plan id ready for commit_edit_plan; the timeline remains unchanged until commit.",
             schema_object::<CaptionCorrectionPlanArgs>(),
         )
-        .with_annotations(read_only()),
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(true)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        ),
         Tool::new(
             "add_styled_captions",
             "Build transcript-timed burned-in captions using one stable preset plus optional fade, pop, or slide-up automation, then apply them as one revision-gated undo entry.",
@@ -5790,10 +5818,8 @@ mod tests {
         assert_eq!(plan.is_error, Some(false));
         let plan = plan.structured_content.unwrap();
         assert_eq!(plan["timeline_revision"], revision.0);
-        assert_eq!(
-            plan["prepare_edit_plan"]["operations"][0]["SetTitleParam"]["value"],
-            "River map steadies the expedition"
-        );
+        assert_eq!(plan["prepared_edit_plan"]["plan_id"], 1);
+        assert_eq!(plan["prepared_edit_plan"]["preview"]["operation_count"], 1);
 
         let unchanged = service
             .captions(CaptionListArgs {
@@ -5827,6 +5853,42 @@ mod tests {
             })
             .unwrap();
         assert_eq!(media_clip.is_error, Some(true));
+
+        let committed = commit_prepared_plan(&service, &plan, revision);
+        assert_eq!(committed.is_error, Some(false));
+        let corrected = service
+            .captions(CaptionListArgs {
+                range: None,
+                offset: None,
+                limit: None,
+            })
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(
+            corrected["captions"][0]["text"],
+            "River map steadies the expedition"
+        );
+    }
+
+    fn commit_prepared_plan(
+        service: &OpenReelMcp,
+        plan: &serde_json::Value,
+        revision: TimelineRevision,
+    ) -> CallToolResult {
+        service
+            .call_blocking(
+                CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                    serde_json::json!({
+                        "plan_id": plan["prepared_edit_plan"]["plan_id"],
+                        "expected_revision": revision,
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap()
     }
 
     #[test]
