@@ -94,6 +94,13 @@ caption words against independently transcribed rendered speech with zero word
 errors tolerated, rather than accepting a caption sequence that only matches
 stale ASR.
 
+The stricter recovery run is recorded in
+`benchmarks/auto-edit/v5/caption-recovery-baseline.json`. It passed 28/28
+assertions with the exact `[1682, 2547)` source range, 0% rendered-dialogue WER,
+0% caption/audio WER, 7 tool calls, 44 operations, and 111,225 total tokens.
+Human acceptance is pending. The original rejected artifact remains preserved
+in `baseline.json` rather than being overwritten by the recovery run.
+
 ## Product capability found by the benchmark
 
 The existing `plan_dialogue_assembly` could clean whole ordered assets but not

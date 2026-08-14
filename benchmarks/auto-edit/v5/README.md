@@ -82,6 +82,12 @@ burned-in caption words to match independently transcribed rendered speech with
 zero word errors. The source is a low-resolution 3:2
 close-up, so the vertical crop remains necessarily tight.
 
+The resulting machine recovery is published separately in
+`caption-recovery-baseline.json`: 28/28 assertions, exact source range
+`[1682, 2547)`, 0% rendered-dialogue WER, 0% caption/audio WER, 7 tool calls,
+44 operations, and 111,225 total tokens. Its human review is pending; the
+rejected first artifact remains unchanged in `baseline.json`.
+
 V5 is intentionally marked `in_progress`. M40 does not pass on one interview.
 It exits only after event/multicam and music-montage tasks are also executable,
 three samples per family pass the machine contract, and the published human

@@ -2460,6 +2460,36 @@ mod tests {
     }
 
     #[test]
+    fn published_v5_caption_recovery_keeps_machine_and_human_truth_separate() {
+        let rejected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v5/baseline.json"
+        ))
+        .unwrap();
+        let recovery: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v5/caption-recovery-baseline.json"
+        ))
+        .unwrap();
+
+        assert_eq!(rejected["human_review"]["status"], "reviewed_rejected");
+        assert_eq!(recovery["machine_summary"]["assertions_passed"], 28);
+        assert_eq!(recovery["machine_summary"]["assertions_total"], 28);
+        assert_eq!(
+            recovery["deliverable"]["rendered_word_error_rate_basis_points"],
+            0
+        );
+        assert_eq!(
+            recovery["deliverable"]["rendered_caption_audio_word_error_rate_basis_points"],
+            0
+        );
+        assert_eq!(recovery["deliverable"]["source_range"]["end"], 2_547);
+        assert_eq!(recovery["human_review"]["status"], "pending");
+        assert_ne!(
+            rejected["deliverable"]["output_sha256"],
+            recovery["deliverable"]["output_sha256"]
+        );
+    }
+
+    #[test]
     fn v3_visual_scenes_render_with_the_pinned_ffmpeg() {
         for (index, (visual, role)) in [
             ("empty_lot", "opening"),
