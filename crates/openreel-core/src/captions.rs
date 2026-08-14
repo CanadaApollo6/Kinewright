@@ -68,6 +68,10 @@ pub fn dedup_timeline_words(words: Vec<TimelineTranscriptWord>) -> Vec<TimelineT
 pub enum CaptionPlanError {
     #[error("there are no caption cues to add")]
     NoCues,
+    #[error("the authored caption script is empty")]
+    EmptyAuthoredScript,
+    #[error("the authored caption script cannot be aligned to the generated cues")]
+    AuthoredScriptAlignment,
     #[error("track id space is exhausted")]
     TrackIdExhausted,
     #[error("clip id space is exhausted")]
@@ -304,6 +308,148 @@ pub fn caption_cues(words: &[TimelineTranscriptWord], project_fps: Rational) -> 
     }
     cues.retain(|cue| cue.end > cue.start);
     cues
+}
+
+/// Re-author generated cue text from an exact script without changing cue timing.
+///
+/// Sentence endings are hard boundaries: one cue never contains the end of one
+/// sentence and the beginning of the next. Existing cue boundaries that are
+/// already sentence-safe are preserved. When a sentence boundary displaces an
+/// existing split, that sentence is rebalanced evenly across its assigned cues.
+///
+/// # Errors
+///
+/// Returns an error when the script is empty or cannot provide at least one
+/// word per cue and one cue per sentence.
+pub fn authored_caption_cues(
+    cues: &[CaptionCue],
+    script: &str,
+) -> Result<Vec<CaptionCue>, CaptionPlanError> {
+    if cues.is_empty() {
+        return Err(CaptionPlanError::NoCues);
+    }
+    let words = script
+        .split_whitespace()
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        return Err(CaptionPlanError::EmptyAuthoredScript);
+    }
+    if words.len() < cues.len() {
+        return Err(CaptionPlanError::AuthoredScriptAlignment);
+    }
+
+    let mut sentence_ends = words
+        .iter()
+        .enumerate()
+        .filter_map(|(index, word)| ends_sentence(word).then_some(index + 1))
+        .collect::<Vec<_>>();
+    if sentence_ends.last().copied() != Some(words.len()) {
+        sentence_ends.push(words.len());
+    }
+    if sentence_ends.len() > cues.len() {
+        return Err(CaptionPlanError::AuthoredScriptAlignment);
+    }
+
+    let raw_word_counts = cues
+        .iter()
+        .map(|cue| cue.text.split_whitespace().count())
+        .collect::<Vec<_>>();
+    let raw_total = raw_word_counts.iter().sum::<usize>();
+    if raw_total == 0 {
+        return Err(CaptionPlanError::AuthoredScriptAlignment);
+    }
+    let raw_boundaries = scaled_boundaries(&raw_word_counts, words.len(), raw_total)?;
+
+    let mut sentence_cue_ends = Vec::with_capacity(sentence_ends.len());
+    let mut previous_cue_end = 0;
+    let mut previous_sentence_end = 0;
+    for (sentence_index, &sentence_end) in sentence_ends.iter().enumerate() {
+        if sentence_index + 1 == sentence_ends.len() {
+            sentence_cue_ends.push(cues.len());
+            break;
+        }
+        let remaining_sentences = sentence_ends.len() - sentence_index - 1;
+        let remaining_words = words.len() - sentence_end;
+        let sentence_words = sentence_end - previous_sentence_end;
+        let minimum = (previous_cue_end + 1).max(cues.len().saturating_sub(remaining_words));
+        let maximum = (cues.len() - remaining_sentences)
+            .min(previous_cue_end + sentence_words)
+            .min(cues.len() - 1);
+        if minimum > maximum {
+            return Err(CaptionPlanError::AuthoredScriptAlignment);
+        }
+        let cue_end = (minimum..=maximum)
+            .min_by_key(|&candidate| raw_boundaries[candidate - 1].abs_diff(sentence_end))
+            .ok_or(CaptionPlanError::AuthoredScriptAlignment)?;
+        sentence_cue_ends.push(cue_end);
+        previous_cue_end = cue_end;
+        previous_sentence_end = sentence_end;
+    }
+
+    let mut final_boundaries = vec![0; cues.len() + 1];
+    let mut sentence_start = 0;
+    let mut cue_start = 0;
+    for (&sentence_end, &cue_end) in sentence_ends.iter().zip(&sentence_cue_ends) {
+        final_boundaries[cue_start] = sentence_start;
+        final_boundaries[cue_end] = sentence_end;
+        let raw_start = cue_start
+            .checked_sub(1)
+            .map_or(0, |index| raw_boundaries[index]);
+        let raw_end = raw_boundaries[cue_end - 1];
+        if raw_start == sentence_start && raw_end == sentence_end {
+            final_boundaries[(cue_start + 1)..cue_end]
+                .copy_from_slice(&raw_boundaries[cue_start..(cue_end - 1)]);
+        } else {
+            let cue_count = cue_end - cue_start;
+            let word_count = sentence_end - sentence_start;
+            let quotient = word_count / cue_count;
+            let remainder = word_count % cue_count;
+            for offset in 1..cue_count {
+                final_boundaries[cue_start + offset] =
+                    sentence_start + quotient * offset + remainder.min(offset);
+            }
+        }
+        sentence_start = sentence_end;
+        cue_start = cue_end;
+    }
+
+    Ok(cues
+        .iter()
+        .enumerate()
+        .map(|(index, cue)| CaptionCue {
+            start: cue.start,
+            end: cue.end,
+            text: words[final_boundaries[index]..final_boundaries[index + 1]].join(" "),
+        })
+        .collect())
+}
+
+fn scaled_boundaries(
+    raw_word_counts: &[usize],
+    authored_word_count: usize,
+    raw_word_count: usize,
+) -> Result<Vec<usize>, CaptionPlanError> {
+    let mut boundaries = Vec::with_capacity(raw_word_counts.len());
+    let mut raw_cumulative = 0_usize;
+    let mut previous = 0_usize;
+    for (index, count) in raw_word_counts.iter().enumerate() {
+        raw_cumulative = raw_cumulative.saturating_add(*count);
+        let remaining_cues = raw_word_counts.len() - index - 1;
+        let minimum = previous + 1;
+        let maximum = authored_word_count.saturating_sub(remaining_cues);
+        if minimum > maximum {
+            return Err(CaptionPlanError::AuthoredScriptAlignment);
+        }
+        let scaled = raw_cumulative
+            .saturating_mul(authored_word_count)
+            .saturating_add(raw_word_count / 2)
+            / raw_word_count;
+        let boundary = scaled.clamp(minimum, maximum);
+        boundaries.push(boundary);
+        previous = boundary;
+    }
+    Ok(boundaries)
 }
 
 /// Serialize caption cues as `SubRip` text.
@@ -554,6 +700,56 @@ mod tests {
         assert_eq!(
             caption_cues(&words, fps),
             vec![cue(0, 10, "First."), cue(10, 27, "Second")]
+        );
+    }
+
+    #[test]
+    fn authored_script_makes_sentence_boundaries_authoritative() {
+        let generated = vec![
+            cue(4, 119, "Last spring this empty lot collected weeds"),
+            cue(119, 182, "and rain Neighbors decided it could feed"),
+            cue(182, 287, "families instead Over three weekends"),
+            cue(287, 342, "volunteers built raised beds"),
+            cue(350, 412, "Then they planted tomatoes herbs and"),
+            cue(412, 448, "peppers"),
+            cue(448, 508, "Now the Saturday market supplies fresh"),
+            cue(508, 585, "produce to dozens of local families"),
+        ];
+        let script = concat!(
+            "Last spring this empty lot collected weeds and rainwater. ",
+            "Neighbors decided it could feed families instead. ",
+            "Over three weekends volunteers built raised beds. ",
+            "Then they planted tomatoes herbs and peppers. ",
+            "Now the Saturday market supplies fresh produce to dozens of local families."
+        );
+
+        let authored = authored_caption_cues(&generated, script).unwrap();
+        assert_eq!(
+            authored
+                .iter()
+                .map(|cue| cue.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Last spring this empty lot collected weeds and rainwater.",
+                "Neighbors decided it could feed families instead.",
+                "Over three weekends volunteers",
+                "built raised beds.",
+                "Then they planted tomatoes herbs and",
+                "peppers.",
+                "Now the Saturday market supplies fresh",
+                "produce to dozens of local families.",
+            ]
+        );
+        assert_eq!(authored[0].start, generated[0].start);
+        assert_eq!(authored[7].end, generated[7].end);
+    }
+
+    #[test]
+    fn authored_script_rejects_more_sentences_than_timing_cues() {
+        let generated = [cue(0, 30, "one two")];
+        assert_eq!(
+            authored_caption_cues(&generated, "One. Two."),
+            Err(CaptionPlanError::AuthoredScriptAlignment)
         );
     }
 

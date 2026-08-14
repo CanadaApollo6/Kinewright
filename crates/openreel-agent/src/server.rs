@@ -22,8 +22,8 @@ use openreel_core::{
     QueryResult, SceneStatus, SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings,
     SyncGroupId, ThreePointMode, TimeCode, TimelineBeat, TimelineBeatAnalysisState,
     TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TrackId,
-    TranscriptStatus, animated_caption_operations, beat_pacing_plan, caption_cues,
-    dedup_timeline_words, delivery_conformance, document_for_delivery_profile,
+    TranscriptStatus, animated_caption_operations, authored_caption_cues, beat_pacing_plan,
+    caption_cues, dedup_timeline_words, delivery_conformance, document_for_delivery_profile,
     document_for_delivery_variant, is_filler_word, map_source_range_to_project, music_fit_plan,
     plan_speaker_multicam, qa_document,
 };
@@ -708,7 +708,12 @@ impl OpenReelMcp {
             }
             "add_styled_captions" => {
                 let args: StyledCaptionsArgs = decode_args("add_styled_captions", arguments)?;
-                self.add_styled_captions(args.expected_revision, args.preset, args.motion)
+                self.add_styled_captions(
+                    args.expected_revision,
+                    args.preset,
+                    args.motion,
+                    args.script.as_deref(),
+                )
             }
             "get_qa_report" => Ok(self.qa_report()?),
             "get_delivery_variants" => Ok(Self::delivery_variants()),
@@ -1141,6 +1146,7 @@ impl OpenReelMcp {
         expected_revision: TimelineRevision,
         preset: CaptionPreset,
         motion: CaptionMotion,
+        script: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         let (actual_revision, document) = self.snapshot()?;
         if expected_revision != actual_revision {
@@ -1153,6 +1159,12 @@ impl OpenReelMcp {
         let words = dedup_timeline_words(words);
         let mut cues = caption_cues(&words, document.fps);
         clamp_caption_cues_to_duration(&mut cues, document.duration);
+        if let Some(script) = script {
+            cues = match authored_caption_cues(&cues, script) {
+                Ok(cues) => cues,
+                Err(error) => return Ok(error_text(error.to_string())),
+            };
+        }
         let operations = match animated_caption_operations(&document, &cues, preset, motion) {
             Ok(operations) => operations,
             Err(error) => return Ok(error_text(error.to_string())),
@@ -3721,6 +3733,10 @@ struct StyledCaptionsArgs {
     /// Renderer-native motion composition. Defaults to none.
     #[serde(default)]
     motion: CaptionMotion,
+    /// Optional exact authored wording. Punctuation becomes a hard cue-grouping
+    /// boundary while generated transcript timing remains unchanged.
+    #[serde(default)]
+    script: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -4044,7 +4060,7 @@ fn inspector_tools() -> Vec<Tool> {
         ),
         Tool::new(
             "add_styled_captions",
-            "Build transcript-timed burned-in captions using one stable preset plus optional fade, pop, or slide-up automation, then apply them as one revision-gated undo entry.",
+            "Build transcript-timed burned-in captions using one stable preset plus optional motion and exact authored script. Script punctuation makes sentence grouping deterministic without a correction round trip. Applies as one revision-gated undo entry.",
             schema_object::<StyledCaptionsArgs>(),
         )
         .with_annotations(
@@ -6522,6 +6538,46 @@ mod tests {
         assert_eq!(opened.is_error, Some(false));
         let structured = opened.structured_content.unwrap();
         assert_eq!(structured["capabilities"].as_array().unwrap().len(), 2);
+        let serialized = serde_json::to_string(&structured).unwrap();
+        assert!(serialized.contains("script"));
+        assert!(serialized.contains("Punctuation becomes a hard cue-grouping"));
+    }
+
+    #[test]
+    fn authored_caption_path_reduces_the_dialogue_capability_surface() {
+        let tools = OpenReelMcp::tools().unwrap();
+        let open = |names: &[&str]| {
+            open_capabilities(
+                &tools,
+                CapabilityArgs {
+                    name: None,
+                    names: names.iter().map(ToString::to_string).collect(),
+                },
+            )
+        };
+        let legacy = serde_json::to_vec(&open(&[
+            "get_transcripts",
+            "plan_dialogue_assembly",
+            "add_styled_captions",
+            "get_captions",
+            "plan_caption_corrections",
+            "get_dialogue_pacing",
+            "get_editorial_readiness",
+        ]))
+        .unwrap()
+        .len();
+        let authored = serde_json::to_vec(&open(&[
+            "get_transcripts",
+            "plan_dialogue_assembly",
+            "add_styled_captions",
+            "get_dialogue_pacing",
+            "get_editorial_readiness",
+        ]))
+        .unwrap()
+        .len();
+
+        println!("dialogue capability payload: legacy={legacy} B authored={authored} B");
+        assert!(authored < legacy);
     }
 
     #[test]

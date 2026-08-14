@@ -137,6 +137,7 @@ pub enum EvalAssertion {
     CaptionWordsExact {
         word_set: String,
     },
+    CaptionSentencesCoherent,
     NoSilenceAtLeast {
         source_frames: TimeCode,
     },
@@ -1587,6 +1588,7 @@ fn evaluate_assertion(
         EvalAssertion::WordsRetained { word_set } => evaluate_word_set(word_set, outcome, true),
         EvalAssertion::WordsAbsent { word_set } => evaluate_word_set(word_set, outcome, false),
         EvalAssertion::CaptionWordsExact { word_set } => evaluate_caption_words(word_set, outcome),
+        EvalAssertion::CaptionSentencesCoherent => evaluate_caption_sentences(outcome),
         EvalAssertion::NoSilenceAtLeast { source_frames } => {
             let remaining = cuttable_timeline_silences(
                 &outcome.final_document,
@@ -2032,6 +2034,51 @@ fn evaluate_caption_words(word_set: &str, outcome: &EvalOutcome) -> AssertionRes
             "authored_set={word_set:?}, expected={expected:?}, observed={observed:?}, missing={missing:?}, unexpected={unexpected:?}"
         ),
     )
+}
+
+fn evaluate_caption_sentences(outcome: &EvalOutcome) -> AssertionResult {
+    let mut captions = timeline_clips(&outcome.final_document)
+        .filter_map(|clip| match &clip.content {
+            ClipContent::Title(title) if title.caption_preset.is_some() => {
+                Some((clip.timeline_start, clip.id, title.text.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    captions.sort_by_key(|(start, clip, _)| (*start, *clip));
+    let crossovers = captions
+        .iter()
+        .filter(|(_, _, text)| caption_contains_sentence_crossover(text))
+        .map(|(_, clip, text)| format!("clip {}: {text:?}", clip.0))
+        .collect::<Vec<_>>();
+    assertion_result(
+        "caption sentence grouping",
+        crossovers.is_empty(),
+        if crossovers.is_empty() {
+            format!(
+                "{} caption cues keep sentence boundaries between cues",
+                captions.len()
+            )
+        } else {
+            format!("sentence crossovers={crossovers:?}")
+        },
+    )
+}
+
+fn caption_contains_sentence_crossover(text: &str) -> bool {
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    words
+        .iter()
+        .take(words.len().saturating_sub(1))
+        .any(|word| {
+            let without_closers = word.trim_end_matches(|character| {
+                matches!(
+                    character,
+                    '\'' | '"' | ')' | ']' | '}' | '\u{2019}' | '\u{201d}'
+                )
+            });
+            matches!(without_closers.chars().next_back(), Some('.' | '!' | '?'))
+        })
 }
 
 fn evaluate_scene_cuts(scene_set: &str, outcome: &EvalOutcome) -> AssertionResult {
@@ -3052,6 +3099,19 @@ mod tests {
         };
         title.text = "River map steadies the expedition".to_owned();
         assert!(evaluate_caption_words("authored", &outcome).passed);
+    }
+
+    #[test]
+    fn caption_sentence_grouping_rejects_crossovers() {
+        assert!(caption_contains_sentence_crossover(
+            "and rainwater. Neighbors decided it could feed"
+        ));
+        assert!(!caption_contains_sentence_crossover(
+            "Last spring this empty lot collected weeds and rainwater."
+        ));
+        assert!(!caption_contains_sentence_crossover(
+            "Over three weekends volunteers"
+        ));
     }
 
     #[test]

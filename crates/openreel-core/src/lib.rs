@@ -26,8 +26,8 @@ pub use agent::{
 };
 pub use automation::{AutomationCurve, AutomationCurveError, Keyframe, KeyframeInterpolation};
 pub use captions::{
-    CaptionCue, CaptionMotion, CaptionPlanError, animated_caption_operations, caption_cues,
-    caption_title_operations, dedup_timeline_words, srt, vtt,
+    CaptionCue, CaptionMotion, CaptionPlanError, animated_caption_operations,
+    authored_caption_cues, caption_cues, caption_title_operations, dedup_timeline_words, srt, vtt,
 };
 pub use creator::{
     BeatPacingPlan, BeatPacingPoint, CreatorPlanError, MusicBeatAnchor, MusicDurationFit,

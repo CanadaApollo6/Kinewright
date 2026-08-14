@@ -27,6 +27,15 @@ its last word plus a half-second reading hold. The hold is capped at the next
 cue's start, so cues never overlap. Empty text and non-positive word ranges do
 not produce zero-duration cues.
 
+Agent-authored captions can pass an exact `script` to `add_styled_captions`.
+OpenReel keeps the generated transcript timing but replaces the recognized
+wording before title creation. Script punctuation is authoritative: a cue may
+continue one sentence across multiple timed groups, but it never ends one
+sentence and begins another. Existing sentence-safe splits stay unchanged;
+only the groups displaced by a sentence boundary are rebalanced. This makes
+exact spelling and grouping one deterministic edit instead of a caption-list,
+manual correction-plan, and second commit round trip.
+
 ## Sidecar timestamps
 
 Caption files use project frames and the exact project `Rational` frame rate.
