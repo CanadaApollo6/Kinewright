@@ -20,8 +20,11 @@ between clean dialogue, the planner:
 2. removes the entire filler run with one central cut;
 3. caps excessive acoustic silence without shortening a natural pause already
    below the cap;
-4. reports the available pause, configured maximum, retained pause, acoustic
-   source range, and measurement mode.
+4. caps each retained acoustic flank below the configured cuttable-silence
+   threshold, so the pacing and readiness inspectors cannot contradict one
+   another;
+5. reports the available pause, configured maximum, per-flank maximum,
+   retained pause, acoustic source range, and measurement mode.
 
 The option is additive. Existing callers that omit it retain the v3 behavior.
 

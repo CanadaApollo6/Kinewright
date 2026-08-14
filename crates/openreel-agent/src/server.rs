@@ -2874,7 +2874,7 @@ impl OpenReelMcp {
                     McpError::internal_error("dialogue assembly overflowed", None)
                 })?;
             }
-            let selection = dialogue_selection(&ranges, &transcript, &silences, pacing);
+            let selection = dialogue_selection(&ranges, &transcript, &silences, pacing, minimum);
             selections.push(selection);
         }
 
@@ -4294,6 +4294,7 @@ fn dialogue_selection(
     transcript: &AssetTranscript,
     silences: &AssetSilences,
     pacing: DialoguePacingSettings,
+    minimum_silence_source_frames: TimeCode,
 ) -> serde_json::Value {
     serde_json::json!({
         "asset_id": transcript.asset,
@@ -4302,6 +4303,7 @@ fn dialogue_selection(
             transcript,
             silences,
             pacing.maximum_filler_bridge_pause,
+            minimum_silence_source_frames,
         ),
     })
 }
@@ -4378,6 +4380,7 @@ struct DialogueFillerBridge {
     cut_end: TimeCode,
     available_pause_source_frames: TimeCode,
     maximum_pause_source_frames: TimeCode,
+    maximum_contiguous_pause_source_frames: TimeCode,
     retained_pause_source_frames: TimeCode,
     measurement: &'static str,
 }
@@ -4386,6 +4389,7 @@ fn dialogue_filler_bridges(
     transcript: &AssetTranscript,
     silences: &AssetSilences,
     maximum_pause: Option<TimeCode>,
+    minimum_silence_source_frames: TimeCode,
 ) -> Vec<DialogueFillerBridge> {
     let Some(maximum_pause) = maximum_pause else {
         return Vec::new();
@@ -4453,14 +4457,17 @@ fn dialogue_filler_bridges(
                 )
             };
         let available = left_available.saturating_add(right_available);
+        let maximum_contiguous = minimum_silence_source_frames.0.saturating_sub(1);
+        let left_capacity = left_available.min(maximum_contiguous);
+        let right_capacity = right_available.min(maximum_contiguous);
         let requested = maximum_pause.0;
-        let mut left = (requested / 2).min(left_available);
-        let mut right = requested.saturating_sub(left).min(right_available);
+        let mut left = (requested / 2).min(left_capacity);
+        let mut right = requested.saturating_sub(left).min(right_capacity);
         let mut remaining = requested.saturating_sub(left).saturating_sub(right);
-        let left_extra = left_available.saturating_sub(left).min(remaining);
+        let left_extra = left_capacity.saturating_sub(left).min(remaining);
         left = left.saturating_add(left_extra);
         remaining = remaining.saturating_sub(left_extra);
-        let right_extra = right_available.saturating_sub(right).min(remaining);
+        let right_extra = right_capacity.saturating_sub(right).min(remaining);
         right = right.saturating_add(right_extra);
         let cut_start = TimeCode(bridge_start.0.saturating_add(left));
         let cut_end = TimeCode(bridge_end.0.saturating_sub(right));
@@ -4476,6 +4483,7 @@ fn dialogue_filler_bridges(
             cut_end,
             available_pause_source_frames: TimeCode(available),
             maximum_pause_source_frames: maximum_pause,
+            maximum_contiguous_pause_source_frames: TimeCode(maximum_contiguous),
             retained_pause_source_frames: TimeCode(left.saturating_add(right)),
             measurement,
         });
@@ -4492,7 +4500,12 @@ fn dialogue_keep_ranges(
     pacing: DialoguePacingSettings,
 ) -> Vec<std::ops::Range<TimeCode>> {
     let bridges = if remove_fillers {
-        dialogue_filler_bridges(transcript, silences, pacing.maximum_filler_bridge_pause)
+        dialogue_filler_bridges(
+            transcript,
+            silences,
+            pacing.maximum_filler_bridge_pause,
+            minimum_silence_source_frames,
+        )
     } else {
         Vec::new()
     };
@@ -6728,13 +6741,15 @@ mod tests {
             ],
         };
 
-        let bridges = dialogue_filler_bridges(&transcript, &silences, Some(TimeCode(12)));
+        let bridges =
+            dialogue_filler_bridges(&transcript, &silences, Some(TimeCode(12)), TimeCode(20));
         assert_eq!(bridges.len(), 1);
         assert_eq!(bridges[0].cut_start, TimeCode(21));
         assert_eq!(bridges[0].cut_end, TimeCode(44));
         assert_eq!(bridges[0].retained_pause_source_frames, TimeCode(12));
         assert_eq!(bridges[0].measurement, "acoustic_silence");
-        let preserved = dialogue_filler_bridges(&transcript, &silences, Some(TimeCode(30)));
+        let preserved =
+            dialogue_filler_bridges(&transcript, &silences, Some(TimeCode(30)), TimeCode(20));
         assert_eq!(preserved[0].available_pause_source_frames, TimeCode(25));
         assert_eq!(preserved[0].retained_pause_source_frames, TimeCode(25));
         assert_eq!(preserved[0].cut_start, TimeCode(25));
@@ -6752,7 +6767,7 @@ mod tests {
                     maximum_filler_bridge_pause: Some(TimeCode(12)),
                 },
             ),
-            vec![TimeCode(0)..TimeCode(21), TimeCode(44)..TimeCode(120)]
+            vec![TimeCode(0)..TimeCode(19), TimeCode(46)..TimeCode(120)]
         );
     }
 
@@ -6809,7 +6824,8 @@ mod tests {
             ],
         };
 
-        let bridges = dialogue_filler_bridges(&transcript, &silences, Some(TimeCode(12)));
+        let bridges =
+            dialogue_filler_bridges(&transcript, &silences, Some(TimeCode(12)), TimeCode(20));
 
         assert_eq!(bridges.len(), 1);
         assert_eq!(bridges[0].source_start, TimeCode(108));
@@ -6818,6 +6834,72 @@ mod tests {
         assert_eq!(bridges[0].cut_end, TimeCode(228));
         assert_eq!(bridges[0].retained_pause_source_frames, TimeCode(12));
         assert_eq!(bridges[0].measurement, "acoustic_silence");
+    }
+
+    #[test]
+    fn dialogue_filler_bridge_never_leaves_one_cuttable_acoustic_flank() {
+        let fps = Rational::new(30, 1).unwrap();
+        let transcript = AssetTranscript {
+            asset: AssetId(1),
+            content_sha256: "fixture".to_owned(),
+            source_fps: fps,
+            words: vec![
+                TranscriptWord {
+                    text: "built".to_owned(),
+                    source_start: TimeCode(96),
+                    source_end: TimeCode(104),
+                    speaker: None,
+                },
+                TranscriptWord {
+                    text: "Um".to_owned(),
+                    source_start: TimeCode(162),
+                    source_end: TimeCode(193),
+                    speaker: None,
+                },
+                TranscriptWord {
+                    text: "Um".to_owned(),
+                    source_start: TimeCode(193),
+                    source_end: TimeCode(229),
+                    speaker: None,
+                },
+                TranscriptWord {
+                    text: "Then".to_owned(),
+                    source_start: TimeCode(233),
+                    source_end: TimeCode(237),
+                    speaker: None,
+                },
+            ],
+        };
+        let silences = AssetSilences {
+            asset: AssetId(1),
+            content_sha256: "fixture".to_owned(),
+            source_fps: fps,
+            source_frames: TimeCode(323),
+            threshold_dbfs_hundredths: -3_500,
+            window_milliseconds: 10,
+            spans: vec![
+                SilenceSpan {
+                    source_start: TimeCode(107),
+                    source_end: TimeCode(162),
+                },
+                SilenceSpan {
+                    source_start: TimeCode(205),
+                    source_end: TimeCode(234),
+                },
+            ],
+        };
+
+        let bridges =
+            dialogue_filler_bridges(&transcript, &silences, Some(TimeCode(31)), TimeCode(20));
+
+        assert_eq!(bridges.len(), 1);
+        assert_eq!(
+            bridges[0].maximum_contiguous_pause_source_frames,
+            TimeCode(19)
+        );
+        assert_eq!(bridges[0].retained_pause_source_frames, TimeCode(24));
+        assert_eq!(bridges[0].cut_start, TimeCode(126));
+        assert_eq!(bridges[0].cut_end, TimeCode(229));
     }
 
     #[test]
