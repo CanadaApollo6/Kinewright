@@ -27,6 +27,23 @@ cargo run -p openreel-app
 Keep the setup and Cargo commands in the same PowerShell process. The setup
 script sets process-local environment variables needed by `ffmpeg-sys-next`.
 
+## Build-cache storage
+
+The workspace profiles disable Cargo incremental state and full dependency
+debug symbols. This keeps repeated Windows test builds from accumulating tens
+of gigabytes of PDB, rlib, and incremental artifacts under `target`.
+
+To reclaim build outputs without deleting benchmark runs or downloaded eval
+fixtures:
+
+```powershell
+.\scripts\clean-build-cache.ps1
+```
+
+Use `-WhatIf` to inspect the exact directories first. The script removes only
+known regenerable build-cache directories and preserves `target/evals` and
+`target/eval-fixtures`.
+
 The script downloads this exact shared GPL build:
 
 - Provider: System233 FFmpeg MSVC Prebuilt

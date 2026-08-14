@@ -46,3 +46,22 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = "warn"
 pedantic = "warn"
+
+# MSVC emits very large PDBs for this media/GUI graph. Keep useful line tables
+# for app development, omit dependency symbols, and disable the unbounded
+# incremental cache that previously grew target/ beyond 100 GiB.
+[profile.dev]
+debug = 1
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test]
+debug = 0
+incremental = false
+
+[profile.release]
+debug = 0
+incremental = false
+strip = "debuginfo"
