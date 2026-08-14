@@ -62,6 +62,25 @@ The human rubric remains acceptance, story, pacing, visual finish, audio
 finish, captions, and delivery readiness. The MP4 SHA binds those ratings to an
 exact artifact.
 
+## First preflight result
+
+The corrected `g1` preflight passed 25/25 machine assertions in one turn. It
+used 7 tool calls, 44 edit operations, and 108,701 total tokens. The delivered
+vertical MP4 is 1,038 frames, and independent post-render transcription measured
+9.20% word error rate against the pinned story transcript. Its SHA-256 is
+`0aa88e6fc3761867734d282403acdf505061cab38e997b4fde2610ef5aed9ccc`.
+
+The checked-in `benchmarks/auto-edit/v5/baseline.json` binds those results to
+the fixture, implementation revision, trace hash, proof hash, and output hash.
+Human review is still pending. This is one preflight for one family, not the
+three-sample interview gate and not completion of M40.
+
+The first attempt found an evaluator defect rather than an editing regression:
+the expected-caption builder discarded numeric transcript tokens while the
+rendered edit correctly retained `8` and `12`. The scorer now builds exact
+caption expectations from the authored whitespace-token sequence. The invalid
+failure is preserved in local run artifacts but excluded from the baseline.
+
 ## Product capability found by the benchmark
 
 The existing `plan_dialogue_assembly` could clean whole ordered assets but not

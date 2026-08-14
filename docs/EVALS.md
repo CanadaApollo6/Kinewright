@@ -129,6 +129,11 @@ first non-synthetic fixture in the published benchmark. M40 remains incomplete
 until interview/documentary, event/multicam, and music-montage families each
 pass three model samples and their separate human gate.
 
+The first corrected interview preflight is published at
+`benchmarks/auto-edit/v5/baseline.json`: 1/1 sample, 25/25 assertions, 7 tool
+calls, 108,701 total tokens, and 9.20% independent rendered-speech WER. Human
+review remains pending, and this single run does not satisfy the family gate.
+
 ## Seed suite
 
 | Eval | Rationale | USD ceiling |

@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "openreel-generalization-v5",
+  "suite_manifest": "benchmarks/auto-edit/v5/manifest.json",
+  "scope": {
+    "status": "first_family_preflight",
+    "families_executed": ["interview_documentary"],
+    "families_pending": ["event_multicam", "music_montage"],
+    "note": "This is one successful preflight, not the three-sample family gate or the M40 exit gate."
+  },
+  "fixture": {
+    "pack_id": "m40-interview-v1",
+    "asset_id": "helen-hill-interview-480p",
+    "bytes": 9294247,
+    "sha256": "cc860fe89cdd7e1d653a55fa7458636e4b9d980915d50dedb7ba86d1d86c8656",
+    "license": "LicenseRef-Public-Domain"
+  },
+  "source_trace": {
+    "filename": "openreel-eval-20260814-172557-codex/results.jsonl",
+    "sha256": "b2560a21bc0eb926cd27c4163193fa3c33c5053c0ba3035f11075768a7c4db7c",
+    "note": "The raw trace and media package are generated local artifacts under target/evals and are intentionally not committed."
+  },
+  "environment": {
+    "timestamp_utc": "2026-08-14T17:25:57Z",
+    "harness": "codex",
+    "harness_version": "codex-cli 0.147.0",
+    "model": "harness-default",
+    "os": "windows",
+    "architecture": "x86_64",
+    "openreel_version": "0.1.0",
+    "openreel_revision": "646a636d6cda687d644b570da8e9945e8c379e33"
+  },
+  "machine_summary": {
+    "samples_passed": 1,
+    "samples_total": 1,
+    "assertions_passed": 25,
+    "assertions_total": 25,
+    "turns": 1,
+    "tool_calls": 7,
+    "input_tokens": 107850,
+    "cached_input_tokens": 70144,
+    "uncached_input_tokens": 37706,
+    "output_tokens": 851,
+    "reasoning_output_tokens": 160,
+    "total_tokens": 108701,
+    "cost_usd": null,
+    "wall_time_ms": 75532,
+    "operations_applied": 44
+  },
+  "samples": [
+    {
+      "id": "g1-sample-1",
+      "family": "interview_documentary",
+      "passed": true,
+      "assertions_passed": 25,
+      "assertions_total": 25,
+      "turns": 1,
+      "tool_calls": 7,
+      "input_tokens": 107850,
+      "cached_input_tokens": 70144,
+      "uncached_input_tokens": 37706,
+      "output_tokens": 851,
+      "reasoning_output_tokens": 160,
+      "total_tokens": 108701,
+      "wall_time_ms": 75532,
+      "operations_applied": 44,
+      "rendered_word_error_rate_basis_points": 920,
+      "output_frames": 1038,
+      "output_bytes": 43496136,
+      "output_sha256": "0aa88e6fc3761867734d282403acdf505061cab38e997b4fde2610ef5aed9ccc"
+    }
+  ],
+  "deliverable": {
+    "profile": "vertical_short",
+    "resolution": [1080, 1920],
+    "duration_frames": 1038,
+    "rendered_word_error_rate_basis_points": 920,
+    "proof_sample_frames": [0, 129, 259, 388, 518, 648, 777, 907, 1037],
+    "proof_sha256": "86e6a76efafcc63f0165846e96d3b55b4ae6bcc754e27f61d8ece2ae6adaa614",
+    "output_bytes": 43496136,
+    "output_sha256": "0aa88e6fc3761867734d282403acdf505061cab38e997b4fde2610ef5aed9ccc"
+  },
+  "human_review": {
+    "status": "pending",
+    "review_template": "target/evals/openreel-eval-20260814-172557-codex/human-review.json",
+    "note": "The low-resolution 3:2 talking-head source produces a tight portrait crop. Machine checks do not decide whether its pacing, framing, or finish are publishable."
+  },
+  "benchmark_status": "in_progress"
+}
