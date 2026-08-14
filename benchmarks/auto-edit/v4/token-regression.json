@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "diagnostic_id": "m39-capability-discovery-token-regression",
+  "metric_definition": "total_tokens = input_tokens + output_tokens; cached input is included in input_tokens",
+  "runs": [
+    {
+      "id": "m38_baseline",
+      "label": "M38 accepted baseline",
+      "suite": "dialogue-editorial-v3",
+      "revision": "f232e3575c683dd9d1b716b81209bf692606140a",
+      "trace": "openreel-eval-20260813-172433-codex/results.jsonl",
+      "trace_sha256": "207ad6df211d23609a9f77264cba4ba891128d92669cc7d2fdefb497c282323b",
+      "samples": 3,
+      "tool_calls": 50,
+      "search_capability_calls": 3,
+      "input_tokens": 729804,
+      "cached_input_tokens": 633600,
+      "uncached_input_tokens": 96204,
+      "output_tokens": 8092,
+      "total_tokens": 737896,
+      "mean_total_tokens": 245965.3333,
+      "sample_total_tokens": [251345, 250215, 236336]
+    },
+    {
+      "id": "m39_pre_fix",
+      "label": "M39 before protocol fix",
+      "suite": "dialogue-pacing-v4",
+      "revision": "988a0498cb9bd287e83928195f62e4a6e45ecba9",
+      "trace": "openreel-eval-20260813-223217-codex/results.jsonl",
+      "trace_sha256": "ad75d656c3df936627810ae908caac08731a0465f72140f1f1b79b60f6bd5b14",
+      "samples": 3,
+      "tool_calls": 53,
+      "search_capability_calls": 4,
+      "input_tokens": 840074,
+      "cached_input_tokens": 717056,
+      "uncached_input_tokens": 123018,
+      "output_tokens": 8075,
+      "total_tokens": 848149,
+      "mean_total_tokens": 282716.3333,
+      "sample_total_tokens": [324011, 262061, 262077]
+    },
+    {
+      "id": "m39_post_fix",
+      "label": "M39 after protocol fix",
+      "suite": "dialogue-pacing-v4",
+      "revision": "6e22f3a7e3abc823d6159788a2936736b15f33ed",
+      "trace": "openreel-eval-20260814-054517-codex/results.jsonl",
+      "trace_sha256": "5757bc8de68f0f9467b3bcc52f10dd22e0bff617d991d247ac52c6ebe9bcf943",
+      "samples": 3,
+      "tool_calls": 49,
+      "search_capability_calls": 1,
+      "input_tokens": 740076,
+      "cached_input_tokens": 626944,
+      "uncached_input_tokens": 113132,
+      "output_tokens": 7259,
+      "total_tokens": 747335,
+      "mean_total_tokens": 249111.6667,
+      "sample_total_tokens": [258873, 242265, 246197]
+    }
+  ],
+  "measurements": {
+    "startup_tool_surface_bytes_before": 5698,
+    "startup_tool_surface_bytes_after": 5660,
+    "m38_capability_bundle_bytes": 9247,
+    "m39_capability_bundle_bytes": 10823,
+    "capability_bundle_delta_bytes": 1576,
+    "task_prompt_growth_characters": 199,
+    "pre_fix_total_token_regression_percent": 14.94,
+    "pre_fix_delta_from_cached_input_percent": 75.69,
+    "pre_fix_outlier_share_of_aggregate_delta_percent": 56.2,
+    "post_fix_reduction_percent": 11.89,
+    "post_fix_delta_from_m38_percent": 1.28
+  },
+  "finding": {
+    "root_cause": "The protocol told the model both to batch exact capability names directly and that get_capability only accepted names returned by search_capabilities.",
+    "fix": "Exact capability names present in the request now explicitly bypass discovery; search is reserved for unnamed needs or a failed exact lookup.",
+    "artifact_unchanged": true,
+    "output_sha256": "39ebb79feb96915c845343b043d8879cc2756412f42180f7469936c329327162",
+    "machine_assertions": "99/99"
+  },
+  "limitations": [
+    "Each formal run contains three subscription-backed samples.",
+    "The harness reports aggregate turn usage, not per-tool token attribution.",
+    "Provider cache behavior and model path selection can vary between samples.",
+    "M38 and M39 differ by the pacing feature and final artifact duration, so cross-milestone parity is directional rather than a frozen A/B test."
+  ]
+}

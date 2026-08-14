@@ -1,0 +1,190 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "OpenReel M39 Token Regression Diagnostic",
+    "description": "A technical diagnosis of the M39 benchmark token increase and the validated protocol fix.",
+    "generatedAt": "2026-08-14T05:45:17Z",
+    "cards": [
+      {
+        "id": "initial_regression",
+        "description": "M39 pre-fix mean total tokens relative to M38.",
+        "dataset": "comparison",
+        "sourceId": "token_diagnostic",
+        "metrics": [
+          { "label": "Initial regression", "field": "initial_regression", "format": "percent", "signed": true }
+        ]
+      },
+      {
+        "id": "fix_reduction",
+        "description": "M39 post-fix mean total tokens relative to the first M39 run.",
+        "dataset": "comparison",
+        "sourceId": "token_diagnostic",
+        "metrics": [
+          { "label": "Recovered by fix", "field": "fix_reduction", "format": "percent" }
+        ]
+      },
+      {
+        "id": "remaining_delta",
+        "description": "M39 post-fix mean total tokens relative to M38.",
+        "dataset": "comparison",
+        "sourceId": "token_diagnostic",
+        "metrics": [
+          { "label": "Remaining delta vs M38", "field": "remaining_delta", "format": "percent", "signed": true }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "mean_total_tokens",
+        "title": "Mean total tokens by formal run",
+        "subtitle": "Three subscription-backed samples per run; lower is better.",
+        "type": "bar",
+        "dataset": "run_summary",
+        "sourceId": "token_diagnostic",
+        "options": { "orientation": "horizontal", "grouping": "single" },
+        "encodings": {
+          "x": { "field": "run", "type": "nominal", "label": "Run" },
+          "y": { "field": "mean_total_tokens", "type": "quantitative", "label": "Mean total tokens", "format": "number" },
+          "tooltip": [
+            { "field": "tool_calls", "type": "quantitative", "label": "Aggregate tool calls", "format": "number" },
+            { "field": "search_calls", "type": "quantitative", "label": "Capability searches", "format": "number" }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full"
+      }
+    ],
+    "tables": [
+      {
+        "id": "sample_detail",
+        "title": "Per-sample usage",
+        "subtitle": "All nine formal samples used for the comparison.",
+        "dataset": "sample_detail",
+        "sourceId": "token_diagnostic",
+        "columns": [
+          { "field": "run", "label": "Run", "type": "text" },
+          { "field": "sample", "label": "Sample", "type": "text" },
+          { "field": "total_tokens", "label": "Total tokens", "format": "number" },
+          { "field": "tool_calls", "label": "Tool calls", "format": "number" },
+          { "field": "search_calls", "label": "Search calls", "format": "number" }
+        ],
+        "layout": "full"
+      }
+    ],
+    "sources": [
+      {
+        "id": "token_diagnostic",
+        "label": "M39 token regression evidence",
+        "path": "benchmarks/auto-edit/v4/token-regression.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_json_auto('benchmarks/auto-edit/v4/token-regression.json')",
+          "description": "Loads the checked-in benchmark diagnostic used to construct the bounded report datasets.",
+          "tables_used": ["benchmarks/auto-edit/v4/token-regression.json"],
+          "executed_at": "2026-08-14T05:45:17Z"
+        }
+      }
+    ],
+    "blocks": [
+      { "id": "title", "type": "markdown", "body": "# OpenReel M39 Token Regression Diagnostic" },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "sourceId": "token_diagnostic",
+        "body": "## Technical summary\n\nM39 initially used **14.9% more total tokens** than M38. The pacing capability itself was not the primary regression. A contradictory tool contract told the model both to open exact capability names directly and that those names had to come from search. The resulting redundant discovery, amplified by conversation-history caching, drove most of the avoidable increase. Clarifying the protocol reduced M39 mean usage from **282,716 to 249,112 tokens** while preserving the exact rendered artifact and all **99/99** machine assertions."
+      },
+      { "id": "metrics", "type": "metric-strip", "cardIds": ["initial_regression", "fix_reduction", "remaining_delta"] },
+      {
+        "id": "key_findings",
+        "type": "markdown",
+        "sourceId": "token_diagnostic",
+        "body": "## Key findings\n\n- Cached input accounted for **75.7%** of the original aggregate token increase.\n- One 19-call outlier, which searched and opened capabilities twice, accounted for **56.2%** of the aggregate regression against M38.\n- The two ordinary 17-call pre-fix samples still averaged **4.5%** above comparable M38 samples. The M39 capability bundle is **1,576 bytes** larger, which explains much of that steady feature cost.\n- After the fix, capability searches fell from **4 to 1**, aggregate tool calls fell from **53 to 49**, and the startup tool surface became **38 bytes smaller**."
+      },
+      { "id": "chart", "type": "chart", "chartId": "mean_total_tokens", "layout": "full" },
+      {
+        "id": "chart_interpretation",
+        "type": "markdown",
+        "sourceId": "token_diagnostic",
+        "body": "The post-fix M39 run is effectively back at baseline: **1.3% above M38**, despite carrying the new pacing capability. The remaining difference is small enough to treat as feature cost plus sample variance, not an active regression."
+      },
+      {
+        "id": "scope",
+        "type": "markdown",
+        "sourceId": "token_diagnostic",
+        "body": "## Scope, data, and metric definitions\n\nThis analysis compares three formal Codex runs: the accepted M38 v3 baseline, the first M39 v4 baseline, and a post-fix M39 v4 rerun. Each run contains three subscription-backed samples. `total_tokens` is the harness-reported `input_tokens + output_tokens`; cached input is included in input tokens. Artifact hashes, machine assertions, tool counts, and token fields come from the raw JSONL traces and checked-in benchmark baselines."
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "sourceId": "token_diagnostic",
+        "body": "## Methodology\n\nThe investigation decomposed the aggregate increase into cached input, uncached input, output, tool-call count, startup tool-surface bytes, task-prompt length, and serialized capability-bundle size. Tool sequences were then compared sample by sample. The protocol wording was changed without changing the editing prompt, fixture, evaluator, or M39 output contract. A fresh three-sample run served as the validation gate."
+      },
+      { "id": "table", "type": "table", "tableId": "sample_detail", "layout": "full" },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## Limitations and robustness\n\nThe sample size is three per run, provider cache behavior can vary, and the harness exposes turn-level rather than per-tool token attribution. M38 and M39 also differ by one feature and by final duration, so cross-milestone parity is directional. The stronger evidence is the pre/post M39 comparison: same task, same evaluator, same 607-frame output SHA, and the same 99 passing assertions. One post-fix sample still chose to search once, so the protocol reduces unnecessary discovery but does not make model paths deterministic."
+      },
+      {
+        "id": "next_steps",
+        "type": "markdown",
+        "body": "## Next steps\n\n1. Add per-call request, response, and cumulative-context byte telemetry to benchmark traces.\n2. Add a machine gate for unnecessary capability searches when exact names are present in the prompt.\n3. Track cache-read and uncached-input tokens separately in milestone comparisons.\n4. Continue shrinking repeated planner context, especially multi-step `prepare_edit` exchanges, without weakening reviewability."
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## Further questions\n\n- Why did one post-fix sample still search despite the clarified contract?\n- Should the benchmark publish a cost-weighted metric that discounts cached reads while retaining raw totals?\n- Can capability payloads be referenced by stable handles after first use instead of remaining verbatim in the transcript?\n- Does the same discovery pattern appear in Cursor ACP and future harnesses?"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-14T05:45:17Z",
+    "status": "ready",
+    "datasets": {
+      "comparison": [
+        { "initial_regression": 0.1494, "fix_reduction": 0.1189, "remaining_delta": 0.0128 }
+      ],
+      "run_summary": [
+        { "run": "M38 baseline", "mean_total_tokens": 245965.3333, "tool_calls": 50, "search_calls": 3 },
+        { "run": "M39 pre-fix", "mean_total_tokens": 282716.3333, "tool_calls": 53, "search_calls": 4 },
+        { "run": "M39 post-fix", "mean_total_tokens": 249111.6667, "tool_calls": 49, "search_calls": 1 }
+      ],
+      "sample_detail": [
+        { "run": "M38 baseline", "sample": "1", "total_tokens": 251345, "cached_input_tokens": 206848, "uncached_input_tokens": 41766, "tool_calls": 17, "search_calls": 1 },
+        { "run": "M38 baseline", "sample": "2", "total_tokens": 250215, "cached_input_tokens": 219904, "uncached_input_tokens": 27756, "tool_calls": 17, "search_calls": 1 },
+        { "run": "M38 baseline", "sample": "3", "total_tokens": 236336, "cached_input_tokens": 206848, "uncached_input_tokens": 26682, "tool_calls": 16, "search_calls": 1 },
+        { "run": "M39 pre-fix", "sample": "1", "total_tokens": 324011, "cached_input_tokens": 270848, "uncached_input_tokens": 50465, "tool_calls": 19, "search_calls": 2 },
+        { "run": "M39 pre-fix", "sample": "2", "total_tokens": 262061, "cached_input_tokens": 215040, "uncached_input_tokens": 44344, "tool_calls": 17, "search_calls": 1 },
+        { "run": "M39 pre-fix", "sample": "3", "total_tokens": 262077, "cached_input_tokens": 231168, "uncached_input_tokens": 28209, "tool_calls": 17, "search_calls": 1 },
+        { "run": "M39 post-fix", "sample": "1", "total_tokens": 258873, "cached_input_tokens": 212992, "uncached_input_tokens": 43475, "tool_calls": 17, "search_calls": 1 },
+        { "run": "M39 post-fix", "sample": "2", "total_tokens": 242265, "cached_input_tokens": 197888, "uncached_input_tokens": 42135, "tool_calls": 16, "search_calls": 0 },
+        { "run": "M39 post-fix", "sample": "3", "total_tokens": 246197, "cached_input_tokens": 216064, "uncached_input_tokens": 27522, "tool_calls": 16, "search_calls": 0 }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "token_diagnostic",
+      "label": "M39 token regression evidence",
+      "path": "benchmarks/auto-edit/v4/token-regression.json",
+      "description": "Checked-in aggregates and sample-level measurements from the three formal benchmark traces.",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_json_auto('benchmarks/auto-edit/v4/token-regression.json')",
+        "description": "Loads the checked-in benchmark diagnostic used to construct the bounded report datasets.",
+        "tables_used": ["benchmarks/auto-edit/v4/token-regression.json"],
+        "executed_at": "2026-08-14T05:45:17Z"
+      }
+    }
+  ],
+  "package_info": {
+    "mode": "portable_html",
+    "deliveryMode": "portable_html",
+    "readOnly": true
+  }
+}

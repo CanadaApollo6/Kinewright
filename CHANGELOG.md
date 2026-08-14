@@ -16,9 +16,11 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   from final timeline words and the immutable v4 benchmark requires every gap
   to land between 9 and 15 project frames. The published Codex machine baseline
   passes 3/3 samples and 99/99 assertions, producing four exact 12-frame
-  sentence gaps in one deterministic 607-frame artifact. The human exit target
-  rises from M38's accepted 4/5 pacing score to 4.5/5; human review is pending
-  and remains separate from machine success.
+  sentence gaps in one deterministic 607-frame artifact. Exact capability names
+  in an edit request now bypass redundant discovery, reducing the published M39
+  mean from 282,716 to 249,112 tokens without changing that artifact. The human
+  exit target rises from M38's accepted 4/5 pacing score to 4.5/5; human review
+  is pending and remains separate from machine success.
 - M38 editorial truth benchmark: a new locally generated five-take garden
   story replaces the incoherent color-bar fixture with accepted and rejected
   facts, exact authored captions, and semantically distinct vertical scenes.

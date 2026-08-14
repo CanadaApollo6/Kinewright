@@ -92,8 +92,10 @@ least two accepted SHA-bound artifacts, a 4.0/5 overall mean, 4.5/5 pacing,
 3.5/5 in every other dimension, and zero audible fillers or material caption
 errors. The current Codex machine baseline passes 3/3 samples and 99/99
 assertions. All three artifacts are byte-identical, 607 frames long, and have
-four independently measured 12-frame sentence gaps. Samples used 17-19 tool
-calls and 262,061-324,011 reported tokens. The exact record lives in
+four independently measured 12-frame sentence gaps. Samples used 16-17 tool
+calls and 242,265-258,873 reported tokens, averaging 249,112. A protocol fix
+removed redundant capability discovery and cut mean usage 11.9% from the first
+v4 run without changing the artifact. The exact record lives in
 [`benchmarks/auto-edit/v4/baseline.json`](../benchmarks/auto-edit/v4/baseline.json).
 Human review remains pending, so M39 is not complete.
 

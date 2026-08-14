@@ -34,12 +34,18 @@ cargo run -p openreel-agent --bin openreel-eval -- `
   --samples 3
 ```
 
-The published Codex machine baseline on revision `988a049` passes all three
+The published Codex machine baseline on revision `6e22f3a` passes all three
 samples and all 99 assertions. Every sample produced the same 607-frame MP4
 with sentence-boundary gaps of 12, 12, 12, and 12 project frames and a 4.77%
-independent rendered-dialogue word error rate. Samples used 17-19 tool calls
-and 262,061-324,011 reported tokens. The exact record is in
+independent rendered-dialogue word error rate. Samples used 16-17 tool calls
+and 242,265-258,873 reported tokens, averaging 249,112. Removing a contradictory
+capability-discovery instruction cut mean usage 11.9% from the first v4 run
+without changing the output artifact. The exact record is in
 [`baseline.json`](baseline.json).
+
+The checked-in [regression evidence](token-regression.json) and
+[portable technical report](../../../docs/reports/m39-token-regression/report.html)
+preserve the pre-fix run, post-fix run, root cause, and limitations.
 
 Each output remains SHA-bound to separate human review. The milestone passes
 only when all three samples pass the machine contract, at least two are
