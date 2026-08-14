@@ -89,6 +89,11 @@ cargo run -p openreel-agent --bin openreel-eval -- `
   --samples 3
 ```
 
+Set `OPENREEL_EVAL_TRACE=1` for a bounded stderr trace of agent text, tool
+arguments, and tool results while diagnosing a model loop. The v4 harness
+fails fast after 24 tool calls or 350,000 reported tokens; the accepted
+historical path needed 16-17 calls and averaged 249,112 tokens.
+
 M39 requires a 3/3 machine pass before human review. Its human gate is at
 least two accepted SHA-bound artifacts, a 4.0/5 overall mean, 4.5/5 pacing,
 3.5/5 in every other dimension, and zero audible fillers or material caption

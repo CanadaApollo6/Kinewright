@@ -57,9 +57,9 @@
       },
       "budget": {
         "turns": 1,
-        "tool_calls": 48,
+        "tool_calls": 24,
         "operations": 80,
-        "tokens": 500000,
+        "tokens": 350000,
         "cost_usd": null,
         "wall_time_ms": 3000000,
         "undos": 80

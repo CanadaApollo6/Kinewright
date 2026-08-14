@@ -1328,6 +1328,7 @@ where
     };
     let mut cost_is_complete = true;
     let mut saw_usage = false;
+    let trace_events = std::env::var_os("OPENREEL_EVAL_TRACE").is_some();
     for prompt in prompts {
         if metrics.turns >= budgets.max_turns {
             metrics.errors.push(format!(
@@ -1375,7 +1376,10 @@ where
             }
             match events.recv_timeout(Duration::from_millis(100)) {
                 Ok(AgentEvent::Error(error)) => metrics.errors.push(error),
-                Ok(AgentEvent::ToolCall { name, .. }) => {
+                Ok(AgentEvent::ToolCall { name, arguments }) => {
+                    if trace_events {
+                        eprintln!("EVAL TRACE tool_call {name}: {}", bounded_trace(&arguments));
+                    }
                     let count = metrics.tool_calls.entry(name).or_default();
                     *count = count.saturating_add(1);
                     if metrics.tool_call_count() > budgets.max_tool_calls {
@@ -1434,8 +1438,17 @@ where
                     }
                 }
                 Ok(AgentEvent::Done) => turn_done = true,
-                Ok(AgentEvent::Text(_) | AgentEvent::ToolResult { .. })
-                | Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Ok(AgentEvent::Text(text)) => {
+                    if trace_events {
+                        eprintln!("EVAL TRACE agent_text: {}", bounded_trace(&text));
+                    }
+                }
+                Ok(AgentEvent::ToolResult { name, result }) => {
+                    if trace_events {
+                        eprintln!("EVAL TRACE tool_result {name}: {}", bounded_trace(&result));
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                     metrics
                         .errors
@@ -1457,6 +1470,17 @@ where
     metrics.wall_time_ms = duration_millis(started.elapsed());
     session.interrupt();
     Ok(metrics)
+}
+
+fn bounded_trace(value: &str) -> String {
+    const MAX_CHARS: usize = 2_000;
+    let mut characters = value.chars();
+    let bounded = characters.by_ref().take(MAX_CHARS).collect::<String>();
+    if characters.next().is_some() {
+        format!("{bounded}...[truncated]")
+    } else {
+        bounded
+    }
 }
 
 fn accumulate_optional_tokens(total: &mut Option<u64>, reported: Option<u64>) {
@@ -2584,6 +2608,16 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn diagnostic_trace_is_bounded_on_character_boundaries() {
+        let long = "é".repeat(2_001);
+        let traced = bounded_trace(&long);
+
+        assert_eq!(traced.chars().take(2_000).count(), 2_000);
+        assert!(traced.ends_with("...[truncated]"));
+        assert_eq!(bounded_trace("short"), "short");
+    }
 
     struct FakeDriver {
         events: Vec<AgentEvent>,
