@@ -6,9 +6,14 @@
   "runner": "cargo run -p openreel-agent --bin openreel-eval -- --suite generalization-v5",
   "implementation": "crates/openreel-agent/src/bin/openreel-eval.rs",
   "fixture_pack": "benchmarks/auto-edit/v5/fixture-pack.json",
+  "fixture_packs": [
+    "benchmarks/auto-edit/v5/fixture-pack.json",
+    "benchmarks/auto-edit/v5/event-fixture-pack.json"
+  ],
   "fixture_provenance": {
     "policy": "Every downloaded byte must have an explicit redistribution license, source page, immutable byte count, and SHA-256. Acquisition is an explicit command; benchmark execution is offline and refuses missing or changed media.",
     "interview": "The first task uses Dan Streible's 2006 interview with filmmaker Helen Hill, dedicated to the public domain and hosted by Wikimedia Commons.",
+    "event_multicam": "The second task uses the AMI Meeting Corpus ES2002a participant cameras, headset mix, and manual annotations, released by the AMI Consortium / University of Edinburgh under CC BY 4.0.",
     "analysis": "Pinned local Whisper and FFmpeg analyze the source. Timeline assertions, independent post-render transcription, technical QA, and a separate human rubric score the result.",
     "time_base": "Source and project edits remain exact integer frames."
   },
@@ -17,6 +22,8 @@
       "story inclusion and off-topic exclusion",
       "dialogue duration and gapless media assembly",
       "caption word sequence and sentence grouping",
+      "speaker-to-camera mapping, continuous multicam coverage, and untouched program audio",
+      "bounded editable subject-reframe curves on every multicam shot",
       "technical QA, delivery framing proof, audio, and MP4 identity",
       "tool-use, token, operation, and wall-time budgets"
     ],
@@ -83,6 +90,50 @@
         "independently probed MP4 identity",
         "independent post-render transcript with zero ordered word errors",
         "rendered caption words agree exactly with rendered speech"
+      ]
+    },
+    {
+      "id": "g2",
+      "family": "event_multicam",
+      "name": "real meeting multicam introductions",
+      "fixture": "fixture_real_event_multicam",
+      "fixture_pack": "benchmarks/auto-edit/v5/event-fixture-pack.json",
+      "ground_truth": "benchmarks/auto-edit/v5/event-ground-truth.json",
+      "prompt": "Create a finished vertical multicam cut of the already bounded AMI meeting introduction. Open exactly these five capability schemas in one get_capability call: get_transcript, plan_speaker_multicam, add_effect, track_reframe_subject, and get_editorial_readiness. Do not call search_capabilities unless one of those exact lookups fails. Inspect the timeline and the speaker-labelled transcript on camera-laura. Use sync group 1 and video track 1. Map Laura to 'Laura closeup', David to 'David closeup', Andrew to 'Andrew closeup', and Craig to 'Craig closeup'. Call plan_speaker_multicam for group frames 1750 through 2544 exclusive, record start 0, maximum word gap 5 frames, and minimum shot length 25 frames. This deliberately suppresses brief overlapping backchannels. Inspect that planner's prepared_edit_plan preview and commit its returned plan id directly; do not call prepare_edit_plan or rewrite its operations. Keep track 2 as the single uninterrupted program-audio master; do not cut, retime, duplicate, fade, or change its gain. Reinspect the generated video clips. In one model-authored prepared edit plan, add exactly one reframe effect to every video clip using unique effect ids, target_aspect_basis_points 5625, and initial focus_x_percent/focus_y_percent 50/50; inspect and commit that plan. Then call track_reframe_subject once for each video clip with its reframe effect, subject width 45 percent, subject height 60 percent, step 25 frames, search radius 8 percent, and max width 256. Each tracking call returns a prepared_edit_plan; inspect and commit its returned plan id directly before tracking the next clip, without calling prepare_edit_plan or copying keyframe operations. Do not add captions, transitions, music, titles, or dialogue edits. Finish with one get_editorial_readiness call using vertical_short, check_silence false because continuous program audio is intentionally preserved, centered 50/50 delivery focus, nine storyboard frames, and 240-pixel cells. Do not queue export; the benchmark renders and independently probes the verified snapshot. Keep working until readiness is true.",
+      "delivery": {
+        "profile": "vertical_short",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 9,
+        "proof_cell_width": 240,
+        "require_audio": true,
+        "expected_transcript_word_set": "event-dialogue",
+        "maximum_word_error_rate_basis_points": 3000,
+        "maximum_caption_word_error_rate_basis_points": null
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 24,
+        "operations": 80,
+        "tokens": 500000,
+        "cost_usd": null,
+        "wall_time_ms": 3600000,
+        "undos": 80
+      },
+      "machine_assertions": [
+        "timeline non-empty with exactly five video shots and one audio master",
+        "exact speaker-to-camera sequence and source ranges",
+        "continuous gapless video coverage",
+        "single untouched continuous program-audio source range",
+        "exact duration",
+        "one vertically targeted tracked reframe per video shot",
+        "reframe keyframes remain within safe bounds without unstable jumps",
+        "timeline audio present",
+        "technical QA export ready",
+        "required capability evidence",
+        "undo integrity",
+        "independently probed vertical MP4 identity",
+        "independent post-render dialogue remains within the pinned WER ceiling"
       ]
     }
   ]

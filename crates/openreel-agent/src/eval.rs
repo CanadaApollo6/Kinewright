@@ -15,7 +15,7 @@ use openreel_core::{
     ClipContent, Command, Core, DeliveryConformanceReport, DeliveryProfile, Document, Event,
     Export, ExportCancellation, HarnessInfo, MediaKind, Operation, ParamValue, Playback, Query,
     QueryResult, SessionConfig, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, TitlePosition, TranscriptStatus, dedup_timeline_words,
+    TimelineTranscriptWord, TitlePosition, TrackId, TranscriptStatus, dedup_timeline_words,
     delivery_conformance, document_for_delivery_profile, map_source_range_to_project, qa_document,
 };
 use serde::{Deserialize, Serialize};
@@ -108,6 +108,15 @@ pub struct ExpectedSourceClip {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedTimelineClip {
+    pub asset_alias: String,
+    pub timeline_start: TimeCode,
+    pub timeline_end: TimeCode,
+    pub source_start: TimeCode,
+    pub source_end: TimeCode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalAssertion {
     TimelineNonEmpty,
     ClipCount {
@@ -128,6 +137,10 @@ pub enum EvalAssertion {
     },
     ExactSourceClips {
         clips: Vec<ExpectedSourceClip>,
+    },
+    ExactTrackClips {
+        track: TrackId,
+        clips: Vec<ExpectedTimelineClip>,
     },
     WordsRetained {
         word_set: String,
@@ -176,6 +189,19 @@ pub enum EvalAssertion {
         profile: DeliveryProfile,
     },
     AudioPresent,
+    ProgramAudioUnchanged {
+        track: TrackId,
+        asset_alias: String,
+    },
+    ReframeStability {
+        track: TrackId,
+        minimum_keyframes_per_axis: usize,
+        min_x_percent: i64,
+        max_x_percent: i64,
+        min_y_percent: i64,
+        max_y_percent: i64,
+        maximum_step_percent: i64,
+    },
     QaExportReady,
     UndoIntegrity,
 }
@@ -1699,6 +1725,9 @@ fn evaluate_assertion(
             )
         }
         EvalAssertion::ExactSourceClips { clips } => evaluate_source_clips(clips, outcome),
+        EvalAssertion::ExactTrackClips { track, clips } => {
+            evaluate_track_clips(*track, clips, outcome)
+        }
         EvalAssertion::WordsRetained { word_set } => evaluate_word_set(word_set, outcome, true),
         EvalAssertion::WordsAbsent { word_set } => evaluate_word_set(word_set, outcome, false),
         EvalAssertion::CaptionWordsExact { word_set } => evaluate_caption_words(word_set, outcome),
@@ -1784,6 +1813,25 @@ fn evaluate_assertion(
         } => evaluate_styled_captions(*minimum_cues, *motion, outcome),
         EvalAssertion::CaptionSafeArea { profile } => evaluate_caption_safe_area(*profile, outcome),
         EvalAssertion::AudioPresent => evaluate_audio_present(&outcome.final_document),
+        EvalAssertion::ProgramAudioUnchanged { track, asset_alias } => {
+            evaluate_program_audio_unchanged(*track, asset_alias, outcome)
+        }
+        EvalAssertion::ReframeStability {
+            track,
+            minimum_keyframes_per_axis,
+            min_x_percent,
+            max_x_percent,
+            min_y_percent,
+            max_y_percent,
+            maximum_step_percent,
+        } => evaluate_reframe_stability(
+            *track,
+            *minimum_keyframes_per_axis,
+            *min_x_percent..=*max_x_percent,
+            *min_y_percent..=*max_y_percent,
+            *maximum_step_percent,
+            outcome,
+        ),
         EvalAssertion::QaExportReady => {
             let report = qa_document(&outcome.final_document);
             assertion_result(
@@ -2040,6 +2088,219 @@ fn evaluate_source_clips(clips: &[ExpectedSourceClip], outcome: &EvalOutcome) ->
         "exact source clips",
         observed == clips,
         format!("expected {clips:?}, observed {observed:?}"),
+    )
+}
+
+fn evaluate_track_clips(
+    track_id: TrackId,
+    clips: &[ExpectedTimelineClip],
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let reverse = outcome
+        .context
+        .asset_aliases
+        .iter()
+        .map(|(alias, asset)| (*asset, alias.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "exact track clips",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+    let observed = track
+        .clips
+        .iter()
+        .filter(|clip| clip.content.is_media())
+        .map(|clip| {
+            let timeline_end = outcome
+                .final_document
+                .asset(clip.asset)
+                .and_then(|asset| {
+                    map_source_range_to_project(
+                        clip.source_range.clone(),
+                        asset.fps,
+                        outcome.final_document.fps,
+                    )
+                    .ok()
+                })
+                .and_then(|duration| clip.timeline_start.checked_add(duration))
+                .unwrap_or(TimeCode(i64::MIN));
+            ExpectedTimelineClip {
+                asset_alias: reverse.get(&clip.asset).map_or_else(
+                    || format!("asset-{}", clip.asset.0),
+                    |alias| (*alias).to_owned(),
+                ),
+                timeline_start: clip.timeline_start,
+                timeline_end,
+                source_start: clip.source_range.start,
+                source_end: clip.source_range.end,
+            }
+        })
+        .collect::<Vec<_>>();
+    assertion_result(
+        "exact track clips",
+        observed == clips,
+        format!("track={track_id}, expected={clips:?}, observed={observed:?}"),
+    )
+}
+
+fn evaluate_reframe_stability(
+    track_id: TrackId,
+    minimum_keyframes_per_axis: usize,
+    x_bounds: std::ops::RangeInclusive<i64>,
+    y_bounds: std::ops::RangeInclusive<i64>,
+    maximum_step_percent: i64,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "reframe stability",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+    let mut errors = Vec::new();
+    let media_clips = track
+        .clips
+        .iter()
+        .filter(|clip| clip.content.is_media())
+        .collect::<Vec<_>>();
+    for clip in &media_clips {
+        let reframes = clip
+            .effects
+            .iter()
+            .filter(|effect| effect.name == "reframe")
+            .collect::<Vec<_>>();
+        if reframes.len() != 1 {
+            errors.push(format!(
+                "clip {} has {} reframe effects",
+                clip.id,
+                reframes.len()
+            ));
+            continue;
+        }
+        let effect = reframes[0];
+        for (axis, bounds) in [
+            ("focus_x_percent", &x_bounds),
+            ("focus_y_percent", &y_bounds),
+        ] {
+            let Some(curve) = effect.keyframes.get(axis) else {
+                errors.push(format!("clip {} has no {axis} curve", clip.id));
+                continue;
+            };
+            if curve.keyframes.len() < minimum_keyframes_per_axis {
+                errors.push(format!(
+                    "clip {} {axis} has {} keyframes, expected at least {minimum_keyframes_per_axis}",
+                    clip.id,
+                    curve.keyframes.len()
+                ));
+            }
+            for keyframe in &curve.keyframes {
+                if !bounds.contains(&keyframe.value) {
+                    errors.push(format!(
+                        "clip {} {axis} value {} is outside {}..={} percent",
+                        clip.id,
+                        keyframe.value,
+                        bounds.start(),
+                        bounds.end()
+                    ));
+                }
+            }
+            for pair in curve.keyframes.windows(2) {
+                let step = pair[0].value.abs_diff(pair[1].value);
+                if step > u64::try_from(maximum_step_percent).unwrap_or_default() {
+                    errors.push(format!(
+                        "clip {} {axis} jumps {} percent between frames {} and {}",
+                        clip.id, step, pair[0].at.0, pair[1].at.0
+                    ));
+                }
+            }
+        }
+    }
+    assertion_result(
+        "reframe stability",
+        !media_clips.is_empty() && errors.is_empty(),
+        if errors.is_empty() {
+            format!(
+                "track {track_id} has {} continuously bounded tracked reframe clips",
+                media_clips.len()
+            )
+        } else {
+            errors.join("; ")
+        },
+    )
+}
+
+fn evaluate_program_audio_unchanged(
+    track_id: TrackId,
+    asset_alias: &str,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let Some(asset) = outcome.context.asset_aliases.get(asset_alias) else {
+        return assertion_result(
+            "program audio unchanged",
+            false,
+            format!("unknown asset alias {asset_alias:?}"),
+        );
+    };
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "program audio unchanged",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+    let media_clips = track
+        .clips
+        .iter()
+        .filter(|clip| clip.content.is_media())
+        .collect::<Vec<_>>();
+    let passed = track.kind == openreel_core::TrackKind::Audio
+        && media_clips.len() == 1
+        && media_clips[0].asset == *asset
+        && media_clips[0].audio_gain_tenth_db == 0
+        && media_clips[0].audio_fade_in_frames == TimeCode::ZERO
+        && media_clips[0].audio_fade_out_frames == TimeCode::ZERO
+        && media_clips[0].speed_percent == 100
+        && media_clips[0].effects.is_empty()
+        && media_clips[0].transition_in.is_none();
+    assertion_result(
+        "program audio unchanged",
+        passed,
+        format!(
+            "track={track_id}, kind={:?}, clips={}, asset={}, expected_asset={}, gain_tenth_db={:?}, fades={:?}, speed={:?}, effects={:?}, transition={:?}",
+            track.kind,
+            media_clips.len(),
+            media_clips.first().map_or(AssetId(0), |clip| clip.asset),
+            asset,
+            media_clips.first().map(|clip| clip.audio_gain_tenth_db),
+            media_clips
+                .first()
+                .map(|clip| (clip.audio_fade_in_frames, clip.audio_fade_out_frames)),
+            media_clips.first().map(|clip| clip.speed_percent),
+            media_clips.first().map(|clip| clip.effects.len()),
+            media_clips
+                .first()
+                .and_then(|clip| clip.transition_in.as_ref())
+                .map(|transition| transition.name.as_str()),
+        ),
     )
 }
 

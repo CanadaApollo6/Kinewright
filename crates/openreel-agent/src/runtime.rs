@@ -350,6 +350,11 @@ fn clip_count(document: &Document) -> usize {
 }
 
 pub(crate) fn decode_plan_operation_value(value: Value) -> Result<Operation, String> {
+    if let Value::String(serialized) = &value {
+        let parsed = serde_json::from_str::<Value>(serialized)
+            .map_err(|error| format!("stringified operation is not valid JSON: {error}"))?;
+        return decode_plan_operation_value(parsed);
+    }
     if let Ok(operation) = serde_json::from_value::<Operation>(value.clone()) {
         return Ok(operation);
     }
@@ -425,6 +430,25 @@ mod tests {
                 clip: ClipId(7),
                 at: TimeCode(30),
             }
+        );
+    }
+
+    #[test]
+    fn stringified_operation_objects_are_tolerated_at_the_agent_boundary() {
+        assert_eq!(
+            decode_plan_operation_value(Value::String(
+                r#"{"op":"split_clip","clip":7,"at":30}"#.to_owned(),
+            ))
+            .unwrap(),
+            Operation::SplitClip {
+                clip: ClipId(7),
+                at: TimeCode(30),
+            }
+        );
+        assert!(
+            decode_plan_operation_value(Value::String("not json".to_owned()))
+                .unwrap_err()
+                .starts_with("stringified operation is not valid JSON")
         );
     }
 

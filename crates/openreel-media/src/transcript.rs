@@ -118,6 +118,10 @@ impl TranscriptService {
         cancelled
     }
 
+    pub(crate) fn register(&self, path: &Path, transcript: AssetTranscript) {
+        self.update(path, TranscriptStatus::Ready(Arc::new(transcript)));
+    }
+
     pub(crate) fn timeline_words(
         &self,
         document: &Document,
@@ -804,6 +808,25 @@ mod tests {
         assert_eq!(loaded.asset, AssetId(99));
         assert_eq!(loaded.words, transcript.words);
         assert_eq!(loaded.source_fps, transcript.source_fps);
+    }
+
+    #[test]
+    fn registered_sidecar_transcript_is_immediately_available_for_the_session() {
+        let directory = TempDirectory::new("registered-transcript");
+        let service = TranscriptService::new(directory.root().to_path_buf()).unwrap();
+        let path = directory.path("camera.avi");
+        let transcript = fixture_transcript(
+            AssetId(4),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Rational::new(25, 1).unwrap(),
+        );
+
+        service.register(&path, transcript.clone());
+
+        let TranscriptStatus::Ready(observed) = service.status(&path) else {
+            panic!("registered transcript should be ready");
+        };
+        assert_eq!(observed.as_ref(), &transcript);
     }
 
     #[test]

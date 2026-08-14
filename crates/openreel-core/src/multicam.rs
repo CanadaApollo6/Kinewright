@@ -257,7 +257,11 @@ pub fn plan_speaker_multicam(
     }
 
     let requested = settings.group_start..settings.group_end;
-    let mut words = Vec::new();
+    // Build turns per angle first. Real diarization contains short backchannels
+    // and overlapping acknowledgements; merging globally would make one brief
+    // interjection split an otherwise continuous primary-speaker turn before
+    // the minimum-shot policy gets a chance to suppress it.
+    let mut words_by_angle: BTreeMap<String, Vec<RawTurn>> = BTreeMap::new();
     for (index, word) in transcript.words.iter().enumerate() {
         if word.source_start < TimeCode::ZERO
             || word.source_end <= word.source_start
@@ -289,36 +293,19 @@ pub fn plan_speaker_multicam(
         let member = angles
             .get(angle_key)
             .ok_or_else(|| SpeakerMulticamError::UnknownAngle(angle_key.clone()))?;
-        words.push(RawTurn {
+        let raw = RawTurn {
             speakers: vec![display_speaker.clone()],
             angle_key: angle_key.clone(),
             angle_name: member.angle_name.clone(),
             start: intersection.start,
             end: intersection.end,
-        });
-    }
-    if words.is_empty() {
-        return Err(SpeakerMulticamError::NoSpeakerWords);
-    }
-    words.sort_by(|left, right| {
-        (left.start, left.end, &left.angle_key, &left.speakers).cmp(&(
-            right.start,
-            right.end,
-            &right.angle_key,
-            &right.speakers,
-        ))
-    });
-
-    let mut turns: Vec<RawTurn> = Vec::new();
-    for word in words {
-        if let Some(previous) = turns.last_mut() {
-            if word.start < previous.end && word.angle_key != previous.angle_key {
-                return Err(SpeakerMulticamError::OverlappingSpeakers(word.start));
-            }
+        };
+        let angle_turns = words_by_angle.entry(angle_key.clone()).or_default();
+        if let Some(previous) = angle_turns.last_mut() {
             let merge_limit = add_offset(previous.end, settings.maximum_word_gap_frames)?;
-            if word.angle_key == previous.angle_key && word.start <= merge_limit {
-                previous.end = previous.end.max(word.end);
-                for speaker in word.speakers {
+            if raw.start <= merge_limit {
+                previous.end = previous.end.max(raw.end);
+                for speaker in raw.speakers {
                     if !previous.speakers.contains(&speaker) {
                         previous.speakers.push(speaker);
                     }
@@ -326,8 +313,20 @@ pub fn plan_speaker_multicam(
                 continue;
             }
         }
-        turns.push(word);
+        angle_turns.push(raw);
     }
+    if words_by_angle.is_empty() {
+        return Err(SpeakerMulticamError::NoSpeakerWords);
+    }
+    let mut turns = words_by_angle.into_values().flatten().collect::<Vec<_>>();
+    turns.sort_by(|left, right| {
+        (left.start, left.end, &left.angle_key, &left.speakers).cmp(&(
+            right.start,
+            right.end,
+            &right.angle_key,
+            &right.speakers,
+        ))
+    });
 
     let before_suppression = turns.len();
     turns.retain(|turn| {
@@ -340,8 +339,44 @@ pub fn plan_speaker_multicam(
         return Err(SpeakerMulticamError::AllShotsSuppressed);
     }
 
-    let mut cuts = Vec::with_capacity(turns.len());
+    // Once short backchannels are gone, retained cross-angle overlap is a real
+    // ambiguity and remains an explicit error. Adjacent retained turns on the
+    // same angle can safely absorb their intervening silence as one shot.
+    let mut retained: Vec<RawTurn> = Vec::with_capacity(turns.len());
     for turn in turns {
+        if let Some(previous) = retained.last_mut() {
+            if turn.start < previous.end && turn.angle_key != previous.angle_key {
+                return Err(SpeakerMulticamError::OverlappingSpeakers(turn.start));
+            }
+            if turn.angle_key == previous.angle_key {
+                previous.end = previous.end.max(turn.end);
+                for speaker in turn.speakers {
+                    if !previous.speakers.contains(&speaker) {
+                        previous.speakers.push(speaker);
+                    }
+                }
+                continue;
+            }
+        }
+        retained.push(turn);
+    }
+
+    // Cover the complete requested range. Cuts land halfway through silence
+    // between speakers, so the plan never flashes back to the placeholder
+    // angle during ordinary conversational gaps.
+    let mut coverage_start = settings.group_start;
+    for index in 0..retained.len() {
+        let coverage_end = retained.get(index + 1).map_or(settings.group_end, |next| {
+            let silence = next.start.0.saturating_sub(retained[index].end.0);
+            TimeCode(retained[index].end.0.saturating_add(silence / 2))
+        });
+        retained[index].start = coverage_start;
+        retained[index].end = coverage_end;
+        coverage_start = coverage_end;
+    }
+
+    let mut cuts = Vec::with_capacity(retained.len());
+    for turn in retained {
         let member = angles
             .get(&turn.angle_key)
             .ok_or_else(|| SpeakerMulticamError::UnknownAngle(turn.angle_name.clone()))?;
@@ -769,22 +804,46 @@ mod tests {
 
         assert_eq!(plan.cuts.len(), 2);
         assert_eq!(plan.cuts[0].angle_name, "Close");
-        assert_eq!(plan.cuts[0].source_in, TimeCode(13));
-        assert_eq!(plan.cuts[0].timeline_start, TimeCode(110));
-        assert_eq!(plan.cuts[0].timeline_end, TimeCode(120));
+        assert_eq!(plan.cuts[0].source_in, TimeCode(3));
+        assert_eq!(plan.cuts[0].timeline_start, TimeCode(100));
+        assert_eq!(plan.cuts[0].timeline_end, TimeCode(125));
         assert_eq!(plan.cuts[1].angle_name, "Wide");
-        assert_eq!(plan.cuts[1].timeline_start, TimeCode(130));
+        assert_eq!(plan.cuts[1].timeline_start, TimeCode(125));
+        assert_eq!(plan.cuts[1].timeline_end, TimeCode(160));
         assert!(matches!(
             &plan.operations[0],
             Operation::ThreePointEdit {
                 asset: AssetId(1),
-                timeline_in: Some(TimeCode(130)),
+                timeline_in: Some(TimeCode(125)),
                 ..
             }
         ));
         let mut applied = document;
         apply_batch(&mut applied, &plan.operations).unwrap();
         assert_eq!(applied.tracks[0].clips.len(), 2);
+    }
+
+    #[test]
+    fn speaker_plan_suppresses_short_backchannels_before_resolving_overlap() {
+        let document = multicam_document();
+        let source = transcript(vec![
+            (TimeCode(10), TimeCode(30), Some("Alice")),
+            (TimeCode(20), TimeCode(22), Some("Bob")),
+            (TimeCode(40), TimeCode(55), Some("Bob")),
+        ]);
+        let mut settings = multicam_settings();
+        settings.minimum_shot_frames = TimeCode(5);
+
+        let plan = plan_speaker_multicam(&document, &source, &settings).unwrap();
+
+        assert_eq!(plan.suppressed_short_shots, 1);
+        assert_eq!(plan.cuts.len(), 2);
+        assert_eq!(plan.cuts[0].angle_name, "Close");
+        assert_eq!(plan.cuts[0].group_start, TimeCode::ZERO);
+        assert_eq!(plan.cuts[0].group_end, TimeCode(35));
+        assert_eq!(plan.cuts[1].angle_name, "Wide");
+        assert_eq!(plan.cuts[1].group_start, TimeCode(35));
+        assert_eq!(plan.cuts[1].group_end, TimeCode(60));
     }
 
     #[test]

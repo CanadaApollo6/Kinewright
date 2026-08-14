@@ -13,8 +13,8 @@ The milestone is benchmark-led. A new primitive ships only when a task exposes
 the need and can score the result. Machine checks own exact facts, timing,
 conformance, and artifact identity. A person still owns taste and acceptance.
 
-M40 is **in progress**. The first family is executable; the other two remain
-required before the milestone can pass.
+M40 is **in progress**. Interview/documentary and event/multicam are executable.
+Music montage remains required before the milestone can pass.
 
 ## Phase 1 - licensed fixture packs
 
@@ -117,9 +117,57 @@ This is a general model-facing primitive, not a benchmark exception. It makes
 "assemble and clean these answers" cheap and safe for interviews, podcasts,
 oral histories, and event sound bites.
 
+## Phase 2 - real event/multicam task
+
+`generalization-v5` task `g2` uses the University of Edinburgh's
+[AMI Meeting Corpus](https://groups.inf.ed.ac.uk/ami/corpus/), meeting
+`ES2002a`, under CC BY 4.0. The immutable pack pins four synchronized close-up
+cameras, the program headset mix, and the official annotation archive. The
+download is about 234 MiB and remains outside Git.
+
+The benchmark bounds a 31.76-second introduction at 25 fps. A speaker-labelled
+sidecar derived from the pinned manual annotations names Laura, David, Andrew,
+and Craig. The model must build exactly five contiguous speaker-driven shots,
+preserve one continuous untouched program-audio clip, and add editable tracked
+9:16 reframe curves to every shot. It must not add captions, music, titles,
+transitions, or dialogue edits.
+
+The evaluator independently checks:
+
+- the exact camera, timeline, and source range of all five video shots;
+- the exact source range and untouched state of the program mix;
+- gapless 794-frame coverage and delivery duration;
+- one reframe effect per shot, keyframe count, safe bounds, and maximum jumps;
+- technical QA, vertical delivery conformance, undo integrity, and budgets;
+- a real 1080x1920 MP4, output hash, frame count, duration, audio, and
+  independently transcribed rendered dialogue.
+
+The first model run produced the correct artifact but failed the harness. It
+used 37 calls against a provisional 36-call cap, and the evaluator required the
+retired direct `apply_edit_plan` tool even though the compact runtime does not
+expose it. The trace revealed the deeper product issue: multicam and tracking
+planners still returned copied operation arrays instead of the opaque
+`prepared_edit_plan` handles promised by the compact contract.
+
+The repaired planner boundary validates operations server-side and returns
+handles that commit directly. The generic authored-plan decoder also accepts a
+JSON-stringified operation object, a representation emitted by the harness,
+without weakening operation validation. This removed 17 calls from the same
+edit. The published final preflight passed 23/23 assertions in one turn with 20
+tool calls, 20 edit operations, and 393,543 total tokens, of which 334,080 were
+cached input. The 39,380,998-byte MP4 is 794 frames at 1080x1920 with SHA-256
+`1c168637e2bcb5ba7447d6dafaf19846019cd701beaba01e8824a311f250dc07`.
+
+Readiness also gained an explicit `check_silence` policy. Event work that must
+preserve continuous program audio can skip irrelevant dead-air analysis while
+still running technical QA, delivery conformance, and the real storyboard.
+The final trace ends with editorial readiness `true`. Human acceptance of the
+SHA-bound event artifact remains pending, and one passing sample is not the
+three-sample family gate.
+
 ## Commands
 
-Prepare and verify the pack:
+Prepare and verify the interview pack:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
@@ -127,6 +175,16 @@ cargo run -p openreel-agent --bin openreel-eval -- `
   --prepare-fixtures benchmarks/auto-edit/v5/fixture-pack.json
 cargo run -p openreel-agent --bin openreel-eval -- `
   --verify-fixtures benchmarks/auto-edit/v5/fixture-pack.json
+```
+
+Prepare and verify the event pack:
+
+```powershell
+& .\scripts\setup-ffmpeg.ps1
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --prepare-fixtures benchmarks/auto-edit/v5/event-fixture-pack.json
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --verify-fixtures benchmarks/auto-edit/v5/event-fixture-pack.json
 ```
 
 Run the first task:
@@ -141,6 +199,18 @@ cargo run -p openreel-agent --bin openreel-eval -- `
   --samples 1
 ```
 
+Run the event/multicam task:
+
+```powershell
+& .\scripts\setup-ffmpeg.ps1
+$env:OPENREEL_EVAL = '1'
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --suite generalization-v5 `
+  --harness codex `
+  --only g2 `
+  --samples 1
+```
+
 ## Exit gate
 
 M40 passes only when all three families are checked in and executable, each
@@ -148,6 +218,6 @@ passes 3/3 model samples, at least two outputs per family are accepted by a
 person, the mean human rating is at least 4.0/5, and no material caption error
 survives. One successful interview does not satisfy the milestone.
 
-The next implementation target is event/multicam. Its fixture must make sync,
-speaker choice, audio continuity, and reframe stability independently
-measurable before the first model run.
+The next family implementation target is music montage. Event/multicam still
+needs two more machine samples and at least two human-accepted outputs before
+its family gate can pass.

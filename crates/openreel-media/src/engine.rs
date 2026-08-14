@@ -10,10 +10,10 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use openreel_core::{
-    Analysis, AnalysisKind, AssetId, BeatStatus, Document, Export, ExportSettings, FrameTexture,
-    MediaAsset, MediaError, MediaEvent, Playback, PlaybackState, ProgressSink, Rational, RgbaImage,
-    SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, TranscriptStatus, VisualAssetResult,
+    Analysis, AnalysisKind, AssetId, AssetTranscript, BeatStatus, Document, Export, ExportSettings,
+    FrameTexture, MediaAsset, MediaError, MediaEvent, Playback, PlaybackState, ProgressSink,
+    Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, VisualAssetResult,
 };
 
 use crate::{
@@ -214,6 +214,61 @@ impl FfmpegMediaEngine {
             visual_assets,
             derived_analysis,
         })
+    }
+
+    /// Register a trusted transcript for this engine session after verifying
+    /// that its content identity, frame rate, asset id, and word ranges match
+    /// the referenced media. This is the ingestion seam for reproducible
+    /// speaker-labelled sidecars; it does not rewrite the media or silently
+    /// persist third-party annotations as Whisper output.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the transcript does not describe `asset` or
+    /// contains invalid, unsorted source-frame ranges.
+    pub fn register_transcript(
+        &self,
+        asset: &MediaAsset,
+        transcript: AssetTranscript,
+    ) -> Result<(), MediaError> {
+        if transcript.asset != asset.id {
+            return Err(MediaError::Backend(format!(
+                "transcript asset {} does not match media asset {}",
+                transcript.asset, asset.id
+            )));
+        }
+        if transcript.source_fps != asset.fps {
+            return Err(MediaError::Backend(format!(
+                "transcript frame rate {}/{} does not match media frame rate {}/{}",
+                transcript.source_fps.numerator(),
+                transcript.source_fps.denominator(),
+                asset.fps.numerator(),
+                asset.fps.denominator()
+            )));
+        }
+        let content_sha256 = crate::sha256_file(&asset.path)?;
+        if transcript.content_sha256 != content_sha256 {
+            return Err(MediaError::Backend(format!(
+                "transcript content hash {} does not match media hash {content_sha256}",
+                transcript.content_sha256
+            )));
+        }
+        let mut previous_start = TimeCode::ZERO;
+        for (index, word) in transcript.words.iter().enumerate() {
+            if word.source_start < TimeCode::ZERO
+                || word.source_end <= word.source_start
+                || word.source_end > asset.duration
+                || (index > 0 && word.source_start < previous_start)
+            {
+                return Err(MediaError::Backend(format!(
+                    "transcript word {index} has invalid or unsorted source range {}..{} for media duration {}",
+                    word.source_start.0, word.source_end.0, asset.duration.0
+                )));
+            }
+            previous_start = word.source_start;
+        }
+        self.transcripts.register(&asset.path, transcript);
+        Ok(())
     }
 }
 

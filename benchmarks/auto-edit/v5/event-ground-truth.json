@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "meeting_id": "ES2002a",
+  "reference_asset_id": "ami-es2002a-closeup4",
+  "audio_master_asset_id": "ami-es2002a-headset-mix",
+  "source_range": {
+    "start": 1750,
+    "end": 2544
+  },
+  "audio_source_range": {
+    "start": 2100,
+    "end": 3053
+  },
+  "speaker_assignments": [
+    {
+      "speaker": "Laura",
+      "angle_asset_id": "ami-es2002a-closeup4",
+      "angle_name": "Laura closeup"
+    },
+    {
+      "speaker": "David",
+      "angle_asset_id": "ami-es2002a-closeup1",
+      "angle_name": "David closeup"
+    },
+    {
+      "speaker": "Andrew",
+      "angle_asset_id": "ami-es2002a-closeup3",
+      "angle_name": "Andrew closeup"
+    },
+    {
+      "speaker": "Craig",
+      "angle_asset_id": "ami-es2002a-closeup2",
+      "angle_name": "Craig closeup"
+    }
+  ],
+  "turns": [
+    {
+      "speaker": "Laura",
+      "start": 1750,
+      "end": 1873,
+      "text": "to kind of make sure that we all know each other I'm Laura and I'm the project manager Do"
+    },
+    {
+      "speaker": "Andrew",
+      "start": 1872,
+      "end": 1881,
+      "text": "Great"
+    },
+    {
+      "speaker": "Laura",
+      "start": 1873,
+      "end": 1933,
+      "text": "you want to introduce yourself again"
+    },
+    {
+      "speaker": "David",
+      "start": 1936,
+      "end": 2022,
+      "text": "Hi I'm David and I'm supposed to be an industrial designer"
+    },
+    {
+      "speaker": "Laura",
+      "start": 2020,
+      "end": 2032,
+      "text": "Okay"
+    },
+    {
+      "speaker": "Andrew",
+      "start": 2052,
+      "end": 2112,
+      "text": "And I'm Andrew and I'm uh our marketing"
+    },
+    {
+      "speaker": "Craig",
+      "start": 2149,
+      "end": 2180,
+      "text": "Um"
+    },
+    {
+      "speaker": "Andrew",
+      "start": 2151,
+      "end": 2163,
+      "text": "expert"
+    },
+    {
+      "speaker": "Craig",
+      "start": 2179,
+      "end": 2218,
+      "text": "I'm Craig and I'm User Interface"
+    },
+    {
+      "speaker": "Laura",
+      "start": 2232,
+      "end": 2544,
+      "text": "Great Okay Um so we're designing a new remote control and um Oh I have to record who's here actually So that's David Andrew and Craig isn't it"
+    }
+  ],
+  "expected_video_cuts": [
+    {
+      "angle_asset_id": "ami-es2002a-closeup4",
+      "timeline_start": 0,
+      "timeline_end": 184,
+      "source_start": 1750,
+      "source_end": 1934
+    },
+    {
+      "angle_asset_id": "ami-es2002a-closeup1",
+      "timeline_start": 184,
+      "timeline_end": 287,
+      "source_start": 1934,
+      "source_end": 2037
+    },
+    {
+      "angle_asset_id": "ami-es2002a-closeup3",
+      "timeline_start": 287,
+      "timeline_end": 380,
+      "source_start": 2037,
+      "source_end": 2130
+    },
+    {
+      "angle_asset_id": "ami-es2002a-closeup2",
+      "timeline_start": 380,
+      "timeline_end": 475,
+      "source_start": 2130,
+      "source_end": 2225
+    },
+    {
+      "angle_asset_id": "ami-es2002a-closeup4",
+      "timeline_start": 475,
+      "timeline_end": 794,
+      "source_start": 2225,
+      "source_end": 2544
+    }
+  ],
+  "reframe": {
+    "target_aspect_basis_points": 5625,
+    "minimum_keyframes_per_axis": 2,
+    "min_x_percent": 30,
+    "max_x_percent": 70,
+    "min_y_percent": 25,
+    "max_y_percent": 70,
+    "maximum_step_percent": 12
+  },
+  "expected_dialogue": "to kind of make sure that we all know each other I'm Laura and I'm the project manager Great Do you want to introduce yourself again Hi I'm David and I'm supposed to be an industrial designer Okay And I'm Andrew and I'm uh our marketing expert Um I'm Craig and I'm User Interface Great Okay Um so we're designing a new remote control and um Oh I have to record who's here actually So that's David Andrew and Craig isn't it"
+}

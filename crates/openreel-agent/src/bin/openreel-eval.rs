@@ -14,17 +14,18 @@ use openreel_agent::{
     ClaudeCodeDriver, CodexDriver, CursorAcpDriver,
     eval::{
         EnvironmentStamp, EvalAssertion, EvalBudgets, EvalDefinition, EvalDeliverableSpec,
-        EvalError, EvalResult, ExpectedSourceClip, FixtureContext, HumanReviewFile,
-        PreparedFixture, human_review_template, maximum_duration_after_expected_silence_cuts,
-        render_jsonl, render_scoreboard, result_path, run_eval, run_eval_with_artifacts,
-        summarize_human_review,
+        EvalError, EvalResult, ExpectedSourceClip, ExpectedTimelineClip, FixtureContext,
+        HumanReviewFile, PreparedFixture, human_review_template,
+        maximum_duration_after_expected_silence_cuts, render_jsonl, render_scoreboard, result_path,
+        run_eval, run_eval_with_artifacts, summarize_human_review,
     },
     fixture_pack::{FixturePackManifest, fixture_cache_root},
 };
 use openreel_core::{
     AgentDriver, Analysis, AssetSceneChanges, AssetSilences, AssetTranscript, AuthenticationStatus,
-    CaptionMotion, Clip, ClipId, DeliveryProfile, Document, MediaAsset, Rational, SceneStatus,
-    SilenceStatus, TimeCode, TitlePosition, Track, TrackId, TrackKind, TranscriptStatus,
+    CaptionMotion, Clip, ClipContent, ClipId, DeliveryProfile, Document, MediaAsset, MediaCatalog,
+    Rational, SceneStatus, SilenceStatus, SyncGroup, SyncGroupId, SyncGroupMember, TimeCode,
+    TitlePosition, Track, TrackId, TrackKind, TranscriptStatus, TranscriptWord,
     map_source_range_to_project,
 };
 use openreel_media::{
@@ -800,6 +801,127 @@ fn finished_cut_suite() -> Vec<EvalDefinition> {
     }]
 }
 
+fn event_multicam_definition() -> EvalDefinition {
+    EvalDefinition {
+        name: "g2 real meeting multicam introductions",
+        rationale: "Measures whether the agent can turn synchronized licensed meeting cameras plus speaker-labelled source metadata into continuous speaker-aware coverage with one untouched audio master and stable editable reframing.",
+        fixture_builder: fixture_real_event_multicam,
+        prompts: &[
+            "Create a finished vertical multicam cut of the already bounded AMI meeting introduction. Open exactly these five capability schemas in one get_capability call: get_transcript, plan_speaker_multicam, add_effect, track_reframe_subject, and get_editorial_readiness. Do not call search_capabilities unless one of those exact lookups fails. Inspect the timeline and the speaker-labelled transcript on camera-laura. Use sync group 1 and video track 1. Map Laura to 'Laura closeup', David to 'David closeup', Andrew to 'Andrew closeup', and Craig to 'Craig closeup'. Call plan_speaker_multicam for group frames 1750 through 2544 exclusive, record start 0, maximum word gap 5 frames, and minimum shot length 25 frames. This deliberately suppresses brief overlapping backchannels. Inspect that planner's prepared_edit_plan preview and commit its returned plan id directly; do not call prepare_edit_plan or rewrite its operations. Keep track 2 as the single uninterrupted program-audio master; do not cut, retime, duplicate, fade, or change its gain. Reinspect the generated video clips. In one model-authored prepared edit plan, add exactly one reframe effect to every video clip using unique effect ids, target_aspect_basis_points 5625, and initial focus_x_percent/focus_y_percent 50/50; inspect and commit that plan. Then call track_reframe_subject once for each video clip with its reframe effect, subject width 45 percent, subject height 60 percent, step 25 frames, search radius 8 percent, and max width 256. Each tracking call returns a prepared_edit_plan; inspect and commit its returned plan id directly before tracking the next clip, without calling prepare_edit_plan or copying keyframe operations. Do not add captions, transitions, music, titles, or dialogue edits. Finish with one get_editorial_readiness call using vertical_short, check_silence false because continuous program audio is intentionally preserved, centered 50/50 delivery focus, nine storyboard frames, and 240-pixel cells. Do not queue export; the benchmark renders and independently probes the verified snapshot. Keep working until readiness is true.",
+        ],
+        assertions: event_multicam_assertions(),
+        budgets: EvalBudgets {
+            max_turns: 1,
+            max_tool_calls: 24,
+            max_operations: 80,
+            max_tokens: 500_000,
+            max_cost_usd: None,
+            max_wall_time: Duration::from_hours(1),
+            max_undos: 80,
+        },
+        deliverable: Some(EvalDeliverableSpec {
+            profile: DeliveryProfile::VerticalShort,
+            focus_x_percent: 50,
+            focus_y_percent: 50,
+            proof_frames: 9,
+            proof_cell_width: 240,
+            require_audio: true,
+            expected_transcript_word_set: Some("event-dialogue"),
+            maximum_word_error_rate_basis_points: 3_000,
+            maximum_caption_word_error_rate_basis_points: None,
+        }),
+    }
+}
+
+fn event_multicam_assertions() -> Vec<EvalAssertion> {
+    vec![
+        EvalAssertion::TimelineNonEmpty,
+        EvalAssertion::ClipCount {
+            minimum: 6,
+            maximum: 6,
+        },
+        EvalAssertion::ExactTrackClips {
+            track: TrackId(1),
+            clips: vec![
+                ExpectedTimelineClip {
+                    asset_alias: "camera-laura".to_owned(),
+                    timeline_start: TimeCode(0),
+                    timeline_end: TimeCode(184),
+                    source_start: TimeCode(1_750),
+                    source_end: TimeCode(1_934),
+                },
+                ExpectedTimelineClip {
+                    asset_alias: "camera-david".to_owned(),
+                    timeline_start: TimeCode(184),
+                    timeline_end: TimeCode(287),
+                    source_start: TimeCode(1_934),
+                    source_end: TimeCode(2_037),
+                },
+                ExpectedTimelineClip {
+                    asset_alias: "camera-andrew".to_owned(),
+                    timeline_start: TimeCode(287),
+                    timeline_end: TimeCode(380),
+                    source_start: TimeCode(2_037),
+                    source_end: TimeCode(2_130),
+                },
+                ExpectedTimelineClip {
+                    asset_alias: "camera-craig".to_owned(),
+                    timeline_start: TimeCode(380),
+                    timeline_end: TimeCode(475),
+                    source_start: TimeCode(2_130),
+                    source_end: TimeCode(2_225),
+                },
+                ExpectedTimelineClip {
+                    asset_alias: "camera-laura".to_owned(),
+                    timeline_start: TimeCode(475),
+                    timeline_end: TimeCode(794),
+                    source_start: TimeCode(2_225),
+                    source_end: TimeCode(2_544),
+                },
+            ],
+        },
+        EvalAssertion::ExactTrackClips {
+            track: TrackId(2),
+            clips: vec![ExpectedTimelineClip {
+                asset_alias: "program-audio".to_owned(),
+                timeline_start: TimeCode(0),
+                timeline_end: TimeCode(794),
+                source_start: TimeCode(2_100),
+                source_end: TimeCode(3_053),
+            }],
+        },
+        EvalAssertion::MediaGapless,
+        EvalAssertion::DurationBounds {
+            bounds: "event-introductions".to_owned(),
+        },
+        EvalAssertion::ReframeStability {
+            track: TrackId(1),
+            minimum_keyframes_per_axis: 2,
+            min_x_percent: 30,
+            max_x_percent: 70,
+            min_y_percent: 25,
+            max_y_percent: 70,
+            maximum_step_percent: 12,
+        },
+        EvalAssertion::AudioPresent,
+        EvalAssertion::ProgramAudioUnchanged {
+            track: TrackId(2),
+            asset_alias: "program-audio".to_owned(),
+        },
+        EvalAssertion::QaExportReady,
+        required_all(&[
+            "get_timeline_state",
+            "get_transcript",
+            "plan_speaker_multicam",
+            "prepare_edit_plan",
+            "commit_edit_plan",
+            "track_reframe_subject",
+            "get_editorial_readiness",
+        ]),
+        EvalAssertion::UndoIntegrity,
+    ]
+}
+
 fn editorial_cut_suite() -> Vec<EvalDefinition> {
     vec![EvalDefinition {
         name: "f2 coherent neighborhood garden story",
@@ -915,85 +1037,88 @@ fn dialogue_pacing_suite() -> Vec<EvalDefinition> {
 }
 
 fn generalization_suite() -> Vec<EvalDefinition> {
-    vec![EvalDefinition {
-        name: "g1 real interview recovery story",
-        rationale: "Measures whether the agent can find, clean, caption, frame, and deliver one coherent story from pinned public-domain interview footage it has not seen in the synthetic benchmarks.",
-        fixture_builder: fixture_real_interview_story,
-        prompts: &[
-            "Create a finished vertical social interview cut from interview-raw. Open exactly these four capability schemas in one get_capability call: get_transcript, plan_dialogue_assembly, add_styled_captions, and get_editorial_readiness. Inspect the full source transcript. Build only Helen Hill's coherent first-person story about recovering her films after Hurricane Katrina: begin with her thought starting 'recently I was living in New Orleans' and end after 'Hurricane Katrina films.' Exclude the interview questions, Columbia and South Carolina setup, symposium and festival explanation, the next speaker's response, and the later Dan Streible discussion. Use plan_dialogue_assembly with exactly one half-open source range from frame 1682 through 2547 exclusive, remove conservative fillers and raw dead air of at least 20 source frames, retain 8 source frames around ordinary silence cuts, inspect its prepared plan preview, and commit that exact plan. Do not extend the source range: speech after frame 2547 belongs to the interviewer. Keep the real A/V source dialogue audible without duplicating it onto an audio track. Add social preset captions with pop motion and intent=verbatim, subject_y_percent=50, and this corrected exact script: 'But recently I was living in New Orleans, and my house flooded, and a lot of my films, and especially my recently shot Super 8 home movies, and I've been cleaning them. They deteriorated very quickly in that short, you know, two weeks where they were submerged in those floodwaters. And I've been cleaning them, and they look deteriorated and old even though they're just, you know, maybe 12 months old. So I'm going to be screening just a selection of some of that cleaned flood damage by Hurricane Katrina films.' Preserve that wording exactly; do not silently paraphrase it. Finish with one get_editorial_readiness call using vertical_short, centered 50/50 focus, nine storyboard frames, 240-pixel cells, and a 20-source-frame silence threshold. Do not queue export; the benchmark renders and independently transcribes the verified snapshot. Keep working until readiness is true.",
-        ],
-        assertions: vec![
-            EvalAssertion::TimelineNonEmpty,
-            EvalAssertion::AssetOrder {
-                aliases: aliases(&["interview-raw"]),
-                collapse_adjacent: true,
+    vec![
+        EvalDefinition {
+            name: "g1 real interview recovery story",
+            rationale: "Measures whether the agent can find, clean, caption, frame, and deliver one coherent story from pinned public-domain interview footage it has not seen in the synthetic benchmarks.",
+            fixture_builder: fixture_real_interview_story,
+            prompts: &[
+                "Create a finished vertical social interview cut from interview-raw. Open exactly these four capability schemas in one get_capability call: get_transcript, plan_dialogue_assembly, add_styled_captions, and get_editorial_readiness. Inspect the full source transcript. Build only Helen Hill's coherent first-person story about recovering her films after Hurricane Katrina: begin with her thought starting 'recently I was living in New Orleans' and end after 'Hurricane Katrina films.' Exclude the interview questions, Columbia and South Carolina setup, symposium and festival explanation, the next speaker's response, and the later Dan Streible discussion. Use plan_dialogue_assembly with exactly one half-open source range from frame 1682 through 2547 exclusive, remove conservative fillers and raw dead air of at least 20 source frames, retain 8 source frames around ordinary silence cuts, inspect its prepared plan preview, and commit that exact plan. Do not extend the source range: speech after frame 2547 belongs to the interviewer. Keep the real A/V source dialogue audible without duplicating it onto an audio track. Add social preset captions with pop motion and intent=verbatim, subject_y_percent=50, and this corrected exact script: 'But recently I was living in New Orleans, and my house flooded, and a lot of my films, and especially my recently shot Super 8 home movies, and I've been cleaning them. They deteriorated very quickly in that short, you know, two weeks where they were submerged in those floodwaters. And I've been cleaning them, and they look deteriorated and old even though they're just, you know, maybe 12 months old. So I'm going to be screening just a selection of some of that cleaned flood damage by Hurricane Katrina films.' Preserve that wording exactly; do not silently paraphrase it. Finish with one get_editorial_readiness call using vertical_short, centered 50/50 focus, nine storyboard frames, 240-pixel cells, and a 20-source-frame silence threshold. Do not queue export; the benchmark renders and independently transcribes the verified snapshot. Keep working until readiness is true.",
+            ],
+            assertions: vec![
+                EvalAssertion::TimelineNonEmpty,
+                EvalAssertion::AssetOrder {
+                    aliases: aliases(&["interview-raw"]),
+                    collapse_adjacent: true,
+                },
+                EvalAssertion::ExactSourceClips {
+                    clips: vec![ExpectedSourceClip {
+                        asset_alias: "interview-raw".to_owned(),
+                        source_start: TimeCode(1_682),
+                        source_end: TimeCode(2_547),
+                    }],
+                },
+                EvalAssertion::MediaGapless,
+                EvalAssertion::WordsRetained {
+                    word_set: "recovery-required".to_owned(),
+                },
+                EvalAssertion::WordsAbsent {
+                    word_set: "off-story-exclusions".to_owned(),
+                },
+                EvalAssertion::DurationBounds {
+                    bounds: "recovery-story".to_owned(),
+                },
+                EvalAssertion::StyledCaptions {
+                    minimum_cues: 4,
+                    motion: CaptionMotion::Pop,
+                },
+                EvalAssertion::CaptionPresentation {
+                    allowed_positions: vec![TitlePosition::LowerThird, TitlePosition::Top],
+                    color_token: 0,
+                    background_scrim: false,
+                },
+                EvalAssertion::CaptionWordsExact {
+                    word_set: "recovery-dialogue".to_owned(),
+                },
+                EvalAssertion::CaptionSentencesCoherent,
+                EvalAssertion::CaptionSafeArea {
+                    profile: DeliveryProfile::VerticalShort,
+                },
+                EvalAssertion::AudioPresent,
+                EvalAssertion::QaExportReady,
+                required_all(&[
+                    "get_timeline_state",
+                    "get_transcript",
+                    "plan_dialogue_assembly",
+                    "add_styled_captions",
+                    "get_editorial_readiness",
+                    "commit_edit_plan",
+                ]),
+                EvalAssertion::UndoIntegrity,
+            ],
+            budgets: EvalBudgets {
+                max_turns: 1,
+                max_tool_calls: 20,
+                max_operations: 80,
+                max_tokens: 300_000,
+                max_cost_usd: None,
+                max_wall_time: Duration::from_mins(50),
+                max_undos: 80,
             },
-            EvalAssertion::ExactSourceClips {
-                clips: vec![ExpectedSourceClip {
-                    asset_alias: "interview-raw".to_owned(),
-                    source_start: TimeCode(1_682),
-                    source_end: TimeCode(2_547),
-                }],
-            },
-            EvalAssertion::MediaGapless,
-            EvalAssertion::WordsRetained {
-                word_set: "recovery-required".to_owned(),
-            },
-            EvalAssertion::WordsAbsent {
-                word_set: "off-story-exclusions".to_owned(),
-            },
-            EvalAssertion::DurationBounds {
-                bounds: "recovery-story".to_owned(),
-            },
-            EvalAssertion::StyledCaptions {
-                minimum_cues: 4,
-                motion: CaptionMotion::Pop,
-            },
-            EvalAssertion::CaptionPresentation {
-                allowed_positions: vec![TitlePosition::LowerThird, TitlePosition::Top],
-                color_token: 0,
-                background_scrim: false,
-            },
-            EvalAssertion::CaptionWordsExact {
-                word_set: "recovery-dialogue".to_owned(),
-            },
-            EvalAssertion::CaptionSentencesCoherent,
-            EvalAssertion::CaptionSafeArea {
+            deliverable: Some(EvalDeliverableSpec {
                 profile: DeliveryProfile::VerticalShort,
-            },
-            EvalAssertion::AudioPresent,
-            EvalAssertion::QaExportReady,
-            required_all(&[
-                "get_timeline_state",
-                "get_transcript",
-                "plan_dialogue_assembly",
-                "add_styled_captions",
-                "get_editorial_readiness",
-                "commit_edit_plan",
-            ]),
-            EvalAssertion::UndoIntegrity,
-        ],
-        budgets: EvalBudgets {
-            max_turns: 1,
-            max_tool_calls: 20,
-            max_operations: 80,
-            max_tokens: 300_000,
-            max_cost_usd: None,
-            max_wall_time: Duration::from_mins(50),
-            max_undos: 80,
+                focus_x_percent: 50,
+                focus_y_percent: 50,
+                proof_frames: 9,
+                proof_cell_width: 240,
+                require_audio: true,
+                expected_transcript_word_set: Some("recovery-dialogue"),
+                maximum_word_error_rate_basis_points: 0,
+                maximum_caption_word_error_rate_basis_points: Some(0),
+            }),
         },
-        deliverable: Some(EvalDeliverableSpec {
-            profile: DeliveryProfile::VerticalShort,
-            focus_x_percent: 50,
-            focus_y_percent: 50,
-            proof_frames: 9,
-            proof_cell_width: 240,
-            require_audio: true,
-            expected_transcript_word_set: Some("recovery-dialogue"),
-            maximum_word_error_rate_basis_points: 0,
-            maximum_caption_word_error_rate_basis_points: Some(0),
-        }),
-    }]
+        event_multicam_definition(),
+    ]
 }
 
 fn aliases(values: &[&str]) -> Vec<String> {
@@ -1383,6 +1508,56 @@ struct RealInterviewGroundTruth {
     expected_dialogue: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct EventMulticamGroundTruth {
+    schema_version: u32,
+    meeting_id: String,
+    reference_asset_id: String,
+    audio_master_asset_id: String,
+    source_range: GroundTruthRange,
+    audio_source_range: GroundTruthRange,
+    speaker_assignments: Vec<EventSpeakerAssignment>,
+    turns: Vec<EventSpeakerTurn>,
+    expected_video_cuts: Vec<EventExpectedCut>,
+    reframe: EventReframeTruth,
+    expected_dialogue: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventSpeakerAssignment {
+    speaker: String,
+    angle_asset_id: String,
+    angle_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventSpeakerTurn {
+    speaker: String,
+    start: i64,
+    end: i64,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventExpectedCut {
+    angle_asset_id: String,
+    timeline_start: i64,
+    timeline_end: i64,
+    source_start: i64,
+    source_end: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventReframeTruth {
+    target_aspect_basis_points: i64,
+    minimum_keyframes_per_axis: usize,
+    min_x_percent: i64,
+    max_x_percent: i64,
+    min_y_percent: i64,
+    max_y_percent: i64,
+    maximum_step_percent: i64,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 struct GroundTruthRange {
     start: i64,
@@ -1479,6 +1654,296 @@ fn fixture_real_interview_story() -> Result<PreparedFixture, EvalError> {
     );
     let mut document = empty_timeline_document(vec![asset]);
     document.resolution = (720, 1280);
+    PreparedFixture::new(document, media, context, Vec::new())
+}
+
+#[allow(clippy::too_many_lines)]
+fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
+    let truth: EventMulticamGroundTruth = serde_json::from_str(include_str!(
+        "../../../../benchmarks/auto-edit/v5/event-ground-truth.json"
+    ))
+    .map_err(|error| EvalError::Fixture(format!("invalid v5 event ground truth: {error}")))?;
+    if truth.schema_version != 1
+        || truth.meeting_id.trim().is_empty()
+        || truth.source_range.start < 0
+        || truth.source_range.start >= truth.source_range.end
+        || truth.audio_source_range.start < 0
+        || truth.audio_source_range.start >= truth.audio_source_range.end
+        || truth.speaker_assignments.len() < 2
+        || truth.turns.is_empty()
+        || truth.expected_video_cuts.len() < 2
+        || truth.expected_dialogue.trim().is_empty()
+    {
+        return Err(EvalError::Fixture(
+            "v5 event ground truth has an invalid schema, range, speaker map, cut list, or dialogue"
+                .to_owned(),
+        ));
+    }
+    if truth.speaker_assignments.iter().any(|assignment| {
+        assignment.speaker.trim().is_empty()
+            || assignment.angle_asset_id.trim().is_empty()
+            || assignment.angle_name.trim().is_empty()
+    }) || truth.reframe.target_aspect_basis_points != 5_625
+        || truth.reframe.minimum_keyframes_per_axis < 2
+        || truth.reframe.min_x_percent > truth.reframe.max_x_percent
+        || truth.reframe.min_y_percent > truth.reframe.max_y_percent
+        || truth.reframe.maximum_step_percent <= 0
+    {
+        return Err(EvalError::Fixture(
+            "v5 event speaker assignments or reframe contract are invalid".to_owned(),
+        ));
+    }
+    let expected_duration = truth
+        .source_range
+        .end
+        .saturating_sub(truth.source_range.start);
+    let mut expected_timeline_start = 0_i64;
+    for cut in &truth.expected_video_cuts {
+        if cut.angle_asset_id.trim().is_empty()
+            || cut.timeline_start != expected_timeline_start
+            || cut.timeline_end <= cut.timeline_start
+            || cut.source_start < truth.source_range.start
+            || cut.source_end > truth.source_range.end
+            || cut.source_end.saturating_sub(cut.source_start)
+                != cut.timeline_end.saturating_sub(cut.timeline_start)
+        {
+            return Err(EvalError::Fixture(
+                "v5 event expected cuts are not contiguous real-time source selections".to_owned(),
+            ));
+        }
+        expected_timeline_start = cut.timeline_end;
+    }
+    if expected_timeline_start != expected_duration {
+        return Err(EvalError::Fixture(
+            "v5 event expected cuts do not cover the full bounded event".to_owned(),
+        ));
+    }
+    let pack = FixturePackManifest::from_json(include_str!(
+        "../../../../benchmarks/auto-edit/v5/event-fixture-pack.json"
+    ))
+    .map_err(|error| EvalError::Fixture(error.to_string()))?;
+    let cache = fixture_cache_root();
+    let _annotations = pack
+        .verified_asset(&cache, "ami-manual-annotations-1-6-2")
+        .map_err(|error| EvalError::Fixture(error.to_string()))?;
+    let media = eval_engine();
+    let mut assets_by_fixture_id = BTreeMap::new();
+    let mut aliases_by_fixture_id = BTreeMap::new();
+    let alias_for = |fixture_id: &str| match fixture_id {
+        "ami-es2002a-closeup1" => Some("camera-david"),
+        "ami-es2002a-closeup2" => Some("camera-craig"),
+        "ami-es2002a-closeup3" => Some("camera-andrew"),
+        "ami-es2002a-closeup4" => Some("camera-laura"),
+        "ami-es2002a-headset-mix" => Some("program-audio"),
+        _ => None,
+    };
+    for fixture_id in truth
+        .speaker_assignments
+        .iter()
+        .map(|assignment| assignment.angle_asset_id.as_str())
+        .chain(std::iter::once(truth.audio_master_asset_id.as_str()))
+    {
+        if assets_by_fixture_id.contains_key(fixture_id) {
+            continue;
+        }
+        let alias = alias_for(fixture_id).ok_or_else(|| {
+            EvalError::Fixture(format!("v5 event asset {fixture_id:?} has no stable alias"))
+        })?;
+        let path = pack
+            .verified_asset(&cache, fixture_id)
+            .map_err(|error| EvalError::Fixture(error.to_string()))?;
+        let asset = probe_named(&media, &path, alias)?;
+        aliases_by_fixture_id.insert(fixture_id.to_owned(), alias.to_owned());
+        assets_by_fixture_id.insert(fixture_id.to_owned(), asset);
+    }
+    let reference = assets_by_fixture_id
+        .get(&truth.reference_asset_id)
+        .ok_or_else(|| EvalError::Fixture("v5 event reference asset is missing".to_owned()))?;
+    let audio_master = assets_by_fixture_id
+        .get(&truth.audio_master_asset_id)
+        .ok_or_else(|| EvalError::Fixture("v5 event audio master is missing".to_owned()))?;
+    let project_fps = Rational::new(25, 1).expect("AMI fixture fps is valid");
+    if reference.fps != project_fps {
+        return Err(EvalError::Fixture(format!(
+            "v5 event reference fps is {}/{}, expected 25/1",
+            reference.fps.numerator(),
+            reference.fps.denominator()
+        )));
+    }
+    if truth.source_range.end > reference.duration.0
+        || truth.audio_source_range.end > audio_master.duration.0
+    {
+        return Err(EvalError::Fixture(
+            "v5 event source range exceeds one of its pinned assets".to_owned(),
+        ));
+    }
+
+    let mut transcript_words = Vec::new();
+    for turn in &truth.turns {
+        let tokens = turn.text.split_whitespace().collect::<Vec<_>>();
+        if turn.start < 0 || turn.end <= turn.start || tokens.is_empty() {
+            return Err(EvalError::Fixture(format!(
+                "v5 event speaker turn {:?} has an invalid range or no words",
+                turn.speaker
+            )));
+        }
+        let token_count = i64::try_from(tokens.len()).unwrap_or(i64::MAX);
+        let duration = turn.end.saturating_sub(turn.start);
+        for (index, token) in tokens.into_iter().enumerate() {
+            let index = i64::try_from(index).unwrap_or(i64::MAX);
+            let start = turn
+                .start
+                .saturating_add(duration.saturating_mul(index) / token_count);
+            let end = turn
+                .start
+                .saturating_add(duration.saturating_mul(index.saturating_add(1)) / token_count);
+            transcript_words.push(TranscriptWord {
+                text: token.to_owned(),
+                source_start: TimeCode(start),
+                source_end: TimeCode(end.max(start.saturating_add(1))),
+                speaker: Some(turn.speaker.clone()),
+            });
+        }
+    }
+    transcript_words.sort_by_key(|word| (word.source_start, word.source_end, word.text.clone()));
+    let reference_manifest = pack
+        .assets
+        .iter()
+        .find(|asset| asset.id == truth.reference_asset_id)
+        .ok_or_else(|| EvalError::Fixture("v5 event reference manifest is missing".to_owned()))?;
+    let transcript = Arc::new(AssetTranscript {
+        asset: reference.id,
+        content_sha256: reference_manifest.sha256.clone(),
+        source_fps: project_fps,
+        words: transcript_words,
+    });
+    media
+        .register_transcript(reference, transcript.as_ref().clone())
+        .map_err(|error| EvalError::Fixture(error.to_string()))?;
+
+    let video_asset = assets_by_fixture_id
+        .get("ami-es2002a-closeup4")
+        .ok_or_else(|| EvalError::Fixture("v5 event Laura camera is missing".to_owned()))?;
+    let duration = TimeCode(
+        truth
+            .source_range
+            .end
+            .saturating_sub(truth.source_range.start),
+    );
+    let audio_duration = map_source_range_to_project(
+        TimeCode(truth.audio_source_range.start)..TimeCode(truth.audio_source_range.end),
+        audio_master.fps,
+        project_fps,
+    )
+    .map_err(|error| EvalError::Fixture(error.to_string()))?;
+    if audio_duration != duration {
+        return Err(EvalError::Fixture(format!(
+            "v5 event audio maps to {} project frames, expected {}",
+            audio_duration.0, duration.0
+        )));
+    }
+    let media_pool = assets_by_fixture_id.values().cloned().collect::<Vec<_>>();
+    let sync_members = truth
+        .speaker_assignments
+        .iter()
+        .map(|assignment| {
+            let asset = assets_by_fixture_id
+                .get(&assignment.angle_asset_id)
+                .ok_or_else(|| {
+                    EvalError::Fixture(format!(
+                        "v5 event angle asset {:?} is missing",
+                        assignment.angle_asset_id
+                    ))
+                })?;
+            Ok(SyncGroupMember {
+                asset: asset.id,
+                offset: TimeCode::ZERO,
+                angle_name: assignment.angle_name.clone(),
+            })
+        })
+        .chain(std::iter::once(Ok(SyncGroupMember {
+            asset: audio_master.id,
+            offset: TimeCode::ZERO,
+            angle_name: "Program audio".to_owned(),
+        })))
+        .collect::<Result<Vec<_>, EvalError>>()?;
+    let document = Document {
+        catalog: MediaCatalog {
+            sync_groups: vec![SyncGroup {
+                id: SyncGroupId(1),
+                name: "AMI ES2002a introductions".to_owned(),
+                members: sync_members,
+            }],
+            ..MediaCatalog::default()
+        },
+        audio_mix: openreel_core::AudioMix::default(),
+        tracks: vec![
+            Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![Clip {
+                    id: ClipId(1),
+                    asset: video_asset.id,
+                    source_range: TimeCode(truth.source_range.start)
+                        ..TimeCode(truth.source_range.end),
+                    content: ClipContent::Media,
+                    timeline_start: TimeCode::ZERO,
+                    effects: Vec::new(),
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                }],
+            },
+            Track {
+                id: TrackId(2),
+                kind: TrackKind::Audio,
+                sync_lock: true,
+                clips: vec![Clip {
+                    id: ClipId(2),
+                    asset: audio_master.id,
+                    source_range: TimeCode(truth.audio_source_range.start)
+                        ..TimeCode(truth.audio_source_range.end),
+                    content: ClipContent::Media,
+                    timeline_start: TimeCode::ZERO,
+                    effects: Vec::new(),
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                }],
+            },
+        ],
+        media_pool,
+        markers: Vec::new(),
+        fps: project_fps,
+        resolution: (352, 288),
+        duration,
+    };
+    let mut context = FixtureContext::default();
+    for (fixture_id, asset) in &assets_by_fixture_id {
+        let alias = aliases_by_fixture_id.get(fixture_id).ok_or_else(|| {
+            EvalError::Fixture(format!("v5 event asset {fixture_id:?} lost its alias"))
+        })?;
+        context.asset_aliases.insert(alias.clone(), asset.id);
+    }
+    context.transcripts.insert(reference.id, transcript);
+    context.word_sets.insert(
+        "event-dialogue".to_owned(),
+        truth
+            .expected_dialogue
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect(),
+    );
+    context
+        .duration_bounds
+        .insert("event-introductions".to_owned(), (duration, duration));
     PreparedFixture::new(document, media, context, Vec::new())
 }
 
@@ -2388,7 +2853,7 @@ mod tests {
     }
 
     #[test]
-    fn published_v5_manifest_tracks_the_real_interview_suite_and_fixture_pack() {
+    fn published_v5_manifest_tracks_both_real_footage_families_and_fixture_packs() {
         let manifest: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../benchmarks/auto-edit/v5/manifest.json"
         ))
@@ -2397,15 +2862,23 @@ mod tests {
         assert_eq!(manifest["benchmark_id"], "openreel-generalization-v5");
         assert_eq!(manifest["status"], "in_progress");
         let definitions = generalization_suite();
-        assert_eq!(definitions.len(), 1);
-        let definition = &definitions[0];
-        let task = &manifest["tasks"][0];
-        assert_eq!(
-            task["id"].as_str(),
-            definition.name.split_whitespace().next()
-        );
-        assert_eq!(task["prompt"], definition.prompts[0]);
-        let deliverable = definition.deliverable.unwrap();
+        let tasks = manifest["tasks"].as_array().unwrap();
+        assert_eq!(definitions.len(), 2);
+        assert_eq!(tasks.len(), definitions.len());
+        for (task, definition) in tasks.iter().zip(&definitions) {
+            assert_eq!(
+                task["id"].as_str(),
+                definition.name.split_whitespace().next()
+            );
+            assert_eq!(task["prompt"], definition.prompts[0]);
+            assert_eq!(
+                task["budget"]["tool_calls"],
+                definition.budgets.max_tool_calls
+            );
+            assert_eq!(task["budget"]["tokens"], definition.budgets.max_tokens);
+        }
+        let interview = &definitions[0];
+        let deliverable = interview.deliverable.unwrap();
         assert_eq!(deliverable.profile, DeliveryProfile::VerticalShort);
         assert_eq!(
             deliverable.expected_transcript_word_set,
@@ -2416,7 +2889,7 @@ mod tests {
             deliverable.maximum_caption_word_error_rate_basis_points,
             Some(0)
         );
-        assert!(definition.assertions.iter().any(|assertion| matches!(
+        assert!(interview.assertions.iter().any(|assertion| matches!(
             assertion,
             EvalAssertion::ExactSourceClips { clips }
                 if clips == &[ExpectedSourceClip {
@@ -2425,7 +2898,7 @@ mod tests {
                     source_end: TimeCode(2_547),
                 }]
         )));
-        assert!(definition.assertions.iter().any(|assertion| matches!(
+        assert!(interview.assertions.iter().any(|assertion| matches!(
             assertion,
             EvalAssertion::CaptionPresentation {
                 allowed_positions,
@@ -2433,12 +2906,32 @@ mod tests {
                 background_scrim: false,
             } if allowed_positions == &[TitlePosition::LowerThird, TitlePosition::Top]
         )));
+        let event = &definitions[1];
+        let event_delivery = event.deliverable.unwrap();
         assert_eq!(
-            task["budget"]["tool_calls"],
-            definition.budgets.max_tool_calls
+            event_delivery.expected_transcript_word_set,
+            Some("event-dialogue")
         );
-        assert_eq!(task["budget"]["tokens"], definition.budgets.max_tokens);
+        assert_eq!(event_delivery.maximum_word_error_rate_basis_points, 3_000);
+        assert!(event.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::ExactTrackClips { track: TrackId(1), clips }
+                if clips.len() == 5
+        )));
+        assert!(event.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::ReframeStability {
+                track: TrackId(1),
+                minimum_keyframes_per_axis: 2,
+                maximum_step_percent: 12,
+                ..
+            }
+        )));
 
+        assert_v5_fixture_packs_and_truth();
+    }
+
+    fn assert_v5_fixture_packs_and_truth() {
         let pack = FixturePackManifest::from_json(include_str!(
             "../../../../benchmarks/auto-edit/v5/fixture-pack.json"
         ))
@@ -2447,6 +2940,21 @@ mod tests {
         assert_eq!(pack.assets.len(), 1);
         assert_eq!(pack.assets[0].bytes, 9_294_247);
         assert_eq!(pack.assets[0].sha256.len(), 64);
+
+        let event_pack = FixturePackManifest::from_json(include_str!(
+            "../../../../benchmarks/auto-edit/v5/event-fixture-pack.json"
+        ))
+        .unwrap();
+        assert_eq!(event_pack.pack_id, "m40-event-multicam-v1");
+        assert_eq!(event_pack.assets.len(), 6);
+        assert_eq!(
+            event_pack
+                .assets
+                .iter()
+                .map(|asset| asset.bytes)
+                .sum::<u64>(),
+            245_654_467
+        );
 
         let truth: RealInterviewGroundTruth = serde_json::from_str(include_str!(
             "../../../../benchmarks/auto-edit/v5/ground-truth.json"
@@ -2457,6 +2965,18 @@ mod tests {
         assert_eq!(truth.source_story_range.end, 2_547);
         assert_eq!(truth.required_terms.len(), 19);
         assert_ne!(truth.source_asr_dialogue, truth.expected_dialogue);
+
+        let event_truth: EventMulticamGroundTruth = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v5/event-ground-truth.json"
+        ))
+        .unwrap();
+        assert_eq!(event_truth.schema_version, 1);
+        assert_eq!(event_truth.meeting_id, "ES2002a");
+        assert_eq!(event_truth.speaker_assignments.len(), 4);
+        assert_eq!(event_truth.expected_video_cuts.len(), 5);
+        assert_eq!(event_truth.source_range.start, 1_750);
+        assert_eq!(event_truth.source_range.end, 2_544);
+        assert_eq!(event_truth.reframe.target_aspect_basis_points, 5_625);
     }
 
     #[test]
@@ -2580,6 +3100,88 @@ mod tests {
         assert!(fixture.context.word_sets["recovery-dialogue"].len() > 60);
         assert!(fixture.context.word_sets["recovery-dialogue"].contains(&"8".to_owned()));
         assert!(fixture.context.word_sets["recovery-dialogue"].contains(&"12".to_owned()));
+    }
+
+    #[test]
+    #[ignore = "requires the explicitly prepared M40 event fixture pack"]
+    fn v5_event_fixture_builds_with_real_sync_audio_and_speaker_labels() {
+        let fixture = fixture_real_event_multicam().unwrap();
+        let document = &fixture.original_document;
+        assert_eq!(document.media_pool.len(), 5);
+        assert_eq!(document.tracks.len(), 2);
+        assert_eq!(document.duration, TimeCode(794));
+        assert_eq!(document.catalog.sync_groups.len(), 1);
+        assert_eq!(document.catalog.sync_groups[0].members.len(), 5);
+        assert_eq!(fixture.context.asset_aliases.len(), 5);
+        let reference = document
+            .media_pool
+            .iter()
+            .find(|asset| asset.name == "camera-laura")
+            .unwrap();
+        let TranscriptStatus::Ready(transcript) = fixture.analysis.transcript_status(reference)
+        else {
+            panic!("registered AMI transcript should be ready");
+        };
+        let speakers = transcript
+            .words
+            .iter()
+            .filter_map(|word| word.speaker.as_deref())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            speakers,
+            BTreeSet::from(["Andrew", "Craig", "David", "Laura"])
+        );
+        let plan = openreel_core::plan_speaker_multicam(
+            document,
+            &transcript,
+            &openreel_core::SpeakerMulticamSettings {
+                sync_group: SyncGroupId(1),
+                target_track: TrackId(1),
+                group_start: TimeCode(1_750),
+                group_end: TimeCode(2_544),
+                record_start: TimeCode::ZERO,
+                maximum_word_gap_frames: TimeCode(5),
+                minimum_shot_frames: TimeCode(25),
+                assignments: vec![
+                    openreel_core::SpeakerAngleAssignment {
+                        speaker: "Laura".to_owned(),
+                        angle_name: "Laura closeup".to_owned(),
+                    },
+                    openreel_core::SpeakerAngleAssignment {
+                        speaker: "David".to_owned(),
+                        angle_name: "David closeup".to_owned(),
+                    },
+                    openreel_core::SpeakerAngleAssignment {
+                        speaker: "Andrew".to_owned(),
+                        angle_name: "Andrew closeup".to_owned(),
+                    },
+                    openreel_core::SpeakerAngleAssignment {
+                        speaker: "Craig".to_owned(),
+                        angle_name: "Craig closeup".to_owned(),
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.suppressed_short_shots, 3);
+        assert_eq!(plan.cuts.len(), 5);
+        assert_eq!(
+            plan.cuts
+                .iter()
+                .map(|cut| (
+                    cut.angle_name.as_str(),
+                    cut.timeline_start.0,
+                    cut.timeline_end.0
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Laura closeup", 0, 184),
+                ("David closeup", 184, 287),
+                ("Andrew closeup", 287, 380),
+                ("Craig closeup", 380, 475),
+                ("Laura closeup", 475, 794),
+            ]
+        );
     }
 
     #[test]

@@ -1273,15 +1273,18 @@ impl OpenReelMcp {
         args: &EditorialReadinessArgs,
     ) -> Result<CallToolResult, McpError> {
         let minimum = args.min_silence_source_frames.unwrap_or(TimeCode(20));
-        if minimum <= TimeCode::ZERO {
+        if args.check_silence && minimum <= TimeCode::ZERO {
             return Ok(error_text("min_silence_source_frames must be positive"));
         }
         if args.focus_x_percent > 100 || args.focus_y_percent > 100 {
             return Ok(error_text("delivery focus percentages must be in 0..=100"));
         }
         let (revision, document) = self.snapshot()?;
-        let (cuttable, pending_silence_assets) =
-            self.editorial_silence_evidence(&document, minimum)?;
+        let (cuttable, pending_silence_assets) = if args.check_silence {
+            self.editorial_silence_evidence(&document, minimum)?
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let qa = qa_document(&document);
         let conformance = match delivery_conformance(
             &document,
@@ -1324,6 +1327,7 @@ impl OpenReelMcp {
             "timeline_revision": revision,
             "ready": ready,
             "silence": {
+                "checked": args.check_silence,
                 "minimum_source_frames": minimum,
                 "cuttable_count": cuttable.len(),
                 "spans": cuttable_json,
@@ -1746,6 +1750,14 @@ impl OpenReelMcp {
                 })
             })
             .collect::<Vec<_>>();
+        let plan = match self.prepare_operations(revision, &document, operations) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "tracked mask keyframes do not fit the current clip: {error}"
+                )));
+            }
+        };
         let structured = serde_json::json!({
             "timeline_revision": revision.0,
             "clip_id": args.clip_id.0,
@@ -1756,17 +1768,19 @@ impl OpenReelMcp {
                 "center_x_percent": x_curve,
                 "center_y_percent": y_curve,
             },
-            "apply_edit_plan": {
-                "expected_revision": revision.0,
-                "operations": operations,
+            "prepared_edit_plan": {
+                "plan_id": plan.id,
+                "expected_revision": revision,
+                "preview": plan.preview,
             },
         });
         Ok(success_structured(
             format!(
-                "tracked mask effect {} on clip {} across {} samples; apply the returned revision-gated operations to accept the editable keyframes",
+                "tracked mask effect {} on clip {} across {} samples as edit plan {}; inspect the preview, then commit it at timeline revision {revision}",
                 args.effect_id,
                 args.clip_id,
-                observations.len()
+                observations.len(),
+                plan.id,
             ),
             structured,
         ))
@@ -1908,6 +1922,14 @@ impl OpenReelMcp {
             .map(|observation| observation.confidence_basis_points)
             .min()
             .unwrap_or_default();
+        let plan = match self.prepare_operations(revision, &document, operations) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "tracked reframe keyframes do not fit the current clip: {error}"
+                )));
+            }
+        };
         let structured = serde_json::json!({
             "timeline_revision": revision.0,
             "clip_id": args.clip_id.0,
@@ -1923,18 +1945,20 @@ impl OpenReelMcp {
                 "focus_x_percent": x_curve,
                 "focus_y_percent": y_curve,
             },
-            "apply_edit_plan": {
-                "expected_revision": revision.0,
-                "operations": operations,
+            "prepared_edit_plan": {
+                "plan_id": plan.id,
+                "expected_revision": revision,
+                "preview": plan.preview,
             },
             "detection_boundary": "tracks the explicitly supplied subject region; no learned person or face detection",
         });
         Ok(success_structured(
             format!(
-                "tracked reframe effect {} on clip {} across {} samples (minimum confidence {minimum_confidence}/10000); review low-confidence spans, then apply the returned revision-gated operations to accept the editable focus curves",
+                "tracked reframe effect {} on clip {} across {} samples (minimum confidence {minimum_confidence}/10000) as edit plan {}; review low-confidence spans and the preview, then commit it at timeline revision {revision}",
                 args.effect_id,
                 args.clip_id,
                 tracked.observations.len(),
+                plan.id,
             ),
             structured,
         ))
@@ -3055,19 +3079,29 @@ impl OpenReelMcp {
             Ok(plan) => plan,
             Err(error) => return Ok(error_text(error.to_string())),
         };
+        let prepared = match self.prepare_operations(revision, &document, plan.operations.clone()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "beat pacing plan does not fit the current timeline: {error}"
+                )));
+            }
+        };
         let structured = serde_json::json!({
             "timeline_revision": revision.0,
             "plan": plan,
-            "apply_edit_plan": {
-                "expected_revision": revision.0,
-                "operations": plan.operations,
+            "prepared_edit_plan": {
+                "plan_id": prepared.id,
+                "expected_revision": revision,
+                "preview": prepared.preview,
             },
         });
         Ok(success_structured(
             format!(
-                "planned {} beat-aligned split(s) for clip {}; inspect the selected onsets, then apply the returned revision-gated operations",
+                "prepared {} beat-aligned split(s) for clip {} as edit plan {}; inspect the selected onsets and preview, then commit it at timeline revision {revision}",
                 plan.operations.len(),
                 plan.target_clip,
+                prepared.id,
             ),
             structured,
         ))
@@ -3105,21 +3139,31 @@ impl OpenReelMcp {
             Ok(plan) => plan,
             Err(error) => return Ok(error_text(error.to_string())),
         };
+        let prepared = match self.prepare_operations(revision, &document, plan.operations.clone()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "music fit plan does not fit the current timeline: {error}"
+                )));
+            }
+        };
         let structured = serde_json::json!({
             "timeline_revision": revision.0,
             "plan": plan,
-            "apply_edit_plan": {
-                "expected_revision": revision.0,
-                "operations": plan.operations,
+            "prepared_edit_plan": {
+                "plan_id": prepared.id,
+                "expected_revision": revision,
+                "preview": prepared.preview,
             },
         });
         Ok(success_structured(
             format!(
-                "planned a beat-anchored real-time music edit from source frames {}..{} into project frames {}..{}; no looping or hidden time stretch was used",
+                "prepared beat-anchored real-time music edit from source frames {}..{} into project frames {}..{} as edit plan {}; inspect the preview, then commit it at timeline revision {revision}; no looping or hidden time stretch was used",
                 plan.source_range.start.0,
                 plan.source_range.end.0,
                 plan.timeline_range.start.0,
                 plan.timeline_range.end.0,
+                prepared.id,
             ),
             structured,
         ))
@@ -3162,19 +3206,29 @@ impl OpenReelMcp {
             Ok(plan) => plan,
             Err(error) => return Ok(error_text(error.to_string())),
         };
+        let prepared = match self.prepare_operations(revision, &document, plan.operations.clone()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "speaker multicam plan does not fit the current timeline: {error}"
+                )));
+            }
+        };
         let structured = serde_json::json!({
             "timeline_revision": revision.0,
             "plan": plan,
-            "apply_edit_plan": {
-                "expected_revision": revision.0,
-                "operations": plan.operations,
+            "prepared_edit_plan": {
+                "plan_id": prepared.id,
+                "expected_revision": revision,
+                "preview": prepared.preview,
             },
         });
         Ok(success_structured(
             format!(
-                "planned {} speaker-aware multicam shot(s) from transcript asset {}; operations are latest-first for atomic overwrite application",
+                "prepared {} speaker-aware multicam shot(s) from transcript asset {} as edit plan {}; inspect the preview, then commit it at timeline revision {revision}",
                 plan.cuts.len(),
                 plan.reference_asset,
+                prepared.id,
             ),
             structured,
         ))
@@ -3454,6 +3508,10 @@ struct DeliveryStoryboardArgs {
 struct EditorialReadinessArgs {
     /// Stable delivery contract to verify and preview.
     profile: DeliveryProfile,
+    /// Require transcript-safe silence clearance. Disable only when preserving
+    /// continuous program audio or when dead-air editing is outside the brief.
+    #[serde(default = "default_true")]
+    check_silence: bool,
     /// Minimum transcript-safe cuttable silence in source frames. Defaults to 20.
     #[serde(default)]
     min_silence_source_frames: Option<TimeCode>,
@@ -3528,6 +3586,10 @@ struct ExportJobArgs {
 
 const fn default_delivery_focus() -> u8 {
     50
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -4063,7 +4125,7 @@ fn inspector_tools() -> Vec<Tool> {
         ),
         Tool::new(
             "plan_beat_pacing",
-            "Build a deterministic, revision-gated SplitClip plan from fully analyzed timeline beats. Selected beats are inspectable in ascending order and operations are safely ordered newest-first; the timeline is not changed until apply_edit_plan.",
+            "Build and validate a deterministic, revision-gated SplitClip plan from fully analyzed timeline beats. Selected beats are inspectable in ascending order and operations are safely ordered newest-first; inspect the returned prepared_edit_plan preview, then commit its opaque plan id.",
             schema_object::<BeatPacingPlanArgs>(),
         )
         .with_annotations(read_only()),
@@ -4075,7 +4137,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "plan_speaker_multicam",
-            "Build a revision-gated multicam overwrite plan from real diarization labels, explicit speaker-to-angle assignments, and an existing sync group. Missing or ambiguous speaker data is returned as an error; the timeline is not changed until apply_edit_plan.",
+            "Build and validate a revision-gated multicam overwrite plan from real diarization labels, explicit speaker-to-angle assignments, and an existing sync group. Missing or ambiguous speaker data is returned as an error; inspect the returned prepared_edit_plan preview, then commit its opaque plan id.",
             schema_object::<SpeakerMulticamPlanArgs>(),
         )
         .with_annotations(read_only()),
@@ -4183,7 +4245,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_editorial_readiness",
-            "Run the common final editorial proof in one compact call: transcript-safe silence clearance, technical QA, delivery conformance, and a real delivery-profile storyboard. Returns blocking details without repeating non-blocking issues.",
+            "Run the common final editorial proof in one compact call: optional transcript-safe silence clearance, technical QA, delivery conformance, and a real delivery-profile storyboard. Set check_silence=false only when continuous program audio must be preserved or dead-air editing is outside the brief. Returns blocking details without repeating non-blocking issues.",
             schema_object::<EditorialReadinessArgs>(),
         )
         .with_annotations(read_only()),
@@ -5865,6 +5927,7 @@ mod tests {
         let readiness = service
             .editorial_readiness(&EditorialReadinessArgs {
                 profile: DeliveryProfile::VerticalShort,
+                check_silence: true,
                 min_silence_source_frames: Some(TimeCode(20)),
                 focus_x_percent: 50,
                 focus_y_percent: 50,
@@ -5877,6 +5940,25 @@ mod tests {
             .unwrap();
         assert_eq!(readiness.is_error, Some(false));
         assert_eq!(readiness.structured_content.unwrap()["ready"], false);
+
+        let readiness = service
+            .editorial_readiness(&EditorialReadinessArgs {
+                profile: DeliveryProfile::VerticalShort,
+                check_silence: false,
+                min_silence_source_frames: None,
+                focus_x_percent: 50,
+                focus_y_percent: 50,
+                storyboard: StoryboardArgs {
+                    range: None,
+                    frame_count: Some(2),
+                    max_width: Some(64),
+                },
+            })
+            .unwrap();
+        assert_eq!(readiness.is_error, Some(false));
+        let readiness = readiness.structured_content.unwrap();
+        assert_eq!(readiness["silence"]["checked"], false);
+        assert_eq!(readiness["silence"]["pending_asset_ids"], json!([]));
     }
 
     #[test]

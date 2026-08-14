@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "pack_id": "m40-event-multicam-v1",
+  "title": "M40 synchronized meeting multicam fixture pack",
+  "description": "Four synchronized participant cameras, a continuous headset-mix audio master, and the pinned manual annotations for one AMI meeting. The benchmark edits a bounded introduction window while retaining the immutable full source files.",
+  "assets": [
+    {
+      "id": "ami-es2002a-closeup1",
+      "file_name": "ES2002a.Closeup1.avi",
+      "download_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2002a/video/ES2002a.Closeup1.avi",
+      "source_page_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2002a/video/",
+      "bytes": 60991090,
+      "sha256": "6c06fb51f16fffb266d08ba50220812dca898932c540da06014b8e94fade383b",
+      "license": {
+        "spdx_id": "CC-BY-4.0",
+        "name": "Creative Commons Attribution 4.0 International",
+        "url": "https://creativecommons.org/licenses/by/4.0/",
+        "attribution": "AMI Meeting Corpus, ES2002a Closeup1; AMI Consortium / University of Edinburgh. Cite Jean Carletta et al., The AMI Meeting Corpus: A Pre-announcement, MLMI 2005."
+      }
+    },
+    {
+      "id": "ami-es2002a-closeup2",
+      "file_name": "ES2002a.Closeup2.avi",
+      "download_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2002a/video/ES2002a.Closeup2.avi",
+      "source_page_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2002a/video/",
+      "bytes": 39783576,
+      "sha256": "aebf8e2d2e2d3de0d93cbf71af02d53fc35933712fd900f597af74ebc23d251b",
+      "license": {
+        "spdx_id": "CC-BY-4.0",
+        "name": "Creative Commons Attribution 4.0 International",
+        "url": "https://creativecommons.org/licenses/by/4.0/",
+        "attribution": "AMI Meeting Corpus, ES2002a Closeup2; AMI Consortium / University of Edinburgh. Cite Jean Carletta et al., The AMI Meeting Corpus: A Pre-announcement, MLMI 2005."
+      }
+    },
+    {
+      "id": "ami-es2002a-closeup3",
+      "file_name": "ES2002a.Closeup3.avi",
+      "download_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2002a/video/ES2002a.Closeup3.avi",
+      "source_page_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2002a/video/",
+      "bytes": 38992476,
+      "sha256": "757058b81ce87248f255217bdebee07e078be74ef90400c242367dbb3e36926f",
+      "license": {
+        "spdx_id": "CC-BY-4.0",
+        "name": "Creative Commons Attribution 4.0 International",
+        "url": "https://creativecommons.org/licenses/by/4.0/",
+        "attribution": "AMI Meeting Corpus, ES2002a Closeup3; AMI Consortium / University of Edinburgh. Cite Jean Carletta et al., The AMI Meeting Corpus: A Pre-announcement, MLMI 2005."
+      }
+    },
+    {
+      "id": "ami-es2002a-closeup4",
+      "file_name": "ES2002a.Closeup4.avi",
+      "download_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2002a/video/ES2002a.Closeup4.avi",
+      "source_page_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2002a/video/",
+      "bytes": 42274936,
+      "sha256": "4648d5b75adb48cc90c0bba1fd72304cfb6fcd896d8bdf4bcb0f0bd37f83c40f",
+      "license": {
+        "spdx_id": "CC-BY-4.0",
+        "name": "Creative Commons Attribution 4.0 International",
+        "url": "https://creativecommons.org/licenses/by/4.0/",
+        "attribution": "AMI Meeting Corpus, ES2002a Closeup4; AMI Consortium / University of Edinburgh. Cite Jean Carletta et al., The AMI Meeting Corpus: A Pre-announcement, MLMI 2005."
+      }
+    },
+    {
+      "id": "ami-es2002a-headset-mix",
+      "file_name": "ES2002a.Mix-Headset.wav",
+      "download_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2002a/audio/ES2002a.Mix-Headset.wav",
+      "source_page_url": "https://groups.inf.ed.ac.uk/ami/corpus/signals.shtml",
+      "bytes": 40724524,
+      "sha256": "9c76866990fcc8b84006dc32d273ad99df439090b748ebe72103bb78c3216ee7",
+      "license": {
+        "spdx_id": "CC-BY-4.0",
+        "name": "Creative Commons Attribution 4.0 International",
+        "url": "https://creativecommons.org/licenses/by/4.0/",
+        "attribution": "AMI Meeting Corpus, ES2002a headset mix; AMI Consortium / University of Edinburgh. Cite Jean Carletta et al., The AMI Meeting Corpus: A Pre-announcement, MLMI 2005."
+      }
+    },
+    {
+      "id": "ami-manual-annotations-1-6-2",
+      "file_name": "ami-public-manual-1.6.2.zip",
+      "download_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusAnnotations/ami_public_manual_1.6.2.zip",
+      "source_page_url": "https://groups.inf.ed.ac.uk/ami/download/",
+      "bytes": 22887865,
+      "sha256": "b56e5babb2496b8795deeeda7e71178d7fbc9963f94276cf2a3f4b56ebbc9f9d",
+      "license": {
+        "spdx_id": "CC-BY-4.0",
+        "name": "Creative Commons Attribution 4.0 International",
+        "url": "https://creativecommons.org/licenses/by/4.0/",
+        "attribution": "AMI Meeting Corpus manual annotations v1.6.2; AMI Consortium / University of Edinburgh. Cite Jean Carletta et al., The AMI Meeting Corpus: A Pre-announcement, MLMI 2005."
+      }
+    }
+  ]
+}

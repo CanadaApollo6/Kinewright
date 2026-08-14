@@ -48,8 +48,10 @@ New mutation and delivery tools:
 - `get_export_jobs` returns retained machine-readable status and progress.
 - `cancel_export` cooperatively cancels queued or running work.
 
-Every returned creator plan includes complete `apply_edit_plan` input. Agents
-can inspect the evidence and exact operations before changing the branch.
+Every deterministic creator plan is validated server-side and returns an
+opaque `prepared_edit_plan` handle plus a compact preview. Agents inspect the
+evidence and preview, then commit the handle at the same revision without
+copying a large operation array through another tool call.
 
 ## Delivery contracts
 

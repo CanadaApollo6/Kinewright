@@ -4,23 +4,24 @@ V5 is the M40 benchmark. It stops optimizing only for OpenReel's synthetic
 garden story and measures unfamiliar, licensed footage in three distinct edit
 families: interview/documentary, event/multicam, and music montage.
 
-The first executable family is `g1`, a real public-domain interview with
-filmmaker Helen Hill. The agent must isolate her Hurricane Katrina film-
-recovery answer from a two-minute source, clean natural dead air, preserve the
-story, generate source-faithful captions, and deliver a vertical MP4. This is
-real low-resolution talking-head footage with two speakers and imperfect ASR,
+Two families are executable. `g1` is a real public-domain interview with
+filmmaker Helen Hill. `g2` is a CC BY 4.0 AMI meeting with four synchronized
+participant cameras, a program headset mix, and pinned manual speaker labels.
+Both use real low-resolution footage and independently probed MP4 delivery,
 not generated bars or motion graphics.
 
 ## Immutable fixture acquisition
 
 Downloaded footage is not committed. Its source page, license, byte count,
-SHA-256, and exact transcode URL live in `fixture-pack.json`. Acquisition is an
-explicit network action:
+SHA-256, and exact URL live in `fixture-pack.json` and
+`event-fixture-pack.json`. Acquisition is an explicit network action:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
 cargo run -p openreel-agent --bin openreel-eval -- `
   --prepare-fixtures benchmarks/auto-edit/v5/fixture-pack.json
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --prepare-fixtures benchmarks/auto-edit/v5/event-fixture-pack.json
 ```
 
 Verify the local pack without network access:
@@ -29,6 +30,8 @@ Verify the local pack without network access:
 & .\scripts\setup-ffmpeg.ps1
 cargo run -p openreel-agent --bin openreel-eval -- `
   --verify-fixtures benchmarks/auto-edit/v5/fixture-pack.json
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --verify-fixtures benchmarks/auto-edit/v5/event-fixture-pack.json
 ```
 
 `OPENREEL_EVAL_FIXTURE_DIR` overrides the cache root. Existing files with a
@@ -88,7 +91,41 @@ The resulting machine recovery is published separately in
 44 operations, and 111,225 total tokens. Its human review is pending; the
 rejected first artifact remains unchanged in `baseline.json`.
 
-V5 is intentionally marked `in_progress`. M40 does not pass on one interview.
-It exits only after event/multicam and music-montage tasks are also executable,
-three samples per family pass the machine contract, and the published human
-gate in `manifest.json` passes.
+## Event/multicam preflight
+
+`g2` edits the 31.76-second AMI `ES2002a` introduction into exactly five
+speaker-selected shots. It must preserve the program audio as one untouched
+clip and produce stable editable 9:16 reframe curves for every shot. The
+machine contract scores exact source/timeline ranges, camera order, audio
+identity, reframe stability, QA, undo, budgets, the rendered MP4, and
+independent rendered-dialogue transcription.
+
+The final preflight passed 23/23 assertions in one turn with 20 tool calls, 20
+operations, and 393,543 total tokens, including 334,080 cached input tokens.
+The output is 794 frames at 1080x1920, 39,380,998 bytes, with SHA-256
+`1c168637e2bcb5ba7447d6dafaf19846019cd701beaba01e8824a311f250dc07`.
+The exact artifact is published in `event-multicam-baseline.json`; human review
+is pending.
+
+The benchmark also forced a runtime efficiency fix. Deterministic multicam,
+beat, music-fit, mask-tracking, and reframe-tracking results now return opaque
+`prepared_edit_plan` handles instead of making the model copy operation arrays
+through another planning call. The event edit fell from 37 calls to 20, and the
+gate is now capped at 24.
+
+Run it with:
+
+```powershell
+& .\scripts\setup-ffmpeg.ps1
+$env:OPENREEL_EVAL = '1'
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --suite generalization-v5 `
+  --harness codex `
+  --only g2 `
+  --samples 1
+```
+
+V5 is intentionally marked `in_progress`. M40 does not pass on one interview
+and one event sample. It exits only after music montage is executable, three
+samples per family pass the machine contract, and the published human gate in
+`manifest.json` passes.

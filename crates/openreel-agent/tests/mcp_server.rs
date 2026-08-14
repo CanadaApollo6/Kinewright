@@ -386,10 +386,7 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
     assert_eq!(tracking["timeline_revision"], 0);
     assert_eq!(tracking["observations"].as_array().unwrap().len(), 3);
     assert_eq!(
-        tracking["apply_edit_plan"]["operations"]
-            .as_array()
-            .unwrap()
-            .len(),
+        tracking["prepared_edit_plan"]["preview"]["operation_count"],
         2
     );
 

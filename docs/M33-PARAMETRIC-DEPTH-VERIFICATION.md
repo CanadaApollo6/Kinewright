@@ -54,8 +54,9 @@ New inspectors:
 
 - `get_video_scopes` measures post-compositor RGB/luma histograms, means,
   clipping, and a 64-column luma waveform.
-- `track_mask_region` follows an existing bounded mask and returns complete
-  `apply_edit_plan` input for editable center-X and center-Y curves.
+- `track_mask_region` follows an existing bounded mask, validates the editable
+  center-X and center-Y curves, and returns an opaque `prepared_edit_plan`
+  handle plus preview for direct commit.
 
 `get_timeline_state` and `get_clip_info` render static effect values and their
 automation curves. Audio-bus routes, processors, sidechains, and automation are
