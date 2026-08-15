@@ -43,6 +43,7 @@ pub enum EffectUniform {
     CompressorAttack,
     CompressorRelease,
     CompressorMakeup,
+    LimiterCeiling,
     DuckThreshold,
     DuckReduction,
     DuckAttack,
@@ -467,13 +468,23 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
             },
         ],
     },
+    EffectDescriptor {
+        name: "audio_limiter",
+        parameters: &[EffectParameterDescriptor {
+            name: "ceiling_tenth_db",
+            min: -120,
+            max: 0,
+            neutral: -10,
+            uniform: EffectUniform::LimiterCeiling,
+        }],
+    },
 ];
 
 #[must_use]
 pub fn is_audio_effect(name: &str) -> bool {
     matches!(
         name,
-        "audio_gain" | "audio_eq" | "audio_compressor" | "audio_ducking"
+        "audio_gain" | "audio_eq" | "audio_compressor" | "audio_ducking" | "audio_limiter"
     )
 }
 

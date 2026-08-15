@@ -15,18 +15,18 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use openreel_core::{
-    Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AutomationCurve, BeatStatus,
-    CaptionCue, CaptionMotion, CaptionPreset, ClipContent, ClipId, Command, Core, DeliveryAspect,
-    DeliveryProfile, DeliveryVariant, Document, EffectId, Event, Export, ExportCancellation,
-    Keyframe, KeyframeInterpolation, MediaAsset, MediaKind, Operation, ParamValue, Playback, Query,
-    QueryResult, SceneStatus, SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings,
-    SyncGroupId, ThreePointMode, TimeCode, TimelineBeat, TimelineBeatAnalysisState,
-    TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TitlePosition, TrackId, TranscriptStatus, animated_caption_operations_at,
-    authored_caption_cues, beat_pacing_plan, caption_cues, dedup_timeline_words,
-    delivery_conformance, document_for_delivery_profile, document_for_delivery_variant,
-    is_filler_word, map_source_range_to_project, music_fit_plan, plan_speaker_multicam,
-    qa_document,
+    Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AudioBus, AudioBusId,
+    AudioLoudness, AutomationCurve, BeatStatus, CaptionCue, CaptionMotion, CaptionPreset,
+    ClipContent, ClipId, Command, Core, DeliveryAspect, DeliveryProfile, DeliveryVariant, Document,
+    Effect, EffectId, Event, Export, ExportCancellation, Keyframe, KeyframeInterpolation,
+    MediaAsset, MediaKind, Operation, ParamValue, Playback, Query, QueryResult, SceneStatus,
+    SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings, SyncGroupId, ThreePointMode,
+    TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, TrackId, TranscriptStatus,
+    animated_caption_operations_at, apply_batch, authored_caption_cues, beat_pacing_plan,
+    caption_cues, dedup_timeline_words, delivery_conformance, document_for_delivery_profile,
+    document_for_delivery_variant, is_filler_word, map_source_range_to_project, music_fit_plan,
+    plan_speaker_multicam, qa_document,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -74,6 +74,10 @@ const DEFAULT_TRACKING_STEP_FRAMES: i64 = 5;
 const DEFAULT_TRACKING_SEARCH_RADIUS_PERCENT: u8 = 10;
 const DEFAULT_TRACKING_WIDTH: u32 = 256;
 const MAX_TRACKING_SAMPLES: usize = 120;
+/// AAC and other lossy encoders can overshoot a decoded sample ceiling. Keep
+/// deterministic pre-encode headroom while evaluating the public ceiling on
+/// the actual decoded delivery artifact.
+const LOSSY_CODEC_PEAK_HEADROOM_HUNDREDTHS: i32 = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmationRequest {
@@ -692,6 +696,11 @@ impl OpenReelMcp {
                 let args: SpeakerMulticamPlanArgs =
                     decode_args("plan_speaker_multicam", arguments)?;
                 self.plan_speaker_multicam(args)
+            }
+            "plan_audio_normalization" => {
+                let args: AudioNormalizationPlanArgs =
+                    decode_args("plan_audio_normalization", arguments)?;
+                self.plan_audio_normalization(&args)
             }
             "get_analysis_status" => {
                 let args: AnalysisStatusArgs = decode_args("get_analysis_status", arguments)?;
@@ -1849,6 +1858,31 @@ impl OpenReelMcp {
             )
             .unwrap_or(50)
         };
+        let initial_x = args
+            .initial_subject_x_percent
+            .unwrap_or_else(|| parameter("focus_x_percent"));
+        let initial_y = args
+            .initial_subject_y_percent
+            .unwrap_or_else(|| parameter("focus_y_percent"));
+        if initial_x > 100 || initial_y > 100 {
+            return Ok(error_text(
+                "initial_subject_x_percent and initial_subject_y_percent must be in 0..=100",
+            ));
+        }
+        let focus_bounds = [
+            args.minimum_focus_x_percent.unwrap_or(0),
+            args.maximum_focus_x_percent.unwrap_or(100),
+            args.minimum_focus_y_percent.unwrap_or(0),
+            args.maximum_focus_y_percent.unwrap_or(100),
+        ];
+        if focus_bounds.iter().any(|value| *value > 100)
+            || focus_bounds[0] > focus_bounds[1]
+            || focus_bounds[2] > focus_bounds[3]
+        {
+            return Ok(error_text(
+                "focus bounds must be ordered percentages in 0..=100",
+            ));
+        }
         let search_radius = args
             .search_radius_percent
             .unwrap_or(DEFAULT_TRACKING_SEARCH_RADIUS_PERCENT);
@@ -1864,7 +1898,7 @@ impl OpenReelMcp {
             clip_id: args.clip_id,
             clip_timeline_start: clip.timeline_start,
             sample_frames: &sample_frames,
-            center_percent: [parameter("focus_x_percent"), parameter("focus_y_percent")],
+            center_percent: [initial_x, initial_y],
             box_percent: [
                 i64::from(args.subject_width_percent),
                 i64::from(args.subject_height_percent),
@@ -1876,19 +1910,21 @@ impl OpenReelMcp {
             Ok(tracked) => tracked,
             Err(error) => return Ok(error_text(error)),
         };
-        let curve_for = |axis: usize, extent: u32| AutomationCurve {
+        let curve_for = |axis: usize, extent: u32, minimum: u8, maximum: u8| AutomationCurve {
             keyframes: tracked
                 .observations
                 .iter()
                 .map(|observation| Keyframe {
                     at: observation.local_frame,
-                    value: i64::from(pixel_to_percent(observation.center[axis], extent)),
+                    value: i64::from(
+                        pixel_to_percent(observation.center[axis], extent).clamp(minimum, maximum),
+                    ),
                     interpolation: KeyframeInterpolation::EaseInOut,
                 })
                 .collect(),
         };
-        let x_curve = curve_for(0, tracked.width);
-        let y_curve = curve_for(1, tracked.height);
+        let x_curve = curve_for(0, tracked.width, focus_bounds[0], focus_bounds[1]);
+        let y_curve = curve_for(1, tracked.height, focus_bounds[2], focus_bounds[3]);
         let operations = vec![
             Operation::SetEffectKeyframes {
                 clip: args.clip_id,
@@ -1903,16 +1939,17 @@ impl OpenReelMcp {
                 curve: y_curve.clone(),
             },
         ];
-        let observations = tracked
+        let focus_keyframes = tracked
             .observations
             .iter()
-            .map(|observation| {
+            .zip(&x_curve.keyframes)
+            .zip(&y_curve.keyframes)
+            .map(|((observation, x), y)| {
                 serde_json::json!({
-                    "local_frame": observation.local_frame.0,
-                    "project_frame": observation.project_frame.0,
-                    "focus_x_percent": pixel_to_percent(observation.center[0], tracked.width),
-                    "focus_y_percent": pixel_to_percent(observation.center[1], tracked.height),
-                    "confidence_basis_points": observation.confidence_basis_points,
+                    "frame": observation.local_frame.0,
+                    "x": x.value,
+                    "y": y.value,
+                    "confidence": observation.confidence_basis_points,
                 })
             })
             .collect::<Vec<_>>();
@@ -1938,13 +1975,17 @@ impl OpenReelMcp {
             "subject_template": {
                 "width_percent": args.subject_width_percent,
                 "height_percent": args.subject_height_percent,
+                "initial_center_percent": {"x": initial_x, "y": initial_y},
+            },
+            "focus_bounds_percent": {
+                "minimum_x": focus_bounds[0],
+                "maximum_x": focus_bounds[1],
+                "minimum_y": focus_bounds[2],
+                "maximum_y": focus_bounds[3],
             },
             "minimum_confidence_basis_points": minimum_confidence,
-            "observations": observations,
-            "curves": {
-                "focus_x_percent": x_curve,
-                "focus_y_percent": y_curve,
-            },
+            "focus_keyframes": focus_keyframes,
+            "keyframe_interpolation": "ease_in_out",
             "prepared_edit_plan": {
                 "plan_id": plan.id,
                 "expected_revision": revision,
@@ -3233,6 +3274,305 @@ impl OpenReelMcp {
             structured,
         ))
     }
+
+    fn plan_audio_normalization(
+        &self,
+        args: &AudioNormalizationPlanArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let context = match normalization_context(&document, args) {
+            Ok(context) => context,
+            Err(error) => return Ok(error_text(error)),
+        };
+        let current = match self.analysis.timeline_loudness(&document) {
+            Ok(measurement) => measurement,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "could not measure timeline audio: {error}"
+                )));
+            }
+        };
+        let (operation, predicted) = match verified_normalization_operation(
+            self.analysis.as_ref(),
+            &document,
+            args,
+            &context,
+            current,
+        ) {
+            Ok(result) => result,
+            Err(error) => return Ok(error_text(error)),
+        };
+        let prepared = match self.prepare_operations(revision, &document, vec![operation]) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "normalization plan does not fit the current timeline: {error}"
+                )));
+            }
+        };
+        let current_lufs = current.integrated_lufs_hundredths.unwrap_or_default();
+        let predicted_lufs = predicted.integrated_lufs_hundredths.unwrap_or_default();
+        Ok(success_structured(
+            format!(
+                "prepared measured audio normalization from {current_lufs} to {predicted_lufs} LUFS hundredths as edit plan {}; inspect the bus processing and preview, then commit it at timeline revision {revision}",
+                prepared.id
+            ),
+            serde_json::json!({
+                "timeline_revision": revision.0,
+                "target_lufs_hundredths": args.target_lufs_hundredths,
+                "maximum_sample_peak_dbfs_hundredths": args.maximum_sample_peak_dbfs_hundredths,
+                "lossy_codec_peak_headroom_hundredths": LOSSY_CODEC_PEAK_HEADROOM_HUNDREDTHS,
+                "processing_ceiling_dbfs_hundredths": args.maximum_sample_peak_dbfs_hundredths
+                    .saturating_sub(LOSSY_CODEC_PEAK_HEADROOM_HUNDREDTHS),
+                "tolerance_hundredths": args.tolerance_hundredths,
+                "current": current,
+                "predicted": predicted,
+                "prepared_edit_plan": {
+                    "plan_id": prepared.id,
+                    "expected_revision": revision,
+                    "preview": prepared.preview,
+                },
+            }),
+        ))
+    }
+}
+
+struct NormalizationContext {
+    tracks: Vec<TrackId>,
+    bus_id: AudioBusId,
+    first_effect_id: u64,
+}
+
+fn normalization_context(
+    document: &Document,
+    args: &AudioNormalizationPlanArgs,
+) -> Result<NormalizationContext, String> {
+    if args.track_ids.is_empty() {
+        return Err("track_ids must contain at least one audio source track".to_owned());
+    }
+    let tracks = args.track_ids.iter().copied().collect::<BTreeSet<_>>();
+    if tracks.len() != args.track_ids.len() {
+        return Err("track_ids must not contain duplicates".to_owned());
+    }
+    for track in &tracks {
+        let candidate = document
+            .tracks
+            .iter()
+            .find(|candidate| candidate.id == *track)
+            .ok_or_else(|| format!("track {track} does not exist"))?;
+        if candidate.clips.is_empty() {
+            return Err(format!("track {track} contains no audio source clips"));
+        }
+    }
+    if let Some(bus) = document
+        .audio_mix
+        .buses
+        .iter()
+        .find(|bus| bus.tracks.iter().any(|track| tracks.contains(track)))
+    {
+        return Err(format!(
+            "track selection already intersects audio bus {} ({}); remove or deliberately revise that mix before normalizing",
+            bus.id, bus.name
+        ));
+    }
+    if !(-2_400..=-900).contains(&args.target_lufs_hundredths) {
+        return Err("target_lufs_hundredths must be in -2400..=-900".to_owned());
+    }
+    if !(-300..=0).contains(&args.maximum_sample_peak_dbfs_hundredths) {
+        return Err("maximum_sample_peak_dbfs_hundredths must be in -300..=0".to_owned());
+    }
+    if !(25..=300).contains(&args.tolerance_hundredths) {
+        return Err("tolerance_hundredths must be in 25..=300".to_owned());
+    }
+    let bus_id = AudioBusId(
+        document
+            .audio_mix
+            .buses
+            .iter()
+            .map(|bus| bus.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1),
+    );
+    let first_effect_id = document
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .flat_map(|clip| &clip.effects)
+        .chain(document.audio_mix.buses.iter().flat_map(|bus| &bus.effects))
+        .map(|effect| effect.id.0)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    Ok(NormalizationContext {
+        tracks: tracks.into_iter().collect(),
+        bus_id,
+        first_effect_id,
+    })
+}
+
+fn verified_normalization_operation(
+    analysis: &dyn Analysis,
+    document: &Document,
+    args: &AudioNormalizationPlanArgs,
+    context: &NormalizationContext,
+    current: AudioLoudness,
+) -> Result<(Operation, AudioLoudness), String> {
+    let current_lufs = current.integrated_lufs_hundredths.ok_or_else(|| {
+        "timeline audio is silent; normalization cannot infer a programme level".to_owned()
+    })?;
+    let current_peak = current
+        .sample_peak_dbfs_hundredths
+        .ok_or_else(|| "timeline audio has no measurable sample peak".to_owned())?;
+    let mut requested_gain = args.target_lufs_hundredths.saturating_sub(current_lufs);
+    let mut final_operation = None;
+    let mut predicted = current;
+    for _ in 0..4 {
+        let processing_ceiling = args
+            .maximum_sample_peak_dbfs_hundredths
+            .saturating_sub(LOSSY_CODEC_PEAK_HEADROOM_HUNDREDTHS);
+        let bus = normalization_bus(
+            context.bus_id,
+            context.first_effect_id,
+            context.tracks.clone(),
+            requested_gain,
+            current_peak,
+            processing_ceiling,
+        )?;
+        let operation = Operation::UpsertAudioBus { bus };
+        let mut candidate = document.clone();
+        apply_batch(&mut candidate, std::slice::from_ref(&operation))
+            .map_err(|error| format!("normalization processing is not applicable: {error}"))?;
+        predicted = analysis
+            .timeline_loudness(&candidate)
+            .map_err(|error| format!("could not verify normalized timeline audio: {error}"))?;
+        let predicted_lufs = predicted
+            .integrated_lufs_hundredths
+            .ok_or_else(|| "normalization unexpectedly produced silent output".to_owned())?;
+        final_operation = Some(operation);
+        let correction = args.target_lufs_hundredths.saturating_sub(predicted_lufs);
+        if correction.unsigned_abs() <= u32::from(args.tolerance_hundredths) {
+            break;
+        }
+        requested_gain = requested_gain.saturating_add(correction);
+    }
+    let predicted_lufs = predicted
+        .integrated_lufs_hundredths
+        .ok_or_else(|| "normalized loudness measurement disappeared".to_owned())?;
+    let predicted_peak = predicted
+        .sample_peak_dbfs_hundredths
+        .ok_or_else(|| "normalized peak measurement disappeared".to_owned())?;
+    if predicted_lufs.abs_diff(args.target_lufs_hundredths) > u32::from(args.tolerance_hundredths)
+        || predicted_peak > args.maximum_sample_peak_dbfs_hundredths
+    {
+        return Err(format!(
+            "normalization could not satisfy the delivery contract: predicted_lufs_hundredths={predicted_lufs}, predicted_peak_dbfs_hundredths={predicted_peak}"
+        ));
+    }
+    Ok((
+        final_operation.expect("normalization produced an operation"),
+        predicted,
+    ))
+}
+
+fn round_hundredths_to_tenths(value: i32) -> i64 {
+    i64::from(if value >= 0 {
+        value.saturating_add(5) / 10
+    } else {
+        value.saturating_sub(5) / 10
+    })
+}
+
+fn static_audio_effect(id: EffectId, name: &str, parameters: &[(&str, i64)]) -> Effect {
+    Effect {
+        id,
+        name: name.to_owned(),
+        parameters: parameters
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), ParamValue::Integer(*value)))
+            .collect(),
+        keyframes: BTreeMap::new(),
+    }
+}
+
+fn normalization_bus(
+    bus_id: AudioBusId,
+    first_effect_id: u64,
+    tracks: Vec<TrackId>,
+    gain_hundredths: i32,
+    measured_peak_hundredths: i32,
+    ceiling_hundredths: i32,
+) -> Result<AudioBus, String> {
+    if !(-6_000..=3_600).contains(&gain_hundredths) {
+        return Err(format!(
+            "required normalization gain {gain_hundredths} hundredths dB exceeds the supported -6000..=3600 range"
+        ));
+    }
+    let mut effects = Vec::new();
+    let mut next_effect_id = first_effect_id;
+    if gain_hundredths >= 0 {
+        let makeup_hundredths = gain_hundredths.min(2_400);
+        let post_gain_hundredths = gain_hundredths.saturating_sub(makeup_hundredths);
+        let compression_required =
+            measured_peak_hundredths.saturating_add(gain_hundredths) > ceiling_hundredths;
+        let (threshold_tenth_db, ratio_hundredths) = if compression_required {
+            let numerator = i64::from(ceiling_hundredths)
+                .saturating_sub(i64::from(gain_hundredths))
+                .saturating_sub(i64::from(measured_peak_hundredths).div_euclid(4));
+            let threshold_hundredths = numerator.saturating_mul(4).div_euclid(3).clamp(-6_000, 0);
+            (threshold_hundredths.div_euclid(10), 400)
+        } else {
+            (0, 100)
+        };
+        effects.push(static_audio_effect(
+            EffectId(next_effect_id),
+            "audio_compressor",
+            &[
+                ("threshold_tenth_db", threshold_tenth_db),
+                ("ratio_hundredths", ratio_hundredths),
+                ("attack_milliseconds", 5),
+                ("release_milliseconds", 200),
+                (
+                    "makeup_gain_tenth_db",
+                    round_hundredths_to_tenths(makeup_hundredths),
+                ),
+            ],
+        ));
+        next_effect_id = next_effect_id.saturating_add(1);
+        if post_gain_hundredths > 0 {
+            effects.push(static_audio_effect(
+                EffectId(next_effect_id),
+                "audio_gain",
+                &[(
+                    "gain_tenth_db",
+                    round_hundredths_to_tenths(post_gain_hundredths),
+                )],
+            ));
+            next_effect_id = next_effect_id.saturating_add(1);
+        }
+    } else {
+        effects.push(static_audio_effect(
+            EffectId(next_effect_id),
+            "audio_gain",
+            &[("gain_tenth_db", round_hundredths_to_tenths(gain_hundredths))],
+        ));
+        next_effect_id = next_effect_id.saturating_add(1);
+    }
+    effects.push(static_audio_effect(
+        EffectId(next_effect_id),
+        "audio_limiter",
+        &[(
+            "ceiling_tenth_db",
+            i64::from(ceiling_hundredths).div_euclid(10),
+        )],
+    ));
+    Ok(AudioBus {
+        id: bus_id,
+        name: "Delivery normalization".to_owned(),
+        tracks,
+        effects,
+        ducking_sidechain_tracks: Vec::new(),
+    })
 }
 
 impl ServerHandler for OpenReelMcp {
@@ -3533,6 +3873,24 @@ struct TrackReframeArgs {
     subject_width_percent: u8,
     /// Height of the initial subject template as a frame percentage, in 1..=75.
     subject_height_percent: u8,
+    /// Explicit horizontal center of the subject template. Defaults to the effect focus at start.
+    #[serde(default)]
+    initial_subject_x_percent: Option<u8>,
+    /// Explicit vertical center of the subject template. Defaults to the effect focus at start.
+    #[serde(default)]
+    initial_subject_y_percent: Option<u8>,
+    /// Smallest editable horizontal focus emitted by the tracker. Defaults to zero.
+    #[serde(default)]
+    minimum_focus_x_percent: Option<u8>,
+    /// Largest editable horizontal focus emitted by the tracker. Defaults to 100.
+    #[serde(default)]
+    maximum_focus_x_percent: Option<u8>,
+    /// Smallest editable vertical focus emitted by the tracker. Defaults to zero.
+    #[serde(default)]
+    minimum_focus_y_percent: Option<u8>,
+    /// Largest editable vertical focus emitted by the tracker. Defaults to 100.
+    #[serde(default)]
+    maximum_focus_y_percent: Option<u8>,
     /// First clip-local frame to track. Defaults to zero.
     #[serde(default)]
     start_local_frame: Option<TimeCode>,
@@ -3548,6 +3906,21 @@ struct TrackReframeArgs {
     /// Analysis render width. Defaults to 256; valid range 64..=512.
     #[serde(default)]
     max_width: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AudioNormalizationPlanArgs {
+    /// Source tracks to route through one deterministic delivery bus.
+    track_ids: Vec<TrackId>,
+    /// Target integrated loudness in hundredths of LUFS. Defaults to -1600.
+    #[serde(default = "default_target_lufs_hundredths")]
+    target_lufs_hundredths: i32,
+    /// Maximum decoded sample peak in hundredths of dBFS. Defaults to -100.
+    #[serde(default = "default_maximum_sample_peak_dbfs_hundredths")]
+    maximum_sample_peak_dbfs_hundredths: i32,
+    /// Accepted measured loudness error in hundredths of LU. Defaults to 100.
+    #[serde(default = "default_loudness_tolerance_hundredths")]
+    tolerance_hundredths: u16,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -3590,6 +3963,18 @@ const fn default_delivery_focus() -> u8 {
 
 const fn default_true() -> bool {
     true
+}
+
+const fn default_target_lufs_hundredths() -> i32 {
+    -1_600
+}
+
+const fn default_maximum_sample_peak_dbfs_hundredths() -> i32 {
+    -100
+}
+
+const fn default_loudness_tolerance_hundredths() -> u16 {
+    100
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -4142,6 +4527,12 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "plan_audio_normalization",
+            "Measure the rendered timeline mix, build compressor/gain/limiter processing with lossy-codec peak headroom for selected source tracks, render and remeasure the candidate in memory, and return a revision-gated plan only when it meets the requested LUFS target and sample-peak ceiling.",
+            schema_object::<AudioNormalizationPlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "get_analysis_status",
             "Return the uniform transcript, silence, scene, and beat job lifecycle for one asset without starting work.",
             schema_object::<AnalysisStatusArgs>(),
@@ -4323,7 +4714,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "track_reframe_subject",
-            "Follow an explicitly framed subject through a clip using deterministic sequential template matching, then return confidence observations and revision-gated editable focus curves for an existing reframe effect. This tracks the supplied region; it is not a learned person detector and never silently mutates the timeline.",
+            "Follow an explicitly seeded subject region through a clip using deterministic sequential template matching, clamp the editable curves to explicit face-safe focus bounds when supplied, and return confidence observations plus a revision-gated plan. This is not a learned person detector and never silently mutates the timeline.",
             schema_object::<TrackReframeArgs>(),
         )
         .with_annotations(read_only()),

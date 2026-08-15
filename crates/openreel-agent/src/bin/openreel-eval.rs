@@ -14,10 +14,10 @@ use openreel_agent::{
     ClaudeCodeDriver, CodexDriver, CursorAcpDriver,
     eval::{
         EnvironmentStamp, EvalAssertion, EvalBudgets, EvalDefinition, EvalDeliverableSpec,
-        EvalError, EvalResult, ExpectedSourceClip, ExpectedTimelineClip, FixtureContext,
-        HumanReviewFile, PreparedFixture, human_review_template,
-        maximum_duration_after_expected_silence_cuts, render_jsonl, render_scoreboard, result_path,
-        run_eval, run_eval_with_artifacts, summarize_human_review,
+        EvalError, EvalLoudnessSpec, EvalResult, ExpectedSourceClip, ExpectedTimelineClip,
+        FixtureContext, HumanReviewFile, PreparedFixture, human_review_template,
+        maximum_duration_after_expected_silence_cuts, render_jsonl, render_saved_deliverable,
+        render_scoreboard, result_path, run_eval, run_eval_with_artifacts, summarize_human_review,
     },
     fixture_pack::{FixturePackManifest, fixture_cache_root},
 };
@@ -83,6 +83,9 @@ fn run() -> Result<bool, EvalError> {
     }
     if let Some(review_path) = &options.score_review {
         return score_review_file(review_path).map(|()| true);
+    }
+    if let Some(document_path) = &options.rerender_document {
+        return rerender_document(document_path, &options);
     }
     run_subscription_suite(&options)
 }
@@ -306,109 +309,240 @@ struct Options {
     score_review: Option<PathBuf>,
     prepare_fixtures: Option<PathBuf>,
     verify_fixtures: Option<PathBuf>,
+    rerender_document: Option<PathBuf>,
+    artifact_directory: Option<PathBuf>,
+    delivery_profile: DeliveryProfile,
+    loudness_contract: Option<EvalLoudnessSpec>,
 }
 
 impl Options {
     fn parse(arguments: impl Iterator<Item = String>) -> Result<Self, EvalError> {
-        let mut harness = "claude-code".to_owned();
-        let mut model = None;
-        let mut only = None;
-        let mut samples = 1_u32;
-        let mut suite = "auto-edit-v1".to_owned();
-        let mut score_review = None;
-        let mut prepare_fixtures = None;
-        let mut verify_fixtures = None;
-        let mut arguments = arguments.peekable();
+        let mut options = Self::defaults();
+        let mut arguments = arguments;
         while let Some(argument) = arguments.next() {
-            match argument.as_str() {
-                "--harness" => {
-                    harness = arguments
-                        .next()
-                        .ok_or_else(|| EvalError::Agent("--harness requires a value".to_owned()))?;
-                }
-                "--model" => {
-                    model =
-                        Some(arguments.next().ok_or_else(|| {
-                            EvalError::Agent("--model requires a value".to_owned())
-                        })?);
-                }
-                "--only" => {
-                    only = Some(arguments.next().ok_or_else(|| {
-                        EvalError::Agent("--only requires an eval name (e.g. e7)".to_owned())
-                    })?);
-                }
-                "--samples" => {
-                    let value = arguments
-                        .next()
-                        .ok_or_else(|| EvalError::Agent("--samples requires a count".to_owned()))?;
-                    samples = value
-                        .parse::<u32>()
-                        .ok()
-                        .filter(|n| (1..=25).contains(n))
-                        .ok_or_else(|| {
-                            EvalError::Agent("--samples must be an integer in 1..=25".to_owned())
-                        })?;
-                }
-                "--suite" => {
-                    suite = arguments
-                        .next()
-                        .ok_or_else(|| EvalError::Agent("--suite requires a value".to_owned()))?;
-                }
-                "--score-review" => {
-                    score_review = Some(PathBuf::from(arguments.next().ok_or_else(|| {
-                        EvalError::Agent("--score-review requires a JSON path".to_owned())
-                    })?));
-                }
-                "--prepare-fixtures" => {
-                    prepare_fixtures = Some(PathBuf::from(arguments.next().ok_or_else(|| {
-                        EvalError::Agent(
-                            "--prepare-fixtures requires a fixture-pack manifest path".to_owned(),
-                        )
-                    })?));
-                }
-                "--verify-fixtures" => {
-                    verify_fixtures = Some(PathBuf::from(arguments.next().ok_or_else(|| {
-                        EvalError::Agent(
-                            "--verify-fixtures requires a fixture-pack manifest path".to_owned(),
-                        )
-                    })?));
-                }
-                "-h" | "--help" => {
-                    println!(
-                        "Usage: OPENREEL_EVAL=1 cargo run -p openreel-agent --bin openreel-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3|dialogue-pacing-v4|generalization-v5] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p openreel-agent --bin openreel-eval -- --prepare-fixtures MANIFEST\n       cargo run -p openreel-agent --bin openreel-eval -- --verify-fixtures MANIFEST\n       cargo run -p openreel-agent --bin openreel-eval -- --score-review PATH"
-                    );
-                    return Err(EvalError::Agent("help requested".to_owned()));
-                }
-                other => {
-                    return Err(EvalError::Agent(format!("unknown argument {other:?}")));
+            options.parse_argument(&argument, &mut arguments)?;
+        }
+        options.validate()?;
+        Ok(options)
+    }
+
+    fn defaults() -> Self {
+        Self {
+            harness: "claude-code".to_owned(),
+            model: None,
+            only: None,
+            samples: 1,
+            suite: "auto-edit-v1".to_owned(),
+            score_review: None,
+            prepare_fixtures: None,
+            verify_fixtures: None,
+            rerender_document: None,
+            artifact_directory: None,
+            delivery_profile: DeliveryProfile::VerticalShort,
+            loudness_contract: None,
+        }
+    }
+
+    fn parse_argument(
+        &mut self,
+        argument: &str,
+        arguments: &mut impl Iterator<Item = String>,
+    ) -> Result<(), EvalError> {
+        match argument {
+            "--harness" => self.harness = next_option_value(arguments, argument, "a value")?,
+            "--model" => self.model = Some(next_option_value(arguments, argument, "a value")?),
+            "--only" => {
+                self.only = Some(next_option_value(
+                    arguments,
+                    argument,
+                    "an eval name (e.g. e7)",
+                )?);
+            }
+            "--samples" => {
+                self.samples = next_option_value(arguments, argument, "a count")?
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| (1..=25).contains(n))
+                    .ok_or_else(|| {
+                        EvalError::Agent("--samples must be an integer in 1..=25".to_owned())
+                    })?;
+            }
+            "--suite" => self.suite = next_option_value(arguments, argument, "a value")?,
+            "--score-review" => {
+                self.score_review = Some(PathBuf::from(next_option_value(
+                    arguments,
+                    argument,
+                    "a JSON path",
+                )?));
+            }
+            "--prepare-fixtures" | "--verify-fixtures" => {
+                let path = PathBuf::from(next_option_value(
+                    arguments,
+                    argument,
+                    "a fixture-pack manifest path",
+                )?);
+                if argument == "--prepare-fixtures" {
+                    self.prepare_fixtures = Some(path);
+                } else {
+                    self.verify_fixtures = Some(path);
                 }
             }
+            "--rerender-document" => {
+                self.rerender_document = Some(PathBuf::from(next_option_value(
+                    arguments,
+                    argument,
+                    "a JSON path",
+                )?));
+            }
+            "--artifact-directory" => {
+                self.artifact_directory = Some(PathBuf::from(next_option_value(
+                    arguments, argument, "a path",
+                )?));
+            }
+            "--delivery-profile" => {
+                self.delivery_profile =
+                    parse_delivery_profile(&next_option_value(arguments, argument, "a value")?)?;
+            }
+            "--loudness-contract" => {
+                self.loudness_contract = Some(parse_loudness_contract(&next_option_value(
+                    arguments,
+                    argument,
+                    "MIN_LUFS,MAX_LUFS,MAX_PEAK",
+                )?)?);
+            }
+            "-h" | "--help" => {
+                print_usage();
+                return Err(EvalError::Agent("help requested".to_owned()));
+            }
+            other => return Err(EvalError::Agent(format!("unknown argument {other:?}"))),
         }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), EvalError> {
         let exclusive_actions = [
-            score_review.is_some(),
-            prepare_fixtures.is_some(),
-            verify_fixtures.is_some(),
+            self.score_review.is_some(),
+            self.prepare_fixtures.is_some(),
+            self.verify_fixtures.is_some(),
+            self.rerender_document.is_some(),
         ]
         .into_iter()
         .filter(|selected| *selected)
         .count();
         if exclusive_actions > 1 {
             return Err(EvalError::Agent(
-                "--score-review, --prepare-fixtures, and --verify-fixtures are mutually exclusive"
-                    .to_owned(),
+                "--score-review, --prepare-fixtures, --verify-fixtures, and --rerender-document are mutually exclusive".to_owned(),
             ));
         }
-        Ok(Self {
-            harness,
-            model,
-            only,
-            samples,
-            suite,
-            score_review,
-            prepare_fixtures,
-            verify_fixtures,
-        })
+        if self.rerender_document.is_some() != self.artifact_directory.is_some() {
+            return Err(EvalError::Agent(
+                "--rerender-document and --artifact-directory must be provided together".to_owned(),
+            ));
+        }
+        Ok(())
     }
+}
+
+fn print_usage() {
+    println!(
+        "Usage: OPENREEL_EVAL=1 cargo run -p openreel-agent --bin openreel-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3|dialogue-pacing-v4|generalization-v5] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p openreel-agent --bin openreel-eval -- --prepare-fixtures MANIFEST\n       cargo run -p openreel-agent --bin openreel-eval -- --verify-fixtures MANIFEST\n       cargo run -p openreel-agent --bin openreel-eval -- --score-review PATH\n       cargo run -p openreel-agent --bin openreel-eval -- --rerender-document DOCUMENT --artifact-directory DIRECTORY [--delivery-profile vertical_short] [--loudness-contract MIN_LUFS,MAX_LUFS,MAX_PEAK]"
+    );
+}
+
+fn next_option_value(
+    arguments: &mut impl Iterator<Item = String>,
+    option: &str,
+    expected: &str,
+) -> Result<String, EvalError> {
+    arguments
+        .next()
+        .ok_or_else(|| EvalError::Agent(format!("{option} requires {expected}")))
+}
+
+fn parse_delivery_profile(value: &str) -> Result<DeliveryProfile, EvalError> {
+    DeliveryProfile::ALL
+        .into_iter()
+        .find(|profile| profile.as_str() == value)
+        .ok_or_else(|| {
+            EvalError::Agent(format!(
+                "unknown delivery profile {value:?}; expected source_master, youtube_1080p, vertical_short, or square_social"
+            ))
+        })
+}
+
+fn parse_loudness_contract(value: &str) -> Result<EvalLoudnessSpec, EvalError> {
+    let values = value
+        .split(',')
+        .map(str::parse::<i32>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            EvalError::Agent(
+                "--loudness-contract values must be signed integer hundredths".to_owned(),
+            )
+        })?;
+    let [minimum, maximum, peak] = values.as_slice() else {
+        return Err(EvalError::Agent(
+            "--loudness-contract requires MIN_LUFS,MAX_LUFS,MAX_PEAK".to_owned(),
+        ));
+    };
+    if minimum > maximum || *peak > 0 {
+        return Err(EvalError::Agent(
+            "--loudness-contract requires MIN_LUFS <= MAX_LUFS and MAX_PEAK <= 0".to_owned(),
+        ));
+    }
+    Ok(EvalLoudnessSpec {
+        minimum_integrated_lufs_hundredths: *minimum,
+        maximum_integrated_lufs_hundredths: *maximum,
+        maximum_sample_peak_dbfs_hundredths: *peak,
+    })
+}
+
+fn rerender_document(document_path: &Path, options: &Options) -> Result<bool, EvalError> {
+    let artifact_directory = options.artifact_directory.as_deref().ok_or_else(|| {
+        EvalError::Agent("--artifact-directory is required for rerendering".to_owned())
+    })?;
+    let bytes = fs::read(document_path).map_err(|error| {
+        EvalError::Output(format!(
+            "could not read saved document {}: {error}",
+            document_path.display()
+        ))
+    })?;
+    let document: Document = serde_json::from_slice(&bytes).map_err(|error| {
+        EvalError::Output(format!(
+            "could not parse saved document {}: {error}",
+            document_path.display()
+        ))
+    })?;
+    let engine = eval_engine();
+    let result = render_saved_deliverable(
+        EvalDeliverableSpec {
+            profile: options.delivery_profile,
+            focus_x_percent: 50,
+            focus_y_percent: 50,
+            proof_frames: 9,
+            proof_cell_width: 240,
+            require_audio: true,
+            expected_transcript_word_set: None,
+            maximum_word_error_rate_basis_points: 10_000,
+            maximum_caption_word_error_rate_basis_points: None,
+            loudness: options.loudness_contract,
+        },
+        &document,
+        engine.as_ref(),
+        engine.as_ref(),
+        artifact_directory,
+    );
+    fs::create_dir_all(artifact_directory).map_err(|error| EvalError::Output(error.to_string()))?;
+    let report_path = artifact_directory.join("rerender-report.json");
+    fs::write(
+        &report_path,
+        serde_json::to_vec_pretty(&result).map_err(|error| EvalError::Output(error.to_string()))?,
+    )
+    .map_err(|error| EvalError::Output(error.to_string()))?;
+    println!("Rerender: {}", result.output_path.display());
+    println!("Proof: {}", result.proof_path.display());
+    println!("Report: {}", report_path.display());
+    Ok(result.machine_passed)
 }
 
 fn run_identifier(environment: &EnvironmentStamp) -> String {
@@ -797,6 +931,7 @@ fn finished_cut_suite() -> Vec<EvalDefinition> {
             expected_transcript_word_set: None,
             maximum_word_error_rate_basis_points: 0,
             maximum_caption_word_error_rate_basis_points: None,
+            loudness: None,
         }),
     }]
 }
@@ -804,10 +939,10 @@ fn finished_cut_suite() -> Vec<EvalDefinition> {
 fn event_multicam_definition() -> EvalDefinition {
     EvalDefinition {
         name: "g2 real meeting multicam introductions",
-        rationale: "Measures whether the agent can turn synchronized licensed meeting cameras plus speaker-labelled source metadata into continuous speaker-aware coverage with one untouched audio master and stable editable reframing.",
+        rationale: "Measures whether the agent can turn synchronized licensed meeting cameras plus speaker-labelled source metadata into continuous speaker-aware coverage with normalized program audio and face-safe editable reframing.",
         fixture_builder: fixture_real_event_multicam,
         prompts: &[
-            "Create a finished vertical multicam cut of the already bounded AMI meeting introduction. Open exactly these five capability schemas in one get_capability call: get_transcript, plan_speaker_multicam, add_effect, track_reframe_subject, and get_editorial_readiness. Do not call search_capabilities unless one of those exact lookups fails. Inspect the timeline and the speaker-labelled transcript on camera-laura. Use sync group 1 and video track 1. Map Laura to 'Laura closeup', David to 'David closeup', Andrew to 'Andrew closeup', and Craig to 'Craig closeup'. Call plan_speaker_multicam for group frames 1750 through 2544 exclusive, record start 0, maximum word gap 5 frames, and minimum shot length 25 frames. This deliberately suppresses brief overlapping backchannels. Inspect that planner's prepared_edit_plan preview and commit its returned plan id directly; do not call prepare_edit_plan or rewrite its operations. Keep track 2 as the single uninterrupted program-audio master; do not cut, retime, duplicate, fade, or change its gain. Reinspect the generated video clips. In one model-authored prepared edit plan, add exactly one reframe effect to every video clip using unique effect ids, target_aspect_basis_points 5625, and initial focus_x_percent/focus_y_percent 50/50; inspect and commit that plan. Then call track_reframe_subject once for each video clip with its reframe effect, subject width 45 percent, subject height 60 percent, step 25 frames, search radius 8 percent, and max width 256. Each tracking call returns a prepared_edit_plan; inspect and commit its returned plan id directly before tracking the next clip, without calling prepare_edit_plan or copying keyframe operations. Do not add captions, transitions, music, titles, or dialogue edits. Finish with one get_editorial_readiness call using vertical_short, check_silence false because continuous program audio is intentionally preserved, centered 50/50 delivery focus, nine storyboard frames, and 240-pixel cells. Do not queue export; the benchmark renders and independently probes the verified snapshot. Keep working until readiness is true.",
+            "Create a finished vertical multicam cut of the already bounded AMI meeting introduction. Open exactly these six capability schemas in one get_capability call: get_transcript, plan_speaker_multicam, add_effect, track_reframe_subject, plan_audio_normalization, and get_editorial_readiness. Do not call search_capabilities unless one of those exact lookups fails. Inspect the timeline and the speaker-labelled transcript on camera-laura. Use sync group 1 and video track 1. Map Laura to 'Laura closeup', David to 'David closeup', Andrew to 'Andrew closeup', and Craig to 'Craig closeup'. Call plan_speaker_multicam for group frames 1750 through 2544 exclusive, record start 0, maximum word gap 5 frames, and minimum shot length 25 frames. This deliberately suppresses brief overlapping backchannels. Inspect that planner's prepared_edit_plan preview and commit its returned plan id directly; do not call prepare_edit_plan or rewrite its operations. Keep track 2 as the single uninterrupted program-audio source; do not cut, retime, duplicate, fade, or change its clip gain. Reinspect the generated video clips. In one model-authored prepared edit plan, add exactly one reframe effect to every video clip using unique effect ids, target_aspect_basis_points 5625, and initial focus_x_percent/focus_y_percent 50/42; inspect and commit that plan. Then call track_reframe_subject once for each video clip with its reframe effect, subject width 25 percent, subject height 30 percent, initial subject center 50/42, horizontal focus bounds 25 through 75, vertical focus bounds 20 through 80, step 12 frames, search radius 10 percent, and max width 256. Each tracking call returns a prepared_edit_plan; inspect and commit its returned plan id directly before tracking the next clip, without calling prepare_edit_plan or copying keyframe operations. Preserve the continuous program source but call plan_audio_normalization for track 2 at -1600 LUFS hundredths with a -100 dBFS-hundredths sample-peak ceiling and 100-hundredths tolerance; inspect and commit its returned plan. Do not add captions, transitions, music, titles, or dialogue edits. Finish with one get_editorial_readiness call using vertical_short, check_silence false because continuous program audio is intentionally preserved, centered 50/50 delivery focus, nine storyboard frames, and 240-pixel cells. Do not queue export; the benchmark renders and independently probes the verified snapshot. Keep working until readiness is true.",
         ],
         assertions: event_multicam_assertions(),
         budgets: EvalBudgets {
@@ -829,6 +964,11 @@ fn event_multicam_definition() -> EvalDefinition {
             expected_transcript_word_set: Some("event-dialogue"),
             maximum_word_error_rate_basis_points: 3_000,
             maximum_caption_word_error_rate_basis_points: None,
+            loudness: Some(EvalLoudnessSpec {
+                minimum_integrated_lufs_hundredths: -1_800,
+                maximum_integrated_lufs_hundredths: -1_400,
+                maximum_sample_peak_dbfs_hundredths: -100,
+            }),
         }),
     }
 }
@@ -897,14 +1037,14 @@ fn event_multicam_assertions() -> Vec<EvalAssertion> {
         EvalAssertion::ReframeStability {
             track: TrackId(1),
             minimum_keyframes_per_axis: 2,
-            min_x_percent: 30,
-            max_x_percent: 70,
-            min_y_percent: 25,
-            max_y_percent: 70,
+            min_x_percent: 25,
+            max_x_percent: 75,
+            min_y_percent: 20,
+            max_y_percent: 80,
             maximum_step_percent: 12,
         },
         EvalAssertion::AudioPresent,
-        EvalAssertion::ProgramAudioUnchanged {
+        EvalAssertion::ProgramAudioContinuous {
             track: TrackId(2),
             asset_alias: "program-audio".to_owned(),
         },
@@ -916,6 +1056,7 @@ fn event_multicam_assertions() -> Vec<EvalAssertion> {
             "prepare_edit_plan",
             "commit_edit_plan",
             "track_reframe_subject",
+            "plan_audio_normalization",
             "get_editorial_readiness",
         ]),
         EvalAssertion::UndoIntegrity,
@@ -998,6 +1139,7 @@ fn editorial_cut_suite() -> Vec<EvalDefinition> {
             expected_transcript_word_set: Some("authored-dialogue"),
             maximum_word_error_rate_basis_points: 1_500,
             maximum_caption_word_error_rate_basis_points: None,
+            loudness: None,
         }),
     }]
 }
@@ -1115,6 +1257,7 @@ fn generalization_suite() -> Vec<EvalDefinition> {
                 expected_transcript_word_set: Some("recovery-dialogue"),
                 maximum_word_error_rate_basis_points: 0,
                 maximum_caption_word_error_rate_basis_points: Some(0),
+                loudness: None,
             }),
         },
         event_multicam_definition(),
@@ -2620,6 +2763,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rerender_options_parse_delivery_and_loudness_contracts() {
+        assert_eq!(
+            parse_delivery_profile("vertical_short").unwrap(),
+            DeliveryProfile::VerticalShort
+        );
+        assert!(parse_delivery_profile("portrait-ish").is_err());
+
+        let contract = parse_loudness_contract("-1800,-1400,-100").unwrap();
+        assert_eq!(contract.minimum_integrated_lufs_hundredths, -1_800);
+        assert_eq!(contract.maximum_integrated_lufs_hundredths, -1_400);
+        assert_eq!(contract.maximum_sample_peak_dbfs_hundredths, -100);
+        assert!(parse_loudness_contract("-1400,-1800,-100").is_err());
+        assert!(parse_loudness_contract("-1800,-1400,1").is_err());
+    }
+
+    #[test]
     fn published_v1_manifest_tracks_the_executable_seed_suite() {
         let manifest: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../benchmarks/auto-edit/v1/manifest.json"
@@ -3010,7 +3169,7 @@ mod tests {
     }
 
     #[test]
-    fn published_v5_event_baseline_records_machine_success_and_pending_human_review() {
+    fn published_v5_event_baseline_preserves_machine_success_and_human_rejection() {
         let baseline: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../benchmarks/auto-edit/v5/event-multicam-baseline.json"
         ))
@@ -3025,7 +3184,8 @@ mod tests {
         assert_eq!(baseline["deliverable"]["video_shots"], 5);
         assert_eq!(baseline["deliverable"]["program_audio_clips"], 1);
         assert_eq!(baseline["deliverable"]["tracked_reframe_clips"], 5);
-        assert_eq!(baseline["human_review"]["status"], "pending");
+        assert_eq!(baseline["human_review"]["status"], "reviewed_rejected");
+        assert_eq!(baseline["human_review"]["accepted"], false);
         assert_eq!(baseline["benchmark_status"], "in_progress");
     }
 

@@ -10,6 +10,7 @@ mod derived;
 mod derived_cache;
 mod engine;
 mod export;
+mod loudness;
 mod lut;
 mod render;
 mod sha256;
@@ -38,6 +39,7 @@ pub use derived::{
     DerivedAnalysisConfig, SceneDetectionConfig, SilenceDetectionConfig,
 };
 pub use engine::FfmpegMediaEngine;
+pub use loudness::measure_loudness;
 pub use openreel_core::{
     ThumbnailFrame, ThumbnailKey, VisualAssetResult, VisualRequestKind, WaveformData, WaveformPeak,
 };

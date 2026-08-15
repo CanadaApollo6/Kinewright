@@ -8,7 +8,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 47] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 48] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -37,6 +37,7 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 47] = [
     "plan_dialogue_assembly",
     "plan_beat_pacing",
     "plan_music_fit",
+    "plan_audio_normalization",
     "get_analysis_status",
     "get_caption_presets",
     "get_captions",
@@ -340,7 +341,7 @@ fn operation_tool(
             " gain_tenth_db is an integer number of tenths of a decibel in -600..=120. Fade values are non-negative project frames whose sum cannot exceed the clip duration. Fade-out anchors to the clip's project end. Gain and clip fades compose multiplicatively with transition audio ramps.",
         ),
         "UpsertAudioBus" | "RemoveAudioBus" => description.push_str(
-            " Audio buses route each track to at most one bus. Bus effects must use audio_gain, audio_eq, audio_compressor, or audio_ducking; their numeric controls support the same fixed-point keyframe curves as clip effects. Ducking reads the listed sidechain tracks before bus processing. Unrouted tracks feed the master directly.",
+            " Audio buses route each track to at most one bus. Bus effects must use audio_gain, audio_eq, audio_compressor, audio_ducking, or audio_limiter; their numeric controls support the same fixed-point keyframe curves as clip effects. Ducking reads the listed sidechain tracks before bus processing. Unrouted tracks feed the master directly.",
         ),
         "SetEffectKeyframes" => description.push_str(
             " The curve uses clip-local integer frame offsets and fixed-point parameter values. Keyframes must be non-negative, strictly ordered, inside the clip, and inside the parameter's documented range. Interpolation is hold, linear, ease_in, ease_out, or ease_in_out and applies from each keyframe to the next.",

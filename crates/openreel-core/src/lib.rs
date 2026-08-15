@@ -48,12 +48,12 @@ pub use effect::{
 pub use journal::JournalCommand;
 pub use media::{
     Analysis, AnalysisJobStatus, AnalysisKind, AnalysisPhase, AssetBeats, AssetSceneChanges,
-    AssetSilences, AssetTranscript, BeatMarker, BeatStatus, Export, ExportCancellation,
-    ExportProgress, ExportSettings, FrameTexture, MediaError, MediaEvent, Playback, PlaybackState,
-    ProgressSink, RgbaImage, SceneChange, SceneStatus, SilenceSpan, SilenceStatus, ThumbnailFrame,
-    ThumbnailKey, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TranscriptStatus, TranscriptWord, VisualAssetResult, VisualRequestKind, WaveformData,
-    WaveformPeak,
+    AssetSilences, AssetTranscript, AudioLoudness, BeatMarker, BeatStatus, Export,
+    ExportCancellation, ExportProgress, ExportSettings, FrameTexture, MediaError, MediaEvent,
+    Playback, PlaybackState, ProgressSink, RgbaImage, SceneChange, SceneStatus, SilenceSpan,
+    SilenceStatus, ThumbnailFrame, ThumbnailKey, TimelineBeat, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, TranscriptWord,
+    VisualAssetResult, VisualRequestKind, WaveformData, WaveformPeak,
 };
 pub use model::{
     AssetId, AudioBus, AudioBusId, AudioMix, BinId, Clip, ClipContent, ClipId, Document, Effect,

@@ -273,7 +273,9 @@ pub fn delivery_conformance(
 }
 
 /// Materialize a non-destructive delivery document from a master cut.
-/// Existing reframe effects are replaced so repeated previews never stack crops.
+///
+/// Animated reframes authored for the requested delivery aspect are preserved.
+/// Other reframes are replaced so repeated previews never stack crops.
 ///
 /// # Errors
 ///
@@ -311,7 +313,21 @@ pub fn document_for_delivery_variant(
         if matches!(clip.content, ClipContent::Title(_)) {
             continue;
         }
+        let authored_reframe = clip
+            .effects
+            .iter()
+            .find(|effect| {
+                effect.name == "reframe"
+                    && !effect.keyframes.is_empty()
+                    && effect.parameters.get("target_aspect_basis_points")
+                        == Some(&ParamValue::Integer(aspect_basis_points))
+            })
+            .cloned();
         clip.effects.retain(|effect| effect.name != "reframe");
+        if let Some(effect) = authored_reframe {
+            clip.effects.push(effect);
+            continue;
+        }
         let mut parameters = BTreeMap::new();
         parameters.insert(
             "target_aspect_basis_points".to_owned(),
@@ -403,6 +419,86 @@ mod tests {
                 ParamValue::Integer(50)
             );
         }
+    }
+
+    #[test]
+    fn matching_animated_reframe_survives_delivery_materialization() {
+        let mut source = fixture();
+        let tracked = Effect {
+            id: EffectId(41),
+            name: "reframe".to_owned(),
+            parameters: BTreeMap::from([
+                (
+                    "target_aspect_basis_points".to_owned(),
+                    ParamValue::Integer(5_625),
+                ),
+                ("focus_x_percent".to_owned(), ParamValue::Integer(50)),
+                ("focus_y_percent".to_owned(), ParamValue::Integer(42)),
+            ]),
+            keyframes: BTreeMap::from([(
+                "focus_x_percent".to_owned(),
+                crate::AutomationCurve {
+                    keyframes: vec![
+                        crate::Keyframe {
+                            at: TimeCode::ZERO,
+                            value: 50,
+                            interpolation: crate::KeyframeInterpolation::EaseInOut,
+                        },
+                        crate::Keyframe {
+                            at: TimeCode(29),
+                            value: 35,
+                            interpolation: crate::KeyframeInterpolation::EaseInOut,
+                        },
+                    ],
+                },
+            )]),
+        };
+        source.tracks[0].clips[0].effects.push(tracked.clone());
+
+        let delivered = document_for_delivery_variant(
+            &source,
+            DeliveryVariant::centered(DeliveryAspect::Vertical),
+        )
+        .unwrap();
+
+        assert_eq!(delivered.tracks[0].clips[0].effects, vec![tracked]);
+    }
+
+    #[test]
+    fn mismatched_animated_reframe_is_replaced_for_delivery_aspect() {
+        let mut source = fixture();
+        source.tracks[0].clips[0].effects.push(Effect {
+            id: EffectId(41),
+            name: "reframe".to_owned(),
+            parameters: BTreeMap::from([(
+                "target_aspect_basis_points".to_owned(),
+                ParamValue::Integer(10_000),
+            )]),
+            keyframes: BTreeMap::from([(
+                "focus_x_percent".to_owned(),
+                crate::AutomationCurve {
+                    keyframes: vec![crate::Keyframe {
+                        at: TimeCode::ZERO,
+                        value: 10,
+                        interpolation: crate::KeyframeInterpolation::Linear,
+                    }],
+                },
+            )]),
+        });
+
+        let delivered = document_for_delivery_variant(
+            &source,
+            DeliveryVariant::centered(DeliveryAspect::Vertical),
+        )
+        .unwrap();
+        let effects = &delivered.tracks[0].clips[0].effects;
+
+        assert_eq!(effects.len(), 1);
+        assert_eq!(
+            effects[0].parameters["target_aspect_basis_points"],
+            ParamValue::Integer(5_625)
+        );
+        assert!(effects[0].keyframes.is_empty());
     }
 
     #[test]

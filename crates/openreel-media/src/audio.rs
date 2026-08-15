@@ -417,6 +417,17 @@ impl AudioEffectRuntime {
                     *sample *= *envelope * makeup;
                 }
             }
+            ("audio_limiter", AudioEffectState::Stateless) => {
+                let ceiling = db_gain(audio_value(
+                    &self.effect,
+                    "ceiling_tenth_db",
+                    project_at,
+                    -10,
+                ));
+                for sample in samples {
+                    *sample = sample.clamp(-ceiling, ceiling);
+                }
+            }
             ("audio_ducking", AudioEffectState::GainEnvelope(envelope)) => {
                 let sidechain_level = sidechain
                     .iter()
@@ -1373,6 +1384,33 @@ mod tests {
             "EQ, compression, and ducking should reduce steady full-scale input: {}",
             output[1_999]
         );
+    }
+
+    #[test]
+    fn limiter_enforces_its_declared_sample_ceiling() {
+        let document = processor_document(
+            Rational::new(1_000, 1).unwrap(),
+            2,
+            vec![AudioBus {
+                id: AudioBusId(1),
+                name: "Delivery".to_owned(),
+                tracks: vec![TrackId(1)],
+                effects: vec![audio_effect(
+                    1,
+                    "audio_limiter",
+                    &[("ceiling_tenth_db", -10)],
+                )],
+                ducking_sidechain_tracks: Vec::new(),
+            }],
+        );
+        let tracks = HashMap::from([(TrackId(1), vec![2.0, -2.0])]);
+        let output = AudioMixProcessor::new(&document, 1_000, 1)
+            .mix_chunk(&tracks, 0, 2)
+            .unwrap();
+        let ceiling = 10.0_f32.powf(-1.0 / 20.0);
+
+        assert_close(output[0], ceiling);
+        assert_close(output[1], -ceiling);
     }
 
     #[test]

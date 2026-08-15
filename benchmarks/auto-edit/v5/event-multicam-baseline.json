@@ -91,9 +91,10 @@
     "output_sha256": "1c168637e2bcb5ba7447d6dafaf19846019cd701beaba01e8824a311f250dc07"
   },
   "human_review": {
-    "status": "pending",
+    "status": "reviewed_rejected",
+    "accepted": false,
     "review_template": "target/evals/openreel-eval-20260814-205624-codex/human-review.json",
-    "note": "Machine checks do not decide whether the speaker choices, cut rhythm, low-resolution upscale, or tracked vertical framing are publishable."
+    "note": "Human review found the cut rhythm and speaker selection sound and the crop generally good, but Laura left the safe vertical framing late in the piece. The decisive failure was audio at about -39.9 LUFS, requiring the listener to crank system volume. Captions were intentionally absent for this isolated multicam task. No numeric ratings were supplied, so none are invented here."
   },
   "benchmark_status": "in_progress"
 }

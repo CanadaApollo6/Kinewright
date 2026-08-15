@@ -91,6 +91,22 @@ pub struct ExportSettings {
     pub cancellation: ExportCancellation,
 }
 
+/// Delivery loudness measured from decoded PCM using the ITU-R BS.1770
+/// K-weighting and gating model. Decibel values use hundredths so agent and
+/// project contracts remain deterministic and JSON-safe.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct AudioLoudness {
+    /// Gated programme loudness. `None` means the decoded signal was silent.
+    pub integrated_lufs_hundredths: Option<i32>,
+    /// Highest decoded sample before loudness weighting. `None` means silence.
+    pub sample_peak_dbfs_hundredths: Option<i32>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub sample_frames: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ExportCancellation(Arc<AtomicBool>);
 
@@ -510,6 +526,22 @@ pub trait Analysis: Send + Sync {
         range: Option<std::ops::Range<TimeCode>>,
         minimum_confidence_basis_points: u16,
     ) -> Result<Vec<TimelineSceneChange>, MediaError>;
+    /// Measure a decoded source asset using the delivery loudness contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when audio cannot be decoded or measured.
+    fn asset_loudness(&self, _asset: &MediaAsset) -> Result<AudioLoudness, MediaError> {
+        Err(MediaError::NotImplemented)
+    }
+    /// Render the current audio graph in memory and measure its delivery loudness.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when timeline audio cannot be rendered or measured.
+    fn timeline_loudness(&self, _document: &Document) -> Result<AudioLoudness, MediaError> {
+        Err(MediaError::NotImplemented)
+    }
     /// Queue deterministic beat/onset analysis without blocking the caller.
     fn request_beat_detection(&self, _asset: MediaAsset) {}
     /// Return the latest beat-analysis state for an asset.

@@ -11,12 +11,13 @@ use std::{
 };
 
 use openreel_core::{
-    AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, AssetTranscript, CaptionMotion,
-    ClipContent, Command, Core, DeliveryConformanceReport, DeliveryProfile, Document, Event,
-    Export, ExportCancellation, HarnessInfo, MediaKind, Operation, ParamValue, Playback, Query,
-    QueryResult, SessionConfig, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, TitlePosition, TrackId, TranscriptStatus, dedup_timeline_words,
-    delivery_conformance, document_for_delivery_profile, map_source_range_to_project, qa_document,
+    AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, AssetTranscript, AudioLoudness,
+    CaptionMotion, ClipContent, Command, Core, DeliveryConformanceReport, DeliveryProfile,
+    Document, Event, Export, ExportCancellation, HarnessInfo, MediaKind, Operation, ParamValue,
+    Playback, Query, QueryResult, SessionConfig, TimeCode, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, TrackId, TranscriptStatus,
+    dedup_timeline_words, delivery_conformance, document_for_delivery_profile,
+    map_source_range_to_project, qa_document,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -98,6 +99,14 @@ pub struct EvalDeliverableSpec {
     pub expected_transcript_word_set: Option<&'static str>,
     pub maximum_word_error_rate_basis_points: u16,
     pub maximum_caption_word_error_rate_basis_points: Option<u16>,
+    pub loudness: Option<EvalLoudnessSpec>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct EvalLoudnessSpec {
+    pub minimum_integrated_lufs_hundredths: i32,
+    pub maximum_integrated_lufs_hundredths: i32,
+    pub maximum_sample_peak_dbfs_hundredths: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,7 +198,7 @@ pub enum EvalAssertion {
         profile: DeliveryProfile,
     },
     AudioPresent,
-    ProgramAudioUnchanged {
+    ProgramAudioContinuous {
         track: TrackId,
         asset_alias: String,
     },
@@ -356,9 +365,28 @@ pub struct EvalDeliverableResult {
     pub rendered_transcript: Option<RenderedTranscriptVerification>,
     pub rendered_caption_alignment_required: bool,
     pub rendered_caption_alignment: Option<RenderedTranscriptVerification>,
+    pub rendered_loudness_contract: Option<EvalLoudnessSpec>,
+    pub rendered_loudness: Option<RenderedLoudnessVerification>,
+    pub rendered_reframe: Option<RenderedReframeVerification>,
     pub proof_sample_frames: Vec<TimeCode>,
     pub machine_passed: bool,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderedLoudnessVerification {
+    pub measurement: AudioLoudness,
+    pub minimum_integrated_lufs_hundredths: i32,
+    pub maximum_integrated_lufs_hundredths: i32,
+    pub maximum_sample_peak_dbfs_hundredths: i32,
+    pub passed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderedReframeVerification {
+    pub expected_animated_clips: usize,
+    pub preserved_animated_clips: usize,
+    pub passed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -711,6 +739,7 @@ fn produce_deliverable(
             return finish_deliverable(result);
         }
     };
+    result.rendered_reframe = rendered_reframe_verification(document, &delivery_document);
     match render_proof_sheet(
         analysis,
         &delivery_document,
@@ -738,6 +767,28 @@ fn produce_deliverable(
         );
     }
     finish_deliverable(result)
+}
+
+/// Render and verify a saved edit decision without starting another agent turn.
+///
+/// This is useful when a renderer or delivery-contract fix needs to be checked
+/// against the exact document an agent already produced.
+#[must_use]
+pub fn render_saved_deliverable(
+    spec: EvalDeliverableSpec,
+    document: &Document,
+    analysis: &dyn Analysis,
+    exporter: &dyn Export,
+    directory: &Path,
+) -> EvalDeliverableResult {
+    produce_deliverable(
+        spec,
+        document,
+        analysis,
+        exporter,
+        &FixtureContext::default(),
+        directory,
+    )
 }
 
 fn rendered_transcript_expectation<'a>(
@@ -855,6 +906,9 @@ fn export_and_probe(
             asset.kind
         ));
     }
+    if let Some(contract) = spec.loudness {
+        verify_rendered_loudness(result, analysis, &asset, contract);
+    }
     if let Some(expected_words) = expected_transcript_words {
         verify_rendered_delivery_transcript(
             result,
@@ -865,6 +919,56 @@ fn export_and_probe(
             expected_words,
         );
     }
+}
+
+fn verify_rendered_loudness(
+    result: &mut EvalDeliverableResult,
+    analysis: &dyn Analysis,
+    asset: &openreel_core::MediaAsset,
+    contract: EvalLoudnessSpec,
+) {
+    if contract.minimum_integrated_lufs_hundredths > contract.maximum_integrated_lufs_hundredths {
+        result
+            .errors
+            .push("rendered loudness bounds are reversed".to_owned());
+        return;
+    }
+    let measurement = match analysis.asset_loudness(asset) {
+        Ok(measurement) => measurement,
+        Err(error) => {
+            result
+                .errors
+                .push(format!("rendered loudness measurement failed: {error}"));
+            return;
+        }
+    };
+    let passed = measurement
+        .integrated_lufs_hundredths
+        .is_some_and(|loudness| {
+            (contract.minimum_integrated_lufs_hundredths
+                ..=contract.maximum_integrated_lufs_hundredths)
+                .contains(&loudness)
+        })
+        && measurement
+            .sample_peak_dbfs_hundredths
+            .is_some_and(|peak| peak <= contract.maximum_sample_peak_dbfs_hundredths);
+    if !passed {
+        result.errors.push(format!(
+            "rendered audio violates loudness delivery: integrated_lufs_hundredths={:?}, required={}..={}; sample_peak_dbfs_hundredths={:?}, maximum={}",
+            measurement.integrated_lufs_hundredths,
+            contract.minimum_integrated_lufs_hundredths,
+            contract.maximum_integrated_lufs_hundredths,
+            measurement.sample_peak_dbfs_hundredths,
+            contract.maximum_sample_peak_dbfs_hundredths,
+        ));
+    }
+    result.rendered_loudness = Some(RenderedLoudnessVerification {
+        measurement,
+        minimum_integrated_lufs_hundredths: contract.minimum_integrated_lufs_hundredths,
+        maximum_integrated_lufs_hundredths: contract.maximum_integrated_lufs_hundredths,
+        maximum_sample_peak_dbfs_hundredths: contract.maximum_sample_peak_dbfs_hundredths,
+        passed,
+    });
 }
 
 fn verify_rendered_delivery_transcript(
@@ -1027,6 +1131,9 @@ fn deliverable_shell(
             .maximum_caption_word_error_rate_basis_points
             .is_some(),
         rendered_caption_alignment: None,
+        rendered_loudness_contract: spec.loudness,
+        rendered_loudness: None,
+        rendered_reframe: None,
         proof_sample_frames: Vec::new(),
         machine_passed: false,
         errors: Vec::new(),
@@ -1246,6 +1353,15 @@ fn finish_deliverable(mut result: EvalDeliverableResult) -> EvalDeliverableResul
                 .rendered_caption_alignment
                 .as_ref()
                 .is_some_and(|verification| verification.passed))
+        && (result.rendered_loudness_contract.is_none()
+            || result
+                .rendered_loudness
+                .as_ref()
+                .is_some_and(|verification| verification.passed))
+        && result
+            .rendered_reframe
+            .as_ref()
+            .is_none_or(|verification| verification.passed)
         && !result.proof_sample_frames.is_empty()
         && result.proof_path.is_file()
         && result.document_path.is_file();
@@ -1345,7 +1461,100 @@ fn deliverable_assertions(result: &EvalDeliverableResult) -> Vec<AssertionResult
             ),
         });
     }
+    if result.rendered_loudness_contract.is_some() {
+        assertions.push(rendered_loudness_assertion(result));
+    }
+    if result.rendered_reframe.is_some() {
+        assertions.push(rendered_reframe_assertion(result));
+    }
     assertions
+}
+
+fn rendered_reframe_assertion(result: &EvalDeliverableResult) -> AssertionResult {
+    let Some(verification) = &result.rendered_reframe else {
+        return assertion_result(
+            "rendered reframe automation",
+            false,
+            "animated reframe verification is unavailable".to_owned(),
+        );
+    };
+    assertion_result(
+        "rendered reframe automation",
+        verification.passed,
+        format!(
+            "preserved {} of {} same-aspect animated reframe clips",
+            verification.preserved_animated_clips, verification.expected_animated_clips
+        ),
+    )
+}
+
+fn rendered_reframe_verification(
+    source: &Document,
+    delivered: &Document,
+) -> Option<RenderedReframeVerification> {
+    let (width, height) = delivered.resolution;
+    let aspect_basis_points = i64::from(width)
+        .saturating_mul(10_000)
+        .saturating_add(i64::from(height) / 2)
+        / i64::from(height.max(1));
+    let expected = source
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .flat_map(|clip| {
+            clip.effects.iter().filter_map(move |effect| {
+                (effect.name == "reframe"
+                    && !effect.keyframes.is_empty()
+                    && effect.parameters.get("target_aspect_basis_points")
+                        == Some(&ParamValue::Integer(aspect_basis_points)))
+                .then_some((clip.id, effect))
+            })
+        })
+        .collect::<Vec<_>>();
+    if expected.is_empty() {
+        return None;
+    }
+    let preserved = expected
+        .iter()
+        .filter(|(clip_id, effect)| {
+            delivered
+                .tracks
+                .iter()
+                .flat_map(|track| &track.clips)
+                .find(|clip| clip.id == *clip_id)
+                .is_some_and(|clip| clip.effects.contains(effect))
+        })
+        .count();
+    Some(RenderedReframeVerification {
+        expected_animated_clips: expected.len(),
+        preserved_animated_clips: preserved,
+        passed: preserved == expected.len(),
+    })
+}
+
+fn rendered_loudness_assertion(result: &EvalDeliverableResult) -> AssertionResult {
+    match &result.rendered_loudness {
+        Some(verification) => assertion_result(
+            "rendered audio loudness",
+            verification.passed,
+            format!(
+                "integrated_lufs_hundredths={:?}, required={}..={}; sample_peak_dbfs_hundredths={:?}, maximum={}",
+                verification.measurement.integrated_lufs_hundredths,
+                verification.minimum_integrated_lufs_hundredths,
+                verification.maximum_integrated_lufs_hundredths,
+                verification.measurement.sample_peak_dbfs_hundredths,
+                verification.maximum_sample_peak_dbfs_hundredths,
+            ),
+        ),
+        None => assertion_result(
+            "rendered audio loudness",
+            false,
+            format!(
+                "required rendered loudness measurement is unavailable; errors={:?}",
+                result.errors
+            ),
+        ),
+    }
 }
 
 fn render_proof_sheet(
@@ -1813,8 +2022,8 @@ fn evaluate_assertion(
         } => evaluate_styled_captions(*minimum_cues, *motion, outcome),
         EvalAssertion::CaptionSafeArea { profile } => evaluate_caption_safe_area(*profile, outcome),
         EvalAssertion::AudioPresent => evaluate_audio_present(&outcome.final_document),
-        EvalAssertion::ProgramAudioUnchanged { track, asset_alias } => {
-            evaluate_program_audio_unchanged(*track, asset_alias, outcome)
+        EvalAssertion::ProgramAudioContinuous { track, asset_alias } => {
+            evaluate_program_audio_continuous(*track, asset_alias, outcome)
         }
         EvalAssertion::ReframeStability {
             track,
@@ -2243,14 +2452,14 @@ fn evaluate_reframe_stability(
     )
 }
 
-fn evaluate_program_audio_unchanged(
+fn evaluate_program_audio_continuous(
     track_id: TrackId,
     asset_alias: &str,
     outcome: &EvalOutcome,
 ) -> AssertionResult {
     let Some(asset) = outcome.context.asset_aliases.get(asset_alias) else {
         return assertion_result(
-            "program audio unchanged",
+            "program audio continuous",
             false,
             format!("unknown asset alias {asset_alias:?}"),
         );
@@ -2262,7 +2471,7 @@ fn evaluate_program_audio_unchanged(
         .find(|track| track.id == track_id)
     else {
         return assertion_result(
-            "program audio unchanged",
+            "program audio continuous",
             false,
             format!("track {track_id} does not exist"),
         );
@@ -2282,7 +2491,7 @@ fn evaluate_program_audio_unchanged(
         && media_clips[0].effects.is_empty()
         && media_clips[0].transition_in.is_none();
     assertion_result(
-        "program audio unchanged",
+        "program audio continuous",
         passed,
         format!(
             "track={track_id}, kind={:?}, clips={}, asset={}, expected_asset={}, gain_tenth_db={:?}, fades={:?}, speed={:?}, effects={:?}, transition={:?}",
@@ -3376,6 +3585,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rendered_reframe_verification_detects_lost_delivery_curves() {
+        let mut source = document();
+        source.tracks[0].clips[0]
+            .effects
+            .push(openreel_core::Effect {
+                id: openreel_core::EffectId(9),
+                name: "reframe".to_owned(),
+                parameters: BTreeMap::from([(
+                    "target_aspect_basis_points".to_owned(),
+                    ParamValue::Integer(5_625),
+                )]),
+                keyframes: BTreeMap::from([(
+                    "focus_x_percent".to_owned(),
+                    openreel_core::AutomationCurve {
+                        keyframes: vec![openreel_core::Keyframe {
+                            at: TimeCode::ZERO,
+                            value: 42,
+                            interpolation: openreel_core::KeyframeInterpolation::Linear,
+                        }],
+                    },
+                )]),
+            });
+        let delivered =
+            document_for_delivery_profile(&source, DeliveryProfile::VerticalShort, 50, 50).unwrap();
+        let preserved = rendered_reframe_verification(&source, &delivered).unwrap();
+        assert_eq!(preserved.expected_animated_clips, 1);
+        assert_eq!(preserved.preserved_animated_clips, 1);
+        assert!(preserved.passed);
+
+        let mut lost = delivered;
+        lost.tracks[0].clips[0].effects[0].keyframes.clear();
+        let rejected = rendered_reframe_verification(&source, &lost).unwrap();
+        assert_eq!(rejected.preserved_animated_clips, 0);
+        assert!(!rejected.passed);
+    }
+
     fn unused_fixture() -> Result<PreparedFixture, EvalError> {
         Err(EvalError::Fixture("unused by unit test".to_owned()))
     }
@@ -3740,6 +3986,7 @@ mod tests {
                 expected_transcript_word_set: Some("authored"),
                 maximum_word_error_rate_basis_points: 1_500,
                 maximum_caption_word_error_rate_basis_points: None,
+                loudness: None,
             },
             &document(),
             Path::new("artifacts/f2"),
@@ -3860,6 +4107,7 @@ mod tests {
                 expected_transcript_word_set: None,
                 maximum_word_error_rate_basis_points: 0,
                 maximum_caption_word_error_rate_basis_points: None,
+                loudness: None,
             },
             &document(),
             Path::new("artifacts/f1"),

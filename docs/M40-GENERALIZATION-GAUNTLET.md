@@ -128,16 +128,17 @@ download is about 234 MiB and remains outside Git.
 The benchmark bounds a 31.76-second introduction at 25 fps. A speaker-labelled
 sidecar derived from the pinned manual annotations names Laura, David, Andrew,
 and Craig. The model must build exactly five contiguous speaker-driven shots,
-preserve one continuous untouched program-audio clip, and add editable tracked
-9:16 reframe curves to every shot. It must not add captions, music, titles,
-transitions, or dialogue edits.
+preserve one continuous program-audio clip, normalize it to a measured delivery
+target, and add editable face-safe tracked 9:16 reframe curves to every shot.
+It must not add captions, music, titles, transitions, or dialogue edits.
 
 The evaluator independently checks:
 
 - the exact camera, timeline, and source range of all five video shots;
-- the exact source range and untouched state of the program mix;
+- the exact source range and continuous state of the program mix;
 - gapless 794-frame coverage and delivery duration;
-- one reframe effect per shot, keyframe count, safe bounds, and maximum jumps;
+- one reframe effect per shot, keyframe count, face-safe bounds, and maximum jumps;
+- rendered integrated loudness from -18 to -14 LUFS and a -1 dBFS sample-peak ceiling;
 - technical QA, vertical delivery conformance, undo integrity, and budgets;
 - a real 1080x1920 MP4, output hash, frame count, duration, audio, and
   independently transcribed rendered dialogue.
@@ -158,13 +159,50 @@ tool calls, 20 edit operations, and 393,543 total tokens, of which 334,080 were
 cached input. The 39,380,998-byte MP4 is 794 frames at 1080x1920 with SHA-256
 `1c168637e2bcb5ba7447d6dafaf19846019cd701beaba01e8824a311f250dc07`.
 
+Human review rejected that SHA-bound artifact. Speaker selection and cut rhythm
+were sound, and most crops were good, but Laura drifted out of the safe frame.
+More importantly, both the source segment and rendered programme measured about
+-39.9 LUFS. The evaluator had mistaken "an audio stream exists" for audible
+delivery. M40 now treats loudness and safe subject framing as independent
+machine contracts. The editor measures BS.1770-style integrated loudness,
+previews a compressor/gain/limiter bus, rerenders it in memory, and only returns
+the revision-gated plan when the requested loudness and peak bounds are met.
+The original rejected result remains immutable in
+`event-multicam-baseline.json`; a recovery artifact must get its own baseline.
+
+The first loudness recovery exposed AAC peak overshoot: its in-memory mix met
+the requested ceiling, but the decoded MP4 reached +0.24 dBFS. Normalization
+now reserves 2 dB of encoder headroom and verifies the encoded artifact rather
+than trusting the pre-encode mix. The next model edit passed 24/24 then-current
+assertions in one turn with 21 tool calls, 21 operations, and 417,385 total
+tokens. Its encoded programme measured -16.98 LUFS with a -1.72 dBFS sample
+peak.
+
+Visual review of that run uncovered a second evaluator defect. The master edit
+contained five animated reframes, but delivery materialization discarded every
+curve and substituted a static centered crop. This made tracking changes
+produce byte-identical proof sheets and explained Laura's framing failure.
+Delivery now preserves same-aspect animated reframes, the artifact scorer
+explicitly fails if those curves do not survive, and saved documents can be
+rerendered without spending another agent turn. Rerendering the exact saved
+model edit produced a distinct proof and a 39,718,336-byte MP4 with SHA-256
+`468ffa70090b17ee85f8a149330b7fb641584b7bed8cd49f1fbfe7e984e7e5b8` while
+retaining -16.98 LUFS and -1.72 dBFS. Human acceptance of this recovery
+artifact is pending, so it is not promoted to a checked-in baseline.
+
+The next official sample also uses the crop's actual geometric travel range
+(25-75% horizontally) instead of the overly conservative 45-55% clamp. That
+lets the tracker follow Laura while keeping the supplied 25%-wide subject box
+inside the 9:16 crop.
+
 Readiness also gained an explicit `check_silence` policy. Event work that must
 preserve continuous program audio can skip irrelevant dead-air analysis while
 still running technical QA, delivery conformance, and the real storyboard.
-The final trace ends with editorial readiness `true`. Human acceptance of the
-SHA-bound event artifact remains pending, and one passing sample is not the
-three-sample family gate. The machine result and immutable hashes are recorded
-in `benchmarks/auto-edit/v5/event-multicam-baseline.json`.
+The final trace ended with editorial readiness `true`, proving that readiness
+also lacked the audible-delivery signal. One passing machine sample is not the
+three-sample family gate, and this one is human-rejected. The machine result,
+review outcome, and immutable hashes are recorded in
+`benchmarks/auto-edit/v5/event-multicam-baseline.json`.
 
 ## Commands
 
@@ -210,6 +248,18 @@ cargo run -p openreel-agent --bin openreel-eval -- `
   --harness codex `
   --only g2 `
   --samples 1
+```
+
+Rerender an exact saved edit after a renderer or delivery fix, without another
+model session:
+
+```powershell
+& .\scripts\setup-ffmpeg.ps1
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --rerender-document target/evals/RUN/artifacts/g2-sample-1/final-document.json `
+  --artifact-directory target/evals/RUN-rerender/artifacts/g2-sample-1 `
+  --delivery-profile vertical_short `
+  --loudness-contract '-1800,-1400,-100'
 ```
 
 ## Exit gate

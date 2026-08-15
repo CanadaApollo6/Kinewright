@@ -10,19 +10,21 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use openreel_core::{
-    Analysis, AnalysisKind, AssetId, AssetTranscript, BeatStatus, Document, Export, ExportSettings,
-    FrameTexture, MediaAsset, MediaError, MediaEvent, Playback, PlaybackState, ProgressSink,
-    Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange,
-    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, VisualAssetResult,
+    Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, BeatStatus, Document, Export,
+    ExportCancellation, ExportSettings, FrameTexture, MediaAsset, MediaError, MediaEvent, Playback,
+    PlaybackState, ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode,
+    TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TranscriptStatus, VisualAssetResult,
 };
 
 use crate::{
     analysis::VisualAssetService,
-    audio::{AudioRuntime, MeterState},
+    audio::{AudioRuntime, MeterState, decode_audio_range},
     clock::samples_to_frame,
     compositor::GpuContext,
     decode::probe_path,
     derived::{DerivedAnalysisConfig, DerivedAnalysisService},
+    loudness::measure_loudness,
     render::{DecodeStrategy, FrameRenderer, PREVIEW_MAX_WIDTH, RenderScale},
     transcript::{TranscriptService, default_data_dir},
 };
@@ -399,6 +401,33 @@ impl Analysis for FfmpegMediaEngine {
     ) -> Result<Vec<TimelineSceneChange>, MediaError> {
         self.derived_analysis
             .timeline_scenes(document, range, minimum_confidence_basis_points)
+    }
+
+    fn asset_loudness(&self, asset: &MediaAsset) -> Result<AudioLoudness, MediaError> {
+        let samples = decode_audio_range(
+            &asset.path,
+            asset.fps,
+            TimeCode::ZERO,
+            asset.duration,
+            48_000,
+            2,
+            &ExportCancellation::default(),
+        )?;
+        measure_loudness(&samples, 48_000, 2)
+    }
+
+    fn timeline_loudness(&self, document: &Document) -> Result<AudioLoudness, MediaError> {
+        let settings = ExportSettings {
+            fps: document.fps,
+            resolution: document.resolution,
+            video_codec: "libx264".to_owned(),
+            audio_codec: "aac".to_owned(),
+            video_bitrate: 1,
+            audio_bitrate: 1,
+            cancellation: ExportCancellation::default(),
+        };
+        let samples = crate::export::mix_audio(document, &settings)?;
+        measure_loudness(&samples, 48_000, 2)
     }
 
     fn request_beat_detection(&self, asset: MediaAsset) {

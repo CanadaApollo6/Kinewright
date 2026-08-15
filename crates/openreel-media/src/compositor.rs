@@ -748,6 +748,7 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                 | EffectUniform::CompressorAttack
                 | EffectUniform::CompressorRelease
                 | EffectUniform::CompressorMakeup
+                | EffectUniform::LimiterCeiling
                 | EffectUniform::DuckThreshold
                 | EffectUniform::DuckReduction
                 | EffectUniform::DuckAttack
