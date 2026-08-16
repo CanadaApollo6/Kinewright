@@ -20,6 +20,7 @@ use crate::{
     icons::Icon,
     project::{ProjectSession, index_after_close, project_name, session_index_by_id},
     theme::{self, color, size, space},
+    timeline_ui::is_internal_marker,
     transcript_ui::TranscriptScope,
 };
 
@@ -675,7 +676,7 @@ impl OpenReelApp {
                     }
                     if self.projects[project_index]
                         .selected_marker
-                        .is_some_and(|marker| doc.marker(marker).is_none())
+                        .is_some_and(|marker| doc.marker(marker).is_none_or(is_internal_marker))
                     {
                         self.projects[project_index].selected_marker = None;
                     }

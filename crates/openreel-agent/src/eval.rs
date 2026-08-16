@@ -23,8 +23,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ConfirmationBroker, McpServer, compact_tool_names, pacing::dialogue_pacing_gaps,
-    render::cuttable_timeline_silences, shrink_silence_span_for_cutting_with_transcript,
+    ConfirmationBroker, McpServer, compact_tool_names,
+    pacing::dialogue_pacing_gaps,
+    render::cuttable_timeline_silences,
+    server::{ReframeSubjectProvenance, TrackedSubjectBounds, decode_reframe_subject_provenance},
+    shrink_silence_span_for_cutting_with_transcript,
 };
 
 /// Compute the upper duration bound after cutting every qualifying reported
@@ -386,6 +389,8 @@ pub struct RenderedLoudnessVerification {
 pub struct RenderedReframeVerification {
     pub expected_animated_clips: usize,
     pub preserved_animated_clips: usize,
+    pub expected_subject_provenance_clips: usize,
+    pub preserved_subject_provenance_clips: usize,
     pub passed: bool,
 }
 
@@ -1482,8 +1487,11 @@ fn rendered_reframe_assertion(result: &EvalDeliverableResult) -> AssertionResult
         "rendered reframe automation",
         verification.passed,
         format!(
-            "preserved {} of {} same-aspect animated reframe clips",
-            verification.preserved_animated_clips, verification.expected_animated_clips
+            "preserved {} of {} same-aspect animated reframe clips and {} of {} tracked-subject provenance sidecars",
+            verification.preserved_animated_clips,
+            verification.expected_animated_clips,
+            verification.preserved_subject_provenance_clips,
+            verification.expected_subject_provenance_clips,
         ),
     )
 }
@@ -1514,6 +1522,8 @@ fn rendered_reframe_verification(
     if expected.is_empty() {
         return None;
     }
+    let source_provenance = valid_reframe_subject_provenances(source);
+    let delivered_provenance = valid_reframe_subject_provenances(delivered);
     let preserved = expected
         .iter()
         .filter(|(clip_id, effect)| {
@@ -1525,10 +1535,25 @@ fn rendered_reframe_verification(
                 .is_some_and(|clip| clip.effects.contains(effect))
         })
         .count();
+    let expected_subject_provenance = expected
+        .iter()
+        .filter_map(|(clip_id, effect)| {
+            source_provenance
+                .iter()
+                .find(|provenance| provenance.clip == *clip_id && provenance.effect == effect.id)
+        })
+        .collect::<Vec<_>>();
+    let preserved_subject_provenance = expected_subject_provenance
+        .iter()
+        .filter(|provenance| delivered_provenance.contains(provenance))
+        .count();
     Some(RenderedReframeVerification {
         expected_animated_clips: expected.len(),
         preserved_animated_clips: preserved,
-        passed: preserved == expected.len(),
+        expected_subject_provenance_clips: expected_subject_provenance.len(),
+        preserved_subject_provenance_clips: preserved_subject_provenance,
+        passed: preserved == expected.len()
+            && preserved_subject_provenance == expected_subject_provenance.len(),
     })
 }
 
@@ -2360,6 +2385,7 @@ fn evaluate_track_clips(
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn evaluate_reframe_stability(
     track_id: TrackId,
     minimum_keyframes_per_axis: usize,
@@ -2380,7 +2406,7 @@ fn evaluate_reframe_stability(
             format!("track {track_id} does not exist"),
         );
     };
-    let mut errors = Vec::new();
+    let (provenances, mut errors) = reframe_subject_provenances(&outcome.final_document);
     let media_clips = track
         .clips
         .iter()
@@ -2401,11 +2427,22 @@ fn evaluate_reframe_stability(
             continue;
         }
         let effect = reframes[0];
-        for (axis, bounds) in [
-            ("focus_x_percent", &x_bounds),
-            ("focus_y_percent", &y_bounds),
+        for (axis, percent_name, basis_points_name, bounds) in [
+            (
+                "focus_x",
+                "focus_x_percent",
+                "focus_x_basis_points",
+                &x_bounds,
+            ),
+            (
+                "focus_y",
+                "focus_y_percent",
+                "focus_y_basis_points",
+                &y_bounds,
+            ),
         ] {
-            let Some(curve) = effect.keyframes.get(axis) else {
+            let Some((curve, units)) = reframe_focus_curve(effect, percent_name, basis_points_name)
+            else {
                 errors.push(format!("clip {} has no {axis} curve", clip.id));
                 continue;
             };
@@ -2416,40 +2453,360 @@ fn evaluate_reframe_stability(
                     curve.keyframes.len()
                 ));
             }
+            if curve.keyframes.iter().any(|keyframe| {
+                keyframe.interpolation != openreel_core::KeyframeInterpolation::Linear
+            }) {
+                errors.push(format!(
+                    "clip {} {axis} is not linearly interpolated",
+                    clip.id
+                ));
+            }
             for keyframe in &curve.keyframes {
-                if !bounds.contains(&keyframe.value) {
+                if !units.contains(bounds, keyframe.value) {
                     errors.push(format!(
-                        "clip {} {axis} value {} is outside {}..={} percent",
+                        "clip {} {axis} value {} is outside {}",
                         clip.id,
                         keyframe.value,
-                        bounds.start(),
-                        bounds.end()
+                        units.render_bounds(bounds),
                     ));
                 }
             }
             for pair in curve.keyframes.windows(2) {
                 let step = pair[0].value.abs_diff(pair[1].value);
-                if step > u64::try_from(maximum_step_percent).unwrap_or_default() {
+                if step > units.step_limit(maximum_step_percent) {
                     errors.push(format!(
-                        "clip {} {axis} jumps {} percent between frames {} and {}",
-                        clip.id, step, pair[0].at.0, pair[1].at.0
+                        "clip {} {axis} jumps {} between frames {} and {}",
+                        clip.id,
+                        units.render_value(step),
+                        pair[0].at.0,
+                        pair[1].at.0
                     ));
                 }
             }
         }
+        let matching_provenance = provenances
+            .iter()
+            .filter(|provenance| provenance.clip == clip.id && provenance.effect == effect.id)
+            .collect::<Vec<_>>();
+        if matching_provenance.len() != 1 {
+            errors.push(format!(
+                "clip {} has {} tracked-subject provenance sidecars for reframe effect {}",
+                clip.id,
+                matching_provenance.len(),
+                effect.id,
+            ));
+            continue;
+        }
+        errors.extend(evaluate_tracked_subject_containment(
+            &outcome.final_document,
+            clip,
+            effect,
+            matching_provenance[0],
+        ));
     }
     assertion_result(
         "reframe stability",
         !media_clips.is_empty() && errors.is_empty(),
         if errors.is_empty() {
             format!(
-                "track {track_id} has {} continuously bounded tracked reframe clips",
+                "track {track_id} has {} bounded, speed-limited, linearly interpolated reframes that contain their tracked subjects",
                 media_clips.len()
             )
         } else {
             errors.join("; ")
         },
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReframeFocusUnits {
+    Percent,
+    BasisPoints,
+}
+
+impl ReframeFocusUnits {
+    fn contains(self, bounds: &std::ops::RangeInclusive<i64>, value: i64) -> bool {
+        match self {
+            Self::Percent => bounds.contains(&value),
+            Self::BasisPoints => {
+                let minimum = bounds.start().saturating_mul(100);
+                let maximum = bounds.end().saturating_mul(100);
+                (minimum..=maximum).contains(&value)
+            }
+        }
+    }
+
+    fn render_bounds(self, bounds: &std::ops::RangeInclusive<i64>) -> String {
+        match self {
+            Self::Percent => format!("{}..={} percent", bounds.start(), bounds.end()),
+            Self::BasisPoints => format!(
+                "{}..={} basis points",
+                bounds.start().saturating_mul(100),
+                bounds.end().saturating_mul(100),
+            ),
+        }
+    }
+
+    fn step_limit(self, percent: i64) -> u64 {
+        let limit = match self {
+            Self::Percent => percent,
+            Self::BasisPoints => percent.saturating_mul(100),
+        };
+        u64::try_from(limit).unwrap_or_default()
+    }
+
+    fn render_value(self, value: u64) -> String {
+        match self {
+            Self::Percent => format!("{value} percent"),
+            Self::BasisPoints => format!("{value} basis points"),
+        }
+    }
+}
+
+fn reframe_focus_curve<'a>(
+    effect: &'a openreel_core::Effect,
+    percent_name: &str,
+    basis_points_name: &str,
+) -> Option<(&'a openreel_core::AutomationCurve, ReframeFocusUnits)> {
+    effect
+        .keyframes
+        .get(basis_points_name)
+        .map(|curve| (curve, ReframeFocusUnits::BasisPoints))
+        .or_else(|| {
+            effect
+                .keyframes
+                .get(percent_name)
+                .map(|curve| (curve, ReframeFocusUnits::Percent))
+        })
+}
+
+fn reframe_focus_at_basis_points(
+    effect: &openreel_core::Effect,
+    percent_name: &str,
+    basis_points_name: &str,
+    at: TimeCode,
+) -> Option<i64> {
+    effect
+        .integer_parameter_at(basis_points_name, at)
+        .or_else(|| {
+            effect
+                .integer_parameter_at(percent_name, at)
+                .map(|percent| percent.saturating_mul(100))
+        })
+}
+
+fn reframe_subject_provenances(
+    document: &Document,
+) -> (Vec<ReframeSubjectProvenance>, Vec<String>) {
+    let mut provenances = Vec::new();
+    let mut errors = Vec::new();
+    for marker in &document.markers {
+        match decode_reframe_subject_provenance(&marker.label) {
+            Ok(Some(provenance)) => provenances.push(provenance),
+            Ok(None) => {}
+            Err(error) => errors.push(format!(
+                "tracked-subject provenance marker {} is malformed: {error}",
+                marker.id.0
+            )),
+        }
+    }
+    (provenances, errors)
+}
+
+fn valid_reframe_subject_provenances(document: &Document) -> Vec<ReframeSubjectProvenance> {
+    reframe_subject_provenances(document).0
+}
+
+// Template matching follows a supplied search box, not a segmented face edge.
+// Preserve a 4% edge allowance so the virtual camera can honor its 6% dead
+// zone without falsely rejecting a crop that still retains the tracked
+// subject's tighter central region.
+// Provenance bounds round outward and crop bounds round outward, so strict
+// containment is both deterministic and conservative.
+const SUBJECT_CONTAINMENT_TOLERANCE_BASIS_POINTS: i64 = 0;
+const SUBJECT_CONTAINMENT_ENDPOINT_WINDOW_FRAMES: i64 = 25;
+
+fn evaluate_tracked_subject_containment(
+    document: &Document,
+    clip: &openreel_core::Clip,
+    effect: &openreel_core::Effect,
+    provenance: &ReframeSubjectProvenance,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    let Some(asset) = document.asset(clip.asset) else {
+        return vec![format!("clip {} has no source asset", clip.id)];
+    };
+    let Some((source_width, source_height)) = asset.resolution else {
+        return vec![format!(
+            "clip {} source asset {} has no resolution for reframe containment",
+            clip.id, asset.id
+        )];
+    };
+    if source_width == 0 || source_height == 0 {
+        return vec![format!(
+            "clip {} source asset {} has an invalid {}x{} resolution",
+            clip.id, asset.id, source_width, source_height
+        )];
+    }
+    let duration = match document.clip_duration(clip) {
+        Ok(duration) => duration,
+        Err(error) => {
+            return vec![format!(
+                "clip {} duration is unavailable for reframe containment: {error}",
+                clip.id
+            )];
+        }
+    };
+    let trailing_start = TimeCode(
+        duration
+            .0
+            .saturating_sub(SUBJECT_CONTAINMENT_ENDPOINT_WINDOW_FRAMES),
+    );
+    let mut trailing_samples = 0_usize;
+    for sample in &provenance.samples {
+        if sample.at >= duration {
+            errors.push(format!(
+                "clip {} tracked-subject sample at frame {} is outside duration {}",
+                clip.id, sample.at.0, duration.0
+            ));
+            continue;
+        }
+        if sample.at >= trailing_start {
+            trailing_samples = trailing_samples.saturating_add(1);
+        }
+        let crop = match reframe_crop_bounds_basis_points(
+            effect,
+            source_width,
+            source_height,
+            sample.at,
+        ) {
+            Ok(crop) => crop,
+            Err(error) => {
+                errors.push(format!(
+                    "clip {} frame {} cannot resolve reframe crop: {error}",
+                    clip.id, sample.at.0
+                ));
+                continue;
+            }
+        };
+        if !crop.contains(sample, SUBJECT_CONTAINMENT_TOLERANCE_BASIS_POINTS) {
+            errors.push(format!(
+                "clip {} frame {} crop {}..={} x {}..={} basis points does not contain tracked subject {}..={} x {}..={} basis points",
+                clip.id,
+                sample.at.0,
+                crop.left,
+                crop.right,
+                crop.top,
+                crop.bottom,
+                sample.left_basis_points,
+                sample.right_basis_points,
+                sample.top_basis_points,
+                sample.bottom_basis_points,
+            ));
+        }
+    }
+    if trailing_samples == 0 {
+        errors.push(format!(
+            "clip {} has no tracked-subject sample in its final {} frames",
+            clip.id, SUBJECT_CONTAINMENT_ENDPOINT_WINDOW_FRAMES
+        ));
+    }
+    errors
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReframeCropBounds {
+    left: i64,
+    right: i64,
+    top: i64,
+    bottom: i64,
+}
+
+impl ReframeCropBounds {
+    fn contains(self, subject: &TrackedSubjectBounds, tolerance: i64) -> bool {
+        self.left <= i64::from(subject.left_basis_points).saturating_add(tolerance)
+            && self.right >= i64::from(subject.right_basis_points).saturating_sub(tolerance)
+            && self.top <= i64::from(subject.top_basis_points).saturating_add(tolerance)
+            && self.bottom >= i64::from(subject.bottom_basis_points).saturating_sub(tolerance)
+    }
+}
+
+fn reframe_crop_bounds_basis_points(
+    effect: &openreel_core::Effect,
+    source_width: u32,
+    source_height: u32,
+    at: TimeCode,
+) -> Result<ReframeCropBounds, String> {
+    let target_aspect_basis_points = effect
+        .integer_parameter_at("target_aspect_basis_points", at)
+        .ok_or_else(|| "missing target_aspect_basis_points".to_owned())?;
+    if target_aspect_basis_points <= 0 {
+        return Err(format!(
+            "target_aspect_basis_points must be positive, found {target_aspect_basis_points}"
+        ));
+    }
+    let focus_x =
+        reframe_focus_at_basis_points(effect, "focus_x_percent", "focus_x_basis_points", at)
+            .ok_or_else(|| "missing horizontal focus".to_owned())?
+            .clamp(0, 10_000);
+    let focus_y =
+        reframe_focus_at_basis_points(effect, "focus_y_percent", "focus_y_basis_points", at)
+            .ok_or_else(|| "missing vertical focus".to_owned())?
+            .clamp(0, 10_000);
+    let source_width = i128::from(source_width);
+    let source_height = i128::from(source_height);
+    let target_aspect = i128::from(target_aspect_basis_points);
+    let source_is_wider =
+        source_width.saturating_mul(10_000) > source_height.saturating_mul(target_aspect);
+    let source_is_taller =
+        source_width.saturating_mul(10_000) < source_height.saturating_mul(target_aspect);
+    let (visible_width, visible_height) = if source_is_wider {
+        (
+            i64::try_from(ceil_div_positive(
+                target_aspect.saturating_mul(source_height),
+                source_width,
+            ))
+            .unwrap_or(10_000)
+            .clamp(1, 10_000),
+            10_000,
+        )
+    } else if source_is_taller {
+        (
+            10_000,
+            i64::try_from(ceil_div_positive(
+                source_width.saturating_mul(100_000_000),
+                source_height.saturating_mul(target_aspect),
+            ))
+            .unwrap_or(10_000)
+            .clamp(1, 10_000),
+        )
+    } else {
+        (10_000, 10_000)
+    };
+    let (left, right) = crop_axis(focus_x, visible_width);
+    let (top, bottom) = crop_axis(focus_y, visible_height);
+    Ok(ReframeCropBounds {
+        left,
+        right,
+        top,
+        bottom,
+    })
+}
+
+fn ceil_div_positive(numerator: i128, denominator: i128) -> i128 {
+    numerator
+        .saturating_add(denominator.saturating_sub(1))
+        .checked_div(denominator.max(1))
+        .unwrap_or_default()
+}
+
+fn crop_axis(focus_basis_points: i64, visible_basis_points: i64) -> (i64, i64) {
+    let visible_basis_points = visible_basis_points.clamp(1, 10_000);
+    let maximum_left = 10_000_i64.saturating_sub(visible_basis_points);
+    let left = focus_basis_points
+        .saturating_sub(visible_basis_points / 2)
+        .clamp(0, maximum_left);
+    (left, left.saturating_add(visible_basis_points))
 }
 
 fn evaluate_program_audio_continuous(
@@ -3460,7 +3817,8 @@ mod tests {
     use crossbeam_channel::{Receiver, Sender, unbounded};
     use openreel_core::{
         AgentError, AgentSession, AssetSilences, AuthenticationStatus, CaptionPreset, Clip, ClipId,
-        HarnessId, MediaAsset, MediaKind, Rational, SilenceSpan, Track, TrackId, TrackKind,
+        HarnessId, Marker, MarkerId, MediaAsset, MediaKind, Rational, SilenceSpan, Track, TrackId,
+        TrackKind,
     };
 
     use super::*;
@@ -3585,6 +3943,38 @@ mod tests {
         }
     }
 
+    fn provenance_marker(effect: u64, samples: &[(i64, u16, u16, u16, u16)]) -> Marker {
+        Marker {
+            id: MarkerId(99),
+            position: TimeCode::ZERO,
+            label: crate::server::encode_reframe_subject_provenance(&ReframeSubjectProvenance {
+                clip: ClipId(1),
+                effect: openreel_core::EffectId(effect),
+                samples: samples
+                    .iter()
+                    .map(
+                        |(
+                            at,
+                            left_basis_points,
+                            right_basis_points,
+                            top_basis_points,
+                            bottom_basis_points,
+                        )| {
+                            TrackedSubjectBounds {
+                                at: TimeCode(*at),
+                                left_basis_points: *left_basis_points,
+                                right_basis_points: *right_basis_points,
+                                top_basis_points: *top_basis_points,
+                                bottom_basis_points: *bottom_basis_points,
+                            }
+                        },
+                    )
+                    .collect(),
+            }),
+            color_token: 3,
+        }
+    }
+
     #[test]
     fn rendered_reframe_verification_detects_lost_delivery_curves() {
         let mut source = document();
@@ -3608,11 +3998,20 @@ mod tests {
                     },
                 )]),
             });
+        source.markers.push(provenance_marker(
+            9,
+            &[
+                (0, 4_000, 5_000, 3_500, 6_500),
+                (59, 4_000, 5_000, 3_500, 6_500),
+            ],
+        ));
         let delivered =
             document_for_delivery_profile(&source, DeliveryProfile::VerticalShort, 50, 50).unwrap();
         let preserved = rendered_reframe_verification(&source, &delivered).unwrap();
         assert_eq!(preserved.expected_animated_clips, 1);
         assert_eq!(preserved.preserved_animated_clips, 1);
+        assert_eq!(preserved.expected_subject_provenance_clips, 1);
+        assert_eq!(preserved.preserved_subject_provenance_clips, 1);
         assert!(preserved.passed);
 
         let mut lost = delivered;
@@ -3620,6 +4019,138 @@ mod tests {
         let rejected = rendered_reframe_verification(&source, &lost).unwrap();
         assert_eq!(rejected.preserved_animated_clips, 0);
         assert!(!rejected.passed);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn tracked_subject_containment_rejects_static_or_wrong_direction_reframes() {
+        let effect = |focus_at_end: i64| openreel_core::Effect {
+            id: openreel_core::EffectId(7),
+            name: "reframe".to_owned(),
+            parameters: BTreeMap::from([(
+                "target_aspect_basis_points".to_owned(),
+                ParamValue::Integer(5_625),
+            )]),
+            keyframes: BTreeMap::from([
+                (
+                    "focus_x_basis_points".to_owned(),
+                    openreel_core::AutomationCurve {
+                        keyframes: vec![
+                            openreel_core::Keyframe {
+                                at: TimeCode::ZERO,
+                                value: 5_000,
+                                interpolation: openreel_core::KeyframeInterpolation::Linear,
+                            },
+                            openreel_core::Keyframe {
+                                at: TimeCode(36),
+                                value: focus_at_end,
+                                interpolation: openreel_core::KeyframeInterpolation::Linear,
+                            },
+                        ],
+                    },
+                ),
+                (
+                    "focus_y_basis_points".to_owned(),
+                    openreel_core::AutomationCurve {
+                        keyframes: vec![openreel_core::Keyframe {
+                            at: TimeCode::ZERO,
+                            value: 5_000,
+                            interpolation: openreel_core::KeyframeInterpolation::Linear,
+                        }],
+                    },
+                ),
+            ]),
+        };
+        let provenance = ReframeSubjectProvenance {
+            clip: ClipId(1),
+            effect: openreel_core::EffectId(7),
+            samples: vec![
+                TrackedSubjectBounds {
+                    at: TimeCode::ZERO,
+                    left_basis_points: 4_400,
+                    right_basis_points: 5_600,
+                    top_basis_points: 3_500,
+                    bottom_basis_points: 6_500,
+                },
+                TrackedSubjectBounds {
+                    at: TimeCode(36),
+                    left_basis_points: 7_000,
+                    right_basis_points: 8_000,
+                    top_basis_points: 3_500,
+                    bottom_basis_points: 6_500,
+                },
+            ],
+        };
+        let mut final_document = document();
+        final_document.tracks[0].clips[0]
+            .effects
+            .push(effect(5_000));
+        let clip = &final_document.tracks[0].clips[0];
+        let rejected_static = evaluate_tracked_subject_containment(
+            &final_document,
+            clip,
+            &clip.effects[0],
+            &provenance,
+        );
+        assert!(
+            rejected_static
+                .iter()
+                .any(|detail| detail.contains("does not contain tracked subject")),
+            "{rejected_static:?}"
+        );
+
+        final_document.tracks[0].clips[0].effects[0] = effect(3_000);
+        let clip = &final_document.tracks[0].clips[0];
+        let rejected_wrong_direction = evaluate_tracked_subject_containment(
+            &final_document,
+            clip,
+            &clip.effects[0],
+            &provenance,
+        );
+        assert!(
+            rejected_wrong_direction
+                .iter()
+                .any(|detail| detail.contains("does not contain tracked subject")),
+            "{rejected_wrong_direction:?}"
+        );
+
+        final_document.media_pool[0].resolution = Some((352, 288));
+        final_document.tracks[0].clips[0].effects[0] = effect(4_500);
+        let laura_edge = ReframeSubjectProvenance {
+            clip: ClipId(1),
+            effect: openreel_core::EffectId(7),
+            samples: vec![TrackedSubjectBounds {
+                at: TimeCode(36),
+                left_basis_points: 2_150,
+                right_basis_points: 4_650,
+                top_basis_points: 3_500,
+                bottom_basis_points: 6_500,
+            }],
+        };
+        let clip = &final_document.tracks[0].clips[0];
+        let rejected_edge_clip = evaluate_tracked_subject_containment(
+            &final_document,
+            clip,
+            &clip.effects[0],
+            &laura_edge,
+        );
+        assert!(
+            rejected_edge_clip
+                .iter()
+                .any(|detail| detail.contains("does not contain tracked subject")),
+            "{rejected_edge_clip:?}"
+        );
+
+        final_document.media_pool[0].resolution = Some((320, 180));
+        final_document.tracks[0].clips[0].effects[0] = effect(7_400);
+        let clip = &final_document.tracks[0].clips[0];
+        let accepted = evaluate_tracked_subject_containment(
+            &final_document,
+            clip,
+            &clip.effects[0],
+            &provenance,
+        );
+        assert!(accepted.is_empty(), "{accepted:?}");
     }
 
     fn unused_fixture() -> Result<PreparedFixture, EvalError> {
@@ -3866,6 +4397,80 @@ mod tests {
 
         with_audio.tracks[0].clips[0].speed_percent = 200;
         assert!(!evaluate_audio_present(&with_audio).passed);
+    }
+
+    #[test]
+    fn reframe_stability_rejects_eased_or_fast_virtual_camera_motion() {
+        let mut final_document = document();
+        let curve = |end: i64, interpolation| openreel_core::AutomationCurve {
+            keyframes: vec![
+                openreel_core::Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 50,
+                    interpolation,
+                },
+                openreel_core::Keyframe {
+                    at: TimeCode(12),
+                    value: end,
+                    interpolation,
+                },
+            ],
+        };
+        final_document.tracks[0].clips[0]
+            .effects
+            .push(openreel_core::Effect {
+                id: openreel_core::EffectId(1),
+                name: "reframe".to_owned(),
+                parameters: BTreeMap::from([(
+                    "target_aspect_basis_points".to_owned(),
+                    ParamValue::Integer(5_625),
+                )]),
+                keyframes: BTreeMap::from([
+                    (
+                        "focus_x_percent".to_owned(),
+                        curve(58, openreel_core::KeyframeInterpolation::EaseInOut),
+                    ),
+                    (
+                        "focus_y_percent".to_owned(),
+                        curve(50, openreel_core::KeyframeInterpolation::EaseInOut),
+                    ),
+                ]),
+            });
+        final_document.markers.push(provenance_marker(
+            1,
+            &[
+                (0, 4_500, 5_500, 3_500, 6_500),
+                (12, 4_500, 5_500, 3_500, 6_500),
+                (59, 4_500, 5_500, 3_500, 6_500),
+            ],
+        ));
+        let mut outcome = EvalOutcome {
+            final_document,
+            final_words: Vec::new(),
+            final_timeline_words: Vec::new(),
+            remaining_silences: Vec::new(),
+            remaining_scenes: Vec::new(),
+            context: FixtureContext::default(),
+            session: SessionMetrics::default(),
+            operations: Vec::new(),
+            undo_steps_to_original: None,
+        };
+
+        let rejected = evaluate_reframe_stability(TrackId(1), 2, 25..=75, 20..=80, 2, &outcome);
+        assert!(!rejected.passed);
+        assert!(rejected.detail.contains("not linearly interpolated"));
+        assert!(rejected.detail.contains("jumps 8 percent"));
+
+        let effect = &mut outcome.final_document.tracks[0].clips[0].effects[0];
+        effect.keyframes.insert(
+            "focus_x_percent".to_owned(),
+            curve(52, openreel_core::KeyframeInterpolation::Linear),
+        );
+        effect.keyframes.insert(
+            "focus_y_percent".to_owned(),
+            curve(50, openreel_core::KeyframeInterpolation::Linear),
+        );
+        assert!(evaluate_reframe_stability(TrackId(1), 2, 25..=75, 20..=80, 2, &outcome).passed);
     }
 
     #[test]

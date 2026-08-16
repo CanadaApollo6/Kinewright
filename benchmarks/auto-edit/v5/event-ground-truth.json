@@ -135,11 +135,11 @@
   "reframe": {
     "target_aspect_basis_points": 5625,
     "minimum_keyframes_per_axis": 2,
-    "min_x_percent": 30,
-    "max_x_percent": 70,
-    "min_y_percent": 25,
-    "max_y_percent": 70,
-    "maximum_step_percent": 12
+    "min_x_percent": 25,
+    "max_x_percent": 75,
+    "min_y_percent": 20,
+    "max_y_percent": 80,
+    "maximum_step_percent": 2
   },
   "expected_dialogue": "to kind of make sure that we all know each other I'm Laura and I'm the project manager Great Do you want to introduce yourself again Hi I'm David and I'm supposed to be an industrial designer Okay And I'm Andrew and I'm uh our marketing expert Um I'm Craig and I'm User Interface Great Okay Um so we're designing a new remote control and um Oh I have to record who's here actually So that's David Andrew and Craig isn't it"
 }

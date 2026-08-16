@@ -486,6 +486,19 @@ pub struct SubjectCenterSample {
     pub confidence_basis_points: u16,
 }
 
+/// One externally observed subject center with 0.01 percent coordinate precision.
+///
+/// Coordinate basis points span 0..=10000 across each frame axis. Observations
+/// outside that range are accepted and clamped to the configured safe region by
+/// [`plan_subject_reframe_basis_points`], matching the legacy percent planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SubjectCenterBasisPointSample {
+    pub at: TimeCode,
+    pub x_basis_points: i64,
+    pub y_basis_points: i64,
+    pub confidence_basis_points: u16,
+}
+
 /// Configuration for converting subject observations into editable reframe curves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SubjectReframeSettings {
@@ -493,6 +506,22 @@ pub struct SubjectReframeSettings {
     pub effect: EffectId,
     pub bounds: ReframeFocusBounds,
     pub minimum_confidence_basis_points: u16,
+    /// Subject movement tolerated before the virtual camera follows, in frame percent.
+    #[serde(default = "default_focus_dead_zone_percent")]
+    #[schemars(default = "default_focus_dead_zone_percent")]
+    pub focus_dead_zone_percent: u8,
+    /// Largest focus change allowed between adjacent observations, in frame percent.
+    #[serde(default = "default_maximum_focus_step_percent")]
+    #[schemars(default = "default_maximum_focus_step_percent")]
+    pub maximum_focus_step_percent: u8,
+}
+
+const fn default_focus_dead_zone_percent() -> u8 {
+    6
+}
+
+const fn default_maximum_focus_step_percent() -> u8 {
+    2
 }
 
 /// A validated, non-mutating reframe automation plan.
@@ -501,6 +530,18 @@ pub struct SubjectReframePlan {
     pub clip: ClipId,
     pub effect: EffectId,
     pub samples: Vec<SubjectCenterSample>,
+    pub clamped_samples: usize,
+    pub focus_x_curve: AutomationCurve,
+    pub focus_y_curve: AutomationCurve,
+    pub operations: Vec<Operation>,
+}
+
+/// A precise, validated reframe plan whose samples and curves use basis points.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SubjectReframeBasisPointPlan {
+    pub clip: ClipId,
+    pub effect: EffectId,
+    pub samples: Vec<SubjectCenterBasisPointSample>,
     pub clamped_samples: usize,
     pub focus_x_curve: AutomationCurve,
     pub focus_y_curve: AutomationCurve,
@@ -524,6 +565,10 @@ pub enum SubjectReframeError {
     InvalidBounds,
     #[error("minimum confidence must be in 0..=10000 basis points")]
     InvalidConfidenceThreshold,
+    #[error("focus dead zone must be in 0..=25 percent")]
+    InvalidDeadZone,
+    #[error("maximum focus step must be in 1..=25 percent")]
+    InvalidMaximumStep,
     #[error("sample confidence must be in 0..=10000 basis points at frame {0}")]
     InvalidSampleConfidence(TimeCode),
     #[error("sample at frame {frame} has confidence {actual}, below the required {minimum}")]
@@ -542,9 +587,10 @@ pub enum SubjectReframeError {
 
 /// Convert observed subject centers into bounded, editable reframe keyframes.
 ///
-/// Samples are sorted by clip-local frame, confidence-gated, and clamped to the
-/// requested safe focus region. Two normal `SetEffectKeyframes` operations are
-/// returned for revision-gated application by the caller.
+/// Samples are sorted by clip-local frame, confidence-gated, median-filtered,
+/// clamped to the requested safe focus region, and converted into dead-zone,
+/// speed-limited linear camera motion. Two normal `SetEffectKeyframes`
+/// operations are returned for revision-gated application by the caller.
 ///
 /// # Errors
 ///
@@ -556,6 +602,121 @@ pub fn plan_subject_reframe(
     settings: SubjectReframeSettings,
     samples: &[SubjectCenterSample],
 ) -> Result<SubjectReframePlan, SubjectReframeError> {
+    let samples = samples
+        .iter()
+        .map(|sample| ScaledSubjectCenterSample {
+            at: sample.at,
+            x: sample.x_percent,
+            y: sample.y_percent,
+            confidence_basis_points: sample.confidence_basis_points,
+        })
+        .collect::<Vec<_>>();
+    let plan = plan_subject_reframe_scaled(
+        document,
+        settings,
+        &samples,
+        1,
+        ["focus_x_percent", "focus_y_percent"],
+    )?;
+
+    Ok(SubjectReframePlan {
+        clip: settings.clip,
+        effect: settings.effect,
+        samples: plan
+            .samples
+            .into_iter()
+            .map(|sample| SubjectCenterSample {
+                at: sample.at,
+                x_percent: sample.x,
+                y_percent: sample.y,
+                confidence_basis_points: sample.confidence_basis_points,
+            })
+            .collect(),
+        clamped_samples: plan.clamped_samples,
+        focus_x_curve: plan.focus_x_curve,
+        focus_y_curve: plan.focus_y_curve,
+        operations: plan.operations,
+    })
+}
+
+/// Convert precise subject centers into bounded basis-point reframe keyframes.
+///
+/// This is the non-quantizing counterpart to [`plan_subject_reframe`]. The
+/// existing percent settings remain the public tuning surface and are scaled by
+/// 100 internally, so a six-percent dead zone becomes 600 basis points and a
+/// two-percent maximum step becomes 200 basis points. Generated operations
+/// target `focus_x_basis_points` and `focus_y_basis_points`; renderers therefore
+/// retain every 0.01 percent of tracker precision.
+///
+/// # Errors
+///
+/// Returns the same validation failures as [`plan_subject_reframe`].
+pub fn plan_subject_reframe_basis_points(
+    document: &Document,
+    settings: SubjectReframeSettings,
+    samples: &[SubjectCenterBasisPointSample],
+) -> Result<SubjectReframeBasisPointPlan, SubjectReframeError> {
+    let samples = samples
+        .iter()
+        .map(|sample| ScaledSubjectCenterSample {
+            at: sample.at,
+            x: sample.x_basis_points,
+            y: sample.y_basis_points,
+            confidence_basis_points: sample.confidence_basis_points,
+        })
+        .collect::<Vec<_>>();
+    let plan = plan_subject_reframe_scaled(
+        document,
+        settings,
+        &samples,
+        100,
+        ["focus_x_basis_points", "focus_y_basis_points"],
+    )?;
+
+    Ok(SubjectReframeBasisPointPlan {
+        clip: settings.clip,
+        effect: settings.effect,
+        samples: plan
+            .samples
+            .into_iter()
+            .map(|sample| SubjectCenterBasisPointSample {
+                at: sample.at,
+                x_basis_points: sample.x,
+                y_basis_points: sample.y,
+                confidence_basis_points: sample.confidence_basis_points,
+            })
+            .collect(),
+        clamped_samples: plan.clamped_samples,
+        focus_x_curve: plan.focus_x_curve,
+        focus_y_curve: plan.focus_y_curve,
+        operations: plan.operations,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScaledSubjectCenterSample {
+    at: TimeCode,
+    x: i64,
+    y: i64,
+    confidence_basis_points: u16,
+}
+
+struct ScaledSubjectReframePlan {
+    samples: Vec<ScaledSubjectCenterSample>,
+    clamped_samples: usize,
+    focus_x_curve: AutomationCurve,
+    focus_y_curve: AutomationCurve,
+    operations: Vec<Operation>,
+}
+
+#[allow(clippy::too_many_lines)]
+fn plan_subject_reframe_scaled(
+    document: &Document,
+    settings: SubjectReframeSettings,
+    samples: &[ScaledSubjectCenterSample],
+    coordinate_scale: i64,
+    focus_parameters: [&str; 2],
+) -> Result<ScaledSubjectReframePlan, SubjectReframeError> {
     let clip = document
         .clip(settings.clip)
         .ok_or(SubjectReframeError::MissingClip(settings.clip))?;
@@ -592,11 +753,22 @@ pub fn plan_subject_reframe(
     if settings.minimum_confidence_basis_points > 10_000 {
         return Err(SubjectReframeError::InvalidConfidenceThreshold);
     }
+    if settings.focus_dead_zone_percent > 25 {
+        return Err(SubjectReframeError::InvalidDeadZone);
+    }
+    if !(1..=25).contains(&settings.maximum_focus_step_percent) {
+        return Err(SubjectReframeError::InvalidMaximumStep);
+    }
     let duration = document
         .clip_duration(clip)
         .map_err(|error| SubjectReframeError::PlanNotApplicable(error.to_string()))?;
     let mut normalized = samples.to_vec();
     normalized.sort_by_key(|sample| sample.at);
+    let scaled = |value: i64| value.saturating_mul(coordinate_scale);
+    let min_x = scaled(bounds.min_x_percent);
+    let max_x = scaled(bounds.max_x_percent);
+    let min_y = scaled(bounds.min_y_percent);
+    let max_y = scaled(bounds.max_y_percent);
     let mut clamped_samples = 0;
     for index in 0..normalized.len() {
         if index > 0 && normalized[index - 1].at == normalized[index].at {
@@ -621,42 +793,51 @@ pub fn plan_subject_reframe(
                 duration,
             });
         }
-        let bounded_x = sample
-            .x_percent
-            .clamp(bounds.min_x_percent, bounds.max_x_percent);
-        let bounded_y = sample
-            .y_percent
-            .clamp(bounds.min_y_percent, bounds.max_y_percent);
-        if bounded_x != sample.x_percent || bounded_y != sample.y_percent {
+        let bounded_x = sample.x.clamp(min_x, max_x);
+        let bounded_y = sample.y.clamp(min_y, max_y);
+        if bounded_x != sample.x || bounded_y != sample.y {
             clamped_samples += 1;
         }
-        sample.x_percent = bounded_x;
-        sample.y_percent = bounded_y;
+        sample.x = bounded_x;
+        sample.y = bounded_y;
     }
 
-    let curve_for = |axis: fn(&SubjectCenterSample) -> i64| AutomationCurve {
-        keyframes: normalized
-            .iter()
-            .map(|sample| Keyframe {
-                at: sample.at,
-                value: axis(sample),
-                interpolation: KeyframeInterpolation::Linear,
-            })
-            .collect(),
+    let curve_for = |axis: fn(&ScaledSubjectCenterSample) -> i64,
+                     minimum: i64,
+                     maximum: i64|
+     -> AutomationCurve {
+        let values = stabilized_focus_values(
+            &normalized.iter().map(axis).collect::<Vec<_>>(),
+            minimum,
+            maximum,
+            scaled(i64::from(settings.focus_dead_zone_percent)),
+            scaled(i64::from(settings.maximum_focus_step_percent)),
+        );
+        AutomationCurve {
+            keyframes: normalized
+                .iter()
+                .zip(values)
+                .map(|(sample, value)| Keyframe {
+                    at: sample.at,
+                    value,
+                    interpolation: KeyframeInterpolation::Linear,
+                })
+                .collect(),
+        }
     };
-    let horizontal_curve = curve_for(|sample| sample.x_percent);
-    let vertical_curve = curve_for(|sample| sample.y_percent);
+    let horizontal_curve = curve_for(|sample| sample.x, min_x, max_x);
+    let vertical_curve = curve_for(|sample| sample.y, min_y, max_y);
     let operations = vec![
         Operation::SetEffectKeyframes {
             clip: settings.clip,
             effect: settings.effect,
-            name: "focus_x_percent".to_owned(),
+            name: focus_parameters[0].to_owned(),
             curve: horizontal_curve.clone(),
         },
         Operation::SetEffectKeyframes {
             clip: settings.clip,
             effect: settings.effect,
-            name: "focus_y_percent".to_owned(),
+            name: focus_parameters[1].to_owned(),
             curve: vertical_curve.clone(),
         },
     ];
@@ -664,15 +845,63 @@ pub fn plan_subject_reframe(
     apply_batch(&mut candidate, &operations)
         .map_err(|error| SubjectReframeError::PlanNotApplicable(error.to_string()))?;
 
-    Ok(SubjectReframePlan {
-        clip: settings.clip,
-        effect: settings.effect,
+    Ok(ScaledSubjectReframePlan {
         samples: normalized,
         clamped_samples,
         focus_x_curve: horizontal_curve,
         focus_y_curve: vertical_curve,
         operations,
     })
+}
+
+fn stabilized_focus_values(
+    observations: &[i64],
+    minimum: i64,
+    maximum: i64,
+    dead_zone: i64,
+    maximum_step: i64,
+) -> Vec<i64> {
+    let mut filtered = observations.to_vec();
+    for index in 1..observations.len().saturating_sub(1) {
+        let mut window = [
+            observations[index - 1],
+            observations[index],
+            observations[index + 1],
+        ];
+        window.sort_unstable();
+        filtered[index] = window[1];
+    }
+    if observations.len() >= 3 {
+        let last = observations.len() - 1;
+        let mut window = [
+            observations[last - 2],
+            observations[last - 1],
+            observations[last],
+        ];
+        window.sort_unstable();
+        filtered[last] = window[1];
+    }
+    let Some(first) = filtered.first().copied() else {
+        return Vec::new();
+    };
+    let mut focus = first.clamp(minimum, maximum);
+    filtered
+        .into_iter()
+        .map(|subject| {
+            let subject = subject.clamp(minimum, maximum);
+            let desired = if subject < focus.saturating_sub(dead_zone) {
+                subject.saturating_add(dead_zone)
+            } else if subject > focus.saturating_add(dead_zone) {
+                subject.saturating_sub(dead_zone)
+            } else {
+                focus
+            };
+            focus = focus
+                .saturating_add((desired - focus).clamp(-maximum_step, maximum_step))
+                .clamp(minimum, maximum);
+            focus
+        })
+        .collect()
 }
 
 fn normalized_name(value: &str) -> String {
@@ -916,6 +1145,8 @@ mod tests {
                 max_y_percent: 80,
             },
             minimum_confidence_basis_points: 7_000,
+            focus_dead_zone_percent: 0,
+            maximum_focus_step_percent: 25,
         };
         let samples = [
             SubjectCenterSample {
@@ -936,9 +1167,11 @@ mod tests {
 
         assert_eq!(plan.clamped_samples, 2);
         assert_eq!(plan.samples[0].at, TimeCode::ZERO);
+        assert_eq!(plan.samples[1].x_percent, 90);
+        assert_eq!(plan.samples[1].y_percent, 80);
         assert_eq!(plan.focus_x_curve.keyframes[0].value, 10);
-        assert_eq!(plan.focus_x_curve.keyframes[1].value, 90);
-        assert_eq!(plan.focus_y_curve.keyframes[1].value, 80);
+        assert_eq!(plan.focus_x_curve.keyframes[1].value, 35);
+        assert_eq!(plan.focus_y_curve.keyframes[1].value, 65);
         let mut applied = document;
         apply_batch(&mut applied, &plan.operations).unwrap();
         assert_eq!(
@@ -956,6 +1189,8 @@ mod tests {
                 effect: EffectId(9),
                 bounds: ReframeFocusBounds::default(),
                 minimum_confidence_basis_points: 8_000,
+                focus_dead_zone_percent: 6,
+                maximum_focus_step_percent: 2,
             },
             &[SubjectCenterSample {
                 at: TimeCode(10),
@@ -967,5 +1202,120 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, SubjectReframeError::LowConfidence { .. }));
+    }
+
+    #[test]
+    fn subject_reframe_dead_zone_filters_jitter_and_rate_limits_camera_motion() {
+        let document = reframe_document();
+        let samples = [50, 52, 48, 53, 47, 37, 35, 34, 34, 34]
+            .into_iter()
+            .enumerate()
+            .map(|(index, x_percent)| SubjectCenterSample {
+                at: TimeCode(i64::try_from(index).unwrap() * 10),
+                x_percent,
+                y_percent: 50,
+                confidence_basis_points: 10_000,
+            })
+            .collect::<Vec<_>>();
+
+        let plan = plan_subject_reframe(
+            &document,
+            SubjectReframeSettings {
+                clip: ClipId(2),
+                effect: EffectId(9),
+                bounds: ReframeFocusBounds {
+                    min_x_percent: 25,
+                    max_x_percent: 75,
+                    min_y_percent: 20,
+                    max_y_percent: 80,
+                },
+                minimum_confidence_basis_points: 0,
+                focus_dead_zone_percent: 6,
+                maximum_focus_step_percent: 2,
+            },
+            &samples,
+        )
+        .unwrap();
+        let horizontal = &plan.focus_x_curve.keyframes;
+
+        assert_eq!(
+            horizontal
+                .iter()
+                .map(|keyframe| keyframe.value)
+                .collect::<Vec<_>>(),
+            vec![50, 50, 50, 50, 50, 48, 46, 44, 42, 40]
+        );
+        assert!(
+            horizontal
+                .iter()
+                .all(|keyframe| keyframe.interpolation == KeyframeInterpolation::Linear)
+        );
+        assert!(
+            horizontal
+                .windows(2)
+                .all(|pair| pair[0].value.abs_diff(pair[1].value) <= 2)
+        );
+    }
+
+    #[test]
+    fn subject_reframe_rejects_a_last_frame_tracking_outlier() {
+        let values = stabilized_focus_values(&[50, 50, 34, 35, 80], 25, 75, 6, 25);
+
+        assert_eq!(values, vec![50, 50, 41, 41, 41]);
+    }
+
+    #[test]
+    fn basis_point_subject_reframe_preserves_subpercent_tracker_precision() {
+        let document = reframe_document();
+        let plan = plan_subject_reframe_basis_points(
+            &document,
+            SubjectReframeSettings {
+                clip: ClipId(2),
+                effect: EffectId(9),
+                bounds: ReframeFocusBounds::default(),
+                minimum_confidence_basis_points: 0,
+                focus_dead_zone_percent: 0,
+                maximum_focus_step_percent: 25,
+            },
+            &[
+                SubjectCenterBasisPointSample {
+                    at: TimeCode::ZERO,
+                    x_basis_points: 5_001,
+                    y_basis_points: 4_999,
+                    confidence_basis_points: 10_000,
+                },
+                SubjectCenterBasisPointSample {
+                    at: TimeCode(10),
+                    x_basis_points: 5_002,
+                    y_basis_points: 4_998,
+                    confidence_basis_points: 10_000,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.focus_x_curve
+                .keyframes
+                .iter()
+                .map(|keyframe| keyframe.value)
+                .collect::<Vec<_>>(),
+            vec![5_001, 5_002]
+        );
+        assert!(matches!(
+            &plan.operations[0],
+            Operation::SetEffectKeyframes { name, .. } if name == "focus_x_basis_points"
+        ));
+        let mut applied = document;
+        apply_batch(&mut applied, &plan.operations).unwrap();
+        let effect = &applied.clip(ClipId(2)).unwrap().effects[0];
+        assert_eq!(
+            effect.keyframes["focus_x_basis_points"].keyframes[0].value,
+            5_001
+        );
+        assert_eq!(
+            effect.keyframes["focus_y_basis_points"].keyframes[1].value,
+            4_998
+        );
     }
 }

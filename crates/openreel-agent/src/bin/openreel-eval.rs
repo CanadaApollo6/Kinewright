@@ -942,7 +942,7 @@ fn event_multicam_definition() -> EvalDefinition {
         rationale: "Measures whether the agent can turn synchronized licensed meeting cameras plus speaker-labelled source metadata into continuous speaker-aware coverage with normalized program audio and face-safe editable reframing.",
         fixture_builder: fixture_real_event_multicam,
         prompts: &[
-            "Create a finished vertical multicam cut of the already bounded AMI meeting introduction. Open exactly these six capability schemas in one get_capability call: get_transcript, plan_speaker_multicam, add_effect, track_reframe_subject, plan_audio_normalization, and get_editorial_readiness. Do not call search_capabilities unless one of those exact lookups fails. Inspect the timeline and the speaker-labelled transcript on camera-laura. Use sync group 1 and video track 1. Map Laura to 'Laura closeup', David to 'David closeup', Andrew to 'Andrew closeup', and Craig to 'Craig closeup'. Call plan_speaker_multicam for group frames 1750 through 2544 exclusive, record start 0, maximum word gap 5 frames, and minimum shot length 25 frames. This deliberately suppresses brief overlapping backchannels. Inspect that planner's prepared_edit_plan preview and commit its returned plan id directly; do not call prepare_edit_plan or rewrite its operations. Keep track 2 as the single uninterrupted program-audio source; do not cut, retime, duplicate, fade, or change its clip gain. Reinspect the generated video clips. In one model-authored prepared edit plan, add exactly one reframe effect to every video clip using unique effect ids, target_aspect_basis_points 5625, and initial focus_x_percent/focus_y_percent 50/42; inspect and commit that plan. Then call track_reframe_subject once for each video clip with its reframe effect, subject width 25 percent, subject height 30 percent, initial subject center 50/42, horizontal focus bounds 25 through 75, vertical focus bounds 20 through 80, step 12 frames, search radius 10 percent, and max width 256. Each tracking call returns a prepared_edit_plan; inspect and commit its returned plan id directly before tracking the next clip, without calling prepare_edit_plan or copying keyframe operations. Preserve the continuous program source but call plan_audio_normalization for track 2 at -1600 LUFS hundredths with a -100 dBFS-hundredths sample-peak ceiling and 100-hundredths tolerance; inspect and commit its returned plan. Do not add captions, transitions, music, titles, or dialogue edits. Finish with one get_editorial_readiness call using vertical_short, check_silence false because continuous program audio is intentionally preserved, centered 50/50 delivery focus, nine storyboard frames, and 240-pixel cells. Do not queue export; the benchmark renders and independently probes the verified snapshot. Keep working until readiness is true.",
+            "Create a finished vertical multicam cut of the already bounded AMI meeting introduction. Open exactly these six capability schemas in one get_capability call: get_transcript, plan_speaker_multicam, add_effect, track_reframe_subject, plan_audio_normalization, and get_editorial_readiness. Do not call search_capabilities unless one of those exact lookups fails. Inspect the timeline and the speaker-labelled transcript on camera-laura. Use sync group 1 and video track 1. Map Laura to 'Laura closeup', David to 'David closeup', Andrew to 'Andrew closeup', and Craig to 'Craig closeup'. Call plan_speaker_multicam for group frames 1750 through 2544 exclusive, record start 0, maximum word gap 5 frames, and minimum shot length 25 frames. This deliberately suppresses brief overlapping backchannels. Inspect that planner's prepared_edit_plan preview and commit its returned plan id directly; do not call prepare_edit_plan or rewrite its operations. Keep track 2 as the single uninterrupted program-audio source; do not cut, retime, duplicate, fade, or change its clip gain. Reinspect the generated video clips. In one model-authored prepared edit plan, add exactly one reframe effect to every video clip using unique effect ids, target_aspect_basis_points 5625, and initial focus_x_percent/focus_y_percent 50/42; inspect and commit that plan. Then call track_reframe_subject once for each video clip with its reframe effect, subject width 25 percent, subject height 30 percent, initial subject center 50/42, horizontal focus bounds 25 through 75, vertical focus bounds 20 through 80, subject dead zone 6 percent, maximum focus step 2 percent, step 12 frames, search radius 10 percent, and max width 256. Each tracking call returns a stabilized prepared_edit_plan with linear camera motion; inspect and commit its returned plan id directly before tracking the next clip, without calling prepare_edit_plan or copying keyframe operations. Preserve the continuous program source but call plan_audio_normalization for track 2 at -1600 LUFS hundredths with a -100 dBFS-hundredths sample-peak ceiling and 100-hundredths tolerance; inspect and commit its returned plan. Do not add captions, transitions, music, titles, or dialogue edits. Finish with one get_editorial_readiness call using vertical_short, check_silence false because continuous program audio is intentionally preserved, centered 50/50 delivery focus, nine storyboard frames, and 240-pixel cells. Do not queue export; the benchmark renders and independently probes the verified snapshot. Keep working until readiness is true.",
         ],
         assertions: event_multicam_assertions(),
         budgets: EvalBudgets {
@@ -1041,7 +1041,7 @@ fn event_multicam_assertions() -> Vec<EvalAssertion> {
             max_x_percent: 75,
             min_y_percent: 20,
             max_y_percent: 80,
-            maximum_step_percent: 12,
+            maximum_step_percent: 2,
         },
         EvalAssertion::AudioPresent,
         EvalAssertion::ProgramAudioContinuous {
@@ -3082,7 +3082,7 @@ mod tests {
             EvalAssertion::ReframeStability {
                 track: TrackId(1),
                 minimum_keyframes_per_axis: 2,
-                maximum_step_percent: 12,
+                maximum_step_percent: 2,
                 ..
             }
         )));
@@ -3136,6 +3136,11 @@ mod tests {
         assert_eq!(event_truth.source_range.start, 1_750);
         assert_eq!(event_truth.source_range.end, 2_544);
         assert_eq!(event_truth.reframe.target_aspect_basis_points, 5_625);
+        assert_eq!(event_truth.reframe.min_x_percent, 25);
+        assert_eq!(event_truth.reframe.max_x_percent, 75);
+        assert_eq!(event_truth.reframe.min_y_percent, 20);
+        assert_eq!(event_truth.reframe.max_y_percent, 80);
+        assert_eq!(event_truth.reframe.maximum_step_percent, 2);
     }
 
     #[test]

@@ -718,6 +718,16 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                 EffectUniform::ReframeAspect => params.reframe_aspect = value / 10_000.0,
                 EffectUniform::ReframeFocusX => params.reframe_focus_x = value / 100.0,
                 EffectUniform::ReframeFocusY => params.reframe_focus_y = value / 100.0,
+                EffectUniform::ReframeFocusXBasisPoints => {
+                    if effect.parameters.contains_key(parameter.name) {
+                        params.reframe_focus_x = value / 10_000.0;
+                    }
+                }
+                EffectUniform::ReframeFocusYBasisPoints => {
+                    if effect.parameters.contains_key(parameter.name) {
+                        params.reframe_focus_y = value / 10_000.0;
+                    }
+                }
                 EffectUniform::Exposure => params.exposure += value / 1_000.0,
                 EffectUniform::Temperature => params.temperature += value / 100.0,
                 EffectUniform::Tint => params.tint += value / 100.0,
@@ -1032,6 +1042,52 @@ mod tests {
         };
         assert_pixel_close(pixel(&render(&left), 2, 2), [255, 0, 0, 255], 4);
         assert_pixel_close(pixel(&render(&right), 2, 2), [0, 0, 255, 255], 4);
+    }
+
+    #[test]
+    fn reframe_basis_points_override_legacy_percent_without_quantizing_motion() {
+        let legacy = reframe(1, 10_000, 37, 63);
+        let legacy_params = params_for(
+            std::slice::from_ref(&legacy),
+            TransitionRenderParams::default(),
+        );
+        assert!((legacy_params.reframe_focus_x - 0.37).abs() < f32::EPSILON);
+        assert!((legacy_params.reframe_focus_y - 0.63).abs() < f32::EPSILON);
+
+        let precise = effect_with(
+            2,
+            "reframe",
+            &[
+                ("target_aspect_basis_points", 10_000),
+                ("focus_x_percent", 37),
+                ("focus_y_percent", 63),
+                ("focus_x_basis_points", 3_742),
+                ("focus_y_basis_points", 6_319),
+            ],
+        );
+        let one_basis_point_right = effect_with(
+            3,
+            "reframe",
+            &[
+                ("target_aspect_basis_points", 10_000),
+                ("focus_x_basis_points", 3_743),
+                ("focus_y_basis_points", 6_319),
+            ],
+        );
+        let precise_params = params_for(
+            std::slice::from_ref(&precise),
+            TransitionRenderParams::default(),
+        );
+        let moved_params = params_for(
+            std::slice::from_ref(&one_basis_point_right),
+            TransitionRenderParams::default(),
+        );
+
+        assert!((precise_params.reframe_focus_x - 0.3742).abs() < 1e-6);
+        assert!((precise_params.reframe_focus_y - 0.6319).abs() < 1e-6);
+        let movement = moved_params.reframe_focus_x - precise_params.reframe_focus_x;
+        assert!(movement > 0.0);
+        assert!(movement < 0.001);
     }
 
     #[test]

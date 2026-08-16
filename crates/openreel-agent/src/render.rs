@@ -18,6 +18,11 @@ use crate::shrink_silence_span_for_cutting_with_transcript;
 #[allow(clippy::too_many_lines, clippy::unnecessary_debug_formatting)]
 pub fn render_timeline_state(document: &Document) -> String {
     let mut output = String::new();
+    let visible_marker_count = document
+        .markers
+        .iter()
+        .filter(|marker| !is_internal_marker_label(&marker.label))
+        .count();
     let _ = writeln!(
         output,
         "project fps={}/{} size={}x{} duration={}",
@@ -38,7 +43,7 @@ pub fn render_timeline_state(document: &Document) -> String {
         document.tracks.len(),
         clip_count,
         document.media_pool.len(),
-        document.markers.len(),
+        visible_marker_count,
         link_groups(document).len(),
         document.catalog.bins.len(),
         document.catalog.string_outs.len(),
@@ -253,9 +258,14 @@ fn render_links_and_markers(output: &mut String, document: &Document) {
             let _ = writeln!(output, "  link {link} clips={clips}");
         }
     }
-    if !document.markers.is_empty() {
+    let visible_markers = document
+        .markers
+        .iter()
+        .filter(|marker| !is_internal_marker_label(&marker.label))
+        .collect::<Vec<_>>();
+    if !visible_markers.is_empty() {
         output.push_str("markers:\n");
-        for marker in &document.markers {
+        for marker in visible_markers {
             let _ = writeln!(
                 output,
                 "  marker {} at={} color={} label={:?}",
@@ -266,6 +276,10 @@ fn render_links_and_markers(output: &mut String, document: &Document) {
             );
         }
     }
+}
+
+fn is_internal_marker_label(label: &str) -> bool {
+    label.starts_with("__openreel_")
 }
 
 /// Render detailed state for one clip.
@@ -1010,6 +1024,22 @@ markers:
 assets:
   asset 4 "interview.mp4" kind=AudioVideo duration=300f/10.000s fps=30/1 size=1920x1080 path="fixtures/interview.mp4""#;
         assert_eq!(render_timeline_state(&fixture()), expected);
+    }
+
+    #[test]
+    fn timeline_state_omits_internal_marker_payloads() {
+        let mut document = fixture();
+        document.markers.push(Marker {
+            id: MarkerId(4),
+            position: TimeCode(60),
+            label: "__openreel_reframe_subject_v1:large-private-sidecar".to_owned(),
+            color_token: 3,
+        });
+
+        let rendered = render_timeline_state(&document);
+        assert!(rendered.contains("markers=1"));
+        assert!(!rendered.contains("large-private-sidecar"));
+        assert!(!rendered.contains("marker 4"));
     }
 
     #[test]

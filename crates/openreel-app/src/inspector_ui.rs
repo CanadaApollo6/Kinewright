@@ -10,7 +10,7 @@ use openreel_core::{
 use crate::{
     app::OpenReelApp,
     theme::{self, color, space, type_size},
-    timeline_ui::{linked_members, linked_transition_operations},
+    timeline_ui::{is_internal_marker, linked_members, linked_transition_operations},
 };
 
 const INSPECTOR_MAX_HEIGHT: f32 = 360.0;
@@ -52,6 +52,7 @@ impl OpenReelApp {
             .focused()
             .selected_marker
             .and_then(|id| self.focused().document.marker(id))
+            .filter(|marker| !is_internal_marker(marker))
             .cloned()
         {
             self.marker_inspector(ui, &marker);
@@ -464,6 +465,9 @@ fn effects_section(ui: &mut egui::Ui, clip: &Clip, pending: &mut Vec<Operation>)
                 .find(|descriptor| descriptor.name == effect.name)
             {
                 for parameter in descriptor.parameters {
+                    if !should_render_effect_parameter(descriptor, parameter.name) {
+                        continue;
+                    }
                     let mut value = effect
                         .parameters
                         .get(parameter.name)
@@ -509,6 +513,27 @@ fn effects_section(ui: &mut egui::Ui, clip: &Clip, pending: &mut Vec<Operation>)
             }
         }
     });
+}
+
+/// Keep internal, high-precision reframe storage out of the generic inspector
+/// when the matching percent control is available. The basis-point parameters
+/// remain in the core descriptor for agent-authored edits and rendering.
+fn should_render_effect_parameter(
+    descriptor: &openreel_core::EffectDescriptor,
+    parameter_name: &str,
+) -> bool {
+    let Some(legacy_name) = (match (descriptor.name, parameter_name) {
+        ("reframe", "focus_x_basis_points") => Some("focus_x_percent"),
+        ("reframe", "focus_y_basis_points") => Some("focus_y_percent"),
+        _ => None,
+    }) else {
+        return true;
+    };
+
+    !descriptor
+        .parameters
+        .iter()
+        .any(|parameter| parameter.name == legacy_name)
 }
 
 fn transition_section(
@@ -661,6 +686,7 @@ fn add_effect_operation(clip: &Clip, descriptor: &openreel_core::EffectDescripto
     let parameters = descriptor
         .parameters
         .iter()
+        .filter(|parameter| should_render_effect_parameter(descriptor, parameter.name))
         .map(|parameter| {
             (
                 parameter.name.to_owned(),
@@ -824,6 +850,67 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn inspector_hides_reframe_basis_points_only_when_percent_control_exists() {
+        const BASIS_ONLY_PARAMETERS: &[EffectParameterDescriptor] = &[EffectParameterDescriptor {
+            name: "focus_x_basis_points",
+            min: 0,
+            max: 10_000,
+            neutral: 5_000,
+            uniform: EffectUniform::ReframeFocusX,
+        }];
+        let descriptor = EFFECT_DESCRIPTORS
+            .iter()
+            .find(|descriptor| descriptor.name == "reframe")
+            .expect("reframe descriptor");
+
+        assert!(should_render_effect_parameter(
+            descriptor,
+            "focus_x_percent"
+        ));
+        assert!(!should_render_effect_parameter(
+            descriptor,
+            "focus_x_basis_points"
+        ));
+        assert!(!should_render_effect_parameter(
+            descriptor,
+            "focus_y_basis_points"
+        ));
+        assert!(should_render_effect_parameter(
+            descriptor,
+            "target_aspect_basis_points"
+        ));
+
+        let basis_only_descriptor = EffectDescriptor {
+            name: "reframe",
+            parameters: BASIS_ONLY_PARAMETERS,
+        };
+        assert!(should_render_effect_parameter(
+            &basis_only_descriptor,
+            "focus_x_basis_points"
+        ));
+
+        let clip = Clip {
+            id: ClipId(1),
+            asset: AssetId(1),
+            source_range: TimeCode(0)..TimeCode(30),
+            content: ClipContent::Media,
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+        };
+        let Operation::AddEffect { effect, .. } = add_effect_operation(&clip, descriptor) else {
+            panic!("expected add effect operation");
+        };
+        assert!(!effect.parameters.contains_key("focus_x_basis_points"));
+        assert!(!effect.parameters.contains_key("focus_y_basis_points"));
     }
 
     #[test]

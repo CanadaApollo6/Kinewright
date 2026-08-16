@@ -137,7 +137,8 @@ The evaluator independently checks:
 - the exact camera, timeline, and source range of all five video shots;
 - the exact source range and continuous state of the program mix;
 - gapless 794-frame coverage and delivery duration;
-- one reframe effect per shot, keyframe count, face-safe bounds, and maximum jumps;
+- one reframe effect per shot, keyframe count, face-safe bounds, linear motion,
+  and a 2% maximum per-sample camera move;
 - rendered integrated loudness from -18 to -14 LUFS and a -1 dBFS sample-peak ceiling;
 - technical QA, vertical delivery conformance, undo integrity, and budgets;
 - a real 1080x1920 MP4, output hash, frame count, duration, audio, and
@@ -187,13 +188,26 @@ explicitly fails if those curves do not survive, and saved documents can be
 rerendered without spending another agent turn. Rerendering the exact saved
 model edit produced a distinct proof and a 39,718,336-byte MP4 with SHA-256
 `468ffa70090b17ee85f8a149330b7fb641584b7bed8cd49f1fbfe7e984e7e5b8` while
-retaining -16.98 LUFS and -1.72 dBFS. Human acceptance of this recovery
-artifact is pending, so it is not promoted to a checked-in baseline.
+retaining -16.98 LUFS and -1.72 dBFS. Human review confirmed the loudness fix
+but rejected the framing: the camera visibly stuttered as it chased tracking
+samples, and the final Laura shot still did not travel far enough to contain
+her. It is not promoted to a checked-in baseline.
 
-The next official sample also uses the crop's actual geometric travel range
-(25-75% horizontally) instead of the overly conservative 45-55% clamp. That
-lets the tracker follow Laura while keeping the supplied 25%-wide subject box
-inside the 9:16 crop.
+The failure came from treating raw tracker centers as camera positions every 12
+frames and easing each short segment independently. That produced repeated
+stop-start motion and allowed tracker noise to become visible camera motion.
+Tracking now feeds a virtual camera: a three-sample median filter rejects
+one-sample noise, a 6% subject dead zone prevents needless corrections, camera
+travel is limited to 2% per sample, and every segment is linear so sustained
+movement has continuous velocity. Focus automation uses basis points rather
+than whole percentages; on this 352x288-to-1080x1920 crop, that reduces the
+smallest representable horizontal movement from about 23.5 output pixels to
+about 0.24 pixels. The evaluator rejects eased or faster curves and separately
+checks that tracked subject bounds remain inside the real aspect-aware crop.
+The next official sample also uses the crop's actual geometric travel
+range (25-75% horizontally) instead of the overly conservative 45-55% clamp.
+Together, those rules let the camera follow Laura while keeping the supplied
+25%-wide subject box inside the 9:16 crop without tracker-driven jitter.
 
 Readiness also gained an explicit `check_silence` policy. Event work that must
 preserve continuous program audio can skip irrelevant dead-air analysis while

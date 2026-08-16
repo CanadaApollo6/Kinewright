@@ -21,6 +21,13 @@ const EDGE_HANDLE_WIDTH: f32 = 6.0;
 const SNAP_TOLERANCE: f32 = 8.0;
 const FILMSTRIP_TILE_WIDTH: f32 = 96.0;
 const THUMBNAIL_WIDTH: u32 = 128;
+const INTERNAL_MARKER_LABEL_PREFIX: &str = "__openreel_reframe_subject_v1:";
+
+/// Tracker provenance markers are document sidecars, not editorial markers.
+/// Keep them out of the timeline's visible, selectable, and snapping surfaces.
+pub(crate) fn is_internal_marker(marker: &Marker) -> bool {
+    marker.label.starts_with(INTERNAL_MARKER_LABEL_PREFIX)
+}
 
 #[derive(Clone, Copy)]
 struct ClipBounds {
@@ -127,6 +134,15 @@ impl OpenReelApp {
         if self.focused().transcript_selection.is_some() {
             self.cut_selected_transcript_words();
             return;
+        }
+        let selected_marker = self.focused().selected_marker;
+        if selected_marker.is_some_and(|id| {
+            self.focused()
+                .document
+                .marker(id)
+                .is_some_and(is_internal_marker)
+        }) {
+            self.focused_mut().selected_marker = None;
         }
         if let Some(marker) = self.focused().selected_marker {
             self.send_operation(Operation::RemoveMarker { marker });
@@ -323,6 +339,7 @@ impl OpenReelApp {
         let marker_end = document
             .markers
             .iter()
+            .filter(|marker| !is_internal_marker(marker))
             .map(|marker| marker.position.0.saturating_add(1))
             .max()
             .unwrap_or(0);
@@ -671,7 +688,11 @@ impl OpenReelApp {
                         }
                     }
 
-                    for marker in &document.markers {
+                    for marker in document
+                        .markers
+                        .iter()
+                        .filter(|marker| !is_internal_marker(marker))
+                    {
                         let x = rect.left() + marker.position.0 as f32 * pixels_per_frame;
                         let marker_rect = egui::Rect::from_center_size(
                             egui::pos2(x + 3.0, rect.top() + size::RULER_HEIGHT / 2.0),
@@ -777,7 +798,13 @@ impl OpenReelApp {
                         let candidates = clip_bounds
                             .iter()
                             .flat_map(|bounds| [bounds.start, bounds.end])
-                            .chain(document.markers.iter().map(|marker| marker.position.0))
+                            .chain(
+                                document
+                                    .markers
+                                    .iter()
+                                    .filter(|marker| !is_internal_marker(marker))
+                                    .map(|marker| marker.position.0),
+                            )
                             .collect::<Vec<_>>();
                         let (snapped, guide) = if snapping_disabled {
                             (raw.max(0), None)
@@ -1935,7 +1962,12 @@ fn snap_candidates(
     playhead: i64,
 ) -> Vec<i64> {
     let mut candidates = vec![playhead];
-    candidates.extend(markers.iter().map(|marker| marker.position.0));
+    candidates.extend(
+        markers
+            .iter()
+            .filter(|marker| !is_internal_marker(marker))
+            .map(|marker| marker.position.0),
+    );
     candidates.extend(
         bounds
             .iter()
@@ -1956,7 +1988,7 @@ fn marker_snap_candidates(
     candidates.extend(
         markers
             .iter()
-            .filter(|marker| marker.id != exclude)
+            .filter(|marker| marker.id != exclude && !is_internal_marker(marker))
             .map(|marker| marker.position.0),
     );
     candidates
@@ -2227,15 +2259,52 @@ mod tests {
                 end: 90,
             },
         ];
-        let markers = [Marker {
+        let markers = [
+            Marker {
+                id: MarkerId(3),
+                position: TimeCode(50),
+                label: "Review".to_owned(),
+                color_token: 0,
+            },
+            Marker {
+                id: MarkerId(4),
+                position: TimeCode(75),
+                label: "__openreel_reframe_subject_v1:sidecar".to_owned(),
+                color_token: 0,
+            },
+        ];
+        assert_eq!(
+            snap_candidates(&bounds, &markers, ClipId(1), 25),
+            vec![25, 50, 60, 90]
+        );
+    }
+
+    #[test]
+    fn reframe_provenance_markers_are_not_editorial_or_snap_targets() {
+        let editorial = Marker {
             id: MarkerId(3),
             position: TimeCode(50),
             label: "Review".to_owned(),
             color_token: 0,
+        };
+        let internal = Marker {
+            id: MarkerId(4),
+            position: TimeCode(75),
+            label: "__openreel_reframe_subject_v1:sidecar".to_owned(),
+            color_token: 0,
+        };
+        assert!(!is_internal_marker(&editorial));
+        assert!(is_internal_marker(&internal));
+
+        let markers = [editorial, internal];
+        let bounds = [ClipBounds {
+            id: ClipId(1),
+            start: 10,
+            end: 40,
         }];
         assert_eq!(
-            snap_candidates(&bounds, &markers, ClipId(1), 25),
-            vec![25, 50, 60, 90]
+            marker_snap_candidates(&bounds, &markers, MarkerId(3), 25),
+            vec![25, 10, 40]
         );
     }
 

@@ -465,6 +465,71 @@ mod tests {
     }
 
     #[test]
+    fn precise_reframe_automation_survives_delivery_materialization() {
+        let mut source = fixture();
+        source.tracks[0].clips[0].effects.push(Effect {
+            id: EffectId(41),
+            name: "reframe".to_owned(),
+            parameters: BTreeMap::from([
+                (
+                    "target_aspect_basis_points".to_owned(),
+                    ParamValue::Integer(5_625),
+                ),
+                ("focus_x_percent".to_owned(), ParamValue::Integer(50)),
+                ("focus_y_percent".to_owned(), ParamValue::Integer(50)),
+            ]),
+            keyframes: BTreeMap::new(),
+        });
+        let plan = crate::plan_subject_reframe_basis_points(
+            &source,
+            crate::SubjectReframeSettings {
+                clip: crate::ClipId(1),
+                effect: EffectId(41),
+                bounds: crate::ReframeFocusBounds::default(),
+                minimum_confidence_basis_points: 0,
+                focus_dead_zone_percent: 0,
+                maximum_focus_step_percent: 25,
+            },
+            &[
+                crate::SubjectCenterBasisPointSample {
+                    at: TimeCode::ZERO,
+                    x_basis_points: 5_001,
+                    y_basis_points: 4_999,
+                    confidence_basis_points: 10_000,
+                },
+                crate::SubjectCenterBasisPointSample {
+                    at: TimeCode(29),
+                    x_basis_points: 5_002,
+                    y_basis_points: 4_998,
+                    confidence_basis_points: 10_000,
+                },
+            ],
+        )
+        .unwrap();
+        crate::apply_batch(&mut source, &plan.operations).unwrap();
+
+        let delivered = document_for_delivery_variant(
+            &source,
+            DeliveryVariant::centered(DeliveryAspect::Vertical),
+        )
+        .unwrap();
+        let effect = &delivered.tracks[0].clips[0].effects[0];
+
+        assert_eq!(
+            effect.keyframes["focus_x_basis_points"].keyframes[0].value,
+            5_001
+        );
+        assert_eq!(
+            effect.keyframes["focus_x_basis_points"].keyframes[1].value,
+            5_002
+        );
+        assert_eq!(
+            effect.keyframes["focus_y_basis_points"].keyframes[1].value,
+            4_998
+        );
+    }
+
+    #[test]
     fn mismatched_animated_reframe_is_replaced_for_delivery_aspect() {
         let mut source = fixture();
         source.tracks[0].clips[0].effects.push(Effect {

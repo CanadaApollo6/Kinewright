@@ -12,21 +12,26 @@ use std::{
     time::Duration,
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
+};
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use openreel_core::{
     Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AudioBus, AudioBusId,
     AudioLoudness, AutomationCurve, BeatStatus, CaptionCue, CaptionMotion, CaptionPreset,
     ClipContent, ClipId, Command, Core, DeliveryAspect, DeliveryProfile, DeliveryVariant, Document,
-    Effect, EffectId, Event, Export, ExportCancellation, Keyframe, KeyframeInterpolation,
-    MediaAsset, MediaKind, Operation, ParamValue, Playback, Query, QueryResult, SceneStatus,
-    SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings, SyncGroupId, ThreePointMode,
-    TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange,
-    TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, TrackId, TranscriptStatus,
-    animated_caption_operations_at, apply_batch, authored_caption_cues, beat_pacing_plan,
-    caption_cues, dedup_timeline_words, delivery_conformance, document_for_delivery_profile,
-    document_for_delivery_variant, is_filler_word, map_source_range_to_project, music_fit_plan,
-    plan_speaker_multicam, qa_document,
+    Effect, EffectId, Event, Export, ExportCancellation, Keyframe, KeyframeInterpolation, Marker,
+    MarkerId, MediaAsset, MediaKind, Operation, ParamValue, Playback, Query, QueryResult,
+    ReframeFocusBounds, SceneStatus, SilenceStatus, SpeakerAngleAssignment,
+    SpeakerMulticamSettings, SubjectCenterBasisPointSample, SubjectReframeSettings, SyncGroupId,
+    ThreePointMode, TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision,
+    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, TrackId,
+    TranscriptStatus, animated_caption_operations_at, apply_batch, authored_caption_cues,
+    beat_pacing_plan, caption_cues, dedup_timeline_words, delivery_conformance,
+    document_for_delivery_profile, document_for_delivery_variant, is_filler_word,
+    map_source_range_to_project, music_fit_plan, plan_speaker_multicam,
+    plan_subject_reframe_basis_points, qa_document,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -73,7 +78,18 @@ const DEFAULT_BEAT_STRENGTH_BASIS_POINTS: u16 = 1_000;
 const DEFAULT_TRACKING_STEP_FRAMES: i64 = 5;
 const DEFAULT_TRACKING_SEARCH_RADIUS_PERCENT: u8 = 10;
 const DEFAULT_TRACKING_WIDTH: u32 = 256;
+const DEFAULT_REFRAME_DEAD_ZONE_PERCENT: u8 = 6;
+const DEFAULT_REFRAME_MAXIMUM_STEP_PERCENT: u8 = 2;
 const MAX_TRACKING_SAMPLES: usize = 120;
+/// Compact marker-label sidecar for deterministic subject-tracking evidence.
+///
+/// Effects intentionally accept only registered render parameters, so this
+/// marker is the smallest document-native place to retain non-rendering
+/// tracker evidence through delivery materialization without exposing one
+/// operation per observation to the editing model.
+pub(crate) const REFRAME_SUBJECT_PROVENANCE_PREFIX: &str = "__openreel_reframe_subject_v1:";
+const REFRAME_SUBJECT_PROVENANCE_HEADER_BYTES: usize = 18;
+const REFRAME_SUBJECT_PROVENANCE_SAMPLE_BYTES: usize = 16;
 /// AAC and other lossy encoders can overshoot a decoded sample ceiling. Keep
 /// deterministic pre-encode headroom while evaluating the public ceiling on
 /// the actual decoded delivery artifact.
@@ -1883,6 +1899,18 @@ impl OpenReelMcp {
                 "focus bounds must be ordered percentages in 0..=100",
             ));
         }
+        let focus_dead_zone = args
+            .focus_dead_zone_percent
+            .unwrap_or(DEFAULT_REFRAME_DEAD_ZONE_PERCENT);
+        if focus_dead_zone > 25 {
+            return Ok(error_text("focus_dead_zone_percent must be in 0..=25"));
+        }
+        let maximum_focus_step = args
+            .maximum_focus_step_percent
+            .unwrap_or(DEFAULT_REFRAME_MAXIMUM_STEP_PERCENT);
+        if !(1..=25).contains(&maximum_focus_step) {
+            return Ok(error_text("maximum_focus_step_percent must be in 1..=25"));
+        }
         let search_radius = args
             .search_radius_percent
             .unwrap_or(DEFAULT_TRACKING_SEARCH_RADIUS_PERCENT);
@@ -1910,35 +1938,48 @@ impl OpenReelMcp {
             Ok(tracked) => tracked,
             Err(error) => return Ok(error_text(error)),
         };
-        let curve_for = |axis: usize, extent: u32, minimum: u8, maximum: u8| AutomationCurve {
-            keyframes: tracked
-                .observations
-                .iter()
-                .map(|observation| Keyframe {
-                    at: observation.local_frame,
-                    value: i64::from(
-                        pixel_to_percent(observation.center[axis], extent).clamp(minimum, maximum),
-                    ),
-                    interpolation: KeyframeInterpolation::EaseInOut,
-                })
-                .collect(),
+        let samples = tracked
+            .observations
+            .iter()
+            .map(|observation| SubjectCenterBasisPointSample {
+                at: observation.local_frame,
+                x_basis_points: i64::from(pixel_to_basis_points(
+                    observation.center[0],
+                    tracked.width,
+                )),
+                y_basis_points: i64::from(pixel_to_basis_points(
+                    observation.center[1],
+                    tracked.height,
+                )),
+                confidence_basis_points: observation.confidence_basis_points,
+            })
+            .collect::<Vec<_>>();
+        let reframe = match plan_subject_reframe_basis_points(
+            &document,
+            SubjectReframeSettings {
+                clip: args.clip_id,
+                effect: args.effect_id,
+                bounds: ReframeFocusBounds {
+                    min_x_percent: i64::from(focus_bounds[0]),
+                    max_x_percent: i64::from(focus_bounds[1]),
+                    min_y_percent: i64::from(focus_bounds[2]),
+                    max_y_percent: i64::from(focus_bounds[3]),
+                },
+                minimum_confidence_basis_points: 0,
+                focus_dead_zone_percent: focus_dead_zone,
+                maximum_focus_step_percent: maximum_focus_step,
+            },
+            &samples,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "tracked reframe observations could not be stabilized: {error}"
+                )));
+            }
         };
-        let x_curve = curve_for(0, tracked.width, focus_bounds[0], focus_bounds[1]);
-        let y_curve = curve_for(1, tracked.height, focus_bounds[2], focus_bounds[3]);
-        let operations = vec![
-            Operation::SetEffectKeyframes {
-                clip: args.clip_id,
-                effect: args.effect_id,
-                name: "focus_x_percent".to_owned(),
-                curve: x_curve.clone(),
-            },
-            Operation::SetEffectKeyframes {
-                clip: args.clip_id,
-                effect: args.effect_id,
-                name: "focus_y_percent".to_owned(),
-                curve: y_curve.clone(),
-            },
-        ];
+        let x_curve = &reframe.focus_x_curve;
+        let y_curve = &reframe.focus_y_curve;
         let focus_keyframes = tracked
             .observations
             .iter()
@@ -1947,8 +1988,8 @@ impl OpenReelMcp {
             .map(|((observation, x), y)| {
                 serde_json::json!({
                     "frame": observation.local_frame.0,
-                    "x": x.value,
-                    "y": y.value,
+                    "x_basis_points": x.value,
+                    "y_basis_points": y.value,
                     "confidence": observation.confidence_basis_points,
                 })
             })
@@ -1959,6 +2000,64 @@ impl OpenReelMcp {
             .map(|observation| observation.confidence_basis_points)
             .min()
             .unwrap_or_default();
+        let provenance = ReframeSubjectProvenance {
+            clip: args.clip_id,
+            effect: args.effect_id,
+            samples: tracked
+                .observations
+                .iter()
+                .map(|observation| {
+                    tracked_subject_bounds(
+                        observation,
+                        tracked.width,
+                        tracked.height,
+                        [
+                            i64::from(args.subject_width_percent),
+                            i64::from(args.subject_height_percent),
+                        ],
+                    )
+                })
+                .collect(),
+        };
+        let provenance_label = encode_reframe_subject_provenance(&provenance);
+        let existing_provenance_marker = document.markers.iter().find_map(|marker| {
+            decode_reframe_subject_provenance(&marker.label)
+                .ok()
+                .flatten()
+                .filter(|existing| {
+                    existing.clip == args.clip_id && existing.effect == args.effect_id
+                })
+                .map(|_| marker.id)
+        });
+        let provenance_operation = if let Some(marker) = existing_provenance_marker {
+            Operation::SetMarkerParam {
+                marker,
+                name: "label".to_owned(),
+                value: ParamValue::Text(provenance_label),
+            }
+        } else {
+            let next_marker_id = document
+                .markers
+                .iter()
+                .map(|marker| marker.id.0)
+                .max()
+                .unwrap_or_default()
+                .checked_add(1)
+                .map(MarkerId)
+                .ok_or_else(|| {
+                    McpError::internal_error("marker id space is exhausted".to_owned(), None)
+                })?;
+            Operation::AddMarker {
+                marker: Marker {
+                    id: next_marker_id,
+                    position: clip.timeline_start,
+                    label: provenance_label,
+                    color_token: 3,
+                },
+            }
+        };
+        let mut operations = reframe.operations;
+        operations.push(provenance_operation);
         let plan = match self.prepare_operations(revision, &document, operations) {
             Ok(plan) => plan,
             Err(error) => {
@@ -1983,9 +2082,14 @@ impl OpenReelMcp {
                 "minimum_y": focus_bounds[2],
                 "maximum_y": focus_bounds[3],
             },
+            "camera_stabilization": {
+                "subject_dead_zone_percent": focus_dead_zone,
+                "maximum_step_percent": maximum_focus_step,
+                "observation_filter": "three_sample_median",
+                "keyframe_interpolation": "linear",
+            },
             "minimum_confidence_basis_points": minimum_confidence,
             "focus_keyframes": focus_keyframes,
-            "keyframe_interpolation": "ease_in_out",
             "prepared_edit_plan": {
                 "plan_id": plan.id,
                 "expected_revision": revision,
@@ -1995,7 +2099,7 @@ impl OpenReelMcp {
         });
         Ok(success_structured(
             format!(
-                "tracked reframe effect {} on clip {} across {} samples (minimum confidence {minimum_confidence}/10000) as edit plan {}; review low-confidence spans and the preview, then commit it at timeline revision {revision}",
+                "tracked and stabilized reframe effect {} on clip {} across {} samples (minimum confidence {minimum_confidence}/10000) as edit plan {}; review low-confidence spans and the preview, then commit it at timeline revision {revision}",
                 args.effect_id,
                 args.clip_id,
                 tracked.observations.len(),
@@ -3891,6 +3995,12 @@ struct TrackReframeArgs {
     /// Largest editable vertical focus emitted by the tracker. Defaults to 100.
     #[serde(default)]
     maximum_focus_y_percent: Option<u8>,
+    /// Subject motion tolerated before the virtual camera follows. Defaults to 6%; valid range 0..=25.
+    #[serde(default)]
+    focus_dead_zone_percent: Option<u8>,
+    /// Largest virtual-camera move between samples. Defaults to 2%; valid range 1..=25.
+    #[serde(default)]
+    maximum_focus_step_percent: Option<u8>,
     /// First clip-local frame to track. Defaults to zero.
     #[serde(default)]
     start_local_frame: Option<TimeCode>,
@@ -5239,6 +5349,28 @@ struct TrackingObservation {
     confidence_basis_points: u16,
 }
 
+/// Conservative source-normalized bounds for one tracked subject sample.
+///
+/// Coordinates use basis points so the evaluator can distinguish an actual
+/// camera follow from an integer-percent approximation without making the
+/// reframe effect itself carry non-rendering parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TrackedSubjectBounds {
+    pub at: TimeCode,
+    pub left_basis_points: u16,
+    pub right_basis_points: u16,
+    pub top_basis_points: u16,
+    pub bottom_basis_points: u16,
+}
+
+/// Compact, document-persisted tracking evidence associated with one reframe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReframeSubjectProvenance {
+    pub clip: ClipId,
+    pub effect: EffectId,
+    pub samples: Vec<TrackedSubjectBounds>,
+}
+
 struct RegionTrackingRequest<'a> {
     document: &'a Document,
     clip_id: ClipId,
@@ -5263,36 +5395,228 @@ struct TrackingMatch {
     confidence_basis_points: u16,
 }
 
-fn tracking_sample_frames(range: std::ops::Range<TimeCode>, step: i64) -> Vec<TimeCode> {
-    let mut frames = Vec::new();
-    let mut at = range.start.0;
-    while at < range.end.0 {
-        frames.push(TimeCode(at));
-        let Some(next) = at.checked_add(step) else {
-            break;
-        };
-        at = next;
+pub(crate) fn encode_reframe_subject_provenance(provenance: &ReframeSubjectProvenance) -> String {
+    let sample_count = u16::try_from(provenance.samples.len()).unwrap_or(u16::MAX);
+    let mut bytes = Vec::with_capacity(
+        REFRAME_SUBJECT_PROVENANCE_HEADER_BYTES
+            .saturating_add(usize::from(sample_count) * REFRAME_SUBJECT_PROVENANCE_SAMPLE_BYTES),
+    );
+    bytes.extend_from_slice(&provenance.clip.0.to_le_bytes());
+    bytes.extend_from_slice(&provenance.effect.0.to_le_bytes());
+    bytes.extend_from_slice(&sample_count.to_le_bytes());
+    for sample in provenance.samples.iter().take(usize::from(sample_count)) {
+        bytes.extend_from_slice(&sample.at.0.to_le_bytes());
+        bytes.extend_from_slice(&sample.left_basis_points.to_le_bytes());
+        bytes.extend_from_slice(&sample.right_basis_points.to_le_bytes());
+        bytes.extend_from_slice(&sample.top_basis_points.to_le_bytes());
+        bytes.extend_from_slice(&sample.bottom_basis_points.to_le_bytes());
     }
-    let last = TimeCode(range.end.0.saturating_sub(1));
-    if frames.last() != Some(&last) {
-        frames.push(last);
+    format!(
+        "{REFRAME_SUBJECT_PROVENANCE_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(bytes)
+    )
+}
+
+/// Decode one opaque marker-label tracking sidecar.
+///
+/// Non-provenance labels return `Ok(None)` so ordinary user markers stay
+/// entirely outside this contract. A matching prefix with malformed data is
+/// intentionally an error: silently ignoring corrupted tracking evidence
+/// would let a static or wrong-direction reframe pass evaluation.
+pub(crate) fn decode_reframe_subject_provenance(
+    label: &str,
+) -> Result<Option<ReframeSubjectProvenance>, String> {
+    let Some(encoded) = label.strip_prefix(REFRAME_SUBJECT_PROVENANCE_PREFIX) else {
+        return Ok(None);
+    };
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|error| format!("invalid base64: {error}"))?;
+    if bytes.len() < REFRAME_SUBJECT_PROVENANCE_HEADER_BYTES {
+        return Err("missing provenance header".to_owned());
+    }
+    let decode_id = |offset: usize| {
+        let slice = bytes
+            .get(offset..offset.saturating_add(8))
+            .ok_or_else(|| "truncated provenance header".to_owned())?;
+        let array: [u8; 8] = slice
+            .try_into()
+            .map_err(|_| "invalid provenance header width".to_owned())?;
+        Ok::<u64, String>(u64::from_le_bytes(array))
+    };
+    let read_u16 = |offset: usize| {
+        let slice = bytes
+            .get(offset..offset.saturating_add(2))
+            .ok_or_else(|| "truncated provenance sample".to_owned())?;
+        let array: [u8; 2] = slice
+            .try_into()
+            .map_err(|_| "invalid provenance sample width".to_owned())?;
+        Ok::<u16, String>(u16::from_le_bytes(array))
+    };
+    let decode_frame = |offset: usize| {
+        let slice = bytes
+            .get(offset..offset.saturating_add(8))
+            .ok_or_else(|| "truncated provenance sample".to_owned())?;
+        let array: [u8; 8] = slice
+            .try_into()
+            .map_err(|_| "invalid provenance sample width".to_owned())?;
+        Ok::<i64, String>(i64::from_le_bytes(array))
+    };
+    let clip = ClipId(decode_id(0)?);
+    let effect = EffectId(decode_id(8)?);
+    let sample_count = usize::from(read_u16(16)?);
+    if sample_count > MAX_TRACKING_SAMPLES {
+        return Err(format!(
+            "contains {sample_count} samples, above the {MAX_TRACKING_SAMPLES} sample limit"
+        ));
+    }
+    let expected_length = REFRAME_SUBJECT_PROVENANCE_HEADER_BYTES
+        .saturating_add(sample_count.saturating_mul(REFRAME_SUBJECT_PROVENANCE_SAMPLE_BYTES));
+    if bytes.len() != expected_length {
+        return Err(format!(
+            "expected {expected_length} bytes for {sample_count} samples, found {}",
+            bytes.len()
+        ));
+    }
+    if sample_count == 0 {
+        return Err("contains no tracked subject samples".to_owned());
+    }
+    let mut samples = Vec::with_capacity(sample_count);
+    for index in 0..sample_count {
+        let offset = REFRAME_SUBJECT_PROVENANCE_HEADER_BYTES
+            .saturating_add(index.saturating_mul(REFRAME_SUBJECT_PROVENANCE_SAMPLE_BYTES));
+        let at = TimeCode(decode_frame(offset)?);
+        let left_basis_points = read_u16(offset + 8)?;
+        let right_basis_points = read_u16(offset + 10)?;
+        let top_basis_points = read_u16(offset + 12)?;
+        let bottom_basis_points = read_u16(offset + 14)?;
+        if at < TimeCode::ZERO
+            || left_basis_points > right_basis_points
+            || top_basis_points > bottom_basis_points
+            || right_basis_points > 10_000
+            || bottom_basis_points > 10_000
+        {
+            return Err(format!("sample {index} has invalid bounds"));
+        }
+        if samples
+            .last()
+            .is_some_and(|previous: &TrackedSubjectBounds| at <= previous.at)
+        {
+            return Err(format!("sample {index} is not strictly ordered"));
+        }
+        samples.push(TrackedSubjectBounds {
+            at,
+            left_basis_points,
+            right_basis_points,
+            top_basis_points,
+            bottom_basis_points,
+        });
+    }
+    Ok(Some(ReframeSubjectProvenance {
+        clip,
+        effect,
+        samples,
+    }))
+}
+
+fn tracked_subject_bounds(
+    observation: &TrackingObservation,
+    width: u32,
+    height: u32,
+    box_percent: [i64; 2],
+) -> TrackedSubjectBounds {
+    let half_size = [
+        tracking_half_extent(width, box_percent[0]),
+        tracking_half_extent(height, box_percent[1]),
+    ];
+    let left = observation.center[0].saturating_sub(half_size[0]);
+    let right = observation.center[0]
+        .saturating_add(half_size[0])
+        .min(width.saturating_sub(1));
+    let top = observation.center[1].saturating_sub(half_size[1]);
+    let bottom = observation.center[1]
+        .saturating_add(half_size[1])
+        .min(height.saturating_sub(1));
+    TrackedSubjectBounds {
+        at: observation.local_frame,
+        left_basis_points: pixel_to_basis_points_floor(left, width),
+        right_basis_points: pixel_to_basis_points_ceil(right, width),
+        top_basis_points: pixel_to_basis_points_floor(top, height),
+        bottom_basis_points: pixel_to_basis_points_ceil(bottom, height),
+    }
+}
+
+fn tracking_sample_frames(range: std::ops::Range<TimeCode>, step: i64) -> Vec<TimeCode> {
+    let Some(last) = range.end.0.checked_sub(1) else {
+        return Vec::new();
+    };
+    if last < range.start.0 {
+        return Vec::new();
+    }
+    if last == range.start.0 {
+        return vec![range.start];
+    }
+
+    // Treat `step` as the requested maximum spacing, then distribute the
+    // samples across the whole visible span. Appending `last` after stepping
+    // leaves a one-frame tail whenever the span is not divisible by `step`.
+    // Evenly distributing ceil(span / step) intervals keeps every gap within
+    // one frame of its neighbours and makes the final interval ordinary.
+    let span = i128::from(last) - i128::from(range.start.0);
+    let requested_step = i128::from(step.max(1));
+    let interval_count = usize::try_from((span + requested_step - 1) / requested_step)
+        .unwrap_or(usize::MAX)
+        .max(1);
+    let interval_count_i128 = i128::try_from(interval_count).unwrap_or(i128::MAX);
+    let mut frames = Vec::with_capacity(interval_count.saturating_add(1));
+    for index in 0..=interval_count {
+        let index_i128 = i128::try_from(index).unwrap_or(i128::MAX);
+        let offset = span.saturating_mul(index_i128) / interval_count_i128;
+        let frame = if index == interval_count {
+            last
+        } else {
+            i64::try_from(i128::from(range.start.0).saturating_add(offset)).unwrap_or(last)
+        };
+        frames.push(TimeCode(frame));
     }
     frames
 }
 
 fn tracking_half_size(image: &openreel_core::RgbaImage, box_percent: [i64; 2]) -> [u32; 2] {
-    let half = |extent: u32, percent: i64| {
-        let percent = u32::try_from(percent).unwrap_or_default();
-        extent
-            .saturating_mul(percent)
-            .div_ceil(200)
-            .max(1)
-            .min(extent.saturating_sub(1) / 2)
-    };
     [
-        half(image.width, box_percent[0]),
-        half(image.height, box_percent[1]),
+        tracking_half_extent(image.width, box_percent[0]),
+        tracking_half_extent(image.height, box_percent[1]),
     ]
+}
+
+fn tracking_half_extent(extent: u32, percent: i64) -> u32 {
+    let percent = u32::try_from(percent).unwrap_or_default();
+    extent
+        .saturating_mul(percent)
+        .div_ceil(200)
+        .max(1)
+        .min(extent.saturating_sub(1) / 2)
+}
+
+fn pixel_to_basis_points_floor(pixel: u32, extent: u32) -> u16 {
+    let denominator = u64::from(extent.saturating_sub(1).max(1));
+    let value = u64::from(pixel)
+        .saturating_mul(10_000)
+        .checked_div(denominator)
+        .unwrap_or_default()
+        .min(10_000);
+    u16::try_from(value).unwrap_or(10_000)
+}
+
+fn pixel_to_basis_points_ceil(pixel: u32, extent: u32) -> u16 {
+    let denominator = u64::from(extent.saturating_sub(1).max(1));
+    let numerator = u64::from(pixel).saturating_mul(10_000);
+    let value = numerator
+        .saturating_add(denominator.saturating_sub(1))
+        .checked_div(denominator)
+        .unwrap_or_default()
+        .min(10_000);
+    u16::try_from(value).unwrap_or(10_000)
 }
 
 fn percent_to_pixel(percent: u8, extent: u32) -> u32 {
@@ -5306,6 +5630,15 @@ fn pixel_to_percent(pixel: u32, extent: u32) -> u8 {
     let denominator = extent.saturating_sub(1).max(1);
     let rounded = pixel.saturating_mul(100).saturating_add(denominator / 2) / denominator;
     u8::try_from(rounded.min(100)).unwrap_or(100)
+}
+
+fn pixel_to_basis_points(pixel: u32, extent: u32) -> u16 {
+    let denominator = u64::from(extent.saturating_sub(1).max(1));
+    let rounded = u64::from(pixel)
+        .saturating_mul(10_000)
+        .saturating_add(denominator / 2)
+        / denominator;
+    u16::try_from(rounded.min(10_000)).unwrap_or(10_000)
 }
 
 fn clamp_tracking_center(
@@ -5643,8 +5976,51 @@ mod tracking_tests {
     fn tracking_samples_include_the_exact_last_visible_frame() {
         assert_eq!(
             tracking_sample_frames(TimeCode(3)..TimeCode(15), 5),
-            vec![TimeCode(3), TimeCode(8), TimeCode(13), TimeCode(14)]
+            vec![TimeCode(3), TimeCode(6), TimeCode(10), TimeCode(14)]
         );
+    }
+
+    #[test]
+    fn tracking_samples_distribute_non_divisible_spans_without_a_short_tail() {
+        let frames = tracking_sample_frames(TimeCode(0)..TimeCode(12), 5);
+
+        assert_eq!(
+            frames,
+            vec![TimeCode(0), TimeCode(3), TimeCode(7), TimeCode(11)]
+        );
+        let gaps = frames
+            .windows(2)
+            .map(|pair| pair[1].0 - pair[0].0)
+            .collect::<Vec<_>>();
+        assert_eq!(gaps, vec![3, 4, 4]);
+        assert!(gaps.iter().all(|gap| *gap <= 5));
+        assert!(gaps.windows(2).all(|pair| pair[0].abs_diff(pair[1]) <= 1));
+    }
+
+    #[test]
+    fn tracking_samples_handle_short_ranges_and_exact_division() {
+        assert_eq!(
+            tracking_sample_frames(TimeCode(7)..TimeCode(10), 10),
+            vec![TimeCode(7), TimeCode(9)]
+        );
+        assert_eq!(
+            tracking_sample_frames(TimeCode(4)..TimeCode(15), 5),
+            vec![TimeCode(4), TimeCode(9), TimeCode(14)]
+        );
+        assert_eq!(
+            tracking_sample_frames(TimeCode(6)..TimeCode(7), 5),
+            vec![TimeCode(6)]
+        );
+    }
+
+    #[test]
+    fn tracking_samples_are_unique_and_in_visible_range() {
+        let frames = tracking_sample_frames(TimeCode(10)..TimeCode(31), 6);
+
+        assert_eq!(frames.first(), Some(&TimeCode(10)));
+        assert_eq!(frames.last(), Some(&TimeCode(30)));
+        assert!(frames.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(frames.iter().all(|frame| (10..31).contains(&frame.0)));
     }
 }
 
