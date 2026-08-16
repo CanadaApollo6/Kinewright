@@ -24,14 +24,14 @@ use openreel_core::{
     Effect, EffectId, Event, Export, ExportCancellation, Keyframe, KeyframeInterpolation, Marker,
     MarkerId, MediaAsset, MediaKind, Operation, ParamValue, Playback, Query, QueryResult,
     ReframeFocusBounds, SceneStatus, SilenceStatus, SpeakerAngleAssignment,
-    SpeakerMulticamSettings, SubjectCenterBasisPointSample, SubjectReframeSettings, SyncGroupId,
-    ThreePointMode, TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision,
-    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, TrackId,
-    TranscriptStatus, animated_caption_operations_at, apply_batch, authored_caption_cues,
-    beat_pacing_plan, caption_cues, dedup_timeline_words, delivery_conformance,
-    document_for_delivery_profile, document_for_delivery_variant, is_filler_word,
-    map_source_range_to_project, music_fit_plan, plan_speaker_multicam,
-    plan_subject_reframe_basis_points, qa_document,
+    SpeakerMulticamSettings, SubjectCenterBasisPointSample, SubjectFocusBasisPointConstraint,
+    SubjectReframeSettings, SyncGroupId, ThreePointMode, TimeCode, TimelineBeat,
+    TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange, TimelineSilenceSpan,
+    TimelineTranscriptWord, TitlePosition, TrackId, TranscriptStatus,
+    animated_caption_operations_at, apply_batch, authored_caption_cues, beat_pacing_plan,
+    caption_cues, dedup_timeline_words, delivery_conformance, document_for_delivery_profile,
+    document_for_delivery_variant, is_filler_word, map_source_range_to_project, music_fit_plan,
+    plan_speaker_multicam, plan_subject_reframe_basis_points_with_containment, qa_document,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -1836,6 +1836,21 @@ impl OpenReelMcp {
                 args.effect_id, effect.name
             )));
         }
+        let Some((source_width, source_height)) = document
+            .asset(clip.asset)
+            .and_then(|asset| asset.resolution)
+        else {
+            return Ok(error_text(format!(
+                "clip {} source resolution is required to plan full tracked-subject containment",
+                args.clip_id
+            )));
+        };
+        if source_width == 0 || source_height == 0 {
+            return Ok(error_text(format!(
+                "clip {} has invalid source resolution {source_width}x{source_height}",
+                args.clip_id
+            )));
+        }
         if !(1..=75).contains(&args.subject_width_percent)
             || !(1..=75).contains(&args.subject_height_percent)
         {
@@ -1938,6 +1953,45 @@ impl OpenReelMcp {
             Ok(tracked) => tracked,
             Err(error) => return Ok(error_text(error)),
         };
+        let subject_box_percent = [
+            i64::from(args.subject_width_percent),
+            i64::from(args.subject_height_percent),
+        ];
+        let provenance_samples = tracked
+            .observations
+            .iter()
+            .map(|observation| {
+                tracked_subject_bounds(
+                    observation,
+                    tracked.width,
+                    tracked.height,
+                    subject_box_percent,
+                )
+            })
+            .collect::<Vec<_>>();
+        let containment = provenance_samples
+            .iter()
+            .map(|subject| {
+                let target_aspect_basis_points = effect
+                    .integer_parameter_at("target_aspect_basis_points", subject.at)
+                    .ok_or_else(|| {
+                        format!(
+                            "reframe effect {} has no target_aspect_basis_points at frame {}",
+                            args.effect_id, subject.at
+                        )
+                    })?;
+                tracked_subject_focus_constraint(
+                    *subject,
+                    source_width,
+                    source_height,
+                    target_aspect_basis_points,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let containment = match containment {
+            Ok(constraints) => constraints,
+            Err(error) => return Ok(error_text(error)),
+        };
         let samples = tracked
             .observations
             .iter()
@@ -1954,7 +2008,7 @@ impl OpenReelMcp {
                 confidence_basis_points: observation.confidence_basis_points,
             })
             .collect::<Vec<_>>();
-        let reframe = match plan_subject_reframe_basis_points(
+        let reframe = match plan_subject_reframe_basis_points_with_containment(
             &document,
             SubjectReframeSettings {
                 clip: args.clip_id,
@@ -1970,11 +2024,12 @@ impl OpenReelMcp {
                 maximum_focus_step_percent: maximum_focus_step,
             },
             &samples,
+            &containment,
         ) {
             Ok(plan) => plan,
             Err(error) => {
                 return Ok(error_text(format!(
-                    "tracked reframe observations could not be stabilized: {error}"
+                    "full tracked-subject containment could not be planned: {error}"
                 )));
             }
         };
@@ -2003,21 +2058,7 @@ impl OpenReelMcp {
         let provenance = ReframeSubjectProvenance {
             clip: args.clip_id,
             effect: args.effect_id,
-            samples: tracked
-                .observations
-                .iter()
-                .map(|observation| {
-                    tracked_subject_bounds(
-                        observation,
-                        tracked.width,
-                        tracked.height,
-                        [
-                            i64::from(args.subject_width_percent),
-                            i64::from(args.subject_height_percent),
-                        ],
-                    )
-                })
-                .collect(),
+            samples: provenance_samples,
         };
         let provenance_label = encode_reframe_subject_provenance(&provenance);
         let existing_provenance_marker = document.markers.iter().find_map(|marker| {
@@ -2083,6 +2124,7 @@ impl OpenReelMcp {
                 "maximum_y": focus_bounds[3],
             },
             "camera_stabilization": {
+                "controller": "offline_lookahead_containment",
                 "subject_dead_zone_percent": focus_dead_zone,
                 "maximum_step_percent": maximum_focus_step,
                 "observation_filter": "three_sample_median",
@@ -4824,7 +4866,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "track_reframe_subject",
-            "Follow an explicitly seeded subject region through a clip using deterministic sequential template matching, clamp the editable curves to explicit face-safe focus bounds when supplied, and return confidence observations plus a revision-gated plan. This is not a learned person detector and never silently mutates the timeline.",
+            "Follow an explicitly seeded subject region through a clip using deterministic sequential template matching, then build an offline-lookahead camera path that contains every tracked box within explicit face-safe focus and maximum-step bounds. Returns an explicit error when full containment is infeasible plus confidence observations and a revision-gated plan; this is not a learned person detector and never silently mutates the timeline.",
             schema_object::<TrackReframeArgs>(),
         )
         .with_annotations(read_only()),
@@ -5641,6 +5683,130 @@ fn pixel_to_basis_points(pixel: u32, extent: u32) -> u16 {
     u16::try_from(rounded.min(10_000)).unwrap_or(10_000)
 }
 
+fn tracked_subject_focus_constraint(
+    subject: TrackedSubjectBounds,
+    source_width: u32,
+    source_height: u32,
+    target_aspect_basis_points: i64,
+) -> Result<SubjectFocusBasisPointConstraint, String> {
+    if source_width == 0 || source_height == 0 {
+        return Err(format!(
+            "source resolution must be positive, found {source_width}x{source_height}"
+        ));
+    }
+    if target_aspect_basis_points <= 0 {
+        return Err(format!(
+            "target_aspect_basis_points must be positive, found {target_aspect_basis_points}"
+        ));
+    }
+
+    let source_width = i128::from(source_width);
+    let source_height = i128::from(source_height);
+    let target_aspect = i128::from(target_aspect_basis_points);
+    let source_is_wider =
+        source_width.saturating_mul(10_000) > source_height.saturating_mul(target_aspect);
+    let source_is_taller =
+        source_width.saturating_mul(10_000) < source_height.saturating_mul(target_aspect);
+    let (visible_width, visible_height) = if source_is_wider {
+        (
+            i64::try_from(ceil_positive_ratio(
+                target_aspect.saturating_mul(source_height),
+                source_width,
+            ))
+            .unwrap_or(10_000)
+            .clamp(1, 10_000),
+            10_000,
+        )
+    } else if source_is_taller {
+        (
+            10_000,
+            i64::try_from(ceil_positive_ratio(
+                source_width.saturating_mul(100_000_000),
+                source_height.saturating_mul(target_aspect),
+            ))
+            .unwrap_or(10_000)
+            .clamp(1, 10_000),
+        )
+    } else {
+        (10_000, 10_000)
+    };
+    let (minimum_x, maximum_x) = focus_interval_for_subject_axis(
+        i64::from(subject.left_basis_points),
+        i64::from(subject.right_basis_points),
+        visible_width,
+    )
+    .ok_or_else(|| {
+        format!(
+            "tracked subject at frame {} is wider than the delivery crop",
+            subject.at
+        )
+    })?;
+    let (minimum_y, maximum_y) = focus_interval_for_subject_axis(
+        i64::from(subject.top_basis_points),
+        i64::from(subject.bottom_basis_points),
+        visible_height,
+    )
+    .ok_or_else(|| {
+        format!(
+            "tracked subject at frame {} is taller than the delivery crop",
+            subject.at
+        )
+    })?;
+
+    Ok(SubjectFocusBasisPointConstraint {
+        at: subject.at,
+        min_x_basis_points: minimum_x,
+        max_x_basis_points: maximum_x,
+        min_y_basis_points: minimum_y,
+        max_y_basis_points: maximum_y,
+    })
+}
+
+fn ceil_positive_ratio(numerator: i128, denominator: i128) -> i128 {
+    numerator
+        .saturating_add(denominator.saturating_sub(1))
+        .checked_div(denominator.max(1))
+        .unwrap_or_default()
+}
+
+/// Invert the compositor's clamped crop-axis transform.
+///
+/// At either frame edge, many focus values produce the same clamped crop. The
+/// returned interval retains those plateaus instead of forcing the virtual
+/// camera toward an arbitrary centre value.
+fn focus_interval_for_subject_axis(
+    subject_minimum: i64,
+    subject_maximum: i64,
+    visible_basis_points: i64,
+) -> Option<(i64, i64)> {
+    let visible = visible_basis_points.clamp(1, 10_000);
+    if subject_minimum < 0
+        || subject_maximum > 10_000
+        || subject_minimum > subject_maximum
+        || subject_maximum.saturating_sub(subject_minimum) > visible
+    {
+        return None;
+    }
+    let maximum_crop_start = 10_000_i64.saturating_sub(visible);
+    let minimum_crop_start = subject_maximum.saturating_sub(visible).max(0);
+    let maximum_allowed_crop_start = subject_minimum.min(maximum_crop_start);
+    if minimum_crop_start > maximum_allowed_crop_start {
+        return None;
+    }
+    let half_visible = visible / 2;
+    let minimum_focus = if minimum_crop_start == 0 {
+        0
+    } else {
+        minimum_crop_start.saturating_add(half_visible)
+    };
+    let maximum_focus = if maximum_allowed_crop_start == maximum_crop_start {
+        10_000
+    } else {
+        maximum_allowed_crop_start.saturating_add(half_visible)
+    };
+    Some((minimum_focus, maximum_focus))
+}
+
 fn clamp_tracking_center(
     image: &openreel_core::RgbaImage,
     center: [u32; 2],
@@ -6021,6 +6187,148 @@ mod tracking_tests {
         assert_eq!(frames.last(), Some(&TimeCode(30)));
         assert!(frames.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(frames.iter().all(|frame| (10..31).contains(&frame.0)));
+    }
+
+    #[test]
+    fn tracked_subject_constraints_match_the_failed_vertical_crop_edges() {
+        let constraint = tracked_subject_focus_constraint(
+            TrackedSubjectBounds {
+                at: TimeCode(69),
+                left_basis_points: 2_392,
+                right_basis_points: 4_902,
+                top_basis_points: 1_442,
+                bottom_basis_points: 4_520,
+            },
+            352,
+            288,
+            5_625,
+        )
+        .unwrap();
+
+        assert_eq!(constraint.min_x_basis_points, 2_600);
+        assert_eq!(constraint.max_x_basis_points, 4_693);
+        assert_eq!(constraint.min_y_basis_points, 0);
+        assert_eq!(constraint.max_y_basis_points, 10_000);
+    }
+
+    #[test]
+    fn tracked_subject_constraints_preserve_the_right_edge_focus_plateau() {
+        let constraint = tracked_subject_focus_constraint(
+            TrackedSubjectBounds {
+                at: TimeCode(235),
+                left_basis_points: 1_921,
+                right_basis_points: 4_432,
+                top_basis_points: 3_557,
+                bottom_basis_points: 6_635,
+            },
+            352,
+            288,
+            5_625,
+        )
+        .unwrap();
+
+        assert_eq!(constraint.min_x_basis_points, 0);
+        assert_eq!(constraint.max_x_basis_points, 4_222);
+        assert_eq!(constraint.min_y_basis_points, 0);
+        assert_eq!(constraint.max_y_basis_points, 10_000);
+    }
+}
+
+#[cfg(test)]
+mod reframe_geometry_tests {
+    use super::*;
+
+    fn crop_axis(focus_basis_points: i64, visible_basis_points: i64) -> (i64, i64) {
+        let visible = visible_basis_points.clamp(1, 10_000);
+        let maximum_left = 10_000 - visible;
+        let left = focus_basis_points
+            .saturating_sub(visible / 2)
+            .clamp(0, maximum_left);
+        (left, left + visible)
+    }
+
+    fn contains(
+        focus_basis_points: i64,
+        visible_basis_points: i64,
+        subject_minimum: i64,
+        subject_maximum: i64,
+    ) -> bool {
+        let (left, right) = crop_axis(focus_basis_points, visible_basis_points);
+        left <= subject_minimum && right >= subject_maximum
+    }
+
+    #[test]
+    fn tracked_subject_constraint_inverts_clamped_cover_crop_at_both_edges() {
+        let subject = TrackedSubjectBounds {
+            at: TimeCode(69),
+            left_basis_points: 500,
+            right_basis_points: 700,
+            top_basis_points: 1_000,
+            bottom_basis_points: 2_000,
+        };
+        let constraint = tracked_subject_focus_constraint(subject, 1_920, 1_080, 5_625)
+            .expect("subject fits the vertical short crop");
+
+        // 1920x1080 into a 9:16 delivery leaves 3165 basis points of source
+        // width visible. The left crop edge is clamped for focus 0..=1582,
+        // so the valid focus interval includes that entire plateau.
+        assert_eq!(
+            (constraint.min_x_basis_points, constraint.max_x_basis_points),
+            (0, 2_082)
+        );
+        assert_eq!(
+            (constraint.min_y_basis_points, constraint.max_y_basis_points),
+            (0, 10_000)
+        );
+        for focus in constraint.min_x_basis_points..=constraint.max_x_basis_points {
+            assert!(contains(
+                focus,
+                3_165,
+                i64::from(subject.left_basis_points),
+                i64::from(subject.right_basis_points)
+            ));
+        }
+        assert!(!contains(2_083, 3_165, 500, 700));
+
+        let right_edge_subject = TrackedSubjectBounds {
+            left_basis_points: 9_000,
+            right_basis_points: 9_500,
+            ..subject
+        };
+        let right_edge = tracked_subject_focus_constraint(right_edge_subject, 1_920, 1_080, 5_625)
+            .expect("right-edge subject fits the crop");
+        assert_eq!(
+            (right_edge.min_x_basis_points, right_edge.max_x_basis_points),
+            (7_917, 10_000)
+        );
+        for focus in right_edge.min_x_basis_points..=right_edge.max_x_basis_points {
+            assert!(contains(focus, 3_165, 9_000, 9_500));
+        }
+        assert!(!contains(7_916, 3_165, 9_000, 9_500));
+    }
+
+    #[test]
+    fn tracked_subject_constraint_uses_the_same_aspect_rounding_as_evaluator() {
+        let subject = TrackedSubjectBounds {
+            at: TimeCode(235),
+            left_basis_points: 1_938,
+            right_basis_points: 6_541,
+            top_basis_points: 3_000,
+            bottom_basis_points: 6_000,
+        };
+        let constraint = tracked_subject_focus_constraint(subject, 1_080, 1_920, 16_000)
+            .expect("subject fits the tall crop");
+
+        // ceil(1080 * 100000000 / (1920 * 16000)) = 3516. The helper must
+        // preserve that conservative evaluator rounding when inverting the
+        // vertical crop axis.
+        assert_eq!(
+            (constraint.min_y_basis_points, constraint.max_y_basis_points),
+            (4_242, 4_758)
+        );
+        for focus in constraint.min_y_basis_points..=constraint.max_y_basis_points {
+            assert!(contains(focus, 3_516, 3_000, 6_000));
+        }
     }
 }
 

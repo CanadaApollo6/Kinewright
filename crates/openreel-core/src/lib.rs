@@ -64,9 +64,10 @@ pub use model::{
 pub use multicam::{
     ReframeFocusBounds, SpeakerAngleAssignment, SpeakerMulticamCut, SpeakerMulticamError,
     SpeakerMulticamPlan, SpeakerMulticamSettings, SubjectCenterBasisPointSample,
-    SubjectCenterSample, SubjectReframeBasisPointPlan, SubjectReframeError, SubjectReframePlan,
-    SubjectReframeSettings, plan_speaker_multicam, plan_subject_reframe,
-    plan_subject_reframe_basis_points,
+    SubjectCenterSample, SubjectFocusBasisPointConstraint, SubjectReframeBasisPointPlan,
+    SubjectReframeError, SubjectReframePlan, SubjectReframeSettings, plan_speaker_multicam,
+    plan_subject_reframe, plan_subject_reframe_basis_points,
+    plan_subject_reframe_basis_points_with_containment,
 };
 pub use operation::{ApplyOp, BatchError, OpError, Operation, apply_batch};
 pub use qa::{QaIssue, QaReport, QaSeverity, qa_document};

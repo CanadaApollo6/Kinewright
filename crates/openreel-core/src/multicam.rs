@@ -499,6 +499,21 @@ pub struct SubjectCenterBasisPointSample {
     pub confidence_basis_points: u16,
 }
 
+/// Inclusive virtual-camera focus interval that keeps one tracked subject box
+/// inside the delivery crop at a sample frame.
+///
+/// This is deliberately expressed in basis points and supplied by the caller:
+/// the core planner remains media-backend agnostic while a tracker can account
+/// for its source aspect, crop geometry, and subject bounds exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SubjectFocusBasisPointConstraint {
+    pub at: TimeCode,
+    pub min_x_basis_points: i64,
+    pub max_x_basis_points: i64,
+    pub min_y_basis_points: i64,
+    pub max_y_basis_points: i64,
+}
+
 /// Configuration for converting subject observations into editable reframe curves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SubjectReframeSettings {
@@ -581,6 +596,36 @@ pub enum SubjectReframeError {
     SampleOutsideClip { frame: TimeCode, duration: TimeCode },
     #[error("more than one subject sample targets clip-local frame {0}")]
     DuplicateSampleFrame(TimeCode),
+    #[error("more than one containment constraint targets clip-local frame {0}")]
+    DuplicateContainmentConstraint(TimeCode),
+    #[error("no containment constraint was supplied for tracked sample frame {0}")]
+    MissingContainmentConstraint(TimeCode),
+    #[error("containment constraint targets untracked clip-local frame {0}")]
+    UnexpectedContainmentConstraint(TimeCode),
+    #[error(
+        "containment constraint at frame {frame} has invalid {axis} interval {minimum}..={maximum}"
+    )]
+    InvalidContainmentConstraint {
+        frame: TimeCode,
+        axis: &'static str,
+        minimum: i64,
+        maximum: i64,
+    },
+    #[error(
+        "containment constraint at frame {frame} does not fit the configured {axis} focus bounds"
+    )]
+    ContainmentOutsideFocusBounds { frame: TimeCode, axis: &'static str },
+    #[error(
+        "full tracked-subject containment is infeasible on {axis} at frame {frame}: allowed focus {allowed_minimum}..={allowed_maximum}, reachable with the configured maximum step {reachable_minimum}..={reachable_maximum}"
+    )]
+    ContainmentInfeasible {
+        frame: TimeCode,
+        axis: &'static str,
+        allowed_minimum: i64,
+        allowed_maximum: i64,
+        reachable_minimum: i64,
+        reachable_maximum: i64,
+    },
     #[error("the generated reframe plan is not applicable: {0}")]
     PlanNotApplicable(String),
 }
@@ -617,6 +662,7 @@ pub fn plan_subject_reframe(
         &samples,
         1,
         ["focus_x_percent", "focus_y_percent"],
+        None,
     )?;
 
     Ok(SubjectReframePlan {
@@ -671,6 +717,65 @@ pub fn plan_subject_reframe_basis_points(
         &samples,
         100,
         ["focus_x_basis_points", "focus_y_basis_points"],
+        None,
+    )?;
+
+    Ok(SubjectReframeBasisPointPlan {
+        clip: settings.clip,
+        effect: settings.effect,
+        samples: plan
+            .samples
+            .into_iter()
+            .map(|sample| SubjectCenterBasisPointSample {
+                at: sample.at,
+                x_basis_points: sample.x,
+                y_basis_points: sample.y,
+                confidence_basis_points: sample.confidence_basis_points,
+            })
+            .collect(),
+        clamped_samples: plan.clamped_samples,
+        focus_x_curve: plan.focus_x_curve,
+        focus_y_curve: plan.focus_y_curve,
+        operations: plan.operations,
+    })
+}
+
+/// Plan precise, editable reframe automation with hard per-sample containment.
+///
+/// The controller knows every supplied future interval before emitting a curve.
+/// It therefore begins a bounded move before a future crop edge would exclude
+/// the subject, rather than reacting only after the tracker has already moved.
+/// A configured maximum step remains a hard nominal speed limit whenever a
+/// full-containment path exists. When no such path exists, this returns an
+/// explicit error instead of silently generating an edge-clipped crop.
+///
+/// # Errors
+///
+/// Returns [`SubjectReframeError::ContainmentInfeasible`] when the supplied
+/// intervals cannot be reached under the configured maximum focus step.
+#[allow(clippy::too_many_lines)]
+pub fn plan_subject_reframe_basis_points_with_containment(
+    document: &Document,
+    settings: SubjectReframeSettings,
+    samples: &[SubjectCenterBasisPointSample],
+    containment: &[SubjectFocusBasisPointConstraint],
+) -> Result<SubjectReframeBasisPointPlan, SubjectReframeError> {
+    let samples = samples
+        .iter()
+        .map(|sample| ScaledSubjectCenterSample {
+            at: sample.at,
+            x: sample.x_basis_points,
+            y: sample.y_basis_points,
+            confidence_basis_points: sample.confidence_basis_points,
+        })
+        .collect::<Vec<_>>();
+    let plan = plan_subject_reframe_scaled(
+        document,
+        settings,
+        &samples,
+        100,
+        ["focus_x_basis_points", "focus_y_basis_points"],
+        Some(containment),
     )?;
 
     Ok(SubjectReframeBasisPointPlan {
@@ -701,6 +806,14 @@ struct ScaledSubjectCenterSample {
     confidence_basis_points: u16,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ScaledFocusConstraint {
+    min_x: i64,
+    max_x: i64,
+    min_y: i64,
+    max_y: i64,
+}
+
 struct ScaledSubjectReframePlan {
     samples: Vec<ScaledSubjectCenterSample>,
     clamped_samples: usize,
@@ -716,6 +829,7 @@ fn plan_subject_reframe_scaled(
     samples: &[ScaledSubjectCenterSample],
     coordinate_scale: i64,
     focus_parameters: [&str; 2],
+    containment: Option<&[SubjectFocusBasisPointConstraint]>,
 ) -> Result<ScaledSubjectReframePlan, SubjectReframeError> {
     let clip = document
         .clip(settings.clip)
@@ -801,32 +915,80 @@ fn plan_subject_reframe_scaled(
         sample.x = bounded_x;
         sample.y = bounded_y;
     }
-
-    let curve_for = |axis: fn(&ScaledSubjectCenterSample) -> i64,
-                     minimum: i64,
-                     maximum: i64|
-     -> AutomationCurve {
-        let values = stabilized_focus_values(
-            &normalized.iter().map(axis).collect::<Vec<_>>(),
-            minimum,
-            maximum,
-            scaled(i64::from(settings.focus_dead_zone_percent)),
-            scaled(i64::from(settings.maximum_focus_step_percent)),
-        );
-        AutomationCurve {
-            keyframes: normalized
-                .iter()
-                .zip(values)
-                .map(|(sample, value)| Keyframe {
-                    at: sample.at,
-                    value,
-                    interpolation: KeyframeInterpolation::Linear,
-                })
-                .collect(),
-        }
+    let normalized_containment = containment
+        .map(|constraints| {
+            normalize_containment_constraints(&normalized, constraints, min_x, max_x, min_y, max_y)
+        })
+        .transpose()?;
+    let frames = normalized
+        .iter()
+        .map(|sample| sample.at)
+        .collect::<Vec<_>>();
+    let horizontal_observations = normalized.iter().map(|sample| sample.x).collect::<Vec<_>>();
+    let vertical_observations = normalized.iter().map(|sample| sample.y).collect::<Vec<_>>();
+    let dead_zone = scaled(i64::from(settings.focus_dead_zone_percent));
+    let maximum_step = scaled(i64::from(settings.maximum_focus_step_percent));
+    let horizontal_values = if let Some(constraints) = &normalized_containment {
+        let intervals = constraints
+            .iter()
+            .map(|constraint| (constraint.min_x, constraint.max_x))
+            .collect::<Vec<_>>();
+        containment_aware_focus_values(
+            &horizontal_observations,
+            &intervals,
+            &frames,
+            "horizontal",
+            min_x,
+            max_x,
+            dead_zone,
+            maximum_step,
+        )?
+    } else {
+        stabilized_focus_values(
+            &horizontal_observations,
+            min_x,
+            max_x,
+            dead_zone,
+            maximum_step,
+        )
     };
-    let horizontal_curve = curve_for(|sample| sample.x, min_x, max_x);
-    let vertical_curve = curve_for(|sample| sample.y, min_y, max_y);
+    let vertical_values = if let Some(constraints) = &normalized_containment {
+        let intervals = constraints
+            .iter()
+            .map(|constraint| (constraint.min_y, constraint.max_y))
+            .collect::<Vec<_>>();
+        containment_aware_focus_values(
+            &vertical_observations,
+            &intervals,
+            &frames,
+            "vertical",
+            min_y,
+            max_y,
+            dead_zone,
+            maximum_step,
+        )?
+    } else {
+        stabilized_focus_values(
+            &vertical_observations,
+            min_y,
+            max_y,
+            dead_zone,
+            maximum_step,
+        )
+    };
+    let curve_for = |values: Vec<i64>| AutomationCurve {
+        keyframes: normalized
+            .iter()
+            .zip(values)
+            .map(|(sample, value)| Keyframe {
+                at: sample.at,
+                value,
+                interpolation: KeyframeInterpolation::Linear,
+            })
+            .collect(),
+    };
+    let horizontal_curve = curve_for(horizontal_values);
+    let vertical_curve = curve_for(vertical_values);
     let operations = vec![
         Operation::SetEffectKeyframes {
             clip: settings.clip,
@@ -854,6 +1016,132 @@ fn plan_subject_reframe_scaled(
     })
 }
 
+fn normalize_containment_constraints(
+    samples: &[ScaledSubjectCenterSample],
+    constraints: &[SubjectFocusBasisPointConstraint],
+    minimum_x: i64,
+    maximum_x: i64,
+    minimum_y: i64,
+    maximum_y: i64,
+) -> Result<Vec<ScaledFocusConstraint>, SubjectReframeError> {
+    let mut by_frame = BTreeMap::new();
+    for constraint in constraints {
+        if by_frame.insert(constraint.at, *constraint).is_some() {
+            return Err(SubjectReframeError::DuplicateContainmentConstraint(
+                constraint.at,
+            ));
+        }
+        for (axis, minimum, maximum) in [
+            (
+                "horizontal",
+                constraint.min_x_basis_points,
+                constraint.max_x_basis_points,
+            ),
+            (
+                "vertical",
+                constraint.min_y_basis_points,
+                constraint.max_y_basis_points,
+            ),
+        ] {
+            if minimum < 0 || maximum > 10_000 || minimum > maximum {
+                return Err(SubjectReframeError::InvalidContainmentConstraint {
+                    frame: constraint.at,
+                    axis,
+                    minimum,
+                    maximum,
+                });
+            }
+        }
+    }
+    let mut normalized = Vec::with_capacity(samples.len());
+    for sample in samples {
+        let constraint = by_frame
+            .remove(&sample.at)
+            .ok_or(SubjectReframeError::MissingContainmentConstraint(sample.at))?;
+        let min_x = constraint.min_x_basis_points.max(minimum_x);
+        let max_x = constraint.max_x_basis_points.min(maximum_x);
+        let min_y = constraint.min_y_basis_points.max(minimum_y);
+        let max_y = constraint.max_y_basis_points.min(maximum_y);
+        if min_x > max_x {
+            return Err(SubjectReframeError::ContainmentOutsideFocusBounds {
+                frame: sample.at,
+                axis: "horizontal",
+            });
+        }
+        if min_y > max_y {
+            return Err(SubjectReframeError::ContainmentOutsideFocusBounds {
+                frame: sample.at,
+                axis: "vertical",
+            });
+        }
+        normalized.push(ScaledFocusConstraint {
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+        });
+    }
+    if let Some((at, _)) = by_frame.into_iter().next() {
+        return Err(SubjectReframeError::UnexpectedContainmentConstraint(at));
+    }
+    Ok(normalized)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn containment_aware_focus_values(
+    observations: &[i64],
+    containment: &[(i64, i64)],
+    frames: &[TimeCode],
+    axis: &'static str,
+    minimum: i64,
+    maximum: i64,
+    dead_zone: i64,
+    maximum_step: i64,
+) -> Result<Vec<i64>, SubjectReframeError> {
+    debug_assert_eq!(observations.len(), containment.len());
+    debug_assert_eq!(observations.len(), frames.len());
+    if observations.is_empty() {
+        return Ok(Vec::new());
+    }
+    let desired = stabilized_focus_values(observations, minimum, maximum, dead_zone, maximum_step);
+    let mut reachable: Vec<(i64, i64)> = Vec::with_capacity(containment.len());
+    for (index, &(allowed_minimum, allowed_maximum)) in containment.iter().enumerate() {
+        let (reachable_minimum, reachable_maximum) =
+            if let Some((previous_minimum, previous_maximum)) = reachable.last() {
+                (
+                    previous_minimum.saturating_sub(maximum_step),
+                    previous_maximum.saturating_add(maximum_step),
+                )
+            } else {
+                (minimum, maximum)
+            };
+        let lower = allowed_minimum.max(reachable_minimum).max(minimum);
+        let upper = allowed_maximum.min(reachable_maximum).min(maximum);
+        if lower > upper {
+            return Err(SubjectReframeError::ContainmentInfeasible {
+                frame: frames[index],
+                axis,
+                allowed_minimum,
+                allowed_maximum,
+                reachable_minimum,
+                reachable_maximum,
+            });
+        }
+        reachable.push((lower, upper));
+    }
+    let mut values = vec![0; desired.len()];
+    let last = values.len() - 1;
+    values[last] = desired[last].clamp(reachable[last].0, reachable[last].1);
+    for index in (0..last).rev() {
+        let (reachable_minimum, reachable_maximum) = reachable[index];
+        let lower = reachable_minimum.max(values[index + 1].saturating_sub(maximum_step));
+        let upper = reachable_maximum.min(values[index + 1].saturating_add(maximum_step));
+        debug_assert!(lower <= upper);
+        values[index] = desired[index].clamp(lower, upper);
+    }
+    Ok(values)
+}
+
 fn stabilized_focus_values(
     observations: &[i64],
     minimum: i64,
@@ -861,6 +1149,11 @@ fn stabilized_focus_values(
     dead_zone: i64,
     maximum_step: i64,
 ) -> Vec<i64> {
+    let filtered = median_filtered_observations(observations);
+    reactive_focus_values(&filtered, minimum, maximum, dead_zone, maximum_step)
+}
+
+fn median_filtered_observations(observations: &[i64]) -> Vec<i64> {
     let mut filtered = observations.to_vec();
     for index in 1..observations.len().saturating_sub(1) {
         let mut window = [
@@ -881,12 +1174,23 @@ fn stabilized_focus_values(
         window.sort_unstable();
         filtered[last] = window[1];
     }
+    filtered
+}
+
+fn reactive_focus_values(
+    filtered: &[i64],
+    minimum: i64,
+    maximum: i64,
+    dead_zone: i64,
+    maximum_step: i64,
+) -> Vec<i64> {
     let Some(first) = filtered.first().copied() else {
         return Vec::new();
     };
     let mut focus = first.clamp(minimum, maximum);
     filtered
-        .into_iter()
+        .iter()
+        .copied()
         .map(|subject| {
             let subject = subject.clamp(minimum, maximum);
             let desired = if subject < focus.saturating_sub(dead_zone) {
@@ -1316,6 +1620,146 @@ mod tests {
         assert_eq!(
             effect.keyframes["focus_y_basis_points"].keyframes[1].value,
             4_998
+        );
+    }
+
+    #[test]
+    fn containment_controller_moves_before_a_future_subject_edge_reaches_the_crop() {
+        let document = reframe_document();
+        let settings = SubjectReframeSettings {
+            clip: ClipId(2),
+            effect: EffectId(9),
+            bounds: ReframeFocusBounds {
+                min_x_percent: 25,
+                max_x_percent: 75,
+                min_y_percent: 20,
+                max_y_percent: 80,
+            },
+            minimum_confidence_basis_points: 0,
+            focus_dead_zone_percent: 6,
+            maximum_focus_step_percent: 2,
+        };
+        let samples = [TimeCode::ZERO, TimeCode(10), TimeCode(20)]
+            .into_iter()
+            .map(|at| SubjectCenterBasisPointSample {
+                at,
+                x_basis_points: 5_020,
+                y_basis_points: 5_000,
+                confidence_basis_points: 10_000,
+            })
+            .collect::<Vec<_>>();
+        let containment = [
+            SubjectFocusBasisPointConstraint {
+                at: TimeCode::ZERO,
+                min_x_basis_points: 2_500,
+                max_x_basis_points: 7_500,
+                min_y_basis_points: 2_000,
+                max_y_basis_points: 8_000,
+            },
+            SubjectFocusBasisPointConstraint {
+                at: TimeCode(10),
+                min_x_basis_points: 2_500,
+                max_x_basis_points: 7_500,
+                min_y_basis_points: 2_000,
+                max_y_basis_points: 8_000,
+            },
+            SubjectFocusBasisPointConstraint {
+                at: TimeCode(20),
+                min_x_basis_points: 2_500,
+                max_x_basis_points: 4_693,
+                min_y_basis_points: 2_000,
+                max_y_basis_points: 8_000,
+            },
+        ];
+
+        let plan = plan_subject_reframe_basis_points_with_containment(
+            &document,
+            settings,
+            &samples,
+            &containment,
+        )
+        .unwrap();
+        let horizontal = plan
+            .focus_x_curve
+            .keyframes
+            .iter()
+            .map(|keyframe| keyframe.value)
+            .collect::<Vec<_>>();
+
+        assert_eq!(horizontal, vec![5_020, 4_893, 4_693]);
+        assert!(
+            horizontal
+                .windows(2)
+                .all(|pair| { pair[0].abs_diff(pair[1]) <= 200 })
+        );
+        assert!(
+            plan.focus_x_curve
+                .keyframes
+                .iter()
+                .all(|keyframe| keyframe.interpolation == KeyframeInterpolation::Linear)
+        );
+    }
+
+    #[test]
+    fn containment_controller_returns_an_error_when_the_speed_bound_cannot_reach_the_subject() {
+        let document = reframe_document();
+        let settings = SubjectReframeSettings {
+            clip: ClipId(2),
+            effect: EffectId(9),
+            bounds: ReframeFocusBounds {
+                min_x_percent: 25,
+                max_x_percent: 75,
+                min_y_percent: 20,
+                max_y_percent: 80,
+            },
+            minimum_confidence_basis_points: 0,
+            focus_dead_zone_percent: 6,
+            maximum_focus_step_percent: 2,
+        };
+        let samples = [TimeCode::ZERO, TimeCode(10)]
+            .into_iter()
+            .map(|at| SubjectCenterBasisPointSample {
+                at,
+                x_basis_points: 5_000,
+                y_basis_points: 5_000,
+                confidence_basis_points: 10_000,
+            })
+            .collect::<Vec<_>>();
+        let containment = [
+            SubjectFocusBasisPointConstraint {
+                at: TimeCode::ZERO,
+                min_x_basis_points: 5_000,
+                max_x_basis_points: 5_000,
+                min_y_basis_points: 5_000,
+                max_y_basis_points: 5_000,
+            },
+            SubjectFocusBasisPointConstraint {
+                at: TimeCode(10),
+                min_x_basis_points: 7_000,
+                max_x_basis_points: 7_000,
+                min_y_basis_points: 5_000,
+                max_y_basis_points: 5_000,
+            },
+        ];
+
+        let error = plan_subject_reframe_basis_points_with_containment(
+            &document,
+            settings,
+            &samples,
+            &containment,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            SubjectReframeError::ContainmentInfeasible {
+                frame: TimeCode(10),
+                axis: "horizontal",
+                allowed_minimum: 7_000,
+                allowed_maximum: 7_000,
+                reachable_minimum: 4_800,
+                reachable_maximum: 5_200,
+            }
         );
     }
 }

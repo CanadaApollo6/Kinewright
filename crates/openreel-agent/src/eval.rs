@@ -2618,9 +2618,6 @@ fn valid_reframe_subject_provenances(document: &Document) -> Vec<ReframeSubjectP
 }
 
 // Template matching follows a supplied search box, not a segmented face edge.
-// Preserve a 4% edge allowance so the virtual camera can honor its 6% dead
-// zone without falsely rejecting a crop that still retains the tracked
-// subject's tighter central region.
 // Provenance bounds round outward and crop bounds round outward, so strict
 // containment is both deterministic and conservative.
 const SUBJECT_CONTAINMENT_TOLERANCE_BASIS_POINTS: i64 = 0;
