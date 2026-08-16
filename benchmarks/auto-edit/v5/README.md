@@ -100,12 +100,22 @@ machine contract scores exact source/timeline ranges, camera order, audio
 identity, reframe stability, QA, undo, budgets, the rendered MP4, and
 independent rendered-dialogue transcription.
 
-The final preflight passed 23/23 assertions in one turn with 20 tool calls, 20
-operations, and 393,543 total tokens, including 334,080 cached input tokens.
-The output is 794 frames at 1080x1920, 39,380,998 bytes, with SHA-256
-`1c168637e2bcb5ba7447d6dafaf19846019cd701beaba01e8824a311f250dc07`.
-The exact artifact is published in `event-multicam-baseline.json`; human review
-is pending.
+The original preflight passed its then-current 23/23 machine assertions but was
+human-rejected for inaudible programme audio and unsafe late Laura framing. It
+remains immutable in `event-multicam-baseline.json`.
+
+The recovery contract independently measures encoded loudness, verifies that
+precise animated reframes and compact subject-provenance sidecars survive
+delivery, and requires every tracked subject box to remain inside the real
+aspect-aware crop. The official recovery at revision `181b35c` passed 25/25
+assertions in one turn with 21 tool calls, 26 operations, and 427,778 total
+tokens, of which 388,864 were cached input. Its 794-frame 1080x1920 output is
+40,126,007 bytes with SHA-256
+`262491f9f849ed26fe921917f7769ebe8d5a7fcdd22a968b7aa98c4787b0396a`;
+programme audio measures -16.98 LUFS and -1.72 dBFS peak. Exact run metadata is
+published in `event-multicam-recovery-baseline.json`. The project owner
+accepted that exact artifact with the feedback "Nailed it." No numeric ratings
+were supplied, so none are invented.
 
 The benchmark also forced a runtime efficiency fix. Deterministic multicam,
 beat, music-fit, mask-tracking, and reframe-tracking results now return opaque

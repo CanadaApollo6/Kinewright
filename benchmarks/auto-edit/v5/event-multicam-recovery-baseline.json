@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "openreel-generalization-v5",
+  "suite_manifest": "benchmarks/auto-edit/v5/manifest.json",
+  "supersedes_artifact": {
+    "baseline": "benchmarks/auto-edit/v5/event-multicam-baseline.json",
+    "output_sha256": "1c168637e2bcb5ba7447d6dafaf19846019cd701beaba01e8824a311f250dc07",
+    "human_status": "reviewed_rejected",
+    "note": "The rejected artifact remains the immutable first-preflight record. This file records the audible-delivery and containment-aware camera recovery under the stricter contract."
+  },
+  "scope": {
+    "status": "event_multicam_recovery_preflight",
+    "families_executed": ["event_multicam"],
+    "families_pending": ["music_montage"],
+    "note": "Machine recovery and qualitative human acceptance are complete for this sample. Two more machine samples and one more human-accepted output remain required for the family gate; no numeric rating was supplied, so the mean-rating gate remains unresolved."
+  },
+  "fixture": {
+    "pack_id": "m40-event-multicam-v1",
+    "meeting_id": "ES2002a",
+    "asset_count": 6,
+    "bytes": 245654467,
+    "license": "CC-BY-4.0",
+    "license_url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "source_trace": {
+    "filename": "openreel-eval-20260816-191225-codex/results.jsonl",
+    "sha256": "1c50dac1a4e244ae1e8d55a2f8f1020bc5237f755cd3114739efe13ef5b303d3",
+    "note": "The raw trace and media package are generated local artifacts under target/evals and are intentionally not committed."
+  },
+  "environment": {
+    "timestamp_utc": "2026-08-16T19:12:25Z",
+    "harness": "codex",
+    "harness_version": "codex-cli 0.147.0",
+    "model": "harness-default",
+    "os": "windows",
+    "architecture": "x86_64",
+    "openreel_version": "0.1.0",
+    "openreel_revision": "181b35c3c42fef6186d5b8246c50f72c3135326b"
+  },
+  "machine_summary": {
+    "samples_passed": 1,
+    "samples_total": 1,
+    "assertions_passed": 25,
+    "assertions_total": 25,
+    "turns": 1,
+    "tool_calls": 21,
+    "tool_call_budget": 24,
+    "input_tokens": 426150,
+    "cached_input_tokens": 388864,
+    "uncached_input_tokens": 37286,
+    "output_tokens": 1628,
+    "reasoning_output_tokens": 0,
+    "total_tokens": 427778,
+    "cost_usd": null,
+    "wall_time_ms": 156956,
+    "operations_applied": 26
+  },
+  "samples": [
+    {
+      "id": "g2-sample-1",
+      "family": "event_multicam",
+      "passed": true,
+      "assertions_passed": 25,
+      "assertions_total": 25,
+      "turns": 1,
+      "tool_calls": 21,
+      "input_tokens": 426150,
+      "cached_input_tokens": 388864,
+      "uncached_input_tokens": 37286,
+      "output_tokens": 1628,
+      "reasoning_output_tokens": 0,
+      "total_tokens": 427778,
+      "wall_time_ms": 156956,
+      "operations_applied": 26,
+      "rendered_word_error_rate_basis_points": 1464,
+      "rendered_integrated_lufs_hundredths": -1698,
+      "rendered_sample_peak_dbfs_hundredths": -172,
+      "output_frames": 794,
+      "output_bytes": 40126007,
+      "output_sha256": "262491f9f849ed26fe921917f7769ebe8d5a7fcdd22a968b7aa98c4787b0396a"
+    }
+  ],
+  "deliverable": {
+    "profile": "vertical_short",
+    "resolution": [1080, 1920],
+    "duration_frames": 794,
+    "source_range": {
+      "start": 1750,
+      "end": 2544
+    },
+    "video_shots": 5,
+    "program_audio_clips": 1,
+    "tracked_reframe_clips": 5,
+    "tracked_subject_provenance_clips": 5,
+    "rendered_word_error_rate_basis_points": 1464,
+    "rendered_integrated_lufs_hundredths": -1698,
+    "rendered_sample_peak_dbfs_hundredths": -172,
+    "proof_sample_frames": [0, 99, 198, 297, 396, 495, 594, 693, 793],
+    "proof_sha256": "cfe3933dffa99bdd3604bd3775f3fa42e289493e7a6dd3df6e3a5f92bce20088",
+    "output_bytes": 40126007,
+    "output_sha256": "262491f9f849ed26fe921917f7769ebe8d5a7fcdd22a968b7aa98c4787b0396a"
+  },
+  "human_review": {
+    "status": "reviewed_accepted",
+    "accepted": true,
+    "ratings": null,
+    "review_template": "target/evals/openreel-eval-20260816-191225-codex/human-review.json",
+    "note": "The project owner reviewed this exact SHA-bound artifact and reported 'Nailed it.' No numeric ratings were supplied, so none are invented. Captions were intentionally absent for this isolated multicam task."
+  },
+  "benchmark_status": "in_progress"
+}

@@ -9,6 +9,14 @@ All notable changes to OpenReel are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Added
+- M40 event/multicam recovery: tracked vertical reframing now stores precise
+  basis-point subject evidence, samples the full clip uniformly, preserves
+  animated curves through delivery, and solves an offline lookahead camera path
+  that contains every tracked box while retaining the 2% per-sample motion
+  limit. Encoded loudness is measured independently. The official AMI recovery
+  passed 25/25 machine assertions at -16.98 LUFS / -1.72 dBFS, and the project
+  owner accepted the exact SHA-bound artifact with "Nailed it." The broader M40
+  three-family and repeated-sample gate remains in progress.
 - M39 dialogue pacing: dialogue assembly can now cap the total clean acoustic
   pause retained across a removed filler run without shortening an already
   natural bridge or preserving filler audio,

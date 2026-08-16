@@ -206,17 +206,35 @@ about 0.24 pixels. The evaluator rejects eased or faster curves and separately
 checks that tracked subject bounds remain inside the real aspect-aware crop.
 The next official sample also uses the crop's actual geometric travel
 range (25-75% horizontally) instead of the overly conservative 45-55% clamp.
-Together, those rules let the camera follow Laura while keeping the supplied
-25%-wide subject box inside the 9:16 crop without tracker-driven jitter.
+That first strict sample passed 24/25 checks but exposed a controller defect:
+the reactive camera reached two left-edge constraints late, missing Andrew by
+127 basis points and Laura by 17. The score remained strict. Tracking now
+inverts the evaluator's exact aspect-aware crop geometry into an allowed focus
+interval at every observation, then solves the complete path with a forward
+reachable-interval pass and backward selection. The camera begins moving before
+a future edge while retaining the 2% maximum step; it returns an explicit error
+when no fully containing path exists.
+
+The official recovery run at revision `181b35c` passed 25/25 assertions in one
+turn with 21 tool calls, 26 operations, and 427,778 total tokens, including
+388,864 cached input tokens. All five precise animated reframes and all five
+tracked-subject sidecars survived delivery. The 40,126,007-byte, 794-frame
+1080x1920 MP4 has SHA-256
+`262491f9f849ed26fe921917f7769ebe8d5a7fcdd22a968b7aa98c4787b0396a`;
+its programme measures -16.98 LUFS with a -1.72 dBFS sample peak. The project
+owner reviewed that exact artifact and reported "Nailed it," providing the
+event family's first human-accepted output. No numeric ratings were supplied,
+so none are invented. The immutable recovery record is
+`benchmarks/auto-edit/v5/event-multicam-recovery-baseline.json`.
 
 Readiness also gained an explicit `check_silence` policy. Event work that must
 preserve continuous program audio can skip irrelevant dead-air analysis while
 still running technical QA, delivery conformance, and the real storyboard.
-The final trace ended with editorial readiness `true`, proving that readiness
-also lacked the audible-delivery signal. One passing machine sample is not the
-three-sample family gate, and this one is human-rejected. The machine result,
-review outcome, and immutable hashes are recorded in
-`benchmarks/auto-edit/v5/event-multicam-baseline.json`.
+The original trace ended with editorial readiness `true`, proving that
+readiness also lacked the audible-delivery signal. One accepted recovery sample
+is not the three-sample family gate. The rejected original remains recorded in
+`benchmarks/auto-edit/v5/event-multicam-baseline.json`; the accepted recovery is
+recorded separately.
 
 ## Commands
 
@@ -284,5 +302,5 @@ person, the mean human rating is at least 4.0/5, and no material caption error
 survives. One successful interview does not satisfy the milestone.
 
 The next family implementation target is music montage. Event/multicam still
-needs two more machine samples and at least two human-accepted outputs before
-its family gate can pass.
+needs two more machine samples, one more human-accepted output, and numeric
+ratings sufficient to evaluate the 4.0 mean-rating gate.
