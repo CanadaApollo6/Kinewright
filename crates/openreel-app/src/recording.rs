@@ -503,6 +503,7 @@ fn monitor_info(name: &str, x: i32, y: i32, width: u32, height: u32, primary: bo
 }
 
 /// `xrandr --current` geometry lines look like `HDMI-1 connected primary 1920x1080+0+0`.
+#[cfg(any(target_os = "linux", test))]
 fn parse_xrandr_monitors(stdout: &str) -> Vec<MonitorInfo> {
     stdout
         .lines()
@@ -526,6 +527,7 @@ fn parse_xrandr_monitors(stdout: &str) -> Vec<MonitorInfo> {
         .collect()
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn parse_xrandr_geometry(geometry: &str) -> Option<(u32, u32, i32, i32)> {
     let x_at = geometry.find('x')?;
     let width = geometry[..x_at].parse().ok()?;
@@ -628,6 +630,7 @@ fn ffmpeg_listed_sources(ffmpeg: &Path, device: &str) -> Vec<String> {
 }
 
 /// `ffmpeg -sources` prints `name [description]` after an auto-detected header.
+#[cfg(any(target_os = "linux", test))]
 fn parse_ffmpeg_sources(listing: &str) -> Vec<String> {
     let mut sources = Vec::new();
     let mut in_list = false;
