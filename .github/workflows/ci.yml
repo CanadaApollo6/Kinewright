@@ -35,3 +35,29 @@ jobs:
           cargo test --workspace
           cargo clippy --workspace --all-targets -- -D warnings
 
+  linux:
+    name: Linux workspace
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install native build dependencies
+        run: ./scripts/install-linux-deps.sh
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Provision FFmpeg, build, test, and lint
+        run: |
+          source ./scripts/setup-ffmpeg.sh
+          cargo build --workspace
+          cargo test --workspace
+          cargo clippy --workspace --all-targets -- -D warnings
+

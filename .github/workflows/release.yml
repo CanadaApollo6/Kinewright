@@ -128,3 +128,69 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "GitHub release publication failed with exit code $LASTEXITCODE."
           }
+
+  linux-tarball:
+    name: Linux tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install native build dependencies
+        run: ./scripts/install-linux-deps.sh
+
+      - name: Validate release tag
+        run: |
+          version="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; packages=json.load(sys.stdin)["packages"]; app=next(p for p in packages if p["name"]=="openreel-app"); print(app["version"])')"
+          expected="v${version}"
+          if [[ "${GITHUB_REF_NAME}" != "${expected}" ]]; then
+            echo "Tag '${GITHUB_REF_NAME}' does not match workspace version '${version}'. Expected '${expected}'." >&2
+            exit 1
+          fi
+          echo "OPENREEL_VERSION=${version}" >> "${GITHUB_ENV}"
+
+      - name: Provision FFmpeg, test, build, and package
+        run: |
+          source ./scripts/setup-ffmpeg.sh
+          cargo test --workspace --locked
+          cargo build --package openreel-app --release --locked
+          ./scripts/package-linux.sh --version "${OPENREEL_VERSION}"
+          ./scripts/test-linux-bundle.sh --bundle-dir ./dist/linux-x64
+          tarball="$(find ./dist/tarball -maxdepth 1 -type f -name '*.tar.gz')"
+          if [[ -z "${tarball}" || "$(echo "${tarball}" | wc -l)" -ne 1 ]]; then
+            echo "Expected one Linux tarball, found: ${tarball}" >&2
+            exit 1
+          fi
+          hash="$(sha256sum "${tarball}" | awk '{print $1}')"
+          echo "${hash}  $(basename "${tarball}")" > "${tarball}.sha256"
+          echo "Tarball SHA-256: ${hash}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenReel-${{ env.OPENREEL_VERSION }}-linux-x64
+          path: |
+            dist/tarball/*.tar.gz
+            dist/tarball/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t assets < <(find ./dist/tarball -maxdepth 1 -type f | sort)
+          if [[ "${#assets[@]}" -ne 2 ]]; then
+            echo "Expected tarball and checksum assets, found ${#assets[@]}." >&2
+            exit 1
+          fi
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "${assets[@]}" --verify-tag --generate-notes --title "OpenReel ${GITHUB_REF_NAME}"
+          fi

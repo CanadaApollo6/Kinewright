@@ -6,8 +6,9 @@ target
 dist/
 .tools/
 
-# Provisioned by scripts/setup-ffmpeg.ps1. The binaries are intentionally not
-# committed; the script pins and verifies the exact archive.
+# Provisioned by scripts/setup-ffmpeg.ps1 (Windows) or scripts/setup-ffmpeg.sh
+# (Linux). The binaries are intentionally not committed; the scripts pin and
+# verify the exact archive.
 third_party/ffmpeg/
 third_party/ffmpeg.zip
 third_party/pkgconf/

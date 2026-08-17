@@ -26,10 +26,7 @@ use crate::{
 type MatrixDirectory = TempDirectory;
 
 fn ffprobe() -> PathBuf {
-    std::env::var_os("FFMPEG_DIR").map_or_else(
-        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffprobe.exe"),
-        |directory| PathBuf::from(directory).join("bin/ffprobe.exe"),
-    )
+    crate::test_support::ffprobe_executable()
 }
 
 fn keyframe_count(path: &Path) -> u64 {

@@ -9,7 +9,7 @@
 [![CI](https://github.com/CanadaApollo6/OpenReel/actions/workflows/ci.yml/badge.svg)](https://github.com/CanadaApollo6/OpenReel/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-OpenReel is a native Windows video editor written in Rust that is, at its core, an **agentic harness for video editing**. Type "cut the first three seconds and tighten the pauses" into the chat panel, and the agent CLI you already pay for — Claude Code, Codex, or Cursor — makes the edits on your timeline, using the exact same operations you'd use by hand. Every agent edit lands on the same undo stack as yours: **Ctrl+Z reverses the robot.**
+OpenReel is a **native Windows and Linux** video editor written in Rust — the same fast desktop binary on both platforms, not a web wrapper or VM. At its core it is an **agentic harness for video editing**. Type "cut the first three seconds and tighten the pauses" into the chat panel, and the agent CLI you already pay for — Claude Code, Codex, or Cursor — makes the edits on your timeline, using the exact same operations you'd use by hand. Every agent edit lands on the same undo stack as yours: **Ctrl+Z reverses the robot.**
 
 ![OpenReel: agent session, program monitor, and timeline on a two-track project](docs/assets/openreel.png)
 
@@ -43,7 +43,7 @@ OpenReel is a native Windows video editor written in Rust that is, at its core, 
 
 **Requirements**
 
-- Windows 10/11, 64-bit
+- **Windows** 10/11, 64-bit, or **Linux** x86_64 (glibc 2.28+) — native desktop apps on both, with bundled FFmpeg
 - At least one agent CLI installed and authenticated, if you want agent editing:
   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code/getting-started) (any Claude subscription)
   - [Codex CLI](https://developers.openai.com/codex/cli) 0.147.0+ (ChatGPT subscription)
@@ -52,16 +52,29 @@ OpenReel is a native Windows video editor written in Rust that is, at its core, 
 
 **Install**
 
-An installer is published with each release — see [Releases](https://github.com/CanadaApollo6/OpenReel/releases). Manual editing works with no setup; the chat panel lights up automatically when it detects an agent CLI.
+Each release publishes a native Windows installer and a native Linux x64 tarball — see [Releases](https://github.com/CanadaApollo6/OpenReel/releases). Manual editing works with no setup; the chat panel lights up automatically when it detects an agent CLI.
 
 **Build from source**
 
-See [docs/BUILDING.md](docs/BUILDING.md) for the full walkthrough. Short version:
+See [docs/BUILDING.md](docs/BUILDING.md) for the full walkthrough.
+
+Windows:
 
 ```powershell
 git clone https://github.com/CanadaApollo6/OpenReel.git
 cd OpenReel
 .\scripts\setup-ffmpeg.ps1     # provisions a pinned FFmpeg + build tools locally
+cargo build --workspace
+cargo run -p openreel-app
+```
+
+Linux:
+
+```bash
+git clone https://github.com/CanadaApollo6/OpenReel.git
+cd OpenReel
+./scripts/install-linux-deps.sh
+source ./scripts/setup-ffmpeg.sh   # provisions a pinned FFmpeg 8.x shared GPL build
 cargo build --workspace
 cargo run -p openreel-app
 ```

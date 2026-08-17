@@ -4479,7 +4479,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires local Windows SAPI speech generation and Whisper analysis"]
+    #[ignore = "requires local speech synthesis and Whisper analysis"]
     fn v3_fixture_builds_with_authored_and_recognized_truth() {
         let fixture = fixture_editorial_story().unwrap();
         assert_eq!(fixture.original_document.media_pool.len(), 5);

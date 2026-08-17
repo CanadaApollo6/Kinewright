@@ -25,8 +25,8 @@ use crate::{
     theme::{self, color, size, space, type_size},
 };
 
-/// Capture devices `FFmpeg`'s `DirectShow` backend reports, plus the
-/// displays Windows reports for screen capture.
+/// Capture devices the platform `FFmpeg` input backend reports, plus
+/// displays the OS reports for screen capture.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CaptureDevices {
     pub(crate) video: Vec<String>,
@@ -34,9 +34,9 @@ pub(crate) struct CaptureDevices {
     pub(crate) monitors: Vec<MonitorInfo>,
 }
 
-/// One display in virtual-desktop coordinates, exactly as Windows reports
-/// them - `gdigrab` takes these raw (negative offsets included, for
-/// displays left of or above the primary).
+/// One display in virtual-desktop coordinates. Windows `gdigrab` and Linux
+/// `x11grab` both take these raw (negative offsets included, for displays
+/// left of or above the primary).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MonitorInfo {
     pub(crate) label: String,
@@ -47,8 +47,9 @@ pub(crate) struct MonitorInfo {
     pub(crate) primary: bool,
 }
 
-/// What one recording captures. Microphones are `DirectShow` device names;
-/// a screen capture with no monitor grabs the whole virtual desktop.
+/// What one recording captures. Microphones are platform device names
+/// (`DirectShow` on Windows, Pulse/ALSA on Linux); a screen capture with
+/// no monitor grabs the whole virtual desktop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RecordingMode {
     Screen {
@@ -169,9 +170,8 @@ pub(crate) fn start_recording(
     mode: &RecordingMode,
     directory: &Path,
 ) -> Result<ActiveRecording, String> {
-    let ffmpeg = find_ffmpeg().ok_or_else(|| {
-        "FFmpeg was not found (bundled beside OpenReel.exe, or on PATH)".to_owned()
-    })?;
+    let ffmpeg = find_ffmpeg()
+        .ok_or_else(|| "FFmpeg was not found (bundled beside OpenReel, or on PATH)".to_owned())?;
     std::fs::create_dir_all(directory)
         .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
     let path = next_recording_path(directory, mode.extension());
@@ -198,112 +198,234 @@ pub(crate) fn start_recording(
 
 /// The `FFmpeg` invocation for one capture. Pure so tests can pin the shapes.
 fn ffmpeg_record_args(mode: &RecordingMode, output: &Path) -> Vec<std::ffi::OsString> {
+    #[cfg(windows)]
+    {
+        ffmpeg_record_args_windows(mode, output)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ffmpeg_record_args_linux(mode, output, &x11_display())
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = (mode, output);
+        Vec::new()
+    }
+}
+
+fn push_arg(args: &mut Vec<std::ffi::OsString>, arg: &str) {
+    args.push(arg.into());
+}
+
+fn push_video_encode(args: &mut Vec<std::ffi::OsString>, with_audio: bool) {
+    for arg in [
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
+        "-vf",
+        "crop=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-fps_mode",
+        "cfr",
+        "-r",
+        "30",
+    ] {
+        push_arg(args, arg);
+    }
+    if with_audio {
+        push_arg(args, "-c:a");
+        push_arg(args, "aac");
+    }
+}
+
+#[cfg(windows)]
+fn ffmpeg_record_args_windows(mode: &RecordingMode, output: &Path) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = Vec::new();
-    let mut push = |arg: &str| args.push(arg.into());
-    push("-hide_banner");
-    push("-loglevel");
-    push("error");
+    push_arg(&mut args, "-hide_banner");
+    push_arg(&mut args, "-loglevel");
+    push_arg(&mut args, "error");
     match mode {
         RecordingMode::Screen {
             microphone,
             monitor,
         } => {
-            push("-thread_queue_size");
-            push("1024");
-            push("-f");
-            push("gdigrab");
-            push("-framerate");
-            push("30");
+            push_arg(&mut args, "-thread_queue_size");
+            push_arg(&mut args, "1024");
+            push_arg(&mut args, "-f");
+            push_arg(&mut args, "gdigrab");
+            push_arg(&mut args, "-framerate");
+            push_arg(&mut args, "30");
             if let Some(monitor) = monitor {
-                push("-offset_x");
-                push(&monitor.x.to_string());
-                push("-offset_y");
-                push(&monitor.y.to_string());
-                push("-video_size");
-                push(&format!("{}x{}", monitor.width, monitor.height));
+                push_arg(&mut args, "-offset_x");
+                push_arg(&mut args, &monitor.x.to_string());
+                push_arg(&mut args, "-offset_y");
+                push_arg(&mut args, &monitor.y.to_string());
+                push_arg(&mut args, "-video_size");
+                push_arg(&mut args, &format!("{}x{}", monitor.width, monitor.height));
             }
-            push("-i");
-            push("desktop");
+            push_arg(&mut args, "-i");
+            push_arg(&mut args, "desktop");
             if let Some(microphone) = microphone {
-                push("-thread_queue_size");
-                push("1024");
-                push("-rtbufsize");
-                push("256M");
-                push("-f");
-                push("dshow");
-                push("-i");
-                push(&format!("audio={microphone}"));
+                push_arg(&mut args, "-thread_queue_size");
+                push_arg(&mut args, "1024");
+                push_arg(&mut args, "-rtbufsize");
+                push_arg(&mut args, "256M");
+                push_arg(&mut args, "-f");
+                push_arg(&mut args, "dshow");
+                push_arg(&mut args, "-i");
+                push_arg(&mut args, &format!("audio={microphone}"));
             }
-            // Ultrafast keeps encode cost negligible while capturing; the
-            // even-dimension scale guards odd desktop sizes against yuv420p.
-            push("-c:v");
-            push("libx264");
-            push("-preset");
-            push("ultrafast");
-            push("-pix_fmt");
-            push("yuv420p");
-            push("-vf");
-            push("crop=trunc(iw/2)*2:trunc(ih/2)*2");
-            push("-fps_mode");
-            push("cfr");
-            push("-r");
-            push("30");
-            if microphone.is_some() {
-                push("-c:a");
-                push("aac");
-            }
+            push_video_encode(&mut args, microphone.is_some());
         }
         RecordingMode::Camera { camera, microphone } => {
-            push("-thread_queue_size");
-            push("1024");
-            push("-rtbufsize");
-            push("256M");
-            push("-f");
-            push("dshow");
-            push("-i");
+            push_arg(&mut args, "-thread_queue_size");
+            push_arg(&mut args, "1024");
+            push_arg(&mut args, "-rtbufsize");
+            push_arg(&mut args, "256M");
+            push_arg(&mut args, "-f");
+            push_arg(&mut args, "dshow");
+            push_arg(&mut args, "-i");
             match microphone {
-                Some(microphone) => push(&format!("video={camera}:audio={microphone}")),
-                None => push(&format!("video={camera}")),
+                Some(microphone) => {
+                    push_arg(&mut args, &format!("video={camera}:audio={microphone}"));
+                }
+                None => push_arg(&mut args, &format!("video={camera}")),
             }
-            push("-c:v");
-            push("libx264");
-            push("-preset");
-            push("ultrafast");
-            push("-pix_fmt");
-            push("yuv420p");
-            push("-vf");
-            push("crop=trunc(iw/2)*2:trunc(ih/2)*2");
-            // Device timestamps are wall-clock and drop frames under load, so
-            // without CFR the file's frame grid never aligns with the
-            // project's rational math and edit plans get rejected at
-            // non-integer source boundaries.
-            push("-fps_mode");
-            push("cfr");
-            push("-r");
-            push("30");
-            if microphone.is_some() {
-                push("-c:a");
-                push("aac");
-            }
+            push_video_encode(&mut args, microphone.is_some());
         }
         RecordingMode::Voice { microphone } => {
-            push("-f");
-            push("dshow");
-            push("-i");
-            push(&format!("audio={microphone}"));
-            push("-c:a");
-            push("aac");
+            push_arg(&mut args, "-f");
+            push_arg(&mut args, "dshow");
+            push_arg(&mut args, "-i");
+            push_arg(&mut args, &format!("audio={microphone}"));
+            push_arg(&mut args, "-c:a");
+            push_arg(&mut args, "aac");
         }
     }
-    push("-y");
+    push_arg(&mut args, "-y");
     args.push(output.into());
     args
+}
+
+#[cfg(target_os = "linux")]
+fn x11_display() -> String {
+    std::env::var("DISPLAY")
+        .ok()
+        .filter(|display| !display.is_empty())
+        .unwrap_or_else(|| ":0.0".to_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_audio_format(device: &str) -> &'static str {
+    if device.starts_with("hw:")
+        || device.starts_with("plughw:")
+        || device.starts_with("sysdefault")
+        || device.starts_with("default:")
+    {
+        "alsa"
+    } else {
+        "pulse"
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn ffmpeg_record_args_linux(
+    mode: &RecordingMode,
+    output: &Path,
+    display: &str,
+) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = Vec::new();
+    push_arg(&mut args, "-hide_banner");
+    push_arg(&mut args, "-loglevel");
+    push_arg(&mut args, "error");
+    match mode {
+        RecordingMode::Screen {
+            microphone,
+            monitor,
+        } => {
+            push_arg(&mut args, "-thread_queue_size");
+            push_arg(&mut args, "1024");
+            push_arg(&mut args, "-f");
+            push_arg(&mut args, "x11grab");
+            push_arg(&mut args, "-framerate");
+            push_arg(&mut args, "30");
+            if let Some(monitor) = monitor {
+                push_arg(&mut args, "-video_size");
+                push_arg(&mut args, &format!("{}x{}", monitor.width, monitor.height));
+            }
+            push_arg(&mut args, "-i");
+            push_arg(
+                &mut args,
+                &match monitor {
+                    Some(monitor) => format!("{display}+{},{}", monitor.x, monitor.y),
+                    None => display.to_owned(),
+                },
+            );
+            if let Some(microphone) = microphone {
+                push_arg(&mut args, "-thread_queue_size");
+                push_arg(&mut args, "1024");
+                push_arg(&mut args, "-f");
+                push_arg(&mut args, linux_audio_format(microphone));
+                push_arg(&mut args, "-i");
+                push_arg(&mut args, microphone);
+            }
+            push_video_encode(&mut args, microphone.is_some());
+        }
+        RecordingMode::Camera { camera, microphone } => {
+            push_arg(&mut args, "-thread_queue_size");
+            push_arg(&mut args, "1024");
+            push_arg(&mut args, "-f");
+            push_arg(&mut args, "v4l2");
+            push_arg(&mut args, "-framerate");
+            push_arg(&mut args, "30");
+            push_arg(&mut args, "-i");
+            push_arg(&mut args, camera);
+            if let Some(microphone) = microphone {
+                push_arg(&mut args, "-thread_queue_size");
+                push_arg(&mut args, "1024");
+                push_arg(&mut args, "-f");
+                push_arg(&mut args, linux_audio_format(microphone));
+                push_arg(&mut args, "-i");
+                push_arg(&mut args, microphone);
+            }
+            push_video_encode(&mut args, microphone.is_some());
+        }
+        RecordingMode::Voice { microphone } => {
+            push_arg(&mut args, "-f");
+            push_arg(&mut args, linux_audio_format(microphone));
+            push_arg(&mut args, "-i");
+            push_arg(&mut args, microphone);
+            push_arg(&mut args, "-c:a");
+            push_arg(&mut args, "aac");
+        }
+    }
+    push_arg(&mut args, "-y");
+    args.push(output.into());
+    args
+}
+
+fn list_monitors() -> Vec<MonitorInfo> {
+    #[cfg(windows)]
+    {
+        list_monitors_windows()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        list_monitors_linux()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        Vec::new()
+    }
 }
 
 /// Enumerate displays by asking Windows through a hidden `PowerShell` -
 /// the same subprocess pattern as everything else here, and it keeps
 /// display geometry out of unsafe Win32 calls.
-fn list_monitors() -> Vec<MonitorInfo> {
+#[cfg(windows)]
+fn list_monitors_windows() -> Vec<MonitorInfo> {
     let mut command = Command::new("powershell");
     command
         .args([
@@ -325,7 +447,24 @@ fn list_monitors() -> Vec<MonitorInfo> {
     parse_monitor_lines(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// Enumerate displays from `xrandr --current`. Wayland-only sessions without
+/// `XWayland` report nothing here; screen capture then uses the full `X11` root.
+#[cfg(target_os = "linux")]
+fn list_monitors_linux() -> Vec<MonitorInfo> {
+    let mut command = Command::new("xrandr");
+    command
+        .args(["--current"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    parse_xrandr_monitors(&String::from_utf8_lossy(&output.stdout))
+}
+
 /// Lines look like `\\.\DISPLAY1|0|0|2560|1440|True`.
+#[cfg(any(windows, test))]
 fn parse_monitor_lines(stdout: &str) -> Vec<MonitorInfo> {
     stdout
         .lines()
@@ -337,34 +476,101 @@ fn parse_monitor_lines(stdout: &str) -> Vec<MonitorInfo> {
             let width = fields.next()?.parse().ok()?;
             let height = fields.next()?.parse().ok()?;
             let primary = fields.next()?.eq_ignore_ascii_case("true");
-            let number = device
-                .rsplit("DISPLAY")
-                .next()
-                .and_then(|digits| digits.parse::<u32>().ok());
-            let label = match (number, primary) {
-                (Some(number), true) => format!("Display {number} (primary) · {width}×{height}"),
-                (Some(number), false) => format!("Display {number} · {width}×{height}"),
-                (None, true) => format!("Display (primary) · {width}×{height}"),
-                (None, false) => format!("Display · {width}×{height}"),
-            };
-            Some(MonitorInfo {
-                label,
-                x,
-                y,
-                width,
-                height,
-                primary,
-            })
+            Some(monitor_info(device, x, y, width, height, primary))
         })
         .collect()
 }
 
-/// Enumerate `DirectShow` devices by parsing `FFmpeg`'s listing (it reports the
-/// list on stderr and exits nonzero by design).
+fn monitor_info(name: &str, x: i32, y: i32, width: u32, height: u32, primary: bool) -> MonitorInfo {
+    let number = name
+        .rsplit("DISPLAY")
+        .next()
+        .and_then(|digits| digits.parse::<u32>().ok());
+    let label = match (number, primary) {
+        (Some(number), true) => format!("Display {number} (primary) · {width}×{height}"),
+        (Some(number), false) => format!("Display {number} · {width}×{height}"),
+        (None, true) => format!("{name} (primary) · {width}×{height}"),
+        (None, false) => format!("{name} · {width}×{height}"),
+    };
+    MonitorInfo {
+        label,
+        x,
+        y,
+        width,
+        height,
+        primary,
+    }
+}
+
+/// `xrandr --current` geometry lines look like `HDMI-1 connected primary 1920x1080+0+0`.
+fn parse_xrandr_monitors(stdout: &str) -> Vec<MonitorInfo> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let connected = line.find(" connected")?;
+            let name = line[..connected].trim();
+            if name.is_empty() {
+                return None;
+            }
+            let rest = line[connected + " connected".len()..].trim_start();
+            let primary = rest.starts_with("primary ");
+            let geometry = if primary {
+                rest.strip_prefix("primary ").unwrap_or(rest).trim_start()
+            } else {
+                rest
+            };
+            let (width, height, x, y) = parse_xrandr_geometry(geometry)?;
+            Some(monitor_info(name, x, y, width, height, primary))
+        })
+        .collect()
+}
+
+fn parse_xrandr_geometry(geometry: &str) -> Option<(u32, u32, i32, i32)> {
+    let x_at = geometry.find('x')?;
+    let width = geometry[..x_at].parse().ok()?;
+    let after_x = &geometry[x_at + 1..];
+    let height_end = after_x.find(|character: char| !character.is_ascii_digit())?;
+    let height = after_x[..height_end].parse().ok()?;
+    let offsets = after_x[height_end..]
+        .split_whitespace()
+        .next()?
+        .strip_prefix('+')?;
+    let separator = offsets.rfind('+')?;
+    let x = offsets[..separator].parse().ok()?;
+    let y = offsets[separator + 1..].parse().ok()?;
+    Some((width, height, x, y))
+}
+
 pub(crate) fn list_capture_devices() -> CaptureDevices {
     let Some(ffmpeg) = find_ffmpeg() else {
-        return CaptureDevices::default();
+        return CaptureDevices {
+            monitors: list_monitors(),
+            ..CaptureDevices::default()
+        };
     };
+    #[cfg(windows)]
+    {
+        list_dshow_devices(&ffmpeg)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        list_linux_devices(&ffmpeg)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = ffmpeg;
+        CaptureDevices {
+            monitors: list_monitors(),
+            ..CaptureDevices::default()
+        }
+    }
+}
+
+/// Enumerate `DirectShow` devices by parsing `FFmpeg`'s listing (it reports the
+/// list on stderr and exits nonzero by design).
+#[cfg(windows)]
+fn list_dshow_devices(ffmpeg: &Path) -> CaptureDevices {
     let mut command = Command::new(ffmpeg);
     command
         .args([
@@ -388,9 +594,69 @@ pub(crate) fn list_capture_devices() -> CaptureDevices {
     devices
 }
 
+#[cfg(target_os = "linux")]
+fn list_linux_devices(ffmpeg: &Path) -> CaptureDevices {
+    let mut devices = CaptureDevices {
+        video: ffmpeg_listed_sources(ffmpeg, "v4l2"),
+        audio: ffmpeg_listed_sources(ffmpeg, "pulse"),
+        monitors: list_monitors(),
+    };
+    if devices.audio.is_empty() {
+        devices.audio = ffmpeg_listed_sources(ffmpeg, "alsa");
+    }
+    devices
+}
+
+#[cfg(target_os = "linux")]
+fn ffmpeg_listed_sources(ffmpeg: &Path, device: &str) -> Vec<String> {
+    let mut command = Command::new(ffmpeg);
+    command
+        .args(["-hide_banner", "-sources", device])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_console_window(&mut command);
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    let listing = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_ffmpeg_sources(&listing)
+}
+
+/// `ffmpeg -sources` prints `name [description]` after an auto-detected header.
+fn parse_ffmpeg_sources(listing: &str) -> Vec<String> {
+    let mut sources = Vec::new();
+    let mut in_list = false;
+    for line in listing.lines() {
+        let line = line.trim();
+        if line.starts_with("Auto-detected sources") {
+            in_list = true;
+            continue;
+        }
+        if !in_list || line.is_empty() || line.starts_with('[') {
+            continue;
+        }
+        let name = line.split('[').next().unwrap_or(line).trim();
+        if name.is_empty()
+            || name == "*"
+            || name.eq_ignore_ascii_case("none")
+            || name.starts_with("Cannot")
+        {
+            continue;
+        }
+        sources.push(name.to_owned());
+    }
+    sources
+}
+
 /// Device lines look like `[dshow @ ...] "Name" (video)`; alternative-name
 /// lines repeat the device and are skipped. Devices that do not declare a
 /// category report `(none)` - virtual cameras do this - and count as video.
+#[cfg(any(windows, test))]
 fn parse_dshow_devices(stderr: &str) -> CaptureDevices {
     let mut devices = CaptureDevices::default();
     for line in stderr.lines() {
@@ -423,31 +689,57 @@ fn find_ffmpeg() -> Option<PathBuf> {
             return Some(path);
         }
     }
+    let names = ffmpeg_cli_names();
     if let Ok(exe) = std::env::current_exe() {
         for ancestor in exe.ancestors().skip(1) {
-            let beside = ancestor.join("ffmpeg.exe");
-            if beside.is_file() {
-                return Some(beside);
-            }
-            let dev = ancestor.join("third_party/ffmpeg/bin/ffmpeg.exe");
-            if dev.is_file() {
-                return Some(dev);
+            for name in names {
+                let beside = ancestor.join(name);
+                if beside.is_file() {
+                    return Some(beside);
+                }
+                let nested = ancestor.join("bin").join(name);
+                if nested.is_file() {
+                    return Some(nested);
+                }
+                let dev = ancestor.join("third_party/ffmpeg/bin").join(name);
+                if dev.is_file() {
+                    return Some(dev);
+                }
             }
         }
     }
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|directory| directory.join("ffmpeg.exe"))
-        .find(|candidate| candidate.is_file())
+    std::env::split_paths(&path).find_map(|directory| {
+        names
+            .iter()
+            .map(|name| directory.join(name))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+fn ffmpeg_cli_names() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["ffmpeg.exe"]
+    } else {
+        &["ffmpeg"]
+    }
 }
 
 /// Recordings are user-visible files, grouped by a filesystem-safe project name.
 fn recordings_directory(project_name: &str) -> PathBuf {
-    let root = std::env::var_os("USERPROFILE").map_or_else(
+    recordings_root().join(sanitize_recordings_folder(project_name))
+}
+
+fn recordings_root() -> PathBuf {
+    let home = if cfg!(windows) {
+        std::env::var_os("USERPROFILE")
+    } else {
+        std::env::var_os("HOME")
+    };
+    home.map_or_else(
         || std::env::temp_dir().join("OpenReel"),
         |home| PathBuf::from(home).join("Videos").join("OpenReel"),
-    );
-    root.join(sanitize_recordings_folder(project_name))
+    )
 }
 
 fn sanitize_recordings_folder(project_name: &str) -> String {
@@ -834,6 +1126,7 @@ fn hide_console_window(_command: &mut Command) {}
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     fn joined(mode: &RecordingMode) -> String {
         ffmpeg_record_args(mode, Path::new("out.mp4"))
             .iter()
@@ -842,6 +1135,7 @@ mod tests {
             .join(" ")
     }
 
+    #[cfg(windows)]
     #[test]
     fn screen_capture_grabs_the_desktop_and_mixes_the_chosen_microphone() {
         let with_mic = joined(&RecordingMode::Screen {
@@ -863,6 +1157,47 @@ mod tests {
         assert!(!silent.contains("-c:a"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn screen_capture_grabs_the_x11_root_and_mixes_the_chosen_microphone() {
+        let with_mic = ffmpeg_record_args_linux(
+            &RecordingMode::Screen {
+                microphone: Some("alsa_input.pci-0000_00_1f.3.analog-stereo".to_owned()),
+                monitor: None,
+            },
+            Path::new("out.mp4"),
+            ":0.0",
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+        assert!(with_mic.contains("-f x11grab -framerate 30 -i :0.0"));
+        assert!(with_mic.contains("-f pulse -i alsa_input.pci-0000_00_1f.3.analog-stereo"));
+        assert!(with_mic.contains("-c:v libx264 -preset ultrafast -pix_fmt yuv420p"));
+        assert!(with_mic.contains("-fps_mode cfr -r 30"));
+        assert!(with_mic.contains("-c:a aac"));
+        assert!(with_mic.ends_with("-y out.mp4"));
+
+        let silent = ffmpeg_record_args_linux(
+            &RecordingMode::Screen {
+                microphone: None,
+                monitor: None,
+            },
+            Path::new("out.mp4"),
+            ":1",
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+        assert!(silent.contains("-i :1"));
+        assert!(!silent.contains("pulse"));
+        assert!(!silent.contains("alsa"));
+        assert!(!silent.contains("-c:a"));
+    }
+
+    #[cfg(windows)]
     #[test]
     fn a_chosen_monitor_becomes_a_gdigrab_region_negative_offsets_included() {
         // Real geometry: a display left of the primary sits at x = -2560,
@@ -882,6 +1217,32 @@ mod tests {
         assert!(args.contains("-offset_x -2560 -offset_y 0 -video_size 2560x1440 -i desktop"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_chosen_monitor_becomes_an_x11grab_region_negative_offsets_included() {
+        let monitor = MonitorInfo {
+            label: "DP-2 · 2560×1440".to_owned(),
+            x: -2560,
+            y: 0,
+            width: 2560,
+            height: 1440,
+            primary: false,
+        };
+        let args = ffmpeg_record_args_linux(
+            &RecordingMode::Screen {
+                microphone: None,
+                monitor: Some(monitor),
+            },
+            Path::new("out.mp4"),
+            ":0.0",
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+        assert!(args.contains("-video_size 2560x1440 -i :0.0+-2560,0"));
+    }
+
     #[test]
     fn monitor_lines_parse_bounds_primary_and_display_numbers() {
         let stdout = "\\\\.\\DISPLAY1|0|0|2560|1440|True\r\n\\\\.\\DISPLAY2|-2560|0|2560|1440|False\r\nnot a monitor line\r\n";
@@ -895,6 +1256,28 @@ mod tests {
         assert!(!monitors[1].primary);
     }
 
+    #[test]
+    fn xrandr_lines_parse_bounds_primary_and_negative_offsets() {
+        let stdout = "Screen 0: minimum 320 x 200, current 4480 x 1440, maximum 16384 x 16384\n\
+HDMI-1 connected primary 1920x1080+0+0 (normal left inverted right x axis y axis) 510mm x 290mm\n\
+DP-2 connected 2560x1440+-2560+0 (normal left inverted right x axis y axis) 597mm x 336mm\n\
+VNC-0 connected 1920x1200+0+0 0mm x 0mm\n\
+DP-3 connected (normal left inverted right x axis y axis)\n\
+HDMI-2 disconnected (normal left inverted right x axis y axis)\n";
+        let monitors = parse_xrandr_monitors(stdout);
+        assert_eq!(monitors.len(), 3);
+        assert_eq!(monitors[0].label, "HDMI-1 (primary) · 1920×1080");
+        assert!(monitors[0].primary);
+        assert_eq!((monitors[0].x, monitors[0].y), (0, 0));
+        assert_eq!(monitors[1].label, "DP-2 · 2560×1440");
+        assert_eq!(monitors[1].x, -2560);
+        assert_eq!((monitors[1].width, monitors[1].height), (2560, 1440));
+        assert!(!monitors[1].primary);
+        assert_eq!(monitors[2].label, "VNC-0 · 1920×1200");
+        assert_eq!((monitors[2].width, monitors[2].height), (1920, 1200));
+    }
+
+    #[cfg(windows)]
     #[test]
     fn camera_capture_binds_video_and_audio_into_one_dshow_input() {
         let both = joined(&RecordingMode::Camera {
@@ -913,6 +1296,42 @@ mod tests {
         assert!(!video_only.contains("audio="));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn camera_capture_binds_v4l2_video_and_pulse_audio() {
+        let both = ffmpeg_record_args_linux(
+            &RecordingMode::Camera {
+                camera: "/dev/video0".to_owned(),
+                microphone: Some("default".to_owned()),
+            },
+            Path::new("out.mp4"),
+            ":0.0",
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+        assert!(both.contains("-f v4l2 -framerate 30 -i /dev/video0"));
+        assert!(both.contains("-f pulse -i default"));
+        assert!(both.contains("-fps_mode cfr -r 30"));
+        let video_only = ffmpeg_record_args_linux(
+            &RecordingMode::Camera {
+                camera: "/dev/video0".to_owned(),
+                microphone: None,
+            },
+            Path::new("out.mp4"),
+            ":0.0",
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+        assert!(video_only.contains("-i /dev/video0"));
+        assert!(!video_only.contains("pulse"));
+        assert!(!video_only.contains("-c:a"));
+    }
+
+    #[cfg(windows)]
     #[test]
     fn voice_capture_is_audio_only_aac() {
         let voice = joined(&RecordingMode::Voice {
@@ -928,6 +1347,51 @@ mod tests {
             }
             .extension(),
             "m4a"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn voice_capture_is_audio_only_aac() {
+        let voice = ffmpeg_record_args_linux(
+            &RecordingMode::Voice {
+                microphone: "hw:0".to_owned(),
+            },
+            Path::new("out.m4a"),
+            ":0.0",
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+        assert!(voice.contains("-f alsa -i hw:0"));
+        assert!(voice.contains("-c:a aac"));
+        assert!(!voice.contains("libx264"));
+        assert!(!voice.contains("-fps_mode"));
+        assert_eq!(
+            RecordingMode::Voice {
+                microphone: "hw:0".to_owned()
+            }
+            .extension(),
+            "m4a"
+        );
+    }
+
+    #[test]
+    fn ffmpeg_sources_listing_parses_names_and_skips_none() {
+        let listing = "Auto-detected sources for v4l2:\n\
+ /dev/video0 [Integrated Camera: Integrated Camera]\n\
+ /dev/video1 [Integrated Camera: Integrated Camera]\n\
+ none [None]\n\
+Auto-detected sources for pulse:\n\
+ alsa_input.pci-0000_00_1f.3.analog-stereo [Built-in Audio Analog Stereo]\n";
+        assert_eq!(
+            parse_ffmpeg_sources(listing),
+            [
+                "/dev/video0",
+                "/dev/video1",
+                "alsa_input.pci-0000_00_1f.3.analog-stereo"
+            ]
         );
     }
 

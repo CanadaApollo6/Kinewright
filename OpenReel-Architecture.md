@@ -1,6 +1,6 @@
 # OpenReel — Architecture & Build Path
 
-> A native (Windows-first) video editor written in Rust that is, at its core, an **agentic harness for video editing**. The agent brain is whatever coding-agent CLI the user already pays for — Claude Code, Codex, Cursor's `cursor-agent`, OpenCode — spawned as a subprocess, exactly the way T3 Code drives coding agents. OpenReel's job is to hand that agent *eyes and hands for video*: its tools are the same edit operations the human uses. Think "T3 Code, but the tools are cuts, trims, effects, and exports."
+> A native Windows and Linux video editor written in Rust that is, at its core, an **agentic harness for video editing**. The agent brain is whatever coding-agent CLI the user already pays for — Claude Code, Codex, Cursor's `cursor-agent`, OpenCode — spawned as a subprocess, exactly the way T3 Code drives coding agents. OpenReel's job is to hand that agent *eyes and hands for video*: its tools are the same edit operations the human uses. Think "T3 Code, but the tools are cuts, trims, effects, and exports."
 
 **Not a video generation app.** Models never generate footage here. They edit footage the user shot. That's the difference between this and most "AI video" products, and it's load-bearing: the whole design assumes the source of truth is the user's media plus an edit log, not model output.
 

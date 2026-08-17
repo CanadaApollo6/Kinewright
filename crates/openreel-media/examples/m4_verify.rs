@@ -21,8 +21,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .map_or_else(|| PathBuf::from("target/m4-manual"), PathBuf::from);
     fs::create_dir_all(&output_dir)?;
-    let ffmpeg =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffmpeg.exe");
+    let ffmpeg_name = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    let ffmpeg = std::env::var_os("FFMPEG_DIR").map_or_else(
+        || {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../third_party/ffmpeg/bin")
+                .join(ffmpeg_name)
+        },
+        |directory| PathBuf::from(directory).join("bin").join(ffmpeg_name),
+    );
     let red_path = output_dir.join("red-source.mp4");
     let blue_path = output_dir.join("blue-source.mp4");
     generate_source(&ffmpeg, &red_path, "red", 440)?;

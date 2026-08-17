@@ -1,9 +1,84 @@
-# Building OpenReel on Windows
+# Building OpenReel
+
+OpenReel is a native desktop app for **64-bit Windows** (MSVC) and **64-bit Linux**
+(glibc). The media crate links FFmpeg at build time and loads its shared
+libraries at test and run time. Each platform provisions a pinned GPL FFmpeg 8
+build into `third_party/ffmpeg` — no system FFmpeg install is required.
+
+## Linux (x86_64)
+
+### Prerequisites
+
+- A 64-bit GNU/Linux distribution with glibc 2.28 or newer (Ubuntu 22.04+,
+  Debian 12+, Fedora 39+, and current Arch all qualify).
+- Rust installed by `rustup`, using `stable` (`rust-version = "1.92"`).
+- Python 3, `pkg-config`, a C/C++ toolchain, CMake, and the packages listed in
+  `scripts/install-linux-deps.sh` (ALSA, Vulkan/Mesa, X11/Wayland, GTK 3,
+  libclang).
+
+A GPU is optional. Headless tests fall back to Mesa's lavapipe software Vulkan
+implementation. A display (or Xvfb) is required only to *launch* the GUI.
+
+### Clean-clone setup
+
+```bash
+./scripts/install-linux-deps.sh
+source ./scripts/setup-ffmpeg.sh
+cargo build --workspace
+cargo test --workspace
+cargo run -p openreel-app
+```
+
+`source` the setup script in the same shell as Cargo. It downloads the pinned
+FFmpeg 8.0 x86_64 shared GPL build (the same 8.0 ABI Windows links), verifies
+its SHA-256, extracts it to `third_party/ffmpeg`, and exports `FFMPEG_DIR`,
+`PKG_CONFIG_PATH`, `PATH`, and `LD_LIBRARY_PATH` for `ffmpeg-sys-next` and the
+FFmpeg CLI.
+
+The script downloads this exact shared GPL build:
+
+- Provider: mifi FFmpeg-Builds (BtbN linux64 gpl-shared 8.0)
+- FFmpeg: `n8.0-latest`, linux64, shared, GPL
+- Archive: `ffmpeg-n8.0-latest-linux64-gpl-shared-8.0.tar.xz`
+- SHA-256: `c201d31f5c8a3b169345101c63ca70f71442848a271bec4a16ca29a1876e5cb1`
+
+### Environment variables
+
+`setup-ffmpeg.sh` exports these for the current shell:
+
+```text
+PKG_CONFIG_PATH=<repo>/third_party/ffmpeg/lib/pkgconfig
+FFMPEG_DIR=<repo>/third_party/ffmpeg
+PATH=<repo>/third_party/ffmpeg/bin:<existing PATH>
+LD_LIBRARY_PATH=<repo>/third_party/ffmpeg/lib:<existing LD_LIBRARY_PATH>
+```
+
+If the script is executed rather than sourced, it still provisions the archive
+and prints the `source` command to run next.
+
+### Packaging
+
+After a release build:
+
+```bash
+source ./scripts/setup-ffmpeg.sh
+cargo build --package openreel-app --release --locked
+./scripts/package-linux.sh --version 0.1.0
+./scripts/test-linux-bundle.sh --bundle-dir ./dist/linux-x64
+```
+
+The staged bundle is `dist/linux-x64` (`OpenReel`, `ffmpeg`, `lib/libav*.so*`,
+licenses, a `.desktop` file). `package-linux.sh` then writes
+`dist/tarball/OpenReel-<version>-linux-x64.tar.gz`. `patchelf` sets
+`$ORIGIN/lib` so the binary finds bundled FFmpeg without a machine-level
+install.
+
+## Windows (x86_64 MSVC)
 
 M0 targets 64-bit Windows with the MSVC Rust toolchain. The media crate links
 FFmpeg at build time and loads its DLLs at test and run time.
 
-## Prerequisites
+### Prerequisites
 
 - Windows 10 or newer.
 - Visual Studio 2019 Build Tools or newer with **Desktop development with C++**.
@@ -12,7 +87,7 @@ FFmpeg at build time and loads its DLLs at test and run time.
 
 No system FFmpeg, vcpkg, pkg-config, or LLVM installation is required.
 
-## Clean-clone setup
+### Clean-clone setup
 
 Open PowerShell in the repository root and run:
 
@@ -27,7 +102,7 @@ cargo run -p openreel-app
 Keep the setup and Cargo commands in the same PowerShell process. The setup
 script sets process-local environment variables needed by `ffmpeg-sys-next`.
 
-## Build-cache storage
+### Build-cache storage
 
 The workspace profiles disable Cargo incremental state and full dependency
 debug symbols. This keeps repeated Windows test builds from accumulating tens
@@ -77,7 +152,7 @@ build helpers locally:
 
 All three directories are ignored by Git.
 
-## Environment variables
+### Environment variables
 
 `setup-ffmpeg.ps1` sets every variable for the current PowerShell process:
 
