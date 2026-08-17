@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "pack_id": "m40-music-montage-v2",
+  "title": "M40 real music-montage recovery fixture pack",
+  "description": "Pinned openly licensed Blender Foundation trailers and a slow-burn-to-heroic cinematic music bed used to measure visual source inspection, editorial shot selection, and structurally motivated assembly.",
+  "assets": [
+    {
+      "id": "sintel-trailer-1080p",
+      "file_name": "sintel-trailer-1080p.mp4",
+      "download_url": "https://download.blender.org/durian/trailer/sintel_trailer-1080p.mp4",
+      "source_page_url": "https://durian.blender.org/sharing/",
+      "bytes": 14621544,
+      "sha256": "34bbd52a4b89fdf63c8ace50b268da26653a59508288100cd3c23de276db7931",
+      "license": {
+        "spdx_id": "CC-BY-3.0",
+        "name": "Creative Commons Attribution 3.0 Unported",
+        "url": "https://creativecommons.org/licenses/by/3.0/",
+        "attribution": "Sintel trailer, © copyright Blender Foundation | www.sintel.org"
+      }
+    },
+    {
+      "id": "big-buck-bunny-trailer-1080p",
+      "file_name": "big-buck-bunny-trailer-1080p.ogg",
+      "download_url": "https://download.blender.org/peach/trailer/trailer_1080p.ogg",
+      "source_page_url": "https://peach.blender.org/about/",
+      "bytes": 27873937,
+      "sha256": "6614fbdec56804eea700f1eb8cae14a2729f01ca25d848e800f7b55d775ab646",
+      "license": {
+        "spdx_id": "CC-BY-3.0",
+        "name": "Creative Commons Attribution 3.0 Unported",
+        "url": "https://creativecommons.org/licenses/by/3.0/",
+        "attribution": "Big Buck Bunny trailer, © copyright Blender Foundation | www.bigbuckbunny.org"
+      }
+    },
+    {
+      "id": "uprising-scott-buckley",
+      "file_name": "uprising.mp3",
+      "download_url": "https://www.scottbuckley.com.au/library/wp-content/uploads/2024/07/Uprising.mp3",
+      "source_page_url": "https://www.scottbuckley.com.au/library/uprising/",
+      "bytes": 8229845,
+      "sha256": "c9b82e7f836c37fdf02899e31c46163f6f20a0a965a7a49c695d2c78f2a60517",
+      "license": {
+        "spdx_id": "CC-BY-4.0",
+        "name": "Creative Commons Attribution 4.0 International",
+        "url": "https://creativecommons.org/licenses/by/4.0/",
+        "attribution": "'Uprising' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
+      }
+    }
+  ]
+}

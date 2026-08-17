@@ -31,9 +31,17 @@ pub use captions::{
     dedup_timeline_words, srt, vtt,
 };
 pub use creator::{
-    BeatPacingPlan, BeatPacingPoint, CreatorPlanError, MusicBeatAnchor, MusicDurationFit,
-    MusicEndBeatAlignment, MusicFitPlan, MusicFitStrategy, MusicPlaybackMode, MusicRepeatMode,
-    TimelineBeatAnalysisState, beat_pacing_plan, music_fit_plan,
+    BeatMontageAnchorRepair, BeatMontageCadenceContract, BeatMontageCadenceSummary,
+    BeatMontageCutAnchor, BeatMontagePlan, BeatMontageSelect, BeatMontageShot, BeatPacingPlan,
+    BeatPacingPoint, CreatorPlanError, MUSIC_STRUCTURE_DEFAULT_METER_BEATS,
+    MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, MUSIC_STRUCTURE_MAX_METER_BEATS,
+    MUSIC_STRUCTURE_MAX_PHRASE_BARS, MusicBeatAnchor, MusicDurationFit, MusicEndBeatAlignment,
+    MusicFitPlan, MusicFitStrategy, MusicPlaybackMode, MusicRepeatMode, MusicStructureAnalysis,
+    MusicStructureCandidate, MusicStructureParameters, MusicStructureRole,
+    TimelineBeatAnalysisState, beat_montage_plan, beat_montage_plan_near_anchors,
+    beat_montage_plan_near_anchors_with_report, beat_montage_plan_with_anchors, beat_pacing_plan,
+    music_fit_plan, music_structure_analysis, validate_beat_montage_cadence,
+    validate_beat_montage_plan_cadence,
 };
 pub use delivery::{
     DeliveryAspect, DeliveryConformanceReport, DeliveryProfile, DeliveryVariant,

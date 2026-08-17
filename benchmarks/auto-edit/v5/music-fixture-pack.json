@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "pack_id": "m40-music-montage-v1",
+  "title": "M40 real music-montage fixture pack",
+  "description": "Pinned openly licensed Blender Foundation trailers and an instrumental music bed used to measure visual source inspection, editorial shot selection, and exact beat-aligned assembly.",
+  "assets": [
+    {
+      "id": "sintel-trailer-1080p",
+      "file_name": "sintel-trailer-1080p.mp4",
+      "download_url": "https://download.blender.org/durian/trailer/sintel_trailer-1080p.mp4",
+      "source_page_url": "https://durian.blender.org/sharing/",
+      "bytes": 14621544,
+      "sha256": "34bbd52a4b89fdf63c8ace50b268da26653a59508288100cd3c23de276db7931",
+      "license": {
+        "spdx_id": "CC-BY-3.0",
+        "name": "Creative Commons Attribution 3.0 Unported",
+        "url": "https://creativecommons.org/licenses/by/3.0/",
+        "attribution": "Sintel trailer, © copyright Blender Foundation | www.sintel.org"
+      }
+    },
+    {
+      "id": "big-buck-bunny-trailer-1080p",
+      "file_name": "big-buck-bunny-trailer-1080p.ogg",
+      "download_url": "https://download.blender.org/peach/trailer/trailer_1080p.ogg",
+      "source_page_url": "https://peach.blender.org/about/",
+      "bytes": 27873937,
+      "sha256": "6614fbdec56804eea700f1eb8cae14a2729f01ca25d848e800f7b55d775ab646",
+      "license": {
+        "spdx_id": "CC-BY-3.0",
+        "name": "Creative Commons Attribution 3.0 Unported",
+        "url": "https://creativecommons.org/licenses/by/3.0/",
+        "attribution": "Big Buck Bunny trailer, © copyright Blender Foundation | www.bigbuckbunny.org"
+      }
+    },
+    {
+      "id": "cipher-kevin-macleod",
+      "file_name": "cipher.mp3",
+      "download_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Cipher2.mp3",
+      "source_page_url": "https://incompetech.com/music/royalty-free/index.html?isrc=USUAN1100844",
+      "bytes": 9252699,
+      "sha256": "d3d0614535a61d748e2fd8d5117fc4d781022a7624794802a2462d8af3fdd522",
+      "license": {
+        "spdx_id": "CC-BY-4.0",
+        "name": "Creative Commons Attribution 4.0 International",
+        "url": "https://creativecommons.org/licenses/by/4.0/",
+        "attribution": "\"Cipher\" Kevin MacLeod (incompetech.com), licensed under CC BY 4.0"
+      }
+    }
+  ]
+}

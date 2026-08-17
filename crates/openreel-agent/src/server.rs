@@ -19,19 +19,23 @@ use base64::{
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use openreel_core::{
     Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AudioBus, AudioBusId,
-    AudioLoudness, AutomationCurve, BeatStatus, CaptionCue, CaptionMotion, CaptionPreset,
-    ClipContent, ClipId, Command, Core, DeliveryAspect, DeliveryProfile, DeliveryVariant, Document,
-    Effect, EffectId, Event, Export, ExportCancellation, Keyframe, KeyframeInterpolation, Marker,
-    MarkerId, MediaAsset, MediaKind, Operation, ParamValue, Playback, Query, QueryResult,
-    ReframeFocusBounds, SceneStatus, SilenceStatus, SpeakerAngleAssignment,
-    SpeakerMulticamSettings, SubjectCenterBasisPointSample, SubjectFocusBasisPointConstraint,
-    SubjectReframeSettings, SyncGroupId, ThreePointMode, TimeCode, TimelineBeat,
-    TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, TitlePosition, TrackId, TranscriptStatus,
-    animated_caption_operations_at, apply_batch, authored_caption_cues, beat_pacing_plan,
-    caption_cues, dedup_timeline_words, delivery_conformance, document_for_delivery_profile,
-    document_for_delivery_variant, is_filler_word, map_source_range_to_project, music_fit_plan,
-    plan_speaker_multicam, plan_subject_reframe_basis_points_with_containment, qa_document,
+    AudioLoudness, AutomationCurve, BeatMontageCadenceContract, BeatMontageSelect, BeatStatus,
+    CaptionCue, CaptionMotion, CaptionPreset, Clip, ClipContent, ClipId, Command, Core,
+    DeliveryAspect, DeliveryProfile, DeliveryVariant, Document, Effect, EffectId, Event, Export,
+    ExportCancellation, Keyframe, KeyframeInterpolation, MUSIC_STRUCTURE_DEFAULT_METER_BEATS,
+    MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId, MediaAsset, MediaKind, Operation,
+    ParamValue, Playback, Query, QueryResult, ReframeFocusBounds, SceneStatus, SilenceStatus,
+    SpeakerAngleAssignment, SpeakerMulticamSettings, SubjectCenterBasisPointSample,
+    SubjectFocusBasisPointConstraint, SubjectReframeSettings, SyncGroupId, ThreePointMode,
+    TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, Track, TrackId, TrackKind,
+    TranscriptStatus, animated_caption_operations_at, apply_batch, authored_caption_cues,
+    beat_montage_plan, beat_montage_plan_near_anchors_with_report, beat_montage_plan_with_anchors,
+    beat_pacing_plan, caption_cues, dedup_timeline_words, delivery_conformance,
+    document_for_delivery_profile, document_for_delivery_variant, is_filler_word,
+    map_source_range_to_project, music_fit_plan, music_structure_analysis, plan_speaker_multicam,
+    plan_subject_reframe_basis_points_with_containment, qa_document,
+    validate_beat_montage_plan_cadence,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -69,6 +73,9 @@ const THUMBNAIL_MAX_WIDTH: u32 = 512;
 const STORYBOARD_DEFAULT_FRAMES: u8 = 9;
 const STORYBOARD_MAX_FRAMES: u8 = 16;
 const STORYBOARD_DEFAULT_CELL_WIDTH: u32 = 320;
+const SHOT_BOARD_DEFAULT_CANDIDATES: u8 = 6;
+const SHOT_BOARD_MAX_CANDIDATES: u8 = 12;
+const SHOT_BOARD_EVIDENCE_PER_CANDIDATE: u8 = 3;
 const STORYBOARD_COLUMNS: u32 = 4;
 const STORYBOARD_GUTTER: u32 = 4;
 const DEFAULT_CONFIRMATION_TIMEOUT: Duration = Duration::from_mins(1);
@@ -629,6 +636,14 @@ impl OpenReelMcp {
                 let args: SourceInfoArgs = decode_args("get_source_info", arguments)?;
                 self.source_info(&args)
             }
+            "get_source_storyboard" => {
+                let args: SourceStoryboardArgs = decode_args("get_source_storyboard", arguments)?;
+                self.source_storyboard(&args)
+            }
+            "get_source_shot_board" => {
+                let args: SourceShotBoardArgs = decode_args("get_source_shot_board", arguments)?;
+                self.source_shot_board(&args)
+            }
             "search_media" => {
                 let args: MediaSearchArgs = decode_args("search_media", arguments)?;
                 self.search_media(&args)
@@ -695,6 +710,10 @@ impl OpenReelMcp {
                 let args: TimelineBeatsArgs = decode_args("get_timeline_beats", arguments)?;
                 self.timeline_beats(args.range, args.min_strength)
             }
+            "get_music_structure" => {
+                let args: MusicStructureArgs = decode_args("get_music_structure", arguments)?;
+                self.music_structure(&args)
+            }
             "plan_dialogue_assembly" => {
                 let args: DialogueAssemblyPlanArgs =
                     decode_args("plan_dialogue_assembly", arguments)?;
@@ -703,6 +722,10 @@ impl OpenReelMcp {
             "plan_beat_pacing" => {
                 let args: BeatPacingPlanArgs = decode_args("plan_beat_pacing", arguments)?;
                 self.plan_beat_pacing(args)
+            }
+            "plan_beat_montage" => {
+                let args: BeatMontagePlanArgs = decode_args("plan_beat_montage", arguments)?;
+                self.plan_beat_montage(&args)
             }
             "plan_music_fit" => {
                 let args: MusicFitPlanArgs = decode_args("plan_music_fit", arguments)?;
@@ -2238,6 +2261,424 @@ impl OpenReelMcp {
         self.storyboard_for_document(revision, &document, args, "timeline storyboard", None)
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn source_storyboard(&self, args: &SourceStoryboardArgs) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let Some(asset) = document.asset(args.asset_id).cloned() else {
+            return Ok(error_text(format!(
+                "asset {} does not exist",
+                args.asset_id
+            )));
+        };
+        if !asset.kind.supports(TrackKind::Video) {
+            return Ok(error_text(format!(
+                "asset {} is not a video asset",
+                asset.id
+            )));
+        }
+
+        let source_in = args
+            .range
+            .as_ref()
+            .map_or(TimeCode::ZERO, |range| range.start);
+        let source_out = args
+            .range
+            .as_ref()
+            .map_or(asset.duration, |range| range.end);
+        if source_in < TimeCode::ZERO || source_out > asset.duration || source_out <= source_in {
+            return Ok(error_text(format!(
+                "source storyboard range {source_in}..{source_out} is outside asset {} range 0..{}",
+                asset.id, asset.duration
+            )));
+        }
+
+        let frame_count = args.frame_count.unwrap_or(STORYBOARD_DEFAULT_FRAMES);
+        if !(1..=STORYBOARD_MAX_FRAMES).contains(&frame_count) {
+            return Ok(error_text(format!(
+                "frame_count must be in 1..={STORYBOARD_MAX_FRAMES}"
+            )));
+        }
+        let max_width = args.max_width.unwrap_or(STORYBOARD_DEFAULT_CELL_WIDTH);
+        if !(64..=THUMBNAIL_MAX_WIDTH).contains(&max_width) {
+            return Ok(error_text(format!(
+                "max_width must be in 64..={THUMBNAIL_MAX_WIDTH}"
+            )));
+        }
+        let source_range = source_in..source_out;
+        let duration = match map_source_range_to_project(source_range.clone(), asset.fps, asset.fps)
+        {
+            Ok(duration) => duration,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let temporary = Arc::new(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![Clip {
+                    id: ClipId(1),
+                    asset: asset.id,
+                    source_range,
+                    content: ClipContent::Media,
+                    timeline_start: TimeCode::ZERO,
+                    effects: Vec::new(),
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                }],
+            }],
+            media_pool: vec![asset.clone()],
+            fps: asset.fps,
+            resolution: asset.resolution.unwrap_or((1_920, 1_080)),
+            duration,
+            ..Document::default()
+        });
+
+        let frames = storyboard_sample_frames(&(TimeCode::ZERO..duration), frame_count);
+        let mut images = Vec::with_capacity(frames.len());
+        for frame in &frames {
+            match self
+                .analysis
+                .thumbnail_for_document(Arc::clone(&temporary), *frame, max_width)
+            {
+                Ok(image) => images.push(image),
+                Err(error) => return Ok(error_text(error.to_string())),
+            }
+        }
+        let sheet = compose_contact_sheet(&images)?;
+        let png = encode_png(&sheet)?;
+        let source_range_value = serde_json::json!({
+            "start": source_in.0,
+            "end": source_out.0,
+        });
+        let cells = frames
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| {
+                let source_frame = source_in
+                    .checked_add(*frame)
+                    .expect("validated source storyboard frame cannot overflow");
+                serde_json::json!({
+                    "cell": index + 1,
+                    "asset_id": asset.id.0,
+                    "source_frame": source_frame.0,
+                    "source_range": source_range_value.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let manifest = serde_json::json!({
+            "asset_id": asset.id.0,
+            "source_range": source_range_value,
+            "cells": cells,
+            "sheet": {"width": sheet.width, "height": sheet.height},
+        });
+        let mut result = CallToolResult::success(vec![
+            ContentBlock::text(format!(
+                "source storyboard asset={} range={}..{} cells={}\n{}",
+                asset.id,
+                source_in,
+                source_out,
+                frames.len(),
+                manifest
+            )),
+            ContentBlock::image(BASE64.encode(png), "image/png"),
+        ]);
+        result.structured_content = Some(manifest);
+        Ok(result)
+    }
+
+    /// Return source-monitor candidates derived from cached scene boundaries.
+    ///
+    /// This deliberately builds an isolated, throwaway document for thumbnail
+    /// rendering. It is an inspector: no Core command, prepared plan, or
+    /// playback document is changed.
+    #[allow(clippy::too_many_lines)]
+    fn source_shot_board(&self, args: &SourceShotBoardArgs) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let Some(asset) = document.asset(args.asset_id).cloned() else {
+            return Ok(error_text(format!(
+                "asset {} does not exist",
+                args.asset_id
+            )));
+        };
+        if !asset.kind.supports(TrackKind::Video) {
+            return Ok(error_text(format!(
+                "asset {} is not a video asset",
+                asset.id
+            )));
+        }
+
+        let source_in = args
+            .range
+            .as_ref()
+            .map_or(TimeCode::ZERO, |range| range.start);
+        let source_out = args
+            .range
+            .as_ref()
+            .map_or(asset.duration, |range| range.end);
+        if source_in < TimeCode::ZERO || source_out > asset.duration || source_out <= source_in {
+            return Ok(error_text(format!(
+                "source shot board range {source_in}..{source_out} is outside asset {} range 0..{}",
+                asset.id, asset.duration
+            )));
+        }
+        let candidate_count = args
+            .candidate_count
+            .unwrap_or(SHOT_BOARD_DEFAULT_CANDIDATES);
+        if !(1..=SHOT_BOARD_MAX_CANDIDATES).contains(&candidate_count) {
+            return Ok(error_text(format!(
+                "candidate_count must be in 1..={SHOT_BOARD_MAX_CANDIDATES}"
+            )));
+        }
+        let max_width = args.max_width.unwrap_or(STORYBOARD_DEFAULT_CELL_WIDTH);
+        if !(64..=THUMBNAIL_MAX_WIDTH).contains(&max_width) {
+            return Ok(error_text(format!(
+                "max_width must be in 64..={THUMBNAIL_MAX_WIDTH}"
+            )));
+        }
+        if let Some(minimum_duration_frames) = args.minimum_duration_frames
+            && minimum_duration_frames.0 < 1
+        {
+            return Ok(error_text(
+                "minimum_duration_frames must be at least 1 when provided",
+            ));
+        }
+        let minimum_confidence_basis_points = args
+            .minimum_confidence_basis_points
+            .unwrap_or(DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS);
+        if minimum_confidence_basis_points > 10_000 {
+            return Ok(error_text(
+                "minimum_confidence_basis_points must be in 0..=10000",
+            ));
+        }
+
+        let mut status = self.analysis.scene_status(&asset);
+        if status == SceneStatus::NotRequested {
+            self.analysis.request_scene_detection(asset.clone());
+            status = self.analysis.scene_status(&asset);
+        }
+        let scenes = match status {
+            SceneStatus::Ready(scenes) => scenes,
+            SceneStatus::NotRequested
+            | SceneStatus::Queued
+            | SceneStatus::Hashing
+            | SceneStatus::Analyzing => {
+                let status = match status {
+                    SceneStatus::NotRequested => "requested",
+                    SceneStatus::Queued => "queued",
+                    SceneStatus::Hashing => "hashing",
+                    SceneStatus::Analyzing => "analyzing",
+                    _ => unreachable!(),
+                };
+                let manifest = serde_json::json!({
+                    "asset_id": asset.id.0,
+                    "source_range": {"start": source_in.0, "end": source_out.0},
+                    "status": "pending",
+                    "analysis_status": status,
+                    "scene_confidence_threshold_basis_points": minimum_confidence_basis_points,
+                    "minimum_duration_frames": args.minimum_duration_frames.map(|duration| duration.0),
+                    "message": "scene analysis is pending; call get_source_shot_board again when it is ready",
+                });
+                let mut result = success_text(manifest.to_string());
+                result.structured_content = Some(manifest);
+                return Ok(result);
+            }
+            SceneStatus::NoVideo => {
+                return Ok(error_text(format!(
+                    "asset {} has no decodable video stream",
+                    asset.id
+                )));
+            }
+            SceneStatus::Cancelled => {
+                return Ok(error_text(format!(
+                    "scene analysis for asset {} was cancelled; request it again",
+                    asset.id
+                )));
+            }
+            SceneStatus::Failed(message) => {
+                return Ok(error_text(format!(
+                    "scene analysis for asset {} failed: {message}",
+                    asset.id
+                )));
+            }
+        };
+
+        let mut cuts = BTreeMap::<TimeCode, u16>::new();
+        for change in &scenes.changes {
+            if change.confidence_basis_points >= minimum_confidence_basis_points
+                && change.source_frame > source_in
+                && change.source_frame < source_out
+            {
+                cuts.entry(change.source_frame)
+                    .and_modify(|confidence| {
+                        *confidence = (*confidence).max(change.confidence_basis_points);
+                    })
+                    .or_insert(change.confidence_basis_points);
+            }
+        }
+        let boundaries = std::iter::once(source_in)
+            .chain(cuts.keys().copied())
+            .chain(std::iter::once(source_out))
+            .collect::<Vec<_>>();
+        let candidates = boundaries
+            .windows(2)
+            .enumerate()
+            .map(|(index, boundary)| {
+                let start = boundary[0];
+                let end = boundary[1];
+                serde_json::json!({
+                    "candidate_id": format!("asset-{}-scene-{}-{}", asset.id.0, start.0, end.0),
+                    "candidate_index": index,
+                    "asset_id": asset.id.0,
+                    "source_range": {"start": start.0, "end": end.0},
+                    "duration_frames": end.0 - start.0,
+                    "boundary_provenance": {
+                        "start": if let Some(confidence) = cuts.get(&start) {
+                            serde_json::json!({"kind": "scene_cut", "source_frame": start.0, "confidence_basis_points": confidence})
+                        } else {
+                            serde_json::json!({"kind": "requested_range_start", "source_frame": start.0})
+                        },
+                        "end": if let Some(confidence) = cuts.get(&end) {
+                            serde_json::json!({"kind": "scene_cut", "source_frame": end.0, "confidence_basis_points": confidence})
+                        } else {
+                            serde_json::json!({"kind": "requested_range_end", "source_frame": end.0})
+                        },
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        let minimum_duration_frames = args.minimum_duration_frames.map(|duration| duration.0);
+        let eligible_candidates = candidates
+            .iter()
+            .filter(|candidate| {
+                minimum_duration_frames.is_none_or(|minimum| {
+                    candidate["duration_frames"]
+                        .as_i64()
+                        .is_some_and(|duration| duration >= minimum)
+                })
+            })
+            .collect::<Vec<_>>();
+        let offset = args.candidate_offset.unwrap_or(0);
+        if offset >= eligible_candidates.len() {
+            return Ok(error_text(format!(
+                "candidate_offset {offset} is outside 0..{} for the {} eligible candidates in this source range",
+                eligible_candidates.len().saturating_sub(1),
+                eligible_candidates.len()
+            )));
+        }
+        let selected = eligible_candidates
+            .iter()
+            .skip(offset)
+            .take(usize::from(candidate_count))
+            .map(|candidate| (*candidate).clone())
+            .collect::<Vec<_>>();
+
+        let source_range = source_in..source_out;
+        let duration = match map_source_range_to_project(source_range.clone(), asset.fps, asset.fps)
+        {
+            Ok(duration) => duration,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let temporary = Arc::new(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![Clip {
+                    id: ClipId(1),
+                    asset: asset.id,
+                    source_range,
+                    content: ClipContent::Media,
+                    timeline_start: TimeCode::ZERO,
+                    effects: Vec::new(),
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                }],
+            }],
+            media_pool: vec![asset.clone()],
+            fps: asset.fps,
+            resolution: asset.resolution.unwrap_or((1_920, 1_080)),
+            duration,
+            ..Document::default()
+        });
+        let mut images = Vec::new();
+        let mut cells = Vec::new();
+        for candidate in &selected {
+            let candidate_range = candidate["source_range"]
+                .as_object()
+                .expect("candidate source range");
+            let candidate_start =
+                TimeCode(candidate_range["start"].as_i64().expect("candidate start"));
+            let candidate_end = TimeCode(candidate_range["end"].as_i64().expect("candidate end"));
+            for (evidence_index, source_frame) in
+                shot_board_evidence_frames(candidate_start..candidate_end)
+                    .into_iter()
+                    .enumerate()
+            {
+                let evidence = ["start", "middle", "end"][evidence_index];
+                let local_frame = TimeCode(source_frame.0 - source_in.0);
+                match self.analysis.thumbnail_for_document(
+                    Arc::clone(&temporary),
+                    local_frame,
+                    max_width,
+                ) {
+                    Ok(image) => images.push(image),
+                    Err(error) => return Ok(error_text(error.to_string())),
+                }
+                cells.push(serde_json::json!({
+                    "cell": cells.len() + 1,
+                    "candidate_id": candidate["candidate_id"].clone(),
+                    "candidate_index": candidate["candidate_index"].clone(),
+                    "evidence": evidence,
+                    "asset_id": asset.id.0,
+                    "source_frame": source_frame.0,
+                    "source_range": candidate["source_range"].clone(),
+                }));
+            }
+        }
+        let sheet = compose_contact_sheet(&images)?;
+        let png = encode_png(&sheet)?;
+        let manifest = serde_json::json!({
+            "asset_id": asset.id.0,
+            "source_range": {"start": source_in.0, "end": source_out.0},
+            "status": "ready",
+            "scene_confidence_threshold_basis_points": minimum_confidence_basis_points,
+            "minimum_duration_frames": minimum_duration_frames,
+            "candidate_offset": offset,
+            "candidate_count": selected.len(),
+            "returned_candidates": selected.len(),
+            "filtered_candidates": eligible_candidates.len(),
+            "total_candidates": candidates.len(),
+            "next_candidate_offset": (offset + selected.len() < eligible_candidates.len()).then_some(offset + selected.len()),
+            "evidence_per_candidate": SHOT_BOARD_EVIDENCE_PER_CANDIDATE,
+            "candidates": selected,
+            "cells": cells,
+            "sheet": {"width": sheet.width, "height": sheet.height},
+        });
+        let mut result = CallToolResult::success(vec![
+            ContentBlock::text(format!(
+                "source shot board asset={} ready: returned {} of {} eligible candidates (offset={}), {} evidence cells, sheet={}x{}; candidate ranges are in structured content",
+                asset.id,
+                selected.len(),
+                eligible_candidates.len(),
+                offset,
+                cells.len(),
+                sheet.width,
+                sheet.height,
+            )),
+            ContentBlock::image(BASE64.encode(png), "image/png"),
+        ]);
+        result.structured_content = Some(manifest);
+        Ok(result)
+    }
+
     fn delivery_variant_storyboard(
         &self,
         args: DeliveryStoryboardArgs,
@@ -3038,6 +3479,133 @@ impl OpenReelMcp {
         ))
     }
 
+    /// Return a compact, read-only heuristic hypothesis about one music
+    /// asset's beat/bar/phrase structure. The analysis is deliberately kept
+    /// separate from edit planning: it produces no operations and never
+    /// changes the document or prepared-plan store.
+    #[allow(clippy::too_many_lines)]
+    fn music_structure(&self, args: &MusicStructureArgs) -> Result<CallToolResult, McpError> {
+        let document = self.document()?;
+        let Some(music_asset) = document.asset(args.music_asset_id) else {
+            return Ok(error_text(format!(
+                "music asset {} does not exist",
+                args.music_asset_id
+            )));
+        };
+        if !music_asset.kind.supports(TrackKind::Audio) {
+            return Ok(error_text(format!(
+                "music asset {} does not contain audio",
+                args.music_asset_id
+            )));
+        }
+        let requested_range = args.range.as_ref().map(|range| TranscriptRangeArgs {
+            start: range.start,
+            end: range.end,
+        });
+        let range = validated_timeline_range(&document, requested_range, "music structure")?;
+        if !timeline_contains_asset(&document, args.music_asset_id, &range) {
+            return Ok(error_text(format!(
+                "music asset {} is not present on an audio-capable timeline clip overlapping project range {}..{}",
+                args.music_asset_id, range.start, range.end
+            )));
+        }
+        let minimum_strength = match args.min_strength {
+            Some(value) => match percentage_to_basis_points(value, "min_strength") {
+                Ok(value) => value,
+                Err(error) => return Ok(error_text(error)),
+            },
+            None => DEFAULT_BEAT_STRENGTH_BASIS_POINTS,
+        };
+        let meter_beats = args
+            .meter_beats
+            .unwrap_or(MUSIC_STRUCTURE_DEFAULT_METER_BEATS);
+        let phrase_bars = args
+            .phrase_bars
+            .unwrap_or(MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS);
+
+        let mut status = self.analysis.beat_status(music_asset);
+        if status == BeatStatus::NotRequested {
+            self.analysis.request_beat_detection(music_asset.clone());
+            status = self.analysis.beat_status(music_asset);
+        }
+        let analysis_state = beat_montage_analysis_state(args.music_asset_id, &status);
+        let beats =
+            match self
+                .analysis
+                .timeline_beats(&document, Some(range.clone()), minimum_strength)
+            {
+                Ok(beats) => beats,
+                Err(error) => return Ok(error_text(error.to_string())),
+            };
+        let analysis = match music_structure_analysis(
+            &document,
+            args.music_asset_id,
+            range,
+            &beats,
+            &analysis_state,
+            minimum_strength,
+            meter_beats,
+            phrase_bars,
+        ) {
+            Ok(analysis) => analysis,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let total_candidate_count = analysis.candidates.len();
+        let omitted_ordinary_candidate_count = if args.structural_only {
+            analysis
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.role == openreel_core::MusicStructureRole::Beat)
+                .count()
+        } else {
+            0
+        };
+        let candidates = if args.structural_only {
+            analysis
+                .candidates
+                .iter()
+                .copied()
+                .filter(|candidate| candidate.role != openreel_core::MusicStructureRole::Beat)
+                .collect::<Vec<_>>()
+        } else {
+            analysis.candidates.clone()
+        };
+        let returned_candidate_count = candidates.len();
+        let structured = serde_json::json!({
+            "music_asset_id": analysis.music_asset.0,
+            "range": {
+                "start": analysis.timeline_range.start.0,
+                "end": analysis.timeline_range.end.0,
+            },
+            "minimum_strength_basis_points": analysis.minimum_strength_basis_points,
+            "analysis_status": "ready",
+            "timeline_audio_asset_present": true,
+            "heuristic": true,
+            "structural_only": args.structural_only,
+            "total_candidate_count": total_candidate_count,
+            "returned_candidate_count": returned_candidate_count,
+            "omitted_ordinary_candidate_count": omitted_ordinary_candidate_count,
+            "disclaimer": "Heuristic candidates, not guaranteed music theory; validate the musical result by listening before using them to drive cuts.",
+            "parameters": analysis.parameters,
+            "candidates": candidates,
+        });
+        Ok(success_structured(
+            format!(
+                "heuristic music structure for asset {} in {}..{}: {} candidate onsets returned ({} total; {} ordinary omitted), inferred meter {} and phrase length {} bars; structural_only={}; candidates are not guaranteed music theory",
+                analysis.music_asset,
+                analysis.timeline_range.start,
+                analysis.timeline_range.end,
+                returned_candidate_count,
+                total_candidate_count,
+                omitted_ordinary_candidate_count,
+                analysis.parameters.meter_beats,
+                analysis.parameters.phrase_bars,
+                args.structural_only,
+            ),
+            structured,
+        ))
+    }
+
     fn plan_dialogue_assembly(
         &self,
         args: &DialogueAssemblyPlanArgs,
@@ -3294,6 +3862,193 @@ impl OpenReelMcp {
         ))
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn plan_beat_montage(&self, args: &BeatMontagePlanArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let Some(music_asset) = document.asset(args.music_asset_id) else {
+            return Ok(error_text(format!(
+                "music asset {} does not exist",
+                args.music_asset_id
+            )));
+        };
+        if !music_asset.kind.supports(TrackKind::Audio) {
+            return Ok(error_text(format!(
+                "music asset {} does not contain audio",
+                args.music_asset_id
+            )));
+        }
+        let minimum_strength = match args.min_strength {
+            Some(value) => match percentage_to_basis_points(value, "min_strength") {
+                Ok(value) => value,
+                Err(error) => return Ok(error_text(error)),
+            },
+            None => DEFAULT_BEAT_STRENGTH_BASIS_POINTS,
+        };
+        let range = args.timeline_range.start..args.timeline_range.end;
+        let mut status = self.analysis.beat_status(music_asset);
+        if status == BeatStatus::NotRequested {
+            self.analysis.request_beat_detection(music_asset.clone());
+            status = self.analysis.beat_status(music_asset);
+        }
+        let analysis_state = beat_montage_analysis_state(args.music_asset_id, &status);
+        let beats =
+            match self
+                .analysis
+                .timeline_beats(&document, Some(range.clone()), minimum_strength)
+            {
+                Ok(beats) => beats,
+                Err(error) => return Ok(error_text(error.to_string())),
+            };
+        let selects = args
+            .selects
+            .iter()
+            .map(|select| BeatMontageSelect {
+                asset: select.asset_id,
+                source_range: select.source_range.start..select.source_range.end,
+            })
+            .collect::<Vec<_>>();
+        let minimum_shot_frames = args.minimum_shot_frames.unwrap_or(TimeCode(20));
+        let maximum_shot_frames = args.maximum_shot_frames.unwrap_or(TimeCode(120));
+        let (plan, anchor_repair) = match (
+            args.cut_anchor_frames.as_deref(),
+            args.anchor_repair.as_ref(),
+        ) {
+            (Some(preferred_anchors), Some(settings)) => {
+                if settings.maximum_movement_frames < TimeCode::ZERO {
+                    return Ok(error_text(
+                        "anchor_repair.maximum_movement_frames must be non-negative; repair is always bounded and never silently broadened",
+                    ));
+                }
+                if settings
+                    .locked_anchor_indices
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+                {
+                    return Ok(error_text(
+                        "anchor_repair.locked_anchor_indices must be strictly increasing and unique",
+                    ));
+                }
+                let (plan, report) = match beat_montage_plan_near_anchors_with_report(
+                    &document,
+                    args.target_track_id,
+                    args.music_asset_id,
+                    range,
+                    &selects,
+                    preferred_anchors,
+                    &beats,
+                    &analysis_state,
+                    minimum_strength,
+                    minimum_shot_frames,
+                    maximum_shot_frames,
+                    args.mode,
+                    Some(settings.maximum_movement_frames),
+                    &settings.locked_anchor_indices,
+                    args.cadence,
+                ) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        return Ok(error_text(format!(
+                            "beat montage anchor repair could not satisfy preferred anchors within maximum_movement_frames={}: {error}; revise preferred anchors, increase the explicit bound, unlock an anchor, or adjust source envelopes and retry",
+                            settings.maximum_movement_frames
+                        )));
+                    }
+                };
+                let repaired = report.signed_deltas.iter().any(|delta| *delta != 0);
+                let evidence = serde_json::json!({
+                    "repaired": repaired,
+                    "preferred_anchor_frames": report.preferred_anchors,
+                    "resolved_anchor_frames": report.resolved_anchors,
+                    "signed_delta_frames": report.signed_deltas,
+                    "absolute_delta_frames": report.absolute_deltas,
+                    "maximum_absolute_delta_frames": report.maximum_absolute_delta,
+                    "total_absolute_delta_frames": report.total_absolute_delta,
+                    "maximum_movement_frames": settings.maximum_movement_frames,
+                    "locked_anchor_indices": settings.locked_anchor_indices,
+                });
+                (plan, Some(evidence))
+            }
+            (Some(cut_anchor_frames), None) => {
+                match beat_montage_plan_with_anchors(
+                    &document,
+                    args.target_track_id,
+                    args.music_asset_id,
+                    range,
+                    &selects,
+                    cut_anchor_frames,
+                    &beats,
+                    &analysis_state,
+                    minimum_strength,
+                    minimum_shot_frames,
+                    maximum_shot_frames,
+                    args.mode,
+                ) {
+                    Ok(plan) => (plan, None),
+                    Err(error) => return Ok(error_text(error.to_string())),
+                }
+            }
+            (None, Some(_)) => {
+                return Ok(error_text(
+                    "anchor_repair requires explicit cut_anchor_frames; supply exactly one fewer preferred anchor than selects or omit anchor_repair",
+                ));
+            }
+            (None, None) => match beat_montage_plan(
+                &document,
+                args.target_track_id,
+                args.music_asset_id,
+                range,
+                &selects,
+                &beats,
+                &analysis_state,
+                minimum_strength,
+                minimum_shot_frames,
+                maximum_shot_frames,
+                args.mode,
+            ) {
+                Ok(plan) => (plan, None),
+                Err(error) => return Ok(error_text(error.to_string())),
+            },
+        };
+        let cadence_summary = match args.cadence {
+            Some(contract) => match validate_beat_montage_plan_cadence(&plan, contract) {
+                Ok(summary) => Some(summary),
+                Err(error) => {
+                    return Ok(error_text(format!(
+                        "beat montage cadence contract rejected prepared plan: {error}; revise shot durations or cut anchors and retry"
+                    )));
+                }
+            },
+            None => None,
+        };
+        let prepared = match self.prepare_operations(revision, &document, plan.operations.clone()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "beat montage plan does not fit the current timeline: {error}"
+                )));
+            }
+        };
+        let structured = serde_json::json!({
+            "timeline_revision": revision.0,
+            "plan": plan,
+            "cadence": cadence_summary,
+            "anchor_repair": anchor_repair,
+            "prepared_edit_plan": {
+                "plan_id": prepared.id,
+                "expected_revision": revision,
+                "preview": prepared.preview,
+            },
+        });
+        Ok(success_structured(
+            format!(
+                "prepared {} model-ordered, source-feasible hard-cut montage shot(s) against music asset {} as edit plan {}; inspect the resolved beat anchors, optional anchor_repair evidence, and preview before committing it at timeline revision {revision}; no transition or retime was added",
+                plan.shots.len(),
+                plan.music_asset,
+                prepared.id,
+            ),
+            structured,
+        ))
+    }
+
     fn plan_music_fit(&self, args: &MusicFitPlanArgs) -> Result<CallToolResult, McpError> {
         let (revision, document) = self.snapshot()?;
         let Some(asset) = document.asset(args.asset_id) else {
@@ -3481,6 +4236,57 @@ impl OpenReelMcp {
             }),
         ))
     }
+}
+
+fn beat_montage_analysis_state(
+    music_asset: AssetId,
+    status: &BeatStatus,
+) -> TimelineBeatAnalysisState {
+    match status {
+        BeatStatus::Ready(_) => TimelineBeatAnalysisState::Ready,
+        BeatStatus::NoAudio => TimelineBeatAnalysisState::Unavailable {
+            asset_ids: vec![music_asset],
+            reason: "music asset has no audio stream".to_owned(),
+        },
+        BeatStatus::Cancelled => TimelineBeatAnalysisState::Unavailable {
+            asset_ids: vec![music_asset],
+            reason: "beat analysis was cancelled".to_owned(),
+        },
+        BeatStatus::Failed(reason) => TimelineBeatAnalysisState::Unavailable {
+            asset_ids: vec![music_asset],
+            reason: format!("beat analysis failed: {reason}"),
+        },
+        BeatStatus::NotRequested
+        | BeatStatus::Queued
+        | BeatStatus::Hashing
+        | BeatStatus::Analyzing { .. } => TimelineBeatAnalysisState::Pending {
+            asset_ids: vec![music_asset],
+        },
+    }
+}
+
+fn timeline_contains_asset(
+    document: &Document,
+    asset_id: AssetId,
+    range: &std::ops::Range<TimeCode>,
+) -> bool {
+    document.tracks.iter().any(|track| {
+        if track.kind != TrackKind::Audio {
+            return false;
+        }
+        track.clips.iter().any(|clip| {
+            if clip.asset != asset_id || !clip.content.is_media() {
+                return false;
+            }
+            let Some(duration) = document.clip_duration(clip).ok() else {
+                return false;
+            };
+            let Some(end) = clip.timeline_start.checked_add(duration) else {
+                return false;
+            };
+            clip.timeline_start < range.end && end > range.start
+        })
+    })
 }
 
 struct NormalizationContext {
@@ -4150,6 +4956,50 @@ struct SourceInfoArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct SourceStoryboardArgs {
+    /// Stable video asset id shown by `get_timeline_state`, `get_source_info`, or `search_media`.
+    asset_id: AssetId,
+    /// Optional half-open source-frame range. Omit for the full source asset.
+    #[serde(default)]
+    range: Option<TranscriptRangeArgs>,
+    /// Number of uniformly sampled cells. Defaults to 9 and is capped at 16.
+    #[serde(default)]
+    frame_count: Option<u8>,
+    /// Maximum width of each rendered cell. Defaults to 320 and is capped at 512.
+    #[serde(default)]
+    max_width: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SourceShotBoardArgs {
+    /// Stable video asset id shown by `get_timeline_state`, `get_source_info`, or `search_media`.
+    asset_id: AssetId,
+    /// Optional half-open source-frame range. Omit for the full source asset.
+    #[serde(default)]
+    range: Option<TranscriptRangeArgs>,
+    /// First eligible scene-derived candidate to return. Defaults to zero;
+    /// this offset is applied after `minimum_duration_frames` filtering.
+    #[serde(default)]
+    candidate_offset: Option<usize>,
+    /// Optional inclusive minimum scene duration in source frames. Candidates
+    /// shorter than this are filtered before pagination; their original
+    /// candidate index and id remain stable in the returned manifest.
+    #[serde(default)]
+    minimum_duration_frames: Option<TimeCode>,
+    /// Minimum scene-boundary confidence in basis points (0..=10000).
+    /// Defaults to 1000 (10%). Raise this for motion-heavy footage when weak
+    /// frame differences over-segment a continuous shot.
+    #[serde(default)]
+    minimum_confidence_basis_points: Option<u16>,
+    /// Number of scene-derived candidates to return. Defaults to 6 and is capped at 12.
+    #[serde(default)]
+    candidate_count: Option<u8>,
+    /// Maximum width of each rendered evidence cell. Defaults to 320 and is capped at 512.
+    #[serde(default)]
+    max_width: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct MediaSearchArgs {
     /// Case-insensitive text matched against asset name, path, cached words,
     /// and cached speaker labels.
@@ -4224,6 +5074,28 @@ struct TimelineBeatsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct MusicStructureArgs {
+    /// Audio-capable media asset whose mapped timeline beats should be analyzed.
+    music_asset_id: AssetId,
+    /// Optional half-open project-frame range. Omit for the full timeline.
+    #[serde(default)]
+    range: Option<TranscriptRangeArgs>,
+    /// Optional onset-strength threshold from 0 through 100 percent. Defaults to 10.
+    #[serde(default)]
+    min_strength: Option<f64>,
+    /// Optional meter hypothesis in beats per bar. Defaults to the core heuristic default.
+    #[serde(default)]
+    meter_beats: Option<u8>,
+    /// Optional phrase hypothesis in bars. Defaults to the core heuristic default.
+    #[serde(default)]
+    phrase_bars: Option<u8>,
+    /// Return only inferred bar and phrase candidates, omitting ordinary beat candidates.
+    /// The structured response reports total, returned, and omitted candidate counts.
+    #[serde(default)]
+    structural_only: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct BeatPacingPlanArgs {
     /// Existing media clip to split at the selected musical onsets.
     clip_id: ClipId,
@@ -4236,6 +5108,62 @@ struct BeatPacingPlanArgs {
     /// Minimum distance between selected onsets in project frames. Defaults to 6.
     #[serde(default)]
     minimum_spacing_frames: Option<TimeCode>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct BeatMontageSelectArgs {
+    /// Video-capable source asset selected by the editing model.
+    asset_id: AssetId,
+    /// Exact half-open source-frame envelope allowed for this shot.
+    source_range: TranscriptRangeArgs,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct BeatMontageAnchorRepairArgs {
+    /// Inclusive maximum project-frame movement allowed for every preferred anchor.
+    /// Must be non-negative; the planner never broadens this bound.
+    maximum_movement_frames: TimeCode,
+    /// Optional strictly increasing zero-based preferred-anchor indices that must remain exact.
+    #[serde(default)]
+    locked_anchor_indices: Vec<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct BeatMontagePlanArgs {
+    /// Existing video track that receives the ordered hard-cut montage.
+    target_track_id: TrackId,
+    /// Audio-capable timeline asset whose mapped beats provide cut anchors.
+    music_asset_id: AssetId,
+    /// Exact half-open project range the montage must fill.
+    timeline_range: TranscriptRangeArgs,
+    /// Model-selected shots in final story order. The planner does not reorder or replace them.
+    selects: Vec<BeatMontageSelectArgs>,
+    /// Optional exact project-frame cut anchors chosen from music analysis.
+    /// When present, there must be exactly one fewer anchor than `selects`.
+    /// They remain strict unless `anchor_repair` explicitly opts into bounded repair.
+    #[serde(default)]
+    cut_anchor_frames: Option<Vec<TimeCode>>,
+    /// Optional bounded repair for explicit preferred anchors. Valid only with
+    /// `cut_anchor_frames`; omit it to preserve strict exact-anchor behavior.
+    #[serde(default)]
+    anchor_repair: Option<BeatMontageAnchorRepairArgs>,
+    /// Optional onset-strength threshold from 0 through 100 percent. Defaults to 10.
+    #[serde(default)]
+    min_strength: Option<f64>,
+    /// Shortest permitted shot in exact project frames. Defaults to 20.
+    #[serde(default)]
+    minimum_shot_frames: Option<TimeCode>,
+    /// Longest permitted shot in exact project frames. Defaults to 120.
+    #[serde(default)]
+    maximum_shot_frames: Option<TimeCode>,
+    /// Optional observable cadence contract for the resolved project-frame shot durations.
+    /// When present, the planner rejects the prepared plan unless it satisfies the
+    /// requested number of duration buckets and similar-run limit.
+    #[serde(default)]
+    cadence: Option<BeatMontageCadenceContract>,
+    /// Three-point collision policy. Overwrite is the predictable default.
+    #[serde(default = "default_three_point_overwrite")]
+    mode: ThreePointMode,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -4649,6 +5577,12 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "get_music_structure",
+            "Infer a compact beat/bar/phrase hypothesis from one audio asset's mapped timeline beats. Results are heuristic candidates, not guaranteed music theory; this read-only capability produces no edit operations and never changes the timeline.",
+            schema_object::<MusicStructureArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "plan_dialogue_assembly",
             "Build and validate an exact, gapless AddClip plan from ordered dialogue assets using ready transcripts and raw silence analysis. It removes qualifying detector spans and optional conservative filler words without model-side frame arithmetic, then returns an opaque plan id ready for commit_edit_plan.",
             schema_object::<DialogueAssemblyPlanArgs>(),
@@ -4664,6 +5598,12 @@ fn inspector_tools() -> Vec<Tool> {
             "plan_beat_pacing",
             "Build and validate a deterministic, revision-gated SplitClip plan from fully analyzed timeline beats. Selected beats are inspectable in ascending order and operations are safely ordered newest-first; inspect the returned prepared_edit_plan preview, then commit its opaque plan id.",
             schema_object::<BeatPacingPlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "plan_beat_montage",
+            "Build a source-feasible hard-cut montage timed to one analyzed music asset. The model owns every shot choice and the final order; the planner only selects beat boundaries that satisfy the supplied source envelopes and duration constraints, with no hidden transition, retime, or semantic replacement. Explicit anchors remain exact unless anchor_repair opts into a non-negative maximum movement bound and optional locked indices; requested, resolved, and per-anchor movement evidence is returned for review. An optional cadence contract validates rounded shot-duration buckets and similar runs before the prepared plan is stored. Returns an inspectable plan and opaque prepared_edit_plan preview without mutating the timeline.",
+            schema_object::<BeatMontagePlanArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -4838,6 +5778,18 @@ fn inspector_tools() -> Vec<Tool> {
             "get_source_info",
             "Inspect one asset as source media with optional exact source-frame in/out marks. Returns technical metadata plus cached transcript words, speaker labels, scene boundaries, beats, and analysis lifecycle for that range.",
             schema_object::<SourceInfoArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_source_storyboard",
+            "Render a bounded PNG contact sheet directly from one video asset's source frames. The manifest maps every cell to its exact source frame, asset id, and requested half-open source range without changing the timeline.",
+            schema_object::<SourceStoryboardArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_source_shot_board",
+            "Return scene-derived, paged source-shot candidates for one video asset and render start/middle/end evidence cells for each. An optional inclusive minimum_duration_frames filters short candidates before pagination while preserving original candidate ids and indexes. minimum_confidence_basis_points controls scene-boundary sensitivity (0..=10000, default 1000); raise it for motion-heavy footage when weak differences over-segment a continuous shot. The manifest reports requested, filtered, returned, and total counts. Candidate ids, exact half-open source ranges, and scene-boundary confidence provenance are stable; this inspector never changes the timeline.",
+            schema_object::<SourceShotBoardArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -6372,6 +7324,14 @@ fn storyboard_sample_frames(range: &std::ops::Range<TimeCode>, frame_count: u8) 
         .collect()
 }
 
+/// Three source-monitor views per candidate. The last sample is always the
+/// last visible frame, which makes an embedded fade or abrupt pre-cut visible
+/// whenever the candidate is long enough to contain one. This is evidence,
+/// not a claim that the server detected a fade.
+fn shot_board_evidence_frames(range: std::ops::Range<TimeCode>) -> Vec<TimeCode> {
+    storyboard_sample_frames(&range, SHOT_BOARD_EVIDENCE_PER_CANDIDATE)
+}
+
 fn compose_contact_sheet(
     images: &[openreel_core::RgbaImage],
 ) -> Result<openreel_core::RgbaImage, McpError> {
@@ -6717,10 +7677,10 @@ fn render_plan_outcomes(
 mod tests {
     use super::*;
     use openreel_core::{
-        AssetId, AssetTranscript, Clip, FrameTexture, Marker, MarkerId, MediaAsset, MediaError,
-        MediaEvent, MediaKind, ParamValue, Rational, RgbaImage, SceneStatus, SilenceSpan,
-        SilenceStatus, TimelineSceneChange, TimelineSilenceSpan, Title, Track, TrackId, TrackKind,
-        TranscriptWord, VisualAssetResult,
+        AssetBeats, AssetId, AssetSceneChanges, AssetTranscript, BeatMarker, Clip, FrameTexture,
+        Marker, MarkerId, MediaAsset, MediaError, MediaEvent, MediaKind, ParamValue, Rational,
+        RgbaImage, SceneChange, SceneStatus, SilenceSpan, SilenceStatus, TimelineSceneChange,
+        TimelineSilenceSpan, Title, Track, TrackId, TrackKind, TranscriptWord, VisualAssetResult,
     };
     use serde_json::json;
     use std::{
@@ -6732,6 +7692,12 @@ mod tests {
     #[derive(Default)]
     struct NoopMedia {
         transcript: Option<Arc<AssetTranscript>>,
+        beat_statuses: BTreeMap<AssetId, BeatStatus>,
+        scene_statuses: BTreeMap<AssetId, SceneStatus>,
+        timeline_beats: Vec<TimelineBeat>,
+        timeline_beat_error: Option<String>,
+        beat_requests: Mutex<Vec<AssetId>>,
+        scene_requests: Mutex<Vec<AssetId>>,
     }
 
     impl Playback for NoopMedia {
@@ -6804,10 +7770,15 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn request_scene_detection(&self, _asset: MediaAsset) {}
+        fn request_scene_detection(&self, asset: MediaAsset) {
+            self.scene_requests.lock().unwrap().push(asset.id);
+        }
 
-        fn scene_status(&self, _asset: &MediaAsset) -> SceneStatus {
-            SceneStatus::NotRequested
+        fn scene_status(&self, asset: &MediaAsset) -> SceneStatus {
+            self.scene_statuses
+                .get(&asset.id)
+                .cloned()
+                .unwrap_or(SceneStatus::NotRequested)
         }
 
         fn timeline_scene_changes(
@@ -6817,6 +7788,39 @@ mod tests {
             _minimum_confidence_basis_points: u16,
         ) -> Result<Vec<TimelineSceneChange>, MediaError> {
             Ok(Vec::new())
+        }
+
+        fn request_beat_detection(&self, asset: MediaAsset) {
+            self.beat_requests.lock().unwrap().push(asset.id);
+        }
+
+        fn beat_status(&self, asset: &MediaAsset) -> BeatStatus {
+            self.beat_statuses
+                .get(&asset.id)
+                .cloned()
+                .unwrap_or(BeatStatus::NotRequested)
+        }
+
+        fn timeline_beats(
+            &self,
+            _document: &Document,
+            range: Option<std::ops::Range<TimeCode>>,
+            minimum_strength_basis_points: u16,
+        ) -> Result<Vec<TimelineBeat>, MediaError> {
+            if let Some(error) = &self.timeline_beat_error {
+                return Err(MediaError::Backend(error.clone()));
+            }
+            Ok(self
+                .timeline_beats
+                .iter()
+                .copied()
+                .filter(|beat| beat.strength_basis_points >= minimum_strength_basis_points)
+                .filter(|beat| {
+                    range.as_ref().is_none_or(|range| {
+                        beat.project_frame >= range.start && beat.project_frame < range.end
+                    })
+                })
+                .collect())
         }
 
         fn thumbnail_at(&self, _t: TimeCode, _max_w: u32) -> Result<RgbaImage, MediaError> {
@@ -6894,6 +7898,218 @@ mod tests {
         };
         let media = Arc::new(NoopMedia::default());
         (Core::spawn(document).unwrap(), media.clone(), media)
+    }
+
+    fn montage_analysis(status: BeatStatus) -> Arc<NoopMedia> {
+        Arc::new(NoopMedia {
+            beat_statuses: BTreeMap::from([(AssetId(9), status)]),
+            timeline_beats: vec![TimelineBeat {
+                asset: AssetId(9),
+                track: TrackId(2),
+                clip: ClipId(90),
+                source_frame: TimeCode(30),
+                project_frame: TimeCode(30),
+                strength_basis_points: 9_000,
+                estimated_bpm_milli: 120_000,
+            }],
+            ..NoopMedia::default()
+        })
+    }
+
+    fn montage_fixture(status: BeatStatus) -> (Core, Arc<NoopMedia>) {
+        let fps = Rational::new(30, 1).unwrap();
+        let video_asset = |id| MediaAsset {
+            id: AssetId(id),
+            path: PathBuf::from(format!("montage-{id}.mp4")),
+            name: format!("montage-{id}"),
+            duration: TimeCode(180),
+            fps,
+            kind: MediaKind::Video,
+            resolution: Some((1_920, 1_080)),
+        };
+        let music = MediaAsset {
+            id: AssetId(9),
+            path: PathBuf::from("montage-music.mp4"),
+            name: "montage music".to_owned(),
+            duration: TimeCode(180),
+            fps,
+            kind: MediaKind::AudioVideo,
+            resolution: Some((1_920, 1_080)),
+        };
+        let document = Document {
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: Vec::new(),
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: vec![Clip {
+                        id: ClipId(90),
+                        asset: music.id,
+                        source_range: TimeCode::ZERO..TimeCode(120),
+                        content: ClipContent::Media,
+                        timeline_start: TimeCode::ZERO,
+                        effects: Vec::new(),
+                        transition_in: None,
+                        link: None,
+                        audio_gain_tenth_db: 0,
+                        audio_fade_in_frames: TimeCode::ZERO,
+                        audio_fade_out_frames: TimeCode::ZERO,
+                        speed_percent: 100,
+                    }],
+                },
+            ],
+            media_pool: vec![video_asset(1), video_asset(2), music],
+            fps,
+            resolution: (1_920, 1_080),
+            duration: TimeCode(120),
+            ..Document::default()
+        };
+        let analysis = montage_analysis(status);
+        (Core::spawn(document).unwrap(), analysis)
+    }
+
+    fn music_structure_fixture(
+        status: BeatStatus,
+        timeline_beats: Vec<TimelineBeat>,
+    ) -> (Core, Arc<NoopMedia>) {
+        let fps = Rational::new(30, 1).unwrap();
+        let video = MediaAsset {
+            id: AssetId(1),
+            path: PathBuf::from("music-structure-video.mp4"),
+            name: "music structure video".to_owned(),
+            duration: TimeCode(120),
+            fps,
+            kind: MediaKind::Video,
+            resolution: Some((1_920, 1_080)),
+        };
+        let music = MediaAsset {
+            id: AssetId(9),
+            path: PathBuf::from("music-structure-audio.wav"),
+            name: "music structure audio".to_owned(),
+            duration: TimeCode(120),
+            fps,
+            kind: MediaKind::Audio,
+            resolution: None,
+        };
+        let media_clip = |id, asset, track_start| Clip {
+            id: ClipId(id),
+            asset: AssetId(asset),
+            source_range: TimeCode::ZERO..TimeCode(120),
+            content: ClipContent::Media,
+            timeline_start: TimeCode(track_start),
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+        };
+        let document = Document {
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![media_clip(1, 1, 0)],
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: vec![media_clip(90, 9, 0)],
+                },
+            ],
+            media_pool: vec![video, music],
+            fps,
+            resolution: (1_920, 1_080),
+            duration: TimeCode(120),
+            ..Document::default()
+        };
+        let analysis = Arc::new(NoopMedia {
+            beat_statuses: BTreeMap::from([(AssetId(9), status)]),
+            timeline_beats,
+            ..NoopMedia::default()
+        });
+        (Core::spawn(document).unwrap(), analysis)
+    }
+
+    fn ready_music_structure_status() -> BeatStatus {
+        BeatStatus::Ready(Arc::new(AssetBeats {
+            asset: AssetId(9),
+            content_sha256: "music-structure-test".to_owned(),
+            source_fps: Rational::new(30, 1).unwrap(),
+            source_frames: TimeCode(120),
+            estimated_bpm_milli: 120_000,
+            beats: vec![
+                BeatMarker {
+                    source_frame: TimeCode::ZERO,
+                    strength_basis_points: 9_000,
+                },
+                BeatMarker {
+                    source_frame: TimeCode(30),
+                    strength_basis_points: 5_000,
+                },
+                BeatMarker {
+                    source_frame: TimeCode(60),
+                    strength_basis_points: 8_000,
+                },
+            ],
+        }))
+    }
+
+    fn ready_montage_status() -> BeatStatus {
+        BeatStatus::Ready(Arc::new(AssetBeats {
+            asset: AssetId(9),
+            content_sha256: "montage-test".to_owned(),
+            source_fps: Rational::new(30, 1).unwrap(),
+            source_frames: TimeCode(180),
+            estimated_bpm_milli: 120_000,
+            beats: vec![BeatMarker {
+                source_frame: TimeCode(30),
+                strength_basis_points: 9_000,
+            }],
+        }))
+    }
+
+    fn montage_plan_args() -> BeatMontagePlanArgs {
+        BeatMontagePlanArgs {
+            target_track_id: TrackId(1),
+            music_asset_id: AssetId(9),
+            timeline_range: TranscriptRangeArgs {
+                start: TimeCode::ZERO,
+                end: TimeCode(60),
+            },
+            selects: vec![
+                BeatMontageSelectArgs {
+                    asset_id: AssetId(1),
+                    source_range: TranscriptRangeArgs {
+                        start: TimeCode(10),
+                        end: TimeCode(100),
+                    },
+                },
+                BeatMontageSelectArgs {
+                    asset_id: AssetId(2),
+                    source_range: TranscriptRangeArgs {
+                        start: TimeCode(20),
+                        end: TimeCode(110),
+                    },
+                },
+            ],
+            cut_anchor_frames: None,
+            anchor_repair: None,
+            min_strength: None,
+            minimum_shot_frames: None,
+            maximum_shot_frames: None,
+            cadence: None,
+            mode: ThreePointMode::Overwrite,
+        }
     }
 
     struct CountingPlayback(AtomicUsize);
@@ -7165,6 +8381,804 @@ mod tests {
     }
 
     #[test]
+    fn beat_montage_returns_an_inspectable_ready_plan_without_mutating() {
+        let (core, analysis) = montage_fixture(ready_montage_status());
+        let service = OpenReelMcp::new(
+            core.clone(),
+            analysis.clone(),
+            analysis,
+            ConfirmationBroker::default(),
+        );
+
+        let result = service.plan_beat_montage(&montage_plan_args()).unwrap();
+        assert_eq!(result.is_error, Some(false));
+        let result = result.structured_content.unwrap();
+        assert_eq!(result["timeline_revision"], 0);
+        assert_eq!(result["plan"]["shots"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            result["plan"]["cut_anchors"][0]["beat"]["project_frame"],
+            30
+        );
+        assert_eq!(
+            result["plan"]["shots"][0]["source_range"],
+            json!({"start": 10, "end": 40})
+        );
+        assert_eq!(
+            result["prepared_edit_plan"]["preview"]["operation_count"],
+            2
+        );
+
+        let Event::QueryResult(QueryResult::Document(document)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected document query");
+        };
+        assert!(document.tracks[0].clips.is_empty());
+    }
+
+    #[test]
+    fn beat_montage_validates_optional_cadence_before_preparing() {
+        let (core, analysis) = montage_fixture(ready_montage_status());
+        let service = OpenReelMcp::new(
+            core,
+            analysis.clone(),
+            analysis,
+            ConfirmationBroker::default(),
+        );
+        let mut args = montage_plan_args();
+        args.cadence = Some(BeatMontageCadenceContract {
+            minimum_duration_buckets: 1,
+            duration_bucket_frames: TimeCode(20),
+            maximum_similar_run: 2,
+            similar_tolerance_frames: TimeCode(8),
+        });
+        let result = service
+            .plan_beat_montage(&args)
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(result["cadence"]["distinct_buckets"], json!([2]));
+        assert_eq!(result["cadence"]["longest_similar_run"], 2);
+
+        args.cadence = Some(BeatMontageCadenceContract {
+            minimum_duration_buckets: 3,
+            duration_bucket_frames: TimeCode(20),
+            maximum_similar_run: 2,
+            similar_tolerance_frames: TimeCode(8),
+        });
+        let rejected = service.plan_beat_montage(&args).unwrap();
+        assert_eq!(rejected.is_error, Some(true));
+        let message = rejected.content[0].as_text().unwrap().text.as_str();
+        assert!(message.contains("beat montage cadence contract rejected prepared plan"));
+        assert!(message.contains("requires at least 3 distinct buckets"));
+    }
+
+    #[test]
+    fn beat_montage_schema_exposes_optional_cadence_and_anchor_repair_contracts() {
+        let tool = OpenReelMcp::capability_tools()
+            .unwrap()
+            .into_iter()
+            .find(|tool| tool.name == "plan_beat_montage")
+            .expect("beat montage capability is registered");
+        let properties = tool
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("beat montage schema properties");
+        assert!(properties.contains_key("cadence"));
+        assert!(properties.contains_key("anchor_repair"));
+        let schema = serde_json::to_string(&tool.input_schema).unwrap();
+        assert!(
+            tool.description
+                .as_deref()
+                .is_some_and(|description| description.contains("cadence contract")
+                    && description.contains("remain exact unless anchor_repair"))
+        );
+        for field in [
+            "minimum_duration_buckets",
+            "duration_bucket_frames",
+            "maximum_similar_run",
+            "similar_tolerance_frames",
+        ] {
+            assert!(schema.contains(field), "cadence schema omitted {field}");
+        }
+        for field in ["maximum_movement_frames", "locked_anchor_indices"] {
+            assert!(
+                schema.contains(field),
+                "anchor repair schema omitted {field}"
+            );
+        }
+        let repair_schema = tool.input_schema["$defs"]
+            .as_object()
+            .and_then(|definitions| {
+                definitions.values().find(|schema| {
+                    schema["properties"].as_object().is_some_and(|properties| {
+                        properties.contains_key("maximum_movement_frames")
+                    })
+                })
+            })
+            .expect("anchor repair definition");
+        let repair_required = repair_schema["required"]
+            .as_array()
+            .expect("anchor repair required fields");
+        assert!(
+            repair_required
+                .iter()
+                .any(|field| field == "maximum_movement_frames")
+        );
+        assert!(
+            repair_required
+                .iter()
+                .all(|field| field != "locked_anchor_indices")
+        );
+        assert!(
+            !tool
+                .input_schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|required| required.iter().any(|field| field == "cadence"))
+        );
+        assert!(
+            !tool
+                .input_schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|required| required.iter().any(|field| field == "anchor_repair"))
+        );
+    }
+
+    #[test]
+    fn beat_montage_preserves_explicit_model_selected_anchor() {
+        let (core, analysis) = montage_fixture(ready_montage_status());
+        let service = OpenReelMcp::new(
+            core,
+            analysis.clone(),
+            analysis,
+            ConfirmationBroker::default(),
+        );
+        let mut args = montage_plan_args();
+        args.cut_anchor_frames = Some(vec![TimeCode(30)]);
+        let result = service
+            .plan_beat_montage(&args)
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(
+            result["plan"]["cut_anchors"][0]["beat"]["project_frame"],
+            30
+        );
+        assert!(result["anchor_repair"].is_null());
+
+        args.cut_anchor_frames = Some(vec![TimeCode(31)]);
+        let rejected = service.plan_beat_montage(&args).unwrap();
+        assert_eq!(rejected.is_error, Some(true));
+        assert!(
+            rejected.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("not an eligible beat for music asset")
+        );
+    }
+
+    #[test]
+    fn beat_montage_repairs_preferred_anchor_with_bounded_inspectable_evidence() {
+        let (core, analysis) = montage_fixture(ready_montage_status());
+        let service = OpenReelMcp::new(
+            core.clone(),
+            analysis.clone(),
+            analysis,
+            ConfirmationBroker::default(),
+        );
+        let mut args = montage_plan_args();
+        args.cut_anchor_frames = Some(vec![TimeCode(31)]);
+        args.anchor_repair = Some(BeatMontageAnchorRepairArgs {
+            maximum_movement_frames: TimeCode(2),
+            locked_anchor_indices: Vec::new(),
+        });
+
+        let result = service
+            .plan_beat_montage(&args)
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(
+            result["plan"]["cut_anchors"][0]["beat"]["project_frame"],
+            30
+        );
+        assert_eq!(result["plan"]["shots"][0]["asset"], 1);
+        assert_eq!(result["plan"]["shots"][1]["asset"], 2);
+        assert_eq!(
+            result["plan"]["shots"][0]["source_envelope"],
+            json!({"start": 10, "end": 100})
+        );
+        assert_eq!(
+            result["plan"]["shots"][1]["source_envelope"],
+            json!({"start": 20, "end": 110})
+        );
+        assert_eq!(result["anchor_repair"]["repaired"], true);
+        assert_eq!(
+            result["anchor_repair"]["preferred_anchor_frames"],
+            json!([31])
+        );
+        assert_eq!(
+            result["anchor_repair"]["resolved_anchor_frames"],
+            json!([30])
+        );
+        assert_eq!(result["anchor_repair"]["signed_delta_frames"], json!([-1]));
+        assert_eq!(result["anchor_repair"]["absolute_delta_frames"], json!([1]));
+        assert_eq!(result["anchor_repair"]["maximum_absolute_delta_frames"], 1);
+        assert_eq!(result["anchor_repair"]["total_absolute_delta_frames"], 1);
+        assert_eq!(result["anchor_repair"]["maximum_movement_frames"], 2);
+        assert_eq!(
+            result["prepared_edit_plan"]["preview"]["operation_count"],
+            2
+        );
+
+        let Event::QueryResult(QueryResult::Document(document)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected document query");
+        };
+        assert!(document.tracks[0].clips.is_empty());
+    }
+
+    #[test]
+    fn beat_montage_anchor_repair_enforces_opt_in_bounds_and_locks() {
+        let (core, analysis) = montage_fixture(ready_montage_status());
+        let service = OpenReelMcp::new(
+            core,
+            analysis.clone(),
+            analysis,
+            ConfirmationBroker::default(),
+        );
+        let mut args = montage_plan_args();
+        args.anchor_repair = Some(BeatMontageAnchorRepairArgs {
+            maximum_movement_frames: TimeCode(2),
+            locked_anchor_indices: Vec::new(),
+        });
+        let missing_anchors = service.plan_beat_montage(&args).unwrap();
+        assert_eq!(missing_anchors.is_error, Some(true));
+        assert!(
+            missing_anchors.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("anchor_repair requires explicit cut_anchor_frames")
+        );
+
+        args.cut_anchor_frames = Some(vec![TimeCode(31)]);
+        args.anchor_repair.as_mut().unwrap().maximum_movement_frames = TimeCode(-1);
+        let negative = service.plan_beat_montage(&args).unwrap();
+        assert_eq!(negative.is_error, Some(true));
+        assert!(
+            negative.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("must be non-negative")
+        );
+
+        args.anchor_repair.as_mut().unwrap().maximum_movement_frames = TimeCode::ZERO;
+        let bounded = service.plan_beat_montage(&args).unwrap();
+        assert_eq!(bounded.is_error, Some(true));
+        assert!(
+            bounded.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("within maximum_movement_frames=0")
+        );
+
+        let settings = args.anchor_repair.as_mut().unwrap();
+        settings.maximum_movement_frames = TimeCode(2);
+        settings.locked_anchor_indices = vec![0];
+        let locked = service.plan_beat_montage(&args).unwrap();
+        assert_eq!(locked.is_error, Some(true));
+        assert!(
+            locked.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("not an eligible beat for music asset")
+        );
+
+        args.anchor_repair.as_mut().unwrap().locked_anchor_indices = vec![0, 0];
+        let duplicates = service.plan_beat_montage(&args).unwrap();
+        assert_eq!(duplicates.is_error, Some(true));
+        assert!(
+            duplicates.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("must be strictly increasing and unique")
+        );
+
+        args.anchor_repair.as_mut().unwrap().locked_anchor_indices = vec![1];
+        let out_of_range_lock = service.plan_beat_montage(&args).unwrap();
+        assert_eq!(out_of_range_lock.is_error, Some(true));
+        assert!(
+            out_of_range_lock.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("invalid beat montage anchor-repair settings")
+        );
+    }
+
+    #[test]
+    fn beat_montage_surfaces_source_capacity_and_repair_hint() {
+        let (core, analysis) = montage_fixture(ready_montage_status());
+        let service = OpenReelMcp::new(
+            core,
+            analysis.clone(),
+            analysis,
+            ConfirmationBroker::default(),
+        );
+        let mut args = montage_plan_args();
+        args.selects[0].source_range = TranscriptRangeArgs {
+            start: TimeCode::ZERO,
+            end: TimeCode(20),
+        };
+
+        let rejected = service.plan_beat_montage(&args).unwrap();
+        assert_eq!(rejected.is_error, Some(true));
+        let message = rejected.content[0].as_text().unwrap().text.as_str();
+        assert!(message.contains("can supply at most 20 project frames"));
+        assert!(
+            message.contains(
+                "reassign this select to a shorter slot or select a larger source envelope"
+            )
+        );
+    }
+
+    #[test]
+    fn beat_montage_reports_music_analysis_pending_and_failure_explicitly() {
+        let (pending_core, pending_analysis) = montage_fixture(BeatStatus::NotRequested);
+        let pending_service = OpenReelMcp::new(
+            pending_core,
+            pending_analysis.clone(),
+            pending_analysis.clone(),
+            ConfirmationBroker::default(),
+        );
+        let pending = pending_service
+            .plan_beat_montage(&montage_plan_args())
+            .unwrap();
+        assert_eq!(pending.is_error, Some(true));
+        assert!(
+            pending.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("still pending for assets [AssetId(9)]")
+        );
+        assert_eq!(
+            *pending_analysis.beat_requests.lock().unwrap(),
+            vec![AssetId(9)]
+        );
+
+        let (failed_core, failed_analysis) =
+            montage_fixture(BeatStatus::Failed("decoder stopped".to_owned()));
+        let failed_service = OpenReelMcp::new(
+            failed_core,
+            failed_analysis.clone(),
+            failed_analysis.clone(),
+            ConfirmationBroker::default(),
+        );
+        let failed = failed_service
+            .plan_beat_montage(&montage_plan_args())
+            .unwrap();
+        assert_eq!(failed.is_error, Some(true));
+        assert!(
+            failed.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("beat analysis failed: decoder stopped")
+        );
+        assert!(failed_analysis.beat_requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn beat_montage_is_internal_and_invocable_through_the_compact_dispatcher() {
+        let registry = OpenReelMcp::capability_tools().unwrap();
+        assert!(registry.iter().any(|tool| tool.name == "plan_beat_montage"));
+        assert!(
+            OpenReelMcp::served_tools()
+                .unwrap()
+                .iter()
+                .all(|tool| tool.name != "plan_beat_montage")
+        );
+
+        let (core, analysis) = montage_fixture(ready_montage_status());
+        let service = OpenReelMcp::new(
+            core,
+            analysis.clone(),
+            analysis,
+            ConfirmationBroker::default(),
+        );
+        let invoked = service
+            .call_exposed_blocking(
+                CallToolRequestParams::new("invoke_capability").with_arguments(
+                    json!({
+                        "name": "plan_beat_montage",
+                        "arguments": {
+                            "target_track_id": 1,
+                            "music_asset_id": 9,
+                            "timeline_range": {"start": 0, "end": 60},
+                            "selects": [
+                                {"asset_id": 1, "source_range": {"start": 10, "end": 100}},
+                                {"asset_id": 2, "source_range": {"start": 20, "end": 110}}
+                            ],
+                            "cut_anchor_frames": [31],
+                            "anchor_repair": {
+                                "maximum_movement_frames": 2,
+                                "locked_anchor_indices": []
+                            },
+                            "cadence": {
+                                "minimum_duration_buckets": 1,
+                                "duration_bucket_frames": 20,
+                                "maximum_similar_run": 2,
+                                "similar_tolerance_frames": 8
+                            }
+                        }
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(invoked.is_error, Some(false));
+        let invoked = invoked.structured_content.unwrap();
+        assert_eq!(invoked["plan"]["shots"].as_array().unwrap().len(), 2);
+        assert_eq!(invoked["anchor_repair"]["repaired"], true);
+        assert_eq!(
+            invoked["anchor_repair"]["preferred_anchor_frames"],
+            json!([31])
+        );
+        assert_eq!(
+            invoked["anchor_repair"]["resolved_anchor_frames"],
+            json!([30])
+        );
+    }
+
+    #[test]
+    fn beat_montage_prepared_plan_commits_gaplessly() {
+        let (core, analysis) = montage_fixture(ready_montage_status());
+        let service = OpenReelMcp::new(
+            core.clone(),
+            analysis.clone(),
+            analysis,
+            ConfirmationBroker::default(),
+        );
+        let planned = service
+            .plan_beat_montage(&montage_plan_args())
+            .unwrap()
+            .structured_content
+            .unwrap();
+
+        let committed = commit_prepared_plan(&service, &planned, TimelineRevision::default());
+        assert_eq!(committed.is_error, Some(false));
+        let Event::QueryResult(QueryResult::Document(document)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected document query");
+        };
+        let clips = &document.tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].timeline_start, TimeCode::ZERO);
+        assert_eq!(clips[1].timeline_start, TimeCode(30));
+        assert_eq!(clips[0].source_range, TimeCode(10)..TimeCode(40));
+        assert_eq!(clips[1].source_range, TimeCode(20)..TimeCode(50));
+    }
+
+    #[test]
+    fn music_structure_is_ready_filtered_and_does_not_mutate() {
+        let beats = vec![
+            TimelineBeat {
+                asset: AssetId(9),
+                track: TrackId(2),
+                clip: ClipId(90),
+                source_frame: TimeCode::ZERO,
+                project_frame: TimeCode::ZERO,
+                strength_basis_points: 9_000,
+                estimated_bpm_milli: 120_000,
+            },
+            TimelineBeat {
+                asset: AssetId(9),
+                track: TrackId(2),
+                clip: ClipId(90),
+                source_frame: TimeCode(30),
+                project_frame: TimeCode(30),
+                strength_basis_points: 4_000,
+                estimated_bpm_milli: 120_000,
+            },
+            TimelineBeat {
+                asset: AssetId(9),
+                track: TrackId(2),
+                clip: ClipId(90),
+                source_frame: TimeCode(60),
+                project_frame: TimeCode(60),
+                strength_basis_points: 8_000,
+                estimated_bpm_milli: 120_000,
+            },
+            TimelineBeat {
+                asset: AssetId(1),
+                track: TrackId(1),
+                clip: ClipId(1),
+                source_frame: TimeCode(30),
+                project_frame: TimeCode(30),
+                strength_basis_points: 10_000,
+                estimated_bpm_milli: 120_000,
+            },
+        ];
+        let (core, analysis) = music_structure_fixture(ready_music_structure_status(), beats);
+        let service = OpenReelMcp::new(
+            core,
+            analysis.clone(),
+            analysis,
+            ConfirmationBroker::default(),
+        );
+        let before = service.document().unwrap();
+        let result = service
+            .music_structure(&MusicStructureArgs {
+                music_asset_id: AssetId(9),
+                range: Some(TranscriptRangeArgs {
+                    start: TimeCode::ZERO,
+                    end: TimeCode(100),
+                }),
+                min_strength: Some(50.0),
+                meter_beats: Some(4),
+                phrase_bars: Some(2),
+                structural_only: false,
+            })
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["analysis_status"], "ready");
+        assert_eq!(structured["heuristic"], true);
+        assert!(
+            structured["disclaimer"]
+                .as_str()
+                .unwrap()
+                .contains("not guaranteed music theory")
+        );
+        assert_eq!(structured["parameters"]["meter_beats"], 4);
+        assert_eq!(structured["parameters"]["phrase_bars"], 2);
+        assert_eq!(
+            structured["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|candidate| candidate["project_frame"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![0, 60]
+        );
+        assert!(
+            structured["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|candidate| candidate["asset"] == 9)
+        );
+        assert_eq!(&*service.document().unwrap(), &*before);
+        assert!(
+            service
+                .prepared_plans
+                .lock()
+                .unwrap()
+                .get(PreparedPlanId(1))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn music_structure_structural_only_compacts_ordinary_candidates_and_reports_counts() {
+        let beats = vec![
+            TimelineBeat {
+                asset: AssetId(9),
+                track: TrackId(2),
+                clip: ClipId(90),
+                source_frame: TimeCode::ZERO,
+                project_frame: TimeCode::ZERO,
+                strength_basis_points: 9_000,
+                estimated_bpm_milli: 120_000,
+            },
+            TimelineBeat {
+                asset: AssetId(9),
+                track: TrackId(2),
+                clip: ClipId(90),
+                source_frame: TimeCode(30),
+                project_frame: TimeCode(30),
+                strength_basis_points: 4_000,
+                estimated_bpm_milli: 120_000,
+            },
+            TimelineBeat {
+                asset: AssetId(9),
+                track: TrackId(2),
+                clip: ClipId(90),
+                source_frame: TimeCode(60),
+                project_frame: TimeCode(60),
+                strength_basis_points: 8_000,
+                estimated_bpm_milli: 120_000,
+            },
+        ];
+        let (core, analysis) = music_structure_fixture(ready_music_structure_status(), beats);
+        let service = OpenReelMcp::new(
+            core,
+            analysis.clone(),
+            analysis,
+            ConfirmationBroker::default(),
+        );
+        let result = service
+            .music_structure(&MusicStructureArgs {
+                music_asset_id: AssetId(9),
+                range: Some(TranscriptRangeArgs {
+                    start: TimeCode::ZERO,
+                    end: TimeCode(100),
+                }),
+                min_strength: Some(0.0),
+                meter_beats: Some(4),
+                phrase_bars: Some(2),
+                structural_only: true,
+            })
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["structural_only"], true);
+        assert_eq!(structured["total_candidate_count"], 3);
+        assert_eq!(structured["returned_candidate_count"], 1);
+        assert_eq!(structured["omitted_ordinary_candidate_count"], 2);
+        assert!(
+            structured["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|candidate| candidate["role"] != "beat")
+        );
+    }
+
+    #[test]
+    fn music_structure_reports_pending_and_failed_analysis_lifecycle() {
+        let (pending_core, pending_analysis) = music_structure_fixture(
+            BeatStatus::NotRequested,
+            vec![TimelineBeat {
+                asset: AssetId(9),
+                track: TrackId(2),
+                clip: ClipId(90),
+                source_frame: TimeCode(30),
+                project_frame: TimeCode(30),
+                strength_basis_points: 9_000,
+                estimated_bpm_milli: 120_000,
+            }],
+        );
+        let pending_service = OpenReelMcp::new(
+            pending_core,
+            pending_analysis.clone(),
+            pending_analysis.clone(),
+            ConfirmationBroker::default(),
+        );
+        let pending = pending_service
+            .music_structure(&MusicStructureArgs {
+                music_asset_id: AssetId(9),
+                range: None,
+                min_strength: None,
+                meter_beats: None,
+                phrase_bars: None,
+                structural_only: false,
+            })
+            .unwrap();
+        assert_eq!(pending.is_error, Some(true));
+        assert!(
+            pending.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("still pending for assets [AssetId(9)]")
+        );
+        assert_eq!(
+            *pending_analysis.beat_requests.lock().unwrap(),
+            vec![AssetId(9)]
+        );
+
+        let (failed_core, failed_analysis) =
+            music_structure_fixture(BeatStatus::Failed("decoder stopped".to_owned()), Vec::new());
+        let failed_service = OpenReelMcp::new(
+            failed_core,
+            failed_analysis.clone(),
+            failed_analysis.clone(),
+            ConfirmationBroker::default(),
+        );
+        let failed = failed_service
+            .music_structure(&MusicStructureArgs {
+                music_asset_id: AssetId(9),
+                range: None,
+                min_strength: None,
+                meter_beats: None,
+                phrase_bars: None,
+                structural_only: false,
+            })
+            .unwrap();
+        assert_eq!(failed.is_error, Some(true));
+        assert!(
+            failed.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("beat analysis failed: decoder stopped")
+        );
+        assert!(failed_analysis.beat_requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn music_structure_is_internal_and_invocable_through_compact_dispatcher() {
+        let registry = OpenReelMcp::capability_tools().unwrap();
+        let tool = registry
+            .iter()
+            .find(|tool| tool.name == "get_music_structure")
+            .expect("music structure is registered");
+        let properties = tool
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("music structure schema properties");
+        assert!(properties.contains_key("structural_only"));
+        assert!(
+            OpenReelMcp::served_tools()
+                .unwrap()
+                .iter()
+                .all(|tool| tool.name != "get_music_structure")
+        );
+
+        let (core, analysis) = music_structure_fixture(
+            ready_music_structure_status(),
+            vec![TimelineBeat {
+                asset: AssetId(9),
+                track: TrackId(2),
+                clip: ClipId(90),
+                source_frame: TimeCode(30),
+                project_frame: TimeCode(30),
+                strength_basis_points: 9_000,
+                estimated_bpm_milli: 120_000,
+            }],
+        );
+        let service = OpenReelMcp::new(
+            core,
+            analysis.clone(),
+            analysis,
+            ConfirmationBroker::default(),
+        );
+        let invoked = service
+            .call_exposed_blocking(
+                CallToolRequestParams::new("invoke_capability").with_arguments(
+                    json!({
+                        "name": "get_music_structure",
+                        "arguments": {
+                            "music_asset_id": 9,
+                            "range": {"start": 0, "end": 90},
+                            "min_strength": 0,
+                            "meter_beats": 4,
+                            "phrase_bars": 4,
+                            "structural_only": true
+                        }
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(invoked.is_error, Some(false));
+        let structured = invoked.structured_content.unwrap();
+        assert_eq!(structured["structural_only"], true);
+        assert_eq!(structured["total_candidate_count"], 1);
+        assert_eq!(structured["returned_candidate_count"], 1);
+        assert_eq!(structured["omitted_ordinary_candidate_count"], 0);
+        assert_eq!(structured["candidates"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
     fn m34_agent_tools_expose_creator_plans_tracking_and_delivery_jobs() {
         let tools = OpenReelMcp::tools().unwrap();
         let names = tools
@@ -7244,6 +9258,7 @@ mod tests {
         });
         let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia {
             transcript: Some(transcript),
+            ..NoopMedia::default()
         });
         let service = OpenReelMcp::new(core, playback, analysis, ConfirmationBroker::default());
 
@@ -7696,6 +9711,426 @@ mod tests {
         assert_eq!(&sheet.pixels[gutter..gutter + 4], &[16, 16, 16, 255]);
         let blue_start = usize::try_from(2 + STORYBOARD_GUTTER).unwrap() * 4;
         assert_eq!(&sheet.pixels[blue_start..blue_start + 4], &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn source_storyboard_maps_cells_to_exact_source_frames_without_mutating_timeline() {
+        let (core, playback, analysis) = fixture();
+        let service = OpenReelMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let before = service.document().unwrap();
+        let result = service
+            .call_blocking(
+                CallToolRequestParams::new("get_source_storyboard").with_arguments(
+                    json!({
+                        "asset_id": 1,
+                        "range": {"start": 10, "end": 50},
+                        "frame_count": 4,
+                        "max_width": 64
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        assert!(
+            result
+                .content
+                .iter()
+                .any(|block| block.as_image().is_some())
+        );
+        let manifest = result.structured_content.unwrap();
+        assert_eq!(manifest["asset_id"], 1);
+        assert_eq!(manifest["source_range"], json!({"start": 10, "end": 50}));
+        assert_eq!(manifest["sheet"], json!({"width": 20, "height": 2}));
+        let cells = manifest["cells"].as_array().unwrap();
+        assert_eq!(cells.len(), 4);
+        assert_eq!(
+            cells
+                .iter()
+                .map(|cell| cell["source_frame"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            [10, 23, 36, 49]
+        );
+        for cell in cells {
+            assert_eq!(cell["asset_id"], 1);
+            assert_eq!(cell["source_range"], json!({"start": 10, "end": 50}));
+        }
+        assert_eq!(&*service.document().unwrap(), &*before);
+    }
+
+    #[test]
+    fn source_storyboard_rejects_missing_nonvideo_and_invalid_requests() {
+        let (core, playback, analysis) = fixture();
+        core.request(Command::Do(Operation::AddAsset {
+            asset: MediaAsset {
+                id: AssetId(2),
+                path: PathBuf::from("fixture.wav"),
+                name: "fixture audio".to_owned(),
+                duration: TimeCode(60),
+                fps: Rational::new(30, 1).unwrap(),
+                kind: MediaKind::Audio,
+                resolution: None,
+            },
+        }))
+        .unwrap();
+        let service = OpenReelMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        for args in [
+            SourceStoryboardArgs {
+                asset_id: AssetId(999),
+                range: None,
+                frame_count: None,
+                max_width: None,
+            },
+            SourceStoryboardArgs {
+                asset_id: AssetId(2),
+                range: None,
+                frame_count: None,
+                max_width: None,
+            },
+            SourceStoryboardArgs {
+                asset_id: AssetId(1),
+                range: Some(TranscriptRangeArgs {
+                    start: TimeCode(40),
+                    end: TimeCode(40),
+                }),
+                frame_count: None,
+                max_width: None,
+            },
+            SourceStoryboardArgs {
+                asset_id: AssetId(1),
+                range: Some(TranscriptRangeArgs {
+                    start: TimeCode(0),
+                    end: TimeCode(61),
+                }),
+                frame_count: None,
+                max_width: None,
+            },
+            SourceStoryboardArgs {
+                asset_id: AssetId(1),
+                range: None,
+                frame_count: Some(STORYBOARD_MAX_FRAMES + 1),
+                max_width: None,
+            },
+            SourceStoryboardArgs {
+                asset_id: AssetId(1),
+                range: None,
+                frame_count: None,
+                max_width: Some(THUMBNAIL_MAX_WIDTH + 1),
+            },
+        ] {
+            let result = service.source_storyboard(&args).unwrap();
+            assert_eq!(result.is_error, Some(true));
+        }
+    }
+
+    #[test]
+    fn source_storyboard_is_internal_registry_capability_not_compact_tool() {
+        let registry = OpenReelMcp::capability_tools().unwrap();
+        assert!(
+            registry
+                .iter()
+                .any(|tool| tool.name == "get_source_storyboard")
+        );
+        let served = OpenReelMcp::served_tools().unwrap();
+        assert!(
+            served
+                .iter()
+                .all(|tool| tool.name != "get_source_storyboard")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn source_shot_board_segments_exact_scenes_pages_evidence_and_does_not_mutate() {
+        let (core, playback, _) = fixture();
+        let analysis = Arc::new(NoopMedia {
+            scene_statuses: BTreeMap::from([(
+                AssetId(1),
+                SceneStatus::Ready(Arc::new(AssetSceneChanges {
+                    asset: AssetId(1),
+                    content_sha256: "fixture".to_owned(),
+                    source_fps: Rational::new(30, 1).unwrap(),
+                    source_frames: TimeCode(60),
+                    proxy_width: 160,
+                    changes: vec![
+                        SceneChange {
+                            source_frame: TimeCode(10),
+                            confidence_basis_points: 9_100,
+                        },
+                        SceneChange {
+                            source_frame: TimeCode(20),
+                            confidence_basis_points: DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS - 1,
+                        },
+                        SceneChange {
+                            source_frame: TimeCode(30),
+                            confidence_basis_points: 8_200,
+                        },
+                        SceneChange {
+                            source_frame: TimeCode(45),
+                            confidence_basis_points: 7_300,
+                        },
+                    ],
+                })),
+            )]),
+            ..NoopMedia::default()
+        });
+        let service = OpenReelMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let before = service.document().unwrap();
+        let result = service
+            .call_blocking(
+                CallToolRequestParams::new("get_source_shot_board").with_arguments(
+                    json!({
+                        "asset_id": 1,
+                        "range": {"start": 5, "end": 50},
+                        "candidate_offset": 1,
+                        "candidate_count": 2,
+                        "max_width": 64,
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        assert!(
+            result
+                .content
+                .iter()
+                .any(|block| block.as_image().is_some())
+        );
+        let manifest = result.structured_content.unwrap();
+        assert_eq!(manifest["status"], "ready");
+        assert_eq!(
+            manifest["scene_confidence_threshold_basis_points"],
+            DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS
+        );
+        assert_eq!(manifest["total_candidates"], 4);
+        assert_eq!(manifest["next_candidate_offset"], 3);
+        assert_eq!(manifest["sheet"], json!({"width": 20, "height": 8}));
+        assert_eq!(
+            manifest["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|candidate| candidate["source_range"].clone())
+                .collect::<Vec<_>>(),
+            vec![
+                json!({"start": 10, "end": 30}),
+                json!({"start": 30, "end": 45})
+            ]
+        );
+        assert_eq!(
+            manifest["candidates"][0]["boundary_provenance"]["start"]["confidence_basis_points"],
+            9_100
+        );
+        assert_eq!(
+            manifest["candidates"][1]["boundary_provenance"]["end"]["confidence_basis_points"],
+            7_300
+        );
+        let cells = manifest["cells"].as_array().unwrap();
+        assert_eq!(cells.len(), 6);
+        assert_eq!(
+            cells
+                .iter()
+                .map(|cell| cell["source_frame"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![10, 19, 29, 30, 37, 44]
+        );
+        assert_eq!(
+            cells[0]["candidate_id"],
+            manifest["candidates"][0]["candidate_id"]
+        );
+        assert_eq!(
+            cells[3]["candidate_id"],
+            manifest["candidates"][1]["candidate_id"]
+        );
+        assert_eq!(&*service.document().unwrap(), &*before);
+
+        let filtered = service
+            .source_shot_board(&SourceShotBoardArgs {
+                asset_id: AssetId(1),
+                range: None,
+                candidate_offset: Some(1),
+                minimum_duration_frames: Some(TimeCode(15)),
+                minimum_confidence_basis_points: None,
+                candidate_count: Some(1),
+                max_width: Some(64),
+            })
+            .unwrap();
+        assert_eq!(filtered.is_error, Some(false));
+        let filtered_manifest = filtered.structured_content.unwrap();
+        assert_eq!(filtered_manifest["minimum_duration_frames"], 15);
+        assert_eq!(filtered_manifest["total_candidates"], 4);
+        assert_eq!(filtered_manifest["filtered_candidates"], 3);
+        assert_eq!(filtered_manifest["returned_candidates"], 1);
+        assert_eq!(filtered_manifest["next_candidate_offset"], 2);
+        assert_eq!(filtered_manifest["candidates"][0]["candidate_index"], 2);
+        assert_eq!(
+            filtered_manifest["candidates"][0]["candidate_id"],
+            "asset-1-scene-30-45"
+        );
+        let strong_only = service
+            .source_shot_board(&SourceShotBoardArgs {
+                asset_id: AssetId(1),
+                range: None,
+                candidate_offset: None,
+                minimum_duration_frames: None,
+                minimum_confidence_basis_points: Some(8_000),
+                candidate_count: Some(12),
+                max_width: Some(64),
+            })
+            .unwrap();
+        let strong_manifest = strong_only.structured_content.unwrap();
+        assert_eq!(
+            strong_manifest["scene_confidence_threshold_basis_points"],
+            8_000
+        );
+        assert_eq!(strong_manifest["total_candidates"], 3);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn source_shot_board_requests_pending_scene_analysis_and_reports_invalid_states() {
+        let (core, playback, _) = fixture();
+        let analysis = Arc::new(NoopMedia::default());
+        let service = OpenReelMcp::new(
+            core.clone(),
+            playback,
+            analysis.clone(),
+            ConfirmationBroker::default(),
+        );
+        let pending = service
+            .source_shot_board(&SourceShotBoardArgs {
+                asset_id: AssetId(1),
+                range: None,
+                candidate_offset: None,
+                minimum_duration_frames: None,
+                minimum_confidence_basis_points: None,
+                candidate_count: None,
+                max_width: None,
+            })
+            .unwrap();
+        assert_eq!(pending.is_error, Some(false));
+        assert_eq!(pending.structured_content.unwrap()["status"], "pending");
+        assert_eq!(&*analysis.scene_requests.lock().unwrap(), &[AssetId(1)]);
+
+        core.request(Command::Do(Operation::AddAsset {
+            asset: MediaAsset {
+                id: AssetId(2),
+                path: PathBuf::from("fixture.wav"),
+                name: "fixture audio".to_owned(),
+                duration: TimeCode(60),
+                fps: Rational::new(30, 1).unwrap(),
+                kind: MediaKind::Audio,
+                resolution: None,
+            },
+        }))
+        .unwrap();
+        for args in [
+            SourceShotBoardArgs {
+                asset_id: AssetId(2),
+                range: None,
+                candidate_offset: None,
+                minimum_duration_frames: None,
+                minimum_confidence_basis_points: None,
+                candidate_count: None,
+                max_width: None,
+            },
+            SourceShotBoardArgs {
+                asset_id: AssetId(1),
+                range: Some(TranscriptRangeArgs {
+                    start: TimeCode(10),
+                    end: TimeCode(10),
+                }),
+                candidate_offset: None,
+                minimum_duration_frames: None,
+                minimum_confidence_basis_points: None,
+                candidate_count: None,
+                max_width: None,
+            },
+            SourceShotBoardArgs {
+                asset_id: AssetId(1),
+                range: None,
+                candidate_offset: None,
+                minimum_duration_frames: None,
+                minimum_confidence_basis_points: None,
+                candidate_count: Some(SHOT_BOARD_MAX_CANDIDATES + 1),
+                max_width: None,
+            },
+            SourceShotBoardArgs {
+                asset_id: AssetId(1),
+                range: None,
+                candidate_offset: None,
+                minimum_duration_frames: Some(TimeCode(0)),
+                minimum_confidence_basis_points: None,
+                candidate_count: None,
+                max_width: None,
+            },
+            SourceShotBoardArgs {
+                asset_id: AssetId(1),
+                range: None,
+                candidate_offset: None,
+                minimum_duration_frames: None,
+                minimum_confidence_basis_points: Some(10_001),
+                candidate_count: None,
+                max_width: None,
+            },
+        ] {
+            assert_eq!(
+                service.source_shot_board(&args).unwrap().is_error,
+                Some(true)
+            );
+        }
+
+        let failed_analysis = Arc::new(NoopMedia {
+            scene_statuses: BTreeMap::from([(
+                AssetId(1),
+                SceneStatus::Failed("decoder error".to_owned()),
+            )]),
+            ..NoopMedia::default()
+        });
+        let failed = OpenReelMcp::new(
+            core,
+            Arc::new(NoopMedia::default()),
+            failed_analysis,
+            ConfirmationBroker::default(),
+        )
+        .source_shot_board(&SourceShotBoardArgs {
+            asset_id: AssetId(1),
+            range: None,
+            candidate_offset: None,
+            minimum_duration_frames: None,
+            minimum_confidence_basis_points: None,
+            candidate_count: None,
+            max_width: None,
+        })
+        .unwrap();
+        assert_eq!(failed.is_error, Some(true));
+    }
+
+    #[test]
+    fn source_shot_board_is_internal_registry_capability_not_compact_tool() {
+        let registry = OpenReelMcp::capability_tools().unwrap();
+        let tool = registry
+            .iter()
+            .find(|tool| tool.name == "get_source_shot_board")
+            .expect("source shot board is registered");
+        let properties = tool
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("source shot board schema properties");
+        assert!(properties.contains_key("minimum_duration_frames"));
+        assert!(properties.contains_key("minimum_confidence_basis_points"));
+        let served = OpenReelMcp::served_tools().unwrap();
+        assert!(
+            served
+                .iter()
+                .all(|tool| tool.name != "get_source_shot_board")
+        );
     }
 
     #[test]

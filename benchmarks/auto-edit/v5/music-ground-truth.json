@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "montage_id": "blender-contrast-cipher",
+  "project_fps": {
+    "numerator": 25,
+    "denominator": 1
+  },
+  "project_resolution": {
+    "width": 1920,
+    "height": 1080
+  },
+  "timeline_range": {
+    "start": 0,
+    "end": 600
+  },
+  "video_track_id": 1,
+  "audio_track_id": 2,
+  "visual_asset_ids": [
+    "sintel-trailer-1080p",
+    "big-buck-bunny-trailer-1080p"
+  ],
+  "music_asset_id": "cipher-kevin-macleod",
+  "minimum_visual_shots": 8,
+  "maximum_visual_shots": 12,
+  "minimum_shot_frames": 40,
+  "maximum_shot_frames": 120,
+  "minimum_beat_strength_percent": 10.0,
+  "beat_alignment_tolerance_frames": 1,
+  "minimum_visual_assets_used": 2,
+  "minimum_source_separation_frames": 0,
+  "source_scene_minimum_confidence_percent": 10.0,
+  "source_exclusions": [
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 0, "end": 40 },
+      "reason": "black and fade-in opening"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 108, "end": 144 },
+      "reason": "embedded fade between opening shots"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 216, "end": 292 },
+      "reason": "Blender Foundation title slate and black"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 376, "end": 396 },
+      "reason": "black transition"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 420, "end": 441 },
+      "reason": "black transition"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 508, "end": 536 },
+      "reason": "black transition into camp sequence"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 664, "end": 688 },
+      "reason": "black transition"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 768, "end": 780 },
+      "reason": "black transition"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 832, "end": 864 },
+      "reason": "embedded fade into desert sequence"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 984, "end": 1253 },
+      "reason": "Sintel logo, end credits, and black"
+    },
+    {
+      "asset_id": "big-buck-bunny-trailer-1080p",
+      "source_range": { "start": 0, "end": 114 },
+      "reason": "Peach Open Movie Project title and fade"
+    },
+    {
+      "asset_id": "big-buck-bunny-trailer-1080p",
+      "source_range": { "start": 158, "end": 227 },
+      "reason": "One Big Rabbit title slate"
+    },
+    {
+      "asset_id": "big-buck-bunny-trailer-1080p",
+      "source_range": { "start": 280, "end": 330 },
+      "reason": "Three Rodents title slate"
+    },
+    {
+      "asset_id": "big-buck-bunny-trailer-1080p",
+      "source_range": { "start": 400, "end": 466 },
+      "reason": "And One Giant Payback title slate"
+    },
+    {
+      "asset_id": "big-buck-bunny-trailer-1080p",
+      "source_range": { "start": 573, "end": 623 },
+      "reason": "Get Ready title slate"
+    },
+    {
+      "asset_id": "big-buck-bunny-trailer-1080p",
+      "source_range": { "start": 672, "end": 813 },
+      "reason": "Big Buck Bunny logo and closing credits"
+    }
+  ],
+  "minimum_duration_buckets": 3,
+  "duration_bucket_frames": 20,
+  "maximum_similar_run": 3,
+  "similar_tolerance_frames": 8,
+  "minimum_clean_selectable_project_frames": 720,
+  "selection_headroom_frames": 120,
+  "meter_beats": 4,
+  "phrase_bars": 4,
+  "minimum_structural_aligned_cuts": 3,
+  "minimum_structural_aligned_percent": 50.0,
+  "music_preferred_source_start": 734,
+  "story_brief": "Build a deliberate contrast arc: open with Sintel's dramatic world, pivot into Big Buck Bunny's playful energy, then alternate or escalate the two sources into a clean musical finish.",
+  "attribution": [
+    "Sintel trailer, © copyright Blender Foundation | www.sintel.org",
+    "Big Buck Bunny trailer, © copyright Blender Foundation | www.bigbuckbunny.org",
+    "\"Cipher\" Kevin MacLeod (incompetech.com), licensed under CC BY 4.0"
+  ]
+}

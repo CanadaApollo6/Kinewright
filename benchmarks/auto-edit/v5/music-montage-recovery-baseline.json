@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "openreel-generalization-v5",
+  "suite_manifest": "benchmarks/auto-edit/v5/manifest.json",
+  "supersedes_artifact": {
+    "baseline": "benchmarks/auto-edit/v5/music-montage-baseline.json",
+    "output_sha256": "0cb3f6bdebe4a593887cb19d2817ccb761731acc4ac92c68d5171e6e88b0cab1",
+    "human_status": "reviewed_rejected",
+    "note": "The rejected Cipher artifact remains immutable. This file records the Uprising recovery under the stricter story, cadence, source-cleanliness, and hard-cut contract."
+  },
+  "scope": {
+    "status": "music_montage_recovery_preflight",
+    "families_executed": ["music_montage"],
+    "families_pending": [],
+    "note": "Machine recovery is complete for this sample; human review of the new SHA-bound artifact is pending. Two additional accepted samples remain required for the family gate."
+  },
+  "fixture": {
+    "pack_id": "m40-music-montage-v2",
+    "asset_count": 3,
+    "bytes": 50725326,
+    "licenses": ["CC-BY-3.0", "CC-BY-4.0"],
+    "music_asset_id": "uprising-scott-buckley",
+    "music_sha256": "c9b82e7f836c37fdf02899e31c46163f6f20a0a965a7a49c695d2c78f2a60517"
+  },
+  "source_trace": {
+    "filename": "openreel-eval-20260817-002233-codex/results.jsonl",
+    "sha256": "687a75b650d9265da7e951b085eae97014fcaaaa7f8ec6c06328d970304819f9",
+    "machine_report": "openreel-eval-20260817-002233-codex/machine-report.json",
+    "machine_report_sha256": "548d8d00d60244a24562ffb8ec6b4db1d4ff1e426e603a5dd239519bdff416ab",
+    "note": "The raw trace, machine report, independent audit sheets, and media package are generated local artifacts under target/evals and are intentionally not committed."
+  },
+  "environment": {
+    "timestamp_utc": "2026-08-17T00:22:33Z",
+    "harness": "codex",
+    "harness_version": "codex-cli 0.147.0",
+    "model": "harness-default",
+    "os": "windows",
+    "architecture": "x86_64",
+    "openreel_version": "0.1.0"
+  },
+  "machine_summary": {
+    "samples_passed": 1,
+    "samples_total": 1,
+    "assertions_passed": 34,
+    "assertions_total": 34,
+    "turns": 1,
+    "tool_calls": 15,
+    "tool_call_budget": 24,
+    "input_tokens": 314021,
+    "cached_input_tokens": 258560,
+    "uncached_input_tokens": 55461,
+    "output_tokens": 4204,
+    "reasoning_output_tokens": 2427,
+    "total_tokens": 318225,
+    "cost_usd": null,
+    "wall_time_ms": 152755,
+    "operations_applied": 11
+  },
+  "samples": [
+    {
+      "id": "g3-sample-1",
+      "family": "music_montage",
+      "passed": true,
+      "assertions_passed": 34,
+      "assertions_total": 34,
+      "turns": 1,
+      "tool_calls": 15,
+      "input_tokens": 314021,
+      "cached_input_tokens": 258560,
+      "uncached_input_tokens": 55461,
+      "output_tokens": 4204,
+      "reasoning_output_tokens": 2427,
+      "total_tokens": 318225,
+      "wall_time_ms": 152755,
+      "operations_applied": 11,
+      "output_frames": 600,
+      "output_bytes": 25996555,
+      "output_sha256": "236200c27d57bedfd82ccb3a7aae1afde49b79a85dfbf60e0b58504c01c10d69"
+    }
+  ],
+  "deliverable": {
+    "profile": "youtube_1080p",
+    "resolution": [1920, 1080],
+    "duration_frames": 600,
+    "visual_shots": 9,
+    "music_clips": 1,
+    "cut_frames": [73, 137, 230, 299, 366, 423, 473, 532],
+    "structural_cut_count": 6,
+    "bunny_pivot_range": {"start": 230, "end": 299},
+    "proof_sample_frames": [0, 74, 149, 224, 299, 374, 449, 524, 599],
+    "proof_sha256": "8482de7e3c4b862310560a3e88a7256c80b1ea359d305294be22f3f128de2a55",
+    "output_bytes": 25996555,
+    "output_sha256": "236200c27d57bedfd82ccb3a7aae1afde49b79a85dfbf60e0b58504c01c10d69",
+    "rendered_integrated_lufs_hundredths": -1604,
+    "rendered_sample_peak_dbfs_hundredths": -420,
+    "loudness_contract": {
+      "minimum_integrated_lufs_hundredths": -1800,
+      "maximum_integrated_lufs_hundredths": -1400,
+      "maximum_sample_peak_dbfs_hundredths": -100
+    },
+    "independent_frame_audit": {
+      "status": "passed",
+      "uniform_frames": 16,
+      "shot_midpoints": 9,
+      "cut_boundary_frames": 24,
+      "note": "No black frames, titles, logos, slates, or baked transition tails were visible. An earlier machine-passing recovery was rejected by this audit because its final shot began inside a baked source dissolve; the source exclusion was widened before this run."
+    }
+  },
+  "human_review": {
+    "status": "pending",
+    "review_template": "target/evals/openreel-eval-20260817-002233-codex/human-review.json",
+    "note": "Machine and independent frame checks do not decide whether the story, musical motivation, pacing, visual contrast, or overall finish are publishable. Captions are not applicable."
+  },
+  "benchmark_status": "in_progress"
+}

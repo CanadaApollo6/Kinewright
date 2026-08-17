@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "openreel-generalization-v5",
+  "suite_manifest": "benchmarks/auto-edit/v5/manifest.json",
+  "scope": {
+    "status": "music_montage_preflight",
+    "families_executed": ["music_montage"],
+    "families_pending": [],
+    "note": "One machine-passing music sample is published; two additional samples and two human accepts remain required for the family and M40 exit gates."
+  },
+  "fixture": {
+    "pack_id": "m40-music-montage-v1",
+    "asset_count": 3,
+    "bytes": 51748180,
+    "licenses": ["CC-BY-3.0", "CC-BY-4.0"]
+  },
+  "source_trace": {
+    "filename": "openreel-eval-20260816-201436-codex/results.jsonl",
+    "sha256": "1d01d4e5a810e62a77d9b3b8a77d5cfe3d5473181a7688316487df7db249d37b",
+    "machine_report": "openreel-eval-20260816-201436-codex/machine-report.json",
+    "machine_report_sha256": "7b5c1710ba765f194c694caa025f172b897da9b21d88def706488b1193e43931",
+    "note": "The raw trace, machine report, and media package are generated local artifacts under target/evals and are intentionally not committed."
+  },
+  "environment": {
+    "timestamp_utc": "2026-08-16T20:14:36Z",
+    "harness": "codex",
+    "harness_version": "codex-cli 0.147.0",
+    "model": "harness-default",
+    "os": "windows",
+    "architecture": "x86_64",
+    "openreel_version": "0.1.0"
+  },
+  "machine_summary": {
+    "samples_passed": 1,
+    "samples_total": 1,
+    "assertions_passed": 22,
+    "assertions_total": 22,
+    "turns": 1,
+    "tool_calls": 11,
+    "tool_call_budget": 24,
+    "input_tokens": 152739,
+    "cached_input_tokens": 129280,
+    "uncached_input_tokens": 23459,
+    "output_tokens": 1619,
+    "reasoning_output_tokens": 436,
+    "total_tokens": 154358,
+    "cost_usd": null,
+    "wall_time_ms": 76821,
+    "operations_applied": 12
+  },
+  "samples": [
+    {
+      "id": "g3-sample-1",
+      "family": "music_montage",
+      "passed": true,
+      "assertions_passed": 22,
+      "assertions_total": 22,
+      "turns": 1,
+      "tool_calls": 11,
+      "input_tokens": 152739,
+      "cached_input_tokens": 129280,
+      "uncached_input_tokens": 23459,
+      "output_tokens": 1619,
+      "reasoning_output_tokens": 436,
+      "total_tokens": 154358,
+      "wall_time_ms": 76821,
+      "operations_applied": 12,
+      "output_frames": 800,
+      "output_bytes": 34287420,
+      "output_sha256": "0cb3f6bdebe4a593887cb19d2817ccb761731acc4ac92c68d5171e6e88b0cab1"
+    }
+  ],
+  "deliverable": {
+    "profile": "youtube_1080p",
+    "resolution": [1920, 1080],
+    "duration_frames": 800,
+    "visual_shots": 10,
+    "music_clips": 1,
+    "proof_sample_frames": [0, 99, 199, 299, 399, 499, 599, 699, 799],
+    "proof_sha256": "0257ae5bd8b69c955dca7e447454905c9e96126067bce946cdf8f744f5ac3f4f",
+    "output_bytes": 34287420,
+    "output_sha256": "0cb3f6bdebe4a593887cb19d2817ccb761731acc4ac92c68d5171e6e88b0cab1",
+    "rendered_integrated_lufs_hundredths": -1602,
+    "rendered_sample_peak_dbfs_hundredths": -255,
+    "loudness_contract": {
+      "minimum_integrated_lufs_hundredths": -1800,
+      "maximum_integrated_lufs_hundredths": -1400,
+      "maximum_sample_peak_dbfs_hundredths": -100
+    }
+  },
+  "human_review": {
+    "status": "reviewed_rejected",
+    "review_template": "target/evals/openreel-eval-20260816-201436-codex/human-review.json",
+    "reviewer": "Riel St Amand",
+    "accepted": false,
+    "ratings": {
+      "story": 1.0,
+      "pacing": 1.5,
+      "visual_finish": 2.0,
+      "audio_finish": 4.5,
+      "captions": null,
+      "delivery_readiness": null
+    },
+    "note": "Human review rejected this exact SHA-bound artifact. The reviewer found no discernible arc; near-random and incoherent sequencing; metronomic, repetitive, and sometimes rushed pacing; cuts that were not musically motivated; occasional fades despite the stated hard-cut intent; and no meaningful contrast between the visual styles. The shots often felt merely present rather than deliberately chosen. Audio was consistent and audible, but the instrumental did not fit the footage. Captions were not applicable. No numeric delivery-readiness score or overall mean was supplied."
+  },
+  "benchmark_status": "in_progress"
+}

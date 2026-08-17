@@ -12,6 +12,21 @@ cargo run -p openreel-agent --bin openreel-eval
 
 Results are written as timestamped, environment-stamped JSONL under `target/evals/`. A full live suite is intentionally expensive and must not be placed in CI.
 
+To reclaim space from failed or abandoned runs, use the guarded cleanup script:
+
+```powershell
+& .\scripts\clean-eval-runs.ps1 -WhatIf
+& .\scripts\clean-eval-runs.ps1
+```
+
+It only considers direct `openreel-eval-*` directories under `target/evals/`.
+Machine-passing runs, completed human-reviewed runs (accepted or rejected),
+unrecognized directories, unreadable review artifacts, and recent incomplete or
+pending-review runs are preserved. The default 24-hour cutoff applies before an
+old incomplete or pending run can be removed; use
+`-IncompleteMinimumAgeHours` to change that cutoff. The script refuses
+reparse-point roots or descendants and supports `-WhatIf` for a dry run.
+
 The exact-operation contract and first machine-readable baseline live under
 [`benchmarks/auto-edit/v1`](../benchmarks/auto-edit/v1/README.md). The baseline
 preserves the real 6/7 task result and leaves human first-pass acceptance unset.
@@ -128,6 +143,29 @@ film-recovery story from a naturally recorded two-minute interview. It is the
 first non-synthetic fixture in the published benchmark. M40 remains incomplete
 until interview/documentary, event/multicam, and music-montage families each
 pass three model samples and their separate human gate.
+
+The current `g3` recovery uses the separately pinned v2 music pack. Prepare or
+verify it explicitly before the offline run:
+
+```powershell
+& .\scripts\setup-ffmpeg.ps1
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v2.json
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v2.json
+```
+
+The rejected v1 Cipher artifact remains published as historical evidence. V2
+uses Scott Buckley's CC BY 4.0 "Uprising," exact 24-second track coverage,
+bounded inspectable beat-anchor repair, source-phase arc gates, and negative
+checks for transitions, effects, fades, retiming, and periodic A/B cadence.
+The first v2 recovery is published in
+`benchmarks/auto-edit/v5/music-montage-recovery-baseline.json`: 34/34 machine
+assertions, 15 tool calls, 318,225 total tokens, and an independently audited
+24-second MP4. Human review is pending. A prior machine pass was discarded
+after the independent cut-boundary audit exposed a baked dissolve tail; the
+source exclusion and clean-frame feasibility calculation were corrected before
+the published rerun.
 
 The first corrected interview preflight is published at
 `benchmarks/auto-edit/v5/baseline.json`: 1/1 sample, 25/25 assertions, 7 tool

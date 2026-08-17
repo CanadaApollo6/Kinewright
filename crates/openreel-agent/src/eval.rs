@@ -112,14 +112,16 @@ pub struct EvalLoudnessSpec {
     pub maximum_sample_peak_dbfs_hundredths: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ExpectedSourceClip {
     pub asset_alias: String,
     pub source_start: TimeCode,
     pub source_end: TimeCode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ExpectedTimelineClip {
     pub asset_alias: String,
     pub timeline_start: TimeCode,
@@ -128,12 +130,38 @@ pub struct ExpectedTimelineClip {
     pub source_end: TimeCode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A manually reviewed source interval that an edit must not select.
+///
+/// Ranges use Rust's half-open convention: a clip ending exactly where an
+/// exclusion begins, or beginning exactly where one ends, does not overlap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SourceRangeExclusion {
+    pub asset: AssetId,
+    pub source_range: std::ops::Range<TimeCode>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EvalAssertion {
     TimelineNonEmpty,
     ClipCount {
         minimum: usize,
         maximum: usize,
+    },
+    /// Require a bounded number of real media clips on one track, with every
+    /// clip's mapped project duration inside the inclusive duration bounds.
+    /// Titles and freeze frames are intentionally not counted.
+    /// `reject_non_media` additionally rejects title/freeze padding.
+    MediaClipCount {
+        track: TrackId,
+        minimum: usize,
+        maximum: usize,
+        minimum_duration: TimeCode,
+        maximum_duration: TimeCode,
+        #[serde(default)]
+        reject_non_media: bool,
     },
     AssetOrder {
         aliases: Vec<String>,
@@ -153,6 +181,91 @@ pub enum EvalAssertion {
     ExactTrackClips {
         track: TrackId,
         clips: Vec<ExpectedTimelineClip>,
+    },
+    /// Require the document's declared duration and the maximum mapped clip
+    /// end to equal the requested project duration exactly.
+    ExactProjectDuration {
+        duration: TimeCode,
+    },
+    /// Require real media on one track to cover exactly the requested
+    /// half-open project range. Gaps, overlaps, clips crossing either
+    /// boundary, and media tails outside the range all fail. Non-media clips
+    /// are ignored; a gap occupied only by non-media therefore still fails.
+    ExactTrackMediaCoverage {
+        track: TrackId,
+        range: std::ops::Range<TimeCode>,
+    },
+    /// Require every named asset alias to appear as media on exactly this
+    /// track. Unknown aliases are failures rather than silently ignored.
+    RequiredAssetsOnTrack {
+        track: TrackId,
+        aliases: Vec<String>,
+    },
+    /// Require source ranges for each asset on exactly this track to be
+    /// disjoint and separated by at least the non-negative source-frame
+    /// threshold.
+    SourceRangesSeparated {
+        track: TrackId,
+        minimum_separation_frames: TimeCode,
+    },
+    /// Reject selected source envelopes that contain a detected source edit.
+    /// Boundaries exactly at the source in/out marks are valid; only interior
+    /// scene changes prove that one timeline clip contains multiple source
+    /// shots or a baked transition.
+    SourceRangesSceneClean {
+        track: TrackId,
+        scene_set: String,
+    },
+    /// Reject media source ranges that overlap a manually reviewed exclusion
+    /// such as a title slate, logo card, black frame, or embedded fade.
+    SourceRangesAvoid {
+        track: TrackId,
+        exclusion_set: String,
+    },
+    /// Require a deliberately varied hard-cut cadence rather than a long run
+    /// of near-identical shot lengths.
+    ShotCadenceVariation {
+        track: TrackId,
+        minimum_duration_buckets: usize,
+        duration_bucket_frames: TimeCode,
+        maximum_similar_run: usize,
+        similar_tolerance_frames: TimeCode,
+    },
+    /// Reject a long period-two shot-duration pattern such as
+    /// `50, 80, 50, 80, 50, 80`. A repeated pair is compared against the
+    /// first pair in its run within `tolerance_frames`.
+    NoAlternatingShotPattern {
+        track: TrackId,
+        maximum_repeated_pairs: usize,
+        tolerance_frames: TimeCode,
+    },
+    /// Require every cut between media clips on a track to land on a project
+    /// beat marker within the inclusive project-frame tolerance.
+    BeatAlignedCuts {
+        track: TrackId,
+        beat_set: String,
+        tolerance_frames: TimeCode,
+    },
+    /// Require a minimum count and share of internal cuts to use a stronger
+    /// structural subset such as inferred bar or phrase candidates.
+    CutsAlignedToBeatSetAtLeast {
+        track: TrackId,
+        beat_set: String,
+        tolerance_frames: TimeCode,
+        minimum_aligned_cuts: usize,
+        minimum_aligned_basis_points: u16,
+    },
+    /// Require one real-time, beat-anchored music clip with no audio shaping.
+    ///
+    /// `source_beat_set` contains source-frame beat positions for the named
+    /// asset. `timeline_start` and `timeline_end` are project-frame positions.
+    MusicFit {
+        track: TrackId,
+        asset_alias: String,
+        source_beat_set: String,
+        timeline_start: TimeCode,
+        timeline_end: TimeCode,
+        tolerance_source_frames: TimeCode,
     },
     WordsRetained {
         word_set: String,
@@ -193,6 +306,27 @@ pub enum EvalAssertion {
         asset_alias: String,
         transition_name: String,
     },
+    /// Require a target video track's media clips to use hard cuts with no
+    /// visual effects and no playback retiming.
+    NoVisualTransitionsEffectsOrRetiming {
+        track: TrackId,
+    },
+    /// Require an ordered source-phase arc on a target video track. The first
+    /// media phase must use `opening_alias`, one contiguous interior pivot
+    /// phase must start inside `pivot_window`, its return must start inside
+    /// `return_window`, and the final phase must use `closing_alias`.
+    /// Opening and closing holds include contiguous clips using their phase
+    /// alias from the respective edge of the track.
+    SourcePhaseArc {
+        track: TrackId,
+        opening_alias: String,
+        pivot_alias: String,
+        pivot_window: std::ops::Range<TimeCode>,
+        return_window: std::ops::Range<TimeCode>,
+        closing_alias: String,
+        minimum_opening_hold: TimeCode,
+        minimum_closing_hold: TimeCode,
+    },
     StyledCaptions {
         minimum_cues: usize,
         motion: CaptionMotion,
@@ -202,6 +336,13 @@ pub enum EvalAssertion {
     },
     AudioPresent,
     ProgramAudioContinuous {
+        track: TrackId,
+        asset_alias: String,
+    },
+    /// Require exactly one audio-capable media clip in the whole document,
+    /// and require that clip to be on the named track and use the named asset.
+    /// Titles and freeze frames never contribute to the global audio count.
+    SingleAudioMediaClip {
         track: TrackId,
         asset_alias: String,
     },
@@ -222,8 +363,15 @@ pub enum EvalAssertion {
 pub struct FixtureContext {
     pub asset_aliases: BTreeMap<String, AssetId>,
     pub transcripts: BTreeMap<AssetId, Arc<AssetTranscript>>,
+    /// Beat positions in each asset's source-frame time base. These are not
+    /// project positions and must only be consumed by source-range checks.
+    pub source_beat_sets: BTreeMap<String, Vec<TimeCode>>,
+    /// Beat positions in the document's project-frame time base. These are
+    /// not source positions and must only be consumed by timeline checks.
+    pub timeline_beat_sets: BTreeMap<String, Vec<TimeCode>>,
     pub word_sets: BTreeMap<String, Vec<String>>,
     pub scene_sets: BTreeMap<String, Vec<(AssetId, TimeCode)>>,
+    pub exclusion_sets: BTreeMap<String, Vec<SourceRangeExclusion>>,
     pub duration_bounds: BTreeMap<String, (TimeCode, TimeCode)>,
 }
 
@@ -421,7 +569,45 @@ pub struct HumanTaskReview {
     pub artifact_sha256: Option<String>,
     pub accepted: Option<bool>,
     pub ratings: HumanRatings,
+    /// Rating dimensions intentionally not applicable to this task, such as
+    /// captions for an instrumental montage. Missing in legacy JSON means an
+    /// empty list.
+    #[serde(default)]
+    pub not_applicable: Vec<HumanRatingDimension>,
     pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanRatingDimension {
+    Story,
+    Pacing,
+    VisualFinish,
+    AudioFinish,
+    Captions,
+    DeliveryReadiness,
+}
+
+impl HumanRatingDimension {
+    const ALL: [Self; 6] = [
+        Self::Story,
+        Self::Pacing,
+        Self::VisualFinish,
+        Self::AudioFinish,
+        Self::Captions,
+        Self::DeliveryReadiness,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Story => "story",
+            Self::Pacing => "pacing",
+            Self::VisualFinish => "visual_finish",
+            Self::AudioFinish => "audio_finish",
+            Self::Captions => "captions",
+            Self::DeliveryReadiness => "delivery_readiness",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1169,11 +1355,17 @@ pub fn human_review_template(
         } else {
             format!("{base_task_id}-sample-{occurrence}")
         };
+        let not_applicable = if deliverable.rendered_caption_alignment_required {
+            Vec::new()
+        } else {
+            vec![HumanRatingDimension::Captions]
+        };
         tasks.push(HumanTaskReview {
             task_id,
             artifact_sha256: deliverable.output_sha256.clone(),
             accepted: None,
             ratings: HumanRatings::default(),
+            not_applicable,
             notes: None,
         });
     }
@@ -1194,6 +1386,7 @@ pub fn human_review_template(
 ///
 /// Returns an error for duplicate tasks, partial reviews, invalid digests, or
 /// ratings outside the inclusive 1..=5 scale or its half-point increments.
+#[allow(clippy::too_many_lines)]
 pub fn summarize_human_review(review: &HumanReviewFile) -> Result<HumanReviewSummary, EvalError> {
     if review.schema_version != 1 {
         return Err(EvalError::Output(format!(
@@ -1218,6 +1411,23 @@ pub fn summarize_human_review(review: &HumanReviewFile) -> Result<HumanReviewSum
                 task.task_id
             )));
         }
+        let mut not_applicable = BTreeSet::new();
+        for dimension in &task.not_applicable {
+            if !not_applicable.insert(*dimension) {
+                return Err(EvalError::Output(format!(
+                    "task {} lists rating dimension {} as not applicable more than once",
+                    task.task_id,
+                    dimension.label()
+                )));
+            }
+            if task.ratings.get(*dimension).is_some() {
+                return Err(EvalError::Output(format!(
+                    "task {} marks rating dimension {} both rated and not applicable",
+                    task.task_id,
+                    dimension.label()
+                )));
+            }
+        }
         let rating_values = task.ratings.values();
         let any_rating = rating_values.iter().any(Option::is_some);
         match task.accepted {
@@ -1228,21 +1438,28 @@ pub fn summarize_human_review(review: &HumanReviewFile) -> Result<HumanReviewSum
                 )));
             }
             None => {}
-            Some(_) if rating_values.iter().any(Option::is_none) => {
-                return Err(EvalError::Output(format!(
-                    "task {} must fill all six ratings when accepted is set",
-                    task.task_id
-                )));
-            }
             Some(_) => {
-                if let Some(invalid) = rating_values
-                    .into_iter()
-                    .flatten()
-                    .find(|rating| !valid_human_rating(*rating))
-                {
+                let mut missing = Vec::new();
+                for dimension in HumanRatingDimension::ALL {
+                    if task.ratings.get(dimension).is_none() && !not_applicable.contains(&dimension)
+                    {
+                        missing.push(dimension.label());
+                    }
+                    if let Some(rating) = task.ratings.get(dimension)
+                        && !valid_human_rating(rating)
+                    {
+                        return Err(EvalError::Output(format!(
+                            "task {} rating {} for {} must be between 1 and 5 in 0.5 increments",
+                            task.task_id,
+                            rating,
+                            dimension.label()
+                        )));
+                    }
+                }
+                if !missing.is_empty() {
                     return Err(EvalError::Output(format!(
-                        "task {} rating {invalid} must be between 1 and 5 in 0.5 increments",
-                        task.task_id
+                        "task {} must rate or mark not applicable every dimension; missing {:?}",
+                        task.task_id, missing
                     )));
                 }
                 reviewed.push(task);
@@ -1274,12 +1491,12 @@ pub fn summarize_human_review(review: &HumanReviewFile) -> Result<HumanReviewSum
         acceptance_rate,
         overall_mean_rating: overall_mean_rating(&reviewed),
         mean_ratings: HumanMeanRatings {
-            story: mean_rating(&reviewed, |ratings| ratings.story),
-            pacing: mean_rating(&reviewed, |ratings| ratings.pacing),
-            visual_finish: mean_rating(&reviewed, |ratings| ratings.visual_finish),
-            audio_finish: mean_rating(&reviewed, |ratings| ratings.audio_finish),
-            captions: mean_rating(&reviewed, |ratings| ratings.captions),
-            delivery_readiness: mean_rating(&reviewed, |ratings| ratings.delivery_readiness),
+            story: mean_rating(&reviewed, HumanRatingDimension::Story),
+            pacing: mean_rating(&reviewed, HumanRatingDimension::Pacing),
+            visual_finish: mean_rating(&reviewed, HumanRatingDimension::VisualFinish),
+            audio_finish: mean_rating(&reviewed, HumanRatingDimension::AudioFinish),
+            captions: mean_rating(&reviewed, HumanRatingDimension::Captions),
+            delivery_readiness: mean_rating(&reviewed, HumanRatingDimension::DeliveryReadiness),
         },
     })
 }
@@ -1295,6 +1512,17 @@ impl HumanRatings {
             self.delivery_readiness,
         ]
     }
+
+    fn get(&self, dimension: HumanRatingDimension) -> Option<f64> {
+        match dimension {
+            HumanRatingDimension::Story => self.story,
+            HumanRatingDimension::Pacing => self.pacing,
+            HumanRatingDimension::VisualFinish => self.visual_finish,
+            HumanRatingDimension::AudioFinish => self.audio_finish,
+            HumanRatingDimension::Captions => self.captions,
+            HumanRatingDimension::DeliveryReadiness => self.delivery_readiness,
+        }
+    }
 }
 
 fn valid_human_rating(rating: f64) -> bool {
@@ -1303,18 +1531,22 @@ fn valid_human_rating(rating: f64) -> bool {
         && (rating * 2.0).fract().abs() <= f64::EPSILON
 }
 
-fn mean_rating(
-    reviewed: &[&HumanTaskReview],
-    select: impl Fn(&HumanRatings) -> Option<f64>,
-) -> Option<f64> {
-    if reviewed.is_empty() {
-        return None;
-    }
+fn mean_rating(reviewed: &[&HumanTaskReview], dimension: HumanRatingDimension) -> Option<f64> {
     let sum = reviewed
         .iter()
-        .filter_map(|task| select(&task.ratings))
+        .filter(|task| !task.not_applicable.contains(&dimension))
+        .filter_map(|task| task.ratings.get(dimension))
         .sum::<f64>();
-    let count = u32::try_from(reviewed.len()).ok()?;
+    let count = reviewed
+        .iter()
+        .filter(|task| {
+            !task.not_applicable.contains(&dimension) && task.ratings.get(dimension).is_some()
+        })
+        .count();
+    let count = u32::try_from(count).ok()?;
+    if count == 0 {
+        return None;
+    }
     Some(sum / f64::from(count))
 }
 
@@ -1322,13 +1554,22 @@ fn overall_mean_rating(reviewed: &[&HumanTaskReview]) -> Option<f64> {
     if reviewed.is_empty() {
         return None;
     }
-    let sum = reviewed
-        .iter()
-        .flat_map(|task| task.ratings.values())
-        .flatten()
-        .sum::<f64>();
-    let rating_count = reviewed.len().checked_mul(6)?;
+    let mut sum = 0.0;
+    let mut rating_count = 0_usize;
+    for task in reviewed {
+        for dimension in HumanRatingDimension::ALL {
+            if !task.not_applicable.contains(&dimension)
+                && let Some(rating) = task.ratings.get(dimension)
+            {
+                sum += rating;
+                rating_count = rating_count.saturating_add(1);
+            }
+        }
+    }
     let rating_count = u32::try_from(rating_count).ok()?;
+    if rating_count == 0 {
+        return None;
+    }
     Some(sum / f64::from(rating_count))
 }
 
@@ -1919,6 +2160,22 @@ fn evaluate_assertion(
                 format!("expected {minimum}..={maximum}, observed {count}"),
             )
         }
+        EvalAssertion::MediaClipCount {
+            track,
+            minimum,
+            maximum,
+            minimum_duration,
+            maximum_duration,
+            reject_non_media,
+        } => evaluate_media_clip_count(
+            *track,
+            *minimum,
+            *maximum,
+            *minimum_duration,
+            *maximum_duration,
+            *reject_non_media,
+            outcome,
+        ),
         EvalAssertion::AssetOrder {
             aliases,
             collapse_adjacent,
@@ -1962,6 +2219,85 @@ fn evaluate_assertion(
         EvalAssertion::ExactTrackClips { track, clips } => {
             evaluate_track_clips(*track, clips, outcome)
         }
+        EvalAssertion::ExactProjectDuration { duration } => {
+            evaluate_exact_project_duration(*duration, outcome)
+        }
+        EvalAssertion::ExactTrackMediaCoverage { track, range } => {
+            evaluate_exact_track_media_coverage(*track, range, outcome)
+        }
+        EvalAssertion::RequiredAssetsOnTrack { track, aliases } => {
+            evaluate_required_assets_on_track(*track, aliases, outcome)
+        }
+        EvalAssertion::SourceRangesSeparated {
+            track,
+            minimum_separation_frames,
+        } => evaluate_source_ranges_separated(*track, *minimum_separation_frames, outcome),
+        EvalAssertion::SourceRangesSceneClean { track, scene_set } => {
+            evaluate_source_ranges_scene_clean(*track, scene_set, outcome)
+        }
+        EvalAssertion::SourceRangesAvoid {
+            track,
+            exclusion_set,
+        } => evaluate_source_ranges_avoid(*track, exclusion_set, outcome),
+        EvalAssertion::ShotCadenceVariation {
+            track,
+            minimum_duration_buckets,
+            duration_bucket_frames,
+            maximum_similar_run,
+            similar_tolerance_frames,
+        } => evaluate_shot_cadence_variation(
+            *track,
+            *minimum_duration_buckets,
+            *duration_bucket_frames,
+            *maximum_similar_run,
+            *similar_tolerance_frames,
+            outcome,
+        ),
+        EvalAssertion::NoAlternatingShotPattern {
+            track,
+            maximum_repeated_pairs,
+            tolerance_frames,
+        } => evaluate_no_alternating_shot_pattern(
+            *track,
+            *maximum_repeated_pairs,
+            *tolerance_frames,
+            outcome,
+        ),
+        EvalAssertion::BeatAlignedCuts {
+            track,
+            beat_set,
+            tolerance_frames,
+        } => evaluate_beat_aligned_cuts(*track, beat_set, *tolerance_frames, outcome),
+        EvalAssertion::CutsAlignedToBeatSetAtLeast {
+            track,
+            beat_set,
+            tolerance_frames,
+            minimum_aligned_cuts,
+            minimum_aligned_basis_points,
+        } => evaluate_cuts_aligned_to_beat_set_at_least(
+            *track,
+            beat_set,
+            *tolerance_frames,
+            *minimum_aligned_cuts,
+            *minimum_aligned_basis_points,
+            outcome,
+        ),
+        EvalAssertion::MusicFit {
+            track,
+            asset_alias,
+            source_beat_set,
+            timeline_start,
+            timeline_end,
+            tolerance_source_frames,
+        } => evaluate_music_fit(
+            *track,
+            asset_alias,
+            source_beat_set,
+            *timeline_start,
+            *timeline_end,
+            *tolerance_source_frames,
+            outcome,
+        ),
         EvalAssertion::WordsRetained { word_set } => evaluate_word_set(word_set, outcome, true),
         EvalAssertion::WordsAbsent { word_set } => evaluate_word_set(word_set, outcome, false),
         EvalAssertion::CaptionWordsExact { word_set } => evaluate_caption_words(word_set, outcome),
@@ -2041,6 +2377,29 @@ fn evaluate_assertion(
             asset_alias,
             transition_name,
         } => evaluate_transition(asset_alias, transition_name, outcome),
+        EvalAssertion::NoVisualTransitionsEffectsOrRetiming { track } => {
+            evaluate_no_visual_transitions_effects_or_retiming(*track, outcome)
+        }
+        EvalAssertion::SourcePhaseArc {
+            track,
+            opening_alias,
+            pivot_alias,
+            pivot_window,
+            return_window,
+            closing_alias,
+            minimum_opening_hold,
+            minimum_closing_hold,
+        } => evaluate_source_phase_arc(
+            *track,
+            opening_alias,
+            pivot_alias,
+            pivot_window,
+            return_window,
+            closing_alias,
+            *minimum_opening_hold,
+            *minimum_closing_hold,
+            outcome,
+        ),
         EvalAssertion::StyledCaptions {
             minimum_cues,
             motion,
@@ -2049,6 +2408,9 @@ fn evaluate_assertion(
         EvalAssertion::AudioPresent => evaluate_audio_present(&outcome.final_document),
         EvalAssertion::ProgramAudioContinuous { track, asset_alias } => {
             evaluate_program_audio_continuous(*track, asset_alias, outcome)
+        }
+        EvalAssertion::SingleAudioMediaClip { track, asset_alias } => {
+            evaluate_single_audio_media_clip(*track, asset_alias, outcome)
         }
         EvalAssertion::ReframeStability {
             track,
@@ -2383,6 +2745,1022 @@ fn evaluate_track_clips(
         observed == clips,
         format!("track={track_id}, expected={clips:?}, observed={observed:?}"),
     )
+}
+
+fn project_range_for_media_clip(
+    document: &Document,
+    clip: &openreel_core::Clip,
+) -> Result<std::ops::Range<TimeCode>, String> {
+    let duration = document
+        .clip_duration(clip)
+        .map_err(|error| format!("clip {} duration mapping failed: {error}", clip.id))?;
+    let end = clip
+        .timeline_start
+        .checked_add(duration)
+        .ok_or_else(|| format!("clip {} project end overflowed", clip.id))?;
+    if end <= clip.timeline_start {
+        return Err(format!(
+            "clip {} has non-positive project range {}..{}",
+            clip.id, clip.timeline_start.0, end.0
+        ));
+    }
+    Ok(clip.timeline_start..end)
+}
+
+fn ordered_media_project_ranges<'a>(
+    document: &Document,
+    track: &'a openreel_core::Track,
+) -> (
+    Vec<(&'a openreel_core::Clip, std::ops::Range<TimeCode>)>,
+    Vec<String>,
+) {
+    let mut ranges = Vec::new();
+    let mut errors = Vec::new();
+    for clip in track
+        .clips
+        .iter()
+        .filter(|clip| matches!(clip.content, ClipContent::Media))
+    {
+        match project_range_for_media_clip(document, clip) {
+            Ok(range) => ranges.push((clip, range)),
+            Err(error) => errors.push(error),
+        }
+    }
+    ranges.sort_by_key(|(clip, range)| (range.start, clip.id));
+    (ranges, errors)
+}
+
+fn evaluate_exact_project_duration(expected: TimeCode, outcome: &EvalOutcome) -> AssertionResult {
+    if expected.0 < 0 {
+        return assertion_result(
+            "exact project duration",
+            false,
+            format!(
+                "requested project duration must be non-negative, observed {}",
+                expected.0
+            ),
+        );
+    }
+
+    let mut errors = Vec::new();
+    let mut maximum_clip_end = TimeCode::ZERO;
+    for clip in outcome
+        .final_document
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+    {
+        if clip.timeline_start.0 < 0 {
+            errors.push(format!(
+                "clip {} starts before project frame zero at {}",
+                clip.id, clip.timeline_start.0
+            ));
+        }
+        match outcome.final_document.clip_duration(clip) {
+            Ok(duration) => match clip.timeline_start.checked_add(duration) {
+                Some(end) => maximum_clip_end = maximum_clip_end.max(end),
+                None => errors.push(format!("clip {} project end overflowed", clip.id)),
+            },
+            Err(error) => errors.push(format!("clip {} duration mapping failed: {error}", clip.id)),
+        }
+    }
+
+    let declared = outcome.final_document.duration;
+    let passed = errors.is_empty() && declared == expected && maximum_clip_end == expected;
+    assertion_result(
+        "exact project duration",
+        passed,
+        if errors.is_empty() {
+            format!(
+                "expected {expected} frames, declared document duration={}, mapped clip end={}, observed clip end must equal the contract",
+                declared.0, maximum_clip_end.0
+            )
+        } else {
+            format!(
+                "expected {expected} frames, declared document duration={}, mapped clip end={}; {}",
+                declared.0,
+                maximum_clip_end.0,
+                errors.join("; ")
+            )
+        },
+    )
+}
+
+fn evaluate_exact_track_media_coverage(
+    track_id: TrackId,
+    requested: &std::ops::Range<TimeCode>,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    if requested.start.0 < 0 || requested.start >= requested.end {
+        return assertion_result(
+            "exact track media coverage",
+            false,
+            format!(
+                "requested project range must be non-empty and non-negative, observed {}..{}",
+                requested.start.0, requested.end.0
+            ),
+        );
+    }
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "exact track media coverage",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+
+    let (ranges, mapping_errors) = ordered_media_project_ranges(&outcome.final_document, track);
+    let mut errors = mapping_errors;
+    if ranges.is_empty() {
+        errors.push("track has no real media clips".to_owned());
+    } else {
+        if ranges[0].1.start != requested.start {
+            errors.push(format!(
+                "coverage starts at {} but requested range starts at {}",
+                ranges[0].1.start.0, requested.start.0
+            ));
+        }
+        for (clip, range) in &ranges {
+            if range.start < requested.start || range.end > requested.end {
+                errors.push(format!(
+                    "clip {} range {}..{} falls outside requested {}..{}",
+                    clip.id, range.start.0, range.end.0, requested.start.0, requested.end.0
+                ));
+            }
+        }
+        for ((left_clip, left), (right_clip, right)) in ranges.iter().zip(ranges.iter().skip(1)) {
+            if left.end != right.start {
+                let relation = if left.end < right.start {
+                    "gap"
+                } else {
+                    "overlap"
+                };
+                errors.push(format!(
+                    "{relation} between clips {} ({}..{}) and {} ({}..{})",
+                    left_clip.id,
+                    left.start.0,
+                    left.end.0,
+                    right_clip.id,
+                    right.start.0,
+                    right.end.0
+                ));
+            }
+        }
+        if let Some((clip, range)) = ranges.last()
+            && range.end != requested.end
+        {
+            errors.push(format!(
+                "coverage ends at {} on clip {} but requested range ends at {}",
+                range.end.0, clip.id, requested.end.0
+            ));
+        }
+    }
+    assertion_result(
+        "exact track media coverage",
+        errors.is_empty(),
+        if errors.is_empty() {
+            format!(
+                "track {track_id} has contiguous real-media coverage exactly over {}..{} (half-open)",
+                requested.start.0, requested.end.0
+            )
+        } else {
+            errors.join("; ")
+        },
+    )
+}
+
+fn evaluate_required_assets_on_track(
+    track_id: TrackId,
+    aliases: &[String],
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let unknown = aliases
+        .iter()
+        .filter(|alias| !outcome.context.asset_aliases.contains_key(*alias))
+        .cloned()
+        .collect::<Vec<_>>();
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "required assets on track",
+            false,
+            format!("track {track_id} does not exist; unknown aliases={unknown:?}"),
+        );
+    };
+    let present = track
+        .clips
+        .iter()
+        .filter(|clip| clip.content.is_media())
+        .map(|clip| clip.asset)
+        .collect::<BTreeSet<_>>();
+    let missing = aliases
+        .iter()
+        .filter(|alias| {
+            outcome
+                .context
+                .asset_aliases
+                .get(*alias)
+                .is_some_and(|asset| !present.contains(asset))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assertion_result(
+        "required assets on track",
+        unknown.is_empty() && missing.is_empty(),
+        if unknown.is_empty() && missing.is_empty() {
+            format!("track {track_id} contains every required media asset alias {aliases:?}")
+        } else {
+            format!("track {track_id} missing aliases={missing:?}; unknown aliases={unknown:?}")
+        },
+    )
+}
+
+fn evaluate_source_ranges_separated(
+    track_id: TrackId,
+    minimum_separation_frames: TimeCode,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    if minimum_separation_frames.0 < 0 {
+        return assertion_result(
+            "source ranges separated",
+            false,
+            format!(
+                "minimum source-frame separation must be non-negative, observed {}",
+                minimum_separation_frames.0
+            ),
+        );
+    }
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "source ranges separated",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+    let mut ranges_by_asset =
+        BTreeMap::<AssetId, Vec<(openreel_core::ClipId, TimeCode, TimeCode)>>::new();
+    for clip in track.clips.iter().filter(|clip| clip.content.is_media()) {
+        ranges_by_asset.entry(clip.asset).or_default().push((
+            clip.id,
+            clip.source_range.start,
+            clip.source_range.end,
+        ));
+    }
+    let aliases_by_asset = outcome
+        .context
+        .asset_aliases
+        .iter()
+        .map(|(alias, asset)| (*asset, alias.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut conflicts = Vec::new();
+    for (asset, mut ranges) in ranges_by_asset {
+        ranges.sort_by_key(|(_, start, end)| (*start, *end));
+        for pair in ranges.windows(2) {
+            let (_, left_start, left_end) = pair[0];
+            let (right_clip, right_start, right_end) = pair[1];
+            let separation = right_start.0.saturating_sub(left_end.0);
+            let overlaps = right_start < left_end;
+            if overlaps || separation < minimum_separation_frames.0 {
+                let label = aliases_by_asset
+                    .get(&asset)
+                    .map_or_else(|| format!("asset-{asset}"), |alias| (*alias).to_owned());
+                conflicts.push(format!(
+                    "{label} ({asset}) source range {}..{} and clip {} range {}..{} overlap={} and are separated by {} source frames; minimum is {}",
+                    left_start.0,
+                    left_end.0,
+                    right_clip,
+                    right_start.0,
+                    right_end.0,
+                    overlaps,
+                    separation,
+                    minimum_separation_frames.0,
+                ));
+            }
+        }
+    }
+    assertion_result(
+        "source ranges separated",
+        conflicts.is_empty(),
+        if conflicts.is_empty() {
+            format!(
+                "all media source ranges on track {track_id} are disjoint and separated by at least {} source frames",
+                minimum_separation_frames.0
+            )
+        } else {
+            conflicts.join("; ")
+        },
+    )
+}
+
+fn evaluate_source_ranges_scene_clean(
+    track_id: TrackId,
+    scene_set: &str,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let Some(scene_boundaries) = outcome.context.scene_sets.get(scene_set) else {
+        return assertion_result(
+            "source ranges scene clean",
+            false,
+            format!("unknown source scene set {scene_set:?}"),
+        );
+    };
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "source ranges scene clean",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+    let aliases_by_asset = outcome
+        .context
+        .asset_aliases
+        .iter()
+        .map(|(alias, asset)| (*asset, alias.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut crossings = Vec::new();
+    for clip in track.clips.iter().filter(|clip| clip.content.is_media()) {
+        for (_, boundary) in scene_boundaries
+            .iter()
+            .filter(|(asset, _)| *asset == clip.asset)
+        {
+            if *boundary > clip.source_range.start && *boundary < clip.source_range.end {
+                let label = aliases_by_asset.get(&clip.asset).map_or_else(
+                    || format!("asset-{}", clip.asset),
+                    |alias| (*alias).to_owned(),
+                );
+                crossings.push(format!(
+                    "clip {} uses {label} ({}) source {}..{} across detected boundary {}",
+                    clip.id,
+                    clip.asset,
+                    clip.source_range.start.0,
+                    clip.source_range.end.0,
+                    boundary.0,
+                ));
+            }
+        }
+    }
+    assertion_result(
+        "source ranges scene clean",
+        crossings.is_empty(),
+        if crossings.is_empty() {
+            format!(
+                "every media source range on track {track_id} contains at most one detected source shot from {scene_set:?}"
+            )
+        } else {
+            crossings.join("; ")
+        },
+    )
+}
+
+fn evaluate_source_ranges_avoid(
+    track_id: TrackId,
+    exclusion_set: &str,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let Some(exclusions) = outcome.context.exclusion_sets.get(exclusion_set) else {
+        return assertion_result(
+            "source ranges avoid exclusions",
+            false,
+            format!("unknown source-range exclusion set {exclusion_set:?}"),
+        );
+    };
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "source ranges avoid exclusions",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+
+    let aliases_by_asset = outcome
+        .context
+        .asset_aliases
+        .iter()
+        .map(|(alias, asset)| (*asset, alias.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let known_assets = outcome
+        .final_document
+        .media_pool
+        .iter()
+        .map(|asset| asset.id)
+        .collect::<BTreeSet<_>>();
+    let mut problems = Vec::new();
+    for (index, exclusion) in exclusions.iter().enumerate() {
+        if exclusion.source_range.start >= exclusion.source_range.end {
+            problems.push(format!(
+                "exclusion {index} has an empty or reversed source range {}..{}",
+                exclusion.source_range.start.0, exclusion.source_range.end.0
+            ));
+        }
+        if !known_assets.contains(&exclusion.asset) {
+            problems.push(format!(
+                "exclusion {index} references unknown asset {}",
+                exclusion.asset
+            ));
+        }
+        if exclusion.reason.trim().is_empty() {
+            problems.push(format!("exclusion {index} has an empty reason"));
+        }
+    }
+
+    for clip in track.clips.iter().filter(|clip| clip.content.is_media()) {
+        for exclusion in exclusions
+            .iter()
+            .filter(|exclusion| exclusion.asset == clip.asset)
+        {
+            // Source ranges are half-open. Touching at an endpoint is valid;
+            // only a positive-width intersection is prohibited.
+            if clip.source_range.start < exclusion.source_range.end
+                && exclusion.source_range.start < clip.source_range.end
+            {
+                let label = aliases_by_asset.get(&clip.asset).map_or_else(
+                    || format!("asset-{}", clip.asset),
+                    |alias| (*alias).to_owned(),
+                );
+                problems.push(format!(
+                    "clip {} uses {label} ({}) source {}..{} overlapping prohibited range {}..{} ({})",
+                    clip.id,
+                    clip.asset,
+                    clip.source_range.start.0,
+                    clip.source_range.end.0,
+                    exclusion.source_range.start.0,
+                    exclusion.source_range.end.0,
+                    exclusion.reason,
+                ));
+            }
+        }
+    }
+
+    assertion_result(
+        "source ranges avoid exclusions",
+        problems.is_empty(),
+        if problems.is_empty() {
+            format!(
+                "all media source ranges on track {track_id} avoid {} manually reviewed exclusions from {exclusion_set:?}",
+                exclusions.len()
+            )
+        } else {
+            problems.join("; ")
+        },
+    )
+}
+
+fn evaluate_shot_cadence_variation(
+    track_id: TrackId,
+    minimum_duration_buckets: usize,
+    duration_bucket_frames: TimeCode,
+    maximum_similar_run: usize,
+    similar_tolerance_frames: TimeCode,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    if minimum_duration_buckets == 0
+        || duration_bucket_frames.0 <= 0
+        || maximum_similar_run == 0
+        || similar_tolerance_frames.0 < 0
+    {
+        return assertion_result(
+            "shot cadence variation",
+            false,
+            format!(
+                "invalid cadence contract: minimum_duration_buckets={minimum_duration_buckets}, duration_bucket_frames={}, maximum_similar_run={maximum_similar_run}, similar_tolerance_frames={}",
+                duration_bucket_frames.0, similar_tolerance_frames.0
+            ),
+        );
+    }
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "shot cadence variation",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+    let mut clips = track
+        .clips
+        .iter()
+        .filter(|clip| clip.content.is_media())
+        .collect::<Vec<_>>();
+    clips.sort_by_key(|clip| (clip.timeline_start, clip.id));
+    let durations = clips
+        .iter()
+        .map(|clip| outcome.final_document.clip_duration(clip))
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(durations) = durations else {
+        return assertion_result(
+            "shot cadence variation",
+            false,
+            "one or more media clip durations could not be mapped into project frames".to_owned(),
+        );
+    };
+    let buckets = durations
+        .iter()
+        .map(|duration| {
+            duration
+                .0
+                .saturating_add(duration_bucket_frames.0 / 2)
+                .div_euclid(duration_bucket_frames.0)
+        })
+        .collect::<BTreeSet<_>>();
+    let mut current_run = usize::from(!durations.is_empty());
+    let mut longest_run = current_run;
+    for pair in durations.windows(2) {
+        if pair[0].0.abs_diff(pair[1].0) <= similar_tolerance_frames.0.unsigned_abs() {
+            current_run += 1;
+            longest_run = longest_run.max(current_run);
+        } else {
+            current_run = 1;
+        }
+    }
+    let passed = buckets.len() >= minimum_duration_buckets && longest_run <= maximum_similar_run;
+    assertion_result(
+        "shot cadence variation",
+        passed,
+        format!(
+            "track {track_id} mapped durations={:?}, rounded buckets={buckets:?} using {} frames, distinct={} required>={minimum_duration_buckets}, longest similar run={longest_run} allowed<={maximum_similar_run} at tolerance {}",
+            durations
+                .iter()
+                .map(|duration| duration.0)
+                .collect::<Vec<_>>(),
+            duration_bucket_frames.0,
+            buckets.len(),
+            similar_tolerance_frames.0,
+        ),
+    )
+}
+
+fn evaluate_no_alternating_shot_pattern(
+    track_id: TrackId,
+    maximum_repeated_pairs: usize,
+    tolerance_frames: TimeCode,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    if maximum_repeated_pairs == 0 || tolerance_frames.0 < 0 {
+        return assertion_result(
+            "non-alternating shot pattern",
+            false,
+            format!(
+                "invalid alternating-pattern contract: maximum_repeated_pairs={maximum_repeated_pairs}, tolerance_frames={}",
+                tolerance_frames.0
+            ),
+        );
+    }
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "non-alternating shot pattern",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+    if track.kind != openreel_core::TrackKind::Video {
+        return assertion_result(
+            "non-alternating shot pattern",
+            false,
+            format!(
+                "track {track_id} has kind {:?}; an alternating visual-shot contract requires a video track",
+                track.kind
+            ),
+        );
+    }
+
+    let (clips, mapping_errors) = ordered_media_project_ranges(&outcome.final_document, track);
+    if !mapping_errors.is_empty() {
+        return assertion_result(
+            "non-alternating shot pattern",
+            false,
+            mapping_errors.join("; "),
+        );
+    }
+    let durations = clips
+        .iter()
+        .map(|(_, range)| range.end.0.saturating_sub(range.start.0))
+        .collect::<Vec<_>>();
+    let tolerance = tolerance_frames.0.unsigned_abs();
+    let mut longest_run = 0_usize;
+    let mut violation = None;
+    for start in 0..durations.len().saturating_sub(3) {
+        // A constant run is period one, not the alternating pattern this
+        // predicate is intended to reject. ShotCadenceVariation owns that
+        // separate case.
+        if durations[start].abs_diff(durations[start + 1]) <= tolerance {
+            continue;
+        }
+        let mut repeated_pairs = 1_usize;
+        while start
+            .saturating_add(repeated_pairs.saturating_mul(2))
+            .saturating_add(1)
+            < durations.len()
+            && durations[start].abs_diff(durations[start + repeated_pairs * 2]) <= tolerance
+            && durations[start + 1].abs_diff(durations[start + repeated_pairs * 2 + 1]) <= tolerance
+        {
+            repeated_pairs += 1;
+        }
+        longest_run = longest_run.max(repeated_pairs);
+        if repeated_pairs > maximum_repeated_pairs {
+            violation = Some((start, repeated_pairs));
+            break;
+        }
+    }
+
+    let passed = violation.is_none();
+    let detail = if let Some((start, repeated_pairs)) = violation {
+        format!(
+            "track {track_id} mapped durations={durations:?}; period-two pair starting at clip index {start} repeats {repeated_pairs} times, allowed maximum is {maximum_repeated_pairs}, tolerance={}",
+            tolerance_frames.0
+        )
+    } else {
+        format!(
+            "track {track_id} mapped durations={durations:?}; longest repeated AB-pair run={longest_run}, allowed maximum={maximum_repeated_pairs}, tolerance={}",
+            tolerance_frames.0
+        )
+    };
+    assertion_result("non-alternating shot pattern", passed, detail)
+}
+
+fn evaluate_beat_aligned_cuts(
+    track_id: TrackId,
+    beat_set: &str,
+    tolerance_frames: TimeCode,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let Some(beats) = outcome.context.timeline_beat_sets.get(beat_set) else {
+        return assertion_result(
+            "beat-aligned cuts",
+            false,
+            format!("unknown project-frame beat set {beat_set:?}"),
+        );
+    };
+    if tolerance_frames.0 < 0 {
+        return assertion_result(
+            "beat-aligned cuts",
+            false,
+            format!(
+                "project-frame tolerance must be non-negative, observed {}",
+                tolerance_frames.0
+            ),
+        );
+    }
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "beat-aligned cuts",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+    let mut media_clips = track
+        .clips
+        .iter()
+        .filter(|clip| clip.content.is_media())
+        .collect::<Vec<_>>();
+    media_clips.sort_by_key(|clip| clip.timeline_start);
+    if media_clips.len() < 2 {
+        return assertion_result(
+            "beat-aligned cuts",
+            false,
+            format!(
+                "track {track_id} has {} media clips; at least two are required",
+                media_clips.len()
+            ),
+        );
+    }
+    if beats.is_empty() {
+        return assertion_result(
+            "beat-aligned cuts",
+            false,
+            format!("project-frame beat set {beat_set:?} is empty"),
+        );
+    }
+
+    let tolerance = tolerance_frames.0.cast_unsigned();
+    let misses = media_clips
+        .windows(2)
+        .filter_map(|pair| {
+            let boundary = pair[1].timeline_start;
+            let nearest = nearest_frame_distance(boundary, beats);
+            nearest.filter(|distance| *distance > tolerance).map(|distance| {
+                format!(
+                    "cut boundary between clips {} and {} at project frame {} misses every beat in {beat_set:?} (nearest distance {} > tolerance {})",
+                    pair[0].id,
+                    pair[1].id,
+                    boundary.0,
+                    distance,
+                    tolerance_frames.0,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    assertion_result(
+        "beat-aligned cuts",
+        misses.is_empty(),
+        if misses.is_empty() {
+            format!(
+                "{} media clips on track {track_id}; every internal project-frame boundary is within inclusive tolerance {} of beat set {beat_set:?}",
+                media_clips.len(),
+                tolerance_frames.0,
+            )
+        } else {
+            misses.join("; ")
+        },
+    )
+}
+
+fn evaluate_cuts_aligned_to_beat_set_at_least(
+    track_id: TrackId,
+    beat_set: &str,
+    tolerance_frames: TimeCode,
+    minimum_aligned_cuts: usize,
+    minimum_aligned_basis_points: u16,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    if tolerance_frames.0 < 0 || minimum_aligned_basis_points > 10_000 {
+        return assertion_result(
+            "structural beat-aligned cuts",
+            false,
+            format!(
+                "invalid structural alignment contract: tolerance={} minimum_aligned_basis_points={minimum_aligned_basis_points}",
+                tolerance_frames.0
+            ),
+        );
+    }
+    let Some(beats) = outcome.context.timeline_beat_sets.get(beat_set) else {
+        return assertion_result(
+            "structural beat-aligned cuts",
+            false,
+            format!("unknown project-frame beat set {beat_set:?}"),
+        );
+    };
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "structural beat-aligned cuts",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+    let mut media_clips = track
+        .clips
+        .iter()
+        .filter(|clip| clip.content.is_media())
+        .collect::<Vec<_>>();
+    media_clips.sort_by_key(|clip| (clip.timeline_start, clip.id));
+    let total_cuts = media_clips.len().saturating_sub(1);
+    if total_cuts == 0 || beats.is_empty() {
+        return assertion_result(
+            "structural beat-aligned cuts",
+            false,
+            format!(
+                "track {track_id} internal cuts={total_cuts}; structural beat set {beat_set:?} contains {} frames",
+                beats.len()
+            ),
+        );
+    }
+    let tolerance = tolerance_frames.0.cast_unsigned();
+    let aligned = media_clips
+        .iter()
+        .skip(1)
+        .filter(|clip| {
+            nearest_frame_distance(clip.timeline_start, beats)
+                .is_some_and(|distance| distance <= tolerance)
+        })
+        .count();
+    let aligned_basis_points = u16::try_from(
+        (u128::try_from(aligned).unwrap_or(u128::MAX) * 10_000)
+            / u128::try_from(total_cuts).unwrap_or(u128::MAX),
+    )
+    .unwrap_or(10_000);
+    let passed =
+        aligned >= minimum_aligned_cuts && aligned_basis_points >= minimum_aligned_basis_points;
+    assertion_result(
+        "structural beat-aligned cuts",
+        passed,
+        format!(
+            "track {track_id} aligned {aligned}/{total_cuts} internal cuts ({aligned_basis_points} basis points) to {beat_set:?} within {} frames; required count>={minimum_aligned_cuts} and share>={minimum_aligned_basis_points}",
+            tolerance_frames.0
+        ),
+    )
+}
+
+const MUSIC_FIT_MODEL_GUARANTEE: &str = "repeat/looping is impossible with one finite source_range; speed_percent=100 rejects time-stretch";
+
+#[allow(clippy::too_many_lines)]
+fn evaluate_music_fit(
+    track_id: TrackId,
+    asset_alias: &str,
+    source_beat_set: &str,
+    timeline_start: TimeCode,
+    timeline_end: TimeCode,
+    tolerance_source_frames: TimeCode,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let music_result = |passed: bool, detail: String| {
+        assertion_result(
+            "music fit",
+            passed,
+            format!("{detail}; {MUSIC_FIT_MODEL_GUARANTEE}"),
+        )
+    };
+    if tolerance_source_frames.0 < 0 {
+        return music_result(
+            false,
+            format!(
+                "source-frame tolerance must be non-negative, observed {}",
+                tolerance_source_frames.0
+            ),
+        );
+    }
+    let Some(expected_asset) = outcome.context.asset_aliases.get(asset_alias) else {
+        return music_result(false, format!("unknown asset alias {asset_alias:?}"));
+    };
+    let Some(source_beats) = outcome.context.source_beat_sets.get(source_beat_set) else {
+        return music_result(
+            false,
+            format!("unknown source-frame beat set {source_beat_set:?}"),
+        );
+    };
+    if source_beats.is_empty() {
+        return music_result(
+            false,
+            format!("source-frame beat set {source_beat_set:?} is empty"),
+        );
+    }
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return music_result(false, format!("track {track_id} does not exist"));
+    };
+    let media_clips = track
+        .clips
+        .iter()
+        .filter(|clip| clip.content.is_media())
+        .collect::<Vec<_>>();
+    if media_clips.len() != 1 {
+        return music_result(
+            false,
+            format!(
+                "track {track_id} has {} media clips; exactly one is required",
+                media_clips.len()
+            ),
+        );
+    }
+    let clip = media_clips[0];
+    let mut errors = Vec::new();
+    if track.kind != openreel_core::TrackKind::Audio {
+        errors.push(format!(
+            "track {track_id} has kind {:?}; music must be on an audio track",
+            track.kind
+        ));
+    }
+    let Some(asset) = outcome.final_document.asset(clip.asset) else {
+        errors.push(format!(
+            "clip {} references missing asset {}",
+            clip.id, clip.asset
+        ));
+        return music_result(false, errors.join("; "));
+    };
+    if clip.asset != *expected_asset {
+        errors.push(format!(
+            "expected asset alias {asset_alias:?} ({expected_asset}), observed {}",
+            clip.asset
+        ));
+    }
+    if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
+        errors.push(format!(
+            "asset {} has kind {:?}; expected audio-capable media",
+            clip.asset, asset.kind
+        ));
+    }
+    if clip.timeline_start != timeline_start {
+        errors.push(format!(
+            "expected project start {}, observed {}",
+            timeline_start.0, clip.timeline_start.0
+        ));
+    }
+    match outcome.final_document.clip_duration(clip) {
+        Ok(duration) => match clip.timeline_start.checked_add(duration) {
+            Some(observed_end) if observed_end == timeline_end => {}
+            Some(observed_end) => errors.push(format!(
+                "expected project coverage {}..{}, observed {}..{}",
+                timeline_start.0, timeline_end.0, clip.timeline_start.0, observed_end.0
+            )),
+            None => errors.push(format!(
+                "project end overflowed from start {} and duration {}",
+                clip.timeline_start.0, duration.0
+            )),
+        },
+        Err(error) => errors.push(format!("could not map music clip duration: {error}")),
+    }
+    if clip.speed_percent != 100 {
+        errors.push(format!(
+            "music clip speed is {}%; expected real-time 100%",
+            clip.speed_percent
+        ));
+    }
+    let source_start = clip.source_range.start;
+    let nearest = nearest_frame_distance(source_start, source_beats);
+    let tolerance = tolerance_source_frames.0.cast_unsigned();
+    if nearest.is_none_or(|distance| distance > tolerance) {
+        match nearest {
+            Some(distance) => errors.push(format!(
+                "source start {} is {} frames from the nearest source beat in {source_beat_set:?}; inclusive tolerance is {}",
+                source_start.0,
+                distance,
+                tolerance_source_frames.0
+            )),
+            None => errors.push(format!(
+                "source start {} has no eligible source beat in {source_beat_set:?}",
+                source_start.0
+            )),
+        }
+    }
+    if clip.audio_gain_tenth_db != 0 {
+        errors.push(format!(
+            "clip gain is {} tenths of a dB; expected zero",
+            clip.audio_gain_tenth_db
+        ));
+    }
+    if clip.audio_fade_in_frames != TimeCode::ZERO {
+        errors.push(format!(
+            "audio fade-in is {} project frames; expected zero",
+            clip.audio_fade_in_frames.0
+        ));
+    }
+    if clip.audio_fade_out_frames != TimeCode::ZERO {
+        errors.push(format!(
+            "audio fade-out is {} project frames; expected zero",
+            clip.audio_fade_out_frames.0
+        ));
+    }
+    if !clip.effects.is_empty() {
+        errors.push(format!(
+            "music clip has {} effect(s); expected none",
+            clip.effects.len()
+        ));
+    }
+    if clip.transition_in.is_some() {
+        errors.push("music clip has an incoming transition; expected none".to_owned());
+    }
+    if errors.is_empty() {
+        music_result(
+            true,
+            format!(
+                "track {track_id} has one audio clip from project {}..{} using asset alias {asset_alias:?}; source start {} is within {} source frames of an eligible beat",
+                timeline_start.0, timeline_end.0, source_start.0, tolerance_source_frames.0,
+            ),
+        )
+    } else {
+        music_result(false, errors.join("; "))
+    }
+}
+
+fn nearest_frame_distance(frame: TimeCode, candidates: &[TimeCode]) -> Option<u64> {
+    candidates
+        .iter()
+        .map(|candidate| frame.0.abs_diff(candidate.0))
+        .min()
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2867,6 +4245,134 @@ fn evaluate_program_audio_continuous(
     )
 }
 
+fn evaluate_media_clip_count(
+    track_id: TrackId,
+    minimum: usize,
+    maximum: usize,
+    minimum_duration: TimeCode,
+    maximum_duration: TimeCode,
+    reject_non_media: bool,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "media clip count and duration bounds",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+
+    if minimum > maximum {
+        return assertion_result(
+            "media clip count and duration bounds",
+            false,
+            format!("invalid media clip count bounds {minimum}..={maximum}"),
+        );
+    }
+    if minimum_duration > maximum_duration {
+        return assertion_result(
+            "media clip count and duration bounds",
+            false,
+            format!(
+                "invalid media clip duration bounds {}..={}",
+                minimum_duration.0, maximum_duration.0
+            ),
+        );
+    }
+
+    let media_clips = track
+        .clips
+        .iter()
+        .filter(|clip| matches!(clip.content, ClipContent::Media))
+        .collect::<Vec<_>>();
+    let non_media_clips = track
+        .clips
+        .iter()
+        .filter(|clip| !matches!(clip.content, ClipContent::Media))
+        .map(|clip| format!("clip {} ({:?})", clip.id, clip.content))
+        .collect::<Vec<_>>();
+    let count = media_clips.len();
+    let count_passed = (minimum..=maximum).contains(&count);
+    let duration_violations = media_clips
+        .iter()
+        .filter_map(|clip| match outcome.final_document.clip_duration(clip) {
+            Ok(duration) if (minimum_duration..=maximum_duration).contains(&duration) => None,
+            Ok(duration) => Some(format!(
+                "clip {} duration {} outside {}..={}",
+                clip.id, duration.0, minimum_duration.0, maximum_duration.0
+            )),
+            Err(error) => Some(format!("clip {} duration mapping failed: {error}", clip.id)),
+        })
+        .collect::<Vec<_>>();
+    let non_media_passed = !reject_non_media || non_media_clips.is_empty();
+    let passed = count_passed && duration_violations.is_empty() && non_media_passed;
+    let detail = if !non_media_passed {
+        format!(
+            "track {track_id}: non-media clips are forbidden but observed [{}]",
+            non_media_clips.join(", ")
+        )
+    } else if duration_violations.is_empty() {
+        format!(
+            "track {track_id}: expected {minimum}..={maximum} media clips, observed {count}; every mapped project duration is within {}..={}; non-media clips allowed={}",
+            minimum_duration.0, maximum_duration.0, !reject_non_media
+        )
+    } else {
+        format!(
+            "track {track_id}: expected {minimum}..={maximum} media clips, observed {count}; {}",
+            duration_violations.join("; ")
+        )
+    };
+    assertion_result("media clip count and duration bounds", passed, detail)
+}
+
+fn evaluate_single_audio_media_clip(
+    track_id: TrackId,
+    asset_alias: &str,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let Some(expected_asset) = outcome.context.asset_aliases.get(asset_alias) else {
+        return assertion_result(
+            "single audio media clip",
+            false,
+            format!("unknown asset alias {asset_alias:?}"),
+        );
+    };
+
+    let audio_clips = outcome
+        .final_document
+        .tracks
+        .iter()
+        .flat_map(|track| {
+            track.clips.iter().filter_map(move |clip| {
+                let asset = outcome.final_document.asset(clip.asset)?;
+                (clip.content.is_media()
+                    && matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo))
+                .then_some((track.id, clip))
+            })
+        })
+        .collect::<Vec<_>>();
+    let passed = audio_clips.len() == 1
+        && audio_clips[0].0 == track_id
+        && audio_clips[0].1.asset == *expected_asset;
+    let observed = audio_clips
+        .iter()
+        .map(|(track, clip)| format!("track {track}/clip {} asset {}", clip.id, clip.asset))
+        .collect::<Vec<_>>();
+    assertion_result(
+        "single audio media clip",
+        passed,
+        format!(
+            "expected exactly one audio-capable media clip on track {track_id} using asset {asset_alias:?} ({expected_asset}); observed [{}]",
+            observed.join(", ")
+        ),
+    )
+}
+
 fn evaluate_dialogue_pause_bounds(
     words: &[TimelineTranscriptWord],
     silences: &[TimelineSilenceSpan],
@@ -3339,6 +4845,277 @@ fn evaluate_transition(
         "transition on asset",
         matched,
         format!("asset={asset_alias:?}, transition={transition_name:?}, matched={matched}"),
+    )
+}
+
+fn evaluate_no_visual_transitions_effects_or_retiming(
+    track_id: TrackId,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "hard-cut video track",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+    if track.kind != openreel_core::TrackKind::Video {
+        return assertion_result(
+            "hard-cut video track",
+            false,
+            format!(
+                "track {track_id} has kind {:?}; a hard-cut visual contract requires a video track",
+                track.kind
+            ),
+        );
+    }
+
+    let mut violations = Vec::new();
+    for clip in track
+        .clips
+        .iter()
+        .filter(|clip| matches!(clip.content, ClipContent::Media))
+    {
+        if let Some(transition) = &clip.transition_in {
+            violations.push(format!(
+                "clip {} has transition {} ({} frames)",
+                clip.id, transition.name, transition.duration.0
+            ));
+        }
+        if !clip.effects.is_empty() {
+            let effects = clip
+                .effects
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            violations.push(format!("clip {} has effects [{effects}]", clip.id));
+        }
+        if clip.speed_percent != 100 {
+            violations.push(format!(
+                "clip {} is retimed to {}%",
+                clip.id, clip.speed_percent
+            ));
+        }
+    }
+    assertion_result(
+        "hard-cut video track",
+        violations.is_empty(),
+        if violations.is_empty() {
+            format!(
+                "track {track_id} media clips have no incoming transitions, effects, or non-real-time playback"
+            )
+        } else {
+            violations.join("; ")
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn evaluate_source_phase_arc(
+    track_id: TrackId,
+    opening_alias: &str,
+    pivot_alias: &str,
+    pivot_window: &std::ops::Range<TimeCode>,
+    return_window: &std::ops::Range<TimeCode>,
+    closing_alias: &str,
+    minimum_opening_hold: TimeCode,
+    minimum_closing_hold: TimeCode,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    if minimum_opening_hold.0 < 0
+        || minimum_closing_hold.0 < 0
+        || pivot_window.start.0 < 0
+        || pivot_window.start >= pivot_window.end
+        || return_window.start.0 < 0
+        || return_window.start >= return_window.end
+    {
+        return assertion_result(
+            "source-phase arc",
+            false,
+            format!(
+                "invalid source-phase contract: pivot_window={}..{}, return_window={}..{}, minimum_opening_hold={}, minimum_closing_hold={}",
+                pivot_window.start.0,
+                pivot_window.end.0,
+                return_window.start.0,
+                return_window.end.0,
+                minimum_opening_hold.0,
+                minimum_closing_hold.0
+            ),
+        );
+    }
+
+    let unknown_aliases = [opening_alias, pivot_alias, closing_alias]
+        .into_iter()
+        .filter(|alias| !outcome.context.asset_aliases.contains_key(*alias))
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    if !unknown_aliases.is_empty() {
+        return assertion_result(
+            "source-phase arc",
+            false,
+            format!("unknown asset aliases {unknown_aliases:?}"),
+        );
+    }
+    let opening_asset = outcome
+        .context
+        .asset_aliases
+        .get(opening_alias)
+        .copied()
+        .expect("unknown aliases returned above");
+    let pivot_asset = outcome
+        .context
+        .asset_aliases
+        .get(pivot_alias)
+        .copied()
+        .expect("unknown aliases returned above");
+    let closing_asset = outcome
+        .context
+        .asset_aliases
+        .get(closing_alias)
+        .copied()
+        .expect("unknown aliases returned above");
+
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "source-phase arc",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+    if track.kind != openreel_core::TrackKind::Video {
+        return assertion_result(
+            "source-phase arc",
+            false,
+            format!(
+                "track {track_id} has kind {:?}; a source-phase arc requires a video track",
+                track.kind
+            ),
+        );
+    }
+    let (ranges, mapping_errors) = ordered_media_project_ranges(&outcome.final_document, track);
+    if !mapping_errors.is_empty() {
+        return assertion_result("source-phase arc", false, mapping_errors.join("; "));
+    }
+    if ranges.is_empty() {
+        return assertion_result(
+            "source-phase arc",
+            false,
+            format!("track {track_id} has no real media clips"),
+        );
+    }
+    let non_media = track
+        .clips
+        .iter()
+        .filter(|clip| !matches!(clip.content, ClipContent::Media))
+        .map(|clip| format!("clip {} ({:?})", clip.id, clip.content))
+        .collect::<Vec<_>>();
+    if !non_media.is_empty() {
+        return assertion_result(
+            "source-phase arc",
+            false,
+            format!(
+                "track {track_id} contains non-media clips [{}]",
+                non_media.join(", ")
+            ),
+        );
+    }
+
+    let first = &ranges[0];
+    let last = ranges.last().expect("ranges checked non-empty");
+    let first_alias_matches = first.0.asset == opening_asset;
+    let last_alias_matches = last.0.asset == closing_asset;
+
+    let mut opening_hold_end = first.1.end;
+    for (clip, range) in ranges.iter().skip(1) {
+        if clip.asset == opening_asset && range.start == opening_hold_end {
+            opening_hold_end = range.end;
+        } else {
+            break;
+        }
+    }
+    let opening_hold = opening_hold_end
+        .checked_sub(first.1.start)
+        .unwrap_or(TimeCode::ZERO);
+
+    let mut closing_hold_start = last.1.start;
+    for (clip, range) in ranges.iter().rev().skip(1) {
+        if clip.asset == closing_asset && range.end == closing_hold_start {
+            closing_hold_start = range.start;
+        } else {
+            break;
+        }
+    }
+    let closing_hold = last
+        .1
+        .end
+        .checked_sub(closing_hold_start)
+        .unwrap_or(TimeCode::ZERO);
+
+    let pivot_indices = ranges
+        .iter()
+        .enumerate()
+        .filter(|(_, (clip, _))| clip.asset == pivot_asset)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let pivot_start_index = pivot_indices.first().copied();
+    let pivot_end_index = pivot_indices.last().copied();
+    let pivot_is_interior = pivot_start_index.is_some_and(|index| index > 0)
+        && pivot_end_index.is_some_and(|index| index + 1 < ranges.len());
+    let pivot_is_contiguous = pivot_start_index
+        .zip(pivot_end_index)
+        .is_some_and(|(start, end)| {
+            ranges[start..=end]
+                .iter()
+                .all(|(clip, _)| clip.asset == pivot_asset)
+        });
+    let pivot_start = pivot_start_index.map(|index| ranges[index].1.start);
+    let return_start = pivot_end_index
+        .and_then(|index| ranges.get(index + 1))
+        .map(|(_, range)| range.start);
+    let pivot_starts_in_window =
+        pivot_start.is_some_and(|start| pivot_window.start <= start && start < pivot_window.end);
+    let return_starts_in_window =
+        return_start.is_some_and(|start| return_window.start <= start && start < return_window.end);
+    let passed = first.1.start == TimeCode::ZERO
+        && first_alias_matches
+        && last_alias_matches
+        && opening_hold >= minimum_opening_hold
+        && closing_hold >= minimum_closing_hold
+        && pivot_is_interior
+        && pivot_is_contiguous
+        && pivot_starts_in_window
+        && return_starts_in_window;
+    assertion_result(
+        "source-phase arc",
+        passed,
+        format!(
+            "track {track_id}: first={} at {}..{}, opening={opening_alias:?} first_match={first_alias_matches} hold={} minimum={}, pivot={pivot_alias:?} indices={pivot_indices:?} contiguous={pivot_is_contiguous} interior={pivot_is_interior} start={:?} window={}..{}, return={:?} window={}..{}, closing={closing_alias:?} last_match={last_alias_matches} hold={} minimum={}, last_end={}",
+            first.0.asset,
+            first.1.start.0,
+            first.1.end.0,
+            opening_hold.0,
+            minimum_opening_hold.0,
+            pivot_start.map(|frame| frame.0),
+            pivot_window.start.0,
+            pivot_window.end.0,
+            return_start.map(|frame| frame.0),
+            return_window.start.0,
+            return_window.end.0,
+            closing_hold.0,
+            minimum_closing_hold.0,
+            last.1.end.0,
+        ),
     )
 }
 
@@ -3940,6 +5717,692 @@ mod tests {
         }
     }
 
+    fn outcome_for(final_document: Document, context: FixtureContext) -> EvalOutcome {
+        EvalOutcome {
+            final_document,
+            final_words: Vec::new(),
+            final_timeline_words: Vec::new(),
+            remaining_silences: Vec::new(),
+            remaining_scenes: Vec::new(),
+            context,
+            session: SessionMetrics::default(),
+            operations: Vec::new(),
+            undo_steps_to_original: None,
+        }
+    }
+
+    fn three_cut_document() -> Document {
+        let mut final_document = document();
+        let mut second = final_document.tracks[0].clips[0].clone();
+        second.id = ClipId(2);
+        second.timeline_start = TimeCode(60);
+        let mut third = second.clone();
+        third.id = ClipId(3);
+        third.timeline_start = TimeCode(120);
+        final_document.tracks[0].clips =
+            vec![final_document.tracks[0].clips[0].clone(), second, third];
+        final_document.duration = TimeCode(180);
+        final_document
+    }
+
+    fn music_document() -> Document {
+        let mut final_document = document();
+        final_document.media_pool[0].kind = MediaKind::Audio;
+        final_document.media_pool[0].duration = TimeCode(120);
+        final_document.tracks[0].kind = TrackKind::Audio;
+        final_document.tracks[0].clips[0].source_range = TimeCode(10)..TimeCode(70);
+        final_document.duration = TimeCode(60);
+        final_document
+    }
+
+    fn clip_fixture(
+        id: u64,
+        asset: AssetId,
+        timeline_start: i64,
+        source_start: i64,
+        source_end: i64,
+        content: ClipContent,
+    ) -> Clip {
+        Clip {
+            id: ClipId(id),
+            asset,
+            source_range: TimeCode(source_start)..TimeCode(source_end),
+            content,
+            timeline_start: TimeCode(timeline_start),
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+        }
+    }
+
+    fn audio_fixture_document() -> (Document, FixtureContext) {
+        let mut final_document = document();
+        let audio_asset = MediaAsset {
+            id: AssetId(2),
+            path: PathBuf::from("music.wav"),
+            name: "music".to_owned(),
+            duration: TimeCode(120),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Audio,
+            resolution: None,
+        };
+        final_document.media_pool.push(audio_asset);
+        final_document.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![clip_fixture(2, AssetId(2), 0, 0, 60, ClipContent::Media)],
+        });
+        final_document.duration = TimeCode(60);
+        let mut context = FixtureContext::default();
+        context.asset_aliases.insert("music".to_owned(), AssetId(2));
+        (final_document, context)
+    }
+
+    #[test]
+    fn media_clip_count_ignores_title_and_freeze_padding() {
+        let mut final_document = document();
+        final_document.tracks[0].clips.extend([
+            clip_fixture(
+                2,
+                AssetId::default(),
+                60,
+                60,
+                120,
+                ClipContent::Title(CaptionPreset::Social.title("padding")),
+            ),
+            clip_fixture(
+                3,
+                AssetId(1),
+                120,
+                120,
+                180,
+                ClipContent::Freeze(openreel_core::FreezeFrame {
+                    source_frame: TimeCode(0),
+                }),
+            ),
+        ]);
+        final_document.duration = TimeCode(180);
+        let outcome = outcome_for(final_document, FixtureContext::default());
+
+        let result = evaluate_media_clip_count(
+            TrackId(1),
+            1,
+            1,
+            TimeCode(60),
+            TimeCode(60),
+            false,
+            &outcome,
+        );
+        assert!(result.passed, "{result:?}");
+    }
+
+    #[test]
+    fn media_clip_count_can_reject_title_and_freeze_padding() {
+        let mut final_document = document();
+        final_document.tracks[0].clips.extend([
+            clip_fixture(
+                2,
+                AssetId::default(),
+                60,
+                60,
+                120,
+                ClipContent::Title(CaptionPreset::Social.title("padding")),
+            ),
+            clip_fixture(
+                3,
+                AssetId(1),
+                120,
+                120,
+                180,
+                ClipContent::Freeze(openreel_core::FreezeFrame {
+                    source_frame: TimeCode(0),
+                }),
+            ),
+        ]);
+        final_document.duration = TimeCode(180);
+        let outcome = outcome_for(final_document, FixtureContext::default());
+
+        let result =
+            evaluate_media_clip_count(TrackId(1), 1, 1, TimeCode(60), TimeCode(60), true, &outcome);
+        assert!(
+            !result.passed,
+            "non-media padding unexpectedly passed: {result:?}"
+        );
+        assert!(result.detail.contains("non-media clips are forbidden"));
+    }
+
+    #[test]
+    fn media_clip_count_rejects_too_short_and_too_long_media() {
+        for (label, duration) in [("too short", 39_i64), ("too long", 81_i64)] {
+            let mut final_document = document();
+            final_document.tracks[0].clips[0].source_range = TimeCode::ZERO..TimeCode(duration);
+            final_document.duration = TimeCode(duration);
+            let outcome = outcome_for(final_document, FixtureContext::default());
+            let result = evaluate_media_clip_count(
+                TrackId(1),
+                1,
+                1,
+                TimeCode(40),
+                TimeCode(80),
+                true,
+                &outcome,
+            );
+            assert!(
+                !result.passed,
+                "{label} clip unexpectedly passed: {result:?}"
+            );
+            assert!(result.detail.contains(&duration.to_string()), "{result:?}");
+        }
+    }
+
+    #[test]
+    fn media_clip_count_uses_mapped_project_duration() {
+        let mut final_document = document();
+        final_document.tracks[0].clips[0].source_range = TimeCode::ZERO..TimeCode(30);
+        final_document.tracks[0].clips[0].speed_percent = 50;
+        final_document.duration = TimeCode(60);
+        let outcome = outcome_for(final_document, FixtureContext::default());
+
+        let result =
+            evaluate_media_clip_count(TrackId(1), 1, 1, TimeCode(60), TimeCode(60), true, &outcome);
+        assert!(result.passed, "{result:?}");
+    }
+
+    #[test]
+    fn single_audio_media_clip_accepts_the_unique_named_asset() {
+        let (final_document, context) = audio_fixture_document();
+        let outcome = outcome_for(final_document, context);
+        let result = evaluate_single_audio_media_clip(TrackId(2), "music", &outcome);
+        assert!(result.passed, "{result:?}");
+    }
+
+    #[test]
+    fn single_audio_media_clip_rejects_extra_audio_track_or_clip() {
+        let (mut final_document, context) = audio_fixture_document();
+        final_document.tracks.push(Track {
+            id: TrackId(3),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![clip_fixture(3, AssetId(2), 0, 60, 120, ClipContent::Media)],
+        });
+        let outcome = outcome_for(final_document, context.clone());
+        let result = evaluate_single_audio_media_clip(TrackId(2), "music", &outcome);
+        assert!(
+            !result.passed,
+            "extra audio track unexpectedly passed: {result:?}"
+        );
+
+        let (mut final_document, context) = audio_fixture_document();
+        final_document.tracks[1].clips.push(clip_fixture(
+            3,
+            AssetId(2),
+            60,
+            60,
+            120,
+            ClipContent::Media,
+        ));
+        let outcome = outcome_for(final_document, context);
+        let result = evaluate_single_audio_media_clip(TrackId(2), "music", &outcome);
+        assert!(
+            !result.passed,
+            "extra audio clip unexpectedly passed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn source_ranges_scene_clean_rejects_interior_source_edits_but_allows_boundaries() {
+        let mut context = FixtureContext::default();
+        context.asset_aliases.insert("video".to_owned(), AssetId(1));
+        context.scene_sets.insert(
+            "source-scenes".to_owned(),
+            vec![(AssetId(1), TimeCode(20)), (AssetId(1), TimeCode(40))],
+        );
+
+        let crossing = outcome_for(document(), context.clone());
+        let result = evaluate_source_ranges_scene_clean(TrackId(1), "source-scenes", &crossing);
+        assert!(!result.passed, "interior source edits passed: {result:?}");
+        assert!(result.detail.contains("boundary 20"));
+
+        let mut clean_document = document();
+        clean_document.tracks[0].clips = vec![
+            clip_fixture(1, AssetId(1), 0, 0, 20, ClipContent::Media),
+            clip_fixture(2, AssetId(1), 20, 20, 40, ClipContent::Media),
+            clip_fixture(3, AssetId(1), 40, 40, 60, ClipContent::Media),
+        ];
+        let clean = outcome_for(clean_document, context);
+        let result = evaluate_source_ranges_scene_clean(TrackId(1), "source-scenes", &clean);
+        assert!(result.passed, "scene-aligned clips failed: {result:?}");
+    }
+
+    #[test]
+    fn source_ranges_avoid_uses_half_open_overlap_and_reports_reason() {
+        let mut context = FixtureContext::default();
+        context.asset_aliases.insert("video".to_owned(), AssetId(1));
+        context.exclusion_sets.insert(
+            "reviewed-slates".to_owned(),
+            vec![SourceRangeExclusion {
+                asset: AssetId(1),
+                source_range: TimeCode(20)..TimeCode(40),
+                reason: "embedded title slate".to_owned(),
+            }],
+        );
+
+        let mut boundary_document = document();
+        boundary_document.tracks[0].clips[0].source_range = TimeCode::ZERO..TimeCode(20);
+        boundary_document.duration = TimeCode(20);
+        let boundary = outcome_for(boundary_document, context.clone());
+        let result = evaluate_source_ranges_avoid(TrackId(1), "reviewed-slates", &boundary);
+        assert!(
+            result.passed,
+            "touching exclusion boundary failed: {result:?}"
+        );
+
+        let mut crossing_document = document();
+        crossing_document.tracks[0].clips[0].source_range = TimeCode::ZERO..TimeCode(21);
+        crossing_document.duration = TimeCode(21);
+        let crossing = outcome_for(crossing_document, context);
+        let result = evaluate_source_ranges_avoid(TrackId(1), "reviewed-slates", &crossing);
+        assert!(!result.passed, "overlapping exclusion passed: {result:?}");
+        assert!(result.detail.contains("embedded title slate"));
+        assert!(result.detail.contains("20..40"));
+    }
+
+    #[test]
+    fn shot_cadence_variation_rejects_a_metronome_and_accepts_a_varied_shape() {
+        let cadence_outcome = |durations: &[i64]| {
+            let mut final_document = document();
+            final_document.media_pool[0].duration = TimeCode(200);
+            let mut timeline_start = 0_i64;
+            final_document.tracks[0].clips = durations
+                .iter()
+                .enumerate()
+                .map(|(index, duration)| {
+                    let clip = clip_fixture(
+                        u64::try_from(index + 1).unwrap(),
+                        AssetId(1),
+                        timeline_start,
+                        0,
+                        *duration,
+                        ClipContent::Media,
+                    );
+                    timeline_start += duration;
+                    clip
+                })
+                .collect();
+            final_document.duration = TimeCode(timeline_start);
+            outcome_for(final_document, FixtureContext::default())
+        };
+
+        let metronome = cadence_outcome(&[76, 80, 83, 80, 77, 80, 80, 84]);
+        let result = evaluate_shot_cadence_variation(
+            TrackId(1),
+            3,
+            TimeCode(20),
+            3,
+            TimeCode(8),
+            &metronome,
+        );
+        assert!(!result.passed, "metronomic cadence passed: {result:?}");
+        assert!(result.detail.contains("longest similar run=8"));
+
+        let varied = cadence_outcome(&[120, 80, 40, 60, 40, 80, 120]);
+        let result =
+            evaluate_shot_cadence_variation(TrackId(1), 3, TimeCode(20), 3, TimeCode(8), &varied);
+        assert!(result.passed, "varied cadence failed: {result:?}");
+    }
+
+    #[test]
+    fn structural_cut_alignment_enforces_both_count_and_share() {
+        let mut context = FixtureContext::default();
+        context
+            .timeline_beat_sets
+            .insert("structural".to_owned(), vec![TimeCode(60)]);
+        let outcome = outcome_for(three_cut_document(), context);
+        let passing = evaluate_cuts_aligned_to_beat_set_at_least(
+            TrackId(1),
+            "structural",
+            TimeCode::ZERO,
+            1,
+            5_000,
+            &outcome,
+        );
+        assert!(passing.passed, "half-aligned cadence failed: {passing:?}");
+
+        let count_failure = evaluate_cuts_aligned_to_beat_set_at_least(
+            TrackId(1),
+            "structural",
+            TimeCode::ZERO,
+            2,
+            5_000,
+            &outcome,
+        );
+        assert!(!count_failure.passed);
+        let share_failure = evaluate_cuts_aligned_to_beat_set_at_least(
+            TrackId(1),
+            "structural",
+            TimeCode::ZERO,
+            1,
+            5_001,
+            &outcome,
+        );
+        assert!(!share_failure.passed);
+    }
+
+    #[test]
+    fn eval_assertion_media_contracts_round_trip_through_json() {
+        let assertions = vec![
+            EvalAssertion::ExactProjectDuration {
+                duration: TimeCode(600),
+            },
+            EvalAssertion::ExactTrackMediaCoverage {
+                track: TrackId(1),
+                range: TimeCode::ZERO..TimeCode(600),
+            },
+            EvalAssertion::MediaClipCount {
+                track: TrackId(1),
+                minimum: 8,
+                maximum: 12,
+                minimum_duration: TimeCode(40),
+                maximum_duration: TimeCode(120),
+                reject_non_media: true,
+            },
+            EvalAssertion::SingleAudioMediaClip {
+                track: TrackId(2),
+                asset_alias: "music".to_owned(),
+            },
+            EvalAssertion::SourceRangesSceneClean {
+                track: TrackId(1),
+                scene_set: "source-scenes".to_owned(),
+            },
+            EvalAssertion::SourceRangesAvoid {
+                track: TrackId(1),
+                exclusion_set: "reviewed-slates".to_owned(),
+            },
+            EvalAssertion::ShotCadenceVariation {
+                track: TrackId(1),
+                minimum_duration_buckets: 3,
+                duration_bucket_frames: TimeCode(20),
+                maximum_similar_run: 3,
+                similar_tolerance_frames: TimeCode(8),
+            },
+            EvalAssertion::NoAlternatingShotPattern {
+                track: TrackId(1),
+                maximum_repeated_pairs: 2,
+                tolerance_frames: TimeCode(8),
+            },
+            EvalAssertion::CutsAlignedToBeatSetAtLeast {
+                track: TrackId(1),
+                beat_set: "structural".to_owned(),
+                tolerance_frames: TimeCode(1),
+                minimum_aligned_cuts: 3,
+                minimum_aligned_basis_points: 5_000,
+            },
+            EvalAssertion::NoVisualTransitionsEffectsOrRetiming { track: TrackId(1) },
+            EvalAssertion::SourcePhaseArc {
+                track: TrackId(1),
+                opening_alias: "opening".to_owned(),
+                pivot_alias: "pivot".to_owned(),
+                pivot_window: TimeCode(150)..TimeCode(275),
+                return_window: TimeCode(275)..TimeCode(400),
+                closing_alias: "closing".to_owned(),
+                minimum_opening_hold: TimeCode(60),
+                minimum_closing_hold: TimeCode(60),
+            },
+        ];
+        let encoded = serde_json::to_string(&assertions).unwrap();
+        let decoded = serde_json::from_str::<Vec<EvalAssertion>>(&encoded).unwrap();
+        assert_eq!(decoded, assertions);
+
+        let exclusion = SourceRangeExclusion {
+            asset: AssetId(1),
+            source_range: TimeCode(12)..TimeCode(24),
+            reason: "black transition".to_owned(),
+        };
+        let encoded = serde_json::to_string(&exclusion).unwrap();
+        let decoded = serde_json::from_str::<SourceRangeExclusion>(&encoded).unwrap();
+        assert_eq!(decoded, exclusion);
+    }
+
+    #[test]
+    fn exact_duration_and_media_coverage_reject_tails_gaps_and_cross_track_mismatch() {
+        let mut exact_document = document();
+        exact_document.media_pool[0].duration = TimeCode(800);
+        exact_document.tracks[0].clips[0] =
+            clip_fixture(1, AssetId(1), 0, 0, 600, ClipContent::Media);
+        let audio_asset = MediaAsset {
+            id: AssetId(2),
+            path: PathBuf::from("music.wav"),
+            name: "music".to_owned(),
+            duration: TimeCode(600),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Audio,
+            resolution: None,
+        };
+        exact_document.media_pool.push(audio_asset);
+        exact_document.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![clip_fixture(2, AssetId(2), 0, 0, 600, ClipContent::Media)],
+        });
+        exact_document.duration = TimeCode(600);
+        let mut context = FixtureContext::default();
+        context
+            .asset_aliases
+            .insert("opening".to_owned(), AssetId(1));
+        context.asset_aliases.insert("music".to_owned(), AssetId(2));
+
+        let exact = outcome_for(exact_document.clone(), context.clone());
+        assert!(evaluate_exact_project_duration(TimeCode(600), &exact).passed);
+        assert!(
+            evaluate_exact_track_media_coverage(
+                TrackId(1),
+                &(TimeCode::ZERO..TimeCode(600)),
+                &exact
+            )
+            .passed
+        );
+        assert!(
+            evaluate_exact_track_media_coverage(
+                TrackId(2),
+                &(TimeCode::ZERO..TimeCode(600)),
+                &exact
+            )
+            .passed
+        );
+
+        let mut wide_document = exact_document.clone();
+        wide_document.tracks[0].clips[0].source_range = TimeCode::ZERO..TimeCode(800);
+        // Keep the declared duration at the requested range to prove the
+        // hard gate inspects mapped final clip ranges, not only the field.
+        wide_document.duration = TimeCode(600);
+        let wide = outcome_for(wide_document, context.clone());
+        let duration_failure = evaluate_exact_project_duration(TimeCode(600), &wide);
+        assert!(!duration_failure.passed, "{duration_failure:?}");
+        assert!(duration_failure.detail.contains("mapped clip end=800"));
+        let coverage_failure = evaluate_exact_track_media_coverage(
+            TrackId(1),
+            &(TimeCode::ZERO..TimeCode(600)),
+            &wide,
+        );
+        assert!(!coverage_failure.passed, "{coverage_failure:?}");
+        assert!(coverage_failure.detail.contains("outside requested"));
+        assert!(
+            evaluate_exact_track_media_coverage(
+                TrackId(2),
+                &(TimeCode::ZERO..TimeCode(600)),
+                &wide
+            )
+            .passed
+        );
+
+        let mut gap_document = exact_document;
+        gap_document.tracks[0].clips = vec![
+            clip_fixture(1, AssetId(1), 0, 0, 300, ClipContent::Media),
+            clip_fixture(3, AssetId(1), 350, 300, 550, ClipContent::Media),
+        ];
+        let gap = outcome_for(gap_document, context);
+        let gap_failure =
+            evaluate_exact_track_media_coverage(TrackId(1), &(TimeCode::ZERO..TimeCode(600)), &gap);
+        assert!(!gap_failure.passed, "{gap_failure:?}");
+        assert!(gap_failure.detail.contains("gap"));
+    }
+
+    #[test]
+    fn hard_cut_gate_rejects_every_visual_treatment_on_media_clips() {
+        let clean = outcome_for(document(), FixtureContext::default());
+        assert!(evaluate_no_visual_transitions_effects_or_retiming(TrackId(1), &clean).passed);
+
+        let mut treated_document = document();
+        let clip = &mut treated_document.tracks[0].clips[0];
+        clip.transition_in = Some(openreel_core::Transition {
+            name: "crossfade".to_owned(),
+            duration: TimeCode(6),
+        });
+        clip.effects.push(openreel_core::Effect {
+            id: openreel_core::EffectId(4),
+            name: "color_grade".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        });
+        clip.speed_percent = 200;
+        let treated = outcome_for(treated_document, FixtureContext::default());
+        let rejected = evaluate_no_visual_transitions_effects_or_retiming(TrackId(1), &treated);
+        assert!(!rejected.passed, "{rejected:?}");
+        assert!(rejected.detail.contains("transition"));
+        assert!(rejected.detail.contains("effects"));
+        assert!(rejected.detail.contains("retimed to 200%"));
+    }
+
+    #[test]
+    fn source_phase_arc_uses_actual_alias_order_window_and_edge_holds() {
+        let mut final_document = document();
+        final_document.media_pool[0].duration = TimeCode(600);
+        let pivot_asset = MediaAsset {
+            id: AssetId(2),
+            path: PathBuf::from("pivot.mp4"),
+            name: "pivot".to_owned(),
+            duration: TimeCode(600),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Video,
+            resolution: Some((320, 180)),
+        };
+        let closing_asset = MediaAsset {
+            id: AssetId(3),
+            path: PathBuf::from("closing.mp4"),
+            name: "closing".to_owned(),
+            duration: TimeCode(600),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Video,
+            resolution: Some((320, 180)),
+        };
+        final_document
+            .media_pool
+            .extend([pivot_asset, closing_asset]);
+        final_document.tracks[0].clips = vec![
+            clip_fixture(1, AssetId(1), 0, 0, 100, ClipContent::Media),
+            clip_fixture(2, AssetId(2), 100, 0, 200, ClipContent::Media),
+            clip_fixture(3, AssetId(3), 300, 0, 300, ClipContent::Media),
+        ];
+        final_document.duration = TimeCode(600);
+        let mut context = FixtureContext::default();
+        context
+            .asset_aliases
+            .insert("opening".to_owned(), AssetId(1));
+        context.asset_aliases.insert("pivot".to_owned(), AssetId(2));
+        context
+            .asset_aliases
+            .insert("closing".to_owned(), AssetId(3));
+        let outcome = outcome_for(final_document.clone(), context.clone());
+        let contract = |outcome: &EvalOutcome| {
+            evaluate_source_phase_arc(
+                TrackId(1),
+                "opening",
+                "pivot",
+                &(TimeCode(100)..TimeCode(200)),
+                &(TimeCode(250)..TimeCode(350)),
+                "closing",
+                TimeCode(80),
+                TimeCode(200),
+                outcome,
+            )
+        };
+        let accepted = contract(&outcome);
+        assert!(accepted.passed, "{accepted:?}");
+
+        let mut pivot_before_window = final_document.clone();
+        pivot_before_window.tracks[0].clips[1].timeline_start = TimeCode(50);
+        let rejected_pivot = contract(&outcome_for(pivot_before_window, context.clone()));
+        assert!(!rejected_pivot.passed, "{rejected_pivot:?}");
+        assert!(rejected_pivot.detail.contains("start=Some(50)"));
+
+        let mut short_opening = final_document.clone();
+        short_opening.tracks[0].clips[0].source_range = TimeCode::ZERO..TimeCode(60);
+        short_opening.tracks[0].clips[1].timeline_start = TimeCode(60);
+        short_opening.tracks[0].clips[2].timeline_start = TimeCode(260);
+        let rejected_hold = contract(&outcome_for(short_opening, context.clone()));
+        assert!(!rejected_hold.passed, "{rejected_hold:?}");
+        assert!(rejected_hold.detail.contains("hold=60 minimum=80"));
+
+        let mut pivot_reentry = final_document;
+        pivot_reentry.tracks[0].clips = vec![
+            clip_fixture(1, AssetId(1), 0, 0, 100, ClipContent::Media),
+            clip_fixture(2, AssetId(2), 100, 0, 100, ClipContent::Media),
+            clip_fixture(3, AssetId(3), 200, 0, 100, ClipContent::Media),
+            clip_fixture(4, AssetId(2), 300, 100, 200, ClipContent::Media),
+            clip_fixture(5, AssetId(3), 400, 100, 300, ClipContent::Media),
+        ];
+        let rejected_reentry = contract(&outcome_for(pivot_reentry, context.clone()));
+        assert!(!rejected_reentry.passed, "{rejected_reentry:?}");
+        assert!(rejected_reentry.detail.contains("contiguous=false"));
+    }
+
+    #[test]
+    fn alternating_shot_pattern_gate_rejects_period_two_but_allows_varied_durations() {
+        let cadence_document = |durations: &[i64]| {
+            let mut final_document = document();
+            final_document.media_pool[0].duration = TimeCode(2_000);
+            let mut timeline_start = 0_i64;
+            final_document.tracks[0].clips = durations
+                .iter()
+                .enumerate()
+                .map(|(index, duration)| {
+                    let clip = clip_fixture(
+                        u64::try_from(index + 1).unwrap(),
+                        AssetId(1),
+                        timeline_start,
+                        timeline_start,
+                        timeline_start + duration,
+                        ClipContent::Media,
+                    );
+                    timeline_start += duration;
+                    clip
+                })
+                .collect();
+            final_document.duration = TimeCode(timeline_start);
+            outcome_for(final_document, FixtureContext::default())
+        };
+
+        let metronome = cadence_document(&[50, 80, 50, 80, 50, 80]);
+        let rejected = evaluate_no_alternating_shot_pattern(TrackId(1), 2, TimeCode(5), &metronome);
+        assert!(!rejected.passed, "{rejected:?}");
+        assert!(rejected.detail.contains("repeats 3 times"));
+
+        let varied = cadence_document(&[50, 80, 60, 90, 50, 80]);
+        let accepted = evaluate_no_alternating_shot_pattern(TrackId(1), 2, TimeCode(5), &varied);
+        assert!(accepted.passed, "{accepted:?}");
+
+        let near_metronome = cadence_document(&[50, 80, 54, 84, 51, 79]);
+        let rejected_near =
+            evaluate_no_alternating_shot_pattern(TrackId(1), 2, TimeCode(5), &near_metronome);
+        assert!(!rejected_near.passed, "{rejected_near:?}");
+    }
+
     fn provenance_marker(effect: u64, samples: &[(i64, u16, u16, u16, u16)]) -> Marker {
         Marker {
             id: MarkerId(99),
@@ -4386,6 +6849,154 @@ mod tests {
     }
 
     #[test]
+    fn beat_aligned_cuts_accept_project_frame_boundaries_on_beats() {
+        let mut context = FixtureContext::default();
+        context.timeline_beat_sets.insert(
+            "montage-beats".to_owned(),
+            vec![TimeCode(60), TimeCode(120)],
+        );
+        let outcome = outcome_for(three_cut_document(), context);
+
+        let result =
+            evaluate_beat_aligned_cuts(TrackId(1), "montage-beats", TimeCode::ZERO, &outcome);
+        assert!(result.passed, "{result:?}");
+        assert!(result.detail.contains("inclusive tolerance"));
+    }
+
+    #[test]
+    fn beat_aligned_cuts_reports_every_project_frame_miss() {
+        let mut context = FixtureContext::default();
+        context
+            .timeline_beat_sets
+            .insert("montage-beats".to_owned(), vec![TimeCode(10)]);
+        let outcome = outcome_for(three_cut_document(), context);
+
+        let result =
+            evaluate_beat_aligned_cuts(TrackId(1), "montage-beats", TimeCode::ZERO, &outcome);
+        assert!(!result.passed, "{result:?}");
+        assert!(result.detail.contains("clips 1 and 2"));
+        assert!(result.detail.contains("clips 2 and 3"));
+    }
+
+    #[test]
+    fn required_assets_and_source_range_separation_are_track_scoped() {
+        let mut final_document = document();
+        let second_asset = MediaAsset {
+            id: AssetId(2),
+            path: PathBuf::from("second.mp4"),
+            name: "second".to_owned(),
+            duration: TimeCode(60),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Video,
+            resolution: Some((320, 180)),
+        };
+        final_document.media_pool.push(second_asset);
+        let mut second_clip = final_document.tracks[0].clips[0].clone();
+        second_clip.id = ClipId(2);
+        second_clip.asset = AssetId(2);
+        second_clip.timeline_start = TimeCode(60);
+        final_document.tracks[0].clips.push(second_clip);
+        let mut context = FixtureContext::default();
+        context.asset_aliases.insert("first".to_owned(), AssetId(1));
+        context
+            .asset_aliases
+            .insert("second".to_owned(), AssetId(2));
+        let outcome = outcome_for(final_document, context);
+
+        let required = evaluate_required_assets_on_track(
+            TrackId(1),
+            &["first".to_owned(), "second".to_owned()],
+            &outcome,
+        );
+        assert!(required.passed, "{required:?}");
+        let separated = evaluate_source_ranges_separated(TrackId(1), TimeCode::ZERO, &outcome);
+        assert!(separated.passed, "{separated:?}");
+    }
+
+    #[test]
+    fn source_range_separation_rejects_overlap_and_reports_each_conflict() {
+        let mut final_document = three_cut_document();
+        final_document.tracks[0].clips[1].source_range = TimeCode(59)..TimeCode(90);
+        final_document.tracks[0].clips[2].source_range = TimeCode(89)..TimeCode(120);
+        let mut context = FixtureContext::default();
+        context
+            .asset_aliases
+            .insert("montage".to_owned(), AssetId(1));
+        let outcome = outcome_for(final_document, context);
+
+        let result = evaluate_source_ranges_separated(TrackId(1), TimeCode::ZERO, &outcome);
+        assert!(!result.passed, "{result:?}");
+        assert!(result.detail.contains("clip 2"));
+        assert!(result.detail.contains("clip 3"));
+    }
+
+    #[test]
+    fn music_fit_accepts_one_real_time_beat_anchored_audio_clip() {
+        let mut context = FixtureContext::default();
+        context.asset_aliases.insert("music".to_owned(), AssetId(1));
+        context
+            .source_beat_sets
+            .insert("music-beats".to_owned(), vec![TimeCode(10), TimeCode(40)]);
+        let outcome = outcome_for(music_document(), context);
+
+        let result = evaluate_music_fit(
+            TrackId(1),
+            "music",
+            "music-beats",
+            TimeCode::ZERO,
+            TimeCode(60),
+            TimeCode::ZERO,
+            &outcome,
+        );
+        assert!(result.passed, "{result:?}");
+        assert!(result.detail.contains("repeat/looping is impossible"));
+    }
+
+    #[test]
+    fn music_fit_rejects_retime_shaping_and_misaligned_source_start() {
+        let mut final_document = music_document();
+        let clip = &mut final_document.tracks[0].clips[0];
+        clip.source_range = TimeCode(12)..TimeCode(72);
+        clip.speed_percent = 200;
+        clip.audio_gain_tenth_db = 10;
+        clip.audio_fade_in_frames = TimeCode(2);
+        clip.effects.push(openreel_core::Effect {
+            id: openreel_core::EffectId(1),
+            name: "compressor".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        });
+        clip.transition_in = Some(openreel_core::Transition {
+            name: "crossfade".to_owned(),
+            duration: TimeCode(2),
+        });
+        let mut context = FixtureContext::default();
+        context.asset_aliases.insert("music".to_owned(), AssetId(1));
+        context
+            .source_beat_sets
+            .insert("music-beats".to_owned(), vec![TimeCode(10)]);
+        let outcome = outcome_for(final_document, context);
+
+        let result = evaluate_music_fit(
+            TrackId(1),
+            "music",
+            "music-beats",
+            TimeCode::ZERO,
+            TimeCode(60),
+            TimeCode::ZERO,
+            &outcome,
+        );
+        assert!(!result.passed, "{result:?}");
+        assert!(result.detail.contains("speed is 200%"));
+        assert!(result.detail.contains("source start 12"));
+        assert!(result.detail.contains("clip gain"));
+        assert!(result.detail.contains("fade-in"));
+        assert!(result.detail.contains("effect(s)"));
+        assert!(result.detail.contains("transition"));
+        assert!(result.detail.contains("time-stretch"));
+    }
+
+    #[test]
     fn audio_presence_follows_the_real_mixer_contract() {
         let mut with_audio = document();
         assert!(!evaluate_audio_present(&with_audio).passed);
@@ -4717,13 +7328,24 @@ mod tests {
         deliverable.output_sha256 = Some("a".repeat(64));
         result.deliverable = Some(deliverable);
 
+        let mut caption_required_result = result.clone();
+        caption_required_result
+            .deliverable
+            .as_mut()
+            .expect("caption fixture should have a deliverable")
+            .rendered_caption_alignment_required = true;
         let sampled_review = human_review_template(
             "finished-v2",
             "run-sampled",
-            &[result.clone(), result.clone()],
+            &[result.clone(), caption_required_result],
         );
         assert_eq!(sampled_review.tasks[0].task_id, "f1");
         assert_eq!(sampled_review.tasks[1].task_id, "f1-sample-2");
+        assert_eq!(
+            sampled_review.tasks[0].not_applicable,
+            vec![HumanRatingDimension::Captions]
+        );
+        assert!(sampled_review.tasks[1].not_applicable.is_empty());
 
         let mut review = human_review_template("finished-v2", "run-1", &[result]);
         let pending = summarize_human_review(&review).unwrap();
@@ -4733,6 +7355,7 @@ mod tests {
 
         review.reviewer = Some("human".to_owned());
         review.tasks[0].accepted = Some(true);
+        review.tasks[0].not_applicable.clear();
         review.tasks[0].ratings = HumanRatings {
             story: Some(4.0),
             pacing: Some(2.5),
@@ -4764,6 +7387,7 @@ mod tests {
                     story: Some(0.5),
                     ..HumanRatings::default()
                 },
+                not_applicable: Vec::new(),
                 notes: None,
             }],
         };
@@ -4780,6 +7404,129 @@ mod tests {
 
         review.tasks[0].ratings.delivery_readiness = Some(4.25);
         assert!(summarize_human_review(&review).is_err());
+    }
+
+    #[test]
+    fn human_review_allows_captions_to_be_not_applicable_without_awarding_a_score() {
+        let review = HumanReviewFile {
+            schema_version: 1,
+            benchmark_id: "finished-v2".to_owned(),
+            run_id: "run-1".to_owned(),
+            reviewer: Some("human".to_owned()),
+            tasks: vec![HumanTaskReview {
+                task_id: "g3".to_owned(),
+                artifact_sha256: None,
+                accepted: Some(true),
+                ratings: HumanRatings {
+                    story: Some(4.0),
+                    pacing: Some(4.0),
+                    visual_finish: Some(4.0),
+                    audio_finish: Some(4.0),
+                    captions: None,
+                    delivery_readiness: Some(4.0),
+                },
+                not_applicable: vec![HumanRatingDimension::Captions],
+                notes: None,
+            }],
+        };
+        let summary = summarize_human_review(&review).unwrap();
+        assert_eq!(summary.tasks_reviewed, 1);
+        assert_eq!(summary.mean_ratings.captions, None);
+        assert_eq!(summary.overall_mean_rating, Some(4.0));
+    }
+
+    #[test]
+    fn legacy_human_review_json_defaults_to_all_applicable_dimensions() {
+        let json = r#"
+        {
+          "schema_version": 1,
+          "benchmark_id": "finished-v2",
+          "run_id": "run-1",
+          "reviewer": "human",
+          "tasks": [{
+            "task_id": "g1",
+            "artifact_sha256": null,
+            "accepted": true,
+            "ratings": {
+              "story": 4.0,
+              "pacing": 3.5,
+              "visual_finish": 4.0,
+              "audio_finish": 4.5,
+              "captions": 3.0,
+              "delivery_readiness": 4.0
+            },
+            "notes": null
+          }]
+        }
+        "#;
+        let review = serde_json::from_str::<HumanReviewFile>(json).unwrap();
+        assert!(review.tasks[0].not_applicable.is_empty());
+        let summary = summarize_human_review(&review).unwrap();
+        assert_eq!(summary.tasks_reviewed, 1);
+        assert_eq!(summary.mean_ratings.captions, Some(3.0));
+    }
+
+    #[test]
+    fn human_review_rejects_not_applicable_overlap_and_duplicates() {
+        let mut review = HumanReviewFile {
+            schema_version: 1,
+            benchmark_id: "finished-v2".to_owned(),
+            run_id: "run-1".to_owned(),
+            reviewer: None,
+            tasks: vec![HumanTaskReview {
+                task_id: "g3".to_owned(),
+                artifact_sha256: None,
+                accepted: Some(true),
+                ratings: HumanRatings {
+                    story: Some(4.0),
+                    pacing: Some(4.0),
+                    visual_finish: Some(4.0),
+                    audio_finish: Some(4.0),
+                    captions: Some(4.0),
+                    delivery_readiness: Some(4.0),
+                },
+                not_applicable: vec![HumanRatingDimension::Captions],
+                notes: None,
+            }],
+        };
+        let overlap = summarize_human_review(&review).unwrap_err().to_string();
+        assert!(overlap.contains("both rated and not applicable"));
+
+        review.tasks[0].ratings.captions = None;
+        review.tasks[0].not_applicable = vec![
+            HumanRatingDimension::Captions,
+            HumanRatingDimension::Captions,
+        ];
+        let duplicate = summarize_human_review(&review).unwrap_err().to_string();
+        assert!(duplicate.contains("more than once"));
+    }
+
+    #[test]
+    fn human_review_rejects_partial_not_applicable_decisions() {
+        let review = HumanReviewFile {
+            schema_version: 1,
+            benchmark_id: "finished-v2".to_owned(),
+            run_id: "run-1".to_owned(),
+            reviewer: None,
+            tasks: vec![HumanTaskReview {
+                task_id: "g3".to_owned(),
+                artifact_sha256: None,
+                accepted: Some(true),
+                ratings: HumanRatings {
+                    story: Some(4.0),
+                    pacing: Some(4.0),
+                    visual_finish: Some(4.0),
+                    audio_finish: Some(4.0),
+                    captions: None,
+                    delivery_readiness: Some(4.0),
+                },
+                not_applicable: Vec::new(),
+                notes: None,
+            }],
+        };
+        let error = summarize_human_review(&review).unwrap_err().to_string();
+        assert!(error.contains("missing"));
+        assert!(error.contains("captions"));
     }
 
     #[test]

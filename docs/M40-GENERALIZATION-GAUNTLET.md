@@ -13,8 +13,9 @@ The milestone is benchmark-led. A new primitive ships only when a task exposes
 the need and can score the result. Machine checks own exact facts, timing,
 conformance, and artifact identity. A person still owns taste and acceptance.
 
-M40 is **in progress**. Interview/documentary and event/multicam are executable.
-Music montage remains required before the milestone can pass.
+M40 is **in progress**. Interview/documentary, event/multicam, and music
+montage are executable. None has yet satisfied the full three-sample machine
+and two-accept human exit gate.
 
 ## Phase 1 - licensed fixture packs
 
@@ -236,6 +237,96 @@ is not the three-sample family gate. The rejected original remains recorded in
 `benchmarks/auto-edit/v5/event-multicam-baseline.json`; the accepted recovery is
 recorded separately.
 
+## Phase 3 - real music montage
+
+`generalization-v5` task `g3` uses two Blender Foundation trailers. The
+rejected v1 preflight paired them with Kevin MacLeod's instrumental "Cipher."
+The v2 recovery replaces that flat bed with Scott Buckley's "Uprising," whose
+dark slow-burn and heroic backend provide a real midpoint event
+for the edit. Both fixture versions remain pinned and openly licensed. The task
+is deliberately horizontal: g1 and g2 already exercise 9:16 delivery, while g3
+isolates source inspection, shot selection, beat sense, and music finishing.
+
+The benchmark exposed three agent-facing gaps. A model could inspect frames only
+after putting footage on the timeline, the old beat planner could split one
+existing clip but could not assemble model-chosen source selects, and there was
+no compact representation of musical hierarchy for deliberate cut placement.
+M40 adds:
+
+- `get_source_storyboard`, a bounded source contact sheet whose manifest maps
+  every cell to an exact asset frame;
+- `get_source_shot_board`, a ranged scene-derived shot board with exact
+  candidate envelopes plus start, middle, and end evidence frames;
+- `get_music_structure`, a read-only heuristic beat/bar/phrase hierarchy whose
+  confidence is disclosed to the model rather than presented as musicological
+  truth;
+- `plan_beat_montage`, a deterministic planner that accepts ordered source
+  envelopes and explicit cut anchors, validates scene-clean source ranges,
+  selects source-feasible boundaries under explicit shot-length bounds, and
+  returns one atomic prepared plan. Explicit anchors remain strict by default;
+  an opt-in repair mode searches the nearest globally source- and cadence-valid
+  detected-beat schedule under a hard movement bound, preserving shot order and
+  reporting every requested-to-resolved delta.
+
+The model still owns the creative decision: which images to use, where each
+source envelope begins, and the order that tells the contrast story. OpenReel
+owns mixed-frame-rate mapping, beat snapping, collision policy, validation, and
+revision safety. The first slice is honest hard cuts. It does not silently add
+crossfades, speed ramps, looping, time stretch, or semantic shot selection.
+
+The active recovery contract requires 8-10 gapless visual shots over exactly 24
+seconds (600 project frames), both visual sources, separated and scene-clean
+source ranges, 50-120-frame shots, at least three duration bands without a long
+near-equal or repeating A/B run, and at least half of the internal cuts on
+structural bar or phrase candidates. Artifact gates now require a held Sintel
+opening, a Big Buck Bunny pivot in the intended window, a held Sintel finish,
+and zero transitions, effects, fades, or retiming. They also require exact
+video/audio coverage, one clean real-time music clip, source-audio exclusion,
+delivery loudness, QA, undo, budget evidence, and an independently probed 1080p
+MP4. Human review still owns the irreducible taste judgments: story, rhythm,
+visual finish, audio finish, and delivery readiness. Captions are explicitly
+not applicable for this instrumental montage.
+
+The first machine-passing `g3` preflight is recorded in
+[`benchmarks/auto-edit/v5/music-montage-baseline.json`](../benchmarks/auto-edit/v5/music-montage-baseline.json).
+It passed 22/22 assertions in one turn with 11 tool calls, 12 operations, and
+154,358 total tokens. The delivered 800-frame 1920x1080 MP4 measures -16.02
+LUFS and -2.55 dBFS peak, with SHA-256
+`0cb3f6bdebe4a593887cb19d2817ccb761731acc4ac92c68d5171e6e88b0cab1`.
+Human review of that exact artifact rejected it: story 1.0, pacing 1.5, visual
+finish 2.0, and audio finish 4.5; captions were not applicable, and no numeric
+delivery-readiness score was supplied. The reviewer found no discernible arc,
+near-random and incoherent sequencing, metronomic and sometimes rushed pacing,
+unmotivated cuts, occasional fades despite the stated hard-cut intent, and no
+meaningful contrast between the visual styles. Audio was consistent and
+audible, but the instrumental did not fit the footage. M40 remains **in progress**
+and this is one preflight sample, not the three-sample family or milestone gate.
+
+The original rejection is preserved as the immutable baseline and is not
+converted into a score that the reviewer did not provide: captions are N/A and
+delivery readiness has no numeric rating. The v2 recovery passed 34/34 machine
+assertions in one turn with 15 tool calls, 11 operations, and 318,225 total
+tokens. Its 600-frame 1920x1080 MP4 measures -16.04 LUFS and -4.20 dBFS peak,
+with SHA-256
+`236200c27d57bedfd82ccb3a7aae1afde49b79a85dfbf60e0b58504c01c10d69`.
+The recovery is recorded separately in
+[`benchmarks/auto-edit/v5/music-montage-recovery-baseline.json`](../benchmarks/auto-edit/v5/music-montage-recovery-baseline.json),
+and human review remains pending. Its acceptance target is a readable contrast arc (held dramatic Sintel
+opening, unmistakable contiguous Big Buck Bunny pivot, Sintel action return at
+the cue's major lift, and held finish), exact scene-derived shot envelopes,
+nonuniform shot cadence, and structural musical anchors that explain the major
+transitions. The executable manifest requires acceptance for a scored artifact
+and a 4.0 minimum mean for every applicable human-rating dimension; N/A
+dimensions are excluded from those means.
+
+Independent frame review rejected one earlier machine-passing recovery because
+its final shot began inside a baked source dissolve. That artifact is not the
+published recovery. The manually reviewed exclusion was widened, clean-frame
+feasibility accounting was corrected to stop counting excluded intervals, and
+the final recovery was re-run. Uniform frames, every shot midpoint, and frames
+on both sides of every cut in the published recovery show no black, title,
+logo, slate, or baked transition tail.
+
 ## Commands
 
 Prepare and verify the interview pack:
@@ -256,6 +347,16 @@ cargo run -p openreel-agent --bin openreel-eval -- `
   --prepare-fixtures benchmarks/auto-edit/v5/event-fixture-pack.json
 cargo run -p openreel-agent --bin openreel-eval -- `
   --verify-fixtures benchmarks/auto-edit/v5/event-fixture-pack.json
+```
+
+Prepare and verify the music-montage pack:
+
+```powershell
+& .\scripts\setup-ffmpeg.ps1
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v2.json
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v2.json
 ```
 
 Run the first task:
@@ -282,6 +383,18 @@ cargo run -p openreel-agent --bin openreel-eval -- `
   --samples 1
 ```
 
+Run the music-montage task:
+
+```powershell
+& .\scripts\setup-ffmpeg.ps1
+$env:OPENREEL_EVAL = '1'
+cargo run -p openreel-agent --bin openreel-eval -- `
+  --suite generalization-v5 `
+  --harness codex `
+  --only g3 `
+  --samples 1
+```
+
 Rerender an exact saved edit after a renderer or delivery fix, without another
 model session:
 
@@ -301,6 +414,8 @@ passes 3/3 model samples, at least two outputs per family are accepted by a
 person, the mean human rating is at least 4.0/5, and no material caption error
 survives. One successful interview does not satisfy the milestone.
 
-The next family implementation target is music montage. Event/multicam still
-needs two more machine samples, one more human-accepted output, and numeric
-ratings sufficient to evaluate the 4.0 mean-rating gate.
+Music montage has one rejected historical preflight and one 34/34 machine-passing
+v2 recovery pending human review. The family still needs two more machine passes
+and two human accepts.
+Event/multicam still needs two more machine samples, one more human-accepted
+output, and numeric ratings sufficient to evaluate the 4.0 mean-rating gate.

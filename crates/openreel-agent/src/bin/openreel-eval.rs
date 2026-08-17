@@ -15,17 +15,19 @@ use openreel_agent::{
     eval::{
         EnvironmentStamp, EvalAssertion, EvalBudgets, EvalDefinition, EvalDeliverableSpec,
         EvalError, EvalLoudnessSpec, EvalResult, ExpectedSourceClip, ExpectedTimelineClip,
-        FixtureContext, HumanReviewFile, PreparedFixture, human_review_template,
-        maximum_duration_after_expected_silence_cuts, render_jsonl, render_saved_deliverable,
-        render_scoreboard, result_path, run_eval, run_eval_with_artifacts, summarize_human_review,
+        FixtureContext, HumanReviewFile, PreparedFixture, SourceRangeExclusion,
+        human_review_template, maximum_duration_after_expected_silence_cuts, render_jsonl,
+        render_saved_deliverable, render_scoreboard, result_path, run_eval,
+        run_eval_with_artifacts, summarize_human_review,
     },
     fixture_pack::{FixturePackManifest, fixture_cache_root},
 };
 use openreel_core::{
-    AgentDriver, Analysis, AssetSceneChanges, AssetSilences, AssetTranscript, AuthenticationStatus,
-    CaptionMotion, Clip, ClipContent, ClipId, DeliveryProfile, Document, MediaAsset, MediaCatalog,
-    Rational, SceneStatus, SilenceStatus, SyncGroup, SyncGroupId, SyncGroupMember, TimeCode,
-    TitlePosition, Track, TrackId, TrackKind, TranscriptStatus, TranscriptWord,
+    AgentDriver, Analysis, AssetBeats, AssetId, AssetSceneChanges, AssetSilences, AssetTranscript,
+    AuthenticationStatus, BeatStatus, CaptionMotion, Clip, ClipContent, ClipId, DeliveryProfile,
+    Document, FrameRounding, MediaAsset, MediaCatalog, Rational, SceneStatus, SilenceStatus,
+    SyncGroup, SyncGroupId, SyncGroupMember, ThreePointMode, TimeCode, TitlePosition, Track,
+    TrackId, TrackKind, TranscriptStatus, TranscriptWord, map_frames_with_rounding,
     map_source_range_to_project,
 };
 use openreel_media::{
@@ -38,6 +40,11 @@ const FPS: u32 = 30;
 const LONG_SILENCE_FRAMES: i64 = 20;
 const SCENE_CONFIDENCE_BASIS_POINTS: u16 = 1_000;
 const FILLER_WORDS: &[&str] = &["um", "uh", "erm", "er"];
+const MUSIC_SOURCE_BEAT_SET: &str = "music-bed-source-beats";
+const MUSIC_PROJECT_BEAT_SET: &str = "music-bed-project-beats";
+const MUSIC_STRUCTURAL_BEAT_SET: &str = "music-bed-structural-beats";
+const MUSIC_SOURCE_SCENE_SET: &str = "montage-source-scenes";
+const MUSIC_SOURCE_EXCLUSION_SET: &str = "montage-source-exclusions";
 
 fn main() -> ExitCode {
     match run() {
@@ -563,6 +570,21 @@ fn score_review_file(path: &Path) -> Result<(), EvalError> {
             path.display()
         ))
     })?;
+    let machine_report_path = path.with_file_name("machine-report.json");
+    let machine_report_bytes = fs::read(&machine_report_path).map_err(|error| {
+        EvalError::Output(format!(
+            "could not read machine report {} for review binding: {error}",
+            machine_report_path.display()
+        ))
+    })?;
+    let machine_report: serde_json::Value =
+        serde_json::from_slice(&machine_report_bytes).map_err(|error| {
+            EvalError::Output(format!(
+                "could not parse machine report {} for review binding: {error}",
+                machine_report_path.display()
+            ))
+        })?;
+    verify_review_artifact_bindings(&review, &machine_report)?;
     let summary = summarize_human_review(&review)?;
     let output = path.with_file_name("human-score.json");
     fs::write(
@@ -576,6 +598,73 @@ fn score_review_file(path: &Path) -> Result<(), EvalError> {
         summary.tasks_reviewed, summary.tasks_total, summary.tasks_accepted, summary.tasks_reviewed
     );
     println!("Score: {}", output.display());
+    Ok(())
+}
+
+fn verify_review_artifact_bindings(
+    review: &HumanReviewFile,
+    machine_report: &serde_json::Value,
+) -> Result<(), EvalError> {
+    if machine_report["benchmark_id"].as_str() != Some(review.benchmark_id.as_str())
+        || machine_report["run_id"].as_str() != Some(review.run_id.as_str())
+    {
+        return Err(EvalError::Output(
+            "human review benchmark_id/run_id does not match its sibling machine report".to_owned(),
+        ));
+    }
+    let results = machine_report["results"]
+        .as_array()
+        .ok_or_else(|| EvalError::Output("machine report results must be an array".to_owned()))?;
+    let mut occurrences = BTreeMap::<String, usize>::new();
+    let mut expected_hashes = BTreeMap::<String, String>::new();
+    for result in results {
+        let Some(name) = result["name"].as_str() else {
+            continue;
+        };
+        let base_task_id = name.split_whitespace().next().unwrap_or(name);
+        let occurrence = occurrences.entry(base_task_id.to_owned()).or_default();
+        *occurrence = occurrence.saturating_add(1);
+        let task_id = if *occurrence == 1 {
+            base_task_id.to_owned()
+        } else {
+            format!("{base_task_id}-sample-{occurrence}")
+        };
+        let Some(hash) = result["deliverable"]["output_sha256"].as_str() else {
+            continue;
+        };
+        if expected_hashes
+            .insert(task_id.clone(), hash.to_owned())
+            .is_some()
+        {
+            return Err(EvalError::Output(format!(
+                "machine report contains duplicate human-review task id {task_id:?}"
+            )));
+        }
+    }
+    for task in &review.tasks {
+        let expected = expected_hashes.get(&task.task_id).ok_or_else(|| {
+            EvalError::Output(format!(
+                "human-review task {:?} has no delivered artifact in the machine report",
+                task.task_id
+            ))
+        })?;
+        match task.artifact_sha256.as_deref() {
+            Some(observed) if observed == expected => {}
+            Some(observed) => {
+                return Err(EvalError::Output(format!(
+                    "human-review task {:?} is bound to artifact {observed}, but the machine report records {expected}",
+                    task.task_id
+                )));
+            }
+            None if task.accepted.is_some() => {
+                return Err(EvalError::Output(format!(
+                    "reviewed task {:?} must include the machine-reported artifact sha256 {expected}",
+                    task.task_id
+                )));
+            }
+            None => {}
+        }
+    }
     Ok(())
 }
 
@@ -1063,6 +1152,162 @@ fn event_multicam_assertions() -> Vec<EvalAssertion> {
     ]
 }
 
+fn music_montage_definition() -> EvalDefinition {
+    EvalDefinition {
+        name: "g3 real music montage",
+        rationale: "Measures whether the agent can inspect unfamiliar licensed visual sources, fit a real music bed to a fixed project range, and assemble a deliberate multi-source montage at detected musical onsets without source overlap or hidden retiming.",
+        fixture_builder: fixture_real_music_montage,
+        prompts: &[
+            "Create a finished 1080p YouTube music montage from the pinned visual sources sintel and big-buck-bunny, paced to the pinned Uprising music-bed asset. The cue is intentionally two-part: a restrained opening becomes a dramatic driving backend near the project midpoint. Build this exact visual arc: open on a held Sintel dramatic-world shot; make one unmistakable contiguous pivot into Big Buck Bunny's playful world between project frames 150 and 275; return to Sintel action at or just after the major musical lift near frame 300; then develop with motivated action, direction, or composition matches and finish on a held Sintel shot. Do not alternate sources mechanically. Open exactly these seven capability schemas in one get_capability call: get_source_storyboard, get_source_shot_board, plan_music_fit, get_music_structure, plan_beat_montage, plan_audio_normalization, and get_editorial_readiness. Inspect both complete visual assets with get_source_storyboard. Then call get_source_shot_board exactly once per visual asset over its full range with minimum_duration_frames 50, minimum_confidence_basis_points 5000, candidate_count 12, and max_width 240. Use the returned start, middle, and end evidence to choose scene-clean action and reaction shots. Candidate envelopes are evidence, not mandatory full-length selections, so trim within them when needed. Never cross a detected scene boundary. Never select any range overlapping these half-open exclusions: Sintel [0..40), [108..144), [216..292), [376..396), [420..441), [508..536), [664..688), [768..780), [832..880), [984..1253); Big Buck Bunny [0..114), [158..227), [280..330), [400..466), [573..623), [672..813). These regions contain black, baked fades, titles, logos, or credits. Use plan_music_fit first on audio track 2 with music-bed, project range 0..600, preferred source start 3450, minimum strength 10 percent, and overwrite mode. Inspect and commit that prepared plan. Keep it as the only audio: one real-time clip, no loop, retime, duplication, source-video audio, or later trim. Call get_music_structure on music-bed over project range 0..600 with minimum strength 10 percent, meter 4, 4 bars per phrase, and structural_only=false. Treat the returned roles as heuristic musical candidates, but use only its returned project frames as cuts. Choose 8 through 10 shots in final story order, using both visual assets. Each shot must fill 50..120 project frames; same-asset source ranges must not overlap. Hold the opening and finish for at least 60 frames each. Use at least three meaningfully different duration bands, no more than three near-equal durations in a row, and no repetitive short-long alternation. At least 3 cuts and at least half of all cuts must resolve to returned bar or phrase candidates; place structural cuts at the playful pivot, the driving midpoint lift, and the finish setup. Call plan_beat_montage on video track 1 with project range 0..600, minimum shot length 50, maximum shot length 120, minimum beat strength 10 percent, overwrite mode, the ordered selects, exactly one fewer preferred cut_anchor_frames than selects, cadence {minimum_duration_buckets:3, duration_bucket_frames:20, maximum_similar_run:3, similar_tolerance_frames:8}, and anchor_repair {maximum_movement_frames:24, locked_anchor_indices:[]}. The repair is only a bounded timing solver: it may move preferred beats but must not reorder or replace your shots. Inspect preferred_anchor_frames, resolved_anchor_frames, every signed delta, the final shot durations, and the actual structural roles before committing. If the repaired result loses the required structural share or phase cuts, revise preferred anchors or source envelopes and retry within the same 24-frame bound. Never stop after one infeasible attempt. Normalize only audio track 2 with plan_audio_normalization at -1600 LUFS hundredths, -100 dBFS-hundredths peak, and 100-hundredths tolerance; inspect and commit it. Add no captions, titles, transitions, fades, effects, or retiming. Finish with get_editorial_readiness using youtube_1080p, check_silence=false, centered 50/50 delivery focus, 16 storyboard frames, and 240-pixel cells. Inspect every cell. Reject and revise your own edit if any cell contains black, a fade, title, logo, slate, arbitrary sequencing, mechanical alternation, or a weak opening, pivot, lift, or finish. Do not queue export; the benchmark renders the verified snapshot. Keep working until readiness is true.",
+        ],
+        assertions: music_montage_assertions(),
+        budgets: EvalBudgets {
+            max_turns: 1,
+            max_tool_calls: 24,
+            max_operations: 80,
+            max_tokens: 500_000,
+            max_cost_usd: None,
+            max_wall_time: Duration::from_hours(1),
+            max_undos: 80,
+        },
+        deliverable: Some(EvalDeliverableSpec {
+            profile: DeliveryProfile::Youtube1080p,
+            focus_x_percent: 50,
+            focus_y_percent: 50,
+            proof_frames: 9,
+            proof_cell_width: 240,
+            require_audio: true,
+            expected_transcript_word_set: None,
+            maximum_word_error_rate_basis_points: 0,
+            maximum_caption_word_error_rate_basis_points: None,
+            loudness: Some(EvalLoudnessSpec {
+                minimum_integrated_lufs_hundredths: -1_800,
+                maximum_integrated_lufs_hundredths: -1_400,
+                maximum_sample_peak_dbfs_hundredths: -100,
+            }),
+        }),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn music_montage_assertions() -> Vec<EvalAssertion> {
+    let truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
+        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v2.json"
+    ))
+    .expect("checked-in v5 music ground truth must parse");
+    let minimum_structural_aligned_basis_points = percentage_to_basis_points_for_fixture(
+        truth.minimum_structural_aligned_percent,
+        "minimum_structural_aligned_percent",
+    )
+    .expect("checked-in v5 structural alignment percentage must be valid");
+    vec![
+        EvalAssertion::TimelineNonEmpty,
+        EvalAssertion::ExactProjectDuration {
+            duration: TimeCode(truth.timeline_range.end),
+        },
+        EvalAssertion::ExactTrackMediaCoverage {
+            track: TrackId(truth.video_track_id),
+            range: TimeCode(truth.timeline_range.start)..TimeCode(truth.timeline_range.end),
+        },
+        EvalAssertion::ExactTrackMediaCoverage {
+            track: TrackId(truth.audio_track_id),
+            range: TimeCode(truth.timeline_range.start)..TimeCode(truth.timeline_range.end),
+        },
+        EvalAssertion::ClipCount {
+            minimum: truth.minimum_visual_shots + 1,
+            maximum: truth.maximum_visual_shots + 1,
+        },
+        EvalAssertion::MediaClipCount {
+            track: TrackId(truth.video_track_id),
+            minimum: truth.minimum_visual_shots,
+            maximum: truth.maximum_visual_shots,
+            minimum_duration: TimeCode(truth.minimum_shot_frames),
+            maximum_duration: TimeCode(truth.maximum_shot_frames),
+            reject_non_media: true,
+        },
+        EvalAssertion::RequiredAssetsOnTrack {
+            track: TrackId(truth.video_track_id),
+            aliases: aliases(&["sintel", "big-buck-bunny"]),
+        },
+        EvalAssertion::SourceRangesSeparated {
+            track: TrackId(truth.video_track_id),
+            minimum_separation_frames: TimeCode(truth.minimum_source_separation_frames),
+        },
+        EvalAssertion::SourceRangesSceneClean {
+            track: TrackId(truth.video_track_id),
+            scene_set: MUSIC_SOURCE_SCENE_SET.to_owned(),
+        },
+        EvalAssertion::SourceRangesAvoid {
+            track: TrackId(truth.video_track_id),
+            exclusion_set: MUSIC_SOURCE_EXCLUSION_SET.to_owned(),
+        },
+        EvalAssertion::ShotCadenceVariation {
+            track: TrackId(truth.video_track_id),
+            minimum_duration_buckets: truth.minimum_duration_buckets,
+            duration_bucket_frames: TimeCode(truth.duration_bucket_frames),
+            maximum_similar_run: truth.maximum_similar_run,
+            similar_tolerance_frames: TimeCode(truth.similar_tolerance_frames),
+        },
+        EvalAssertion::NoAlternatingShotPattern {
+            track: TrackId(truth.video_track_id),
+            maximum_repeated_pairs: 2,
+            tolerance_frames: TimeCode(truth.similar_tolerance_frames),
+        },
+        EvalAssertion::NoVisualTransitionsEffectsOrRetiming {
+            track: TrackId(truth.video_track_id),
+        },
+        EvalAssertion::SourcePhaseArc {
+            track: TrackId(truth.video_track_id),
+            opening_alias: "sintel".to_owned(),
+            pivot_alias: "big-buck-bunny".to_owned(),
+            pivot_window: TimeCode(150)..TimeCode(276),
+            return_window: TimeCode(280)..TimeCode(321),
+            closing_alias: "sintel".to_owned(),
+            minimum_opening_hold: TimeCode(60),
+            minimum_closing_hold: TimeCode(60),
+        },
+        EvalAssertion::BeatAlignedCuts {
+            track: TrackId(truth.video_track_id),
+            beat_set: MUSIC_PROJECT_BEAT_SET.to_owned(),
+            tolerance_frames: TimeCode(truth.beat_alignment_tolerance_frames),
+        },
+        EvalAssertion::CutsAlignedToBeatSetAtLeast {
+            track: TrackId(truth.video_track_id),
+            beat_set: MUSIC_STRUCTURAL_BEAT_SET.to_owned(),
+            tolerance_frames: TimeCode(truth.beat_alignment_tolerance_frames),
+            minimum_aligned_cuts: truth.minimum_structural_aligned_cuts,
+            minimum_aligned_basis_points: minimum_structural_aligned_basis_points,
+        },
+        EvalAssertion::MusicFit {
+            track: TrackId(truth.audio_track_id),
+            asset_alias: "music-bed".to_owned(),
+            source_beat_set: MUSIC_SOURCE_BEAT_SET.to_owned(),
+            timeline_start: TimeCode(truth.timeline_range.start),
+            timeline_end: TimeCode(truth.timeline_range.end),
+            tolerance_source_frames: TimeCode::ZERO,
+        },
+        EvalAssertion::MediaGapless,
+        EvalAssertion::AudioPresent,
+        EvalAssertion::SingleAudioMediaClip {
+            track: TrackId(truth.audio_track_id),
+            asset_alias: "music-bed".to_owned(),
+        },
+        EvalAssertion::QaExportReady,
+        required_all(&[
+            "get_capability",
+            "get_source_storyboard",
+            "get_source_shot_board",
+            "plan_music_fit",
+            "get_music_structure",
+            "plan_beat_montage",
+            "plan_audio_normalization",
+            "get_editorial_readiness",
+            "commit_edit_plan",
+        ]),
+        EvalAssertion::UndoIntegrity,
+    ]
+}
+
 fn editorial_cut_suite() -> Vec<EvalDefinition> {
     vec![EvalDefinition {
         name: "f2 coherent neighborhood garden story",
@@ -1261,6 +1506,7 @@ fn generalization_suite() -> Vec<EvalDefinition> {
             }),
         },
         event_multicam_definition(),
+        music_montage_definition(),
     ]
 }
 
@@ -1701,6 +1947,55 @@ struct EventReframeTruth {
     maximum_step_percent: i64,
 }
 
+#[derive(Debug, Deserialize)]
+struct MusicMontageGroundTruth {
+    schema_version: u32,
+    montage_id: String,
+    project_fps: Rational,
+    project_resolution: GroundTruthResolution,
+    timeline_range: GroundTruthRange,
+    video_track_id: u64,
+    audio_track_id: u64,
+    visual_asset_ids: Vec<String>,
+    music_asset_id: String,
+    minimum_visual_shots: usize,
+    maximum_visual_shots: usize,
+    minimum_shot_frames: i64,
+    maximum_shot_frames: i64,
+    minimum_beat_strength_percent: f64,
+    beat_alignment_tolerance_frames: i64,
+    minimum_visual_assets_used: usize,
+    minimum_source_separation_frames: i64,
+    source_scene_minimum_confidence_percent: f64,
+    source_exclusions: Vec<GroundTruthSourceExclusion>,
+    minimum_duration_buckets: usize,
+    duration_bucket_frames: i64,
+    maximum_similar_run: usize,
+    similar_tolerance_frames: i64,
+    minimum_clean_selectable_project_frames: i64,
+    selection_headroom_frames: i64,
+    meter_beats: u8,
+    phrase_bars: u8,
+    minimum_structural_aligned_cuts: usize,
+    minimum_structural_aligned_percent: f64,
+    music_preferred_source_start: i64,
+    story_brief: String,
+    attribution: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GroundTruthSourceExclusion {
+    asset_id: String,
+    source_range: GroundTruthRange,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct GroundTruthResolution {
+    width: u32,
+    height: u32,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 struct GroundTruthRange {
     start: i64,
@@ -1711,6 +2006,95 @@ struct GroundTruthRange {
 struct GroundTruthDurationBounds {
     minimum: i64,
     maximum: i64,
+}
+
+/// Return the project-frame duration that can be selected from source ranges
+/// which are both scene-clean and outside the manually reviewed exclusions.
+///
+/// A source scene is an indivisible editorial unit for the montage planner, so
+/// each candidate interval is split at detected boundaries before exclusions
+/// are subtracted. Intervals shorter than the minimum shot length are not
+/// counted: they cannot satisfy the active shot contract even if their frames
+/// are otherwise clean.
+fn clean_selectable_project_frames(
+    assets: &[MediaAsset],
+    project_fps: Rational,
+    scene_boundaries: &[(AssetId, TimeCode)],
+    exclusions: &[SourceRangeExclusion],
+    minimum_shot_frames: TimeCode,
+) -> Result<i64, EvalError> {
+    if minimum_shot_frames <= TimeCode::ZERO {
+        return Err(EvalError::Fixture(
+            "music source feasibility requires a positive minimum shot length".to_owned(),
+        ));
+    }
+    let mut selectable_project_frames = 0_i64;
+    for asset in assets
+        .iter()
+        .filter(|asset| asset.kind.supports(TrackKind::Video))
+    {
+        let mut boundaries = vec![TimeCode::ZERO, asset.duration];
+        boundaries.extend(
+            scene_boundaries
+                .iter()
+                .filter(|(asset_id, frame)| {
+                    *asset_id == asset.id && *frame > TimeCode::ZERO && *frame < asset.duration
+                })
+                .map(|(_, frame)| *frame),
+        );
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
+        let asset_exclusions = exclusions
+            .iter()
+            .filter(|exclusion| exclusion.asset == asset.id)
+            .collect::<Vec<_>>();
+        for window in boundaries.windows(2) {
+            let scene_start = window[0];
+            let scene_end = window[1];
+            let mut cuts = vec![scene_start, scene_end];
+            for exclusion in &asset_exclusions {
+                if exclusion.source_range.end <= scene_start
+                    || exclusion.source_range.start >= scene_end
+                {
+                    continue;
+                }
+                cuts.push(exclusion.source_range.start.max(scene_start));
+                cuts.push(exclusion.source_range.end.min(scene_end));
+            }
+            cuts.sort_unstable();
+            cuts.dedup();
+            for interval in cuts.windows(2) {
+                let source_start = interval[0];
+                let source_end = interval[1];
+                if asset_exclusions.iter().any(|exclusion| {
+                    exclusion.source_range.start < source_end
+                        && exclusion.source_range.end > source_start
+                }) {
+                    continue;
+                }
+                let source_frames = source_end.0.saturating_sub(source_start.0);
+                if source_frames < minimum_shot_frames.0 {
+                    continue;
+                }
+                let project_frames = map_frames_with_rounding(
+                    TimeCode(source_frames),
+                    asset.fps,
+                    project_fps,
+                    FrameRounding::Nearest,
+                )
+                .map_err(|error| {
+                    EvalError::Fixture(format!(
+                        "could not map clean source interval {source_start}..{source_end} for {}: {error}",
+                        asset.id
+                    ))
+                })?;
+                selectable_project_frames =
+                    selectable_project_frames.saturating_add(project_frames.0);
+            }
+        }
+    }
+    Ok(selectable_project_frames)
 }
 
 fn fixture_real_interview_story() -> Result<PreparedFixture, EvalError> {
@@ -2087,6 +2471,406 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
     context
         .duration_bounds
         .insert("event-introductions".to_owned(), (duration, duration));
+    PreparedFixture::new(document, media, context, Vec::new())
+}
+
+#[allow(clippy::too_many_lines)]
+fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
+    let truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
+        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v2.json"
+    ))
+    .map_err(|error| EvalError::Fixture(format!("invalid v5 music ground truth: {error}")))?;
+    let project_fps = Rational::new(25, 1).expect("music fixture fps is valid");
+    if truth.schema_version != 1
+        || truth.montage_id.trim().is_empty()
+        || truth.project_fps != project_fps
+        || truth.project_resolution.width != 1_920
+        || truth.project_resolution.height != 1_080
+        || truth.timeline_range.start < 0
+        || truth.timeline_range.end <= truth.timeline_range.start
+        || truth.video_track_id != 1
+        || truth.audio_track_id != 2
+        || truth.visual_asset_ids.len() != 2
+        || truth.visual_asset_ids.iter().any(|id| id.trim().is_empty())
+        || truth.visual_asset_ids[0] == truth.visual_asset_ids[1]
+        || truth.visual_asset_ids.contains(&truth.music_asset_id)
+        || truth.music_asset_id.trim().is_empty()
+        || truth.source_exclusions.is_empty()
+        || truth.source_exclusions.iter().any(|exclusion| {
+            exclusion.asset_id.trim().is_empty()
+                || exclusion.source_range.start < 0
+                || exclusion.source_range.end <= exclusion.source_range.start
+                || exclusion.reason.trim().is_empty()
+        })
+        || truth.minimum_visual_shots < 2
+        || truth.minimum_visual_shots > truth.maximum_visual_shots
+        || truth.minimum_shot_frames <= 0
+        || truth.minimum_shot_frames > truth.maximum_shot_frames
+        || !(0.0..=100.0).contains(&truth.minimum_beat_strength_percent)
+        || truth.beat_alignment_tolerance_frames < 0
+        || truth.minimum_visual_assets_used != 2
+        || truth.minimum_source_separation_frames < 0
+        || !(0.0..=100.0).contains(&truth.source_scene_minimum_confidence_percent)
+        || truth.minimum_duration_buckets < 2
+        || truth.duration_bucket_frames <= 0
+        || truth.maximum_similar_run == 0
+        || truth.similar_tolerance_frames < 0
+        || truth.minimum_clean_selectable_project_frames <= 0
+        || truth.selection_headroom_frames < 0
+        || truth.minimum_clean_selectable_project_frames
+            < truth
+                .timeline_range
+                .end
+                .saturating_sub(truth.timeline_range.start)
+                .saturating_add(truth.selection_headroom_frames)
+        || !(2..=12).contains(&truth.meter_beats)
+        || !(1..=16).contains(&truth.phrase_bars)
+        || truth.minimum_structural_aligned_cuts == 0
+        || truth.minimum_structural_aligned_cuts >= truth.maximum_visual_shots
+        || !(0.0..=100.0).contains(&truth.minimum_structural_aligned_percent)
+        || truth.minimum_structural_aligned_percent == 0.0
+        || truth.music_preferred_source_start < 0
+        || truth.story_brief.trim().is_empty()
+        || truth.attribution.is_empty()
+    {
+        return Err(EvalError::Fixture(
+            "v5 music ground truth has an invalid schema, project contract, asset set, or montage constraints"
+                .to_owned(),
+        ));
+    }
+
+    let minimum_strength_basis_points = percentage_to_basis_points_for_fixture(
+        truth.minimum_beat_strength_percent,
+        "minimum_beat_strength_percent",
+    )?;
+    let source_scene_minimum_confidence_basis_points = percentage_to_basis_points_for_fixture(
+        truth.source_scene_minimum_confidence_percent,
+        "source_scene_minimum_confidence_percent",
+    )?;
+    let _minimum_structural_aligned_basis_points = percentage_to_basis_points_for_fixture(
+        truth.minimum_structural_aligned_percent,
+        "minimum_structural_aligned_percent",
+    )?;
+    let pack = FixturePackManifest::from_json(include_str!(
+        "../../../../benchmarks/auto-edit/v5/music-fixture-pack-v2.json"
+    ))
+    .map_err(|error| EvalError::Fixture(error.to_string()))?;
+    let cache = fixture_cache_root();
+    let media = eval_engine();
+    let mut assets_by_fixture_id = BTreeMap::new();
+    let mut aliases_by_fixture_id = BTreeMap::new();
+    let alias_for = |fixture_id: &str| match fixture_id {
+        "sintel-trailer-1080p" => Some("sintel"),
+        "big-buck-bunny-trailer-1080p" => Some("big-buck-bunny"),
+        "uprising-scott-buckley" => Some("music-bed"),
+        _ => None,
+    };
+    for fixture_id in truth
+        .visual_asset_ids
+        .iter()
+        .chain(std::iter::once(&truth.music_asset_id))
+    {
+        if assets_by_fixture_id.contains_key(fixture_id) {
+            continue;
+        }
+        let alias = alias_for(fixture_id).ok_or_else(|| {
+            EvalError::Fixture(format!("v5 music asset {fixture_id:?} has no stable alias"))
+        })?;
+        let path = pack
+            .verified_asset(&cache, fixture_id)
+            .map_err(|error| EvalError::Fixture(error.to_string()))?;
+        let mut asset = probe_named(&media, &path, alias)?;
+        if truth.visual_asset_ids.iter().any(|id| id == fixture_id) {
+            // The visual source files may carry an incidental audio stream.
+            // The benchmark deliberately makes the pinned music bed the only program audio.
+            asset.kind = openreel_core::MediaKind::Video;
+        }
+        aliases_by_fixture_id.insert(fixture_id.clone(), alias.to_owned());
+        assets_by_fixture_id.insert(fixture_id.clone(), asset);
+    }
+
+    for exclusion in &truth.source_exclusions {
+        if !truth
+            .visual_asset_ids
+            .iter()
+            .any(|asset_id| asset_id == &exclusion.asset_id)
+        {
+            return Err(EvalError::Fixture(format!(
+                "v5 music source exclusion {:?} is not attached to a pinned visual asset",
+                exclusion.asset_id
+            )));
+        }
+        let asset = assets_by_fixture_id
+            .get(&exclusion.asset_id)
+            .expect("validated source exclusion asset exists");
+        if exclusion.source_range.end > asset.duration.0 {
+            return Err(EvalError::Fixture(format!(
+                "v5 music source exclusion {:?} ends at {}, beyond asset duration {}",
+                exclusion.asset_id, exclusion.source_range.end, asset.duration.0
+            )));
+        }
+    }
+    let source_exclusions = truth
+        .source_exclusions
+        .iter()
+        .map(|exclusion| {
+            let asset = assets_by_fixture_id
+                .get(&exclusion.asset_id)
+                .expect("validated source exclusion asset exists");
+            SourceRangeExclusion {
+                asset: asset.id,
+                source_range: TimeCode(exclusion.source_range.start)
+                    ..TimeCode(exclusion.source_range.end),
+                reason: exclusion.reason.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let music = assets_by_fixture_id
+        .get(&truth.music_asset_id)
+        .ok_or_else(|| EvalError::Fixture("v5 music asset is missing".to_owned()))?;
+    if !music.kind.supports(TrackKind::Audio) {
+        return Err(EvalError::Fixture(format!(
+            "v5 music asset {} is not audio-capable after probe: {:?}",
+            music.id, music.kind
+        )));
+    }
+    for fixture_id in &truth.visual_asset_ids {
+        let asset = assets_by_fixture_id.get(fixture_id).ok_or_else(|| {
+            EvalError::Fixture(format!("v5 visual asset {fixture_id:?} is missing"))
+        })?;
+        if asset.kind != openreel_core::MediaKind::Video {
+            return Err(EvalError::Fixture(format!(
+                "v5 visual asset {fixture_id:?} was not forced to video kind"
+            )));
+        }
+    }
+    let mut source_scenes = Vec::new();
+    for fixture_id in &truth.visual_asset_ids {
+        let asset = assets_by_fixture_id
+            .get(fixture_id)
+            .expect("validated visual fixture asset exists");
+        media.request_scene_detection(asset.clone());
+        let scenes = wait_for_scenes(media.as_ref(), asset)?;
+        source_scenes.extend(
+            scenes
+                .changes
+                .iter()
+                .filter(|change| {
+                    change.confidence_basis_points >= source_scene_minimum_confidence_basis_points
+                })
+                .map(|change| (asset.id, change.source_frame)),
+        );
+    }
+    if source_scenes.is_empty() {
+        return Err(EvalError::Fixture(
+            "v5 music visual sources produced no qualifying scene boundaries".to_owned(),
+        ));
+    }
+
+    let media_pool = truth
+        .visual_asset_ids
+        .iter()
+        .chain(std::iter::once(&truth.music_asset_id))
+        .map(|fixture_id| {
+            assets_by_fixture_id
+                .get(fixture_id)
+                .cloned()
+                .ok_or_else(|| EvalError::Fixture(format!("v5 music asset {fixture_id:?} missing")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let clean_selectable_project_frames = clean_selectable_project_frames(
+        &media_pool,
+        project_fps,
+        &source_scenes,
+        &source_exclusions,
+        TimeCode(truth.minimum_shot_frames),
+    )?;
+    let target_project_frames = truth
+        .timeline_range
+        .end
+        .saturating_sub(truth.timeline_range.start);
+    let required_clean_project_frames =
+        target_project_frames.saturating_add(truth.selection_headroom_frames);
+    if clean_selectable_project_frames < truth.minimum_clean_selectable_project_frames
+        || clean_selectable_project_frames < required_clean_project_frames
+    {
+        return Err(EvalError::Fixture(format!(
+            "v5 music source ranges provide only {clean_selectable_project_frames} clean selectable project frames; required at least {} (target {target_project_frames} + headroom {})",
+            truth.minimum_clean_selectable_project_frames, truth.selection_headroom_frames
+        )));
+    }
+    let document = Document {
+        catalog: MediaCatalog::default(),
+        audio_mix: openreel_core::AudioMix::default(),
+        tracks: vec![
+            Track {
+                id: TrackId(truth.video_track_id),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: Vec::new(),
+            },
+            Track {
+                id: TrackId(truth.audio_track_id),
+                kind: TrackKind::Audio,
+                sync_lock: true,
+                clips: Vec::new(),
+            },
+        ],
+        media_pool,
+        markers: Vec::new(),
+        fps: project_fps,
+        resolution: (
+            truth.project_resolution.width,
+            truth.project_resolution.height,
+        ),
+        duration: TimeCode::ZERO,
+    };
+
+    let music = document
+        .asset(music.id)
+        .cloned()
+        .ok_or_else(|| EvalError::Fixture("music asset was lost from media pool".to_owned()))?;
+    media.request_beat_detection(music.clone());
+    let beats = wait_for_beats(media.as_ref(), &music)?;
+    let beat_status = BeatStatus::Ready(Arc::clone(&beats));
+    let timeline_range = TimeCode(truth.timeline_range.start)..TimeCode(truth.timeline_range.end);
+    let music_plan = openreel_core::music_fit_plan(
+        &document,
+        TrackId(truth.audio_track_id),
+        music.id,
+        timeline_range.clone(),
+        Some(TimeCode(truth.music_preferred_source_start)),
+        &beat_status,
+        minimum_strength_basis_points,
+        ThreePointMode::Overwrite,
+    )
+    .map_err(|error| {
+        EvalError::Fixture(format!("v5 music fit contract is not feasible: {error}"))
+    })?;
+    if music_plan.timeline_range != timeline_range
+        || music_plan.source_range.start < TimeCode::ZERO
+        || music_plan.source_range.end > music.duration
+        || music_plan.source_range.end <= music_plan.source_range.start
+    {
+        return Err(EvalError::Fixture(
+            "v5 music fit returned an invalid source or project range".to_owned(),
+        ));
+    }
+
+    let source_beats = beats
+        .beats
+        .iter()
+        .filter(|beat| {
+            beat.source_frame >= TimeCode::ZERO
+                && beat.source_frame < music.duration
+                && beat.strength_basis_points >= minimum_strength_basis_points
+        })
+        .map(|beat| beat.source_frame)
+        .collect::<Vec<_>>();
+    if source_beats.is_empty() || !source_beats.contains(&music_plan.source_range.start) {
+        return Err(EvalError::Fixture(
+            "v5 music fit anchor is absent from the eligible source beat set".to_owned(),
+        ));
+    }
+
+    let mut project_beats = beats
+        .beats
+        .iter()
+        .filter(|beat| {
+            beat.source_frame >= music_plan.source_range.start
+                && beat.source_frame < music_plan.source_range.end
+                && beat.strength_basis_points >= minimum_strength_basis_points
+        })
+        .filter_map(|beat| {
+            let offset = beat
+                .source_frame
+                .checked_sub(music_plan.source_range.start)?;
+            let project_offset =
+                map_frames_with_rounding(offset, music.fps, project_fps, FrameRounding::Nearest)
+                    .ok()?;
+            let project_frame = music_plan
+                .timeline_range
+                .start
+                .checked_add(project_offset)?;
+            (project_frame >= music_plan.timeline_range.start
+                && project_frame < music_plan.timeline_range.end)
+                .then_some(project_frame)
+        })
+        .collect::<Vec<_>>();
+    project_beats.sort_unstable();
+    project_beats.dedup();
+    if project_beats.is_empty() {
+        return Err(EvalError::Fixture(
+            "v5 music fit produced no eligible project-frame beats".to_owned(),
+        ));
+    }
+    let mut structure_document = document.clone();
+    openreel_core::apply_batch(&mut structure_document, &music_plan.operations).map_err(
+        |error| {
+            EvalError::Fixture(format!(
+                "v5 music fit could not build the structure-analysis snapshot: {error}"
+            ))
+        },
+    )?;
+    let structure_timeline_beats = media
+        .timeline_beats(
+            &structure_document,
+            Some(timeline_range.clone()),
+            minimum_strength_basis_points,
+        )
+        .map_err(|error| {
+            EvalError::Fixture(format!(
+                "v5 music structure beats could not be mapped: {error}"
+            ))
+        })?;
+    let structure = openreel_core::music_structure_analysis(
+        &structure_document,
+        music.id,
+        timeline_range.clone(),
+        &structure_timeline_beats,
+        &openreel_core::TimelineBeatAnalysisState::Ready,
+        minimum_strength_basis_points,
+        truth.meter_beats,
+        truth.phrase_bars,
+    )
+    .map_err(|error| EvalError::Fixture(format!("v5 music structure failed: {error}")))?;
+    let structural_beats = structure
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.role != openreel_core::MusicStructureRole::Beat)
+        .map(|candidate| candidate.project_frame)
+        .collect::<Vec<_>>();
+    if structural_beats.len() < truth.minimum_structural_aligned_cuts {
+        return Err(EvalError::Fixture(format!(
+            "v5 music structure produced only {} bar/phrase candidates, fewer than the required {} cuts",
+            structural_beats.len(),
+            truth.minimum_structural_aligned_cuts
+        )));
+    }
+
+    let mut context = FixtureContext::default();
+    for (fixture_id, asset) in &assets_by_fixture_id {
+        let alias = aliases_by_fixture_id.get(fixture_id).ok_or_else(|| {
+            EvalError::Fixture(format!("v5 music asset {fixture_id:?} lost its alias"))
+        })?;
+        context.asset_aliases.insert(alias.clone(), asset.id);
+    }
+    context
+        .source_beat_sets
+        .insert(MUSIC_SOURCE_BEAT_SET.to_owned(), source_beats);
+    context
+        .timeline_beat_sets
+        .insert(MUSIC_PROJECT_BEAT_SET.to_owned(), project_beats);
+    context
+        .timeline_beat_sets
+        .insert(MUSIC_STRUCTURAL_BEAT_SET.to_owned(), structural_beats);
+    context
+        .scene_sets
+        .insert(MUSIC_SOURCE_SCENE_SET.to_owned(), source_scenes);
+    context
+        .exclusion_sets
+        .insert(MUSIC_SOURCE_EXCLUSION_SET.to_owned(), source_exclusions);
     PreparedFixture::new(document, media, context, Vec::new())
 }
 
@@ -2658,6 +3442,60 @@ fn wait_for_scenes(
     }
 }
 
+fn wait_for_beats(media: &dyn Analysis, asset: &MediaAsset) -> Result<Arc<AssetBeats>, EvalError> {
+    let deadline = Instant::now() + Duration::from_mins(5);
+    let label = asset.id;
+    let mut previous = String::new();
+    loop {
+        let status = media.beat_status(asset);
+        let summary = match &status {
+            BeatStatus::Ready(beats) => format!(
+                "Ready(beats={}, source_fps={}/{}, bpm={})",
+                beats.beats.len(),
+                beats.source_fps.numerator(),
+                beats.source_fps.denominator(),
+                beats.estimated_bpm_milli
+            ),
+            other => format!("{other:?}"),
+        };
+        if summary != previous {
+            println!("  BEATS {label}: {summary}");
+            previous = summary;
+        }
+        match status {
+            BeatStatus::Ready(beats) => return Ok(beats),
+            BeatStatus::NoAudio => {
+                return Err(EvalError::Fixture(format!(
+                    "asset {label} has no audio for beat analysis"
+                )));
+            }
+            BeatStatus::Cancelled => {
+                return Err(EvalError::Fixture(format!(
+                    "asset {label} beat analysis was cancelled"
+                )));
+            }
+            BeatStatus::Failed(error) => return Err(EvalError::Fixture(error)),
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            return Err(EvalError::Fixture(format!(
+                "asset {label} beat analysis timed out"
+            )));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn percentage_to_basis_points_for_fixture(value: f64, field: &str) -> Result<u16, EvalError> {
+    if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+        return Err(EvalError::Fixture(format!(
+            "{field} must be finite and between 0 and 100 percent, observed {value}"
+        )));
+    }
+    Ok((value * 100.0).round() as u16)
+}
+
 fn silence_frames(silences: &AssetSilences, minimum_frames: i64) -> i64 {
     silences
         .spans
@@ -2776,6 +3614,78 @@ mod tests {
         assert_eq!(contract.maximum_sample_peak_dbfs_hundredths, -100);
         assert!(parse_loudness_contract("-1400,-1800,-100").is_err());
         assert!(parse_loudness_contract("-1800,-1400,1").is_err());
+    }
+
+    #[test]
+    fn clean_selectable_frames_do_not_count_excluded_intervals() {
+        let asset = MediaAsset {
+            id: AssetId(1),
+            path: PathBuf::from("fixture.mp4"),
+            name: "fixture".to_owned(),
+            duration: TimeCode(100),
+            fps: Rational::new(25, 1).unwrap(),
+            kind: openreel_core::MediaKind::Video,
+            resolution: Some((1_920, 1_080)),
+        };
+        let exclusions = [SourceRangeExclusion {
+            asset: asset.id,
+            source_range: TimeCode(20)..TimeCode(40),
+            reason: "baked transition".to_owned(),
+        }];
+        let clean = clean_selectable_project_frames(
+            &[asset],
+            Rational::new(25, 1).unwrap(),
+            &[(AssetId(1), TimeCode(70))],
+            &exclusions,
+            TimeCode(10),
+        )
+        .unwrap();
+        assert_eq!(clean, 80);
+    }
+
+    #[test]
+    fn human_review_scoring_is_bound_to_the_machine_report_artifact() {
+        let review_json = r#"{
+          "schema_version": 1,
+          "benchmark_id": "bench",
+          "run_id": "run",
+          "reviewer": "owner",
+          "tasks": [{
+            "task_id": "g3",
+            "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "accepted": true,
+            "ratings": {
+              "story": 4.0,
+              "pacing": 4.0,
+              "visual_finish": 4.0,
+              "audio_finish": 4.0,
+              "captions": null,
+              "delivery_readiness": 4.0
+            },
+            "not_applicable": ["captions"],
+            "notes": null
+          }]
+        }"#;
+        let mut review: HumanReviewFile = serde_json::from_str(review_json).unwrap();
+        let report = serde_json::json!({
+            "benchmark_id": "bench",
+            "run_id": "run",
+            "results": [{
+                "name": "g3 real montage",
+                "deliverable": {
+                    "output_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            }]
+        });
+        verify_review_artifact_bindings(&review, &report).unwrap();
+
+        review.tasks[0].artifact_sha256 =
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned());
+        assert!(verify_review_artifact_bindings(&review, &report).is_err());
+        review.tasks[0].artifact_sha256 = None;
+        assert!(verify_review_artifact_bindings(&review, &report).is_err());
+        review.tasks[0].accepted = None;
+        verify_review_artifact_bindings(&review, &report).unwrap();
     }
 
     #[test]
@@ -3012,6 +3922,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn published_v5_manifest_tracks_both_real_footage_families_and_fixture_packs() {
         let manifest: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../benchmarks/auto-edit/v5/manifest.json"
@@ -3020,9 +3931,40 @@ mod tests {
         assert_eq!(manifest["schema_version"], 5);
         assert_eq!(manifest["benchmark_id"], "openreel-generalization-v5");
         assert_eq!(manifest["status"], "in_progress");
+        assert_eq!(
+            manifest["score_layers"]["human"]["acceptance_required_for_scored_artifact"],
+            true
+        );
+        assert_eq!(
+            manifest["score_layers"]["human"]["not_applicable_dimensions_excluded_from_means"],
+            true
+        );
+        for dimension in [
+            "story",
+            "pacing",
+            "visual_finish",
+            "audio_finish",
+            "captions",
+            "delivery_readiness",
+        ] {
+            assert_eq!(
+                manifest["milestone_exit"]["minimum_mean_human_rating_by_applicable_dimension"]
+                    [dimension],
+                4.0,
+                "every applicable human-rating dimension must clear the 4.0 gate: {dimension}"
+            );
+        }
         let definitions = generalization_suite();
         let tasks = manifest["tasks"].as_array().unwrap();
-        assert_eq!(definitions.len(), 2);
+        assert_eq!(manifest["fixture_packs"].as_array().unwrap().len(), 4);
+        assert!(
+            manifest["fixture_packs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|path| path == "benchmarks/auto-edit/v5/music-fixture-pack-v2.json")
+        );
+        assert_eq!(definitions.len(), 3);
         assert_eq!(tasks.len(), definitions.len());
         for (task, definition) in tasks.iter().zip(&definitions) {
             assert_eq!(
@@ -3086,6 +4028,179 @@ mod tests {
                 ..
             }
         )));
+        let music = &definitions[2];
+        let music_delivery = music.deliverable.unwrap();
+        assert_eq!(music_delivery.profile, DeliveryProfile::Youtube1080p);
+        assert_eq!(music_delivery.expected_transcript_word_set, None);
+        assert_eq!(
+            music_delivery.loudness,
+            Some(EvalLoudnessSpec {
+                minimum_integrated_lufs_hundredths: -1_800,
+                maximum_integrated_lufs_hundredths: -1_400,
+                maximum_sample_peak_dbfs_hundredths: -100,
+            })
+        );
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::ClipCount {
+                minimum: 9,
+                maximum: 11,
+            }
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::MediaClipCount {
+                track: TrackId(1),
+                minimum: 8,
+                maximum: 10,
+                minimum_duration: TimeCode(50),
+                maximum_duration: TimeCode(120),
+                reject_non_media: true,
+            }
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::BeatAlignedCuts {
+                track: TrackId(1),
+                beat_set,
+                tolerance_frames: TimeCode(1),
+            } if beat_set == MUSIC_PROJECT_BEAT_SET
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::CutsAlignedToBeatSetAtLeast {
+                track: TrackId(1),
+                beat_set,
+                tolerance_frames: TimeCode(1),
+                minimum_aligned_cuts: 3,
+                minimum_aligned_basis_points: 5_000,
+            } if beat_set == MUSIC_STRUCTURAL_BEAT_SET
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::MusicFit {
+                track: TrackId(2),
+                asset_alias,
+                source_beat_set,
+                timeline_start: TimeCode(0),
+                timeline_end: TimeCode(600),
+                tolerance_source_frames: TimeCode(0),
+            } if asset_alias == "music-bed" && source_beat_set == MUSIC_SOURCE_BEAT_SET
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::RequiredAssetsOnTrack {
+                track: TrackId(1),
+                aliases,
+            } if aliases == &["sintel".to_owned(), "big-buck-bunny".to_owned()]
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::SourceRangesSeparated {
+                track: TrackId(1),
+                minimum_separation_frames: TimeCode(0),
+            }
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::ExactProjectDuration {
+                duration: TimeCode(600),
+            }
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::ExactTrackMediaCoverage {
+                track: TrackId(1),
+                range,
+            } if range == &(TimeCode::ZERO..TimeCode(600))
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::ExactTrackMediaCoverage {
+                track: TrackId(2),
+                range,
+            } if range == &(TimeCode::ZERO..TimeCode(600))
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::SourceRangesSceneClean {
+                track: TrackId(1),
+                scene_set,
+            } if scene_set == MUSIC_SOURCE_SCENE_SET
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::ShotCadenceVariation {
+                track: TrackId(1),
+                minimum_duration_buckets: 3,
+                duration_bucket_frames: TimeCode(20),
+                maximum_similar_run: 3,
+                similar_tolerance_frames: TimeCode(8),
+            }
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::SingleAudioMediaClip {
+                track: TrackId(2),
+                asset_alias,
+            } if asset_alias == "music-bed"
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::NoAlternatingShotPattern {
+                track: TrackId(1),
+                maximum_repeated_pairs: 2,
+                tolerance_frames: TimeCode(8),
+            }
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::NoVisualTransitionsEffectsOrRetiming { track: TrackId(1) }
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::SourcePhaseArc {
+                track: TrackId(1),
+                opening_alias,
+                pivot_alias,
+                pivot_window,
+                return_window,
+                closing_alias,
+                minimum_opening_hold: TimeCode(60),
+                minimum_closing_hold: TimeCode(60),
+            } if opening_alias == "sintel"
+                && pivot_alias == "big-buck-bunny"
+                && pivot_window == &(TimeCode(150)..TimeCode(276))
+                && return_window == &(TimeCode(280)..TimeCode(321))
+                && closing_alias == "sintel"
+        )));
+        let music_prompt = music.prompts[0];
+        for required in [
+            "call get_source_shot_board exactly once per visual asset over its full range",
+            "minimum_confidence_basis_points 5000",
+            "trim within them when needed",
+            "Sintel [0..40)",
+            "[984..1253)",
+            "Big Buck Bunny [0..114)",
+            "Never select any range overlapping these half-open exclusions",
+            "preferred source start 3450",
+            "structural_only=false",
+            "use only its returned project frames as cuts",
+            "At least 3 cuts and at least half of all cuts",
+            "cadence {minimum_duration_buckets:3, duration_bucket_frames:20, maximum_similar_run:3, similar_tolerance_frames:8}",
+            "anchor_repair {maximum_movement_frames:24, locked_anchor_indices:[]}",
+            "preferred_anchor_frames, resolved_anchor_frames, every signed delta",
+            "Never stop after one infeasible attempt",
+            "Add no captions, titles, transitions, fades, effects, or retiming",
+            "16 storyboard frames",
+            "Inspect every cell",
+        ] {
+            assert!(
+                music_prompt.contains(required),
+                "G3 prompt is missing required contract text: {required}"
+            );
+        }
+        assert!(!music_prompt.contains("structural_only=true"));
 
         assert_v5_fixture_packs_and_truth();
     }
@@ -3141,6 +4256,53 @@ mod tests {
         assert_eq!(event_truth.reframe.min_y_percent, 20);
         assert_eq!(event_truth.reframe.max_y_percent, 80);
         assert_eq!(event_truth.reframe.maximum_step_percent, 2);
+
+        let music_pack = FixturePackManifest::from_json(include_str!(
+            "../../../../benchmarks/auto-edit/v5/music-fixture-pack-v2.json"
+        ))
+        .unwrap();
+        assert_eq!(music_pack.pack_id, "m40-music-montage-v2");
+        assert_eq!(music_pack.assets.len(), 3);
+        assert_eq!(
+            music_pack
+                .assets
+                .iter()
+                .map(|asset| asset.bytes)
+                .sum::<u64>(),
+            50_725_326
+        );
+        let music_truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v5/music-ground-truth-v2.json"
+        ))
+        .unwrap();
+        assert_eq!(music_truth.schema_version, 1);
+        assert_eq!(music_truth.montage_id, "blender-contrast-uprising");
+        assert_eq!(music_truth.project_fps, Rational::new(25, 1).unwrap());
+        assert_eq!(
+            music_truth.visual_asset_ids,
+            [
+                "sintel-trailer-1080p".to_owned(),
+                "big-buck-bunny-trailer-1080p".to_owned()
+            ]
+        );
+        assert_eq!(music_truth.music_asset_id, "uprising-scott-buckley");
+        assert_eq!(music_truth.timeline_range.start, 0);
+        assert_eq!(music_truth.timeline_range.end, 600);
+        assert_eq!(music_truth.minimum_visual_shots, 8);
+        assert_eq!(music_truth.maximum_visual_shots, 10);
+        assert_eq!(music_truth.minimum_shot_frames, 50);
+        assert_eq!(music_truth.maximum_shot_frames, 120);
+        assert!((music_truth.minimum_beat_strength_percent - 10.0).abs() < f64::EPSILON);
+        assert_eq!(music_truth.minimum_source_separation_frames, 0);
+        assert!((music_truth.source_scene_minimum_confidence_percent - 50.0).abs() < f64::EPSILON);
+        assert_eq!(music_truth.minimum_duration_buckets, 3);
+        assert_eq!(music_truth.duration_bucket_frames, 20);
+        assert_eq!(music_truth.maximum_similar_run, 3);
+        assert_eq!(music_truth.similar_tolerance_frames, 8);
+        assert_eq!(music_truth.meter_beats, 4);
+        assert_eq!(music_truth.phrase_bars, 4);
+        assert_eq!(music_truth.minimum_structural_aligned_cuts, 3);
+        assert!((music_truth.minimum_structural_aligned_percent - 50.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -3191,6 +4353,65 @@ mod tests {
         assert_eq!(baseline["deliverable"]["tracked_reframe_clips"], 5);
         assert_eq!(baseline["human_review"]["status"], "reviewed_rejected");
         assert_eq!(baseline["human_review"]["accepted"], false);
+        assert_eq!(baseline["benchmark_status"], "in_progress");
+    }
+
+    #[test]
+    fn published_v5_music_baseline_preserves_machine_success_and_human_rejection() {
+        let baseline: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v5/music-montage-baseline.json"
+        ))
+        .unwrap();
+        assert_eq!(baseline["benchmark_id"], "openreel-generalization-v5");
+        assert_eq!(baseline["scope"]["status"], "music_montage_preflight");
+        assert_eq!(baseline["machine_summary"]["samples_passed"], 1);
+        assert_eq!(baseline["machine_summary"]["assertions_passed"], 22);
+        assert_eq!(baseline["machine_summary"]["assertions_total"], 22);
+        assert_eq!(baseline["machine_summary"]["tool_calls"], 11);
+        assert_eq!(baseline["machine_summary"]["tool_call_budget"], 24);
+        assert_eq!(baseline["machine_summary"]["operations_applied"], 12);
+        assert_eq!(baseline["machine_summary"]["total_tokens"], 154_358);
+        assert_eq!(baseline["deliverable"]["visual_shots"], 10);
+        assert_eq!(baseline["deliverable"]["music_clips"], 1);
+        assert_eq!(baseline["deliverable"]["duration_frames"], 800);
+        assert_eq!(
+            baseline["deliverable"]["rendered_integrated_lufs_hundredths"],
+            -1_602
+        );
+        assert_eq!(baseline["human_review"]["status"], "reviewed_rejected");
+        assert_eq!(baseline["human_review"]["accepted"], false);
+        assert_eq!(baseline["human_review"]["ratings"]["story"], 1.0);
+        assert_eq!(baseline["human_review"]["ratings"]["pacing"], 1.5);
+        assert_eq!(baseline["human_review"]["ratings"]["visual_finish"], 2.0);
+        assert_eq!(baseline["human_review"]["ratings"]["audio_finish"], 4.5);
+        assert!(baseline["human_review"]["ratings"]["captions"].is_null());
+        assert!(baseline["human_review"]["ratings"]["delivery_readiness"].is_null());
+        assert_eq!(baseline["benchmark_status"], "in_progress");
+    }
+
+    #[test]
+    fn published_v5_music_recovery_keeps_machine_success_and_human_review_separate() {
+        let baseline: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v5/music-montage-recovery-baseline.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            baseline["supersedes_artifact"]["human_status"],
+            "reviewed_rejected"
+        );
+        assert_eq!(baseline["fixture"]["pack_id"], "m40-music-montage-v2");
+        assert_eq!(baseline["machine_summary"]["assertions_passed"], 34);
+        assert_eq!(baseline["machine_summary"]["assertions_total"], 34);
+        assert_eq!(baseline["machine_summary"]["tool_calls"], 15);
+        assert_eq!(baseline["deliverable"]["duration_frames"], 600);
+        assert_eq!(baseline["deliverable"]["visual_shots"], 9);
+        assert_eq!(baseline["deliverable"]["structural_cut_count"], 6);
+        assert_eq!(
+            baseline["deliverable"]["independent_frame_audit"]["status"],
+            "passed"
+        );
+        assert_eq!(baseline["human_review"]["status"], "pending");
+        assert!(baseline["human_review"].get("accepted").is_none());
         assert_eq!(baseline["benchmark_status"], "in_progress");
     }
 
@@ -3367,6 +4588,169 @@ mod tests {
                 ("Laura closeup", 475, 794),
             ]
         );
+    }
+
+    #[test]
+    #[ignore = "requires the explicitly prepared M40 music fixture pack and beat analysis"]
+    #[allow(clippy::too_many_lines)]
+    fn v5_music_fixture_builds_with_real_media_and_pinned_beats() {
+        let fixture = fixture_real_music_montage().unwrap();
+        let document = &fixture.original_document;
+        assert_eq!(document.media_pool.len(), 3);
+        assert_eq!(document.tracks.len(), 2);
+        assert_eq!(document.duration, TimeCode::ZERO);
+        assert_eq!(document.fps, Rational::new(25, 1).unwrap());
+        assert_eq!(document.resolution, (1_920, 1_080));
+        assert_eq!(fixture.context.asset_aliases.len(), 3);
+        let source_beats = &fixture.context.source_beat_sets[MUSIC_SOURCE_BEAT_SET];
+        let project_beats = &fixture.context.timeline_beat_sets[MUSIC_PROJECT_BEAT_SET];
+        let source_scenes = &fixture.context.scene_sets[MUSIC_SOURCE_SCENE_SET];
+        println!(
+            "Uprising fixture: source_beats={} project_beats={} strong_source_scene_boundaries={}",
+            source_beats.len(),
+            project_beats.len(),
+            source_scenes.len()
+        );
+        assert!(!source_beats.is_empty());
+        assert!(!project_beats.is_empty());
+        assert!(!source_scenes.is_empty());
+        assert_eq!(
+            fixture.context.asset_aliases["sintel"],
+            document.media_pool[0].id
+        );
+        assert_eq!(
+            fixture.context.asset_aliases["big-buck-bunny"],
+            document.media_pool[1].id
+        );
+        assert_eq!(
+            fixture.context.asset_aliases["music-bed"],
+            document.media_pool[2].id
+        );
+
+        let mut planned_document = document.clone();
+        let music = planned_document.media_pool[2].clone();
+        let status = fixture.analysis.beat_status(&music);
+        let music_plan = openreel_core::music_fit_plan(
+            &planned_document,
+            TrackId(2),
+            music.id,
+            TimeCode::ZERO..TimeCode(600),
+            Some(TimeCode(3_450)),
+            &status,
+            1_000,
+            ThreePointMode::Overwrite,
+        )
+        .unwrap();
+        openreel_core::apply_batch(&mut planned_document, &music_plan.operations).unwrap();
+        let timeline_beats = fixture
+            .analysis
+            .timeline_beats(
+                &planned_document,
+                Some(TimeCode::ZERO..TimeCode(600)),
+                1_000,
+            )
+            .unwrap();
+        let structure = openreel_core::music_structure_analysis(
+            &planned_document,
+            music.id,
+            TimeCode::ZERO..TimeCode(600),
+            &timeline_beats,
+            &openreel_core::TimelineBeatAnalysisState::Ready,
+            1_000,
+            4,
+            4,
+        )
+        .unwrap();
+        println!(
+            "Uprising inferred structure: parameters={:?} candidates={:?}",
+            structure.parameters,
+            structure
+                .candidates
+                .iter()
+                .map(|candidate| (
+                    candidate.project_frame,
+                    candidate.role,
+                    candidate.strength_basis_points,
+                    candidate.confidence_basis_points,
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            structure
+                .candidates
+                .iter()
+                .any(|candidate| candidate.role == openreel_core::MusicStructureRole::Phrase)
+        );
+        let sintel = fixture.context.asset_aliases["sintel"];
+        let bunny = fixture.context.asset_aliases["big-buck-bunny"];
+        let selects = [
+            (sintel, 144_i64..216),
+            (sintel, 40_i64..108),
+            (sintel, 536_i64..664),
+            (bunny, 330_i64..400),
+            (sintel, 292_i64..376),
+            (sintel, 780_i64..832),
+            (sintel, 441_i64..508),
+            (sintel, 688_i64..768),
+            (sintel, 880_i64..984),
+        ]
+        .map(|(asset, source_range)| openreel_core::BeatMontageSelect {
+            asset,
+            source_range: TimeCode(source_range.start)..TimeCode(source_range.end),
+        });
+        // This feasible 600-frame schedule exercises the recovery contract:
+        // six of eight cuts are structural candidates, the Bunny pivot spans
+        // the frame-299 phrase lift, cadence has three duration bands, and all
+        // source envelopes avoid the manually reviewed exclusion ranges.
+        let explicit_anchors = [73, 130, 230, 299, 356, 408, 473, 532].map(TimeCode);
+        let montage = openreel_core::beat_montage_plan_with_anchors(
+            &planned_document,
+            TrackId(1),
+            music.id,
+            TimeCode::ZERO..TimeCode(600),
+            &selects,
+            &explicit_anchors,
+            &timeline_beats,
+            &openreel_core::TimelineBeatAnalysisState::Ready,
+            1_000,
+            TimeCode(50),
+            TimeCode(120),
+            ThreePointMode::Overwrite,
+        )
+        .expect("the pinned media must support a scene-clean nonuniform beat montage");
+        assert_eq!(montage.shots.len(), 9);
+        assert_eq!(montage.operations.len(), 9);
+        assert_eq!(
+            montage
+                .cut_anchors
+                .iter()
+                .map(|anchor| anchor.beat.project_frame)
+                .collect::<Vec<_>>(),
+            explicit_anchors
+        );
+        let durations = montage
+            .shots
+            .iter()
+            .map(|shot| shot.timeline_range.end.0 - shot.timeline_range.start.0)
+            .collect::<Vec<_>>();
+        assert_eq!(durations, [73, 57, 100, 69, 57, 52, 65, 59, 68]);
+        let structural_frames = structure
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.role != openreel_core::MusicStructureRole::Beat)
+            .map(|candidate| candidate.project_frame)
+            .collect::<std::collections::BTreeSet<_>>();
+        let structural_cut_count = explicit_anchors
+            .iter()
+            .filter(|frame| structural_frames.contains(frame))
+            .count();
+        assert_eq!(structural_cut_count, 6);
+        assert!(structural_cut_count >= explicit_anchors.len().div_ceil(2));
+        let cadence_buckets = durations
+            .iter()
+            .map(|duration| (duration + 10).div_euclid(20))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(cadence_buckets.len(), 3);
     }
 
     #[test]
