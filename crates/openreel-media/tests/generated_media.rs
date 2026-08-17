@@ -30,7 +30,11 @@ impl Drop for TemporaryFile {
 impl TestClip {
     fn generate() -> Self {
         let ffmpeg = ffmpeg_executable();
-        assert!(ffmpeg.is_file(), "provisioned ffmpeg.exe is missing");
+        assert!(
+            ffmpeg.is_file(),
+            "provisioned ffmpeg CLI is missing at {}",
+            ffmpeg.display()
+        );
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -67,7 +71,7 @@ impl TestClip {
             ])
             .arg(&output)
             .status()
-            .expect("failed to run provisioned ffmpeg.exe");
+            .expect("failed to run provisioned ffmpeg CLI");
         assert!(result.success(), "test media generation failed");
         Self(output)
     }

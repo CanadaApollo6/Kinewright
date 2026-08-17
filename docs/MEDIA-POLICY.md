@@ -171,7 +171,7 @@ black frame.
 
 The generator is the test-support module
 `crates/openreel-media/src/media_matrix_tests.rs`. It invokes only the
-provisioned `ffmpeg.exe`, writes into a unique temporary directory, and removes
+provisioned FFmpeg CLI, writes into a unique temporary directory, and removes
 the generated files after the test. No fixtures or codec binaries are checked
 in.
 

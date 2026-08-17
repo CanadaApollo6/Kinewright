@@ -8,9 +8,11 @@ use test_support::{SpeechClip, normalized_words, test_engine, wait_for_transcrip
 const TTS_TEXT: &str = "Hello, um, this is an Open Reel transcript test.";
 
 #[test]
-fn windows_sapi_speech_is_transcribed_by_the_real_model() {
+fn synthesized_speech_is_transcribed_by_the_real_model() {
     if std::env::var("OPENREEL_TRANSCRIPT_TEST").as_deref() != Ok("1") {
-        eprintln!("skipped: set OPENREEL_TRANSCRIPT_TEST=1 to run SAPI and local Whisper");
+        eprintln!(
+            "skipped: set OPENREEL_TRANSCRIPT_TEST=1 to run local speech synthesis and Whisper"
+        );
         return;
     }
 

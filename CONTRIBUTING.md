@@ -4,7 +4,12 @@ Thanks for your interest! OpenReel is early and moving fast, which means contrib
 
 ## Getting set up
 
-Follow [docs/BUILDING.md](docs/BUILDING.md). The short version: Windows + MSVC Rust toolchain + Python, then `.\scripts\setup-ffmpeg.ps1` once per shell, then normal `cargo` commands. No system FFmpeg, vcpkg, or LLVM install is required — everything is provisioned locally and pinned.
+Follow [docs/BUILDING.md](docs/BUILDING.md). Short version:
+
+- **Windows:** MSVC Rust toolchain + Python, then `.\scripts\setup-ffmpeg.ps1` once per shell.
+- **Linux:** `./scripts/install-linux-deps.sh` once per machine, then `source ./scripts/setup-ffmpeg.sh` once per shell.
+
+No system FFmpeg, vcpkg, or LLVM install is required — everything is provisioned locally and pinned.
 
 Run the test suite with `cargo test --workspace`. Some tests are gated behind environment variables because they need real hardware or your own agent subscription:
 
@@ -14,7 +19,7 @@ Run the test suite with `cargo test --workspace`. Some tests are gated behind en
 | `OPENREEL_AGENT_TEST=1` | Live agent E2E via your installed Claude Code / Codex CLI (uses your subscription; costs cents) |
 | `OPENREEL_TRANSCRIPT_TEST=1` | Real Whisper transcription E2E (downloads the model once) |
 
-CI runs the ungated suite on clean Windows runners; your PR must keep it green.
+CI runs the ungated suite on clean Windows and Linux runners; your PR must keep both green.
 
 ## The ground rules (short but firm)
 
@@ -42,7 +47,7 @@ The design system is specified in [docs/DESIGN.md](docs/DESIGN.md) ("Cut Room").
 
 ## Releases
 
-Maintainers cut releases by pushing a version tag (`v*`), which builds, tests, packages the Windows installer, and publishes a GitHub Release. See [docs/RELEASING.md](docs/RELEASING.md).
+Maintainers cut releases by pushing a version tag (`v*`), which builds, tests, packages the Windows installer and Linux tarball, and publishes a GitHub Release. See [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Licensing
 

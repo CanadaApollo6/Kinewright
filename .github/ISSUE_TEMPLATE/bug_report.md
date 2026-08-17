@@ -15,7 +15,7 @@ assignees: ""
 
 **Environment**
 - OpenReel version / commit:
-- Windows version:
+- OS / version (Windows or Linux):
 - Agent CLI (if agent-related): Claude Code / Codex + version
 - Media details (if playback/export-related): container, codec, resolution, fps
 

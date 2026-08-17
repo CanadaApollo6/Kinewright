@@ -1225,8 +1225,8 @@ pub(crate) fn run() -> eframe::Result {
                 FfmpegMediaEngine::new_with_gpu(gpu).expect("FFmpeg media engine must initialize"),
             );
             let mut app = OpenReelApp::new(media);
-            // `OpenReel.exe project.openreel` opens the project directly; this
-            // is also the hook Windows file association needs.
+            // `OpenReel project.openreel` opens the project directly; this is
+            // also the hook file associations need.
             if let Some(argument) = std::env::args().nth(1) {
                 let path = PathBuf::from(&argument);
                 if path.is_file() {

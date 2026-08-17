@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OpenReel
+Comment=An open-source agentic video editor
+Exec=OpenReel %f
+Icon=openreel
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+MimeType=application/x-openreel;
+StartupWMClass=OpenReel
+Keywords=video;editor;timeline;ffmpeg;

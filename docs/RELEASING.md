@@ -1,6 +1,11 @@
-# Releasing OpenReel for Windows
+# Releasing OpenReel
 
-OpenReel releases are built by `.github/workflows/release.yml`. A pushed tag matching `v*` runs the full Windows test suite, builds the release executable, bundles the pinned GPL FFmpeg shared DLLs, compiles the installer, smoke-tests the staged bundle with FFmpeg removed from `PATH`, and publishes both a GitHub Actions artifact and GitHub Release assets.
+OpenReel releases are built by `.github/workflows/release.yml`. A pushed tag matching `v*` runs the full Windows and Linux test suites, then publishes:
+
+- a Windows installer that bundles the pinned GPL FFmpeg shared DLLs;
+- a Linux x64 tarball that bundles the pinned GPL FFmpeg shared libraries and CLI.
+
+Both jobs smoke-test the staged bundle with FFmpeg removed from `PATH`, and publish GitHub Actions artifacts plus GitHub Release assets.
 
 ## Installer toolchain
 
@@ -22,10 +27,12 @@ git push origin v0.1.0
 ```
 
 4. Open the `Release` workflow run. Download `OpenReel-0.1.0-windows-x64` from the run summary if needed.
-5. After the job succeeds, verify the GitHub Release contains:
+5. After the jobs succeed, verify the GitHub Release contains:
 
    - `OpenReel-0.1.0-windows-x64-setup.exe`
    - `OpenReel-0.1.0-windows-x64-setup.exe.sha256`
+   - `OpenReel-0.1.0-linux-x64.tar.gz`
+   - `OpenReel-0.1.0-linux-x64.tar.gz.sha256`
 
 The installer is currently unsigned. Windows SmartScreen may warn until a code-signing certificate is wired into the workflow. Signing is not required to build or install the artifact.
 
@@ -74,4 +81,33 @@ If local policy prevents running Inno Setup, stage and smoke-test the bundle wit
 ```powershell
 .\scripts\package-windows.ps1 -Version 0.1.0 -StageOnly
 .\scripts\test-windows-bundle.ps1 -BundleDir .\dist\windows-x64
+```
+
+## Linux tarball
+
+`scripts/package-linux.sh` stages:
+
+- `target/release/openreel-app` as `OpenReel`;
+- the pinned FFmpeg CLI as `ffmpeg` (and `ffprobe` when present);
+- the libav/libsw shared libraries under `lib/`;
+- the OpenReel GPLv3 license, FFmpeg license, font licenses, a `.desktop` file, and the app icon.
+
+`patchelf` sets `RPATH` to `$ORIGIN/lib` on the executable and FFmpeg CLI so a clean machine does not need FFmpeg on `PATH` or `LD_LIBRARY_PATH`.
+
+### Local tarball build
+
+```bash
+source ./scripts/setup-ffmpeg.sh
+cargo test --workspace --locked
+cargo build --package openreel-app --release --locked
+./scripts/package-linux.sh --version 0.1.0
+./scripts/test-linux-bundle.sh --bundle-dir ./dist/linux-x64
+sha256sum ./dist/tarball/OpenReel-0.1.0-linux-x64.tar.gz
+```
+
+Stage without creating the tarball:
+
+```bash
+./scripts/package-linux.sh --version 0.1.0 --stage-only
+./scripts/test-linux-bundle.sh --bundle-dir ./dist/linux-x64
 ```

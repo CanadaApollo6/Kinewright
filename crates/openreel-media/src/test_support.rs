@@ -237,11 +237,36 @@ pub fn single_clip_document(asset: MediaAsset) -> Document {
 }
 
 #[must_use]
-pub fn ffmpeg_executable() -> PathBuf {
+fn ffmpeg_cli_filename(tool: &str) -> String {
+    if cfg!(windows) {
+        format!("{tool}.exe")
+    } else {
+        tool.to_owned()
+    }
+}
+
+/// Path to a provisioned `FFmpeg` CLI tool (`ffmpeg` or `ffprobe`).
+#[must_use]
+pub fn ffmpeg_tool(tool: &str) -> PathBuf {
+    let filename = ffmpeg_cli_filename(tool);
     std::env::var_os("FFMPEG_DIR").map_or_else(
-        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffmpeg.exe"),
-        |directory| PathBuf::from(directory).join("bin/ffmpeg.exe"),
+        || {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../third_party/ffmpeg/bin")
+                .join(&filename)
+        },
+        |directory| PathBuf::from(directory).join("bin").join(&filename),
     )
+}
+
+#[must_use]
+pub fn ffmpeg_executable() -> PathBuf {
+    ffmpeg_tool("ffmpeg")
+}
+
+#[must_use]
+pub fn ffprobe_executable() -> PathBuf {
+    ffmpeg_tool("ffprobe")
 }
 
 /// Run the provisioned `FFmpeg` executable and require a successful exit.
@@ -251,13 +276,17 @@ pub fn ffmpeg_executable() -> PathBuf {
 /// Panics if `FFmpeg` is missing, cannot start, or reports an error.
 pub fn run_ffmpeg<S: AsRef<OsStr>>(arguments: &[S], output: &Path) {
     let ffmpeg = ffmpeg_executable();
-    assert!(ffmpeg.is_file(), "provisioned ffmpeg.exe is missing");
+    assert!(
+        ffmpeg.is_file(),
+        "provisioned ffmpeg CLI is missing at {}",
+        ffmpeg.display()
+    );
     let result = Command::new(ffmpeg)
         .args(["-hide_banner", "-loglevel", "error", "-y"])
         .args(arguments)
         .arg(output)
         .output()
-        .expect("failed to run provisioned ffmpeg.exe");
+        .expect("failed to run provisioned ffmpeg CLI");
     assert!(
         result.status.success(),
         "media generation failed for {}: {}",
@@ -267,23 +296,39 @@ pub fn run_ffmpeg<S: AsRef<OsStr>>(arguments: &[S], output: &Path) {
 }
 
 fn synthesize_speech(output: &Path, speech: &str, is_ssml: bool) {
-    let speak = if is_ssml {
-        "$voice.SpeakSsml($env:OPENREEL_SAPI_SPEECH); "
-    } else {
-        "$voice.Speak($env:OPENREEL_SAPI_SPEECH); "
-    };
-    let script = format!(
-        "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.Speech; \
-         $voice = New-Object System.Speech.Synthesis.SpeechSynthesizer; \
-         $voice.SetOutputToWaveFile($env:OPENREEL_SAPI_OUTPUT); {speak}$voice.Dispose()"
-    );
-    let status = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .env("OPENREEL_SAPI_OUTPUT", output)
-        .env("OPENREEL_SAPI_SPEECH", speech)
-        .status()
-        .expect("Windows PowerShell with System.Speech is required by this gated test");
-    assert!(status.success(), "SAPI speech synthesis failed");
+    #[cfg(windows)]
+    {
+        let speak = if is_ssml {
+            "$voice.SpeakSsml($env:OPENREEL_SAPI_SPEECH); "
+        } else {
+            "$voice.Speak($env:OPENREEL_SAPI_SPEECH); "
+        };
+        let script = format!(
+            "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.Speech; \
+             $voice = New-Object System.Speech.Synthesis.SpeechSynthesizer; \
+             $voice.SetOutputToWaveFile($env:OPENREEL_SAPI_OUTPUT); {speak}$voice.Dispose()"
+        );
+        let status = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .env("OPENREEL_SAPI_OUTPUT", output)
+            .env("OPENREEL_SAPI_SPEECH", speech)
+            .status()
+            .expect("Windows PowerShell with System.Speech is required by this gated test");
+        assert!(status.success(), "SAPI speech synthesis failed");
+    }
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("espeak-ng");
+        command.arg("-w").arg(output);
+        if is_ssml {
+            command.arg("-m");
+        }
+        command.arg(speech);
+        let status = command.status().expect(
+            "espeak-ng is required for gated speech tests on this platform; install it or set the audio override env var",
+        );
+        assert!(status.success(), "espeak-ng speech synthesis failed");
+    }
 }
 
 fn mux_speech(wav: &Path, output: &Path) {
@@ -311,7 +356,7 @@ fn mux_speech(wav: &Path, output: &Path) {
         ])
         .arg(output)
         .status()
-        .expect("failed to run provisioned ffmpeg.exe");
+        .expect("failed to run provisioned ffmpeg CLI");
     assert!(status.success(), "speech/video mux failed");
 }
 

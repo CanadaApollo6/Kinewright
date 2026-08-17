@@ -9,6 +9,9 @@ All notable changes to OpenReel are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Added
+- Native Linux x86_64 desktop builds: pinned FFmpeg 8.0 shared GPL provisioning,
+  Vulkan/ALSA/GTK dependencies, x11grab/v4l2/Pulse recording, a staged tarball
+  with bundled libav libraries, and Linux CI/release jobs alongside Windows.
 - M40 event/multicam recovery: tracked vertical reframing now stores precise
   basis-point subject evidence, samples the full clip uniformly, preserves
   animated curves through delivery, and solves an offline lookahead camera path

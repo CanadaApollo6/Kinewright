@@ -22,18 +22,20 @@ Sources (v1):
 
 | Source | FFmpeg inputs | Output |
 | --- | --- | --- |
-| Screen | `gdigrab` desktop at 30 fps, optional dshow microphone | `Recording N.mp4` |
-| Camera | one dshow input binding `video=…:audio=…` | `Recording N.mp4` |
-| Voice | dshow microphone only | `Recording N.m4a` |
+| Screen | Windows: `gdigrab` desktop at 30 fps, optional dshow microphone. Linux: `x11grab` at 30 fps, optional Pulse/ALSA microphone | `Recording N.mp4` |
+| Camera | Windows: one dshow input binding `video=…:audio=…`. Linux: `v4l2` camera plus optional Pulse/ALSA microphone | `Recording N.mp4` |
+| Voice | Windows: dshow microphone. Linux: Pulse or ALSA microphone | `Recording N.m4a` |
 
 On multi-display machines a **Display** picker chooses one monitor (or all
-of them). Displays are enumerated through a hidden PowerShell call to
-`System.Windows.Forms.Screen` — display geometry without unsafe Win32 —
-and the chosen bounds become a `gdigrab` region (`-offset_x/-offset_y/`
+of them). Windows enumerates displays through a hidden PowerShell call to
+`System.Windows.Forms.Screen` and feeds `gdigrab` (`-offset_x/-offset_y/`
 `-video_size`, in raw virtual-desktop coordinates: a display left of the
-primary really does pass a negative offset, verified live). The default is
-the primary display; recording every screen at once is the surprise, not
-the expectation.
+primary really does pass a negative offset, verified live). Linux enumerates
+displays with `xrandr --current` and feeds `x11grab` (`-video_size` plus
+`:DISPLAY+x,y`). The default is the primary display; recording every screen
+at once is the surprise, not the expectation. Wayland-only sessions without
+XWayland cannot use `x11grab` yet — portal capture is deferred with
+system-audio loopback.
 
 Video encodes with `libx264 -preset ultrafast` (capture must never contend
 with the machine being recorded) plus an even-dimension crop guard for
@@ -60,17 +62,21 @@ take back, the transcript is arriving and the words are cuttable.
 
 ## Packaging
 
-`ffmpeg.exe` now stages beside `OpenReel.exe` and ships in the installer
-(the GPL FFmpeg build was already bundled as DLLs; recording needs the CLI
-too). At runtime the CLI resolves: `OPENREEL_FFMPEG` override → beside the
-executable (installed layout) → `third_party\ffmpeg\bin` above the
-executable (dev checkouts) → PATH.
+`ffmpeg` now stages beside `OpenReel` and ships in the Windows installer and
+Linux tarball (the GPL FFmpeg build was already bundled as shared libraries;
+recording needs the CLI too). At runtime the CLI resolves: `OPENREEL_FFMPEG`
+override → beside the executable (installed layout) → `bin/` beside the
+executable → `third_party/ffmpeg/bin` above the executable (dev checkouts) →
+PATH.
 
 ## Deferred
 
 - Window / freeform-region capture (single-monitor selection shipped).
 - System-audio (loopback) capture — Windows needs a WASAPI loopback route
-  that dshow alone does not offer cleanly.
+  that dshow alone does not offer cleanly; Linux needs a Pulse/PipeWire
+  monitor source.
+- Wayland screen capture via xdg-desktop-portal (v1 Linux recording uses
+  `x11grab` / XWayland).
 - Simultaneous screen + camera (picture-in-picture) capture.
 - A camera preview inside the record dialog.
 - Pause/resume within one recording.
