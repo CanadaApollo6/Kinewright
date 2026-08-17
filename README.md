@@ -4,12 +4,14 @@
 
 # OpenReel
 
-**An open-source agentic video editor.** Your footage, your subscriptions, your timeline.
+**An open-source agentic video editor.** Native on Windows and Linux. Your footage, your subscriptions, your timeline.
 
 [![CI](https://github.com/CanadaApollo6/OpenReel/actions/workflows/ci.yml/badge.svg)](https://github.com/CanadaApollo6/OpenReel/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Windows](https://img.shields.io/badge/Windows-native-0078D4?logo=windows&logoColor=white)](docs/BUILDING.md)
+[![Linux](https://img.shields.io/badge/Linux-native-FCC624?logo=linux&logoColor=black)](docs/BUILDING.md)
 
-OpenReel is a **native Windows and Linux** video editor written in Rust — the same fast desktop binary on both platforms, not a web wrapper or VM. At its core it is an **agentic harness for video editing**. Type "cut the first three seconds and tighten the pauses" into the chat panel, and the agent CLI you already pay for — Claude Code, Codex, or Cursor — makes the edits on your timeline, using the exact same operations you'd use by hand. Every agent edit lands on the same undo stack as yours: **Ctrl+Z reverses the robot.**
+OpenReel is a **native desktop** video editor written in Rust — the same fast binary on **Windows and Linux**, not a web wrapper, Electron shell, or VM. At its core it is an **agentic harness for video editing**. Type "cut the first three seconds and tighten the pauses" into the chat panel, and the agent CLI you already pay for — Claude Code, Codex, or Cursor — makes the edits on your timeline, using the exact same operations you'd use by hand. Every agent edit lands on the same undo stack as yours: **Ctrl+Z reverses the robot.**
 
 ![OpenReel: agent session, program monitor, and timeline on a two-track project](docs/assets/openreel.png)
 
@@ -17,6 +19,7 @@ OpenReel is a **native Windows and Linux** video editor written in Rust — the 
 
 ## What makes it different
 
+- **Native on Windows and Linux.** One Rust desktop app on both platforms — `eframe` / `wgpu` / FFmpeg, not a browser tab. Same editor, same agent harness, same undo stack.
 - **Not a video generator.** Models never create footage here. They edit footage *you shot*. The source of truth is your media plus an inspectable edit log — never model output.
 - **Bring your own subscription.** OpenReel drives the agent CLIs already installed on your machine (Claude Code, Codex CLI, or Cursor Agent). No API keys to paste, no account, no server, no markup. The CLI handles auth; OpenReel never sees a credential.
 - **Human/agent parity by construction.** Every OpenReel mutation — human or agent — is an `Operation` flowing through one core actor. The agent's editing tools are *generated from the operation set*, so it receives the same validated, undoable editing vocabulary as the GUI.
@@ -100,7 +103,7 @@ Four crates, two trait boundaries, one message bus:
 openreel-core    document model, operations, undo, the Core actor  (pure logic)
 openreel-media   FFmpeg decode/encode, wgpu compositor, audio, Whisper
 openreel-agent   MCP server, tool generation, agent CLI drivers
-openreel-app     the egui application
+openreel-app     the native egui desktop app (Windows and Linux)
 ```
 
 The full design doc — including why every mutation is an operation, why undo is snapshots, and why the audio callback owns the clock — is [OpenReel-Architecture.md](OpenReel-Architecture.md). The visual language is specified in [docs/DESIGN.md](docs/DESIGN.md).
