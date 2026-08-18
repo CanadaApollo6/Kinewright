@@ -179,11 +179,26 @@ And music fit checked the start and duration, not the musical source endpoint or
 the delivered encoded tail. The published v2 artifact therefore remained a
 machine pass and a human rejection.
 
-The prepared v3 recovery addresses those gaps with a compatible Tears of Steel
-source, a minimum of two clips and 120 project frames per visual asset, a 10%
-scene-boundary veto floor, actual first/last shot-hold assertions, exact
-end-anchored music fit, and encoded quiet-tail verification. It has not run, so
-there is no v3 machine result or human acceptance to report.
+The active v3 recovery addresses those gaps with a compatible Tears of Steel
+source, a minimum of three clips and 210 project frames per visual asset,
+distinct early and late appearances for both sources, a 10% scene-boundary veto
+floor, actual first/last shot-hold assertions, exact end-anchored music fit, and
+encoded quiet-tail verification. One local diagnostic passed its then-current
+38/38 machine assertions with 15 tool calls, 11 operations, and 333,560 total
+tokens, but independent review withheld it: Sintel appeared in only two
+disconnected clips totaling 140 frames against seven Tears of Steel clips and
+560 frames. It is not a published baseline and does not count toward the family
+gate. No v3 human acceptance existed at that point.
+
+Two fresh samples on the hardened contract now pass 40/40. The first used 18
+calls, six montage-planner attempts, and 432,226 tokens. Kinewright now returns
+the nearest globally feasible source- and cadence-valid anchor schedule as an
+exact retry patch when a bounded montage request fails. The next sample used 15
+calls, three planner attempts, and 342,058 tokens, reducing tokens by 20.9%.
+Their SHA-256 values are
+`203461a7331ad0b7ed45654954b244b63c71dc6e3ca1fd11f0f3a562ef22dac4` and
+`4c802c58d2a056f87bc305e742db5bdb9fbfc0dfafa2a200604835ee3857daf6`.
+Both remain pending human review and neither is an accepted baseline.
 
 The first corrected interview preflight is published at
 `benchmarks/auto-edit/v5/baseline.json`: 1/1 sample, 25/25 assertions, 7 tool

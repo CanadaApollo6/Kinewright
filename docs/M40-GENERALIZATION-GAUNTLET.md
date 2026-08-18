@@ -243,7 +243,7 @@ recorded separately.
 preflight paired Sintel and Big Buck Bunny with Kevin MacLeod's instrumental
 "Cipher." The v2 recovery replaced that flat bed with Scott Buckley's
 "Uprising," whose dark slow-burn and heroic backend provide a real midpoint
-event for the edit. The prepared v3 recovery keeps Uprising, replaces the
+event for the edit. The active v3 recovery keeps Uprising, replaces the
 forced Bunny cameo with a compatible Tears of Steel source, and reaches the
 cue's natural tail. All fixture versions remain pinned and openly licensed.
 The task is deliberately horizontal: g1 and g2 already exercise 9:16 delivery,
@@ -287,13 +287,15 @@ effects, fades, or retiming. Those checks still allowed a forced cameo, did not
 fully veto baked source cuts, and did not require a musical endpoint or quiet
 encoded tail.
 
-The prepared v3 contract keeps the useful cadence and source-clean checks while
-adding a compatible Tears of Steel source, at least two clips and 120 project
-frames per visual asset, a 10% scene-boundary veto floor, actual opening and
-closing shot holds, exact source-end anchoring at the cue's natural tail, and a
-quiet five-frame encoded-tail check. It targets 8-10 gapless shots over 28
-seconds (700 project frames), with a coherent action-to-release arc. It has not
-run. Human review still owns the irreducible taste judgments: story, rhythm,
+The active v3 contract keeps the useful cadence and source-clean checks while
+adding a compatible Tears of Steel source, at least three clips and 210 project
+frames per visual asset, and distinct early and late appearances for both
+sources. This makes each source carry at least 30% of the edit and rejects
+bookends or isolated inserts. It also adds a 10% scene-boundary veto floor,
+actual opening and closing shot holds, exact source-end anchoring at the cue's
+natural tail, and a quiet five-frame encoded-tail check. It targets 8-10 gapless
+shots over 28 seconds (700 project frames), with a coherent action-to-release
+arc. Human review still owns the irreducible taste judgments: story, rhythm,
 visual finish, audio finish, and delivery readiness. Captions are explicitly not
 applicable for this instrumental montage.
 
@@ -338,11 +340,31 @@ anchors that explain the major transitions. The executable manifest requires
 acceptance for a scored artifact and a 4.0 minimum mean for every applicable
 human-rating dimension; N/A dimensions are excluded from those means.
 
-The v3 recovery is prepared but not run. It replaces the forced Bunny cameo
-with Tears of Steel, requires meaningful use of both visual assets, lowers the
-scene-boundary veto floor to 10%, checks the actual first and last shot holds,
-anchors the music source end exactly at the natural cue tail, and verifies a
-quiet encoded tail. No v3 machine result or human acceptance exists yet.
+The first local v3 diagnostic passed its then-current 38/38 machine assertions
+with 15 tool calls, 11 operations, and 333,560 total tokens. Its rendered SHA-256
+was `23a416bddc2753833c16f6e61cf555b7b7ab33a2a9ec84076a48df71c311e472`.
+Independent review withheld it from human scoring and publication because it
+used only two disconnected Sintel clips totaling 140 frames against seven Tears
+of Steel clips totaling 560 frames. It proved the endpoint, tail, scene, and
+delivery fixes, but also proved that the old multi-source minimum still allowed
+a decorative cameo. It is not a baseline and does not count toward the family
+gate. The executable contract now requires three clips and 210 frames from each
+source plus distinct early and late appearances.
+
+Two fresh samples on the hardened contract now pass 40/40 machine assertions.
+The first used four Sintel shots over 293 frames and five Tears of Steel shots
+over 407 frames. It required 18 calls, including six montage-planner attempts,
+and 432,226 tokens; its rendered SHA-256 is
+`203461a7331ad0b7ed45654954b244b63c71dc6e3ca1fd11f0f3a562ef22dac4`.
+That retry loop was a real token regression. `plan_beat_montage` now returns the
+nearest globally feasible source- and cadence-valid schedule plus an exact retry
+patch when the requested movement bound is infeasible. The following sample
+needed three planner calls, 15 total calls, and 342,058 tokens, a 20.9% token
+reduction while preserving the 40/40 result. It used four Sintel shots over 248
+frames and five Tears of Steel shots over 452 frames; its rendered SHA-256 is
+`4c802c58d2a056f87bc305e742db5bdb9fbfc0dfafa2a200604835ee3857daf6`.
+Both fresh artifacts await human review. Neither has been published as an
+accepted baseline.
 
 Independent frame review rejected one earlier machine-passing recovery because
 its final shot began inside a baked source dissolve. That artifact is not the
@@ -441,7 +463,9 @@ person, the mean human rating is at least 4.0/5, and no material caption error
 survives. One successful interview does not satisfy the milestone.
 
 Music montage has one rejected historical preflight and one 34/34 machine-passing
-v2 recovery rejected in human review. The v3 recovery contract is prepared but
-not run. The family still needs two more machine passes and two human accepts.
+v2 recovery rejected in human review. One v3 machine diagnostic was withheld
+after independent review exposed source-cameo behavior, so it does not count.
+Two fresh hardened-v3 samples now pass 40/40 and await human review. The family
+still needs one more hardened-v3 machine pass and two human accepts.
 Event/multicam still needs two more machine samples, one more human-accepted
 output, and numeric ratings sufficient to evaluate the 4.0 mean-rating gate.

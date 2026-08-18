@@ -3963,7 +3963,7 @@ impl KinewrightMcp {
                     &document,
                     args.target_track_id,
                     args.music_asset_id,
-                    range,
+                    range.clone(),
                     &selects,
                     preferred_anchors,
                     &beats,
@@ -3978,10 +3978,73 @@ impl KinewrightMcp {
                 ) {
                     Ok(result) => result,
                     Err(error) => {
-                        return Ok(error_text(format!(
-                            "beat montage anchor repair could not satisfy preferred anchors within maximum_movement_frames={}: {error}; revise preferred anchors, increase the explicit bound, unlock an anchor, or adjust source envelopes and retry",
-                            settings.maximum_movement_frames
-                        )));
+                        let failure = error.to_string();
+                        let recovery = beat_montage_plan_near_anchors_with_report(
+                            &document,
+                            args.target_track_id,
+                            args.music_asset_id,
+                            range,
+                            &selects,
+                            preferred_anchors,
+                            &beats,
+                            &analysis_state,
+                            minimum_strength,
+                            minimum_shot_frames,
+                            maximum_shot_frames,
+                            args.mode,
+                            None,
+                            &[],
+                            args.cadence,
+                        )
+                        .ok()
+                        .map(|(suggested_plan, suggested_report)| {
+                            let shot_durations = suggested_plan
+                                .shots
+                                .iter()
+                                .map(|shot| {
+                                    shot.timeline_range
+                                        .end
+                                        .0
+                                        .saturating_sub(shot.timeline_range.start.0)
+                                })
+                                .collect::<Vec<_>>();
+                            serde_json::json!({
+                                "cut_anchor_frames": suggested_report.resolved_anchors,
+                                "shot_durations": shot_durations,
+                                "signed_delta_frames": suggested_report.signed_deltas,
+                                "maximum_absolute_delta_frames": suggested_report.maximum_absolute_delta,
+                                "total_absolute_delta_frames": suggested_report.total_absolute_delta,
+                                "exact_retry_patch": {
+                                    "cut_anchor_frames": suggested_report.resolved_anchors,
+                                    "anchor_repair": {
+                                        "maximum_movement_frames": 0,
+                                        "locked_anchor_indices": [],
+                                    },
+                                },
+                            })
+                        });
+                        let message = format!(
+                            "beat montage anchor repair could not satisfy preferred anchors within maximum_movement_frames={}: {failure}; revise preferred anchors, increase the explicit bound, unlock an anchor, or adjust source envelopes and retry{}",
+                            settings.maximum_movement_frames,
+                            if recovery.is_some() {
+                                "; the structured error includes the nearest globally feasible source- and cadence-valid anchor schedule plus an exact_retry_patch, so reuse it instead of guessing"
+                            } else {
+                                ""
+                            }
+                        );
+                        if let Some(recovery) = recovery {
+                            return Ok(error_structured(
+                                message,
+                                serde_json::json!({
+                                    "status": "bounded_anchor_repair_infeasible",
+                                    "error": failure,
+                                    "requested_maximum_movement_frames": settings.maximum_movement_frames,
+                                    "requested_locked_anchor_indices": settings.locked_anchor_indices,
+                                    "nearest_globally_feasible": recovery,
+                                }),
+                            ));
+                        }
+                        return Ok(error_text(message));
                     }
                 };
                 let repaired = report.signed_deltas.iter().any(|delta| *delta != 0);
@@ -5026,11 +5089,11 @@ struct SourceStoryboardArgs {
 #[serde(rename_all = "snake_case")]
 enum ShotBoardCandidateSelection {
     /// Return a consecutive page of eligible candidates. This is the
-    /// backward-compatible default and is the only mode that accepts an offset.
-    #[default]
+    /// only mode that accepts an offset.
     Page,
     /// Sample eligible candidates across the full inspected range. For two or
     /// more returned candidates this always includes the first and last.
+    #[default]
     Coverage,
 }
 
@@ -5050,10 +5113,10 @@ struct SourceShotBoardArgs {
     /// Optional half-open source-frame range. Omit for the full source asset.
     #[serde(default)]
     range: Option<TranscriptRangeArgs>,
-    /// Candidate selection strategy. `page` (the default) returns a
-    /// consecutive offset page. `coverage` deterministically spreads up to
-    /// `candidate_count` eligible candidates across the complete source range;
-    /// it cannot be combined with `candidate_offset`.
+    /// Candidate selection strategy. `coverage` (the default) deterministically
+    /// spreads up to `candidate_count` eligible candidates across the complete
+    /// source range. `page` returns a consecutive offset page and is the only
+    /// strategy that accepts `candidate_offset`.
     #[serde(default)]
     candidate_selection: Option<ShotBoardCandidateSelection>,
     /// First eligible scene-derived candidate to return. Defaults to zero;
@@ -5692,7 +5755,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "plan_beat_montage",
-            "Build a source-feasible hard-cut montage timed to one analyzed music asset. The model owns every shot choice and the final order; the planner only selects beat boundaries that satisfy the supplied source envelopes and duration constraints, with no hidden transition, retime, or semantic replacement. Explicit anchors remain exact unless anchor_repair opts into a non-negative maximum movement bound and optional locked indices; requested, resolved, and per-anchor movement evidence is returned for review. An optional cadence contract validates rounded shot-duration buckets and similar runs before the prepared plan is stored. Returns an inspectable plan and opaque prepared_edit_plan preview without mutating the timeline.",
+            "Build a source-feasible hard-cut montage timed to one analyzed music asset. The model owns every shot choice and the final order; the planner only selects beat boundaries that satisfy the supplied source envelopes and duration constraints, with no hidden transition, retime, or semantic replacement. Explicit anchors remain exact unless anchor_repair opts into a non-negative maximum movement bound and optional locked indices; requested, resolved, and per-anchor movement evidence is returned for review. When a bounded repair is infeasible but the same selects and cadence have a global solution, the structured error returns the nearest valid schedule and an exact retry patch instead of forcing repeated guesses. An optional cadence contract validates rounded shot-duration buckets and similar runs before the prepared plan is stored. Returns an inspectable plan and opaque prepared_edit_plan preview without mutating the timeline.",
             schema_object::<BeatMontagePlanArgs>(),
         )
         .with_annotations(read_only()),
@@ -5878,7 +5941,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_source_shot_board",
-            "Return scene-derived, paged source-shot candidates for one video asset and render start/middle/end evidence cells for each. An optional inclusive minimum_duration_frames filters short candidates before pagination while preserving original candidate ids and indexes. minimum_confidence_basis_points controls scene-boundary sensitivity (0..=10000, default 1000); raise it for motion-heavy footage when weak differences over-segment a continuous shot. The manifest reports requested, filtered, returned, and total counts. Candidate ids, exact half-open source ranges, and scene-boundary confidence provenance are stable; this inspector never changes the timeline.",
+            "Return scene-derived source-shot candidates for one video asset and render start/middle/end evidence cells for each. By default candidates are sampled across the complete requested source range so one bounded call exposes the whole asset; use candidate_selection=page only for consecutive pagination. An optional inclusive minimum_duration_frames filters short candidates while preserving original candidate ids and indexes. minimum_confidence_basis_points controls scene-boundary sensitivity (0..=10000, default 1000); raise it for motion-heavy footage when weak differences over-segment a continuous shot. The manifest reports selection strategy, selected positions, requested, filtered, returned, and total counts. Candidate ids, exact half-open source ranges, and scene-boundary confidence provenance are stable; this inspector never changes the timeline.",
             schema_object::<SourceShotBoardArgs>(),
         )
         .with_annotations(read_only()),
@@ -6383,6 +6446,12 @@ fn success_structured(text: impl Into<String>, value: serde_json::Value) -> Call
 
 fn error_text(text: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(text)])
+}
+
+fn error_structured(text: impl Into<String>, value: serde_json::Value) -> CallToolResult {
+    let mut result = error_text(text);
+    result.structured_content = Some(value);
+    result
 }
 
 fn paths_resolve_equal(left: &Path, right: &Path) -> bool {
@@ -8949,7 +9018,6 @@ mod tests {
                 .text
                 .contains("within maximum_movement_frames=0")
         );
-
         let settings = args.anchor_repair.as_mut().unwrap();
         settings.maximum_movement_frames = TimeCode(2);
         settings.locked_anchor_indices = vec![0];
@@ -8983,6 +9051,56 @@ mod tests {
                 .unwrap()
                 .text
                 .contains("invalid beat montage anchor-repair settings")
+        );
+    }
+
+    #[test]
+    fn beat_montage_bounded_failure_returns_one_exact_feasible_retry() {
+        let (core, analysis) = montage_fixture(ready_montage_status());
+        let service = KinewrightMcp::new(
+            core,
+            analysis.clone(),
+            analysis,
+            ConfirmationBroker::default(),
+        );
+        let mut args = montage_plan_args();
+        args.cut_anchor_frames = Some(vec![TimeCode(31)]);
+        args.anchor_repair = Some(BeatMontageAnchorRepairArgs {
+            maximum_movement_frames: TimeCode::ZERO,
+            locked_anchor_indices: Vec::new(),
+        });
+
+        let rejected = service.plan_beat_montage(&args).unwrap();
+        assert_eq!(rejected.is_error, Some(true));
+        assert!(
+            rejected.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("reuse it instead of guessing")
+        );
+        let recovery = rejected.structured_content.unwrap();
+        assert_eq!(recovery["status"], "bounded_anchor_repair_infeasible");
+        let feasible = &recovery["nearest_globally_feasible"];
+        assert_eq!(feasible["cut_anchor_frames"], json!([30]));
+        assert_eq!(feasible["shot_durations"], json!([30, 30]));
+        assert_eq!(
+            feasible["exact_retry_patch"],
+            json!({
+                "cut_anchor_frames": [30],
+                "anchor_repair": {
+                    "maximum_movement_frames": 0,
+                    "locked_anchor_indices": [],
+                },
+            })
+        );
+
+        args.cut_anchor_frames = Some(vec![TimeCode(30)]);
+        let exact_retry = service.plan_beat_montage(&args).unwrap();
+        assert_eq!(exact_retry.is_error, Some(false));
+        assert_eq!(
+            exact_retry.structured_content.unwrap()["plan"]["cut_anchors"][0]["beat"]["project_frame"],
+            30
         );
     }
 
@@ -10164,6 +10282,7 @@ mod tests {
                     json!({
                         "asset_id": 1,
                         "range": {"start": 5, "end": 50},
+                        "candidate_selection": "page",
                         "candidate_offset": 1,
                         "candidate_count": 2,
                         "max_width": 64,
@@ -10233,7 +10352,7 @@ mod tests {
             .source_shot_board(&SourceShotBoardArgs {
                 asset_id: AssetId(1),
                 range: None,
-                candidate_selection: None,
+                candidate_selection: Some(ShotBoardCandidateSelection::Page),
                 candidate_offset: Some(1),
                 minimum_duration_frames: Some(TimeCode(15)),
                 minimum_confidence_basis_points: None,
@@ -10276,7 +10395,7 @@ mod tests {
             .source_shot_board(&SourceShotBoardArgs {
                 asset_id: AssetId(1),
                 range: None,
-                candidate_selection: Some(ShotBoardCandidateSelection::Coverage),
+                candidate_selection: None,
                 candidate_offset: None,
                 minimum_duration_frames: None,
                 minimum_confidence_basis_points: None,

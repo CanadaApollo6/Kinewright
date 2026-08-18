@@ -27,8 +27,10 @@
   "minimum_beat_strength_percent": 10.0,
   "beat_alignment_tolerance_frames": 1,
   "minimum_visual_assets_used": 2,
-  "minimum_clips_per_visual_asset": 2,
-  "minimum_project_frames_per_visual_asset": 120,
+  "minimum_clips_per_visual_asset": 3,
+  "minimum_project_frames_per_visual_asset": 210,
+  "latest_early_start_per_visual_asset": 175,
+  "earliest_late_start_per_visual_asset": 450,
   "minimum_source_separation_frames": 0,
   "source_scene_minimum_confidence_percent": 10.0,
   "source_exclusions": [
@@ -100,7 +102,7 @@
   "minimum_closing_shot_frames": 100,
   "rendered_tail_window_frames": 5,
   "rendered_tail_maximum_peak_dbfs_hundredths": -3000,
-  "story_brief": "Build one coherent action-to-release arc across two dramatic worlds: establish character and threat, develop matching action or composition, escalate toward one clear visual and musical peak, then resolve on a held image as the cue reaches its verified natural tail. Every cross-source cut must have an intelligible action, motion, scale, color, or composition bridge; neither source may appear as an isolated cameo.",
+  "story_brief": "Build one coherent action-to-release arc across two dramatic worlds: establish both worlds, develop an intelligible relationship through action, motion, scale, color, or composition, return to both during escalation or resolution, then end on a causally earned held image as the cue reaches its verified natural tail. Neither source may appear only as bookends, isolated inserts, or a threshold-satisfying cameo.",
   "attribution": [
     "Sintel trailer, © copyright Blender Foundation | www.sintel.org",
     "Tears of Steel clip, (CC) Blender Foundation | mango.blender.org",

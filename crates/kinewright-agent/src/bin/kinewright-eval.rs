@@ -1167,7 +1167,7 @@ fn music_montage_definition() -> EvalDefinition {
         rationale: "Measures whether the agent can inspect two tonally compatible licensed visual sources, build a coherent dramatic arc, and resolve a deliberate beat-aware montage at the music cue's verified natural tail.",
         fixture_builder: fixture_real_music_montage,
         prompts: &[
-            "Create a finished 1080p YouTube music montage from exactly the pinned sintel and tears-of-steel visual sources, paced to Uprising on music-bed. Build one coherent dramatic arc: establish character and threat, develop matching action or composition across both worlds, escalate to one clear visual and musical peak, then resolve on a held image. Every cross-source cut needs an intelligible action, motion, scale, color, or composition bridge; neither source may be a cameo. Open exactly these six capability schemas in one get_capability call: get_source_shot_board, plan_music_fit, get_music_structure, plan_beat_montage, plan_audio_normalization, and get_editorial_readiness. Do not call get_source_storyboard. Call get_source_shot_board exactly once per visual asset over its full source range with minimum_duration_frames 55, minimum_confidence_basis_points 1000, candidate_count 10, and max_width 160. Use that visual evidence to choose scene-clean shots, and never cross a returned scene boundary. Never select a Sintel range overlapping [0..40), [108..144), [216..292), [376..396), [420..441), [508..536), [664..688), [768..780), [832..880), or [984..1253); these contain black, fades, titles, or credits. First call plan_music_fit on audio track 2 with music-bed, project range 0..700, preferred source start 5160, preferred source end 6000, maximum end drift 0 frames, minimum strength 10 percent, and overwrite mode. Inspect and commit that endpoint-anchored plan; it must produce the exact real-time source range [5160..6000) so the montage reaches the cue's natural quiet tail. Keep it as the only audio, with no loop, retime, duplication, source-video audio, or later trim. Call get_music_structure over project range 0..700 with minimum strength 10 percent, meter 4, 4 bars per phrase, and structural_only=false. Its roles are low-confidence timing guides, not evidence of musical closure. Choose 8 through 10 shots in final story order. Use both sources for at least 2 clips and 120 project frames each. Each shot must fill 55..140 project frames, same-asset source ranges must not overlap, the opening shot must hold at least 75 frames, and the closing shot at least 100. Use at least three duration bands, no more than three similar durations in a row, and no mechanical A/B alternation. Put every internal cut on a returned beat; place at least 3 cuts and at least half of all cuts on returned bar or phrase candidates, prioritizing strong and structural moments for escalation, peak, and resolution. Call plan_beat_montage on video track 1 over 0..700 with minimum shot length 55, maximum shot length 140, minimum beat strength 10 percent, overwrite mode, the ordered selects, exactly one fewer preferred cut anchors than selects, cadence {minimum_duration_buckets:3, duration_bucket_frames:20, maximum_similar_run:3, similar_tolerance_frames:8}, and anchor repair with maximum_movement_frames 24 and no locked anchors. Inspect the resolved anchors, signed deltas, shot durations, source order, and structural share before committing; revise and retry if the plan is infeasible or weak. Normalize only audio track 2 to -1600 LUFS hundredths with a -100 dBFS-hundredths sample-peak ceiling and 100-hundredths tolerance. Add no captions, titles, transitions, model-authored fades, effects, or retiming. Finish with get_editorial_readiness using youtube_1080p, check_silence=false, centered 50/50 focus, 12 storyboard frames, and 160-pixel cells. Inspect the whole sheet and revise black, baked fades, slates, arbitrary sequencing, weak bridges, weak arc stages, or an unresolved finish. Do not queue export; the benchmark renders the verified snapshot. Keep working until readiness is true.",
+            "Create a finished 1080p YouTube music montage from exactly the pinned sintel and tears-of-steel visual sources, paced to Uprising on music-bed. Build one coherent dramatic arc: establish character and threat, develop matching action or composition across both worlds, escalate to one clear visual and musical peak, then resolve on a held image. Every cross-source cut needs an intelligible action, motion, scale, color, or composition bridge; neither source may be a cameo. Open exactly these six capability schemas in one get_capability call: get_source_shot_board, plan_music_fit, get_music_structure, plan_beat_montage, plan_audio_normalization, and get_editorial_readiness. Do not call get_source_storyboard. Call get_source_shot_board exactly once per visual asset over its full source range with candidate_selection coverage, minimum_duration_frames 55, minimum_confidence_basis_points 1000, candidate_count 12, and max_width 160. Use that full-range visual evidence to choose scene-clean shots, and never cross a returned scene boundary. Never select a Sintel range overlapping [0..40), [108..144), [216..292), [376..396), [420..441), [508..536), [664..688), [768..780), [832..880), or [984..1253); these contain black, fades, titles, or credits. First call plan_music_fit on audio track 2 with music-bed, project range 0..700, preferred source start 5160, preferred source end 6000, maximum end drift 0 frames, minimum strength 10 percent, and overwrite mode. Inspect and commit that endpoint-anchored plan; it must produce the exact real-time source range [5160..6000) so the montage reaches the cue's natural quiet tail. Keep it as the only audio, with no loop, retime, duplication, source-video audio, or later trim. Call get_music_structure over project range 0..700 with minimum strength 10 percent, meter 4, 4 bars per phrase, and structural_only=false. Its roles are low-confidence timing guides, not evidence of musical closure. Choose 8 through 10 shots in final story order. Use both sources for at least 3 clips and 210 project frames each. Each source must appear in an early shot starting no later than frame 175 and return in a distinct late shot starting no earlier than frame 450; do not use one world only as bookends or isolated inserts. Build short visual phrases rather than mechanical A/B alternation: establish both worlds, develop a meaningful visual relationship, return to both during escalation or resolution, and make the final held image feel causally earned. Each shot must fill 55..140 project frames, same-asset source ranges must not overlap, the opening shot must hold at least 75 frames, and the closing shot at least 100. Use at least three duration bands and no more than three similar durations in a row. Put every internal cut on a returned beat; place at least 3 cuts and at least half of all cuts on returned bar or phrase candidates, prioritizing strong and structural moments for escalation, peak, and resolution. Call plan_beat_montage on video track 1 over 0..700 with minimum shot length 55, maximum shot length 140, minimum beat strength 10 percent, overwrite mode, the ordered selects, exactly one fewer preferred cut anchors than selects, cadence {minimum_duration_buckets:3, duration_bucket_frames:20, maximum_similar_run:3, similar_tolerance_frames:8}, and anchor repair with maximum_movement_frames 24 and no locked anchors. Inspect the resolved anchors, signed deltas, shot durations, source order, temporal spread, and structural share before committing; revise and retry if the plan is infeasible or weak. If a failed call returns an exact_retry_patch, apply it once instead of guessing a new schedule. Normalize only audio track 2 to -1600 LUFS hundredths with a -100 dBFS-hundredths sample-peak ceiling and 100-hundredths tolerance. Add no captions, titles, transitions, model-authored fades, effects, or retiming. Finish with get_editorial_readiness using youtube_1080p, check_silence=false, centered 50/50 focus, 12 storyboard frames, and 160-pixel cells. Inspect the whole sheet and revise black, baked fades, slates, arbitrary sequencing, weak bridges, weak arc stages, source cameos, or an unresolved finish. Do not queue export; the benchmark renders the verified snapshot. Keep working until readiness is true.",
         ],
         assertions: music_montage_assertions(),
         budgets: EvalBudgets {
@@ -1254,6 +1254,18 @@ fn music_montage_assertions() -> Vec<EvalAssertion> {
             asset_alias: "tears-of-steel".to_owned(),
             minimum_clip_count: truth.minimum_clips_per_visual_asset,
             minimum_project_frames: TimeCode(truth.minimum_project_frames_per_visual_asset),
+        },
+        EvalAssertion::AssetTemporalSpread {
+            track: TrackId(truth.video_track_id),
+            asset_alias: "sintel".to_owned(),
+            latest_early_start: TimeCode(truth.latest_early_start_per_visual_asset),
+            earliest_late_start: TimeCode(truth.earliest_late_start_per_visual_asset),
+        },
+        EvalAssertion::AssetTemporalSpread {
+            track: TrackId(truth.video_track_id),
+            asset_alias: "tears-of-steel".to_owned(),
+            latest_early_start: TimeCode(truth.latest_early_start_per_visual_asset),
+            earliest_late_start: TimeCode(truth.earliest_late_start_per_visual_asset),
         },
         EvalAssertion::SourceRangesSeparated {
             track: TrackId(truth.video_track_id),
@@ -1995,6 +2007,8 @@ struct MusicMontageGroundTruth {
     minimum_visual_assets_used: usize,
     minimum_clips_per_visual_asset: usize,
     minimum_project_frames_per_visual_asset: i64,
+    latest_early_start_per_visual_asset: i64,
+    earliest_late_start_per_visual_asset: i64,
     minimum_source_separation_frames: i64,
     source_scene_minimum_confidence_percent: f64,
     source_exclusions: Vec<GroundTruthSourceExclusion>,
@@ -2547,6 +2561,20 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
         || truth.minimum_visual_assets_used != 2
         || truth.minimum_clips_per_visual_asset == 0
         || truth.minimum_project_frames_per_visual_asset <= 0
+        || truth.latest_early_start_per_visual_asset < truth.timeline_range.start
+        || truth.latest_early_start_per_visual_asset >= truth.earliest_late_start_per_visual_asset
+        || truth.earliest_late_start_per_visual_asset >= truth.timeline_range.end
+        || truth
+            .minimum_clips_per_visual_asset
+            .saturating_mul(truth.visual_asset_ids.len())
+            > truth.maximum_visual_shots
+        || truth
+            .minimum_project_frames_per_visual_asset
+            .saturating_mul(i64::try_from(truth.visual_asset_ids.len()).unwrap_or(i64::MAX))
+            > truth
+                .timeline_range
+                .end
+                .saturating_sub(truth.timeline_range.start)
         || truth.minimum_source_separation_frames < 0
         || !(0.0..=100.0).contains(&truth.source_scene_minimum_confidence_percent)
         || truth.minimum_duration_buckets < 2
@@ -4168,8 +4196,17 @@ mod tests {
                 EvalAssertion::AssetUseMinimum {
                     track: TrackId(1),
                     asset_alias,
-                    minimum_clip_count: 2,
-                    minimum_project_frames: TimeCode(120),
+                    minimum_clip_count: 3,
+                    minimum_project_frames: TimeCode(210),
+                } if asset_alias == alias
+            )));
+            assert!(music.assertions.iter().any(|assertion| matches!(
+                assertion,
+                EvalAssertion::AssetTemporalSpread {
+                    track: TrackId(1),
+                    asset_alias,
+                    latest_early_start: TimeCode(175),
+                    earliest_late_start: TimeCode(450),
                 } if asset_alias == alias
             )));
         }
@@ -4253,6 +4290,8 @@ mod tests {
         let music_prompt = music.prompts[0];
         for required in [
             "Call get_source_shot_board exactly once per visual asset over its full source range",
+            "candidate_selection coverage",
+            "candidate_count 12",
             "minimum_confidence_basis_points 1000",
             "exactly the pinned sintel and tears-of-steel visual sources",
             "[0..40)",
@@ -4262,7 +4301,10 @@ mod tests {
             "maximum end drift 0 frames",
             "exact real-time source range [5160..6000)",
             "structural_only=false",
-            "at least 2 clips and 120 project frames each",
+            "at least 3 clips and 210 project frames each",
+            "early shot starting no later than frame 175",
+            "late shot starting no earlier than frame 450",
+            "do not use one world only as bookends or isolated inserts",
             "opening shot must hold at least 75 frames",
             "closing shot at least 100",
             "at least 3 cuts and at least half of all cuts",
@@ -4394,8 +4436,10 @@ mod tests {
         assert_eq!(music_truth.phrase_bars, 4);
         assert_eq!(music_truth.minimum_structural_aligned_cuts, 3);
         assert!((music_truth.minimum_structural_aligned_percent - 50.0).abs() < f64::EPSILON);
-        assert_eq!(music_truth.minimum_clips_per_visual_asset, 2);
-        assert_eq!(music_truth.minimum_project_frames_per_visual_asset, 120);
+        assert_eq!(music_truth.minimum_clips_per_visual_asset, 3);
+        assert_eq!(music_truth.minimum_project_frames_per_visual_asset, 210);
+        assert_eq!(music_truth.latest_early_start_per_visual_asset, 175);
+        assert_eq!(music_truth.earliest_late_start_per_visual_asset, 450);
         assert_eq!(music_truth.music_preferred_source_start, 5_160);
         assert_eq!(music_truth.music_preferred_source_end, 6_000);
         assert_eq!(music_truth.music_maximum_end_drift_frames, 0);

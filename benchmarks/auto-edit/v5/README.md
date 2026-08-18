@@ -10,7 +10,7 @@ participant cameras, a program headset mix, and pinned manual speaker labels.
 `g3` is a cuts-first horizontal music montage built from two CC BY 3.0 Blender
 Foundation productions. Its rejected historical preflight used Kevin MacLeod's
 CC BY 4.0 instrumental "Cipher"; the v2 recovery used Scott Buckley's CC BY
-4.0 "Uprising." The prepared v3 recovery keeps that cue, replaces the forced
+4.0 "Uprising." The active v3 recovery keeps that cue, replaces the forced
 Big Buck Bunny cameo with a compatible Tears of Steel source, and gives the
 editor a real musical event and natural ending to cut around. Each task uses
 real footage and independently probed MP4 delivery, not generated bars or
@@ -152,13 +152,14 @@ cargo run -p kinewright-agent --bin kinewright-eval -- `
 `g3` measures the missing composition layer: whether the model can survey raw
 source footage visually, choose a deliberate shot sequence, and assemble it
 against detected musical onsets without hand-authoring frame arithmetic. The
-prepared v3 recovery is a 28-second action-to-release arc across Sintel and
+active v3 recovery is a 28-second action-to-release arc across Sintel and
 Tears of Steel, ending at a verified natural tail of the Uprising cue. It is a
-recovery target, not a completed or human-accepted run.
+recovery target, not a completed or human-accepted sample.
 
 The recovery contract uses three general agent-facing primitives. One
-full-range `get_source_shot_board` call per source replaces the redundant broad
-storyboard pass and returns up to 10 exact scene-derived candidate envelopes
+coverage-mode `get_source_shot_board` call per source replaces the redundant
+broad storyboard pass and returns up to 12 scene-derived candidate envelopes
+sampled across the full source range,
 with start, middle, and end evidence frames. Passing
 `minimum_duration_frames: 55` and `minimum_confidence_basis_points: 1000`
 filters unusably short candidates while retaining low-confidence boundaries as
@@ -182,9 +183,11 @@ v2 rerun. V2 also anchored the music start without requiring a musical source
 endpoint or a quiet encoded tail, which left the published artifact ending
 inside a phrase.
 
-The prepared v3 contract closes those gaps. It uses compatible Tears of Steel
-footage, requires at least two clips and 120 project frames from each visual
-asset, lowers the scene-boundary veto floor to 10% confidence, measures the
+The active v3 contract closes those gaps. It uses compatible Tears of Steel
+footage, requires at least three clips and 210 project frames from each visual
+asset, and requires both sources in distinct early and late phases. That makes
+each film carry at least 30% of the edit and rejects bookends or isolated
+inserts. It lowers the scene-boundary veto floor to 10% confidence, measures the
 actual first and last shot holds, anchors the music source end exactly at the
 cue's natural tail, and verifies the final encoded five-frame window is quiet.
 It retains scene-clean source exclusions, nonuniform shot cadence, structural
@@ -241,12 +244,32 @@ musical lift, and a held finish; at least three duration bands; no more than
 three near-equal shots in a row; exact scene-derived source envelopes; and
 structural bar/phrase anchors carrying at least half of the cuts.
 
-The v3 recovery is prepared but has not run. Its pinned pack and ground truth
-are `music-fixture-pack-v3.json` and `music-ground-truth-v3.json`. It replaces
-the forced Bunny cameo with Tears of Steel, requires meaningful use of both
-assets, treats low-confidence scene changes as vetoes, checks the actual edge
-shot holds, anchors the music source end to the natural cue tail, and verifies
-the encoded tail. No v3 machine result or human review exists yet.
+The first local v3 diagnostic passed its then-current 38/38 machine assertions
+with 15 tool calls, 11 operations, and 333,560 total tokens. Its rendered SHA-256
+was `23a416bddc2753833c16f6e61cf555b7b7ab33a2a9ec84076a48df71c311e472`.
+Independent review withheld it from human scoring and publication: Sintel
+appeared in only two disconnected clips totaling 140 frames, while Tears of
+Steel occupied seven clips and 560 frames. The old minimum-use rule had allowed
+a source cameo while claiming multi-source composition. This diagnostic is not
+a baseline and does not count toward the family gate. The contract now requires
+three clips and 210 frames from each source plus distinct early and late
+appearances. Its pinned pack and ground truth remain `music-fixture-pack-v3.json`
+and `music-ground-truth-v3.json`.
+
+Two fresh samples on that hardened contract now pass 40/40 machine assertions.
+The first used 18 calls and 432,226 tokens; it used four Sintel shots over 293
+frames and five Tears of Steel shots over 407 frames. Its rendered SHA-256 is
+`203461a7331ad0b7ed45654954b244b63c71dc6e3ca1fd11f0f3a562ef22dac4`.
+The planning trace exposed a token regression: six montage-planner calls
+repeated the accumulated visual context. `plan_beat_montage` now returns the
+nearest globally feasible source- and cadence-valid schedule as an exact retry
+patch when a bounded schedule fails. The next sample needed three planner calls,
+15 total calls, and 342,058 tokens: 20.9% fewer tokens while preserving the
+stricter 40/40 result. It used four Sintel shots over 248 frames and five Tears
+of Steel shots over 452 frames; its rendered SHA-256 is
+`4c802c58d2a056f87bc305e742db5bdb9fbfc0dfafa2a200604835ee3857daf6`.
+Both artifacts await human review. Neither is a published or accepted baseline
+yet.
 
 The published v2 recovery also passed a separate 16-frame overview, every-shot
 midpoint sheet, and before/at/after inspection around all eight cuts. That audit
