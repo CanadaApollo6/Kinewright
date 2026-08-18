@@ -1,6 +1,6 @@
 # Media correctness policy
 
-OpenReel's project timeline is constant-frame-rate (CFR). Every project and
+Kinewright's project timeline is constant-frame-rate (CFR). Every project and
 source edit boundary remains an integer `TimeCode` plus an exact rational frame
 rate. Importing variable-frame-rate (VFR) media does not change that model.
 
@@ -46,7 +46,7 @@ rate, channel layout, and PTS.
 ## Rotation metadata
 
 Display-matrix side data is authoritative, with the legacy `rotate` stream tag
-as a fallback. OpenReel applies 0, 90, 180, and 270 degree rotations during the
+as a fallback. Kinewright applies 0, 90, 180, and 270 degree rotations during the
 shared decode path. Probe reports post-rotation display dimensions, and width
 limits are calculated in display orientation. Preview, cached thumbnails,
 compositing, and export all consume those same rotated RGBA frames.
@@ -123,7 +123,7 @@ underflow) and atomically advances the sample-count master clock. A project with
 no audio therefore still advances on callback-generated silence.
 
 The two-second output ring is shared by the entire mix rather than duplicated
-per source. OpenReel-owned f32 sample storage is
+per source. Kinewright-owned f32 sample storage is
 `2 * sample_rate * channels * 4` bytes for that ring, plus
 `1,024 * channels * 4` bytes for the feeder chunk, plus one unread resampled
 decoder chunk per simultaneously active source. At 48 kHz stereo the fixed
@@ -170,7 +170,7 @@ black frame.
 ## Torture-matrix generator and tests
 
 The generator is the test-support module
-`crates/openreel-media/src/media_matrix_tests.rs`. It invokes only the
+`crates/kinewright-media/src/media_matrix_tests.rs`. It invokes only the
 provisioned FFmpeg CLI, writes into a unique temporary directory, and removes
 the generated files after the test. No fixtures or codec binaries are checked
 in.
@@ -182,7 +182,7 @@ seek, applicable audio resampling, damaged-input errors, and one mixed-timeline
 export. Run it with:
 
 ```powershell
-cargo test -p openreel-media --lib fast_media_matrix -- --nocapture
+cargo test -p kinewright-media --lib fast_media_matrix -- --nocapture
 ```
 
 The gated matrix adds 3840x2160 H.264 with a 250-frame GOP and three-second
@@ -190,8 +190,8 @@ duration plus 1920x1080 HEVC. It performs the same checks and prints a per-file
 result table:
 
 ```powershell
-$env:OPENREEL_MEDIA_MATRIX = '1'
-cargo test -p openreel-media --lib full_media_matrix -- --nocapture
+$env:KINEWRIGHT_MEDIA_MATRIX = '1'
+cargo test -p kinewright-media --lib full_media_matrix -- --nocapture
 ```
 
 The provisioned FFmpeg build contains `libx265`. The generator detects it; if a
@@ -206,8 +206,8 @@ sequential decode in 15-frame windows, and 20 forward scrub steps, all at the
 1280-pixel proxy limit:
 
 ```powershell
-$env:OPENREEL_PERF_TEST = '1'
-cargo test -p openreel-media --lib proxy_preview_performance -- --nocapture
+$env:KINEWRIGHT_PERF_TEST = '1'
+cargo test -p kinewright-media --lib proxy_preview_performance -- --nocapture
 ```
 
 The local machine-class budgets are cold-seek p95 below 250 ms, scrub-step p95

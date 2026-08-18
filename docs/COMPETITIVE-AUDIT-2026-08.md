@@ -4,7 +4,7 @@
 > [Product position after M35](PRODUCT-POSITION-M35-2026-08.md); it reflects
 > M32-M35 and current official product material, including DaVinci Resolve 21.
 
-Where OpenReel stands against DaVinci Resolve 20, Premiere Pro 2026, and
+Where Kinewright stands against DaVinci Resolve 20, Premiere Pro 2026, and
 CapCut Desktop 2026; why the app still feels janky; and a proposed refocus.
 
 ---
@@ -53,7 +53,7 @@ Sources:
 - [Flowith — CapCut Desktop Pro 2026](https://flowith.io/blog/capcut-desktop-pro-2026-ai-auto-edit-define-short-form-video-2026/),
   [Marc Andrews — CapCut AI review](https://marcandrews.com/capcut-ai-features-review-2026-which-ones-are-worth-it/)
 
-## 2. Where OpenReel actually is (honest inventory)
+## 2. Where Kinewright actually is (honest inventory)
 
 **Editing core.** Operation-centric validated core, integer-frame math,
 atomic batches, snapshot undo, journaled crash recovery (per-project),
@@ -71,7 +71,7 @@ detection with transcript-aware clamping (words are never clipped).
 
 **Agents (the differentiator).** Conversation-first layout; local Claude
 Code, Codex CLI, and Cursor Agent subscriptions as subprocesses (no
-credentials, no OpenReel cloud, no OpenReel per-credit fees); full
+credentials, no Kinewright cloud, no Kinewright per-credit fees); full
 mutator/inspector MCP toolset; destructive-op confirmation broker;
 provider-specific isolation; concurrent threads over one timeline;
 watchable diffs (EditCards with review/undo); live model, effort, speed,
@@ -89,7 +89,7 @@ and cancellation, per-project default naming.
 
 ## 3. Gap matrix
 
-| Discipline | Resolve 20 | Premiere 2026 | CapCut 2026 | OpenReel today |
+| Discipline | Resolve 20 | Premiere 2026 | CapCut 2026 | Kinewright today |
 |---|---|---|---|---|
 | Core cutting | ★★★ | ★★★ | ★★ | ★★ solid but thin tools |
 | Trim suite (roll/slip/slide, 3-point, source monitor) | ★★★ | ★★★ | ★ | — |
@@ -231,7 +231,7 @@ polished web app in a screen recording". Ordered by leverage:
 6. Frame-pacing audit during playback/scrub.
 
 ### Pillar B — AGENT LETHALITY (the moat)
-Make "tell OpenReel what you want" beat CapCut Auto-Edit on quality and
+Make "tell Kinewright what you want" beat CapCut Auto-Edit on quality and
 Premiere Assistant on scope, using senses + tools the agent composes:
 1. **Music/beat sense** — onset/beat detection as an analysis facet +
    agent tool (unlocks beat-sync cuts, montage pacing).

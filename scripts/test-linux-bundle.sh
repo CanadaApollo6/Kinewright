@@ -35,7 +35,7 @@ if [[ ! "$startup_timeout_seconds" =~ ^[0-9]+$ ]] || [[ "$startup_timeout_second
 fi
 
 bundle_dir="$(cd -- "$bundle_dir" && pwd)"
-source_bin="$bundle_dir/OpenReel"
+source_bin="$bundle_dir/Kinewright"
 if [[ ! -f "$source_bin" ]]; then
     echo "Staged executable not found: $source_bin" >&2
     exit 1
@@ -52,7 +52,7 @@ if [[ ! -f "$bundle_dir/ffmpeg" ]]; then
     exit 1
 fi
 
-smoke_dir="$(mktemp -d "${TMPDIR:-/tmp}/OpenReel-bundle-smoke-XXXXXX")"
+smoke_dir="$(mktemp -d "${TMPDIR:-/tmp}/Kinewright-bundle-smoke-XXXXXX")"
 cleanup() {
     if [[ -n "${smoke_pid:-}" ]] && kill -0 "$smoke_pid" 2>/dev/null; then
         kill "$smoke_pid" 2>/dev/null || true
@@ -63,7 +63,7 @@ cleanup() {
 trap cleanup EXIT
 
 cp -a "$bundle_dir/." "$smoke_dir/"
-smoke_bin="$smoke_dir/OpenReel"
+smoke_bin="$smoke_dir/Kinewright"
 
 run_smoke() {
     env -i \
@@ -87,8 +87,8 @@ fi
 sleep "$startup_timeout_seconds"
 if ! kill -0 "$smoke_pid" 2>/dev/null; then
     wait "$smoke_pid" || true
-    echo "OpenReel exited during the startup smoke window." >&2
+    echo "Kinewright exited during the startup smoke window." >&2
     exit 1
 fi
 
-echo "OpenReel stayed running for ${startup_timeout_seconds} seconds from an isolated directory with a system-only PATH."
+echo "Kinewright stayed running for ${startup_timeout_seconds} seconds from an isolated directory with a system-only PATH."

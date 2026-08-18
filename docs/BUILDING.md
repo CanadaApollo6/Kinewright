@@ -1,6 +1,6 @@
-# Building OpenReel
+# Building Kinewright
 
-OpenReel is a native desktop app for **64-bit Windows** (MSVC) and **64-bit Linux**
+Kinewright is a native desktop app for **64-bit Windows** (MSVC) and **64-bit Linux**
 (glibc). The media crate links FFmpeg at build time and loads its shared
 libraries at test and run time. Each platform provisions a pinned GPL FFmpeg 8
 build into `third_party/ffmpeg` — no system FFmpeg install is required.
@@ -26,7 +26,7 @@ implementation. A display (or Xvfb) is required only to *launch* the GUI.
 source ./scripts/setup-ffmpeg.sh
 cargo build --workspace
 cargo test --workspace
-cargo run -p openreel-app
+cargo run -p kinewright-app
 ```
 
 `source` the setup script in the same shell as Cargo. It downloads the pinned
@@ -62,14 +62,14 @@ After a release build:
 
 ```bash
 source ./scripts/setup-ffmpeg.sh
-cargo build --package openreel-app --release --locked
+cargo build --package kinewright-app --release --locked
 ./scripts/package-linux.sh --version 0.1.0
 ./scripts/test-linux-bundle.sh --bundle-dir ./dist/linux-x64
 ```
 
-The staged bundle is `dist/linux-x64` (`OpenReel`, `ffmpeg`, `lib/libav*.so*`,
+The staged bundle is `dist/linux-x64` (`Kinewright`, `ffmpeg`, `lib/libav*.so*`,
 licenses, a `.desktop` file). `package-linux.sh` then writes
-`dist/tarball/OpenReel-<version>-linux-x64.tar.gz`. `patchelf` sets
+`dist/tarball/Kinewright-<version>-linux-x64.tar.gz`. `patchelf` sets
 `$ORIGIN/lib` so the binary finds bundled FFmpeg without a machine-level
 install.
 
@@ -96,7 +96,7 @@ rustup default stable-x86_64-pc-windows-msvc
 & .\scripts\setup-ffmpeg.ps1
 cargo build --workspace
 cargo test --workspace
-cargo run -p openreel-app
+cargo run -p kinewright-app
 ```
 
 Keep the setup and Cargo commands in the same PowerShell process. The setup
@@ -168,7 +168,7 @@ BINDGEN_EXTRA_CLANG_ARGS=<MSVC and Windows SDK include directories from vcvars64
 `PKG_CONFIG` and `PKG_CONFIG_PATH` let `ffmpeg-sys-next` find the MSVC import
 libraries and headers. `LIBCLANG_PATH` lets its bindgen step load libclang.
 `PATH` is required both for the crate's build-time feature probe and for loading
-the FFmpeg DLLs when tests or OpenReel run. `FFMPEG_DIR` is an OpenReel
+the FFmpeg DLLs when tests or Kinewright run. `FFMPEG_DIR` is an Kinewright
 convenience variable for later media milestones; `ffmpeg-sys-next` itself uses
 pkg-config. The script imports the complete environment emitted by
 `vcvars64.bat`, including `INCLUDE`, `LIB`, `LIBPATH`, `WindowsSdkDir`,
@@ -177,7 +177,7 @@ pkg-config. The script imports the complete environment emitted by
 caller `PATH` entries so the Rust toolchain remains available.
 
 Environment changes are not permanent. Run the setup script again in each new
-PowerShell session before building, testing, or launching OpenReel.
+PowerShell session before building, testing, or launching Kinewright.
 
 ## M0 contract notes
 

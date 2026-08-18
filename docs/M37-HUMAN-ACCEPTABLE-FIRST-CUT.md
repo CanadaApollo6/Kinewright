@@ -42,7 +42,7 @@ preview/export raster   deterministic QA
       delivery conformance + eval assertion
 ```
 
-`openreel-core::title_layout` is now the single composition contract. It:
+`kinewright-core::title_layout` is now the single composition contract. It:
 
 - scales font tokens from the output short edge, so 1080x1920 no longer turns a
   96 px social caption into a 171 px caption;
@@ -73,7 +73,7 @@ not a screenshot heuristic and does not depend on a selected proof frame.
 
 The benchmark also fails before artifact acceptance when the timeline has no
 real-time media clip backed by an audio or audio-video asset. Video-track A/V
-clips already feed OpenReel's mixer; requiring a duplicate audio-track copy
+clips already feed Kinewright's mixer; requiring a duplicate audio-track copy
 would double the mix. After export, the independent probe must classify the MP4
 as audio-video. This catches both editorial audio omission and mux failures;
 human review remains responsible for mix quality.
@@ -128,8 +128,8 @@ Do not run this as part of ordinary tests. After explicit user approval, run:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval -- --suite finished-cut-v2 --harness codex --only f1 --samples 1
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval -- --suite finished-cut-v2 --harness codex --only f1 --samples 1
 ```
 
 No model override is supplied, matching the harness-default shape of the first

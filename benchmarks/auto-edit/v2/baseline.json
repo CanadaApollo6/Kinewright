@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "benchmark_id": "openreel-finished-cut-v2",
+  "benchmark_id": "kinewright-finished-cut-v2",
   "suite_manifest": "benchmarks/auto-edit/v2/manifest.json",
   "source_trace": {
     "filename": "openreel-eval-20260813-063929-codex/results.jsonl",
@@ -14,7 +14,7 @@
     "model": "harness-default",
     "os": "windows",
     "architecture": "x86_64",
-    "openreel_version": "0.1.0"
+    "kinewright_version": "0.1.0"
   },
   "machine_summary": {
     "tasks_passed": 1,

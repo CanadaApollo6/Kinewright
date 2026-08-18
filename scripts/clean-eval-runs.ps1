@@ -112,7 +112,7 @@ $preservedRuns = 0
 $recoveredBytes = 0L
 
 foreach ($run in Get-ChildItem -LiteralPath $evalRoot -Directory) {
-    if (-not $run.Name.StartsWith('openreel-eval-', [System.StringComparison]::Ordinal)) {
+    if (-not $run.Name.StartsWith('kinewright-eval-', [System.StringComparison]::Ordinal)) {
         Write-Host "Preserving unrecognized eval directory: $($run.Name)"
         $preservedRuns += 1
         continue

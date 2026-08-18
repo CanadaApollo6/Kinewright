@@ -74,5 +74,5 @@ lists, and marker position, token index, and label lines.
 This is an additive project-format change and does not require a version bump.
 `Clip.link` defaults to `None` when absent and is omitted when empty;
 `Document.markers` defaults to an empty list and is omitted when empty. The
-pre-M13 fixture in `crates/openreel-core/tests/fixtures` proves that an old
+pre-M13 fixture in `crates/kinewright-core/tests/fixtures` proves that an old
 project JSON document loads, validates, and reserializes without either field.

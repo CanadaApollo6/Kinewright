@@ -28,7 +28,7 @@ cue's start, so cues never overlap. Empty text and non-positive word ranges do
 not produce zero-duration cues.
 
 Agent-authored captions can pass an exact `script` to `add_styled_captions`.
-OpenReel keeps the generated transcript timing but replaces the recognized
+Kinewright keeps the generated transcript timing but replaces the recognized
 wording before title creation. Script punctuation is authoritative: a cue may
 continue one sentence across multiple timed groups, but it never ends one
 sentence and begins another. Existing sentence-safe splits stay unchanged;

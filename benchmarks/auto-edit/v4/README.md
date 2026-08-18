@@ -1,4 +1,4 @@
-# OpenReel Dialogue-Pacing Benchmark v4
+# Kinewright Dialogue-Pacing Benchmark v4
 
 V4 targets the one material weakness left in the accepted M38 cut: sentence
 rhythm. The M38 output scored 4/5 for pacing and contained project-frame gaps
@@ -30,8 +30,8 @@ Run three subscription-backed samples with:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval -- `
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --suite dialogue-pacing-v4 `
   --harness codex `
   --only f3 `

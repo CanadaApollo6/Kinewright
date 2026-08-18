@@ -2,7 +2,7 @@
   "schema_version": 1,
   "pack_id": "m40-interview-v1",
   "title": "M40 real interview fixture pack",
-  "description": "A pinned public-domain talking-head interview used to measure OpenReel on unfamiliar, naturally recorded speech and video.",
+  "description": "A pinned public-domain talking-head interview used to measure Kinewright on unfamiliar, naturally recorded speech and video.",
   "assets": [
     {
       "id": "helen-hill-interview-480p",
@@ -15,7 +15,7 @@
         "spdx_id": "LicenseRef-Public-Domain",
         "name": "Public domain dedication by the copyright holder",
         "url": "https://commons.wikimedia.org/wiki/Template:PD-self",
-        "attribution": "Interview with filmmaker Helen Hill, recorded by Dan Streible on March 27, 2006; public-domain source hosted by Wikimedia Commons. OpenReel uses Wikimedia's 480p VP9 transcode."
+        "attribution": "Interview with filmmaker Helen Hill, recorded by Dan Streible on March 27, 2006; public-domain source hosted by Wikimedia Commons. Kinewright uses Wikimedia's 480p VP9 transcode."
       }
     }
   ]

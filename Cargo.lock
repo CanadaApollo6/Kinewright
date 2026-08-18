@@ -2252,6 +2252,73 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
+name = "kinewright-agent"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.23.1",
+ "crossbeam-channel",
+ "image",
+ "kinewright-core",
+ "kinewright-media",
+ "reqwest",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "kinewright-app"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "eframe",
+ "egui_extras",
+ "image",
+ "kinewright-agent",
+ "kinewright-core",
+ "kinewright-media",
+ "proptest",
+ "rfd",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kinewright-core"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "crossbeam-channel",
+ "proptest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "kinewright-media"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "cpal",
+ "crossbeam-channel",
+ "ffmpeg-next",
+ "kinewright-core",
+ "pollster",
+ "reqwest",
+ "rtrb",
+ "serde",
+ "serde_json",
+ "wgpu",
+ "whisper-rs",
+]
+
+[[package]]
 name = "kurbo"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2930,73 +2997,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "openreel-agent"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base64 0.23.1",
- "crossbeam-channel",
- "image",
- "openreel-core",
- "openreel-media",
- "reqwest",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
-]
-
-[[package]]
-name = "openreel-app"
-version = "0.1.0"
-dependencies = [
- "crossbeam-channel",
- "eframe",
- "egui_extras",
- "image",
- "openreel-agent",
- "openreel-core",
- "openreel-media",
- "proptest",
- "rfd",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "openreel-core"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "crossbeam-channel",
- "proptest",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "openreel-media"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "cpal",
- "crossbeam-channel",
- "ffmpeg-next",
- "openreel-core",
- "pollster",
- "reqwest",
- "rtrb",
- "serde",
- "serde_json",
- "wgpu",
- "whisper-rs",
-]
 
 [[package]]
 name = "openssl-probe"

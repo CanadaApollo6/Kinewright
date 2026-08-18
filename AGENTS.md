@@ -4,13 +4,13 @@
 
 ### Platform reality: Windows/MSVC desktop app, Linux-native on this VM
 
-OpenReel targets **64-bit Windows (MSVC)** and **64-bit Linux (glibc)** — see
+Kinewright targets **64-bit Windows (MSVC)** and **64-bit Linux (glibc)** — see
 `docs/BUILDING.md`. This Cloud Agent VM is Linux, so the full workspace is
 buildable here after provisioning FFmpeg and the native desktop libraries:
 
-- `openreel-core` — pure logic (document model, `Operation` set, the `Core` actor,
-  undo/redo, `.openreel` JSON serde). No extra system deps.
-- `openreel-media`, `openreel-agent`, `openreel-app` — FFmpeg 8.x shared libs
+- `kinewright-core` — pure logic (document model, `Operation` set, the `Core` actor,
+  undo/redo, `.kinewright` JSON serde). No extra system deps.
+- `kinewright-media`, `kinewright-agent`, `kinewright-app` — FFmpeg 8.x shared libs
   (not Ubuntu's FFmpeg 6.1), Vulkan (`wgpu`, including Mesa lavapipe), ALSA
   (`cpal`), Whisper (`whisper.cpp` via CMake), GTK 3 (`rfd`), and X11/Wayland
   (`eframe`/`winit`). `scripts/install-linux-deps.sh` plus
@@ -36,17 +36,17 @@ cargo build --workspace
 cargo test  --workspace
 cargo fmt   -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo run -p openreel-app
+cargo run -p kinewright-app
 ```
 
 Core-only (no FFmpeg) still works:
 
 ```bash
-cargo build -p openreel-core
-cargo test  -p openreel-core
+cargo build -p kinewright-core
+cargo test  -p kinewright-core
 ```
 
-There are no long-running services, databases, or dev servers — OpenReel is a
+There are no long-running services, databases, or dev servers — Kinewright is a
 desktop GUI binary. The only "server" is an in-process, ephemeral, localhost MCP
 endpoint the app starts for agent sessions. Launching the GUI needs a display
 (`DISPLAY` is typically set on this VM).

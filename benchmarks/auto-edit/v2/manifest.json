@@ -1,12 +1,12 @@
 {
   "schema_version": 2,
-  "benchmark_id": "openreel-finished-cut-v2",
-  "title": "OpenReel Finished-Cut Benchmark v2",
-  "runner": "cargo run -p openreel-agent --bin openreel-eval -- --suite finished-cut-v2",
-  "implementation": "crates/openreel-agent/src/bin/openreel-eval.rs",
+  "benchmark_id": "kinewright-finished-cut-v2",
+  "title": "Kinewright Finished-Cut Benchmark v2",
+  "runner": "cargo run -p kinewright-agent --bin kinewright-eval -- --suite finished-cut-v2",
+  "implementation": "crates/kinewright-agent/src/bin/kinewright-eval.rs",
   "fixture_provenance": {
     "policy": "Generated locally; no private footage or downloaded evaluation corpus.",
-    "video": "Pinned OpenReel FFmpeg generates five visually distinct source takes.",
+    "video": "Pinned Kinewright FFmpeg generates five visually distinct source takes.",
     "speech": "Windows SAPI creates the checked-in scripted dialogue and pauses.",
     "analysis": "Local Whisper plus content-addressed silence analysis provide evidence to every harness.",
     "time_base": "All editing and scoring use exact integer source or project frames."

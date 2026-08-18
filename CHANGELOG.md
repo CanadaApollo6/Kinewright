@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to OpenReel are documented here. The format follows
+All notable changes to Kinewright are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) once releases begin.
 
@@ -68,7 +68,7 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   then rejected the artifact at a 2.25/5 mean, exposing retained audible
   fillers, inaccurate captions, awkward cuts, unclear story assembly, and a
   reproducible-fixture visual surface that cannot measure real shot selection
-- M36 compact agent runtime: OpenReel-owned Claude, Codex, Cursor, and eval
+- M36 compact agent runtime: Kinewright-owned Claude, Codex, Cursor, and eval
   sessions expose seven stable tools instead of the complete catalog,
   discover exact capability schemas on demand, validate revision-bound edit
   plans before one atomic commit, and reject direct calls to the internal
@@ -81,7 +81,7 @@ The initial development cycle (milestones M0–M7), building the editor end to e
 - A/V playback with the audio device callback as master clock; exact
   keyframe-then-step seeking; frame cache with prefetch
 - Timeline editing: tracks, cut/trim/move/split/delete, drag interactions,
-  snapping, project save/load (`.openreel`)
+  snapping, project save/load (`.kinewright`)
 - Multi-track wgpu compositing with effects (brightness, contrast, saturation,
   opacity, transform) and crossfade transitions; H.264/AAC export sharing the
   preview's render path, with progress and cancellation
@@ -99,7 +99,7 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   Mono, SVG iconography, filmstrip thumbnails and audio waveforms on clips,
   adaptive timecode ruler, animated zoom
 - Windows installer with bundled GPL FFmpeg; tag-driven release pipeline
-- `OpenReel.exe <project>` startup argument
+- `Kinewright.exe <project>` startup argument
 - Real-world media hardening: VFR sources mapped onto the CFR timeline with
   bounded drift, rotation metadata applied everywhere consistently, odd audio
   rates, 4K long-GOP and HEVC coverage, actionable errors instead of silent
@@ -110,7 +110,7 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   detection, and `apply_edit_plan` — atomic multi-operation plans with a single
   undo entry, one summarized confirmation for destructive plans, and
   self-reporting results (remaining cuttable silence count)
-- Agent eval harness (`openreel-eval`): seven scored editing tasks including a
+- Agent eval harness (`kinewright-eval`): seven scored editing tasks including a
   five-take rough-cut flagship, per-eval budgets, pass-rate sampling
   (`--only`, `--samples`), committed baselines in `docs/EVALS.md`
 - Transcript-aware silence cutting: spans reported for cutting never overlap
@@ -128,7 +128,7 @@ The initial development cycle (milestones M0–M7), building the editor end to e
 - Codebase audit and remediation: −7.9% source lines, shared derived-data
   framework, `MediaEngine` split into Playback/Analysis/Export facets, fmt and
   clippy (`-D warnings`) enforced in CI (see `docs/AUDIT-2026-08.md`)
-- OpenReel icon set by GPT-5.6 Luna (app, taskbar, installer, README)
+- Kinewright icon set by GPT-5.6 Luna (app, taskbar, installer, README)
 - Text-based editing: select words in the transcript panel and Delete to
   ripple-cut the media underneath — atomic across sync-locked tracks, one undo
   entry, retained words protected by an fps-aware safety margin, linked-A/V
@@ -263,7 +263,7 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   closing and exit guard every project's unsaved changes individually;
   crash recovery offers every crashed project's journal by name and
   restores each into its own session. Recordings save per project under
-  Videos\OpenReel\<project>, and export naming follows the focused
+  Videos\Kinewright\<project>, and export naming follows the focused
   project. The derived-data layer (transcripts, silence, scenes,
   thumbnails, waveforms) now keys by media content, so identical asset
   ids in different projects can never cross-contaminate - and projects
@@ -284,7 +284,7 @@ The initial development cycle (milestones M0–M7), building the editor end to e
 - In-editor recording: capture the screen (with optional microphone), a
   camera, or a voice-only take from the Record button or /record, driven
   by the bundled FFmpeg CLI as a crash-isolated subprocess with a graceful
-  stop. Stopping lands the file in Videos\OpenReel and sends it straight
+  stop. Stopping lands the file in Videos\Kinewright and sends it straight
   down the import pipeline - onto the timeline, monitor cued,
   transcription started - so a take is text-editable the moment it stops.
   The agent deliberately has no capture tool. ffmpeg.exe now ships in the
@@ -318,4 +318,4 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   composer out of view, and the empty media rail's icon sits centered
   instead of on the panel boundary
 
-[Unreleased]: https://github.com/CanadaApollo6/OpenReel/commits/main
+[Unreleased]: https://github.com/CanadaApollo6/Kinewright/commits/main

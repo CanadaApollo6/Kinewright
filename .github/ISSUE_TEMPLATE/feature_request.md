@@ -7,7 +7,7 @@ assignees: ""
 ---
 
 **The problem**
-What are you trying to do that OpenReel makes hard or impossible today?
+What are you trying to do that Kinewright makes hard or impossible today?
 
 **Proposed solution**
 How would you want it to work? (For editing features: how does it map to

@@ -1,9 +1,9 @@
 {
   "schema_version": 4,
-  "benchmark_id": "openreel-dialogue-pacing-v4",
-  "title": "OpenReel Dialogue-Pacing Benchmark v4",
-  "runner": "cargo run -p openreel-agent --bin openreel-eval -- --suite dialogue-pacing-v4",
-  "implementation": "crates/openreel-agent/src/bin/openreel-eval.rs",
+  "benchmark_id": "kinewright-dialogue-pacing-v4",
+  "title": "Kinewright Dialogue-Pacing Benchmark v4",
+  "runner": "cargo run -p kinewright-agent --bin kinewright-eval -- --suite dialogue-pacing-v4",
+  "implementation": "crates/kinewright-agent/src/bin/kinewright-eval.rs",
   "inherits": "benchmarks/auto-edit/v3",
   "fixture_provenance": {
     "policy": "Generated locally from checked-in authored text and deterministic FFmpeg motion-graphic scenes; no private footage or downloaded corpus.",

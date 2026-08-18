@@ -4,7 +4,7 @@ R3 resolves audit findings F2 and F3. The R2 `main` contract had grown to 20
 `MediaEngine` methods since the audit's 17-method count, plus three visual-asset
 methods available only on `FfmpegMediaEngine`. R3 replaces that surface with
 three core-owned facets and moves the pure visual result types into
-`openreel-core`.
+`kinewright-core`.
 
 ## Facet contracts
 
@@ -91,18 +91,18 @@ is the private composition-root constructor parameter.
 
 ## Signature changes
 
-- Removed `openreel_core::MediaEngine` and its single 20-method implementation
-  requirement. Added `openreel_core::{Playback, Analysis, Export}`.
+- Removed `kinewright_core::MediaEngine` and its single 20-method implementation
+  requirement. Added `kinewright_core::{Playback, Analysis, Export}`.
 - `FfmpegMediaEngine` now implements all three facets separately.
 - Removed the inherent `FfmpegMediaEngine::{request_waveform,
   request_thumbnail, visual_asset_results}` methods. Their signatures are
   unchanged on `Analysis`, so callers now import that trait.
 - Moved `WaveformPeak`, `WaveformData`, `ThumbnailKey`, `ThumbnailFrame`,
-  `VisualRequestKind`, and `VisualAssetResult` from `openreel-media` ownership
-  to `openreel-core`. `openreel-media` re-exports them for source compatibility.
+  `VisualRequestKind`, and `VisualAssetResult` from `kinewright-media` ownership
+  to `kinewright-core`. `kinewright-media` re-exports them for source compatibility.
 - Changed `McpServer::start(core, media: Arc<dyn MediaEngine>)` to
   `McpServer::start(core, playback: Arc<dyn Playback>, analysis: Arc<dyn Analysis>)`.
-- Changed `openreel_media::test_support::wait_for_transcript(
+- Changed `kinewright_media::test_support::wait_for_transcript(
   &FfmpegMediaEngine, AssetId, bool)` to
   `wait_for_transcript(&dyn Analysis, AssetId, bool)`.
 

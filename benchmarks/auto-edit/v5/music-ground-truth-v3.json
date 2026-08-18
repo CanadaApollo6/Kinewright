@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "montage_id": "blender-dramatic-resolution-uprising",
+  "project_fps": {
+    "numerator": 25,
+    "denominator": 1
+  },
+  "project_resolution": {
+    "width": 1920,
+    "height": 1080
+  },
+  "timeline_range": {
+    "start": 0,
+    "end": 700
+  },
+  "video_track_id": 1,
+  "audio_track_id": 2,
+  "visual_asset_ids": [
+    "sintel-trailer-1080p",
+    "tears-of-steel-battle-720p"
+  ],
+  "music_asset_id": "uprising-scott-buckley",
+  "minimum_visual_shots": 8,
+  "maximum_visual_shots": 10,
+  "minimum_shot_frames": 55,
+  "maximum_shot_frames": 140,
+  "minimum_beat_strength_percent": 10.0,
+  "beat_alignment_tolerance_frames": 1,
+  "minimum_visual_assets_used": 2,
+  "minimum_clips_per_visual_asset": 2,
+  "minimum_project_frames_per_visual_asset": 120,
+  "minimum_source_separation_frames": 0,
+  "source_scene_minimum_confidence_percent": 10.0,
+  "source_exclusions": [
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 0, "end": 40 },
+      "reason": "black and fade-in opening"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 108, "end": 144 },
+      "reason": "embedded fade between opening shots"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 216, "end": 292 },
+      "reason": "Blender Foundation title slate and black"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 376, "end": 396 },
+      "reason": "black transition"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 420, "end": 441 },
+      "reason": "black transition"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 508, "end": 536 },
+      "reason": "black transition into camp sequence"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 664, "end": 688 },
+      "reason": "black transition"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 768, "end": 780 },
+      "reason": "black transition"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 832, "end": 880 },
+      "reason": "embedded fade and dissolve tail into desert sequence"
+    },
+    {
+      "asset_id": "sintel-trailer-1080p",
+      "source_range": { "start": 984, "end": 1253 },
+      "reason": "Sintel logo, end credits, and black"
+    }
+  ],
+  "minimum_duration_buckets": 3,
+  "duration_bucket_frames": 20,
+  "maximum_similar_run": 3,
+  "similar_tolerance_frames": 8,
+  "minimum_clean_selectable_project_frames": 840,
+  "selection_headroom_frames": 140,
+  "meter_beats": 4,
+  "phrase_bars": 4,
+  "minimum_structural_aligned_cuts": 3,
+  "minimum_structural_aligned_percent": 50.0,
+  "music_preferred_source_start": 5160,
+  "music_preferred_source_end": 6000,
+  "music_maximum_end_drift_frames": 0,
+  "minimum_opening_shot_frames": 75,
+  "minimum_closing_shot_frames": 100,
+  "rendered_tail_window_frames": 5,
+  "rendered_tail_maximum_peak_dbfs_hundredths": -3000,
+  "story_brief": "Build one coherent action-to-release arc across two dramatic worlds: establish character and threat, develop matching action or composition, escalate toward one clear visual and musical peak, then resolve on a held image as the cue reaches its verified natural tail. Every cross-source cut must have an intelligible action, motion, scale, color, or composition bridge; neither source may appear as an isolated cameo.",
+  "attribution": [
+    "Sintel trailer, © copyright Blender Foundation | www.sintel.org",
+    "Tears of Steel clip, (CC) Blender Foundation | mango.blender.org",
+    "'Uprising' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
+  ]
+}

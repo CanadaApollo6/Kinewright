@@ -1,6 +1,6 @@
 # M26 — In-Editor Recording
 
-Record the screen, a camera, or a voiceover without leaving OpenReel, and
+Record the screen, a camera, or a voiceover without leaving Kinewright, and
 have the result land on the timeline ready for agentic editing. This closes
 the Descript loop: record → transcribe → edit by text — all in one place.
 
@@ -42,7 +42,7 @@ with the machine being recorded) plus an even-dimension crop guard for
 `yuv420p`. Device names come from FFmpeg's own `-list_devices` output,
 parsed from stderr (where DirectShow reports it, by design).
 
-Recordings save to `Videos\OpenReel` under the user profile — user-visible,
+Recordings save to `Videos\Kinewright` under the user profile — user-visible,
 ordinary files. Names count upward (`Recording 1.mp4`, `Recording 2.mp4`);
 no timestamps to squint at.
 
@@ -62,9 +62,9 @@ take back, the transcript is arriving and the words are cuttable.
 
 ## Packaging
 
-`ffmpeg` now stages beside `OpenReel` and ships in the Windows installer and
+`ffmpeg` now stages beside `Kinewright` and ships in the Windows installer and
 Linux tarball (the GPL FFmpeg build was already bundled as shared libraries;
-recording needs the CLI too). At runtime the CLI resolves: `OPENREEL_FFMPEG`
+recording needs the CLI too). At runtime the CLI resolves: `KINEWRIGHT_FFMPEG`
 override → beside the executable (installed layout) → `bin/` beside the
 executable → `third_party/ffmpeg/bin` above the executable (dev checkouts) →
 PATH.

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "benchmark_id": "openreel-generalization-v5",
+  "benchmark_id": "kinewright-generalization-v5",
   "suite_manifest": "benchmarks/auto-edit/v5/manifest.json",
   "scope": {
     "status": "first_family_preflight",
@@ -27,8 +27,8 @@
     "model": "harness-default",
     "os": "windows",
     "architecture": "x86_64",
-    "openreel_version": "0.1.0",
-    "openreel_revision": "646a636d6cda687d644b570da8e9945e8c379e33"
+    "kinewright_version": "0.1.0",
+    "kinewright_revision": "646a636d6cda687d644b570da8e9945e8c379e33"
   },
   "machine_summary": {
     "samples_passed": 1,

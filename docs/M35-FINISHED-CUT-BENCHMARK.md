@@ -4,7 +4,7 @@ M35 turns the public agent benchmark into a real delivery loop:
 
 ```text
 generated footage
-    -> isolated OpenReel runtime
+    -> isolated Kinewright runtime
     -> installed agent edits through MCP
     -> structural and editorial assertions
     -> delivery conformance
@@ -81,7 +81,7 @@ vertical social edit. It must:
 - remain within explicit turn, tool, operation, token, cost, wall-time, and
   undo budgets.
 
-OpenReel, not the agent, exports the exact verified timeline after the turn.
+Kinewright, not the agent, exports the exact verified timeline after the turn.
 That prevents an agent from satisfying the benchmark with an unrelated file or
 an unverified shell command.
 

@@ -3,7 +3,7 @@
   "manifest": {
     "version": 1,
     "surface": "report",
-    "title": "OpenReel M39 Token Regression Diagnostic",
+    "title": "Kinewright M39 Token Regression Diagnostic",
     "description": "A technical diagnosis of the M39 benchmark token increase and the validated protocol fix.",
     "generatedAt": "2026-08-14T05:45:17Z",
     "cards": [
@@ -89,7 +89,7 @@
       }
     ],
     "blocks": [
-      { "id": "title", "type": "markdown", "body": "# OpenReel M39 Token Regression Diagnostic" },
+      { "id": "title", "type": "markdown", "body": "# Kinewright M39 Token Regression Diagnostic" },
       {
         "id": "technical_summary",
         "type": "markdown",

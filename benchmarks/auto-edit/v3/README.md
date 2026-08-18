@@ -1,4 +1,4 @@
-# OpenReel Editorial-Cut Benchmark v3
+# Kinewright Editorial-Cut Benchmark v3
 
 V3 exists because the M37 artifact passed every machine gate and still received
 a human rejection at 2.25/5. It replaces arbitrary color bars and nonsense
@@ -29,8 +29,8 @@ run remains explicit:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval -- `
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --suite editorial-cut-v3 `
   --harness codex `
   --only f2 `

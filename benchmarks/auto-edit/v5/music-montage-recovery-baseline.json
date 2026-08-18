@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "benchmark_id": "openreel-generalization-v5",
+  "benchmark_id": "kinewright-generalization-v5",
   "suite_manifest": "benchmarks/auto-edit/v5/manifest.json",
   "supersedes_artifact": {
     "baseline": "benchmarks/auto-edit/v5/music-montage-baseline.json",
@@ -12,7 +12,7 @@
     "status": "music_montage_recovery_preflight",
     "families_executed": ["music_montage"],
     "families_pending": [],
-    "note": "Machine recovery is complete for this sample; human review of the new SHA-bound artifact is pending. Two additional accepted samples remain required for the family gate."
+    "note": "Machine recovery and human review are complete for this sample; the exact SHA-bound artifact was rejected. Two additional accepted samples remain required for the family gate."
   },
   "fixture": {
     "pack_id": "m40-music-montage-v2",
@@ -36,7 +36,7 @@
     "model": "harness-default",
     "os": "windows",
     "architecture": "x86_64",
-    "openreel_version": "0.1.0"
+    "kinewright_version": "0.1.0"
   },
   "machine_summary": {
     "samples_passed": 1,
@@ -106,10 +106,39 @@
       "note": "No black frames, titles, logos, slates, or baked transition tails were visible. An earlier machine-passing recovery was rejected by this audit because its final shot began inside a baked source dissolve; the source exclusion was widened before this run."
     }
   },
+  "machine_gap_audit": {
+    "status": "v2_post_review",
+    "gaps": [
+      "Required asset and source-phase assertions could force an isolated Big Buck Bunny cameo without proving that the cameo belonged in the story.",
+      "The v2 source-scene confidence floor did not fully veto baked source cuts; an earlier machine-passing candidate was discarded after independent cut-boundary review found a baked dissolve.",
+      "Music fit anchored the source start and duration but did not require a musical source endpoint or a quiet encoded tail, allowing the published artifact to stop inside a phrase."
+    ],
+    "next_recovery": {
+      "status": "prepared_not_run",
+      "fixture_pack": "benchmarks/auto-edit/v5/music-fixture-pack-v3.json",
+      "ground_truth": "benchmarks/auto-edit/v5/music-ground-truth-v3.json",
+      "changes": [
+        "Replace the forced Big Buck Bunny cameo with compatible Tears of Steel footage.",
+        "Require at least two clips and 120 project frames from each visual asset.",
+        "Lower the scene-boundary veto floor to 10% confidence and assert the actual opening and closing shot holds.",
+        "Anchor the music source end at the natural cue tail and verify a quiet five-frame encoded tail."
+      ]
+    }
+  },
   "human_review": {
-    "status": "pending",
+    "status": "reviewed_rejected",
     "review_template": "target/evals/openreel-eval-20260817-002233-codex/human-review.json",
-    "note": "Machine and independent frame checks do not decide whether the story, musical motivation, pacing, visual contrast, or overall finish are publishable. Captions are not applicable."
+    "reviewer": "Riel St Amand",
+    "accepted": false,
+    "ratings": {
+      "story": 2.5,
+      "pacing": 3.5,
+      "visual_finish": 4.0,
+      "audio_finish": 2.0,
+      "captions": null,
+      "delivery_readiness": 2.0
+    },
+    "note": "Human review rejected this exact SHA-bound artifact. Story feedback: \"better, the bunny thing now feels very out of place\". The main issue here is that the whole just ends in the middle of a musical phrase. It feels like we're ending in the middle of a longer video, not that the video has one coherent arc. Captions were not applicable."
   },
   "benchmark_status": "in_progress"
 }

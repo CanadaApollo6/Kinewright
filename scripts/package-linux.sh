@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage OpenReel plus the pinned FFmpeg shared libraries for Linux x64.
+# Stage Kinewright plus the pinned FFmpeg shared libraries for Linux x64.
 set -euo pipefail
 
 usage() {
@@ -64,7 +64,7 @@ mkdir -p "$output_dir"
 output_dir="$(cd -- "$output_dir" && pwd)"
 stage_dir="$repo_root/dist/linux-x64"
 
-source_bin="$target_dir/openreel-app"
+source_bin="$target_dir/kinewright-app"
 if [[ ! -f "$source_bin" ]]; then
     echo "Release executable not found: $source_bin" >&2
     exit 1
@@ -105,8 +105,8 @@ rm -rf "$stage_dir"
 licenses_dir="$stage_dir/LICENSES"
 mkdir -p "$licenses_dir" "$stage_dir/lib" "$output_dir"
 
-cp "$source_bin" "$stage_dir/OpenReel"
-chmod +x "$stage_dir/OpenReel"
+cp "$source_bin" "$stage_dir/Kinewright"
+chmod +x "$stage_dir/Kinewright"
 cp "$ffmpeg_cli" "$stage_dir/ffmpeg"
 chmod +x "$stage_dir/ffmpeg"
 if [[ -f "$ffmpeg_bin_dir/ffprobe" ]]; then
@@ -118,7 +118,7 @@ fi
 find "$ffmpeg_lib_dir" -maxdepth 1 \( -name 'libav*.so*' -o -name 'libsw*.so*' \) -exec cp -a {} "$stage_dir/lib/" \;
 
 if command -v patchelf >/dev/null 2>&1; then
-    for binary in "$stage_dir/OpenReel" "$stage_dir/ffmpeg"; do
+    for binary in "$stage_dir/Kinewright" "$stage_dir/ffmpeg"; do
         patchelf --set-rpath '$ORIGIN/lib' "$binary"
     done
     if [[ -f "$stage_dir/ffprobe" ]]; then
@@ -133,24 +133,24 @@ else
     echo 'patchelf was not found; the staged binaries keep their original RPATH.' >&2
 fi
 
-cp "$repo_root/LICENSE" "$licenses_dir/OpenReel-GPL-3.0.txt"
+cp "$repo_root/LICENSE" "$licenses_dir/Kinewright-GPL-3.0.txt"
 cp "$ffmpeg_license" "$licenses_dir/FFmpeg-GPL.txt"
-cp "$repo_root/crates/openreel-app/assets/licenses/Inter-OFL.txt" "$licenses_dir/"
-cp "$repo_root/crates/openreel-app/assets/licenses/JetBrains-Mono-OFL.txt" "$licenses_dir/"
+cp "$repo_root/crates/kinewright-app/assets/licenses/Inter-OFL.txt" "$licenses_dir/"
+cp "$repo_root/crates/kinewright-app/assets/licenses/JetBrains-Mono-OFL.txt" "$licenses_dir/"
 cp "$repo_root/packaging/linux/LICENSES/README.txt" "$licenses_dir/"
-cp "$repo_root/packaging/linux/openreel.desktop" "$stage_dir/openreel.desktop"
-cp "$repo_root/crates/openreel-app/assets/openreel-icon.png" "$stage_dir/openreel.png"
+cp "$repo_root/packaging/linux/kinewright.desktop" "$stage_dir/kinewright.desktop"
+cp "$repo_root/crates/kinewright-app/assets/kinewright-icon.png" "$stage_dir/kinewright.png"
 
-tarball_name="OpenReel-$version-linux-x64.tar.gz"
+tarball_name="Kinewright-$version-linux-x64.tar.gz"
 tarball_path="$output_dir/$tarball_name"
 
 if [[ "$stage_only" -eq 1 ]]; then
-    echo "Staged OpenReel plus FFmpeg shared libraries in $stage_dir"
+    echo "Staged Kinewright plus FFmpeg shared libraries in $stage_dir"
     echo 'Stage-only mode: tarball creation was skipped.'
     exit 0
 fi
 
 rm -f "$tarball_path"
 tar -C "$(dirname "$stage_dir")" -czf "$tarball_path" "$(basename "$stage_dir")"
-echo "Staged OpenReel plus FFmpeg shared libraries in $stage_dir"
+echo "Staged Kinewright plus FFmpeg shared libraries in $stage_dir"
 echo "Tarball: $tarball_path"

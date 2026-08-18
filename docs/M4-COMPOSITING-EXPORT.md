@@ -56,10 +56,10 @@ then one update per fully composited and submitted video frame.
 With the documented FFmpeg build environment active, run:
 
 ```powershell
-cargo run -p openreel-media --example m4_verify -- target/m4-manual
+cargo run -p kinewright-media --example m4_verify -- target/m4-manual
 ```
 
-The example generates two 2-second A/V source clips, builds `two-track.openreel` through effect
+The example generates two 2-second A/V source clips, builds `two-track.kinewright` through effect
 and transition operations, samples the preview compositor, advances real playback, and exports
 `two-track-export.mp4`. The source tones are 440 Hz and 660 Hz, the upper blue layer has 65%
 opacity, and its crossfade-in lasts 15 frames. The generated directory is under `target` and is

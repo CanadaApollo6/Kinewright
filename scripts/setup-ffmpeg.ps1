@@ -101,7 +101,7 @@ if ($installedHash -ne $FfmpegSha256) {
 import sys
 import urllib.request
 
-request = urllib.request.Request(sys.argv[1], headers={'User-Agent': 'OpenReel-M0'})
+request = urllib.request.Request(sys.argv[1], headers={'User-Agent': 'Kinewright-M0'})
 with urllib.request.urlopen(request, timeout=60) as source, open(sys.argv[2], 'wb') as target:
     while chunk := source.read(1024 * 1024):
         target.write(chunk)

@@ -1,6 +1,6 @@
-# Releasing OpenReel
+# Releasing Kinewright
 
-OpenReel releases are built by `.github/workflows/release.yml`. A pushed tag matching `v*` runs the full Windows and Linux test suites, then publishes:
+Kinewright releases are built by `.github/workflows/release.yml`. A pushed tag matching `v*` runs the full Windows and Linux test suites, then publishes:
 
 - a Windows installer that bundles the pinned GPL FFmpeg shared DLLs;
 - a Linux x64 tarball that bundles the pinned GPL FFmpeg shared libraries and CLI.
@@ -13,7 +13,7 @@ The release uses Inno Setup. GitHub's current `windows-latest` image includes bo
 
 The packaging script locates `ISCC.exe`, prints its path and version, and fails if it is absent. This is an intentional check against runner-image drift. The current runner inventory is documented at <https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md>.
 
-The `.openreel` file association is deferred. The application does not yet accept a project path on its command line, so registering `%1` would create a shortcut that cannot open the selected project. Add the association after that CLI contract exists.
+The `.kinewright` file association is deferred. The application does not yet accept a project path on its command line, so registering `%1` would create a shortcut that cannot open the selected project. Add the association after that CLI contract exists.
 
 ## Cut a release
 
@@ -26,13 +26,13 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-4. Open the `Release` workflow run. Download `OpenReel-0.1.0-windows-x64` from the run summary if needed.
+4. Open the `Release` workflow run. Download `Kinewright-0.1.0-windows-x64` from the run summary if needed.
 5. After the jobs succeed, verify the GitHub Release contains:
 
-   - `OpenReel-0.1.0-windows-x64-setup.exe`
-   - `OpenReel-0.1.0-windows-x64-setup.exe.sha256`
-   - `OpenReel-0.1.0-linux-x64.tar.gz`
-   - `OpenReel-0.1.0-linux-x64.tar.gz.sha256`
+   - `Kinewright-0.1.0-windows-x64-setup.exe`
+   - `Kinewright-0.1.0-windows-x64-setup.exe.sha256`
+   - `Kinewright-0.1.0-linux-x64.tar.gz`
+   - `Kinewright-0.1.0-linux-x64.tar.gz.sha256`
 
 The installer is currently unsigned. Windows SmartScreen may warn until a code-signing certificate is wired into the workflow. Signing is not required to build or install the artifact.
 
@@ -40,12 +40,12 @@ The installer is currently unsigned. Windows SmartScreen may warn until a code-s
 
 `scripts/package-windows.ps1` stages:
 
-- `target/release/openreel-app.exe` as `OpenReel.exe`;
+- `target/release/kinewright-app.exe` as `Kinewright.exe`;
 - every shared DLL from the pinned `third_party/ffmpeg/bin` build, beside the executable;
-- the OpenReel GPLv3 license;
+- the Kinewright GPLv3 license;
 - the FFmpeg license, build metadata when present, attribution, and source-availability links.
 
-Windows searches an unpackaged desktop application's executable directory when resolving its DLL imports. Keeping the FFmpeg DLLs beside `OpenReel.exe` therefore avoids a machine-level `PATH` or FFmpeg installation. See Microsoft's [dynamic-link library search order](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order).
+Windows searches an unpackaged desktop application's executable directory when resolving its DLL imports. Keeping the FFmpeg DLLs beside `Kinewright.exe` therefore avoids a machine-level `PATH` or FFmpeg installation. See Microsoft's [dynamic-link library search order](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order).
 
 The release build enables the MSVC static C runtime with `-C target-feature=+crt-static`, reducing clean-machine runtime dependencies. The workflow also prints `dumpbin /dependents` output for the executable in the build log.
 
@@ -54,20 +54,20 @@ The release build enables the MSVC static C runtime with `-C target-feature=+crt
 Do not run `scripts/setup-ffmpeg.ps1` against the shared local `third_party` tree. Use the already provisioned paths and a Visual Studio developer PowerShell so `rc.exe` is available for the executable's icon and version resources.
 
 ```powershell
-$env:FFMPEG_DIR = 'C:\Users\Riel St Amand\Documents\GitHub\OpenReel\third_party\ffmpeg'
-$env:PKG_CONFIG = 'C:\Users\Riel St Amand\Documents\GitHub\OpenReel\third_party\pkgconf\pkgconf\.bin\pkgconf.exe'
-$env:PKG_CONFIG_PATH = 'C:\Users\Riel St Amand\Documents\GitHub\OpenReel\third_party\ffmpeg\lib\pkgconfig'
-$env:LIBCLANG_PATH = 'C:\Users\Riel St Amand\Documents\GitHub\OpenReel\third_party\libclang\clang\native'
-$env:CARGO_HOME = 'C:\Users\Riel St Amand\Documents\GitHub\OpenReel\.cargo-home'
+$env:FFMPEG_DIR = 'C:\Users\Riel St Amand\Documents\GitHub\Kinewright\third_party\ffmpeg'
+$env:PKG_CONFIG = 'C:\Users\Riel St Amand\Documents\GitHub\Kinewright\third_party\pkgconf\pkgconf\.bin\pkgconf.exe'
+$env:PKG_CONFIG_PATH = 'C:\Users\Riel St Amand\Documents\GitHub\Kinewright\third_party\ffmpeg\lib\pkgconfig'
+$env:LIBCLANG_PATH = 'C:\Users\Riel St Amand\Documents\GitHub\Kinewright\third_party\libclang\clang\native'
+$env:CARGO_HOME = 'C:\Users\Riel St Amand\Documents\GitHub\Kinewright\.cargo-home'
 $rustBin = 'C:\Users\Riel St Amand\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin'
 $env:Path = "$env:FFMPEG_DIR\bin;$rustBin;$env:Path"
 
 cargo test --workspace --locked
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
-cargo build --package openreel-app --release --locked
+cargo build --package kinewright-app --release --locked
 .\scripts\package-windows.ps1 -Version 0.1.0
 .\scripts\test-windows-bundle.ps1 -BundleDir .\dist\windows-x64
-Get-FileHash .\dist\installer\OpenReel-0.1.0-windows-x64-setup.exe -Algorithm SHA256
+Get-FileHash .\dist\installer\Kinewright-0.1.0-windows-x64-setup.exe -Algorithm SHA256
 ```
 
 Inno Setup 6 or 7 is required locally. Its own installer supports `/PORTABLE=1`, so it can be installed into a worktree-local tools directory without an uninstall entry. Pass its compiler explicitly when it is not on `PATH`:
@@ -87,10 +87,10 @@ If local policy prevents running Inno Setup, stage and smoke-test the bundle wit
 
 `scripts/package-linux.sh` stages:
 
-- `target/release/openreel-app` as `OpenReel`;
+- `target/release/kinewright-app` as `Kinewright`;
 - the pinned FFmpeg CLI as `ffmpeg` (and `ffprobe` when present);
 - the libav/libsw shared libraries under `lib/`;
-- the OpenReel GPLv3 license, FFmpeg license, font licenses, a `.desktop` file, and the app icon.
+- the Kinewright GPLv3 license, FFmpeg license, font licenses, a `.desktop` file, and the app icon.
 
 `patchelf` sets `RPATH` to `$ORIGIN/lib` on the executable and FFmpeg CLI so a clean machine does not need FFmpeg on `PATH` or `LD_LIBRARY_PATH`.
 
@@ -99,10 +99,10 @@ If local policy prevents running Inno Setup, stage and smoke-test the bundle wit
 ```bash
 source ./scripts/setup-ffmpeg.sh
 cargo test --workspace --locked
-cargo build --package openreel-app --release --locked
+cargo build --package kinewright-app --release --locked
 ./scripts/package-linux.sh --version 0.1.0
 ./scripts/test-linux-bundle.sh --bundle-dir ./dist/linux-x64
-sha256sum ./dist/tarball/OpenReel-0.1.0-linux-x64.tar.gz
+sha256sum ./dist/tarball/Kinewright-0.1.0-linux-x64.tar.gz
 ```
 
 Stage without creating the tarball:

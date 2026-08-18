@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Kinewright
+Comment=An open-source agentic video editor
+Exec=Kinewright %f
+Icon=kinewright
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+MimeType=application/x-kinewright;
+StartupWMClass=Kinewright
+Keywords=video;editor;timeline;ffmpeg;

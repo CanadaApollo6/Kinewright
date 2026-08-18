@@ -34,7 +34,7 @@ if (-not $stageDir.StartsWith($repoPrefix, [System.StringComparison]::OrdinalIgn
     throw "Refusing to reset staging directory outside the repository: $stageDir"
 }
 
-$sourceExe = Join-Path $TargetDir 'openreel-app.exe'
+$sourceExe = Join-Path $TargetDir 'kinewright-app.exe'
 if (-not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) {
     throw "Release executable not found: $sourceExe"
 }
@@ -76,7 +76,7 @@ $licensesDir = Join-Path $stageDir 'LICENSES'
 New-Item -ItemType Directory -Path $licensesDir -Force | Out-Null
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
-$stagedExe = Join-Path $stageDir 'OpenReel.exe'
+$stagedExe = Join-Path $stageDir 'Kinewright.exe'
 Copy-Item -LiteralPath $sourceExe -Destination $stagedExe
 foreach ($dll in $dlls) {
     Copy-Item -LiteralPath $dll.FullName -Destination $stageDir
@@ -89,10 +89,10 @@ if (-not (Test-Path -LiteralPath $ffmpegCli -PathType Leaf)) {
 }
 Copy-Item -LiteralPath $ffmpegCli -Destination $stageDir
 
-Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $licensesDir 'OpenReel-GPL-3.0.txt')
+Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $licensesDir 'Kinewright-GPL-3.0.txt')
 Copy-Item -LiteralPath $ffmpegLicense -Destination (Join-Path $licensesDir 'FFmpeg-GPL.txt')
-Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\openreel-app\assets\licenses\Inter-OFL.txt') -Destination $licensesDir
-Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\openreel-app\assets\licenses\JetBrains-Mono-OFL.txt') -Destination $licensesDir
+Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\kinewright-app\assets\licenses\Inter-OFL.txt') -Destination $licensesDir
+Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\kinewright-app\assets\licenses\JetBrains-Mono-OFL.txt') -Destination $licensesDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging\windows\LICENSES\README.txt') -Destination $licensesDir
 
 $ffmpegBuildInfo = Join-Path $FfmpegDir 'BUILD_INFO'
@@ -101,22 +101,22 @@ if (Test-Path -LiteralPath $ffmpegBuildInfo -PathType Leaf) {
 }
 
 $fileInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($stagedExe)
-if ($fileInfo.ProductName -ne 'OpenReel') {
-    throw "OpenReel.exe does not contain the expected product resource; ProductName was '$($fileInfo.ProductName)'"
+if ($fileInfo.ProductName -ne 'Kinewright') {
+    throw "Kinewright.exe does not contain the expected product resource; ProductName was '$($fileInfo.ProductName)'"
 }
 if ($fileInfo.ProductVersion -ne $Version) {
-    throw "OpenReel.exe product version '$($fileInfo.ProductVersion)' does not match package version '$Version'"
+    throw "Kinewright.exe product version '$($fileInfo.ProductVersion)' does not match package version '$Version'"
 }
 
-$icon = Get-ChildItem -LiteralPath (Join-Path $TargetDir 'build') -Recurse -File -Filter 'OpenReel.ico' -ErrorAction SilentlyContinue |
+$icon = Get-ChildItem -LiteralPath (Join-Path $TargetDir 'build') -Recurse -File -Filter 'Kinewright.ico' -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 if (-not $icon) {
-    throw "Generated OpenReel.ico was not found under $(Join-Path $TargetDir 'build')"
+    throw "Generated Kinewright.ico was not found under $(Join-Path $TargetDir 'build')"
 }
 
 if ($StageOnly) {
-    Write-Host "Staged OpenReel.exe plus $($dlls.Count) FFmpeg DLLs in $stageDir"
+    Write-Host "Staged Kinewright.exe plus $($dlls.Count) FFmpeg DLLs in $stageDir"
     Write-Host 'Stage-only mode: Inno Setup compilation was skipped.'
     return
 }
@@ -142,19 +142,19 @@ $IsccPath = [System.IO.Path]::GetFullPath($IsccPath)
 $isccVersion = (Get-Item -LiteralPath $IsccPath).VersionInfo.ProductVersion
 Write-Host "Inno Setup compiler: $IsccPath ($isccVersion)"
 
-$installerName = "OpenReel-$Version-windows-x64-setup.exe"
+$installerName = "Kinewright-$Version-windows-x64-setup.exe"
 $installerPath = Join-Path $OutputDir $installerName
 if (Test-Path -LiteralPath $installerPath -PathType Leaf) {
     Remove-Item -LiteralPath $installerPath -Force
 }
 
 $environmentNames = @(
-    'OPENREEL_APP_VERSION',
-    'OPENREEL_NUMERIC_VERSION',
-    'OPENREEL_STAGE_DIR',
-    'OPENREEL_OUTPUT_DIR',
-    'OPENREEL_REPO_ROOT',
-    'OPENREEL_APP_ICON'
+    'KINEWRIGHT_APP_VERSION',
+    'KINEWRIGHT_NUMERIC_VERSION',
+    'KINEWRIGHT_STAGE_DIR',
+    'KINEWRIGHT_OUTPUT_DIR',
+    'KINEWRIGHT_REPO_ROOT',
+    'KINEWRIGHT_APP_ICON'
 )
 $previousEnvironment = @{}
 foreach ($name in $environmentNames) {
@@ -162,14 +162,14 @@ foreach ($name in $environmentNames) {
 }
 
 try {
-    $env:OPENREEL_APP_VERSION = $Version
-    $env:OPENREEL_NUMERIC_VERSION = $Version.Split('-')[0]
-    $env:OPENREEL_STAGE_DIR = $stageDir
-    $env:OPENREEL_OUTPUT_DIR = $OutputDir
-    $env:OPENREEL_REPO_ROOT = $repoRoot
-    $env:OPENREEL_APP_ICON = $icon.FullName
+    $env:KINEWRIGHT_APP_VERSION = $Version
+    $env:KINEWRIGHT_NUMERIC_VERSION = $Version.Split('-')[0]
+    $env:KINEWRIGHT_STAGE_DIR = $stageDir
+    $env:KINEWRIGHT_OUTPUT_DIR = $OutputDir
+    $env:KINEWRIGHT_REPO_ROOT = $repoRoot
+    $env:KINEWRIGHT_APP_ICON = $icon.FullName
 
-    & $IsccPath (Join-Path $repoRoot 'packaging\windows\OpenReel.iss')
+    & $IsccPath (Join-Path $repoRoot 'packaging\windows\Kinewright.iss')
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup failed with exit code $LASTEXITCODE"
     }
@@ -183,5 +183,5 @@ if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
     throw "Inno Setup did not produce the expected installer: $installerPath"
 }
 
-Write-Host "Staged OpenReel.exe plus $($dlls.Count) FFmpeg DLLs in $stageDir"
+Write-Host "Staged Kinewright.exe plus $($dlls.Count) FFmpeg DLLs in $stageDir"
 Write-Host "Installer: $installerPath"

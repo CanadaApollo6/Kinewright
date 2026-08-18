@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "pack_id": "m40-music-montage-v3",
+  "title": "M40 resolved music-montage recovery fixture pack",
+  "description": "Pinned openly licensed dramatic Blender Foundation footage and a cinematic music bed with a verified natural tail, used to measure source inspection, coherent multi-source editing, musical closure, and delivery finish.",
+  "assets": [
+    {
+      "id": "sintel-trailer-1080p",
+      "file_name": "sintel-trailer-1080p.mp4",
+      "download_url": "https://download.blender.org/durian/trailer/sintel_trailer-1080p.mp4",
+      "source_page_url": "https://durian.blender.org/sharing/",
+      "bytes": 14621544,
+      "sha256": "34bbd52a4b89fdf63c8ace50b268da26653a59508288100cd3c23de276db7931",
+      "license": {
+        "spdx_id": "CC-BY-3.0",
+        "name": "Creative Commons Attribution 3.0 Unported",
+        "url": "https://creativecommons.org/licenses/by/3.0/",
+        "attribution": "Sintel trailer, © copyright Blender Foundation | www.sintel.org"
+      }
+    },
+    {
+      "id": "tears-of-steel-battle-720p",
+      "file_name": "tears-of-steel-battle-720p.webm",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/8/88/Tears_of_Steel_clip.ogv/Tears_of_Steel_clip.ogv.720p.vp9.webm",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:Tears_of_Steel_clip.ogv",
+      "bytes": 20343468,
+      "sha256": "628eea988a37ef617d6a5e2d36e48f31997b1b602465e039e78d1ae24fff33ba",
+      "license": {
+        "spdx_id": "CC-BY-3.0",
+        "name": "Creative Commons Attribution 3.0 Unported",
+        "url": "https://creativecommons.org/licenses/by/3.0/",
+        "attribution": "Tears of Steel clip, (CC) Blender Foundation | mango.blender.org"
+      }
+    },
+    {
+      "id": "uprising-scott-buckley",
+      "file_name": "uprising.mp3",
+      "download_url": "https://www.scottbuckley.com.au/library/wp-content/uploads/2024/07/Uprising.mp3",
+      "source_page_url": "https://www.scottbuckley.com.au/library/uprising/",
+      "bytes": 8229845,
+      "sha256": "c9b82e7f836c37fdf02899e31c46163f6f20a0a965a7a49c695d2c78f2a60517",
+      "license": {
+        "spdx_id": "CC-BY-4.0",
+        "name": "Creative Commons Attribution 4.0 International",
+        "url": "https://creativecommons.org/licenses/by/4.0/",
+        "attribution": "'Uprising' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
+      }
+    }
+  ]
+}

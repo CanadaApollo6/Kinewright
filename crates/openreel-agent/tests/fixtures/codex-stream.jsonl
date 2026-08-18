@@ -1,7 +1,0 @@
-{"type":"thread.started","thread_id":"019fe3e6-0aca-77e2-bc11-3cc61e500f40"}
-{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `openreel-probe-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
-{"type":"turn.started"}
-{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"scratch","tool":"probe_echo","arguments":{"text":"mcp-ok"},"result":null,"error":null,"status":"in_progress"}}
-{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"scratch","tool":"probe_echo","arguments":{"text":"mcp-ok"},"result":{"content":[{"type":"text","text":"OPENREEL_PROBE:mcp-ok"}],"structured_content":null},"error":null,"status":"completed"}}
-{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"MCP succeeded; no built-in write tool was available."}}
-{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":3,"reasoning_output_tokens":0}}

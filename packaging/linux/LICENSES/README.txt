@@ -1,15 +1,15 @@
-OpenReel and bundled FFmpeg licensing
+Kinewright and bundled FFmpeg licensing
 =====================================
 
-OpenReel
+Kinewright
 --------
 
-OpenReel is licensed under the GNU General Public License, version 3 only
+Kinewright is licensed under the GNU General Public License, version 3 only
 (GPL-3.0-only). The complete license text is installed beside this file as
-OpenReel-GPL-3.0.txt.
+Kinewright-GPL-3.0.txt.
 
 Project and corresponding source:
-https://github.com/CanadaApollo6/OpenReel
+https://github.com/CanadaApollo6/Kinewright
 
 FFmpeg
 ------
@@ -17,7 +17,7 @@ FFmpeg
 This Linux bundle includes the shared libraries and CLI from the pinned
 FFmpeg 8.0 x86_64 Linux GPL shared build (BtbN linux64 gpl-shared, published
 as mifi/ffmpeg-builds 8.0-1). This GPL-enabled build is used deliberately
-because OpenReel is GPLv3 software.
+because Kinewright is GPLv3 software.
 
 Exact binary build and build-provider source:
 https://github.com/mifi/ffmpeg-builds/releases/tag/8.0-1
@@ -34,7 +34,7 @@ the FFmpeg project.
 Embedded fonts
 --------------
 
-The OpenReel interface embeds Inter Variable from The Inter Project Authors.
+The Kinewright interface embeds Inter Variable from The Inter Project Authors.
 Inter is licensed under the SIL Open Font License, Version 1.1. The complete
 license text is installed beside this file as Inter-OFL.txt.
 
@@ -49,5 +49,5 @@ file as JetBrains-Mono-OFL.txt.
 Project source:
 https://github.com/JetBrains/JetBrainsMono
 
-OpenReel's SVG interface icons are original project assets and are covered by
-OpenReel's GPL-3.0-only license.
+Kinewright's SVG interface icons are original project assets and are covered by
+Kinewright's GPL-3.0-only license.

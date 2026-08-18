@@ -1,6 +1,6 @@
 # M32 - Editorial credibility
 
-M32 makes professional editorial intent a typed part of OpenReel's Rust domain
+M32 makes professional editorial intent a typed part of Kinewright's Rust domain
 model. Agents no longer need to reconstruct common NLE edits from brittle
 sequences of trims, moves, and speed changes.
 

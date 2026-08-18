@@ -1,13 +1,13 @@
 # M36 - Agent runtime efficiency
 
-M36 gives OpenReel-owned agent sessions a small, task-shaped editing contract
+M36 gives Kinewright-owned agent sessions a small, task-shaped editing contract
 while keeping the complete capability catalog internal. It targets the repeated
 tool-schema cost and coordination risk created by advertising every editor
 capability on every model turn.
 
 ## Outcome and requirements
 
-An OpenReel session now starts with seven stable tools:
+An Kinewright session now starts with seven stable tools:
 
 1. `get_timeline_state`
 2. `search_capabilities`
@@ -99,7 +99,7 @@ That is a 99.1% reduction in initially advertised serialized tool metadata.
 It is not yet a claim of 99.1% fewer provider tokens. Providers transform,
 cache, and meter tool definitions differently. A controlled benchmark between
 the pre-M36 revision and the current runtime is the acceptance gate for model-
-token and latency savings; OpenReel does not retain an obsolete production mode
+token and latency savings; Kinewright does not retain an obsolete production mode
 only to run that comparison.
 
 ## Token telemetry
@@ -116,7 +116,7 @@ scoreboard now carry these categories when a harness reports them:
 
 Claude cache reads and cache creation are included in normalized total input.
 Codex accepts both its direct fields and OpenAI-style nested token-detail
-fields. Missing provider categories remain `n/a`; OpenReel does not silently
+fields. Missing provider categories remain `n/a`; Kinewright does not silently
 turn missing telemetry into zero. Each eval result also records the exact tool
 surface byte counts used for that session.
 
@@ -149,7 +149,7 @@ The next useful runtime steps are:
 4. benchmark native, Pi, Prime Agent, and other harness adapters against the
    same work-quality and token-efficiency gates before adopting one;
 5. keep MCP as the public interoperability layer while allowing a tighter
-   in-process runtime for harnesses OpenReel directly controls.
+   in-process runtime for harnesses Kinewright directly controls.
 
 ## Verification
 

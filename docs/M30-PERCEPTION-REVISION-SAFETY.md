@@ -39,7 +39,7 @@ agent harness
     |
     | get_timeline_state / get_timeline_storyboard / get_*_analysis
     v
-OpenReel MCP  ---- exact snapshot revision ----> Core actor
+Kinewright MCP  ---- exact snapshot revision ----> Core actor
     |                                            |
     |                                            | DoBatchIfRevision
     |                                            v
@@ -70,7 +70,7 @@ Agent mutations use `DoIfRevision` and `DoBatchIfRevision`. A mismatch produces
 operation, ask for destructive confirmation, touch history, or update playback.
 The agent must inspect again and re-plan.
 
-The revision is actor-local runtime state, not serialized into `.openreel`.
+The revision is actor-local runtime state, not serialized into `.kinewright`.
 Saving a project describes media and editorial state; reopening it intentionally
 starts a new revision lineage at 0.
 
@@ -132,7 +132,7 @@ The existing generated-media eval becomes a publishable artifact through:
 
 - a versioned suite manifest describing tasks, fixture provenance, assertions,
   and budgets;
-- JSONL run traces already produced by `openreel-eval`;
+- JSONL run traces already produced by `kinewright-eval`;
 - a checked-in baseline JSON containing harness/model, pass rate, latency, token
   usage, and failure categories;
 - a documented reproduction command that never depends on private footage.

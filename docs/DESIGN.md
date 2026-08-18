@@ -1,8 +1,8 @@
-# OpenReel design system
+# Kinewright design system
 
 ## Direction: Cut Room
 
-OpenReel is a professional editing instrument. It should feel dense, quiet, and
+Kinewright is a professional editing instrument. It should feel dense, quiet, and
 confident: a dark cut room where media, timing, and edit state carry the visual
 weight. The reference territory is DaVinci Resolve, not consumer creator tools.
 Surfaces are nearly flat, borders establish hierarchy, type is compact, and
@@ -214,7 +214,7 @@ through widget state; selected/playing uses `accent`.
 
 The set covers play, pause, step backward, step forward, split, delete, undo,
 redo, import, add-to-timeline, send, stop, export, folder, filmstrip, waveform,
-sync lock/unlock, and panel/chat identity. Icons are original OpenReel assets
+sync lock/unlock, and panel/chat identity. Icons are original Kinewright assets
 and ship under the repository's GPL-3.0-only license; no external icon library
 is bundled.
 
@@ -340,12 +340,12 @@ the accent selection treatment. Cancel remains neutral. Destructive actions use
 
 ## Licensing and distribution
 
-- Inter font files and `Inter-OFL.txt` are embedded in `openreel-app` and must be
+- Inter font files and `Inter-OFL.txt` are embedded in `kinewright-app` and must be
   copied into the Windows installer's `LICENSES/` directory.
 - JetBrains Mono font files and `JetBrains-Mono-OFL.txt` are embedded in
-  `openreel-app` and must be copied into the Windows installer's `LICENSES/`
+  `kinewright-app` and must be copied into the Windows installer's `LICENSES/`
   directory.
-- OpenReel SVG icons are original project assets covered by GPL-3.0-only. The
+- Kinewright SVG icons are original project assets covered by GPL-3.0-only. The
   installer does not need a separate third-party icon license.
 - The installer licensing manifest must name both fonts and preserve their OFL
   texts verbatim.

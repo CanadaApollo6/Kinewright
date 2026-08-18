@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "benchmark_id": "openreel-auto-edit-v1",
-  "title": "OpenReel Auto-Edit Benchmark v1",
-  "runner": "cargo run -p openreel-agent --bin openreel-eval",
-  "implementation": "crates/openreel-agent/src/bin/openreel-eval.rs",
+  "benchmark_id": "kinewright-auto-edit-v1",
+  "title": "Kinewright Auto-Edit Benchmark v1",
+  "runner": "cargo run -p kinewright-agent --bin kinewright-eval",
+  "implementation": "crates/kinewright-agent/src/bin/kinewright-eval.rs",
   "fixture_provenance": {
     "policy": "Generated locally; no private footage or downloaded evaluation corpus.",
-    "video": "Pinned OpenReel FFmpeg generates test patterns, solid colors, and sine audio.",
+    "video": "Pinned Kinewright FFmpeg generates test patterns, solid colors, and sine audio.",
     "speech": "Windows SAPI creates local speech fixtures from checked-in text and SSML.",
     "media_cache": "Derived transcript, silence, and scene data are content-addressed by SHA-256.",
     "time_base": "All scoring uses exact integer source or project frames."

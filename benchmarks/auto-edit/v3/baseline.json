@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "benchmark_id": "openreel-editorial-cut-v3",
+  "benchmark_id": "kinewright-editorial-cut-v3",
   "suite_manifest": "benchmarks/auto-edit/v3/manifest.json",
   "source_trace": {
     "filename": "openreel-eval-20260813-172433-codex/results.jsonl",
@@ -14,8 +14,8 @@
     "model": "harness-default",
     "os": "windows",
     "architecture": "x86_64",
-    "openreel_version": "0.1.0",
-    "openreel_revision": "f232e3575c683dd9d1b716b81209bf692606140a"
+    "kinewright_version": "0.1.0",
+    "kinewright_revision": "f232e3575c683dd9d1b716b81209bf692606140a"
   },
   "machine_summary": {
     "samples_passed": 3,

@@ -2,7 +2,7 @@
 
 ## Bottom line
 
-OpenReel is a serious technical alpha and a credible agent-native editing
+Kinewright is a serious technical alpha and a credible agent-native editing
 runtime. It is not yet a credible replacement for Premiere Pro, DaVinci
 Resolve, Final Cut Pro, After Effects, Nuke, CapCut, or Descript in those
 products' strongest workflows.
@@ -67,7 +67,7 @@ Premiere remains vastly ahead in traditional editing breadth, media formats,
 hardware and interchange, effects, audio, collaboration, plugins, performance
 history, and production trust. Its current AI Assistant is real, but Adobe
 still describes it as a public beta centered on project preparation,
-organization, search, and rough assembly. OpenReel has the more complete
+organization, search, and rough assembly. Kinewright has the more complete
 agent-native control architecture; Premiere has the overwhelmingly more
 complete editor underneath it.
 
@@ -77,7 +77,7 @@ Sources: [Adobe Premiere AI Assistant](https://helpx.adobe.com/premiere/desktop/
 ### After Effects and Nuke
 
 These are compositing and motion/VFX comparisons, not direct NLE comparisons.
-OpenReel has a useful declarative beginning - effects, automation curves,
+Kinewright has a useful declarative beginning - effects, automation curves,
 masks, tracking, keying, LUTs, compositing nodes, and titles - but not their
 creative depth. It lacks AE's mature layer, expression, typography, shape,
 puppet, 3D, tracking, roto, plugin, and motion-design systems. It lacks Nuke's
@@ -92,7 +92,7 @@ Sources: [After Effects features](https://www.adobe.com/products/aftereffects/fe
 
 Resolve is the widest gap. Resolve 21 combines mature edit and cut pages with
 Fusion, world-class color, Fairlight audio, media management, delivery, and
-years of production optimization. OpenReel has agent-facing plans for color,
+years of production optimization. Kinewright has agent-facing plans for color,
 audio, multicam, beats, reframe, and delivery, but each is a narrow typed slice
 of a discipline Resolve treats as a product of its own.
 
@@ -104,7 +104,7 @@ Final Cut is far ahead in interaction speed, Magnetic Timeline behavior,
 64-angle multicam, media organization, roles, effects, retiming, object
 tracking, captions, plugins, and Apple-silicon optimization. Its 2026 releases
 also add transcript and visual search, beat detection, caption generation, auto
-masking, and color matching. OpenReel wins only on general agent orchestration,
+masking, and color matching. Kinewright wins only on general agent orchestration,
 provider choice, local typed automation, and auditable benchmark design.
 
 Sources: [Final Cut Pro overview](https://www.apple.com/final-cut-pro/),
@@ -116,7 +116,7 @@ Sources: [Final Cut Pro overview](https://www.apple.com/final-cut-pro/),
 CapCut is much farther ahead at producing attractive social output quickly. It
 has a huge template and effects surface, consumer-polished captions, auto
 reframe, smart search, filler removal, background tools, and platform-native
-delivery. OpenReel is more open, local, general, reversible, and model-native;
+delivery. Kinewright is more open, local, general, reversible, and model-native;
 CapCut is far more likely to make a non-editor happy on the first attempt today.
 
 Source: [CapCut Desktop AI features](https://www.capcut.com/tools/desktop-ai-power).
@@ -125,7 +125,7 @@ Source: [CapCut Desktop AI features](https://www.capcut.com/tools/desktop-ai-pow
 
 Descript is the closest workflow competitor. It already combines transcript,
 scene, canvas, and timeline editing with filler cleanup, captions, Studio
-Sound, layouts, collaboration, and its Underlord co-editor. OpenReel has the
+Sound, layouts, collaboration, and its Underlord co-editor. Kinewright has the
 stronger general editing-agent harness and lower-level deterministic contract.
 Descript has the dramatically more complete product, collaboration loop,
 recording experience, audio cleanup, templates, and user trust.
@@ -139,7 +139,7 @@ Sources: [Descript video editor](https://www.descript.com/tools/video-editor),
 The scale is deliberately coarse: 1 is a narrow foundation, 3 is useful in
 real work with limits, and 5 is category-leading production depth.
 
-| Surface | OpenReel | Premiere | AE | Resolve | Nuke | Final Cut | CapCut | Descript |
+| Surface | Kinewright | Premiere | AE | Resolve | Nuke | Final Cut | CapCut | Descript |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | General agent-native control | 5 | 2 | 1 | 1 | 1 | 1 | 1 | 3 |
 | Core professional NLE | 2 | 5 | 1 | 5 | 2 | 5 | 3 | 2 |
@@ -152,14 +152,14 @@ real work with limits, and 5 is category-leading production depth.
 | Product polish and production trust | 1 | 5 | 5 | 5 | 5 | 5 | 5 | 4 |
 | Extensibility ecosystem | 1 | 5 | 5 | 5 | 5 | 5 | 3 | 3 |
 
-These are product-depth judgments, not code-quality scores. OpenReel's two
+These are product-depth judgments, not code-quality scores. Kinewright's two
 fives are the thesis. Its ones are why it is not ready to replace an incumbent.
 
 ## Best near-term product
 
 The highest-value reachable promise is:
 
-> Give OpenReel messy local interview, event, podcast, screen, or multicam
+> Give Kinewright messy local interview, event, podcast, screen, or multicam
 > footage. Direct a model in plain language. Get a coherent, reversible,
 > technically valid first cut with proofs and variants in minutes. Keep
 > directing it until accepted, then finish or export locally.
@@ -176,7 +176,7 @@ The next gates should be:
 3. Build a fast human correction loop: direct manipulation, compare variants,
    approve individual changes, and immediately replay the corrected intent.
 4. Add interchange and finishing bridges such as OTIO/FCPXML/AAF where legally
-   and technically practical. OpenReel can be useful beside established tools
+   and technically practical. Kinewright can be useful beside established tools
    before it replaces them.
 5. Deepen creator quality before feature breadth: dialogue polish, loudness,
    music transitions, caption typography, reframing stability, color matching,

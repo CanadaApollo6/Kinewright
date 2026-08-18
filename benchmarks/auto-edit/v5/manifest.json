@@ -1,22 +1,23 @@
 {
   "schema_version": 5,
-  "benchmark_id": "openreel-generalization-v5",
-  "title": "OpenReel Generalization Gauntlet v5",
+  "benchmark_id": "kinewright-generalization-v5",
+  "title": "Kinewright Generalization Gauntlet v5",
   "status": "in_progress",
-  "runner": "cargo run -p openreel-agent --bin openreel-eval -- --suite generalization-v5",
-  "implementation": "crates/openreel-agent/src/bin/openreel-eval.rs",
+  "runner": "cargo run -p kinewright-agent --bin kinewright-eval -- --suite generalization-v5",
+  "implementation": "crates/kinewright-agent/src/bin/kinewright-eval.rs",
   "fixture_pack": "benchmarks/auto-edit/v5/fixture-pack.json",
   "fixture_packs": [
     "benchmarks/auto-edit/v5/fixture-pack.json",
     "benchmarks/auto-edit/v5/event-fixture-pack.json",
     "benchmarks/auto-edit/v5/music-fixture-pack.json",
-    "benchmarks/auto-edit/v5/music-fixture-pack-v2.json"
+    "benchmarks/auto-edit/v5/music-fixture-pack-v2.json",
+    "benchmarks/auto-edit/v5/music-fixture-pack-v3.json"
   ],
   "fixture_provenance": {
     "policy": "Every downloaded byte must have an explicit redistribution license, source page, immutable byte count, and SHA-256. Acquisition is an explicit command; benchmark execution is offline and refuses missing or changed media.",
     "interview": "The first task uses Dan Streible's 2006 interview with filmmaker Helen Hill, dedicated to the public domain and hosted by Wikimedia Commons.",
     "event_multicam": "The second task uses the AMI Meeting Corpus ES2002a participant cameras, headset mix, and manual annotations, released by the AMI Consortium / University of Edinburgh under CC BY 4.0.",
-    "music_montage": "The rejected historical preflight used Kevin MacLeod's CC BY 4.0 instrumental Cipher. The recovery task keeps the pinned CC BY 3.0 Sintel and Big Buck Bunny trailers and uses Scott Buckley's CC BY 4.0 slow-burn-to-heroic cue Uprising so the 24-second brief contains a real musical transition.",
+    "music_montage": "The rejected historical preflight used Kevin MacLeod's CC BY 4.0 instrumental Cipher. The first recovery paired the CC BY 3.0 Sintel and Big Buck Bunny trailers with Scott Buckley's CC BY 4.0 cue Uprising, but human review rejected its forced tonal pivot and unresolved hard audio stop. The active recovery pairs tonally dramatic CC BY 3.0 Sintel and Tears of Steel footage with a 28-second Uprising window that reaches the cue's verified natural tail.",
     "analysis": "Pinned local Whisper and FFmpeg analyze the source. Timeline assertions, independent post-render transcription, technical QA, and a separate human rubric score the result.",
     "time_base": "Source and project edits remain exact integer frames."
   },
@@ -28,7 +29,7 @@
       "speaker-to-camera mapping, continuous multicam coverage, and untouched program audio",
       "bounded editable subject-reframe curves on every multicam shot",
       "multi-source visual coverage, separated source ranges, and detected-beat-aligned montage cuts",
-      "one exact real-time music fit with independently measured delivery loudness",
+      "one exact real-time music fit with a constrained source endpoint, independently measured delivery loudness, and a quiet encoded tail",
       "technical QA, delivery framing proof, audio, and MP4 identity",
       "tool-use, token, operation, and wall-time budgets"
     ],
@@ -158,11 +159,11 @@
     {
       "id": "g3",
       "family": "music_montage",
-      "name": "real Blender contrast montage",
+      "name": "real Blender dramatic-resolution montage",
       "fixture": "fixture_real_music_montage",
-      "fixture_pack": "benchmarks/auto-edit/v5/music-fixture-pack-v2.json",
-      "ground_truth": "benchmarks/auto-edit/v5/music-ground-truth-v2.json",
-      "prompt": "Create a finished 1080p YouTube music montage from the pinned visual sources sintel and big-buck-bunny, paced to the pinned Uprising music-bed asset. The cue is intentionally two-part: a restrained opening becomes a dramatic driving backend near the project midpoint. Build this exact visual arc: open on a held Sintel dramatic-world shot; make one unmistakable contiguous pivot into Big Buck Bunny's playful world between project frames 150 and 275; return to Sintel action at or just after the major musical lift near frame 300; then develop with motivated action, direction, or composition matches and finish on a held Sintel shot. Do not alternate sources mechanically. Open exactly these seven capability schemas in one get_capability call: get_source_storyboard, get_source_shot_board, plan_music_fit, get_music_structure, plan_beat_montage, plan_audio_normalization, and get_editorial_readiness. Inspect both complete visual assets with get_source_storyboard. Then call get_source_shot_board exactly once per visual asset over its full range with minimum_duration_frames 50, minimum_confidence_basis_points 5000, candidate_count 12, and max_width 240. Use the returned start, middle, and end evidence to choose scene-clean action and reaction shots. Candidate envelopes are evidence, not mandatory full-length selections, so trim within them when needed. Never cross a detected scene boundary. Never select any range overlapping these half-open exclusions: Sintel [0..40), [108..144), [216..292), [376..396), [420..441), [508..536), [664..688), [768..780), [832..880), [984..1253); Big Buck Bunny [0..114), [158..227), [280..330), [400..466), [573..623), [672..813). These regions contain black, baked fades, titles, logos, or credits. Use plan_music_fit first on audio track 2 with music-bed, project range 0..600, preferred source start 3450, minimum strength 10 percent, and overwrite mode. Inspect and commit that prepared plan. Keep it as the only audio: one real-time clip, no loop, retime, duplication, source-video audio, or later trim. Call get_music_structure on music-bed over project range 0..600 with minimum strength 10 percent, meter 4, 4 bars per phrase, and structural_only=false. Treat the returned roles as heuristic musical candidates, but use only its returned project frames as cuts. Choose 8 through 10 shots in final story order, using both visual assets. Each shot must fill 50..120 project frames; same-asset source ranges must not overlap. Hold the opening and finish for at least 60 frames each. Use at least three meaningfully different duration bands, no more than three near-equal durations in a row, and no repetitive short-long alternation. At least 3 cuts and at least half of all cuts must resolve to returned bar or phrase candidates; place structural cuts at the playful pivot, the driving midpoint lift, and the finish setup. Call plan_beat_montage on video track 1 with project range 0..600, minimum shot length 50, maximum shot length 120, minimum beat strength 10 percent, overwrite mode, the ordered selects, exactly one fewer preferred cut_anchor_frames than selects, cadence {minimum_duration_buckets:3, duration_bucket_frames:20, maximum_similar_run:3, similar_tolerance_frames:8}, and anchor_repair {maximum_movement_frames:24, locked_anchor_indices:[]}. The repair is only a bounded timing solver: it may move preferred beats but must not reorder or replace your shots. Inspect preferred_anchor_frames, resolved_anchor_frames, every signed delta, the final shot durations, and the actual structural roles before committing. If the repaired result loses the required structural share or phase cuts, revise preferred anchors or source envelopes and retry within the same 24-frame bound. Never stop after one infeasible attempt. Normalize only audio track 2 with plan_audio_normalization at -1600 LUFS hundredths, -100 dBFS-hundredths peak, and 100-hundredths tolerance; inspect and commit it. Add no captions, titles, transitions, fades, effects, or retiming. Finish with get_editorial_readiness using youtube_1080p, check_silence=false, centered 50/50 delivery focus, 16 storyboard frames, and 240-pixel cells. Inspect every cell. Reject and revise your own edit if any cell contains black, a fade, title, logo, slate, arbitrary sequencing, mechanical alternation, or a weak opening, pivot, lift, or finish. Do not queue export; the benchmark renders the verified snapshot. Keep working until readiness is true.",
+      "fixture_pack": "benchmarks/auto-edit/v5/music-fixture-pack-v3.json",
+      "ground_truth": "benchmarks/auto-edit/v5/music-ground-truth-v3.json",
+      "prompt": "Create a finished 1080p YouTube music montage from exactly the pinned sintel and tears-of-steel visual sources, paced to Uprising on music-bed. Build one coherent dramatic arc: establish character and threat, develop matching action or composition across both worlds, escalate to one clear visual and musical peak, then resolve on a held image. Every cross-source cut needs an intelligible action, motion, scale, color, or composition bridge; neither source may be a cameo. Open exactly these six capability schemas in one get_capability call: get_source_shot_board, plan_music_fit, get_music_structure, plan_beat_montage, plan_audio_normalization, and get_editorial_readiness. Do not call get_source_storyboard. Call get_source_shot_board exactly once per visual asset over its full source range with minimum_duration_frames 55, minimum_confidence_basis_points 1000, candidate_count 10, and max_width 160. Use that visual evidence to choose scene-clean shots, and never cross a returned scene boundary. Never select a Sintel range overlapping [0..40), [108..144), [216..292), [376..396), [420..441), [508..536), [664..688), [768..780), [832..880), or [984..1253); these contain black, fades, titles, or credits. First call plan_music_fit on audio track 2 with music-bed, project range 0..700, preferred source start 5160, preferred source end 6000, maximum end drift 0 frames, minimum strength 10 percent, and overwrite mode. Inspect and commit that endpoint-anchored plan; it must produce the exact real-time source range [5160..6000) so the montage reaches the cue's natural quiet tail. Keep it as the only audio, with no loop, retime, duplication, source-video audio, or later trim. Call get_music_structure over project range 0..700 with minimum strength 10 percent, meter 4, 4 bars per phrase, and structural_only=false. Its roles are low-confidence timing guides, not evidence of musical closure. Choose 8 through 10 shots in final story order. Use both sources for at least 2 clips and 120 project frames each. Each shot must fill 55..140 project frames, same-asset source ranges must not overlap, the opening shot must hold at least 75 frames, and the closing shot at least 100. Use at least three duration bands, no more than three similar durations in a row, and no mechanical A/B alternation. Put every internal cut on a returned beat; place at least 3 cuts and at least half of all cuts on returned bar or phrase candidates, prioritizing strong and structural moments for escalation, peak, and resolution. Call plan_beat_montage on video track 1 over 0..700 with minimum shot length 55, maximum shot length 140, minimum beat strength 10 percent, overwrite mode, the ordered selects, exactly one fewer preferred cut anchors than selects, cadence {minimum_duration_buckets:3, duration_bucket_frames:20, maximum_similar_run:3, similar_tolerance_frames:8}, and anchor repair with maximum_movement_frames 24 and no locked anchors. Inspect the resolved anchors, signed deltas, shot durations, source order, and structural share before committing; revise and retry if the plan is infeasible or weak. Normalize only audio track 2 to -1600 LUFS hundredths with a -100 dBFS-hundredths sample-peak ceiling and 100-hundredths tolerance. Add no captions, titles, transitions, model-authored fades, effects, or retiming. Finish with get_editorial_readiness using youtube_1080p, check_silence=false, centered 50/50 focus, 12 storyboard frames, and 160-pixel cells. Inspect the whole sheet and revise black, baked fades, slates, arbitrary sequencing, weak bridges, weak arc stages, or an unresolved finish. Do not queue export; the benchmark renders the verified snapshot. Keep working until readiness is true.",
       "delivery": {
         "profile": "youtube_1080p",
         "focus_x_percent": 50,
@@ -175,7 +176,9 @@
         "maximum_caption_word_error_rate_basis_points": null,
         "minimum_integrated_lufs_hundredths": -1800,
         "maximum_integrated_lufs_hundredths": -1400,
-        "maximum_sample_peak_dbfs_hundredths": -100
+        "maximum_sample_peak_dbfs_hundredths": -100,
+        "audio_tail_terminal_window_frames": 5,
+        "audio_tail_maximum_sample_peak_dbfs_hundredths": -3000
       },
       "budget": {
         "turns": 1,
@@ -190,12 +193,13 @@
         "timeline non-empty with eight to ten visual shots and one music clip",
         "both named visual sources appear on the video track",
         "source selections from the same asset are disjoint and separated",
-        "exact 0..600 visual and music coverage with exact project duration",
-        "Sintel opening, one bounded Big Buck Bunny pivot, a return near the musical lift, and a Sintel held finish",
+        "each named visual source contributes at least two clips and 120 project frames",
+        "exact 0..700 visual and music coverage with exact project duration",
+        "the first shot holds at least 75 frames and the final shot holds at least 100 frames",
         "no visual transitions, effects, fades, retiming, or periodic A/B cadence",
         "every internal visual cut is aligned to a detected project-frame music beat",
-        "music starts on an eligible detected source beat and remains one exact real-time unshaped clip",
-        "visual source audio is absent and rendered music meets the pinned loudness and peak contract",
+        "music uses the exact endpoint-anchored real-time source range 5160..6000 as one unshaped clip",
+        "visual source audio is absent; rendered music meets the loudness and peak contract and its final five frames remain below -30 dBFS peak",
         "technical QA export ready",
         "required capability evidence",
         "undo integrity",

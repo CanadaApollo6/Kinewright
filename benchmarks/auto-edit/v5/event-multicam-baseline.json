@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "benchmark_id": "openreel-generalization-v5",
+  "benchmark_id": "kinewright-generalization-v5",
   "suite_manifest": "benchmarks/auto-edit/v5/manifest.json",
   "scope": {
     "status": "event_multicam_preflight",
@@ -29,8 +29,8 @@
     "model": "harness-default",
     "os": "windows",
     "architecture": "x86_64",
-    "openreel_version": "0.1.0",
-    "openreel_revision": "16d0bb9575692a981053b5e9c58fa568f86f539c"
+    "kinewright_version": "0.1.0",
+    "kinewright_revision": "16d0bb9575692a981053b5e9c58fa568f86f539c"
   },
   "machine_summary": {
     "samples_passed": 1,

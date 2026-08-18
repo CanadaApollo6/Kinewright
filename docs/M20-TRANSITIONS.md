@@ -38,7 +38,7 @@ index, which keeps preview/playback and export phase-continuous and sample-ident
 
 ## Descriptor table and consumers
 
-`openreel-core` owns `TRANSITION_DESCRIPTORS`. Each entry contains the stable operation/serde name,
+`kinewright-core` owns `TRANSITION_DESCRIPTORS`. Each entry contains the stable operation/serde name,
 a one-line description, and compositor shading metadata. The table is the source of truth for:
 
 - core operation and document validation;

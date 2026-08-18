@@ -20,7 +20,7 @@ if [[ "${BASH_SOURCE[0]:-}" != "$0" ]]; then
     sourced=1
 fi
 if [[ "$sourced" -eq 1 ]]; then
-    _openreel_setup_shopts="$(set +o)"
+    _kinewright_setup_shopts="$(set +o)"
 fi
 set -euo pipefail
 
@@ -68,7 +68,7 @@ if [[ "$installed_hash" != "$FFMPEG_SHA256" ]]; then
 import sys
 import urllib.request
 
-request = urllib.request.Request(sys.argv[1], headers={"User-Agent": "OpenReel-Linux"})
+request = urllib.request.Request(sys.argv[1], headers={"User-Agent": "Kinewright-Linux"})
 with urllib.request.urlopen(request, timeout=120) as source, open(sys.argv[2], "wb") as target:
     while chunk := source.read(1024 * 1024):
         target.write(chunk)
@@ -131,8 +131,8 @@ echo "libavcodec: $codec_version"
 echo "$ffmpeg_version"
 if [[ "$sourced" -eq 1 ]]; then
     echo 'FFmpeg build environment is active in this shell.'
-    eval "${_openreel_setup_shopts}"
-    unset _openreel_setup_shopts
+    eval "${_kinewright_setup_shopts}"
+    unset _kinewright_setup_shopts
 else
     echo 'FFmpeg is provisioned. Source this script so cargo sees the environment:'
     echo "  source $script_path"

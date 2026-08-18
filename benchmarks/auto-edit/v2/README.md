@@ -1,7 +1,7 @@
-# OpenReel Finished-Cut Benchmark v2
+# Kinewright Finished-Cut Benchmark v2
 
 V1 proves that an agent can make exact edits. V2 measures the whole first-cut
-loop: generated footage enters an isolated OpenReel runtime, an installed model
+loop: generated footage enters an isolated Kinewright runtime, an installed model
 edits it through the public MCP contract, and the benchmark renders the exact
 result as a reviewable vertical MP4.
 
@@ -56,13 +56,13 @@ From a PowerShell where `scripts/setup-ffmpeg.ps1` has activated the pinned
 native build environment:
 
 ```powershell
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval -- `
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --suite finished-cut-v2 `
   --harness codex
 ```
 
-The run package is written beneath `target/evals/openreel-eval-*`. It contains
+The run package is written beneath `target/evals/kinewright-eval-*`. It contains
 the raw JSONL results, machine report, final document, proof sheet, MP4, and an
 unscored `human-review.json` template.
 
@@ -70,7 +70,7 @@ After watching `finished.mp4`, fill every rating and set `accepted` for the
 task. Then validate and score it without spending model quota:
 
 ```powershell
-cargo run -p openreel-agent --bin openreel-eval -- `
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --score-review target/evals/<run>/human-review.json
 ```
 

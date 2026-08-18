@@ -58,7 +58,7 @@ It never mutates the timeline by itself.
   filler so the audible onset or tail is not stranded.
 
 Both values are included in the returned evidence. The model still chooses the
-story and takes; OpenReel owns the frame arithmetic. Cleanup cuts separated by
+story and takes; Kinewright owns the frame arithmetic. Cleanup cuts separated by
 no more than the requested retained pause are coalesced. This prevents tiny
 silent islands between overlapping filler and detector cuts while preserving
 the requested pause around the complete cleanup region.
@@ -78,7 +78,7 @@ callback: the wrapper stores an erased closure but invokes it through a
 different concrete pointer type. On Windows this intermittently aborts healthy
 encoder and decoder graphs with errors `-6` and `-9`.
 
-OpenReel no longer installs that callback. Cancellation is still observed
+Kinewright no longer installs that callback. Cancellation is still observed
 before decoding, before inference, immediately after inference, and before
 cache publication. A cancellation requested during the synchronous Whisper
 call becomes terminal at the next boundary rather than corrupting inference.
@@ -92,7 +92,7 @@ The generated fixture gate spends no model-session quota:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-cargo test -p openreel-agent --bin openreel-eval `
+cargo test -p kinewright-agent --bin kinewright-eval `
   v3_fixture_builds_with_authored_and_recognized_truth -- --ignored
 ```
 
@@ -107,8 +107,8 @@ The subscription-backed model run is explicit:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval -- `
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --suite editorial-cut-v3 `
   --harness codex `
   --only f2 `

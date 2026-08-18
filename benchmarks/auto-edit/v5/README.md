@@ -1,6 +1,6 @@
-# OpenReel Generalization Gauntlet v5
+# Kinewright Generalization Gauntlet v5
 
-V5 is the M40 benchmark. It stops optimizing only for OpenReel's synthetic
+V5 is the M40 benchmark. It stops optimizing only for Kinewright's synthetic
 garden story and measures unfamiliar, licensed footage in three distinct edit
 families: interview/documentary, event/multicam, and music montage.
 
@@ -8,42 +8,45 @@ All three families are executable. `g1` is a real public-domain interview with
 filmmaker Helen Hill. `g2` is a CC BY 4.0 AMI meeting with four synchronized
 participant cameras, a program headset mix, and pinned manual speaker labels.
 `g3` is a cuts-first horizontal music montage built from two CC BY 3.0 Blender
-Foundation trailers. Its rejected historical preflight used Kevin MacLeod's
-CC BY 4.0 instrumental "Cipher"; the recovery fixture uses Scott Buckley's
-CC BY 4.0 "Uprising," whose slow-burn-to-heroic transition gives the editor a
-real musical event to cut around. Each task uses real footage and
-independently probed MP4 delivery, not generated bars or motion graphics.
+Foundation productions. Its rejected historical preflight used Kevin MacLeod's
+CC BY 4.0 instrumental "Cipher"; the v2 recovery used Scott Buckley's CC BY
+4.0 "Uprising." The prepared v3 recovery keeps that cue, replaces the forced
+Big Buck Bunny cameo with a compatible Tears of Steel source, and gives the
+editor a real musical event and natural ending to cut around. Each task uses
+real footage and independently probed MP4 delivery, not generated bars or
+motion graphics.
 
 ## Immutable fixture acquisition
 
 Downloaded footage is not committed. Its source page, license, byte count,
 SHA-256, and exact URL live in `fixture-pack.json`,
-`event-fixture-pack.json`, `music-fixture-pack.json`, and
-`music-fixture-pack-v2.json`. Acquisition is an explicit network action:
+`event-fixture-pack.json`, `music-fixture-pack.json`,
+`music-fixture-pack-v2.json`, and `music-fixture-pack-v3.json`. Acquisition is
+an explicit network action:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-cargo run -p openreel-agent --bin openreel-eval -- `
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --prepare-fixtures benchmarks/auto-edit/v5/fixture-pack.json
-cargo run -p openreel-agent --bin openreel-eval -- `
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --prepare-fixtures benchmarks/auto-edit/v5/event-fixture-pack.json
-cargo run -p openreel-agent --bin openreel-eval -- `
-  --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v2.json
+cargo run -p kinewright-agent --bin kinewright-eval -- `
+  --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v3.json
 ```
 
 Verify the local pack without network access:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-cargo run -p openreel-agent --bin openreel-eval -- `
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --verify-fixtures benchmarks/auto-edit/v5/fixture-pack.json
-cargo run -p openreel-agent --bin openreel-eval -- `
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --verify-fixtures benchmarks/auto-edit/v5/event-fixture-pack.json
-cargo run -p openreel-agent --bin openreel-eval -- `
-  --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v2.json
+cargo run -p kinewright-agent --bin kinewright-eval -- `
+  --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v3.json
 ```
 
-`OPENREEL_EVAL_FIXTURE_DIR` overrides the cache root. Existing files with a
+`KINEWRIGHT_EVAL_FIXTURE_DIR` overrides the cache root. Existing files with a
 wrong length or hash are rejected and never silently overwritten. Benchmark
 execution itself never downloads inputs.
 
@@ -51,8 +54,8 @@ execution itself never downloads inputs.
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval -- `
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --suite generalization-v5 `
   --harness codex `
   --only g1 `
@@ -136,8 +139,8 @@ Run it with:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval -- `
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --suite generalization-v5 `
   --harness codex `
   --only g2 `
@@ -149,20 +152,19 @@ cargo run -p openreel-agent --bin openreel-eval -- `
 `g3` measures the missing composition layer: whether the model can survey raw
 source footage visually, choose a deliberate shot sequence, and assemble it
 against detected musical onsets without hand-authoring frame arithmetic. The
-24-second recovery brief asks for a contrast arc from Sintel's dramatic imagery into
-Big Buck Bunny's playful energy, then a clean musical finish.
+prepared v3 recovery is a 28-second action-to-release arc across Sintel and
+Tears of Steel, ending at a verified natural tail of the Uprising cue. It is a
+recovery target, not a completed or human-accepted run.
 
-The recovery contract exposes three general agent-facing primitives. The broad
-`get_source_storyboard` contact sheet lets the model survey each full source
-before footage is on the timeline. One full-range `get_source_shot_board` call
-per source then returns up to 12 exact scene-derived candidate envelopes with
-start, middle, and end evidence frames. Passing
-`minimum_duration_frames: 50` and `minimum_confidence_basis_points: 5000`
-filter short candidates and weak motion-derived boundaries before pagination,
-so the model spends tokens on shots that can actually serve the 50-frame minimum;
-the manifest reports the requested threshold plus filtered and total counts,
-while candidate ids and indexes remain stable. Candidates crossing a detected
-source boundary are not admissible.
+The recovery contract uses three general agent-facing primitives. One
+full-range `get_source_shot_board` call per source replaces the redundant broad
+storyboard pass and returns up to 10 exact scene-derived candidate envelopes
+with start, middle, and end evidence frames. Passing
+`minimum_duration_frames: 55` and `minimum_confidence_basis_points: 1000`
+filters unusably short candidates while retaining low-confidence boundaries as
+source-cut vetoes. This spends fewer model tokens while making baked edits
+harder to miss; candidate ids and indexes remain stable, and ranges crossing a
+detected source boundary are inadmissible.
 `get_music_structure` returns beat, bar, and phrase candidates for the selected
 music range. Its roles and confidence are explicitly heuristic, so the model
 still has to make the editorial decision. Finally, `plan_beat_montage` accepts
@@ -171,22 +173,31 @@ source-feasible gapless hard-cut assembly, and returns one opaque
 revision-gated plan. These tools do not choose the footage, invent
 transitions, retime clips, or claim to score taste.
 
-The machine gate checks both visual sources are used without overlapping source
-ranges, every selected envelope is scene-clean, shot durations have at least
-three substantially different bands rather than a long near-equal run, and at
-least half of the internal cuts land on structural bar or phrase candidates.
-It also checks every internal cut against the detected music beat set, the
-music bed is one exact real-time clip, source audio is absent, encoded
-loudness is within contract, and the horizontal H.264/AAC MP4 is independently
-probed. Captions are intentionally not part of this instrumental task and are
+The v2 machine gate checked both visual sources, but that was not enough to
+prove a coherent arc: a required-source assertion could force an isolated Big
+Buck Bunny cameo, and the source-scene confidence floor did not fully veto
+baked scene cuts. An independent audit caught a baked dissolve in an earlier
+machine-passing candidate; that candidate was discarded before the published
+v2 rerun. V2 also anchored the music start without requiring a musical source
+endpoint or a quiet encoded tail, which left the published artifact ending
+inside a phrase.
+
+The prepared v3 contract closes those gaps. It uses compatible Tears of Steel
+footage, requires at least two clips and 120 project frames from each visual
+asset, lowers the scene-boundary veto floor to 10% confidence, measures the
+actual first and last shot holds, anchors the music source end exactly at the
+cue's natural tail, and verifies the final encoded five-frame window is quiet.
+It retains scene-clean source exclusions, nonuniform shot cadence, structural
+music anchors, source-audio exclusion, loudness, and independent H.264/AAC MP4
+probing. Captions are intentionally not part of this instrumental task and are
 marked not applicable in human review rather than receiving an invented score.
 
 Prepare the pack as above, then run:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval -- `
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --suite generalization-v5 `
   --harness codex `
   --only g3 `
@@ -216,23 +227,35 @@ this is one music sample, not the three-sample family gate or the M40 exit gate.
 
 This rejected artifact and its v1 Cipher fixture remain immutable in meaning
 and are not silently re-scored. The v2 recovery passed 34/34 machine assertions
-and is published separately in `music-montage-recovery-baseline.json`; human
-review is pending. It uses a 24-second section of "Uprising" with a pronounced midpoint
-lift, plus bounded and inspectable anchor repair. Its edit contract is 600
-project frames with a held dramatic Sintel opening, a clear pivot into Big Buck
-Bunny's playful energy, action-oriented development at the musical lift, and a
-held finish; at least three duration bands; no more than three near-equal shots
-in a row; exact scene-derived source envelopes; and structural bar/phrase
-anchors carrying at least half of the cuts. The original review supplied no
-numeric delivery-readiness score, so the v1 baseline records that dimension as
-`null`.
+and is published separately in `music-montage-recovery-baseline.json`. Human
+review rejected that exact SHA-bound artifact with story 2.5, pacing 3.5, visual
+finish 4.0, audio finish 2.0, delivery readiness 2.0, and captions not
+applicable. The story was "better, the bunny thing now feels very out of place".
+The main issue here is that the whole just ends in the middle of a musical
+phrase. It feels like we're ending in the middle of a longer video, not that the
+video has one coherent arc. It used a 24-second section of "Uprising" with a
+pronounced midpoint lift, plus bounded and inspectable anchor repair. Its edit
+contract was 600 project frames with a held dramatic Sintel opening, a clear
+pivot into Big Buck Bunny's playful energy, action-oriented development at the
+musical lift, and a held finish; at least three duration bands; no more than
+three near-equal shots in a row; exact scene-derived source envelopes; and
+structural bar/phrase anchors carrying at least half of the cuts.
 
-The published recovery also passed a separate 16-frame overview, every-shot
-midpoint sheet, and before/at/after inspection around all eight cuts. An earlier
-machine pass was discarded when that independent audit found a baked dissolve
-at the start of the last source range. The v2 exclusion now covers the full
-dissolve tail, and fixture feasibility no longer counts frames inside excluded
-intervals.
+The v3 recovery is prepared but has not run. Its pinned pack and ground truth
+are `music-fixture-pack-v3.json` and `music-ground-truth-v3.json`. It replaces
+the forced Bunny cameo with Tears of Steel, requires meaningful use of both
+assets, treats low-confidence scene changes as vetoes, checks the actual edge
+shot holds, anchors the music source end to the natural cue tail, and verifies
+the encoded tail. No v3 machine result or human review exists yet.
+
+The published v2 recovery also passed a separate 16-frame overview, every-shot
+midpoint sheet, and before/at/after inspection around all eight cuts. That audit
+was necessary because the v2 machine contract had not fully caught baked source
+cuts: an earlier machine-passing candidate was discarded after its final shot
+began inside a baked dissolve. The v2 exclusion was then widened and fixture
+feasibility stopped counting frames inside excluded intervals. V3 makes that
+lesson explicit with the lower-confidence scene-boundary veto and per-shot
+edge checks.
 
 V5 exits only after three samples per family pass the machine contract and the
 published human gate in `manifest.json` passes.

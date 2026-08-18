@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the Debian/Ubuntu packages required to build OpenReel on Linux.
+# Install the Debian/Ubuntu packages required to build Kinewright on Linux.
 # Run from a fresh clone before scripts/setup-ffmpeg.sh.
 set -euo pipefail
 

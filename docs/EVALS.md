@@ -1,12 +1,12 @@
 # Agent evals
 
-OpenReel's Arc 2 editing competence suite runs only when `OPENREEL_EVAL=1` is explicitly set. It uses generated media, the real MCP server, and an installed subscription harness. CI covers the framework with a fake driver and spends nothing.
+Kinewright's Arc 2 editing competence suite runs only when `KINEWRIGHT_EVAL=1` is explicitly set. It uses generated media, the real MCP server, and an installed subscription harness. CI covers the framework with a fake driver and spends nothing.
 
 ## Run
 
 ```powershell
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval
 # Optional: -- --harness codex
 ```
 
@@ -19,7 +19,7 @@ To reclaim space from failed or abandoned runs, use the guarded cleanup script:
 & .\scripts\clean-eval-runs.ps1
 ```
 
-It only considers direct `openreel-eval-*` directories under `target/evals/`.
+It only considers direct `kinewright-eval-*` directories under `target/evals/`.
 Machine-passing runs, completed human-reviewed runs (accepted or rejected),
 unrecognized directories, unreadable review artifacts, and recent incomplete or
 pending-review runs are preserved. The default 24-hour cutoff applies before an
@@ -38,8 +38,8 @@ sheet, probed and hashed MP4, and a separate pending human-review record. Run it
 with:
 
 ```powershell
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval -- `
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --suite finished-cut-v2 `
   --harness codex
 ```
@@ -47,7 +47,7 @@ cargo run -p openreel-agent --bin openreel-eval -- `
 Human review is scored without running another agent:
 
 ```powershell
-cargo run -p openreel-agent --bin openreel-eval -- `
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --score-review target/evals/<run>/human-review.json
 ```
 
@@ -67,8 +67,8 @@ word error rate. Run three independent samples with:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval -- `
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --suite editorial-cut-v3 `
   --harness codex `
   --only f2 `
@@ -96,15 +96,15 @@ with:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval -- `
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --suite dialogue-pacing-v4 `
   --harness codex `
   --only f3 `
   --samples 3
 ```
 
-Set `OPENREEL_EVAL_TRACE=1` for a bounded stderr trace of agent text, tool
+Set `KINEWRIGHT_EVAL_TRACE=1` for a bounded stderr trace of agent text, tool
 arguments, and tool results while diagnosing a model loop. The v4 harness
 fails fast after 24 tool calls or 350,000 reported tokens; the current
 machine path uses 8 calls and averages 108,296 tokens.
@@ -132,9 +132,9 @@ offline. Prepare and verify the first public-domain interview pack with:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-cargo run -p openreel-agent --bin openreel-eval -- `
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --prepare-fixtures benchmarks/auto-edit/v5/fixture-pack.json
-cargo run -p openreel-agent --bin openreel-eval -- `
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --verify-fixtures benchmarks/auto-edit/v5/fixture-pack.json
 ```
 
@@ -144,15 +144,16 @@ first non-synthetic fixture in the published benchmark. M40 remains incomplete
 until interview/documentary, event/multicam, and music-montage families each
 pass three model samples and their separate human gate.
 
-The current `g3` recovery uses the separately pinned v2 music pack. Prepare or
-verify it explicitly before the offline run:
+The recorded `g3` recovery baseline below is the separately pinned v2 music
+pack. The next recovery uses the v3 pack, which is prepared but not yet run.
+Prepare or verify the v3 inputs explicitly before the offline run:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-cargo run -p openreel-agent --bin openreel-eval -- `
-  --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v2.json
-cargo run -p openreel-agent --bin openreel-eval -- `
-  --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v2.json
+cargo run -p kinewright-agent --bin kinewright-eval -- `
+  --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v3.json
+cargo run -p kinewright-agent --bin kinewright-eval -- `
+  --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v3.json
 ```
 
 The rejected v1 Cipher artifact remains published as historical evidence. V2
@@ -162,10 +163,27 @@ checks for transitions, effects, fades, retiming, and periodic A/B cadence.
 The first v2 recovery is published in
 `benchmarks/auto-edit/v5/music-montage-recovery-baseline.json`: 34/34 machine
 assertions, 15 tool calls, 318,225 total tokens, and an independently audited
-24-second MP4. Human review is pending. A prior machine pass was discarded
-after the independent cut-boundary audit exposed a baked dissolve tail; the
-source exclusion and clean-frame feasibility calculation were corrected before
-the published rerun.
+24-second MP4. Human review rejected that exact SHA-bound artifact: story 2.5,
+pacing 3.5, visual finish 4.0, audio finish 2.0, delivery readiness 2.0, and
+captions were not applicable. The story was "better, the bunny thing now feels
+very out of place". The main issue here is that the whole just ends in the
+middle of a musical phrase. It feels like we're ending in the middle of a longer
+video, not that the video has one coherent arc.
+
+The v2 machine contract also had three important blind spots. Its required
+asset/phase assertions could force an isolated Big Buck Bunny cameo without
+testing whether the cameo belonged in the story. Its source-scene confidence
+floor did not fully veto baked source cuts; an earlier machine-passing candidate
+was discarded only after independent cut-boundary review found a baked dissolve.
+And music fit checked the start and duration, not the musical source endpoint or
+the delivered encoded tail. The published v2 artifact therefore remained a
+machine pass and a human rejection.
+
+The prepared v3 recovery addresses those gaps with a compatible Tears of Steel
+source, a minimum of two clips and 120 project frames per visual asset, a 10%
+scene-boundary veto floor, actual first/last shot-hold assertions, exact
+end-anchored music fit, and encoded quiet-tail verification. It has not run, so
+there is no v3 machine result or human acceptance to report.
 
 The first corrected interview preflight is published at
 `benchmarks/auto-edit/v5/baseline.json`: 1/1 sample, 25/25 assertions, 7 tool

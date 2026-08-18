@@ -2,7 +2,7 @@
 
 ## Outcome
 
-M40 moves OpenReel's quality claim from one tuned synthetic story to unfamiliar,
+M40 moves Kinewright's quality claim from one tuned synthetic story to unfamiliar,
 licensed footage across three edit families:
 
 1. interview/documentary;
@@ -20,7 +20,7 @@ and two-accept human exit gate.
 ## Phase 1 - licensed fixture packs
 
 Synthetic media could be generated inside a fixture function. Real footage
-needs a reproducible boundary of its own. `openreel-agent::fixture_pack`
+needs a reproducible boundary of its own. `kinewright-agent::fixture_pack`
 provides it:
 
 - one checked-in JSON manifest per pack;
@@ -32,7 +32,7 @@ provides it:
 - offline `--verify-fixtures` and benchmark-time verification;
 - atomic temporary downloads;
 - no silent overwrite of an existing changed file;
-- `OPENREEL_EVAL_FIXTURE_DIR` for a shared or custom cache.
+- `KINEWRIGHT_EVAL_FIXTURE_DIR` for a shared or custom cache.
 
 Downloaded media remains outside Git. A benchmark cannot start if a file is
 missing, truncated, or has drifted.
@@ -239,13 +239,16 @@ recorded separately.
 
 ## Phase 3 - real music montage
 
-`generalization-v5` task `g3` uses two Blender Foundation trailers. The
-rejected v1 preflight paired them with Kevin MacLeod's instrumental "Cipher."
-The v2 recovery replaces that flat bed with Scott Buckley's "Uprising," whose
-dark slow-burn and heroic backend provide a real midpoint event
-for the edit. Both fixture versions remain pinned and openly licensed. The task
-is deliberately horizontal: g1 and g2 already exercise 9:16 delivery, while g3
-isolates source inspection, shot selection, beat sense, and music finishing.
+`generalization-v5` task `g3` uses Blender Foundation footage. The rejected v1
+preflight paired Sintel and Big Buck Bunny with Kevin MacLeod's instrumental
+"Cipher." The v2 recovery replaced that flat bed with Scott Buckley's
+"Uprising," whose dark slow-burn and heroic backend provide a real midpoint
+event for the edit. The prepared v3 recovery keeps Uprising, replaces the
+forced Bunny cameo with a compatible Tears of Steel source, and reaches the
+cue's natural tail. All fixture versions remain pinned and openly licensed.
+The task is deliberately horizontal: g1 and g2 already exercise 9:16 delivery,
+while g3 isolates source inspection, shot selection, beat sense, and music
+finishing.
 
 The benchmark exposed three agent-facing gaps. A model could inspect frames only
 after putting footage on the timeline, the old beat planner could split one
@@ -269,23 +272,30 @@ M40 adds:
   reporting every requested-to-resolved delta.
 
 The model still owns the creative decision: which images to use, where each
-source envelope begins, and the order that tells the contrast story. OpenReel
+source envelope begins, and the order that tells the contrast story. Kinewright
 owns mixed-frame-rate mapping, beat snapping, collision policy, validation, and
 revision safety. The first slice is honest hard cuts. It does not silently add
 crossfades, speed ramps, looping, time stretch, or semantic shot selection.
 
-The active recovery contract requires 8-10 gapless visual shots over exactly 24
-seconds (600 project frames), both visual sources, separated and scene-clean
-source ranges, 50-120-frame shots, at least three duration bands without a long
-near-equal or repeating A/B run, and at least half of the internal cuts on
-structural bar or phrase candidates. Artifact gates now require a held Sintel
-opening, a Big Buck Bunny pivot in the intended window, a held Sintel finish,
-and zero transitions, effects, fades, or retiming. They also require exact
-video/audio coverage, one clean real-time music clip, source-audio exclusion,
-delivery loudness, QA, undo, budget evidence, and an independently probed 1080p
-MP4. Human review still owns the irreducible taste judgments: story, rhythm,
-visual finish, audio finish, and delivery readiness. Captions are explicitly
-not applicable for this instrumental montage.
+The historical v2 recovery contract required 8-10 gapless visual shots over
+exactly 24 seconds (600 project frames), both visual sources, separated and
+scene-clean source ranges, 50-120-frame shots, at least three duration bands
+without a long near-equal or repeating A/B run, and at least half of the
+internal cuts on structural bar or phrase candidates. It required a held Sintel
+opening, a Big Buck Bunny pivot, a held Sintel finish, and zero transitions,
+effects, fades, or retiming. Those checks still allowed a forced cameo, did not
+fully veto baked source cuts, and did not require a musical endpoint or quiet
+encoded tail.
+
+The prepared v3 contract keeps the useful cadence and source-clean checks while
+adding a compatible Tears of Steel source, at least two clips and 120 project
+frames per visual asset, a 10% scene-boundary veto floor, actual opening and
+closing shot holds, exact source-end anchoring at the cue's natural tail, and a
+quiet five-frame encoded-tail check. It targets 8-10 gapless shots over 28
+seconds (700 project frames), with a coherent action-to-release arc. It has not
+run. Human review still owns the irreducible taste judgments: story, rhythm,
+visual finish, audio finish, and delivery readiness. Captions are explicitly not
+applicable for this instrumental montage.
 
 The first machine-passing `g3` preflight is recorded in
 [`benchmarks/auto-edit/v5/music-montage-baseline.json`](../benchmarks/auto-edit/v5/music-montage-baseline.json).
@@ -311,21 +321,37 @@ with SHA-256
 `236200c27d57bedfd82ccb3a7aae1afde49b79a85dfbf60e0b58504c01c10d69`.
 The recovery is recorded separately in
 [`benchmarks/auto-edit/v5/music-montage-recovery-baseline.json`](../benchmarks/auto-edit/v5/music-montage-recovery-baseline.json),
-and human review remains pending. Its acceptance target is a readable contrast arc (held dramatic Sintel
-opening, unmistakable contiguous Big Buck Bunny pivot, Sintel action return at
-the cue's major lift, and held finish), exact scene-derived shot envelopes,
-nonuniform shot cadence, and structural musical anchors that explain the major
-transitions. The executable manifest requires acceptance for a scored artifact
-and a 4.0 minimum mean for every applicable human-rating dimension; N/A
-dimensions are excluded from those means.
+and human review rejected that exact SHA-bound artifact: story 2.5, pacing 3.5,
+visual finish 4.0, audio finish 2.0, delivery readiness 2.0, and captions N/A.
+The story was "better, the bunny thing now feels very out of place". The main
+issue here is that the whole just ends in the middle of a musical phrase. It
+feels like we're ending in the middle of a longer video, not that the video has
+one coherent arc. The v2 machine score did not catch that composition failure:
+required asset/phase assertions could force a Bunny cameo, and music fit had no
+source-end or encoded quiet-tail gate. Its source-scene confidence floor also
+did not fully veto baked source cuts; an earlier machine-passing candidate was
+discarded after independent review found a baked dissolve. Its acceptance target
+was a readable contrast arc (held dramatic Sintel opening, contiguous Bunny
+pivot, Sintel action return at the cue's major lift, and held finish), exact
+scene-derived shot envelopes, nonuniform shot cadence, and structural musical
+anchors that explain the major transitions. The executable manifest requires
+acceptance for a scored artifact and a 4.0 minimum mean for every applicable
+human-rating dimension; N/A dimensions are excluded from those means.
+
+The v3 recovery is prepared but not run. It replaces the forced Bunny cameo
+with Tears of Steel, requires meaningful use of both visual assets, lowers the
+scene-boundary veto floor to 10%, checks the actual first and last shot holds,
+anchors the music source end exactly at the natural cue tail, and verifies a
+quiet encoded tail. No v3 machine result or human acceptance exists yet.
 
 Independent frame review rejected one earlier machine-passing recovery because
 its final shot began inside a baked source dissolve. That artifact is not the
-published recovery. The manually reviewed exclusion was widened, clean-frame
-feasibility accounting was corrected to stop counting excluded intervals, and
-the final recovery was re-run. Uniform frames, every shot midpoint, and frames
-on both sides of every cut in the published recovery show no black, title,
-logo, slate, or baked transition tail.
+published v2 recovery. The manually reviewed exclusion was widened and
+clean-frame feasibility accounting was corrected to stop counting excluded
+intervals before the v2 rerun. Uniform frames, every shot midpoint, and frames
+on both sides of every cut in the published v2 recovery show no black, title,
+logo, slate, or baked transition tail. V3 turns that audit lesson into a lower
+confidence scene-boundary veto rather than relying on the audit alone.
 
 ## Commands
 
@@ -333,9 +359,9 @@ Prepare and verify the interview pack:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-cargo run -p openreel-agent --bin openreel-eval -- `
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --prepare-fixtures benchmarks/auto-edit/v5/fixture-pack.json
-cargo run -p openreel-agent --bin openreel-eval -- `
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --verify-fixtures benchmarks/auto-edit/v5/fixture-pack.json
 ```
 
@@ -343,28 +369,28 @@ Prepare and verify the event pack:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-cargo run -p openreel-agent --bin openreel-eval -- `
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --prepare-fixtures benchmarks/auto-edit/v5/event-fixture-pack.json
-cargo run -p openreel-agent --bin openreel-eval -- `
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --verify-fixtures benchmarks/auto-edit/v5/event-fixture-pack.json
 ```
 
-Prepare and verify the music-montage pack:
+Prepare and verify the next music-montage pack:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-cargo run -p openreel-agent --bin openreel-eval -- `
-  --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v2.json
-cargo run -p openreel-agent --bin openreel-eval -- `
-  --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v2.json
+cargo run -p kinewright-agent --bin kinewright-eval -- `
+  --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v3.json
+cargo run -p kinewright-agent --bin kinewright-eval -- `
+  --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v3.json
 ```
 
 Run the first task:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval -- `
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --suite generalization-v5 `
   --harness codex `
   --only g1 `
@@ -375,8 +401,8 @@ Run the event/multicam task:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval -- `
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --suite generalization-v5 `
   --harness codex `
   --only g2 `
@@ -387,8 +413,8 @@ Run the music-montage task:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-$env:OPENREEL_EVAL = '1'
-cargo run -p openreel-agent --bin openreel-eval -- `
+$env:KINEWRIGHT_EVAL = '1'
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --suite generalization-v5 `
   --harness codex `
   --only g3 `
@@ -400,7 +426,7 @@ model session:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
-cargo run -p openreel-agent --bin openreel-eval -- `
+cargo run -p kinewright-agent --bin kinewright-eval -- `
   --rerender-document target/evals/RUN/artifacts/g2-sample-1/final-document.json `
   --artifact-directory target/evals/RUN-rerender/artifacts/g2-sample-1 `
   --delivery-profile vertical_short `
@@ -415,7 +441,7 @@ person, the mean human rating is at least 4.0/5, and no material caption error
 survives. One successful interview does not satisfy the milestone.
 
 Music montage has one rejected historical preflight and one 34/34 machine-passing
-v2 recovery pending human review. The family still needs two more machine passes
-and two human accepts.
+v2 recovery rejected in human review. The v3 recovery contract is prepared but
+not run. The family still needs two more machine passes and two human accepts.
 Event/multicam still needs two more machine samples, one more human-accepted
 output, and numeric ratings sufficient to evaluate the 4.0 mean-rating gate.

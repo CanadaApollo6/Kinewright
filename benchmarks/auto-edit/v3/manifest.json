@@ -1,9 +1,9 @@
 {
   "schema_version": 3,
-  "benchmark_id": "openreel-editorial-cut-v3",
-  "title": "OpenReel Editorial-Cut Benchmark v3",
-  "runner": "cargo run -p openreel-agent --bin openreel-eval -- --suite editorial-cut-v3",
-  "implementation": "crates/openreel-agent/src/bin/openreel-eval.rs",
+  "benchmark_id": "kinewright-editorial-cut-v3",
+  "title": "Kinewright Editorial-Cut Benchmark v3",
+  "runner": "cargo run -p kinewright-agent --bin kinewright-eval -- --suite editorial-cut-v3",
+  "implementation": "crates/kinewright-agent/src/bin/kinewright-eval.rs",
   "fixture_provenance": {
     "policy": "Generated locally from checked-in authored text and deterministic FFmpeg motion-graphic scenes; no private footage or downloaded corpus.",
     "video": "Five semantically distinct vertical scenes depict an empty lot, a retake, a garden build, and two market outcomes.",

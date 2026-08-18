@@ -1,6 +1,6 @@
 # The Model-First Editor
 
-OpenReel should be a local, transactional video runtime for agents, with a human
+Kinewright should be a local, transactional video runtime for agents, with a human
 director and reviewer. It should not become a traditional NLE with a chat panel
 bolted onto it.
 
@@ -16,7 +16,7 @@ The primary editing loop is:
 The human still owns the goal, taste, source media, approvals, and final call.
 The model owns the mechanical editing work.
 
-## What OpenReel already gets right
+## What Kinewright already gets right
 
 The current foundation is unusually well aligned with that goal:
 
@@ -39,13 +39,13 @@ editor runtime designed around machine use.
 
 - [T3 Code](https://t3.codes/) treats the application as a control plane over
   interchangeable coding agents and gives work its own thread and branch.
-  OpenReel should do the same for model providers and timeline variants.
+  Kinewright should do the same for model providers and timeline variants.
 - [Premiere's AI Assistant](https://helpx.adobe.com/premiere/desktop/premiere-ai-assistant/overview.html)
   works through project-aware tools to organize media and assemble an initial
   edit. The important idea is structured project context, not a branded chatbot.
 - [DaVinci Resolve](https://www.blackmagicdesign.com/products/davinciresolve)
   separates editing, compositing, color, audio, media, and delivery into deep
-  domains. Those domains are a useful capability map even when OpenReel does
+  domains. Those domains are a useful capability map even when Kinewright does
   not copy their panels.
 - [Final Cut Pro's multicam workflow](https://support.apple.com/guide/final-cut-pro/intro-to-multicam-editing-ver23c76439/mac)
   and Magnetic Timeline show how sync and story relationships can be first-class
@@ -96,7 +96,7 @@ agentic coding safe.
 
 ### 3. Verification needs to become a product surface
 
-"The operation succeeded" is not the same as "the video is good." OpenReel
+"The operation succeeded" is not the same as "the video is good." Kinewright
 should automatically check the result for:
 
 - unintended gaps, black frames, freezes, and offline media;
@@ -112,7 +112,7 @@ branch action.
 
 ### 4. The operation vocabulary needs professional depth
 
-OpenReel does not need every panel in Premiere or Resolve. It does need the
+Kinewright does not need every panel in Premiere or Resolve. It does need the
 underlying primitives agents would use from those panels:
 
 - source ranges, three-point editing, roll, slip, slide, replace, and fit-to-fill;
@@ -308,7 +308,7 @@ The metrics should reflect whether agents are becoming better editors:
 - model cost and wall-clock time per accepted minute.
 
 Provider-specific benchmarks matter, but the product metric is how well the
-same OpenReel contract lifts every capable model.
+same Kinewright contract lifts every capable model.
 
 ## Product boundaries
 

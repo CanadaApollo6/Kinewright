@@ -1,0 +1,27 @@
+[package]
+name = "kinewright-app"
+build = "build.rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+crossbeam-channel.workspace = true
+eframe.workspace = true
+egui_extras.workspace = true
+image.workspace = true
+kinewright-agent = { path = "../kinewright-agent" }
+kinewright-core = { path = "../kinewright-core" }
+kinewright-media = { path = "../kinewright-media" }
+rfd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
+
