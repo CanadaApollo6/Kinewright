@@ -145,7 +145,7 @@ until interview/documentary, event/multicam, and music-montage families each
 pass three model samples and their separate human gate.
 
 The recorded `g3` recovery baseline below is the separately pinned v2 music
-pack. The active recovery is v5: an 18-second, single-source Tears of
+pack. The active recovery is v6: an 18-second, single-source Tears of
 Steel trailer cut to reviewed Vanguard musical events and a short decay. Prepare or verify its inputs
 explicitly before the offline run:
 
@@ -225,8 +225,18 @@ The first replacement under that contract passes 37/37 machine assertions with
 `6335..6875` exactly, measures -16.03 LUFS, and passes the encoded terminal-
 activity check. Its SHA-256 is
 `816ece8a11a69b1048a949420a597a1839726fd8a9bcd58d3fbf7f3d482f824c`.
-Independent cut-neighborhood inspection found clean event boundaries and a
-continuous climax-to-resolution final shot. Human review remains pending.
+Human review rejected that exact artifact: the edit spent the five-second build
+on a man looking at his arm, then placed its most climactic action after the
+15-second hit under a fading note and silence. No numeric ratings were supplied.
+V6 assigns the fourth shot, frames 249..375, to the strongest sustained action
+and makes frame 375 a mandatory release into low-motion resolution.
+
+The first v6 replacement passes 37/37 with 12 calls, 7 operations, and 218,894
+tokens. Its SHA-256 is
+`8c7f34c6633819a3b3f48bbe90a79fbee20fe96df15a6a500be8e7ebcae99d46`.
+Independent cut inspection confirms robot action through frame 374, a clean
+release at frame 375 to a stable wide team composition, and no returning action
+through the six sampled frames under the fade. Human review remains pending.
 
 The first corrected interview preflight is published at
 `benchmarks/auto-edit/v5/baseline.json`: 1/1 sample, 25/25 assertions, 7 tool

@@ -152,7 +152,7 @@ cargo run -p kinewright-agent --bin kinewright-eval -- `
 `g3` measures the missing composition layer: whether the model can survey one
 narrative source visually, choose a deliberate shot sequence, and recut it into
 a trailer against detected musical onsets without hand-authoring frame
-arithmetic. The active v5 contract is an 18-second action arc from Tears of
+arithmetic. The active v6 contract is an 18-second action arc from Tears of
 Steel. It establishes the human team and weapon, reveals the mechanical threat,
 escalates after a musical valley, peaks on confrontation, and resolves on a held
 image during a short audible decay. It is a recovery target, not
@@ -185,11 +185,11 @@ v2 rerun. V2 also anchored the music start without requiring a musical source
 endpoint or a quiet encoded tail, which left the published artifact ending
 inside a phrase.
 
-The active v5 contract keeps v4's single-source correction and fixes the music contract.
+The active v6 contract keeps v4's single-source correction and fixes the music contract.
 Tears of Steel must be the sole visual source and fill the complete video track
 through exactly five disjoint, scene-clean shots. Four human-reviewed musical
-events have explicit editorial roles: first lift, commitment, re-entry, and
-climax. The machine gate requires cuts at all four events, nonuniform cadence, a
+events have explicit editorial roles: first lift, commitment, climax drive, and
+release. The machine gate requires cuts at all four events, nonuniform cadence, a
 held resolution, source-audio exclusion, loudness, no more than one second of
 perceptually inactive audio at the end, and independent H.264/AAC MP4 probing.
 The fixture test proves the five-shot schedule is beat-valid, cadence-valid,
@@ -211,16 +211,28 @@ were supplied. That failure invalidated the old structural-share and terminal-
 quiet gates; the 18-second reviewed-event and maximum-inactive-tail contract now
 replaces them.
 
-The first hardened-v4 replacement passes 37/37 machine assertions in one turn
+The first reviewed-event replacement passed 37/37 machine assertions in one turn
 with 13 tool calls, 7 operations, and 238,496 total tokens. It uses the exact
 five-shot cadence `[48, 78, 123, 126, 75]`, resolves music source frames
 `6335..6875` with zero endpoint drift, measures -16.03 LUFS, and keeps the final
 one-second encoded window above the -30 LUFS activity floor before ending below
 -18.5 dBFS peak. Its rendered SHA-256 is
 `816ece8a11a69b1048a949420a597a1839726fd8a9bcd58d3fbf7f3d482f824c`.
-Independent cut-neighborhood inspection found clean event boundaries and a
-continuous climax-to-resolution final shot. Human review is pending; machine
-success alone does not make this an accepted sample.
+Human review rejected that exact artifact. The edit spent the five-second build
+on a man looking at his arm, then placed the most climactic action after the
+15-second musical hit under a fading note and silence. No numeric ratings were
+supplied. V6 reverses those last two editorial roles: frames 249..375 must carry
+the strongest sustained action, and frame 375 must cut away to a held low-motion
+resolution with no fighting, firing, collision, destruction, or major robot
+movement under the fade.
+
+The first v6 replacement passes 37/37 machine assertions with 12 tool calls, 7
+operations, and 218,894 total tokens. Its rendered SHA-256 is
+`8c7f34c6633819a3b3f48bbe90a79fbee20fe96df15a6a500be8e7ebcae99d46`.
+Independent cut inspection confirms that frames 249..375 carry the robot action,
+frame 375 removes the robot and cuts to a stable wide team composition, and six
+samples through the remaining fade stay on that calm resolution. Human review
+is pending.
 
 Prepare the pack as above, then run:
 

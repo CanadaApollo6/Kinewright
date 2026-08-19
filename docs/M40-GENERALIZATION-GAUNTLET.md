@@ -289,7 +289,7 @@ effects, fades, or retiming. Those checks still allowed a forced cameo, did not
 fully veto baked source cuts, and did not require a musical endpoint or quiet
 encoded tail.
 
-The active v5 contract retains the useful cadence, source-clean, endpoint, and
+The active v6 contract retains the useful cadence, source-clean, endpoint, and
 encoded-delivery checks while removing the source quota entirely. Tears of
 Steel is the only visual source and must fill the entire 450-frame timeline in
 exactly five disjoint scene-clean shots. The story target is explicit:
@@ -297,7 +297,7 @@ establish the human team and weapon, reveal the mechanical threat, escalate
 destruction, peak on confrontation, and resolve on a held survivor, team, or
 aftermath image. The four internal cuts are locked to reviewed musical events
 at project frames 48, 126, 249, and 375, with the roles first lift, commitment,
-re-entry, and climax. The cue ends within two source frames of its reviewed
+climax drive, and release. The cue ends within two source frames of its reviewed
 endpoint after a short decay. The fixture test proves the five-shot schedule is source-feasible, beat-valid, cadence-valid, and safe
 across the 24 fps source, 25 fps project, and 30 fps music before model tokens
 are spent. Human review still owns story, rhythm, visual finish, audio finish,
@@ -483,9 +483,18 @@ The first replacement under that contract passes 37/37 with 13 calls, 7
 operations, and 238,496 tokens. Its five shot durations are 48, 78, 123, 126,
 and 75 frames; the music range resolves exactly to `6335..6875`; rendered audio
 measures -16.03 LUFS; and the encoded terminal-activity gate passes. Independent
-cut-neighborhood inspection found clean event boundaries and a continuous
-climax-to-resolution final shot. Its SHA-256 is
+Its SHA-256 is
 `816ece8a11a69b1048a949420a597a1839726fd8a9bcd58d3fbf7f3d482f824c`.
-Human review remains pending.
+Human review rejected it: the five-second build stayed on a man looking at his
+arm, then the strongest action began after the 15-second musical hit and played
+under a fading note and silence. No numeric ratings were supplied. V6 now
+requires frames 249..375 to contain the strongest sustained action and frame
+375 to cut away to a held low-motion resolution.
+The first v6 replacement passes 37/37 with 12 calls, 7 operations, and 218,894
+tokens. Its SHA-256 is
+`8c7f34c6633819a3b3f48bbe90a79fbee20fe96df15a6a500be8e7ebcae99d46`.
+Independent cut inspection confirms robot action through frame 374, a clean
+release at frame 375 to a stable wide team composition, and no returning action
+through the six sampled fade frames. Human review remains pending.
 Event/multicam still needs two more machine samples, one more human-accepted
 output, and numeric ratings sufficient to evaluate the 4.0 mean-rating gate.
