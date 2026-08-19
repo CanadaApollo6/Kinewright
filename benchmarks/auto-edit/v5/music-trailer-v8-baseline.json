@@ -99,11 +99,11 @@
     }
   },
   "human_review": {
-    "status": "pending",
+    "status": "reviewed_rejected",
     "review_template": "target/evals/kinewright-eval-20260819-034308-codex/human-review.json",
-    "accepted": null,
+    "accepted": false,
     "ratings": null,
-    "note": "Review must bind to output SHA-256 e5aacda303f81cffb3479455faaf554b4ae46f3ca23a9bbf3296448e93574660. Captions are not applicable."
+    "note": "Owner review found a story-order regression: the opening reused what had previously functioned as a late workshop image, while the ending returned to the earlier man-looking-at-his-arm material. The source sequence 716 -> 221 -> 482 -> 990 -> 309 shuffled one continuous narrative source. No numeric ratings were supplied. Captions are not applicable."
   },
   "benchmark_status": "in_progress"
 }

@@ -145,10 +145,9 @@ until interview/documentary, event/multicam, and music-montage families each
 pass three model samples and their separate human gate.
 
 The recorded `g3` recovery baseline below is the separately pinned v2 music
-pack. The active recovery is v8: an 18-second, single-source Tears of
-Steel trailer cut to reviewed Vanguard musical events, a connected-opening
-role, exact cut-edge proof, reviewed climax/resolution source windows, and a
-short decay. Prepare or verify its inputs
+pack. The active recovery is v9: an 18-second, single-source Tears of Steel
+trailer cut to reviewed Vanguard musical events, five chronologically ordered
+story roles, exact cut-edge proof, and a short decay. Prepare or verify its inputs
 explicitly before the offline run:
 
 ```powershell
@@ -256,7 +255,21 @@ operations, and 347,488 tokens. The encoded artifact opens on the same workshop
 team and machine continued by shot two, while preserving the clean climax and
 release edges. Its SHA-256 is
 `e5aacda303f81cffb3479455faaf554b4ae46f3ca23a9bbf3296448e93574660`.
-Human review of this exact artifact is pending.
+Human review rejected this exact artifact without numeric ratings. Its source
+sequence `716 -> 221 -> 482 -> 990 -> 309` shuffled one continuous story: the
+former ending image became the opening, and the edit ended by returning to the
+earlier man-looking-at-his-arm material.
+
+V9 adds `source_ranges_chronological` plus five ordered semantic source-window
+checks. Disjoint footage is no longer sufficient: every repeated range from the
+narrative asset must move forward on the timeline. The first v9 run passes
+43/43 with 12 calls, 7 operations, and 236,944 tokens. Its source ranges are
+`165..211`, `221..296`, `482..613`, `987..1107`, and `1285..1345`, moving from
+threat to preparation, operator, battle, and aftermath. Independent story and
+cut-edge audits pass. Its SHA-256 is
+`c5e7fe4d3c8184c7cf2f33ae49f6f4f2c42704c1190c44b1db42616d6380cda6`.
+An earlier 40/41 v9 attempt was withheld when its battle select crossed a
+detected source boundary. Human review of the passing v9 artifact is pending.
 
 The first corrected interview preflight is published at
 `benchmarks/auto-edit/v5/baseline.json`: 1/1 sample, 25/25 assertions, 7 tool

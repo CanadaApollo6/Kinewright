@@ -289,21 +289,22 @@ effects, fades, or retiming. Those checks still allowed a forced cameo, did not
 fully veto baked source cuts, and did not require a musical endpoint or quiet
 encoded tail.
 
-The active v8 contract retains the useful cadence, source-clean, endpoint, and
-encoded-delivery checks while removing the source quota entirely. Tears of
-Steel is the only visual source and must fill the entire 450-frame timeline in
-exactly five disjoint scene-clean shots. The story target is explicit:
-establish the human team and weapon, reveal the mechanical threat, escalate
-destruction, peak on confrontation, and resolve on a held survivor, team, or
-aftermath image. The four internal cuts are locked to reviewed musical events
-at project frames 48, 126, 249, and 375, with the roles first lift, commitment,
-climax drive, and release. The cue ends within two source frames of its reviewed
-endpoint after a short decay. Exact cut-neighborhood proof rejects a secondary
-source cut inside an incoming handle, while reviewed source windows keep the
-climax before the release after any repair. The fixture test proves the five-shot schedule is source-feasible, beat-valid, cadence-valid, and safe
-across the 24 fps source, 25 fps project, and 30 fps music before model tokens
-are spent. Human review still owns story, rhythm, visual finish, audio finish,
-and delivery readiness. Captions are explicitly not applicable.
+The active v9 contract retains the useful cadence, source-clean, endpoint, and
+encoded-delivery checks while making story chronology explicit. Tears of Steel
+is the only visual source and must fill the entire 450-frame timeline in exactly
+five disjoint scene-clean shots. Those shots must move forward through five
+reviewed source roles: tower-scale threat, device preparation, operator reveal,
+battle, and later industrial aftermath. The four internal cuts are locked to
+reviewed musical events at project frames 48, 126, 263, and 388. The cue ends
+within two source frames of its reviewed endpoint after a short decay. Exact
+cut-neighborhood proof rejects a secondary source cut inside an incoming
+handle. `source_ranges_chronological` additionally rejects any edit that moves
+backward through the narrative source, even when all selected ranges are
+disjoint. The fixture test proves the five-shot schedule is source-feasible,
+beat-valid, cadence-valid, chronological, and safe across the 24 fps source,
+25 fps project, and 30 fps music before model tokens are spent. Human review
+still owns story, rhythm, visual finish, audio finish, and delivery readiness.
+Captions are explicitly not applicable.
 
 The first machine-passing `g3` preflight is recorded in
 [`benchmarks/auto-edit/v5/music-montage-baseline.json`](../benchmarks/auto-edit/v5/music-montage-baseline.json).
@@ -518,6 +519,19 @@ operations, and 347,488 tokens. The encoded artifact now moves from a wide view
 of the workshop team into their device at frame 48 while preserving the clean
 climax and release edges. Its SHA-256 is
 `e5aacda303f81cffb3479455faaf554b4ae46f3ca23a9bbf3296448e93574660`.
-Human review of this exact artifact is pending.
+Human review rejected it without numeric ratings: the source sequence
+`716 -> 221 -> 482 -> 990 -> 309` put the story out of order, reused the former
+ending as the opening, and ended by returning to the earlier arm-inspection
+material.
+
+V9 makes this failure machine-visible with `source_ranges_chronological` and
+five ordered semantic source windows. The first run passes 43/43 with 12 calls,
+7 operations, and 236,944 tokens. It moves through source ranges `165..211`,
+`221..296`, `482..613`, `987..1107`, and `1285..1345`; independent story and
+cut-neighborhood audits pass. Its SHA-256 is
+`c5e7fe4d3c8184c7cf2f33ae49f6f4f2c42704c1190c44b1db42616d6380cda6`.
+One earlier v9 attempt stopped at 40/41 because its action select crossed a
+detected source boundary and was withheld before human review. The passing v9
+artifact still awaits human acceptance.
 Event/multicam still needs two more machine samples, one more human-accepted
 output, and numeric ratings sufficient to evaluate the 4.0 mean-rating gate.

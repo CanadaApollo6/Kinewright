@@ -218,6 +218,14 @@ pub enum EvalAssertion {
         track: TrackId,
         minimum_separation_frames: TimeCode,
     },
+    /// Require repeated uses of each source asset to move forward in source
+    /// time as the target timeline moves forward. This catches a technically
+    /// disjoint edit that shuffles one narrative source into reverse or
+    /// arbitrary story order.
+    SourceRangesChronological {
+        track: TrackId,
+        minimum_forward_gap_frames: TimeCode,
+    },
     /// Reject selected source envelopes that contain a detected source edit.
     /// Boundaries exactly at the source in/out marks are valid; only interior
     /// scene changes prove that one timeline clip contains multiple source
@@ -2556,6 +2564,10 @@ fn evaluate_assertion(
             track,
             minimum_separation_frames,
         } => evaluate_source_ranges_separated(*track, *minimum_separation_frames, outcome),
+        EvalAssertion::SourceRangesChronological {
+            track,
+            minimum_forward_gap_frames,
+        } => evaluate_source_ranges_chronological(*track, *minimum_forward_gap_frames, outcome),
         EvalAssertion::SourceRangesSceneClean { track, scene_set } => {
             evaluate_source_ranges_scene_clean(*track, scene_set, outcome)
         }
@@ -3441,6 +3453,89 @@ fn evaluate_source_ranges_separated(
             format!(
                 "all media source ranges on track {track_id} are disjoint and separated by at least {} source frames",
                 minimum_separation_frames.0
+            )
+        } else {
+            conflicts.join("; ")
+        },
+    )
+}
+
+fn evaluate_source_ranges_chronological(
+    track_id: TrackId,
+    minimum_forward_gap_frames: TimeCode,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    if minimum_forward_gap_frames.0 < 0 {
+        return assertion_result(
+            "source ranges chronological",
+            false,
+            format!(
+                "minimum forward source-frame gap must be non-negative, observed {}",
+                minimum_forward_gap_frames.0
+            ),
+        );
+    }
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "source ranges chronological",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+    let aliases_by_asset = outcome
+        .context
+        .asset_aliases
+        .iter()
+        .map(|(alias, asset)| (*asset, alias.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut clips = track
+        .clips
+        .iter()
+        .filter(|clip| clip.content.is_media())
+        .collect::<Vec<_>>();
+    clips.sort_by_key(|clip| (clip.timeline_start, clip.id));
+    let mut previous_by_asset =
+        BTreeMap::<AssetId, (kinewright_core::ClipId, TimeCode, TimeCode)>::new();
+    let mut conflicts = Vec::new();
+    for clip in clips {
+        if let Some((previous_clip, previous_start, previous_end)) =
+            previous_by_asset.get(&clip.asset).copied()
+        {
+            let required_start = previous_end.checked_add(minimum_forward_gap_frames);
+            if required_start.is_none_or(|minimum| clip.source_range.start < minimum) {
+                let label = aliases_by_asset.get(&clip.asset).map_or_else(
+                    || format!("asset-{}", clip.asset),
+                    |alias| (*alias).to_owned(),
+                );
+                conflicts.push(format!(
+                    "{label} ({}) moves backward or reuses earlier source time: timeline clip {previous_clip} uses {}..{} before clip {} uses {}..{}; minimum forward gap is {} source frames",
+                    clip.asset,
+                    previous_start.0,
+                    previous_end.0,
+                    clip.id,
+                    clip.source_range.start.0,
+                    clip.source_range.end.0,
+                    minimum_forward_gap_frames.0,
+                ));
+            }
+        }
+        previous_by_asset.insert(
+            clip.asset,
+            (clip.id, clip.source_range.start, clip.source_range.end),
+        );
+    }
+    assertion_result(
+        "source ranges chronological",
+        conflicts.is_empty(),
+        if conflicts.is_empty() {
+            format!(
+                "every repeated source asset on track {track_id} moves forward with at least {} source frames between ranges",
+                minimum_forward_gap_frames.0
             )
         } else {
             conflicts.join("; ")
@@ -6854,6 +6949,10 @@ mod tests {
                 track: TrackId(1),
                 exclusion_set: "reviewed-slates".to_owned(),
             },
+            EvalAssertion::SourceRangesChronological {
+                track: TrackId(1),
+                minimum_forward_gap_frames: TimeCode::ZERO,
+            },
             EvalAssertion::ShotCadenceVariation {
                 track: TrackId(1),
                 minimum_duration_buckets: 3,
@@ -7659,6 +7758,34 @@ mod tests {
         assert!(!result.passed, "{result:?}");
         assert!(result.detail.contains("clip 2"));
         assert!(result.detail.contains("clip 3"));
+    }
+
+    #[test]
+    fn source_range_chronology_rejects_disjoint_but_shuffled_story_order() {
+        let mut final_document = three_cut_document();
+        final_document.tracks[0].clips[0].source_range = TimeCode(120)..TimeCode(180);
+        final_document.tracks[0].clips[1].source_range = TimeCode::ZERO..TimeCode(60);
+        final_document.tracks[0].clips[2].source_range = TimeCode(60)..TimeCode(120);
+        let mut context = FixtureContext::default();
+        context
+            .asset_aliases
+            .insert("narrative".to_owned(), AssetId(1));
+        let shuffled = outcome_for(final_document.clone(), context.clone());
+
+        let separated = evaluate_source_ranges_separated(TrackId(1), TimeCode::ZERO, &shuffled);
+        assert!(separated.passed, "{separated:?}");
+        let chronological =
+            evaluate_source_ranges_chronological(TrackId(1), TimeCode::ZERO, &shuffled);
+        assert!(!chronological.passed, "{chronological:?}");
+        assert!(chronological.detail.contains("moves backward"));
+
+        final_document.tracks[0].clips[0].source_range = TimeCode::ZERO..TimeCode(60);
+        final_document.tracks[0].clips[1].source_range = TimeCode(60)..TimeCode(120);
+        final_document.tracks[0].clips[2].source_range = TimeCode(120)..TimeCode(180);
+        let ordered = outcome_for(final_document, context);
+        let chronological =
+            evaluate_source_ranges_chronological(TrackId(1), TimeCode::ZERO, &ordered);
+        assert!(chronological.passed, "{chronological:?}");
     }
 
     #[test]

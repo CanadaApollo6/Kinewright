@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "kinewright-generalization-v5",
+  "task_id": "g3",
+  "suite_manifest": "benchmarks/auto-edit/v5/manifest.json",
+  "fixture_pack": "benchmarks/auto-edit/v5/music-fixture-pack-v4.json",
+  "ground_truth": "benchmarks/auto-edit/v5/music-ground-truth-v9.json",
+  "scope": {
+    "status": "single_source_trailer_chronological_candidate",
+    "families_executed": ["music_montage"],
+    "families_pending": [],
+    "note": "The v9 machine contract requires the entire single-source story to move forward through five reviewed semantic windows, in addition to the existing cut-edge, musical-ending, and delivery gates. Human review remains required for this exact artifact."
+  },
+  "supersedes": {
+    "contract": "music-ground-truth-v8.json",
+    "output_sha256": "e5aacda303f81cffb3479455faaf554b4ae46f3ca23a9bbf3296448e93574660",
+    "human_status": "reviewed_rejected",
+    "ratings": null,
+    "note": "Owner review found a story-order regression: the opening reused what had previously functioned as a late workshop image, while the ending returned to the earlier man-looking-at-his-arm material. The source sequence 716 -> 221 -> 482 -> 990 -> 309 shuffled one continuous narrative source. No numeric ratings were supplied."
+  },
+  "source_trace": {
+    "run_id": "kinewright-eval-20260819-042348-codex",
+    "filename": "target/evals/kinewright-eval-20260819-042348-codex/results.jsonl",
+    "sha256": "8004039b8cbc9ea4603cf35b598b48afec4a96481b72af94dc770707b39928c7",
+    "machine_report": "target/evals/kinewright-eval-20260819-042348-codex/machine-report.json",
+    "machine_report_sha256": "8ee947b0f74a8af110c256ac088496b6a1efadc03eca54ba568e8c514816eaa6",
+    "note": "The raw trace, machine report, contact sheets, and MP4 remain generated local artifacts under target/evals."
+  },
+  "environment": {
+    "timestamp_utc": "2026-08-19T04:23:48Z",
+    "harness": "codex",
+    "harness_version": "codex-cli 0.148.0",
+    "model": "harness-default",
+    "os": "windows",
+    "architecture": "x86_64",
+    "kinewright_version": "0.1.0"
+  },
+  "machine_summary": {
+    "samples_passed": 1,
+    "samples_total": 1,
+    "assertions_passed": 43,
+    "assertions_total": 43,
+    "turns": 1,
+    "tool_calls": 12,
+    "tool_call_budget": 24,
+    "input_tokens": 235307,
+    "cached_input_tokens": 205824,
+    "uncached_input_tokens": 29483,
+    "output_tokens": 1637,
+    "reasoning_output_tokens": 276,
+    "total_tokens": 236944,
+    "cost_usd": null,
+    "wall_time_ms": 63961,
+    "operations_applied": 7
+  },
+  "deliverable": {
+    "profile": "youtube_1080p",
+    "resolution": [1920, 1080],
+    "duration_frames": 450,
+    "visual_shots": 5,
+    "music_clips": 1,
+    "cut_frames": [48, 126, 263, 388],
+    "shot_durations": [48, 78, 137, 125, 62],
+    "story_source_ranges": [
+      {"role": "threat", "start": 165, "end": 211},
+      {"role": "preparation", "start": 221, "end": 296},
+      {"role": "operator", "start": 482, "end": 613},
+      {"role": "battle", "start": 987, "end": 1107},
+      {"role": "aftermath", "start": 1285, "end": 1345}
+    ],
+    "music_source_range": {"start": 6335, "end": 6875},
+    "proof_sample_frames": [0, 56, 112, 168, 224, 280, 336, 392, 449],
+    "proof_sha256": "3eaa75e1eef44455e1b05db30d6e60016be1f68f1afd6db9707b205c0037cffd",
+    "output_bytes": 19905742,
+    "output_sha256": "c5e7fe4d3c8184c7cf2f33ae49f6f4f2c42704c1190c44b1db42616d6380cda6",
+    "rendered_integrated_lufs_hundredths": -1603,
+    "rendered_sample_peak_dbfs_hundredths": -495,
+    "rendered_terminal_peak_dbfs_hundredths": -1852,
+    "independent_story_audit": {
+      "status": "passed",
+      "note": "The encoded sequence moves forward from the tower-scale robot threat to hands preparing the device, its operator, the battle, and a later dark industrial aftermath. No earlier workshop or arm-inspection image returns at the end."
+    },
+    "independent_cut_audit": {
+      "status": "passed",
+      "cut_neighborhoods": 4,
+      "frames_per_cut": 5,
+      "note": "Every encoded hard cut opens directly on a stable new composition. The battle in-point and later-aftermath release contain no flash, baked source cut, or near-match stutter."
+    }
+  },
+  "machine_gap_audit": {
+    "status": "v9_hardened",
+    "withheld_intermediate": {
+      "run_id": "kinewright-eval-20260819-041843-codex",
+      "output_sha256": "78d52cfed05bb3586672610c489cc1fcea4cf046c483483a92bd710bf3ebda2d",
+      "assertions_passed": 40,
+      "assertions_total": 41,
+      "reason": "The first chronological schedule required 139 project frames from a clean battle scene that supplied only 136. The resulting clip crossed the detector boundary at source frame 1118 and was correctly rejected before human review."
+    },
+    "changes": [
+      "Added source_ranges_chronological, which fails disjoint source ranges when one narrative asset moves backward on the target timeline.",
+      "Pinned all five semantic roles to ordered reviewed source windows while preserving model choice of exact handles.",
+      "Moved the battle in-point to detected beat 263 and the aftermath release to the stronger bar at 388 so both clean source scenes have feasible durations.",
+      "Kept exact cut-neighborhood proof and encoded music-tail validation unchanged."
+    ]
+  },
+  "human_review": {
+    "status": "pending",
+    "review_template": "target/evals/kinewright-eval-20260819-042348-codex/human-review.json",
+    "accepted": null,
+    "ratings": null,
+    "note": "Review must bind to output SHA-256 c5e7fe4d3c8184c7cf2f33ae49f6f4f2c42704c1190c44b1db42616d6380cda6. Captions are not applicable."
+  },
+  "benchmark_status": "in_progress"
+}

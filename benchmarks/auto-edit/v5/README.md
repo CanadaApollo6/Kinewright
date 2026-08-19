@@ -152,11 +152,11 @@ cargo run -p kinewright-agent --bin kinewright-eval -- `
 `g3` measures the missing composition layer: whether the model can survey one
 narrative source visually, choose a deliberate shot sequence, and recut it into
 a trailer against detected musical onsets without hand-authoring frame
-arithmetic. The active v8 contract is an 18-second action arc from Tears of
-Steel. It establishes the human team and weapon, reveals the mechanical threat,
-escalates after a musical valley, peaks on confrontation, and resolves on a held
-image during a short audible decay. It is a recovery target, not
-a completed or human-accepted sample.
+arithmetic. The active v9 contract is an 18-second action arc from Tears of
+Steel. It moves forward through one source chronology: tower-scale mechanical
+threat, device preparation, operator reveal, battle, and a later industrial
+aftermath held through a short audible decay. It is a recovery target, not a
+completed or human-accepted sample.
 
 The recovery contract uses four general agent-facing primitives. One
 coverage-mode `get_source_shot_board` call replaces the redundant broad
@@ -191,17 +191,17 @@ v2 rerun. V2 also anchored the music start without requiring a musical source
 endpoint or a quiet encoded tail, which left the published artifact ending
 inside a phrase.
 
-The active v8 contract keeps v4's single-source correction and fixes the music contract.
+The active v9 contract keeps v4's single-source correction and fixes the music contract.
 Tears of Steel must be the sole visual source and fill the complete video track
 through exactly five disjoint, scene-clean shots. Four human-reviewed musical
 events have explicit editorial roles: first lift, commitment, climax drive, and
-release. The machine gate requires cuts at all four events, nonuniform cadence, a
-held resolution, reviewed climax/resolution source windows, exact cut-edge
-cleanliness, source-audio exclusion, loudness, no more than one second of
-perceptually inactive audio at the end, and independent H.264/AAC MP4 probing.
-The fixture test proves the five-shot schedule is beat-valid, cadence-valid,
-mixed-frame-rate safe, and source-feasible before a model can spend tokens on
-it. Captions are
+release. The machine gate requires cuts at all four events, nonuniform cadence,
+a held resolution, five ordered semantic source windows, strictly forward
+source chronology, exact cut-edge cleanliness, source-audio exclusion,
+loudness, no more than one second of perceptually inactive audio at the end,
+and independent H.264/AAC MP4 probing. The fixture test proves the five-shot
+schedule is beat-valid, cadence-valid, mixed-frame-rate safe, chronological,
+and source-feasible before a model can spend tokens on it. Captions are
 intentionally not part of this instrumental task and are marked not applicable
 instead of receiving an invented score.
 
@@ -258,7 +258,23 @@ and 347,488 total tokens. Its rendered SHA-256 is
 `e5aacda303f81cffb3479455faaf554b4ae46f3ca23a9bbf3296448e93574660`.
 Encoded inspection confirms a workshop-wide opening, a motivated move inward
 to the device at frame 48, and the previously repaired clean climax and release
-cuts. Human review of this exact artifact is pending.
+cuts. Human review rejected this exact artifact: its source sequence
+`716 -> 221 -> 482 -> 990 -> 309` put the story out of order, reused the former
+ending image as its opening, and ended by returning to the earlier man-looking-
+at-his-arm material. No numeric ratings were supplied.
+
+V9 makes that failure machine-visible. `source_ranges_chronological` rejects a
+single narrative asset when later timeline clips move backward or reuse earlier
+source time, even if every range is otherwise disjoint. All five timeline roles
+are also pinned to reviewed, ordered source windows. The first run passes 43/43
+with 12 tool calls, 7 operations, and 236,944 total tokens. Its exact source
+sequence is `165..211 -> 221..296 -> 482..613 -> 987..1107 -> 1285..1345`,
+the output SHA-256 is
+`c5e7fe4d3c8184c7cf2f33ae49f6f4f2c42704c1190c44b1db42616d6380cda6`,
+and independent story and cut-neighborhood audits pass. A preceding 40/41
+attempt was withheld because its battle select crossed a detected source cut;
+it was never presented for human review. Human review of the v9 artifact is
+pending.
 
 Prepare the pack as above, then run:
 
