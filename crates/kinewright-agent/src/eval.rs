@@ -302,6 +302,15 @@ pub enum EvalAssertion {
         latest_early_start: TimeCode,
         earliest_late_start: TimeCode,
     },
+    /// Require the real media clip beginning at one exact project frame to
+    /// come from one named asset and remain fully inside a reviewed source
+    /// window. This pins a semantic role without prescribing the exact edit.
+    ClipSourceWithin {
+        track: TrackId,
+        timeline_start: TimeCode,
+        asset_alias: String,
+        source_window: std::ops::Range<TimeCode>,
+    },
     /// Require the first and last individual media clips on a track to hold
     /// for at least the requested project-frame durations. This deliberately
     /// measures individual clips rather than same-asset phase envelopes.
@@ -2649,6 +2658,18 @@ fn evaluate_assertion(
             *earliest_late_start,
             outcome,
         ),
+        EvalAssertion::ClipSourceWithin {
+            track,
+            timeline_start,
+            asset_alias,
+            source_window,
+        } => evaluate_clip_source_within(
+            *track,
+            *timeline_start,
+            asset_alias,
+            source_window,
+            outcome,
+        ),
         EvalAssertion::EdgeShotHolds {
             track,
             minimum_opening_shot_frames,
@@ -4337,6 +4358,74 @@ fn evaluate_asset_temporal_spread(
                 latest_early_start.0, earliest_late_start.0
             ),
         },
+    )
+}
+
+fn evaluate_clip_source_within(
+    track_id: TrackId,
+    timeline_start: TimeCode,
+    asset_alias: &str,
+    source_window: &std::ops::Range<TimeCode>,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let source_result = |passed: bool, detail: String| {
+        assertion_result("clip source within reviewed window", passed, detail)
+    };
+    if timeline_start.0 < 0 {
+        return source_result(
+            false,
+            format!("timeline start must be non-negative, observed {timeline_start}"),
+        );
+    }
+    if source_window.start.0 < 0 || source_window.end <= source_window.start {
+        return source_result(
+            false,
+            format!(
+                "reviewed source window {}..{} is invalid",
+                source_window.start, source_window.end
+            ),
+        );
+    }
+    let Some(expected_asset) = outcome.context.asset_aliases.get(asset_alias) else {
+        return source_result(false, format!("unknown asset alias {asset_alias:?}"));
+    };
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return source_result(false, format!("track {track_id} does not exist"));
+    };
+    let matching = track
+        .clips
+        .iter()
+        .filter(|clip| clip.content.is_media() && clip.timeline_start == timeline_start)
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return source_result(
+            false,
+            format!(
+                "track {track_id} has {} media clips starting at project frame {timeline_start}; exactly one is required",
+                matching.len()
+            ),
+        );
+    }
+    let clip = matching[0];
+    let asset_matches = clip.asset == *expected_asset;
+    let source_matches = clip.source_range.start >= source_window.start
+        && clip.source_range.end <= source_window.end;
+    source_result(
+        asset_matches && source_matches,
+        format!(
+            "track {track_id} clip {} at project frame {timeline_start} uses asset {} and source {}..{}; required alias {asset_alias:?} ({expected_asset}) fully inside {}..{}",
+            clip.id,
+            clip.asset,
+            clip.source_range.start,
+            clip.source_range.end,
+            source_window.start,
+            source_window.end
+        ),
     )
 }
 
@@ -7793,6 +7882,40 @@ mod tests {
             "unknown track passed: {missing_track:?}"
         );
         assert!(missing_track.detail.contains("does not exist"));
+    }
+
+    #[test]
+    fn clip_source_window_pins_a_timeline_role_without_pinning_exact_frames() {
+        let mut final_document = document();
+        final_document.tracks[0].clips[0] =
+            clip_fixture(1, AssetId(1), 20, 30, 50, ClipContent::Media);
+        let mut context = FixtureContext::default();
+        context
+            .asset_aliases
+            .insert("visual".to_owned(), AssetId(1));
+        let outcome = outcome_for(final_document, context);
+
+        let passing = evaluate_clip_source_within(
+            TrackId(1),
+            TimeCode(20),
+            "visual",
+            &(TimeCode(25)..TimeCode(55)),
+            &outcome,
+        );
+        assert!(passing.passed, "{passing:?}");
+
+        let failing = evaluate_clip_source_within(
+            TrackId(1),
+            TimeCode(20),
+            "visual",
+            &(TimeCode(31)..TimeCode(55)),
+            &outcome,
+        );
+        assert!(
+            !failing.passed,
+            "source escape unexpectedly passed: {failing:?}"
+        );
+        assert!(failing.detail.contains("source 30..50"), "{failing:?}");
     }
 
     #[test]

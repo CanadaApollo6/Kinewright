@@ -152,13 +152,13 @@ cargo run -p kinewright-agent --bin kinewright-eval -- `
 `g3` measures the missing composition layer: whether the model can survey one
 narrative source visually, choose a deliberate shot sequence, and recut it into
 a trailer against detected musical onsets without hand-authoring frame
-arithmetic. The active v6 contract is an 18-second action arc from Tears of
+arithmetic. The active v7 contract is an 18-second action arc from Tears of
 Steel. It establishes the human team and weapon, reveals the mechanical threat,
 escalates after a musical valley, peaks on confrontation, and resolves on a held
 image during a short audible decay. It is a recovery target, not
 a completed or human-accepted sample.
 
-The recovery contract uses three general agent-facing primitives. One
+The recovery contract uses four general agent-facing primitives. One
 coverage-mode `get_source_shot_board` call replaces the redundant broad
 storyboard pass and returns up to 12 scene-derived candidate envelopes sampled
 across the full source range, with start, middle, and end evidence frames.
@@ -176,6 +176,12 @@ source-feasible gapless hard-cut assembly, and returns one opaque
 revision-gated plan. These tools do not choose the footage, invent
 transitions, retime clips, or claim to score taste.
 
+`get_cut_neighborhoods` closes the source-board sampling gap after the edit. It
+renders exact outgoing and incoming frames at every hard cut, measures large
+secondary changes inside each incoming handle, and returns a blocking verdict.
+The model must repair a dirty edge and re-run the proof without exchanging the
+reviewed climax and resolution roles.
+
 The v2 machine gate checked both visual sources, but that was not enough to
 prove a coherent arc: a required-source assertion could force an isolated Big
 Buck Bunny cameo, and the source-scene confidence floor did not fully veto
@@ -185,12 +191,13 @@ v2 rerun. V2 also anchored the music start without requiring a musical source
 endpoint or a quiet encoded tail, which left the published artifact ending
 inside a phrase.
 
-The active v6 contract keeps v4's single-source correction and fixes the music contract.
+The active v7 contract keeps v4's single-source correction and fixes the music contract.
 Tears of Steel must be the sole visual source and fill the complete video track
 through exactly five disjoint, scene-clean shots. Four human-reviewed musical
 events have explicit editorial roles: first lift, commitment, climax drive, and
 release. The machine gate requires cuts at all four events, nonuniform cadence, a
-held resolution, source-audio exclusion, loudness, no more than one second of
+held resolution, reviewed climax/resolution source windows, exact cut-edge
+cleanliness, source-audio exclusion, loudness, no more than one second of
 perceptually inactive audio at the end, and independent H.264/AAC MP4 probing.
 The fixture test proves the five-shot schedule is beat-valid, cadence-valid,
 mixed-frame-rate safe, and source-feasible before a model can spend tokens on
@@ -229,10 +236,18 @@ movement under the fade.
 The first v6 replacement passes 37/37 machine assertions with 12 tool calls, 7
 operations, and 218,894 total tokens. Its rendered SHA-256 is
 `8c7f34c6633819a3b3f48bbe90a79fbee20fe96df15a6a500be8e7ebcae99d46`.
-Independent cut inspection confirms that frames 249..375 carry the robot action,
-frame 375 removes the robot and cuts to a stable wide team composition, and six
-samples through the remaining fade stay on that calm resolution. Human review
-is pending.
+Human review rejected it without numeric ratings: the cut near 0:10 contained a
+two-project-frame flash from one dirty source frame, and the final near-match
+wide-to-wide cut read as a stutter.
+
+V7 adds exact cut-neighborhood inspection with a blocking secondary-change
+verdict, excludes the reviewed dirty source frame, and scores reviewed source
+windows for the climax and resolution roles. The first combined run passes
+39/39 with 12 tool calls, 7 operations, and 234,951 total tokens. Its rendered
+SHA-256 is
+`eeeb83c18af6e5b7af19334b871939aa9bd0853a4eeabc194ae2e05a6cf136f4`.
+Encoded cut inspection confirms a clean frame-249 action in-point and a distinct
+stable close-up at frame 375. Human review of this exact artifact is pending.
 
 Prepare the pack as above, then run:
 

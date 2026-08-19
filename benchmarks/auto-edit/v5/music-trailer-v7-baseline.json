@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "kinewright-generalization-v5",
+  "task_id": "g3",
+  "suite_manifest": "benchmarks/auto-edit/v5/manifest.json",
+  "fixture_pack": "benchmarks/auto-edit/v5/music-fixture-pack-v4.json",
+  "ground_truth": "benchmarks/auto-edit/v5/music-ground-truth-v7.json",
+  "scope": {
+    "status": "single_source_trailer_clean_cut_candidate",
+    "families_executed": ["music_montage"],
+    "families_pending": [],
+    "note": "The v7 machine contract now scores exact cut-edge cleanliness, the reviewed dirty source handle, and the climax/resolution source roles. Human review remains required for this exact artifact."
+  },
+  "supersedes": {
+    "contract": "music-ground-truth-v6.json",
+    "output_sha256": "8c7f34c6633819a3b3f48bbe90a79fbee20fe96df15a6a500be8e7ebcae99d46",
+    "human_status": "reviewed_rejected",
+    "ratings": null,
+    "note": "Owner review found a jarring two-project-frame flash at the cut near 0:10 and a final near-match jump cut that read as a stutter. No numeric ratings were supplied."
+  },
+  "source_trace": {
+    "run_id": "kinewright-eval-20260819-032203-codex",
+    "filename": "target/evals/kinewright-eval-20260819-032203-codex/results.jsonl",
+    "sha256": "4bd2b3202ae8039f836abf14c5d594ff23851c61c4609ddaf0e8f0ac78e29c7f",
+    "machine_report": "target/evals/kinewright-eval-20260819-032203-codex/machine-report.json",
+    "machine_report_sha256": "1fd12df5f3827abd8a73f244836aabbb29c7a9bde6418fbf284dbd123d36ada8",
+    "note": "The raw trace, machine report, contact sheets, and MP4 remain generated local artifacts under target/evals."
+  },
+  "environment": {
+    "timestamp_utc": "2026-08-19T03:22:03Z",
+    "harness": "codex",
+    "harness_version": "codex-cli 0.148.0",
+    "model": "harness-default",
+    "os": "windows",
+    "architecture": "x86_64",
+    "kinewright_version": "0.1.0"
+  },
+  "machine_summary": {
+    "samples_passed": 1,
+    "samples_total": 1,
+    "assertions_passed": 39,
+    "assertions_total": 39,
+    "turns": 1,
+    "tool_calls": 12,
+    "tool_call_budget": 24,
+    "input_tokens": 233343,
+    "cached_input_tokens": 180480,
+    "uncached_input_tokens": 52863,
+    "output_tokens": 1608,
+    "reasoning_output_tokens": 460,
+    "total_tokens": 234951,
+    "cost_usd": null,
+    "wall_time_ms": 63692,
+    "operations_applied": 7
+  },
+  "deliverable": {
+    "profile": "youtube_1080p",
+    "resolution": [1920, 1080],
+    "duration_frames": 450,
+    "visual_shots": 5,
+    "music_clips": 1,
+    "cut_frames": [48, 126, 249, 375],
+    "shot_durations": [48, 78, 123, 126, 75],
+    "climax_source_range": {"start": 987, "end": 1108},
+    "resolution_source_range": {"start": 309, "end": 381},
+    "music_source_range": {"start": 6335, "end": 6875},
+    "proof_sample_frames": [0, 56, 112, 168, 224, 280, 336, 392, 449],
+    "proof_sha256": "56ce5c5dcee3dc6c95390a5dfe737f18ab3eefbf5c2553d4dd8b82df1a8bad65",
+    "output_bytes": 19227743,
+    "output_sha256": "eeeb83c18af6e5b7af19334b871939aa9bd0853a4eeabc194ae2e05a6cf136f4",
+    "rendered_integrated_lufs_hundredths": -1603,
+    "rendered_sample_peak_dbfs_hundredths": -495,
+    "rendered_terminal_peak_dbfs_hundredths": -1852,
+    "independent_cut_audit": {
+      "status": "passed",
+      "cut_neighborhoods": 4,
+      "frames_per_cut": 4,
+      "note": "The encoded frame-249 cut opens directly on one stable action composition with no robot-insert flash. The frame-375 cut moves from the action wide to a distinct calm close-up and remains in that shot."
+    }
+  },
+  "machine_gap_audit": {
+    "status": "v7_hardened",
+    "withheld_intermediates": [
+      {
+        "output_sha256": "44363afa7c06247e1bc9e49baebc85118726c2844416e3f61a81abb5e0c1fe041",
+        "reason": "The model invoked cut inspection but still approved the two-frame flash; the inspector lacked a blocking structured verdict."
+      },
+      {
+        "output_sha256": "33092b07e11b793e78691b0c9f4c0a9378fdd4ad9501193b6545deb4b1d2e4096",
+        "reason": "The blocking edge verdict removed the flash but the repair exchanged climax and resolution roles, placing action under the final fade."
+      }
+    ],
+    "changes": [
+      "Added get_cut_neighborhoods with exact outgoing/incoming evidence and a blocking secondary-change verdict.",
+      "Added the manually reviewed one-frame dirty source exclusion at 986..987.",
+      "Added generic clip_source_within assertions for the reviewed climax and resolution source windows.",
+      "Required the model to recheck cut cleanliness without trading away the editorial role of either shot."
+    ]
+  },
+  "human_review": {
+    "status": "pending",
+    "review_template": "target/evals/kinewright-eval-20260819-032203-codex/human-review.json",
+    "accepted": null,
+    "ratings": null,
+    "note": "Review must bind to output SHA-256 eeeb83c18af6e5b7af19334b871939aa9bd0853a4eeabc194ae2e05a6cf136f4. Captions are not applicable."
+  },
+  "benchmark_status": "in_progress"
+}

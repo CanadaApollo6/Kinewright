@@ -145,8 +145,9 @@ until interview/documentary, event/multicam, and music-montage families each
 pass three model samples and their separate human gate.
 
 The recorded `g3` recovery baseline below is the separately pinned v2 music
-pack. The active recovery is v6: an 18-second, single-source Tears of
-Steel trailer cut to reviewed Vanguard musical events and a short decay. Prepare or verify its inputs
+pack. The active recovery is v7: an 18-second, single-source Tears of
+Steel trailer cut to reviewed Vanguard musical events, exact cut-edge proof,
+reviewed climax/resolution source windows, and a short decay. Prepare or verify its inputs
 explicitly before the offline run:
 
 ```powershell
@@ -234,9 +235,17 @@ and makes frame 375 a mandatory release into low-motion resolution.
 The first v6 replacement passes 37/37 with 12 calls, 7 operations, and 218,894
 tokens. Its SHA-256 is
 `8c7f34c6633819a3b3f48bbe90a79fbee20fe96df15a6a500be8e7ebcae99d46`.
-Independent cut inspection confirms robot action through frame 374, a clean
-release at frame 375 to a stable wide team composition, and no returning action
-through the six sampled frames under the fade. Human review remains pending.
+Human review rejected it without numeric ratings: the cut near 0:10 contained a
+two-project-frame flash from one dirty source frame, and the final near-match
+wide-to-wide cut read as a stutter.
+
+V7 makes exact cut edges model-visible and machine-scored. Its first combined
+run passes 39/39 with 12 calls, 7 operations, and 234,951 tokens. The reviewed
+action window remains at frames 249..375, the release uses a distinct calm
+close-up, and exact encoded inspection finds neither the flash nor the final
+stutter. The candidate SHA-256 is
+`eeeb83c18af6e5b7af19334b871939aa9bd0853a4eeabc194ae2e05a6cf136f4`.
+Human review of this exact artifact is pending.
 
 The first corrected interview preflight is published at
 `benchmarks/auto-edit/v5/baseline.json`: 1/1 sample, 25/25 assertions, 7 tool

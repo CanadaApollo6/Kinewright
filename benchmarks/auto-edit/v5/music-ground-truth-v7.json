@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "montage_id": "tears-of-steel-single-source-vanguard-clean-cut-release",
+  "project_fps": {
+    "numerator": 25,
+    "denominator": 1
+  },
+  "project_resolution": {
+    "width": 1920,
+    "height": 1080
+  },
+  "timeline_range": {
+    "start": 0,
+    "end": 450
+  },
+  "video_track_id": 1,
+  "audio_track_id": 2,
+  "visual_asset_ids": [
+    "tears-of-steel-battle-720p"
+  ],
+  "music_asset_id": "vanguard-scott-buckley",
+  "minimum_visual_shots": 5,
+  "maximum_visual_shots": 5,
+  "minimum_shot_frames": 40,
+  "maximum_shot_frames": 130,
+  "minimum_beat_strength_percent": 10.0,
+  "beat_alignment_tolerance_frames": 1,
+  "minimum_visual_assets_used": 1,
+  "minimum_clips_per_visual_asset": 5,
+  "minimum_project_frames_per_visual_asset": 450,
+  "latest_early_start_per_visual_asset": 125,
+  "earliest_late_start_per_visual_asset": 375,
+  "minimum_source_separation_frames": 0,
+  "source_scene_minimum_confidence_percent": 10.0,
+  "source_exclusions": [
+    {
+      "asset_id": "tears-of-steel-battle-720p",
+      "source_range": { "start": 986, "end": 987 },
+      "reason": "manually reviewed one-source-frame robot insert that creates a two-project-frame flash before the intended wide action shot"
+    }
+  ],
+  "minimum_duration_buckets": 3,
+  "duration_bucket_frames": 15,
+  "maximum_similar_run": 3,
+  "similar_tolerance_frames": 6,
+  "minimum_clean_selectable_project_frames": 600,
+  "selection_headroom_frames": 150,
+  "meter_beats": 4,
+  "phrase_bars": 4,
+  "reviewed_music_events": [
+    {
+      "project_frame": 48,
+      "role": "first lift: widen the world or reveal the team's scale"
+    },
+    {
+      "project_frame": 126,
+      "role": "commitment: move from setup into unmistakable threat or action"
+    },
+    {
+      "project_frame": 249,
+      "role": "climax drive: begin the strongest sustained action and complete its visual peak before frame 375"
+    },
+    {
+      "project_frame": 375,
+      "role": "release: cut away from action to a held low-motion aftermath, survivor, or environmental resolution"
+    }
+  ],
+  "climax_source_window": {
+    "start": 987,
+    "end": 1128
+  },
+  "resolution_source_window": {
+    "start": 309,
+    "end": 716
+  },
+  "music_preferred_source_start": 6334,
+  "music_preferred_source_end": 6875,
+  "music_maximum_end_drift_frames": 2,
+  "minimum_opening_shot_frames": 40,
+  "minimum_closing_shot_frames": 70,
+  "rendered_tail_window_frames": 5,
+  "rendered_tail_maximum_peak_dbfs_hundredths": -1600,
+  "rendered_activity_window_frames": 25,
+  "rendered_activity_minimum_integrated_lufs_hundredths": -3000,
+  "maximum_trailing_inactive_frames": 25,
+  "story_brief": "Recut one visual world into a concise action trailer: establish the human team and their weapon, reveal the mechanical threat, build into the strongest sustained action during frames 249..375, then cut away from all action at frame 375 to a held low-motion resolution during the musical decay. The fourth shot must carry the climax and the fifth must release it; do not place fighting, firing, collision, or major robot movement under the final fade. Every hard cut must have clean incoming handles, and the release must use a composition distinct enough from the outgoing climax that it cannot read as a temporal stutter. Every selected shot must advance that same conflict. The reviewed musical events are editorial targets, not interchangeable metronome ticks. There is no second source quota and no parallel-world conceit.",
+  "attribution": [
+    "Tears of Steel clip, (CC) Blender Foundation | mango.blender.org",
+    "'Vanguard' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
+  ]
+}

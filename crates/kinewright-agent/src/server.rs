@@ -76,6 +76,7 @@ const STORYBOARD_DEFAULT_CELL_WIDTH: u32 = 320;
 const SHOT_BOARD_DEFAULT_CANDIDATES: u8 = 6;
 const SHOT_BOARD_MAX_CANDIDATES: u8 = 12;
 const SHOT_BOARD_EVIDENCE_PER_CANDIDATE: u8 = 3;
+const DEFAULT_MAXIMUM_CUT_SECONDARY_CHANGE_BASIS_POINTS: u16 = 1_200;
 const STORYBOARD_COLUMNS: u32 = 4;
 const STORYBOARD_GUTTER: u32 = 4;
 const DEFAULT_CONFIRMATION_TIMEOUT: Duration = Duration::from_mins(1);
@@ -643,6 +644,10 @@ impl KinewrightMcp {
             "get_source_shot_board" => {
                 let args: SourceShotBoardArgs = decode_args("get_source_shot_board", arguments)?;
                 self.source_shot_board(&args)
+            }
+            "get_cut_neighborhoods" => {
+                let args: CutNeighborhoodsArgs = decode_args("get_cut_neighborhoods", arguments)?;
+                self.cut_neighborhoods(&args)
             }
             "search_media" => {
                 let args: MediaSearchArgs = decode_args("search_media", arguments)?;
@@ -2259,6 +2264,221 @@ impl KinewrightMcp {
     fn timeline_storyboard(&self, args: StoryboardArgs) -> Result<CallToolResult, McpError> {
         let (revision, document) = self.snapshot()?;
         self.storyboard_for_document(revision, &document, args, "timeline storyboard", None)
+    }
+
+    /// Render exact frames on both sides of contiguous media cuts.
+    ///
+    /// Uniform storyboards are intentionally poor at finding one-frame flashes
+    /// and near-match jump cuts. This inspector keeps the cut-local evidence
+    /// compact and maps every cell back to its exact project frame.
+    #[allow(clippy::too_many_lines)]
+    fn cut_neighborhoods(&self, args: &CutNeighborhoodsArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let Some(track) = document
+            .tracks
+            .iter()
+            .find(|track| track.id == args.track_id)
+        else {
+            return Ok(error_text(format!(
+                "track {} does not exist",
+                args.track_id
+            )));
+        };
+        if track.kind != TrackKind::Video {
+            return Ok(error_text(format!(
+                "track {} is not a video track",
+                args.track_id
+            )));
+        }
+
+        let frames_before = args.frames_before.unwrap_or(1);
+        let frames_after = args.frames_after.unwrap_or(3);
+        if !(1..=6).contains(&frames_before) || !(1..=6).contains(&frames_after) {
+            return Ok(error_text(
+                "frames_before and frames_after must be in 1..=6",
+            ));
+        }
+        let cut_count = args.cut_count.unwrap_or(12);
+        if !(1..=12).contains(&cut_count) {
+            return Ok(error_text("cut_count must be in 1..=12"));
+        }
+        let max_width = args.max_width.unwrap_or(160);
+        if !(64..=THUMBNAIL_MAX_WIDTH).contains(&max_width) {
+            return Ok(error_text(format!(
+                "max_width must be in 64..={THUMBNAIL_MAX_WIDTH}"
+            )));
+        }
+        let maximum_secondary_change_basis_points = args
+            .maximum_secondary_change_basis_points
+            .unwrap_or(DEFAULT_MAXIMUM_CUT_SECONDARY_CHANGE_BASIS_POINTS);
+        if maximum_secondary_change_basis_points > 10_000 {
+            return Ok(error_text(
+                "maximum_secondary_change_basis_points must be in 0..=10000",
+            ));
+        }
+
+        let mut clips = track
+            .clips
+            .iter()
+            .filter(|clip| clip.content.is_media())
+            .collect::<Vec<_>>();
+        clips.sort_by_key(|clip| (clip.timeline_start, clip.id));
+        let mut cuts = Vec::new();
+        for pair in clips.windows(2) {
+            let outgoing = pair[0];
+            let incoming = pair[1];
+            let Some(outgoing_end) = document
+                .clip_duration(outgoing)
+                .ok()
+                .and_then(|duration| outgoing.timeline_start.checked_add(duration))
+            else {
+                return Ok(error_text(format!(
+                    "could not map clip {} duration",
+                    outgoing.id
+                )));
+            };
+            if outgoing_end == incoming.timeline_start {
+                cuts.push((incoming.timeline_start, outgoing.id, incoming.id));
+            }
+        }
+
+        let cut_offset = args.cut_offset.unwrap_or_default();
+        if cut_offset > cuts.len() {
+            return Ok(error_text(format!(
+                "cut_offset {cut_offset} exceeds {} contiguous media cuts",
+                cuts.len()
+            )));
+        }
+        let selected = cuts
+            .iter()
+            .enumerate()
+            .skip(cut_offset)
+            .take(usize::from(cut_count))
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            return Ok(success_structured(
+                format!(
+                    "track {} has no selected contiguous media cuts",
+                    args.track_id
+                ),
+                serde_json::json!({
+                    "timeline_revision": revision.0,
+                    "track_id": args.track_id.0,
+                    "total_cut_count": cuts.len(),
+                    "cut_offset": cut_offset,
+                    "returned_cut_count": 0,
+                    "cuts": [],
+                    "cells": [],
+                }),
+            ));
+        }
+
+        let returned_cut_count = selected.len();
+        let mut images = Vec::with_capacity(
+            selected.len() * (usize::from(frames_before) + usize::from(frames_after)),
+        );
+        let mut cells = Vec::with_capacity(images.capacity());
+        let mut cut_manifest = Vec::with_capacity(selected.len());
+        let mut issues = Vec::new();
+        for &(cut_index, &(cut_frame, outgoing_clip, incoming_clip)) in &selected {
+            let first_cell = cells.len() + 1;
+            let first_image = images.len();
+            let mut offsets =
+                Vec::with_capacity(usize::from(frames_before) + usize::from(frames_after));
+            for offset in -i64::from(frames_before)..i64::from(frames_after) {
+                let project_frame = TimeCode(cut_frame.0.saturating_add(offset));
+                if project_frame < TimeCode::ZERO || project_frame >= document.duration {
+                    continue;
+                }
+                match self.analysis.thumbnail_for_document(
+                    Arc::clone(&document),
+                    project_frame,
+                    max_width,
+                ) {
+                    Ok(image) => images.push(image),
+                    Err(error) => return Ok(error_text(error.to_string())),
+                }
+                offsets.push(offset);
+                cells.push(serde_json::json!({
+                    "cell": cells.len() + 1,
+                    "cut_index": cut_index,
+                    "cut_frame": cut_frame.0,
+                    "project_frame": project_frame.0,
+                    "offset_from_cut": offset,
+                    "side": if offset < 0 { "outgoing" } else { "incoming" },
+                }));
+            }
+            let changes = images[first_image..]
+                .windows(2)
+                .zip(offsets.windows(2))
+                .map(|(pair, offsets)| {
+                    let change_basis_points =
+                        rgba_mean_absolute_difference_basis_points(&pair[0], &pair[1])
+                            .unwrap_or(10_000);
+                    let secondary_change = offsets[0] >= 0
+                        && change_basis_points > maximum_secondary_change_basis_points;
+                    if secondary_change {
+                        issues.push(serde_json::json!({
+                            "cut_index": cut_index,
+                            "cut_frame": cut_frame.0,
+                            "kind": "suspected_internal_cut_after_in_point",
+                            "from_offset": offsets[0],
+                            "to_offset": offsets[1],
+                            "change_basis_points": change_basis_points,
+                            "maximum_basis_points": maximum_secondary_change_basis_points,
+                        }));
+                    }
+                    serde_json::json!({
+                        "from_offset": offsets[0],
+                        "to_offset": offsets[1],
+                        "change_basis_points": change_basis_points,
+                        "secondary_change": secondary_change,
+                    })
+                })
+                .collect::<Vec<_>>();
+            cut_manifest.push(serde_json::json!({
+                "cut_index": cut_index,
+                "project_frame": cut_frame.0,
+                    "outgoing_clip_id": outgoing_clip.0,
+                    "incoming_clip_id": incoming_clip.0,
+                "first_cell": first_cell,
+                "last_cell": cells.len(),
+                "adjacent_changes": changes,
+            }));
+        }
+
+        let sheet = compose_contact_sheet(&images)?;
+        let png = encode_png(&sheet)?;
+        let next_cut_offset = (cut_offset + returned_cut_count < cuts.len())
+            .then_some(cut_offset + returned_cut_count);
+        let manifest = serde_json::json!({
+            "timeline_revision": revision.0,
+            "track_id": args.track_id.0,
+            "total_cut_count": cuts.len(),
+            "cut_offset": cut_offset,
+            "returned_cut_count": returned_cut_count,
+            "next_cut_offset": next_cut_offset,
+            "frames_before": frames_before,
+            "frames_after": frames_after,
+            "maximum_secondary_change_basis_points": maximum_secondary_change_basis_points,
+            "clean": issues.is_empty(),
+            "issue_count": issues.len(),
+            "issues": issues,
+            "cuts": cut_manifest,
+            "cells": cells,
+            "sheet": {"width": sheet.width, "height": sheet.height},
+        });
+        let status = if manifest["clean"] == true {
+            "CUT EDGE REVIEW PASSED"
+        } else {
+            "CUT EDGE REVIEW FAILED"
+        };
+        let mut result = CallToolResult::success(vec![
+            ContentBlock::text(format!("{status}: cut neighborhoods {manifest}")),
+            ContentBlock::image(BASE64.encode(png), "image/png"),
+        ]);
+        result.structured_content = Some(manifest);
+        Ok(result)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -5085,6 +5305,34 @@ struct SourceStoryboardArgs {
     max_width: Option<u32>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CutNeighborhoodsArgs {
+    /// Stable video track id shown by `get_timeline_state`.
+    track_id: TrackId,
+    /// Number of exact outgoing frames before each cut. Defaults to 1; valid range 1..=6.
+    #[serde(default)]
+    frames_before: Option<u8>,
+    /// Number of exact incoming frames starting at each cut. Defaults to 3; valid range 1..=6.
+    #[serde(default)]
+    frames_after: Option<u8>,
+    /// First contiguous media cut to inspect. Defaults to zero.
+    #[serde(default)]
+    cut_offset: Option<usize>,
+    /// Maximum contiguous media cuts to inspect. Defaults to 12; valid range 1..=12.
+    #[serde(default)]
+    cut_count: Option<u8>,
+    /// Largest allowed mean pixel change between adjacent incoming frames,
+    /// in basis points of full RGB range. Defaults to 1200. A larger change
+    /// within the first incoming frames is reported as a likely dirty handle
+    /// or baked source cut, while the intentional outgoing-to-incoming cut is
+    /// measured but never rejected by this threshold.
+    #[serde(default)]
+    maximum_secondary_change_basis_points: Option<u16>,
+    /// Maximum width of each rendered cell. Defaults to 160 and is capped at 512.
+    #[serde(default)]
+    max_width: Option<u32>,
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum ShotBoardCandidateSelection {
@@ -5943,6 +6191,12 @@ fn inspector_tools() -> Vec<Tool> {
             "get_source_shot_board",
             "Return scene-derived source-shot candidates for one video asset and render start/middle/end evidence cells for each. By default candidates are sampled across the complete requested source range so one bounded call exposes the whole asset; use candidate_selection=page only for consecutive pagination. An optional inclusive minimum_duration_frames filters short candidates while preserving original candidate ids and indexes. minimum_confidence_basis_points controls scene-boundary sensitivity (0..=10000, default 1000); raise it for motion-heavy footage when weak differences over-segment a continuous shot. The manifest reports selection strategy, selected positions, requested, filtered, returned, and total counts. Candidate ids, exact half-open source ranges, and scene-boundary confidence provenance are stable; this inspector never changes the timeline.",
             schema_object::<SourceShotBoardArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_cut_neighborhoods",
+            "Render exact outgoing and incoming frames around every selected contiguous media cut on one video track. Use this after editing to catch one-frame flashes, dirty source handles, baked cuts immediately after an in-point, and near-match hard cuts that read as a stutter. It measures adjacent-frame RGB change, marks likely secondary cuts inside the incoming handle, and returns an explicit clean boolean plus issues; the intentional hard cut itself is measured but never rejected. The manifest maps every cell to its exact project frame and clip boundary; this inspector never changes the timeline.",
+            schema_object::<CutNeighborhoodsArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -7510,6 +7764,42 @@ fn coverage_candidate_positions(eligible_count: usize, requested_count: usize) -
         .collect()
 }
 
+fn rgba_mean_absolute_difference_basis_points(
+    left: &kinewright_core::RgbaImage,
+    right: &kinewright_core::RgbaImage,
+) -> Option<u16> {
+    if left.width != right.width
+        || left.height != right.height
+        || left.pixels.len() != right.pixels.len()
+        || !left.pixels.len().is_multiple_of(4)
+    {
+        return None;
+    }
+    let mut difference = 0_u128;
+    let mut channels = 0_u128;
+    for (left_pixel, right_pixel) in left
+        .pixels
+        .chunks_exact(4)
+        .zip(right.pixels.chunks_exact(4))
+    {
+        for channel in 0..3 {
+            difference = difference.saturating_add(u128::from(
+                left_pixel[channel].abs_diff(right_pixel[channel]),
+            ));
+            channels = channels.saturating_add(1);
+        }
+    }
+    if channels == 0 {
+        return None;
+    }
+    let denominator = channels.saturating_mul(u128::from(u8::MAX));
+    let rounded = difference
+        .saturating_mul(10_000)
+        .saturating_add(denominator / 2)
+        / denominator;
+    Some(u16::try_from(rounded).unwrap_or(10_000).min(10_000))
+}
+
 fn compose_contact_sheet(
     images: &[kinewright_core::RgbaImage],
 ) -> Result<kinewright_core::RgbaImage, McpError> {
@@ -7877,6 +8167,7 @@ mod tests {
         timeline_beat_error: Option<String>,
         beat_requests: Mutex<Vec<AssetId>>,
         scene_requests: Mutex<Vec<AssetId>>,
+        thumbnail_frames: BTreeMap<TimeCode, RgbaImage>,
     }
 
     impl Playback for NoopMedia {
@@ -8009,9 +8300,12 @@ mod tests {
         fn thumbnail_for_document(
             &self,
             _document: Arc<Document>,
-            _t: TimeCode,
+            t: TimeCode,
             _max_w: u32,
         ) -> Result<RgbaImage, MediaError> {
+            if let Some(image) = self.thumbnail_frames.get(&t) {
+                return Ok(image.clone());
+            }
             Ok(RgbaImage {
                 width: 2,
                 height: 2,
@@ -10112,6 +10406,37 @@ mod tests {
     }
 
     #[test]
+    fn rgba_difference_reports_full_range_and_rejects_mismatched_images() {
+        let black = kinewright_core::RgbaImage {
+            width: 1,
+            height: 1,
+            pixels: vec![0, 0, 0, 255],
+        };
+        let white = kinewright_core::RgbaImage {
+            width: 1,
+            height: 1,
+            pixels: vec![255, 255, 255, 255],
+        };
+        let mismatched = kinewright_core::RgbaImage {
+            width: 2,
+            height: 1,
+            pixels: vec![0; 8],
+        };
+        assert_eq!(
+            rgba_mean_absolute_difference_basis_points(&black, &black),
+            Some(0)
+        );
+        assert_eq!(
+            rgba_mean_absolute_difference_basis_points(&black, &white),
+            Some(10_000)
+        );
+        assert_eq!(
+            rgba_mean_absolute_difference_basis_points(&black, &mismatched),
+            None
+        );
+    }
+
+    #[test]
     fn source_storyboard_maps_cells_to_exact_source_frames_without_mutating_timeline() {
         let (core, playback, analysis) = fixture();
         let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
@@ -10236,6 +10561,202 @@ mod tests {
             served
                 .iter()
                 .all(|tool| tool.name != "get_source_storyboard")
+        );
+    }
+
+    #[test]
+    fn cut_neighborhoods_maps_exact_cut_edges_and_does_not_mutate() {
+        let (core, playback, analysis) = fixture();
+        core.request(Command::Do(Operation::SplitClip {
+            clip: ClipId(1),
+            at: TimeCode(20),
+        }))
+        .unwrap();
+        core.request(Command::Do(Operation::SplitClip {
+            clip: ClipId(2),
+            at: TimeCode(40),
+        }))
+        .unwrap();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let before = service.document().unwrap();
+        let result = service
+            .cut_neighborhoods(&CutNeighborhoodsArgs {
+                track_id: TrackId(1),
+                frames_before: Some(1),
+                frames_after: Some(3),
+                cut_offset: None,
+                cut_count: None,
+                maximum_secondary_change_basis_points: None,
+                max_width: Some(64),
+            })
+            .unwrap();
+
+        assert_eq!(result.is_error, Some(false));
+        assert!(
+            result
+                .content
+                .iter()
+                .any(|block| block.as_image().is_some())
+        );
+        let manifest = result.structured_content.unwrap();
+        assert_eq!(manifest["timeline_revision"], 2);
+        assert_eq!(manifest["track_id"], 1);
+        assert_eq!(manifest["total_cut_count"], 2);
+        assert_eq!(manifest["returned_cut_count"], 2);
+        assert_eq!(manifest["clean"], true);
+        assert_eq!(manifest["issue_count"], 0);
+        assert_eq!(manifest["sheet"], json!({"width": 20, "height": 8}));
+        let cells = manifest["cells"].as_array().unwrap();
+        assert_eq!(
+            cells
+                .iter()
+                .map(|cell| cell["project_frame"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            [19, 20, 21, 22, 39, 40, 41, 42]
+        );
+        assert_eq!(cells[0]["side"], "outgoing");
+        assert_eq!(cells[4]["side"], "outgoing");
+        assert!(cells[1..4].iter().all(|cell| cell["side"] == "incoming"));
+        assert!(cells[5..8].iter().all(|cell| cell["side"] == "incoming"));
+        assert_eq!(&*service.document().unwrap(), &*before);
+    }
+
+    #[test]
+    fn cut_neighborhoods_blocks_a_secondary_change_inside_the_incoming_handle() {
+        let (core, playback, _) = fixture();
+        core.request(Command::Do(Operation::SplitClip {
+            clip: ClipId(1),
+            at: TimeCode(20),
+        }))
+        .unwrap();
+        let black = RgbaImage {
+            width: 2,
+            height: 2,
+            pixels: [0, 0, 0, 255].repeat(4),
+        };
+        let white = RgbaImage {
+            width: 2,
+            height: 2,
+            pixels: [255, 255, 255, 255].repeat(4),
+        };
+        let analysis = Arc::new(NoopMedia {
+            thumbnail_frames: BTreeMap::from([
+                (TimeCode(20), black.clone()),
+                (TimeCode(21), black),
+                (TimeCode(22), white),
+            ]),
+            ..NoopMedia::default()
+        });
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let result = service
+            .cut_neighborhoods(&CutNeighborhoodsArgs {
+                track_id: TrackId(1),
+                frames_before: Some(1),
+                frames_after: Some(3),
+                cut_offset: None,
+                cut_count: Some(1),
+                maximum_secondary_change_basis_points: Some(1_200),
+                max_width: Some(64),
+            })
+            .unwrap();
+
+        assert_eq!(result.is_error, Some(false));
+        assert!(
+            result.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .starts_with("CUT EDGE REVIEW FAILED")
+        );
+        let manifest = result.structured_content.unwrap();
+        assert_eq!(manifest["clean"], false);
+        assert_eq!(manifest["issue_count"], 1);
+        assert_eq!(manifest["issues"][0]["cut_frame"], 20);
+        assert_eq!(manifest["issues"][0]["from_offset"], 1);
+        assert_eq!(manifest["issues"][0]["to_offset"], 2);
+        assert_eq!(manifest["issues"][0]["change_basis_points"], 10_000);
+    }
+
+    #[test]
+    fn cut_neighborhoods_rejects_invalid_tracks_and_bounds() {
+        let (core, playback, analysis) = fixture();
+        core.request(Command::Do(Operation::AddTrack {
+            track: Track {
+                id: TrackId(2),
+                kind: TrackKind::Audio,
+                sync_lock: true,
+                clips: Vec::new(),
+            },
+        }))
+        .unwrap();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        for args in [
+            CutNeighborhoodsArgs {
+                track_id: TrackId(999),
+                frames_before: None,
+                frames_after: None,
+                cut_offset: None,
+                cut_count: None,
+                maximum_secondary_change_basis_points: None,
+                max_width: None,
+            },
+            CutNeighborhoodsArgs {
+                track_id: TrackId(2),
+                frames_before: None,
+                frames_after: None,
+                cut_offset: None,
+                cut_count: None,
+                maximum_secondary_change_basis_points: None,
+                max_width: None,
+            },
+            CutNeighborhoodsArgs {
+                track_id: TrackId(1),
+                frames_before: Some(0),
+                frames_after: None,
+                cut_offset: None,
+                cut_count: None,
+                maximum_secondary_change_basis_points: None,
+                max_width: None,
+            },
+            CutNeighborhoodsArgs {
+                track_id: TrackId(1),
+                frames_before: None,
+                frames_after: None,
+                cut_offset: None,
+                cut_count: Some(13),
+                maximum_secondary_change_basis_points: None,
+                max_width: None,
+            },
+            CutNeighborhoodsArgs {
+                track_id: TrackId(1),
+                frames_before: None,
+                frames_after: None,
+                cut_offset: None,
+                cut_count: None,
+                maximum_secondary_change_basis_points: Some(10_001),
+                max_width: None,
+            },
+        ] {
+            assert_eq!(
+                service.cut_neighborhoods(&args).unwrap().is_error,
+                Some(true)
+            );
+        }
+    }
+
+    #[test]
+    fn cut_neighborhoods_is_internal_registry_capability_not_compact_tool() {
+        let registry = KinewrightMcp::capability_tools().unwrap();
+        assert!(
+            registry
+                .iter()
+                .any(|tool| tool.name == "get_cut_neighborhoods")
+        );
+        let served = KinewrightMcp::served_tools().unwrap();
+        assert!(
+            served
+                .iter()
+                .all(|tool| tool.name != "get_cut_neighborhoods")
         );
     }
 

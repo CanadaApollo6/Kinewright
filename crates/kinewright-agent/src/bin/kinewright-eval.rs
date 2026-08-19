@@ -1159,7 +1159,7 @@ fn event_multicam_assertions() -> Vec<EvalAssertion> {
 
 fn music_montage_definition() -> EvalDefinition {
     let truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
-        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v6.json"
+        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v7.json"
     ))
     .expect("checked-in v5 music ground truth must parse");
     EvalDefinition {
@@ -1167,7 +1167,7 @@ fn music_montage_definition() -> EvalDefinition {
         rationale: "Measures whether the agent can inspect one licensed narrative source, recut it into a coherent character-led trailer, and resolve a deliberate beat-aware edit on a trailer cue's authored final tag.",
         fixture_builder: fixture_real_music_montage,
         prompts: &[
-            "Create a finished 18-second 1080p YouTube trailer edit using Tears of Steel as the only visual source and Vanguard on music-bed as the only audio. This is one conflict, not a montage of unrelated worlds. Build a clear action arc: establish the human team and its weapon, reveal the mechanical threat, drive into the strongest action before the final musical hit, then cut away to a held resolution during the decay. Open exactly these six capability schemas in one get_capability call: get_source_shot_board, plan_music_fit, get_music_structure, plan_beat_montage, plan_audio_normalization, and get_editorial_readiness. Do not call get_source_storyboard. Call get_source_shot_board exactly once over the full Tears of Steel source with candidate_selection coverage, minimum_duration_frames 30, minimum_confidence_basis_points 1000, candidate_count 12, and max_width 160. Use that evidence to choose scene-clean shots and never cross a returned scene boundary. First call plan_music_fit on audio track 2 with music-bed, project range 0..450, preferred source start 6334, preferred source end 6875, maximum end drift 2 frames, minimum strength 10 percent, and overwrite mode. Inspect and commit the resolved endpoint-anchored plan. Keep it unchanged as the sole audio: no loop, retime, duplication, source-video audio, or later trim. The shorter endpoint retains an audible decay without a long perceptually dead tail. Call get_music_structure over 0..450 with minimum strength 10 percent, meter 4, 4 bars per phrase, and structural_only=false. The returned beat labels are heuristic evidence, not an editing score. Use exactly these four reviewed musical events as the internal cut anchors and do not substitute ordinary beats: frame 48 is the first lift and must widen the world or reveal team scale; frame 126 is commitment and must move from setup into unmistakable threat or action; frame 249 begins the climax drive and must start the strongest sustained action, which must visually peak before frame 375; frame 375 is the release and must cut away from all action to a held low-motion aftermath, survivor, or environmental resolution. Choose exactly five non-overlapping Tears of Steel shots in final story order. Every shot must advance setup, threat, escalation, climax, or resolution. Shot four, timeline 249..375, must contain fighting, firing, collision, destruction, or major robot movement; do not spend it on a person merely inspecting or holding a device. Shot five, timeline 375..450, must be visibly calmer than shot four and contain no fighting, firing, collision, destruction, or major robot movement under the fading note. The exact cut schedule creates shot durations 48, 78, 123, 126, and 75 frames; select source envelopes long enough for those durations and hold the final resolution image through frame 450. Call plan_beat_montage on video track 1 over 0..450 with shot bounds 40..130, minimum beat strength 10 percent, overwrite mode, the ordered selects, preferred anchors [48,126,249,375], cadence {minimum_duration_buckets:3, duration_bucket_frames:15, maximum_similar_run:3, similar_tolerance_frames:6}, and anchor repair with maximum_movement_frames 0 and locked_anchor_indices [0,1,2,3]. If a source envelope is infeasible, revise the selected source range; never move a reviewed musical event. Inspect the resolved story order, anchors, deltas, and durations before committing. Normalize only track 2 to -1600 LUFS hundredths with a -100 dBFS-hundredths sample-peak ceiling and 100-hundredths tolerance. Add no captions, titles, transitions, model-authored fades, effects, or retiming. Finish with get_editorial_readiness using youtube_1080p, check_silence=false, centered 50/50 focus, 10 storyboard frames, and 160-pixel cells. Inspect the whole sheet and revise black frames, baked cuts, arbitrary ordering, action continuing after frame 375, a weak climax drive, or an unresolved ending. Do not queue export; the benchmark renders the verified snapshot. Keep working until readiness is true.",
+            "Create a finished 18-second 1080p YouTube trailer edit using Tears of Steel as the only visual source and Vanguard on music-bed as the only audio. This is one conflict, not a montage of unrelated worlds. Build a clear action arc: establish the human team and its weapon, reveal the mechanical threat, drive into the strongest action before the final musical hit, then cut away to a held resolution during the decay. Open exactly these seven capability schemas in one get_capability call: get_source_shot_board, plan_music_fit, get_music_structure, plan_beat_montage, plan_audio_normalization, get_cut_neighborhoods, and get_editorial_readiness. Do not call get_source_storyboard. Call get_source_shot_board exactly once over the full Tears of Steel source with candidate_selection coverage, minimum_duration_frames 30, minimum_confidence_basis_points 1000, candidate_count 12, and max_width 160. Use that evidence to choose scene-clean shots and never cross a returned scene boundary. Treat the three source-board cells as scouting evidence; exact selected in-points still require timeline cut-edge proof. First call plan_music_fit on audio track 2 with music-bed, project range 0..450, preferred source start 6334, preferred source end 6875, maximum end drift 2 frames, minimum strength 10 percent, and overwrite mode. Inspect and commit the resolved endpoint-anchored plan. Keep it unchanged as the sole audio: no loop, retime, duplication, source-video audio, or later trim. The shorter endpoint retains an audible decay without a long perceptually dead tail. Call get_music_structure over 0..450 with minimum strength 10 percent, meter 4, 4 bars per phrase, and structural_only=false. The returned beat labels are heuristic evidence, not an editing score. Use exactly these four reviewed musical events as the internal cut anchors and do not substitute ordinary beats: frame 48 is the first lift and must widen the world or reveal team scale; frame 126 is commitment and must move from setup into unmistakable threat or action; frame 249 begins the climax drive and must start the strongest sustained action, which must visually peak before frame 375; frame 375 is the release and must cut away from all action to a held low-motion aftermath, survivor, or environmental resolution. Choose exactly five non-overlapping Tears of Steel shots in final story order. Every shot must advance setup, threat, escalation, climax, or resolution. Shot four, timeline 249..375, must contain fighting, firing, collision, destruction, or major robot movement; do not spend it on a person merely inspecting or holding a device. Shot five, timeline 375..450, must be visibly calmer than shot four and contain no fighting, firing, collision, destruction, or major robot movement under the fading note. The exact cut schedule creates shot durations 48, 78, 123, 126, and 75 frames; select source envelopes long enough for those durations and hold the final resolution image through frame 450. Call plan_beat_montage on video track 1 over 0..450 with shot bounds 40..130, minimum beat strength 10 percent, overwrite mode, the ordered selects, preferred anchors [48,126,249,375], cadence {minimum_duration_buckets:3, duration_bucket_frames:15, maximum_similar_run:3, similar_tolerance_frames:6}, and anchor repair with maximum_movement_frames 0 and locked_anchor_indices [0,1,2,3]. If a source envelope is infeasible, revise the selected source range; never move a reviewed musical event. Inspect the resolved story order, anchors, deltas, and durations before committing. Normalize only track 2 to -1600 LUFS hundredths with a -100 dBFS-hundredths sample-peak ceiling and 100-hundredths tolerance. Add no captions, titles, transitions, model-authored fades, effects, or retiming. After the first visual commit, call get_cut_neighborhoods on video track 1 with frames_before 1, frames_after 3, cut_offset 0, cut_count 12, maximum_secondary_change_basis_points 1200, and max_width 160. Read each cut as its exact outgoing frame followed by the first three incoming frames. Revise any cut whose incoming cells switch shots, flash unrelated content, begin on a transitional frame, or whose outgoing and incoming compositions are so similar that the hard cut reads as a stutter. Specifically, frame 249 must open directly on one clean sustained-action shot, and frame 375 must change to a clearly distinct calm composition rather than another near-identical wide view of the same room. On this pinned source, the complete shot-four envelope must stay inside the reviewed action window 987..1128 and the complete shot-five envelope must stay inside the reviewed calm device/survivor window 309..716. Never repair an edge by exchanging those two roles; reconfirm both roles after every visual revision. A CUT EDGE REVIEW FAILED result is blocking, not advisory. After any visual revision, call get_cut_neighborhoods again and do not finish until its manifest reports clean true, issue_count 0, and all four cut edges are visually clean. Then call get_editorial_readiness using youtube_1080p, check_silence=false, centered 50/50 focus, 10 storyboard frames, and 160-pixel cells. Inspect the whole sheet and revise black frames, baked cuts, arbitrary ordering, action continuing after frame 375, a weak climax drive, or an unresolved ending. Do not queue export; the benchmark renders the verified snapshot. Keep working until readiness is true.",
         ],
         assertions: music_montage_assertions(),
         budgets: EvalBudgets {
@@ -1210,7 +1210,7 @@ fn music_montage_definition() -> EvalDefinition {
 #[allow(clippy::too_many_lines)]
 fn music_montage_assertions() -> Vec<EvalAssertion> {
     let truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
-        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v6.json"
+        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v7.json"
     ))
     .expect("checked-in v5 music ground truth must parse");
     let visual_aliases = truth
@@ -1222,6 +1222,10 @@ fn music_montage_assertions() -> Vec<EvalAssertion> {
                 .to_owned()
         })
         .collect::<Vec<_>>();
+    let primary_visual_alias = visual_aliases
+        .first()
+        .expect("checked-in single-source trailer must name one visual asset")
+        .clone();
     let mut assertions = vec![
         EvalAssertion::TimelineNonEmpty,
         EvalAssertion::ExactProjectDuration {
@@ -1262,6 +1266,20 @@ fn music_montage_assertions() -> Vec<EvalAssertion> {
         EvalAssertion::SourceRangesAvoid {
             track: TrackId(truth.video_track_id),
             exclusion_set: MUSIC_SOURCE_EXCLUSION_SET.to_owned(),
+        },
+        EvalAssertion::ClipSourceWithin {
+            track: TrackId(truth.video_track_id),
+            timeline_start: TimeCode(truth.reviewed_music_events[2].project_frame),
+            asset_alias: primary_visual_alias.clone(),
+            source_window: TimeCode(truth.climax_source_window.start)
+                ..TimeCode(truth.climax_source_window.end),
+        },
+        EvalAssertion::ClipSourceWithin {
+            track: TrackId(truth.video_track_id),
+            timeline_start: TimeCode(truth.reviewed_music_events[3].project_frame),
+            asset_alias: primary_visual_alias,
+            source_window: TimeCode(truth.resolution_source_window.start)
+                ..TimeCode(truth.resolution_source_window.end),
         },
         EvalAssertion::ShotCadenceVariation {
             track: TrackId(truth.video_track_id),
@@ -1323,6 +1341,7 @@ fn music_montage_assertions() -> Vec<EvalAssertion> {
             "get_music_structure",
             "plan_beat_montage",
             "plan_audio_normalization",
+            "get_cut_neighborhoods",
             "get_editorial_readiness",
             "commit_edit_plan",
         ]),
@@ -2030,6 +2049,8 @@ struct MusicMontageGroundTruth {
     meter_beats: u8,
     phrase_bars: u8,
     reviewed_music_events: Vec<ReviewedMusicEvent>,
+    climax_source_window: GroundTruthRange,
+    resolution_source_window: GroundTruthRange,
     music_preferred_source_start: i64,
     music_preferred_source_end: i64,
     music_maximum_end_drift_frames: i64,
@@ -2553,7 +2574,7 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
 #[allow(clippy::too_many_lines)]
 fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
     let truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
-        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v6.json"
+        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v7.json"
     ))
     .map_err(|error| EvalError::Fixture(format!("invalid v5 music ground truth: {error}")))?;
     let project_fps = Rational::new(25, 1).expect("music fixture fps is valid");
@@ -4429,13 +4450,13 @@ mod tests {
             29_728_929
         );
         let music_truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
-            "../../../../benchmarks/auto-edit/v5/music-ground-truth-v6.json"
+            "../../../../benchmarks/auto-edit/v5/music-ground-truth-v7.json"
         ))
         .unwrap();
         assert_eq!(music_truth.schema_version, 1);
         assert_eq!(
             music_truth.montage_id,
-            "tears-of-steel-single-source-vanguard-climax-before-release"
+            "tears-of-steel-single-source-vanguard-clean-cut-release"
         );
         assert_eq!(music_truth.project_fps, Rational::new(25, 1).unwrap());
         assert_eq!(
@@ -4452,6 +4473,9 @@ mod tests {
         assert!((music_truth.minimum_beat_strength_percent - 10.0).abs() < f64::EPSILON);
         assert_eq!(music_truth.minimum_source_separation_frames, 0);
         assert!((music_truth.source_scene_minimum_confidence_percent - 10.0).abs() < f64::EPSILON);
+        assert_eq!(music_truth.source_exclusions.len(), 1);
+        assert_eq!(music_truth.source_exclusions[0].source_range.start, 986);
+        assert_eq!(music_truth.source_exclusions[0].source_range.end, 987);
         assert_eq!(music_truth.minimum_duration_buckets, 3);
         assert_eq!(music_truth.duration_bucket_frames, 15);
         assert_eq!(music_truth.maximum_similar_run, 3);
@@ -4461,6 +4485,10 @@ mod tests {
         assert_eq!(music_truth.reviewed_music_events.len(), 4);
         assert_eq!(music_truth.reviewed_music_events[0].project_frame, 48);
         assert_eq!(music_truth.reviewed_music_events[3].project_frame, 375);
+        assert_eq!(music_truth.climax_source_window.start, 987);
+        assert_eq!(music_truth.climax_source_window.end, 1_128);
+        assert_eq!(music_truth.resolution_source_window.start, 309);
+        assert_eq!(music_truth.resolution_source_window.end, 716);
         assert_eq!(music_truth.minimum_clips_per_visual_asset, 5);
         assert_eq!(music_truth.minimum_project_frames_per_visual_asset, 450);
         assert_eq!(music_truth.music_preferred_source_start, 6_334);
@@ -4597,6 +4625,33 @@ mod tests {
             2.0
         );
         assert!(baseline["human_review"]["ratings"]["captions"].is_null());
+        assert_eq!(baseline["benchmark_status"], "in_progress");
+    }
+
+    #[test]
+    fn published_v7_trailer_candidate_binds_clean_edges_and_pending_review() {
+        let baseline: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v5/music-trailer-v7-baseline.json"
+        ))
+        .unwrap();
+        assert_eq!(baseline["machine_summary"]["assertions_passed"], 39);
+        assert_eq!(baseline["machine_summary"]["assertions_total"], 39);
+        assert_eq!(baseline["machine_summary"]["tool_calls"], 12);
+        assert_eq!(
+            baseline["deliverable"]["climax_source_range"],
+            serde_json::json!({"start": 987, "end": 1108})
+        );
+        assert_eq!(
+            baseline["deliverable"]["resolution_source_range"],
+            serde_json::json!({"start": 309, "end": 381})
+        );
+        assert_eq!(
+            baseline["deliverable"]["independent_cut_audit"]["status"],
+            "passed"
+        );
+        assert_eq!(baseline["supersedes"]["human_status"], "reviewed_rejected");
+        assert_eq!(baseline["human_review"]["status"], "pending");
+        assert!(baseline["human_review"]["accepted"].is_null());
         assert_eq!(baseline["benchmark_status"], "in_progress");
     }
 

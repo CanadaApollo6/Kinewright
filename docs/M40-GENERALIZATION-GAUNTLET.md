@@ -289,7 +289,7 @@ effects, fades, or retiming. Those checks still allowed a forced cameo, did not
 fully veto baked source cuts, and did not require a musical endpoint or quiet
 encoded tail.
 
-The active v6 contract retains the useful cadence, source-clean, endpoint, and
+The active v7 contract retains the useful cadence, source-clean, endpoint, and
 encoded-delivery checks while removing the source quota entirely. Tears of
 Steel is the only visual source and must fill the entire 450-frame timeline in
 exactly five disjoint scene-clean shots. The story target is explicit:
@@ -298,7 +298,9 @@ destruction, peak on confrontation, and resolve on a held survivor, team, or
 aftermath image. The four internal cuts are locked to reviewed musical events
 at project frames 48, 126, 249, and 375, with the roles first lift, commitment,
 climax drive, and release. The cue ends within two source frames of its reviewed
-endpoint after a short decay. The fixture test proves the five-shot schedule is source-feasible, beat-valid, cadence-valid, and safe
+endpoint after a short decay. Exact cut-neighborhood proof rejects a secondary
+source cut inside an incoming handle, while reviewed source windows keep the
+climax before the release after any repair. The fixture test proves the five-shot schedule is source-feasible, beat-valid, cadence-valid, and safe
 across the 24 fps source, 25 fps project, and 30 fps music before model tokens
 are spent. Human review still owns story, rhythm, visual finish, audio finish,
 and delivery readiness. Captions are explicitly not applicable.
@@ -493,8 +495,19 @@ requires frames 249..375 to contain the strongest sustained action and frame
 The first v6 replacement passes 37/37 with 12 calls, 7 operations, and 218,894
 tokens. Its SHA-256 is
 `8c7f34c6633819a3b3f48bbe90a79fbee20fe96df15a6a500be8e7ebcae99d46`.
-Independent cut inspection confirms robot action through frame 374, a clean
-release at frame 375 to a stable wide team composition, and no returning action
-through the six sampled fade frames. Human review remains pending.
+Human review rejected it without numeric ratings: the cut near 0:10 contained a
+two-project-frame flash from one dirty source frame, and the final near-match
+wide-to-wide cut read as a stutter.
+
+V7 adds `get_cut_neighborhoods`, which renders exact outgoing and incoming
+frames and returns a blocking secondary-change verdict. The score also excludes
+the reviewed dirty source frame and requires the frame-249 climax and frame-375
+resolution clips to remain inside reviewed semantic source windows. The first
+combined run passes 39/39 with 12 calls, 7 operations, and 234,951 tokens. Its
+SHA-256 is
+`eeeb83c18af6e5b7af19334b871939aa9bd0853a4eeabc194ae2e05a6cf136f4`.
+Encoded cut inspection confirms that the flash is gone, the climax remains
+before the release, and frame 375 cuts to a distinct stable close-up. Human
+review of this exact artifact is pending.
 Event/multicam still needs two more machine samples, one more human-accepted
 output, and numeric ratings sufficient to evaluate the 4.0 mean-rating gate.
