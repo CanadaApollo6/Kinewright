@@ -145,15 +145,16 @@ until interview/documentary, event/multicam, and music-montage families each
 pass three model samples and their separate human gate.
 
 The recorded `g3` recovery baseline below is the separately pinned v2 music
-pack. The next recovery uses the v3 pack, which is prepared but not yet run.
-Prepare or verify the v3 inputs explicitly before the offline run:
+pack. The active recovery is v4: a 22-second, single-source Tears of Steel
+trailer cut to Vanguard's authored final tag. Prepare or verify its inputs
+explicitly before the offline run:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
 cargo run -p kinewright-agent --bin kinewright-eval -- `
-  --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v3.json
+  --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v4.json
 cargo run -p kinewright-agent --bin kinewright-eval -- `
-  --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v3.json
+  --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v4.json
 ```
 
 The rejected v1 Cipher artifact remains published as historical evidence. V2
@@ -179,7 +180,7 @@ And music fit checked the start and duration, not the musical source endpoint or
 the delivered encoded tail. The published v2 artifact therefore remained a
 machine pass and a human rejection.
 
-The active v3 recovery addresses those gaps with a compatible Tears of Steel
+The hardened v3 recovery addressed those gaps with a compatible Tears of Steel
 source, a minimum of three clips and 210 project frames per visual asset,
 distinct early and late appearances for both sources, a 10% scene-boundary veto
 floor, actual first/last shot-hold assertions, exact end-anchored music fit, and
@@ -198,7 +199,20 @@ calls, three planner attempts, and 342,058 tokens, reducing tokens by 20.9%.
 Their SHA-256 values are
 `203461a7331ad0b7ed45654954b244b63c71dc6e3ca1fd11f0f3a562ef22dac4` and
 `4c802c58d2a056f87bc305e742db5bdb9fbfc0dfafa2a200604835ee3857daf6`.
-Both remain pending human review and neither is an accepted baseline.
+Neither is an accepted baseline. Owner review rejected the parallel-world
+premise: one music track made the disconnected footage read as one incoherent
+story, neither source felt essential, and the ending still sounded mid-phrase.
+No numeric scores were supplied for that review. V4 removes the forced second
+source and uses a trailer cue with a distinct authored ending. Its fixture test
+proves the 22-second eight-shot contract is source-, beat-, cadence-, and
+endpoint-feasible before a model run.
+
+The first v4 model sample now passes 37/37 with 12 calls, 10 operations, and
+221,521 tokens. It uses eight scene-clean Tears of Steel shots, aligns five of
+seven cuts to structural candidates, measures -15.99 LUFS, and ends within one
+source frame of the reviewed Vanguard endpoint. Its SHA-256 is
+`9b813c6f6888e36e90ba3b2f5ad0938f8d3827374a2465161c3992aa40a8d99a`.
+Independent cut-neighborhood inspection passed; human review remains pending.
 
 The first corrected interview preflight is published at
 `benchmarks/auto-edit/v5/baseline.json`: 1/1 sample, 25/25 assertions, 7 tool

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "pack_id": "m40-single-source-trailer-v4",
+  "title": "M40 single-source trailer fixture pack",
+  "description": "Pinned openly licensed Tears of Steel footage and a purpose-built trailer cue with an authored final tag, used to measure source inspection, coherent single-world trailer editing, musical structure, closure, and delivery finish.",
+  "assets": [
+    {
+      "id": "tears-of-steel-battle-720p",
+      "file_name": "tears-of-steel-battle-720p.webm",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/8/88/Tears_of_Steel_clip.ogv/Tears_of_Steel_clip.ogv.720p.vp9.webm",
+      "source_page_url": "https://commons.wikimedia.org/wiki/File:Tears_of_Steel_clip.ogv",
+      "bytes": 20343468,
+      "sha256": "628eea988a37ef617d6a5e2d36e48f31997b1b602465e039e78d1ae24fff33ba",
+      "license": {
+        "spdx_id": "CC-BY-3.0",
+        "name": "Creative Commons Attribution 3.0 Unported",
+        "url": "https://creativecommons.org/licenses/by/3.0/",
+        "attribution": "Tears of Steel clip, (CC) Blender Foundation | mango.blender.org"
+      }
+    },
+    {
+      "id": "vanguard-scott-buckley",
+      "file_name": "vanguard.mp3",
+      "download_url": "https://www.scottbuckley.com.au/library/wp-content/uploads/2023/07/Vanguard.mp3",
+      "source_page_url": "https://www.scottbuckley.com.au/library/vanguard/",
+      "bytes": 9385461,
+      "sha256": "e3eaf7e0e8727f06db9ceb6b93324bee73cf37f44370a1228da516800bffadff",
+      "license": {
+        "spdx_id": "CC-BY-4.0",
+        "name": "Creative Commons Attribution 4.0 International",
+        "url": "https://creativecommons.org/licenses/by/4.0/",
+        "attribution": "'Vanguard' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
+      }
+    }
+  ]
+}

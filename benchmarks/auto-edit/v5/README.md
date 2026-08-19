@@ -2,27 +2,27 @@
 
 V5 is the M40 benchmark. It stops optimizing only for Kinewright's synthetic
 garden story and measures unfamiliar, licensed footage in three distinct edit
-families: interview/documentary, event/multicam, and music montage.
+families: interview/documentary, event/multicam, and music-led trailer editing.
 
 All three families are executable. `g1` is a real public-domain interview with
 filmmaker Helen Hill. `g2` is a CC BY 4.0 AMI meeting with four synchronized
 participant cameras, a program headset mix, and pinned manual speaker labels.
-`g3` is a cuts-first horizontal music montage built from two CC BY 3.0 Blender
-Foundation productions. Its rejected historical preflight used Kevin MacLeod's
-CC BY 4.0 instrumental "Cipher"; the v2 recovery used Scott Buckley's CC BY
-4.0 "Uprising." The active v3 recovery keeps that cue, replaces the forced
-Big Buck Bunny cameo with a compatible Tears of Steel source, and gives the
-editor a real musical event and natural ending to cut around. Each task uses
-real footage and independently probed MP4 delivery, not generated bars or
-motion graphics.
+`g3` is now a cuts-first single-source trailer edit built from the CC BY 3.0
+Tears of Steel battle clip. It uses Scott Buckley's CC BY 4.0 trailer cue
+"Vanguard" and includes that cue's authored final tag and decay. Earlier
+multi-source montage contracts remain historical evidence, but owner review
+rejected the premise: one music bed made unrelated worlds read as one story,
+neither source felt essential, and a quiet tail did not prove musical closure.
+Each task uses real footage and independently probed MP4 delivery, not
+generated bars or motion graphics.
 
 ## Immutable fixture acquisition
 
 Downloaded footage is not committed. Its source page, license, byte count,
 SHA-256, and exact URL live in `fixture-pack.json`,
 `event-fixture-pack.json`, `music-fixture-pack.json`,
-`music-fixture-pack-v2.json`, and `music-fixture-pack-v3.json`. Acquisition is
-an explicit network action:
+`music-fixture-pack-v2.json`, `music-fixture-pack-v3.json`, and the active
+`music-fixture-pack-v4.json`. Acquisition is an explicit network action:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
@@ -31,7 +31,7 @@ cargo run -p kinewright-agent --bin kinewright-eval -- `
 cargo run -p kinewright-agent --bin kinewright-eval -- `
   --prepare-fixtures benchmarks/auto-edit/v5/event-fixture-pack.json
 cargo run -p kinewright-agent --bin kinewright-eval -- `
-  --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v3.json
+  --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v4.json
 ```
 
 Verify the local pack without network access:
@@ -43,7 +43,7 @@ cargo run -p kinewright-agent --bin kinewright-eval -- `
 cargo run -p kinewright-agent --bin kinewright-eval -- `
   --verify-fixtures benchmarks/auto-edit/v5/event-fixture-pack.json
 cargo run -p kinewright-agent --bin kinewright-eval -- `
-  --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v3.json
+  --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v4.json
 ```
 
 `KINEWRIGHT_EVAL_FIXTURE_DIR` overrides the cache root. Existing files with a
@@ -147,21 +147,23 @@ cargo run -p kinewright-agent --bin kinewright-eval -- `
   --samples 1
 ```
 
-## Music-montage preflight
+## Single-source trailer preflight
 
-`g3` measures the missing composition layer: whether the model can survey raw
-source footage visually, choose a deliberate shot sequence, and assemble it
-against detected musical onsets without hand-authoring frame arithmetic. The
-active v3 recovery is a 28-second action-to-release arc across Sintel and
-Tears of Steel, ending at a verified natural tail of the Uprising cue. It is a
-recovery target, not a completed or human-accepted sample.
+`g3` measures the missing composition layer: whether the model can survey one
+narrative source visually, choose a deliberate shot sequence, and recut it into
+a trailer against detected musical onsets without hand-authoring frame
+arithmetic. The active v4 contract is a 22-second action arc from Tears of
+Steel. It establishes the human team and weapon, reveals the mechanical threat,
+escalates through destruction, peaks on confrontation, and resolves on a held
+image as Vanguard performs its authored final tag. It is a recovery target, not
+a completed or human-accepted sample.
 
 The recovery contract uses three general agent-facing primitives. One
-coverage-mode `get_source_shot_board` call per source replaces the redundant
-broad storyboard pass and returns up to 12 scene-derived candidate envelopes
-sampled across the full source range,
-with start, middle, and end evidence frames. Passing
-`minimum_duration_frames: 55` and `minimum_confidence_basis_points: 1000`
+coverage-mode `get_source_shot_board` call replaces the redundant broad
+storyboard pass and returns up to 12 scene-derived candidate envelopes sampled
+across the full source range, with start, middle, and end evidence frames.
+Passing `minimum_duration_frames: 30` and
+`minimum_confidence_basis_points: 1000`
 filters unusably short candidates while retaining low-confidence boundaries as
 source-cut vetoes. This spends fewer model tokens while making baked edits
 harder to miss; candidate ids and indexes remain stable, and ranges crossing a
@@ -183,17 +185,27 @@ v2 rerun. V2 also anchored the music start without requiring a musical source
 endpoint or a quiet encoded tail, which left the published artifact ending
 inside a phrase.
 
-The active v3 contract closes those gaps. It uses compatible Tears of Steel
-footage, requires at least three clips and 210 project frames from each visual
-asset, and requires both sources in distinct early and late phases. That makes
-each film carry at least 30% of the edit and rejects bookends or isolated
-inserts. It lowers the scene-boundary veto floor to 10% confidence, measures the
-actual first and last shot holds, anchors the music source end exactly at the
-cue's natural tail, and verifies the final encoded five-frame window is quiet.
-It retains scene-clean source exclusions, nonuniform shot cadence, structural
-music anchors, source-audio exclusion, loudness, and independent H.264/AAC MP4
-probing. Captions are intentionally not part of this instrumental task and are
-marked not applicable in human review rather than receiving an invented score.
+The active v4 contract removes the source-quota problem instead of tuning it.
+Tears of Steel must be the sole visual source and fill the complete video track
+through eight or nine disjoint, scene-clean shots. The machine gate requires
+nonuniform cadence, structural music anchors, a real held ending, source-audio
+exclusion, loudness, an encoded quiet tail, and independent H.264/AAC MP4
+probing. The fixture test also proves an eight-shot schedule is simultaneously
+beat-valid, cadence-valid, scene-clean, mixed-frame-rate safe, and
+source-feasible before a model can spend tokens on it. Captions are
+intentionally not part of this instrumental task and are marked not applicable
+instead of receiving an invented score.
+
+The first v4 model sample passes 37/37 machine assertions in one turn with 12
+tool calls, 10 operations, and 221,521 total tokens. It uses eight Tears of
+Steel shots over exactly 550 project frames, places five of seven cuts on
+structural candidates, measures -15.99 LUFS, and ends at Vanguard source frame
+6995 with an encoded five-frame tail below -46 dBFS peak. Its rendered SHA-256
+is `9b813c6f6888e36e90ba3b2f5ad0938f8d3827374a2465161c3992aa40a8d99a`.
+Independent uniform-frame and before/at/after cut inspection found a readable
+weapon/team setup, scale reveal, activation, reaction, robot escalation,
+collision, and aftermath sequence with no baked cut crossing. Human review is
+still pending, so this is a diagnostic sample rather than an accepted baseline.
 
 Prepare the pack as above, then run:
 
@@ -268,8 +280,11 @@ patch when a bounded schedule fails. The next sample needed three planner calls,
 stricter 40/40 result. It used four Sintel shots over 248 frames and five Tears
 of Steel shots over 452 frames; its rendered SHA-256 is
 `4c802c58d2a056f87bc305e742db5bdb9fbfc0dfafa2a200604835ee3857daf6`.
-Both artifacts await human review. Neither is a published or accepted baseline
-yet.
+Neither artifact is a published or accepted baseline. Owner review rejected the
+parallel-world premise itself: the shared music made the footage read as one
+incoherent story, neither source felt essential, and the supposed resolved tail
+still sounded mid-phrase. No numeric ratings were supplied for that review, so
+none are invented. V4 replaces the premise rather than adding another quota.
 
 The published v2 recovery also passed a separate 16-frame overview, every-shot
 midpoint sheet, and before/at/after inspection around all eight cuts. That audit

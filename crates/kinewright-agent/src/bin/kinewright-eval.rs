@@ -1159,15 +1159,15 @@ fn event_multicam_assertions() -> Vec<EvalAssertion> {
 
 fn music_montage_definition() -> EvalDefinition {
     let truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
-        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v3.json"
+        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v4.json"
     ))
     .expect("checked-in v5 music ground truth must parse");
     EvalDefinition {
-        name: "g3 real music montage",
-        rationale: "Measures whether the agent can inspect two tonally compatible licensed visual sources, build a coherent dramatic arc, and resolve a deliberate beat-aware montage at the music cue's verified natural tail.",
+        name: "g3 single-source trailer edit",
+        rationale: "Measures whether the agent can inspect one licensed narrative source, recut it into a coherent character-led trailer, and resolve a deliberate beat-aware edit on a trailer cue's authored final tag.",
         fixture_builder: fixture_real_music_montage,
         prompts: &[
-            "Create a finished 1080p YouTube music montage from exactly the pinned sintel and tears-of-steel visual sources, paced to Uprising on music-bed. Build one coherent dramatic arc: establish character and threat, develop matching action or composition across both worlds, escalate to one clear visual and musical peak, then resolve on a held image. Every cross-source cut needs an intelligible action, motion, scale, color, or composition bridge; neither source may be a cameo. Open exactly these six capability schemas in one get_capability call: get_source_shot_board, plan_music_fit, get_music_structure, plan_beat_montage, plan_audio_normalization, and get_editorial_readiness. Do not call get_source_storyboard. Call get_source_shot_board exactly once per visual asset over its full source range with candidate_selection coverage, minimum_duration_frames 55, minimum_confidence_basis_points 1000, candidate_count 12, and max_width 160. Use that full-range visual evidence to choose scene-clean shots, and never cross a returned scene boundary. Never select a Sintel range overlapping [0..40), [108..144), [216..292), [376..396), [420..441), [508..536), [664..688), [768..780), [832..880), or [984..1253); these contain black, fades, titles, or credits. First call plan_music_fit on audio track 2 with music-bed, project range 0..700, preferred source start 5160, preferred source end 6000, maximum end drift 0 frames, minimum strength 10 percent, and overwrite mode. Inspect and commit that endpoint-anchored plan; it must produce the exact real-time source range [5160..6000) so the montage reaches the cue's natural quiet tail. Keep it as the only audio, with no loop, retime, duplication, source-video audio, or later trim. Call get_music_structure over project range 0..700 with minimum strength 10 percent, meter 4, 4 bars per phrase, and structural_only=false. Its roles are low-confidence timing guides, not evidence of musical closure. Choose 8 through 10 shots in final story order. Use both sources for at least 3 clips and 210 project frames each. Each source must appear in an early shot starting no later than frame 175 and return in a distinct late shot starting no earlier than frame 450; do not use one world only as bookends or isolated inserts. Build short visual phrases rather than mechanical A/B alternation: establish both worlds, develop a meaningful visual relationship, return to both during escalation or resolution, and make the final held image feel causally earned. Each shot must fill 55..140 project frames, same-asset source ranges must not overlap, the opening shot must hold at least 75 frames, and the closing shot at least 100. Use at least three duration bands and no more than three similar durations in a row. Put every internal cut on a returned beat; place at least 3 cuts and at least half of all cuts on returned bar or phrase candidates, prioritizing strong and structural moments for escalation, peak, and resolution. Call plan_beat_montage on video track 1 over 0..700 with minimum shot length 55, maximum shot length 140, minimum beat strength 10 percent, overwrite mode, the ordered selects, exactly one fewer preferred cut anchors than selects, cadence {minimum_duration_buckets:3, duration_bucket_frames:20, maximum_similar_run:3, similar_tolerance_frames:8}, and anchor repair with maximum_movement_frames 24 and no locked anchors. Inspect the resolved anchors, signed deltas, shot durations, source order, temporal spread, and structural share before committing; revise and retry if the plan is infeasible or weak. If a failed call returns an exact_retry_patch, apply it once instead of guessing a new schedule. Normalize only audio track 2 to -1600 LUFS hundredths with a -100 dBFS-hundredths sample-peak ceiling and 100-hundredths tolerance. Add no captions, titles, transitions, model-authored fades, effects, or retiming. Finish with get_editorial_readiness using youtube_1080p, check_silence=false, centered 50/50 focus, 12 storyboard frames, and 160-pixel cells. Inspect the whole sheet and revise black, baked fades, slates, arbitrary sequencing, weak bridges, weak arc stages, source cameos, or an unresolved finish. Do not queue export; the benchmark renders the verified snapshot. Keep working until readiness is true.",
+            "Create a finished 22-second 1080p YouTube trailer edit using Tears of Steel as the only visual source and Vanguard on music-bed as the only audio. This is one conflict, not a montage of unrelated worlds. Build a clear action arc: establish the human team and its weapon, reveal the mechanical threat and scale of the battle, escalate reactions and destruction, peak on the strongest robot confrontation or collision, then resolve on a held survivor, team, or aftermath image as the music performs its final tag. Open exactly these six capability schemas in one get_capability call: get_source_shot_board, plan_music_fit, get_music_structure, plan_beat_montage, plan_audio_normalization, and get_editorial_readiness. Do not call get_source_storyboard. Call get_source_shot_board exactly once over the full Tears of Steel source with candidate_selection coverage, minimum_duration_frames 30, minimum_confidence_basis_points 1000, candidate_count 12, and max_width 160. Use that evidence to choose scene-clean shots and never cross a returned scene boundary. First call plan_music_fit on audio track 2 with music-bed, project range 0..550, preferred source start 6334, preferred source end 6994, maximum end drift 15 frames, minimum strength 10 percent, and overwrite mode. Inspect and commit the resolved endpoint-anchored plan. Keep it unchanged as the sole audio: no loop, retime, duplication, source-video audio, or later trim. The endpoint intentionally includes Vanguard's authored final tag and a short decay; do not substitute mere low volume for musical closure. Call get_music_structure over 0..550 with minimum strength 10 percent, meter 4, 4 bars per phrase, and structural_only=false. Choose 8 or 9 non-overlapping Tears of Steel shots in final story order. Every shot must advance the same team, weapon, threat, escalation, peak, or resolution. Fill 30..140 project frames per shot, hold the opening at least 40 frames and closing at least 100, use at least three duration bands, and allow no more than three similar durations in a row. Put every internal cut on a returned beat; put at least 3 cuts and at least half of all cuts on returned bar or phrase candidates. Let the long musical rests breathe instead of forcing rapid filler cuts. Call plan_beat_montage on video track 1 over 0..550 with shot bounds 30..140, minimum beat strength 10 percent, overwrite mode, the ordered selects, exactly one fewer preferred anchors than selects, cadence {minimum_duration_buckets:3, duration_bucket_frames:15, maximum_similar_run:3, similar_tolerance_frames:6}, and anchor repair with maximum_movement_frames 20 and no locked anchors. Inspect the resolved story order, anchors, deltas, durations, and structural share before committing. Apply one returned exact_retry_patch if necessary. Normalize only track 2 to -1600 LUFS hundredths with a -100 dBFS-hundredths sample-peak ceiling and 100-hundredths tolerance. Add no captions, titles, transitions, model-authored fades, effects, or retiming. Finish with get_editorial_readiness using youtube_1080p, check_silence=false, centered 50/50 focus, 12 storyboard frames, and 160-pixel cells. Inspect the whole sheet and revise black frames, baked cuts, arbitrary ordering, repeated ideas, a weak peak, or an unresolved ending. Do not queue export; the benchmark renders the verified snapshot. Keep working until readiness is true.",
         ],
         assertions: music_montage_assertions(),
         budgets: EvalBudgets {
@@ -1206,7 +1206,7 @@ fn music_montage_definition() -> EvalDefinition {
 #[allow(clippy::too_many_lines)]
 fn music_montage_assertions() -> Vec<EvalAssertion> {
     let truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
-        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v3.json"
+        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v4.json"
     ))
     .expect("checked-in v5 music ground truth must parse");
     let minimum_structural_aligned_basis_points = percentage_to_basis_points_for_fixture(
@@ -1214,7 +1214,16 @@ fn music_montage_assertions() -> Vec<EvalAssertion> {
         "minimum_structural_aligned_percent",
     )
     .expect("checked-in v5 structural alignment percentage must be valid");
-    vec![
+    let visual_aliases = truth
+        .visual_asset_ids
+        .iter()
+        .map(|fixture_id| {
+            music_fixture_alias(fixture_id)
+                .expect("checked-in v5 visual asset must have a stable alias")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let mut assertions = vec![
         EvalAssertion::TimelineNonEmpty,
         EvalAssertion::ExactProjectDuration {
             duration: TimeCode(truth.timeline_range.end),
@@ -1241,31 +1250,7 @@ fn music_montage_assertions() -> Vec<EvalAssertion> {
         },
         EvalAssertion::RequiredAssetsOnTrack {
             track: TrackId(truth.video_track_id),
-            aliases: aliases(&["sintel", "tears-of-steel"]),
-        },
-        EvalAssertion::AssetUseMinimum {
-            track: TrackId(truth.video_track_id),
-            asset_alias: "sintel".to_owned(),
-            minimum_clip_count: truth.minimum_clips_per_visual_asset,
-            minimum_project_frames: TimeCode(truth.minimum_project_frames_per_visual_asset),
-        },
-        EvalAssertion::AssetUseMinimum {
-            track: TrackId(truth.video_track_id),
-            asset_alias: "tears-of-steel".to_owned(),
-            minimum_clip_count: truth.minimum_clips_per_visual_asset,
-            minimum_project_frames: TimeCode(truth.minimum_project_frames_per_visual_asset),
-        },
-        EvalAssertion::AssetTemporalSpread {
-            track: TrackId(truth.video_track_id),
-            asset_alias: "sintel".to_owned(),
-            latest_early_start: TimeCode(truth.latest_early_start_per_visual_asset),
-            earliest_late_start: TimeCode(truth.earliest_late_start_per_visual_asset),
-        },
-        EvalAssertion::AssetTemporalSpread {
-            track: TrackId(truth.video_track_id),
-            asset_alias: "tears-of-steel".to_owned(),
-            latest_early_start: TimeCode(truth.latest_early_start_per_visual_asset),
-            earliest_late_start: TimeCode(truth.earliest_late_start_per_visual_asset),
+            aliases: visual_aliases.clone(),
         },
         EvalAssertion::SourceRangesSeparated {
             track: TrackId(truth.video_track_id),
@@ -1323,7 +1308,7 @@ fn music_montage_assertions() -> Vec<EvalAssertion> {
             track: TrackId(truth.audio_track_id),
             asset_alias: "music-bed".to_owned(),
             expected_source_end: TimeCode(truth.music_preferred_source_end),
-            tolerance_source_frames: TimeCode::ZERO,
+            tolerance_source_frames: TimeCode(truth.music_maximum_end_drift_frames),
         },
         EvalAssertion::MediaGapless,
         EvalAssertion::AudioPresent,
@@ -1343,7 +1328,32 @@ fn music_montage_assertions() -> Vec<EvalAssertion> {
             "commit_edit_plan",
         ]),
         EvalAssertion::UndoIntegrity,
-    ]
+    ];
+    for alias in &visual_aliases {
+        assertions.insert(
+            7,
+            EvalAssertion::AssetUseMinimum {
+                track: TrackId(truth.video_track_id),
+                asset_alias: alias.clone(),
+                minimum_clip_count: truth.minimum_clips_per_visual_asset,
+                minimum_project_frames: TimeCode(truth.minimum_project_frames_per_visual_asset),
+            },
+        );
+    }
+    if visual_aliases.len() > 1 {
+        for alias in &visual_aliases {
+            assertions.insert(
+                8,
+                EvalAssertion::AssetTemporalSpread {
+                    track: TrackId(truth.video_track_id),
+                    asset_alias: alias.clone(),
+                    latest_early_start: TimeCode(truth.latest_early_start_per_visual_asset),
+                    earliest_late_start: TimeCode(truth.earliest_late_start_per_visual_asset),
+                },
+            );
+        }
+    }
+    assertions
 }
 
 fn editorial_cut_suite() -> Vec<EvalDefinition> {
@@ -2033,6 +2043,15 @@ struct MusicMontageGroundTruth {
     attribution: Vec<String>,
 }
 
+fn music_fixture_alias(fixture_id: &str) -> Option<&'static str> {
+    match fixture_id {
+        "sintel-trailer-1080p" => Some("sintel"),
+        "tears-of-steel-battle-720p" => Some("tears-of-steel"),
+        "uprising-scott-buckley" | "vanguard-scott-buckley" => Some("music-bed"),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct GroundTruthSourceExclusion {
     asset_id: String,
@@ -2527,10 +2546,11 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
 #[allow(clippy::too_many_lines)]
 fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
     let truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
-        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v3.json"
+        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v4.json"
     ))
     .map_err(|error| EvalError::Fixture(format!("invalid v5 music ground truth: {error}")))?;
     let project_fps = Rational::new(25, 1).expect("music fixture fps is valid");
+    let unique_visual_asset_ids = truth.visual_asset_ids.iter().collect::<BTreeSet<_>>();
     if truth.schema_version != 1
         || truth.montage_id.trim().is_empty()
         || truth.project_fps != project_fps
@@ -2540,12 +2560,11 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
         || truth.timeline_range.end <= truth.timeline_range.start
         || truth.video_track_id != 1
         || truth.audio_track_id != 2
-        || truth.visual_asset_ids.len() != 2
+        || truth.visual_asset_ids.is_empty()
         || truth.visual_asset_ids.iter().any(|id| id.trim().is_empty())
-        || truth.visual_asset_ids[0] == truth.visual_asset_ids[1]
+        || unique_visual_asset_ids.len() != truth.visual_asset_ids.len()
         || truth.visual_asset_ids.contains(&truth.music_asset_id)
         || truth.music_asset_id.trim().is_empty()
-        || truth.source_exclusions.is_empty()
         || truth.source_exclusions.iter().any(|exclusion| {
             exclusion.asset_id.trim().is_empty()
                 || exclusion.source_range.start < 0
@@ -2558,7 +2577,7 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
         || truth.minimum_shot_frames > truth.maximum_shot_frames
         || !(0.0..=100.0).contains(&truth.minimum_beat_strength_percent)
         || truth.beat_alignment_tolerance_frames < 0
-        || truth.minimum_visual_assets_used != 2
+        || truth.minimum_visual_assets_used != truth.visual_asset_ids.len()
         || truth.minimum_clips_per_visual_asset == 0
         || truth.minimum_project_frames_per_visual_asset <= 0
         || truth.latest_early_start_per_visual_asset < truth.timeline_range.start
@@ -2626,19 +2645,13 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
         "minimum_structural_aligned_percent",
     )?;
     let pack = FixturePackManifest::from_json(include_str!(
-        "../../../../benchmarks/auto-edit/v5/music-fixture-pack-v3.json"
+        "../../../../benchmarks/auto-edit/v5/music-fixture-pack-v4.json"
     ))
     .map_err(|error| EvalError::Fixture(error.to_string()))?;
     let cache = fixture_cache_root();
     let media = eval_engine();
     let mut assets_by_fixture_id = BTreeMap::new();
     let mut aliases_by_fixture_id = BTreeMap::new();
-    let alias_for = |fixture_id: &str| match fixture_id {
-        "sintel-trailer-1080p" => Some("sintel"),
-        "tears-of-steel-battle-720p" => Some("tears-of-steel"),
-        "uprising-scott-buckley" => Some("music-bed"),
-        _ => None,
-    };
     for fixture_id in truth
         .visual_asset_ids
         .iter()
@@ -2647,7 +2660,7 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
         if assets_by_fixture_id.contains_key(fixture_id) {
             continue;
         }
-        let alias = alias_for(fixture_id).ok_or_else(|| {
+        let alias = music_fixture_alias(fixture_id).ok_or_else(|| {
             EvalError::Fixture(format!("v5 music asset {fixture_id:?} has no stable alias"))
         })?;
         let path = pack
@@ -2827,8 +2840,12 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
         EvalError::Fixture(format!("v5 music fit contract is not feasible: {error}"))
     })?;
     if music_plan.timeline_range != timeline_range
-        || music_plan.source_range.start != TimeCode(truth.music_preferred_source_start)
-        || music_plan.source_range.end != TimeCode(truth.music_preferred_source_end)
+        || music_plan
+            .source_range
+            .end
+            .0
+            .abs_diff(truth.music_preferred_source_end)
+            > truth.music_maximum_end_drift_frames.unsigned_abs()
         || music_plan.source_range.start < TimeCode::ZERO
         || music_plan.source_range.end > music.duration
         || music_plan.source_range.end <= music_plan.source_range.start
@@ -4042,7 +4059,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|path| path == "benchmarks/auto-edit/v5/music-fixture-pack-v3.json")
+                .any(|path| path == "benchmarks/auto-edit/v5/music-fixture-pack-v4.json")
         );
         assert_eq!(definitions.len(), 3);
         assert_eq!(tasks.len(), definitions.len());
@@ -4131,7 +4148,7 @@ mod tests {
             assertion,
             EvalAssertion::ClipCount {
                 minimum: 9,
-                maximum: 11,
+                maximum: 10,
             }
         )));
         assert!(music.assertions.iter().any(|assertion| matches!(
@@ -4139,8 +4156,8 @@ mod tests {
             EvalAssertion::MediaClipCount {
                 track: TrackId(1),
                 minimum: 8,
-                maximum: 10,
-                minimum_duration: TimeCode(55),
+                maximum: 9,
+                minimum_duration: TimeCode(30),
                 maximum_duration: TimeCode(140),
                 reject_non_media: true,
             }
@@ -4170,7 +4187,7 @@ mod tests {
                 asset_alias,
                 source_beat_set,
                 timeline_start: TimeCode(0),
-                timeline_end: TimeCode(700),
+                timeline_end: TimeCode(550),
                 tolerance_source_frames: TimeCode(0),
             } if asset_alias == "music-bed" && source_beat_set == MUSIC_SOURCE_BEAT_SET
         )));
@@ -4179,8 +4196,8 @@ mod tests {
             EvalAssertion::MusicSourceEnd {
                 track: TrackId(2),
                 asset_alias,
-                expected_source_end: TimeCode(6_000),
-                tolerance_source_frames: TimeCode(0),
+                expected_source_end: TimeCode(6_994),
+                tolerance_source_frames: TimeCode(15),
             } if asset_alias == "music-bed"
         )));
         assert!(music.assertions.iter().any(|assertion| matches!(
@@ -4188,28 +4205,23 @@ mod tests {
             EvalAssertion::RequiredAssetsOnTrack {
                 track: TrackId(1),
                 aliases,
-            } if aliases == &["sintel".to_owned(), "tears-of-steel".to_owned()]
+            } if aliases == &["tears-of-steel".to_owned()]
         )));
-        for alias in ["sintel", "tears-of-steel"] {
-            assert!(music.assertions.iter().any(|assertion| matches!(
-                assertion,
-                EvalAssertion::AssetUseMinimum {
-                    track: TrackId(1),
-                    asset_alias,
-                    minimum_clip_count: 3,
-                    minimum_project_frames: TimeCode(210),
-                } if asset_alias == alias
-            )));
-            assert!(music.assertions.iter().any(|assertion| matches!(
-                assertion,
-                EvalAssertion::AssetTemporalSpread {
-                    track: TrackId(1),
-                    asset_alias,
-                    latest_early_start: TimeCode(175),
-                    earliest_late_start: TimeCode(450),
-                } if asset_alias == alias
-            )));
-        }
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
+            EvalAssertion::AssetUseMinimum {
+                track: TrackId(1),
+                asset_alias,
+                minimum_clip_count: 8,
+                minimum_project_frames: TimeCode(550),
+            } if asset_alias == "tears-of-steel"
+        )));
+        assert!(
+            !music
+                .assertions
+                .iter()
+                .any(|assertion| matches!(assertion, EvalAssertion::AssetTemporalSpread { .. }))
+        );
         assert!(music.assertions.iter().any(|assertion| matches!(
             assertion,
             EvalAssertion::SourceRangesSeparated {
@@ -4220,7 +4232,7 @@ mod tests {
         assert!(music.assertions.iter().any(|assertion| matches!(
             assertion,
             EvalAssertion::ExactProjectDuration {
-                duration: TimeCode(700),
+                duration: TimeCode(550),
             }
         )));
         assert!(music.assertions.iter().any(|assertion| matches!(
@@ -4228,14 +4240,14 @@ mod tests {
             EvalAssertion::ExactTrackMediaCoverage {
                 track: TrackId(1),
                 range,
-            } if range == &(TimeCode::ZERO..TimeCode(700))
+            } if range == &(TimeCode::ZERO..TimeCode(550))
         )));
         assert!(music.assertions.iter().any(|assertion| matches!(
             assertion,
             EvalAssertion::ExactTrackMediaCoverage {
                 track: TrackId(2),
                 range,
-            } if range == &(TimeCode::ZERO..TimeCode(700))
+            } if range == &(TimeCode::ZERO..TimeCode(550))
         )));
         assert!(music.assertions.iter().any(|assertion| matches!(
             assertion,
@@ -4249,9 +4261,9 @@ mod tests {
             EvalAssertion::ShotCadenceVariation {
                 track: TrackId(1),
                 minimum_duration_buckets: 3,
-                duration_bucket_frames: TimeCode(20),
+                duration_bucket_frames: TimeCode(15),
                 maximum_similar_run: 3,
-                similar_tolerance_frames: TimeCode(8),
+                similar_tolerance_frames: TimeCode(6),
             }
         )));
         assert!(music.assertions.iter().any(|assertion| matches!(
@@ -4266,7 +4278,7 @@ mod tests {
             EvalAssertion::NoAlternatingShotPattern {
                 track: TrackId(1),
                 maximum_repeated_pairs: 2,
-                tolerance_frames: TimeCode(8),
+                tolerance_frames: TimeCode(6),
             }
         )));
         assert!(music.assertions.iter().any(|assertion| matches!(
@@ -4277,7 +4289,7 @@ mod tests {
             assertion,
             EvalAssertion::EdgeShotHolds {
                 track: TrackId(1),
-                minimum_opening_shot_frames: TimeCode(75),
+                minimum_opening_shot_frames: TimeCode(40),
                 minimum_closing_shot_frames: TimeCode(100),
             }
         )));
@@ -4289,30 +4301,25 @@ mod tests {
         );
         let music_prompt = music.prompts[0];
         for required in [
-            "Call get_source_shot_board exactly once per visual asset over its full source range",
+            "Call get_source_shot_board exactly once over the full Tears of Steel source",
             "candidate_selection coverage",
             "candidate_count 12",
             "minimum_confidence_basis_points 1000",
-            "exactly the pinned sintel and tears-of-steel visual sources",
-            "[0..40)",
-            "[984..1253)",
-            "preferred source start 5160",
-            "preferred source end 6000",
-            "maximum end drift 0 frames",
-            "exact real-time source range [5160..6000)",
+            "Tears of Steel as the only visual source",
+            "preferred source start 6334",
+            "preferred source end 6994",
+            "maximum end drift 15 frames",
+            "authored final tag",
             "structural_only=false",
-            "at least 3 clips and 210 project frames each",
-            "early shot starting no later than frame 175",
-            "late shot starting no earlier than frame 450",
-            "do not use one world only as bookends or isolated inserts",
-            "opening shot must hold at least 75 frames",
-            "closing shot at least 100",
+            "Choose 8 or 9 non-overlapping Tears of Steel shots",
+            "hold the opening at least 40 frames",
+            "closing at least 100",
             "at least 3 cuts and at least half of all cuts",
-            "cadence {minimum_duration_buckets:3, duration_bucket_frames:20, maximum_similar_run:3, similar_tolerance_frames:8}",
-            "maximum_movement_frames 24",
+            "cadence {minimum_duration_buckets:3, duration_bucket_frames:15, maximum_similar_run:3, similar_tolerance_frames:6}",
+            "maximum_movement_frames 20",
             "model-authored fades",
             "12 storyboard frames",
-            "natural quiet tail",
+            "musical closure",
         ] {
             assert!(
                 music_prompt.contains(required),
@@ -4388,62 +4395,57 @@ mod tests {
 
     fn assert_music_fixture_and_truth() {
         let music_pack = FixturePackManifest::from_json(include_str!(
-            "../../../../benchmarks/auto-edit/v5/music-fixture-pack-v3.json"
+            "../../../../benchmarks/auto-edit/v5/music-fixture-pack-v4.json"
         ))
         .unwrap();
-        assert_eq!(music_pack.pack_id, "m40-music-montage-v3");
-        assert_eq!(music_pack.assets.len(), 3);
+        assert_eq!(music_pack.pack_id, "m40-single-source-trailer-v4");
+        assert_eq!(music_pack.assets.len(), 2);
         assert_eq!(
             music_pack
                 .assets
                 .iter()
                 .map(|asset| asset.bytes)
                 .sum::<u64>(),
-            43_194_857
+            29_728_929
         );
         let music_truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
-            "../../../../benchmarks/auto-edit/v5/music-ground-truth-v3.json"
+            "../../../../benchmarks/auto-edit/v5/music-ground-truth-v4.json"
         ))
         .unwrap();
         assert_eq!(music_truth.schema_version, 1);
         assert_eq!(
             music_truth.montage_id,
-            "blender-dramatic-resolution-uprising"
+            "tears-of-steel-single-source-vanguard-trailer"
         );
         assert_eq!(music_truth.project_fps, Rational::new(25, 1).unwrap());
         assert_eq!(
             music_truth.visual_asset_ids,
-            [
-                "sintel-trailer-1080p".to_owned(),
-                "tears-of-steel-battle-720p".to_owned()
-            ]
+            ["tears-of-steel-battle-720p".to_owned()]
         );
-        assert_eq!(music_truth.music_asset_id, "uprising-scott-buckley");
+        assert_eq!(music_truth.music_asset_id, "vanguard-scott-buckley");
         assert_eq!(music_truth.timeline_range.start, 0);
-        assert_eq!(music_truth.timeline_range.end, 700);
+        assert_eq!(music_truth.timeline_range.end, 550);
         assert_eq!(music_truth.minimum_visual_shots, 8);
-        assert_eq!(music_truth.maximum_visual_shots, 10);
-        assert_eq!(music_truth.minimum_shot_frames, 55);
+        assert_eq!(music_truth.maximum_visual_shots, 9);
+        assert_eq!(music_truth.minimum_shot_frames, 30);
         assert_eq!(music_truth.maximum_shot_frames, 140);
         assert!((music_truth.minimum_beat_strength_percent - 10.0).abs() < f64::EPSILON);
         assert_eq!(music_truth.minimum_source_separation_frames, 0);
         assert!((music_truth.source_scene_minimum_confidence_percent - 10.0).abs() < f64::EPSILON);
         assert_eq!(music_truth.minimum_duration_buckets, 3);
-        assert_eq!(music_truth.duration_bucket_frames, 20);
+        assert_eq!(music_truth.duration_bucket_frames, 15);
         assert_eq!(music_truth.maximum_similar_run, 3);
-        assert_eq!(music_truth.similar_tolerance_frames, 8);
+        assert_eq!(music_truth.similar_tolerance_frames, 6);
         assert_eq!(music_truth.meter_beats, 4);
         assert_eq!(music_truth.phrase_bars, 4);
         assert_eq!(music_truth.minimum_structural_aligned_cuts, 3);
         assert!((music_truth.minimum_structural_aligned_percent - 50.0).abs() < f64::EPSILON);
-        assert_eq!(music_truth.minimum_clips_per_visual_asset, 3);
-        assert_eq!(music_truth.minimum_project_frames_per_visual_asset, 210);
-        assert_eq!(music_truth.latest_early_start_per_visual_asset, 175);
-        assert_eq!(music_truth.earliest_late_start_per_visual_asset, 450);
-        assert_eq!(music_truth.music_preferred_source_start, 5_160);
-        assert_eq!(music_truth.music_preferred_source_end, 6_000);
-        assert_eq!(music_truth.music_maximum_end_drift_frames, 0);
-        assert_eq!(music_truth.minimum_opening_shot_frames, 75);
+        assert_eq!(music_truth.minimum_clips_per_visual_asset, 8);
+        assert_eq!(music_truth.minimum_project_frames_per_visual_asset, 550);
+        assert_eq!(music_truth.music_preferred_source_start, 6_334);
+        assert_eq!(music_truth.music_preferred_source_end, 6_994);
+        assert_eq!(music_truth.music_maximum_end_drift_frames, 15);
+        assert_eq!(music_truth.minimum_opening_shot_frames, 40);
         assert_eq!(music_truth.minimum_closing_shot_frames, 100);
         assert_eq!(music_truth.rendered_tail_window_frames, 5);
         assert_eq!(
@@ -4752,17 +4754,17 @@ mod tests {
     fn v5_music_fixture_builds_with_real_media_and_pinned_beats() {
         let fixture = fixture_real_music_montage().unwrap();
         let document = &fixture.original_document;
-        assert_eq!(document.media_pool.len(), 3);
+        assert_eq!(document.media_pool.len(), 2);
         assert_eq!(document.tracks.len(), 2);
         assert_eq!(document.duration, TimeCode::ZERO);
         assert_eq!(document.fps, Rational::new(25, 1).unwrap());
         assert_eq!(document.resolution, (1_920, 1_080));
-        assert_eq!(fixture.context.asset_aliases.len(), 3);
+        assert_eq!(fixture.context.asset_aliases.len(), 2);
         let source_beats = &fixture.context.source_beat_sets[MUSIC_SOURCE_BEAT_SET];
         let project_beats = &fixture.context.timeline_beat_sets[MUSIC_PROJECT_BEAT_SET];
         let source_scenes = &fixture.context.scene_sets[MUSIC_SOURCE_SCENE_SET];
         println!(
-            "Uprising fixture: source_beats={} project_beats={} strong_source_scene_boundaries={}",
+            "Vanguard fixture: source_beats={} project_beats={} strong_source_scene_boundaries={}",
             source_beats.len(),
             project_beats.len(),
             source_scenes.len()
@@ -4771,54 +4773,58 @@ mod tests {
         assert!(!project_beats.is_empty());
         assert!(!source_scenes.is_empty());
         assert_eq!(
-            fixture.context.asset_aliases["sintel"],
+            fixture.context.asset_aliases["tears-of-steel"],
             document.media_pool[0].id
         );
         assert_eq!(
-            fixture.context.asset_aliases["tears-of-steel"],
-            document.media_pool[1].id
-        );
-        assert_eq!(
             fixture.context.asset_aliases["music-bed"],
-            document.media_pool[2].id
+            document.media_pool[1].id
         );
 
         let mut planned_document = document.clone();
-        let music = planned_document.media_pool[2].clone();
+        let music = planned_document.media_pool[1].clone();
         let status = fixture.analysis.beat_status(&music);
         let music_plan = kinewright_core::music_fit_plan_with_end_anchor(
             &planned_document,
             TrackId(2),
             music.id,
-            TimeCode::ZERO..TimeCode(700),
-            Some(TimeCode(5_160)),
+            TimeCode::ZERO..TimeCode(550),
+            Some(TimeCode(6_334)),
             Some(kinewright_core::MusicEndAnchor {
-                preferred_source_end: TimeCode(6_000),
-                maximum_drift_frames: TimeCode::ZERO,
+                preferred_source_end: TimeCode(6_994),
+                maximum_drift_frames: TimeCode(15),
             }),
             &status,
             1_000,
             ThreePointMode::Overwrite,
         )
         .unwrap();
-        assert_eq!(music_plan.source_range, TimeCode(5_160)..TimeCode(6_000));
+        assert_eq!(music_plan.timeline_range, TimeCode::ZERO..TimeCode(550));
+        assert!(
+            music_plan.source_range.end.0.abs_diff(6_994) <= 15,
+            "resolved source range was {:?}",
+            music_plan.source_range
+        );
         let end_anchor = music_plan.end_anchor.unwrap();
-        assert_eq!(end_anchor.target_source_end, TimeCode(6_000));
-        assert_eq!(end_anchor.resolved_source_end, TimeCode(6_000));
-        assert_eq!(end_anchor.signed_offset_frames, 0);
+        assert_eq!(end_anchor.target_source_end, TimeCode(6_994));
+        assert!(end_anchor.signed_offset_frames.unsigned_abs() <= 15);
+        println!(
+            "Vanguard resolved music range: {:?}, endpoint offset={} source frames",
+            music_plan.source_range, end_anchor.signed_offset_frames
+        );
         kinewright_core::apply_batch(&mut planned_document, &music_plan.operations).unwrap();
         let timeline_beats = fixture
             .analysis
             .timeline_beats(
                 &planned_document,
-                Some(TimeCode::ZERO..TimeCode(700)),
+                Some(TimeCode::ZERO..TimeCode(550)),
                 1_000,
             )
             .unwrap();
         let structure = kinewright_core::music_structure_analysis(
             &planned_document,
             music.id,
-            TimeCode::ZERO..TimeCode(700),
+            TimeCode::ZERO..TimeCode(550),
             &timeline_beats,
             &kinewright_core::TimelineBeatAnalysisState::Ready,
             1_000,
@@ -4827,7 +4833,7 @@ mod tests {
         )
         .unwrap();
         println!(
-            "Uprising inferred structure: parameters={:?} candidates={:?}",
+            "Vanguard inferred structure: parameters={:?} candidates={:?}",
             structure.parameters,
             structure
                 .candidates
@@ -4847,6 +4853,51 @@ mod tests {
                 .any(|candidate| candidate.role == kinewright_core::MusicStructureRole::Phrase)
         );
         assert!(structure.candidates.len() >= 3);
+
+        let visual = planned_document.media_pool[0].clone();
+        let selects = [
+            53..122,
+            158..221,
+            659..716,
+            1_284..1_346,
+            221..309,
+            986..1_118,
+            716..788,
+            309..479,
+        ]
+        .map(|range| kinewright_core::BeatMontageSelect {
+            asset: visual.id,
+            source_range: TimeCode(range.start)..TimeCode(range.end),
+        });
+        let anchors = [48, 80, 126, 159, 249, 375, 415].map(TimeCode);
+        let montage = kinewright_core::beat_montage_plan_with_anchors(
+            &planned_document,
+            TrackId(1),
+            music.id,
+            TimeCode::ZERO..TimeCode(550),
+            &selects,
+            &anchors,
+            &timeline_beats,
+            &kinewright_core::TimelineBeatAnalysisState::Ready,
+            1_000,
+            TimeCode(30),
+            TimeCode(140),
+            ThreePointMode::Overwrite,
+        )
+        .unwrap();
+        let cadence = kinewright_core::validate_beat_montage_plan_cadence(
+            &montage,
+            kinewright_core::BeatMontageCadenceContract {
+                minimum_duration_buckets: 3,
+                duration_bucket_frames: TimeCode(15),
+                maximum_similar_run: 3,
+                similar_tolerance_frames: TimeCode(6),
+            },
+        )
+        .unwrap();
+        assert_eq!(montage.shots.len(), 8);
+        assert!(cadence.distinct_buckets.len() >= 3);
+        assert!(cadence.longest_similar_run <= 3);
     }
 
     #[test]

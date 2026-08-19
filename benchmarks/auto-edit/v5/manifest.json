@@ -11,13 +11,13 @@
     "benchmarks/auto-edit/v5/event-fixture-pack.json",
     "benchmarks/auto-edit/v5/music-fixture-pack.json",
     "benchmarks/auto-edit/v5/music-fixture-pack-v2.json",
-    "benchmarks/auto-edit/v5/music-fixture-pack-v3.json"
+    "benchmarks/auto-edit/v5/music-fixture-pack-v4.json"
   ],
   "fixture_provenance": {
     "policy": "Every downloaded byte must have an explicit redistribution license, source page, immutable byte count, and SHA-256. Acquisition is an explicit command; benchmark execution is offline and refuses missing or changed media.",
     "interview": "The first task uses Dan Streible's 2006 interview with filmmaker Helen Hill, dedicated to the public domain and hosted by Wikimedia Commons.",
     "event_multicam": "The second task uses the AMI Meeting Corpus ES2002a participant cameras, headset mix, and manual annotations, released by the AMI Consortium / University of Edinburgh under CC BY 4.0.",
-    "music_montage": "The rejected historical preflight used Kevin MacLeod's CC BY 4.0 instrumental Cipher. The first recovery paired the CC BY 3.0 Sintel and Big Buck Bunny trailers with Scott Buckley's CC BY 4.0 cue Uprising, but human review rejected its forced tonal pivot and unresolved hard audio stop. The active recovery pairs tonally dramatic CC BY 3.0 Sintel and Tears of Steel footage with a 28-second Uprising window that reaches the cue's verified natural tail.",
+    "music_montage": "Historical attempts forced unrelated visual sources into one music-led experience; human review found the premise incoherent and neither source essential. The active task is a simpler single-source trailer edit: a CC BY 3.0 Tears of Steel battle scene cut to Scott Buckley's CC BY 4.0 trailer cue Vanguard, ending on its authored final tag and decay.",
     "analysis": "Pinned local Whisper and FFmpeg analyze the source. Timeline assertions, independent post-render transcription, technical QA, and a separate human rubric score the result.",
     "time_base": "Source and project edits remain exact integer frames."
   },
@@ -28,7 +28,7 @@
       "caption word sequence and sentence grouping",
       "speaker-to-camera mapping, continuous multicam coverage, and untouched program audio",
       "bounded editable subject-reframe curves on every multicam shot",
-      "multi-source visual coverage, separated source ranges, and detected-beat-aligned montage cuts",
+      "single-source story coverage, separated source ranges, and detected-beat-aligned trailer cuts",
       "one exact real-time music fit with a constrained source endpoint, independently measured delivery loudness, and a quiet encoded tail",
       "technical QA, delivery framing proof, audio, and MP4 identity",
       "tool-use, token, operation, and wall-time budgets"
@@ -159,11 +159,11 @@
     {
       "id": "g3",
       "family": "music_montage",
-      "name": "real Blender dramatic-resolution montage",
+      "name": "single-source Tears of Steel trailer edit",
       "fixture": "fixture_real_music_montage",
-      "fixture_pack": "benchmarks/auto-edit/v5/music-fixture-pack-v3.json",
-      "ground_truth": "benchmarks/auto-edit/v5/music-ground-truth-v3.json",
-      "prompt": "Create a finished 1080p YouTube music montage from exactly the pinned sintel and tears-of-steel visual sources, paced to Uprising on music-bed. Build one coherent dramatic arc: establish character and threat, develop matching action or composition across both worlds, escalate to one clear visual and musical peak, then resolve on a held image. Every cross-source cut needs an intelligible action, motion, scale, color, or composition bridge; neither source may be a cameo. Open exactly these six capability schemas in one get_capability call: get_source_shot_board, plan_music_fit, get_music_structure, plan_beat_montage, plan_audio_normalization, and get_editorial_readiness. Do not call get_source_storyboard. Call get_source_shot_board exactly once per visual asset over its full source range with candidate_selection coverage, minimum_duration_frames 55, minimum_confidence_basis_points 1000, candidate_count 12, and max_width 160. Use that full-range visual evidence to choose scene-clean shots, and never cross a returned scene boundary. Never select a Sintel range overlapping [0..40), [108..144), [216..292), [376..396), [420..441), [508..536), [664..688), [768..780), [832..880), or [984..1253); these contain black, fades, titles, or credits. First call plan_music_fit on audio track 2 with music-bed, project range 0..700, preferred source start 5160, preferred source end 6000, maximum end drift 0 frames, minimum strength 10 percent, and overwrite mode. Inspect and commit that endpoint-anchored plan; it must produce the exact real-time source range [5160..6000) so the montage reaches the cue's natural quiet tail. Keep it as the only audio, with no loop, retime, duplication, source-video audio, or later trim. Call get_music_structure over project range 0..700 with minimum strength 10 percent, meter 4, 4 bars per phrase, and structural_only=false. Its roles are low-confidence timing guides, not evidence of musical closure. Choose 8 through 10 shots in final story order. Use both sources for at least 3 clips and 210 project frames each. Each source must appear in an early shot starting no later than frame 175 and return in a distinct late shot starting no earlier than frame 450; do not use one world only as bookends or isolated inserts. Build short visual phrases rather than mechanical A/B alternation: establish both worlds, develop a meaningful visual relationship, return to both during escalation or resolution, and make the final held image feel causally earned. Each shot must fill 55..140 project frames, same-asset source ranges must not overlap, the opening shot must hold at least 75 frames, and the closing shot at least 100. Use at least three duration bands and no more than three similar durations in a row. Put every internal cut on a returned beat; place at least 3 cuts and at least half of all cuts on returned bar or phrase candidates, prioritizing strong and structural moments for escalation, peak, and resolution. Call plan_beat_montage on video track 1 over 0..700 with minimum shot length 55, maximum shot length 140, minimum beat strength 10 percent, overwrite mode, the ordered selects, exactly one fewer preferred cut anchors than selects, cadence {minimum_duration_buckets:3, duration_bucket_frames:20, maximum_similar_run:3, similar_tolerance_frames:8}, and anchor repair with maximum_movement_frames 24 and no locked anchors. Inspect the resolved anchors, signed deltas, shot durations, source order, temporal spread, and structural share before committing; revise and retry if the plan is infeasible or weak. If a failed call returns an exact_retry_patch, apply it once instead of guessing a new schedule. Normalize only audio track 2 to -1600 LUFS hundredths with a -100 dBFS-hundredths sample-peak ceiling and 100-hundredths tolerance. Add no captions, titles, transitions, model-authored fades, effects, or retiming. Finish with get_editorial_readiness using youtube_1080p, check_silence=false, centered 50/50 focus, 12 storyboard frames, and 160-pixel cells. Inspect the whole sheet and revise black, baked fades, slates, arbitrary sequencing, weak bridges, weak arc stages, source cameos, or an unresolved finish. Do not queue export; the benchmark renders the verified snapshot. Keep working until readiness is true.",
+      "fixture_pack": "benchmarks/auto-edit/v5/music-fixture-pack-v4.json",
+      "ground_truth": "benchmarks/auto-edit/v5/music-ground-truth-v4.json",
+      "prompt": "Create a finished 22-second 1080p YouTube trailer edit using Tears of Steel as the only visual source and Vanguard on music-bed as the only audio. This is one conflict, not a montage of unrelated worlds. Build a clear action arc: establish the human team and its weapon, reveal the mechanical threat and scale of the battle, escalate reactions and destruction, peak on the strongest robot confrontation or collision, then resolve on a held survivor, team, or aftermath image as the music performs its final tag. Open exactly these six capability schemas in one get_capability call: get_source_shot_board, plan_music_fit, get_music_structure, plan_beat_montage, plan_audio_normalization, and get_editorial_readiness. Do not call get_source_storyboard. Call get_source_shot_board exactly once over the full Tears of Steel source with candidate_selection coverage, minimum_duration_frames 30, minimum_confidence_basis_points 1000, candidate_count 12, and max_width 160. Use that evidence to choose scene-clean shots and never cross a returned scene boundary. First call plan_music_fit on audio track 2 with music-bed, project range 0..550, preferred source start 6334, preferred source end 6994, maximum end drift 15 frames, minimum strength 10 percent, and overwrite mode. Inspect and commit the resolved endpoint-anchored plan. Keep it unchanged as the sole audio: no loop, retime, duplication, source-video audio, or later trim. The endpoint intentionally includes Vanguard's authored final tag and a short decay; do not substitute mere low volume for musical closure. Call get_music_structure over 0..550 with minimum strength 10 percent, meter 4, 4 bars per phrase, and structural_only=false. Choose 8 or 9 non-overlapping Tears of Steel shots in final story order. Every shot must advance the same team, weapon, threat, escalation, peak, or resolution. Fill 30..140 project frames per shot, hold the opening at least 40 frames and closing at least 100, use at least three duration bands, and allow no more than three similar durations in a row. Put every internal cut on a returned beat; put at least 3 cuts and at least half of all cuts on returned bar or phrase candidates. Let the long musical rests breathe instead of forcing rapid filler cuts. Call plan_beat_montage on video track 1 over 0..550 with shot bounds 30..140, minimum beat strength 10 percent, overwrite mode, the ordered selects, exactly one fewer preferred anchors than selects, cadence {minimum_duration_buckets:3, duration_bucket_frames:15, maximum_similar_run:3, similar_tolerance_frames:6}, and anchor repair with maximum_movement_frames 20 and no locked anchors. Inspect the resolved story order, anchors, deltas, durations, and structural share before committing. Apply one returned exact_retry_patch if necessary. Normalize only track 2 to -1600 LUFS hundredths with a -100 dBFS-hundredths sample-peak ceiling and 100-hundredths tolerance. Add no captions, titles, transitions, model-authored fades, effects, or retiming. Finish with get_editorial_readiness using youtube_1080p, check_silence=false, centered 50/50 focus, 12 storyboard frames, and 160-pixel cells. Inspect the whole sheet and revise black frames, baked cuts, arbitrary ordering, repeated ideas, a weak peak, or an unresolved ending. Do not queue export; the benchmark renders the verified snapshot. Keep working until readiness is true.",
       "delivery": {
         "profile": "youtube_1080p",
         "focus_x_percent": 50,
@@ -190,16 +190,14 @@
         "undos": 80
       },
       "machine_assertions": [
-        "timeline non-empty with eight to ten visual shots and one music clip",
-        "both named visual sources appear on the video track",
-        "source selections from the same asset are disjoint and separated",
-        "each named visual source contributes at least three clips and 210 project frames",
-        "each named visual source appears in distinct early and late timeline phases",
-        "exact 0..700 visual and music coverage with exact project duration",
-        "the first shot holds at least 75 frames and the final shot holds at least 100 frames",
-        "no visual transitions, effects, fades, retiming, or periodic A/B cadence",
+        "timeline non-empty with eight to nine Tears of Steel shots and one music clip",
+        "Tears of Steel is the sole visual source and fills the full video track",
+        "source selections are scene-clean and disjoint",
+        "exact 0..550 visual and music coverage with exact project duration",
+        "the first shot holds at least 40 frames and the final shot holds at least 100 frames",
+        "no visual transitions, effects, fades, retiming, or periodic duration cadence",
         "every internal visual cut is aligned to a detected project-frame music beat",
-        "music uses the exact endpoint-anchored real-time source range 5160..6000 as one unshaped clip",
+        "music uses one endpoint-anchored real-time Vanguard range ending within 15 source frames of 6994",
         "visual source audio is absent; rendered music meets the loudness and peak contract and its final five frames remain below -30 dBFS peak",
         "technical QA export ready",
         "required capability evidence",

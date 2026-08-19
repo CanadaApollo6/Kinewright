@@ -237,18 +237,18 @@ is not the three-sample family gate. The rejected original remains recorded in
 `benchmarks/auto-edit/v5/event-multicam-baseline.json`; the accepted recovery is
 recorded separately.
 
-## Phase 3 - real music montage
+## Phase 3 - single-source trailer editing
 
-`generalization-v5` task `g3` uses Blender Foundation footage. The rejected v1
-preflight paired Sintel and Big Buck Bunny with Kevin MacLeod's instrumental
-"Cipher." The v2 recovery replaced that flat bed with Scott Buckley's
-"Uprising," whose dark slow-burn and heroic backend provide a real midpoint
-event for the edit. The active v3 recovery keeps Uprising, replaces the
-forced Bunny cameo with a compatible Tears of Steel source, and reaches the
-cue's natural tail. All fixture versions remain pinned and openly licensed.
-The task is deliberately horizontal: g1 and g2 already exercise 9:16 delivery,
-while g3 isolates source inspection, shot selection, beat sense, and music
-finishing.
+`generalization-v5` task `g3` uses Blender Foundation footage. V1 through v3
+tested multi-source montage contracts. Human review showed that the premise was
+the problem: one music bed made disconnected worlds read as one story, neither
+source felt essential, and a quiet tail still did not sound like a resolved
+phrase. V4 is therefore a simpler 22-second trailer edit from one Tears of
+Steel battle source, cut to Scott Buckley's trailer cue "Vanguard" through its
+authored final tag and decay. All fixture versions remain pinned and openly
+licensed. The task is deliberately horizontal: g1 and g2 already exercise 9:16
+delivery, while g3 isolates source inspection, shot selection, beat sense,
+story construction, and music finishing.
 
 The benchmark exposed three agent-facing gaps. A model could inspect frames only
 after putting footage on the timeline, the old beat planner could split one
@@ -287,17 +287,18 @@ effects, fades, or retiming. Those checks still allowed a forced cameo, did not
 fully veto baked source cuts, and did not require a musical endpoint or quiet
 encoded tail.
 
-The active v3 contract keeps the useful cadence and source-clean checks while
-adding a compatible Tears of Steel source, at least three clips and 210 project
-frames per visual asset, and distinct early and late appearances for both
-sources. This makes each source carry at least 30% of the edit and rejects
-bookends or isolated inserts. It also adds a 10% scene-boundary veto floor,
-actual opening and closing shot holds, exact source-end anchoring at the cue's
-natural tail, and a quiet five-frame encoded-tail check. It targets 8-10 gapless
-shots over 28 seconds (700 project frames), with a coherent action-to-release
-arc. Human review still owns the irreducible taste judgments: story, rhythm,
-visual finish, audio finish, and delivery readiness. Captions are explicitly not
-applicable for this instrumental montage.
+The active v4 contract retains the useful cadence, source-clean, endpoint, and
+encoded-delivery checks while removing the source quota entirely. Tears of
+Steel is the only visual source and must fill the entire 550-frame timeline in
+eight or nine disjoint scene-clean shots. The story target is explicit:
+establish the human team and weapon, reveal the mechanical threat, escalate
+destruction, peak on confrontation, and resolve on a held survivor, team, or
+aftermath image. The cue ends within 15 source frames of its reviewed endpoint,
+which includes Vanguard's final tag plus decay. The fixture test proves an
+eight-shot schedule is source-feasible, beat-valid, cadence-valid, and safe
+across the 24 fps source, 25 fps project, and 30 fps music before model tokens
+are spent. Human review still owns story, rhythm, visual finish, audio finish,
+and delivery readiness. Captions are explicitly not applicable.
 
 The first machine-passing `g3` preflight is recorded in
 [`benchmarks/auto-edit/v5/music-montage-baseline.json`](../benchmarks/auto-edit/v5/music-montage-baseline.json).
@@ -363,8 +364,9 @@ needed three planner calls, 15 total calls, and 342,058 tokens, a 20.9% token
 reduction while preserving the 40/40 result. It used four Sintel shots over 248
 frames and five Tears of Steel shots over 452 frames; its rendered SHA-256 is
 `4c802c58d2a056f87bc305e742db5bdb9fbfc0dfafa2a200604835ee3857daf6`.
-Both fresh artifacts await human review. Neither has been published as an
-accepted baseline.
+Neither fresh artifact is an accepted baseline. Owner review rejected the
+parallel-world premise itself and supplied no numeric ratings, so none are
+invented. V4 replaces that premise rather than tightening another usage quota.
 
 Independent frame review rejected one earlier machine-passing recovery because
 its final shot began inside a baked source dissolve. That artifact is not the
@@ -397,14 +399,14 @@ cargo run -p kinewright-agent --bin kinewright-eval -- `
   --verify-fixtures benchmarks/auto-edit/v5/event-fixture-pack.json
 ```
 
-Prepare and verify the next music-montage pack:
+Prepare and verify the active single-source trailer pack:
 
 ```powershell
 & .\scripts\setup-ffmpeg.ps1
 cargo run -p kinewright-agent --bin kinewright-eval -- `
-  --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v3.json
+  --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v4.json
 cargo run -p kinewright-agent --bin kinewright-eval -- `
-  --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v3.json
+  --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v4.json
 ```
 
 Run the first task:
@@ -465,7 +467,11 @@ survives. One successful interview does not satisfy the milestone.
 Music montage has one rejected historical preflight and one 34/34 machine-passing
 v2 recovery rejected in human review. One v3 machine diagnostic was withheld
 after independent review exposed source-cameo behavior, so it does not count.
-Two fresh hardened-v3 samples now pass 40/40 and await human review. The family
-still needs one more hardened-v3 machine pass and two human accepts.
+Two fresh hardened-v3 samples passed 40/40, but owner review rejected the
+multi-source premise. The first v4 single-source trailer sample now passes
+37/37 with 12 calls, 221,521 tokens, five of seven cuts on structural anchors,
+-15.99 LUFS audio, and a one-frame music-end offset. Independent frame and cut
+inspection passed. Human review is pending, so the family still has no accepted
+single-source trailer sample.
 Event/multicam still needs two more machine samples, one more human-accepted
 output, and numeric ratings sufficient to evaluate the 4.0 mean-rating gate.
