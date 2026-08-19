@@ -145,8 +145,8 @@ until interview/documentary, event/multicam, and music-montage families each
 pass three model samples and their separate human gate.
 
 The recorded `g3` recovery baseline below is the separately pinned v2 music
-pack. The active recovery is v4: a 22-second, single-source Tears of Steel
-trailer cut to Vanguard's authored final tag. Prepare or verify its inputs
+pack. The active recovery is v5: an 18-second, single-source Tears of
+Steel trailer cut to reviewed Vanguard musical events and a short decay. Prepare or verify its inputs
 explicitly before the offline run:
 
 ```powershell
@@ -202,17 +202,31 @@ Their SHA-256 values are
 Neither is an accepted baseline. Owner review rejected the parallel-world
 premise: one music track made the disconnected footage read as one incoherent
 story, neither source felt essential, and the ending still sounded mid-phrase.
-No numeric scores were supplied for that review. V4 removes the forced second
-source and uses a trailer cue with a distinct authored ending. Its fixture test
-proves the 22-second eight-shot contract is source-, beat-, cadence-, and
-endpoint-feasible before a model run.
+No numeric scores were supplied for that review. V4 removed the forced second
+source but still failed music-to-picture motivation and perceptual tail length.
+V5 keeps the single visual source and proves the 18-second five-shot contract is
+source-, beat-, cadence-, and endpoint-feasible before a model run.
 
-The first v4 model sample now passes 37/37 with 12 calls, 10 operations, and
+The first v4 model sample passed the old 37/37 gate with 12 calls, 10 operations, and
 221,521 tokens. It uses eight scene-clean Tears of Steel shots, aligns five of
 seven cuts to structural candidates, measures -15.99 LUFS, and ends within one
 source frame of the reviewed Vanguard endpoint. Its SHA-256 is
 `9b813c6f6888e36e90ba3b2f5ad0938f8d3827374a2465161c3992aa40a8d99a`.
-Independent cut-neighborhood inspection passed; human review remains pending.
+Human review rejected the exact artifact because the music did not motivate the
+cuts or visual action and became perceptually inactive around 15 seconds while
+picture continued for almost seven seconds. No numeric ratings were supplied.
+The replacement gate uses the four reviewed musical events at project frames
+48, 126, 249, and 375, requires all four cuts there, shortens delivery to 450
+frames, and rejects more than 25 trailing frames below -30 LUFS in one-second
+encoded windows.
+
+The first replacement under that contract passes 37/37 machine assertions with
+13 calls, 7 operations, and 238,496 tokens. It resolves music source frames
+`6335..6875` exactly, measures -16.03 LUFS, and passes the encoded terminal-
+activity check. Its SHA-256 is
+`816ece8a11a69b1048a949420a597a1839726fd8a9bcd58d3fbf7f3d482f824c`.
+Independent cut-neighborhood inspection found clean event boundaries and a
+continuous climax-to-resolution final shot. Human review remains pending.
 
 The first corrected interview preflight is published at
 `benchmarks/auto-edit/v5/baseline.json`: 1/1 sample, 25/25 assertions, 7 tool

@@ -9,7 +9,7 @@ filmmaker Helen Hill. `g2` is a CC BY 4.0 AMI meeting with four synchronized
 participant cameras, a program headset mix, and pinned manual speaker labels.
 `g3` is now a cuts-first single-source trailer edit built from the CC BY 3.0
 Tears of Steel battle clip. It uses Scott Buckley's CC BY 4.0 trailer cue
-"Vanguard" and includes that cue's authored final tag and decay. Earlier
+"Vanguard" through a reviewed set of musical events and a short decay. Earlier
 multi-source montage contracts remain historical evidence, but owner review
 rejected the premise: one music bed made unrelated worlds read as one story,
 neither source felt essential, and a quiet tail did not prove musical closure.
@@ -152,10 +152,10 @@ cargo run -p kinewright-agent --bin kinewright-eval -- `
 `g3` measures the missing composition layer: whether the model can survey one
 narrative source visually, choose a deliberate shot sequence, and recut it into
 a trailer against detected musical onsets without hand-authoring frame
-arithmetic. The active v4 contract is a 22-second action arc from Tears of
+arithmetic. The active v5 contract is an 18-second action arc from Tears of
 Steel. It establishes the human team and weapon, reveals the mechanical threat,
-escalates through destruction, peaks on confrontation, and resolves on a held
-image as Vanguard performs its authored final tag. It is a recovery target, not
+escalates after a musical valley, peaks on confrontation, and resolves on a held
+image during a short audible decay. It is a recovery target, not
 a completed or human-accepted sample.
 
 The recovery contract uses three general agent-facing primitives. One
@@ -185,27 +185,42 @@ v2 rerun. V2 also anchored the music start without requiring a musical source
 endpoint or a quiet encoded tail, which left the published artifact ending
 inside a phrase.
 
-The active v4 contract removes the source-quota problem instead of tuning it.
+The active v5 contract keeps v4's single-source correction and fixes the music contract.
 Tears of Steel must be the sole visual source and fill the complete video track
-through eight or nine disjoint, scene-clean shots. The machine gate requires
-nonuniform cadence, structural music anchors, a real held ending, source-audio
-exclusion, loudness, an encoded quiet tail, and independent H.264/AAC MP4
-probing. The fixture test also proves an eight-shot schedule is simultaneously
-beat-valid, cadence-valid, scene-clean, mixed-frame-rate safe, and
-source-feasible before a model can spend tokens on it. Captions are
+through exactly five disjoint, scene-clean shots. Four human-reviewed musical
+events have explicit editorial roles: first lift, commitment, re-entry, and
+climax. The machine gate requires cuts at all four events, nonuniform cadence, a
+held resolution, source-audio exclusion, loudness, no more than one second of
+perceptually inactive audio at the end, and independent H.264/AAC MP4 probing.
+The fixture test proves the five-shot schedule is beat-valid, cadence-valid,
+mixed-frame-rate safe, and source-feasible before a model can spend tokens on
+it. Captions are
 intentionally not part of this instrumental task and are marked not applicable
 instead of receiving an invented score.
 
-The first v4 model sample passes 37/37 machine assertions in one turn with 12
+The first v4 model sample passed the old 37/37 machine assertions in one turn with 12
 tool calls, 10 operations, and 221,521 total tokens. It uses eight Tears of
 Steel shots over exactly 550 project frames, places five of seven cuts on
 structural candidates, measures -15.99 LUFS, and ends at Vanguard source frame
 6995 with an encoded five-frame tail below -46 dBFS peak. Its rendered SHA-256
 is `9b813c6f6888e36e90ba3b2f5ad0938f8d3827374a2465161c3992aa40a8d99a`.
-Independent uniform-frame and before/at/after cut inspection found a readable
-weapon/team setup, scale reveal, activation, reaction, robot escalation,
-collision, and aftermath sequence with no baked cut crossing. Human review is
-still pending, so this is a diagnostic sample rather than an accepted baseline.
+Human review rejected that exact artifact: the cuts and visual action did not
+feel motivated by the music, and the cue became perceptually inactive around
+15 seconds while picture continued for almost seven seconds. No numeric ratings
+were supplied. That failure invalidated the old structural-share and terminal-
+quiet gates; the 18-second reviewed-event and maximum-inactive-tail contract now
+replaces them.
+
+The first hardened-v4 replacement passes 37/37 machine assertions in one turn
+with 13 tool calls, 7 operations, and 238,496 total tokens. It uses the exact
+five-shot cadence `[48, 78, 123, 126, 75]`, resolves music source frames
+`6335..6875` with zero endpoint drift, measures -16.03 LUFS, and keeps the final
+one-second encoded window above the -30 LUFS activity floor before ending below
+-18.5 dBFS peak. Its rendered SHA-256 is
+`816ece8a11a69b1048a949420a597a1839726fd8a9bcd58d3fbf7f3d482f824c`.
+Independent cut-neighborhood inspection found clean event boundaries and a
+continuous climax-to-resolution final shot. Human review is pending; machine
+success alone does not make this an accepted sample.
 
 Prepare the pack as above, then run:
 

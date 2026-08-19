@@ -117,6 +117,9 @@ pub struct EvalLoudnessSpec {
 pub struct EvalAudioTailSpec {
     pub terminal_window_frames: TimeCode,
     pub maximum_sample_peak_dbfs_hundredths: i32,
+    pub activity_window_frames: TimeCode,
+    pub minimum_active_integrated_lufs_hundredths: i32,
+    pub maximum_trailing_inactive_frames: TimeCode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -582,6 +585,12 @@ pub struct RenderedAudioTailVerification {
     pub measurement: AudioLoudness,
     pub terminal_window_frames: TimeCode,
     pub maximum_sample_peak_dbfs_hundredths: i32,
+    pub activity_window_frames: TimeCode,
+    pub minimum_active_integrated_lufs_hundredths: i32,
+    pub maximum_trailing_inactive_frames: TimeCode,
+    pub observed_trailing_inactive_frames: TimeCode,
+    pub latest_active_window_start_frame: Option<TimeCode>,
+    pub latest_active_window_end_frame: Option<TimeCode>,
     pub passed: bool,
 }
 
@@ -1243,6 +1252,18 @@ fn verify_rendered_audio_tail(
         }
     };
     let passed = audio_tail_peak_passes(&measurement, contract.maximum_sample_peak_dbfs_hundredths);
+    let (observed_trailing_inactive_frames, latest_active_window) =
+        match measure_trailing_audio_activity(analysis, asset, contract) {
+            Ok(activity) => activity,
+            Err(error) => {
+                result.errors.push(format!(
+                    "rendered trailing-audio activity measurement failed: {error}"
+                ));
+                return;
+            }
+        };
+    let activity_passed = latest_active_window.is_some()
+        && observed_trailing_inactive_frames <= contract.maximum_trailing_inactive_frames;
     if !passed {
         result.errors.push(format!(
             "rendered audio tail violates terminal peak delivery: frames={}..{}, sample_peak_dbfs_hundredths={:?}, maximum={}",
@@ -1252,14 +1273,64 @@ fn verify_rendered_audio_tail(
             contract.maximum_sample_peak_dbfs_hundredths,
         ));
     }
+    if !activity_passed {
+        result.errors.push(format!(
+            "rendered audio becomes perceptually inactive too early: observed_trailing_inactive_frames_at_least={}, maximum={}, activity_window_frames={}, minimum_active_integrated_lufs_hundredths={}",
+            observed_trailing_inactive_frames.0,
+            contract.maximum_trailing_inactive_frames.0,
+            contract.activity_window_frames.0,
+            contract.minimum_active_integrated_lufs_hundredths,
+        ));
+    }
     result.rendered_audio_tail = Some(RenderedAudioTailVerification {
         tail_start_frame: tail_range.start,
         tail_end_frame: tail_range.end,
         measurement,
         terminal_window_frames: contract.terminal_window_frames,
         maximum_sample_peak_dbfs_hundredths: contract.maximum_sample_peak_dbfs_hundredths,
-        passed,
+        activity_window_frames: contract.activity_window_frames,
+        minimum_active_integrated_lufs_hundredths: contract
+            .minimum_active_integrated_lufs_hundredths,
+        maximum_trailing_inactive_frames: contract.maximum_trailing_inactive_frames,
+        observed_trailing_inactive_frames,
+        latest_active_window_start_frame: latest_active_window.as_ref().map(|range| range.start),
+        latest_active_window_end_frame: latest_active_window.as_ref().map(|range| range.end),
+        passed: passed && activity_passed,
     });
+}
+
+fn measure_trailing_audio_activity(
+    analysis: &dyn Analysis,
+    asset: &kinewright_core::MediaAsset,
+    contract: EvalAudioTailSpec,
+) -> Result<(TimeCode, Option<std::ops::Range<TimeCode>>), String> {
+    let mut window_end = asset.duration;
+    let mut observed_inactive = TimeCode::ZERO;
+    loop {
+        let window_start = TimeCode(
+            window_end
+                .0
+                .saturating_sub(contract.activity_window_frames.0),
+        );
+        let range = window_start..window_end;
+        let document = audio_tail_document(asset, range.clone());
+        let measurement = analysis
+            .timeline_loudness(&document)
+            .map_err(|error| format!("frames={}..{}: {error}", range.start, range.end))?;
+        if audio_activity_loudness_passes(
+            &measurement,
+            contract.minimum_active_integrated_lufs_hundredths,
+        ) {
+            return Ok((observed_inactive, Some(range)));
+        }
+        observed_inactive = TimeCode(observed_inactive.0 + range.end.0 - range.start.0);
+        if observed_inactive > contract.maximum_trailing_inactive_frames
+            || window_start == TimeCode::ZERO
+        {
+            return Ok((observed_inactive, None));
+        }
+        window_end = window_start;
+    }
 }
 
 fn audio_tail_range(
@@ -1282,6 +1353,30 @@ fn audio_tail_range(
         return Err(format!(
             "terminal window {} frames exceeds encoded duration {} frames",
             contract.terminal_window_frames.0, encoded_duration.0
+        ));
+    }
+    if contract.activity_window_frames <= TimeCode::ZERO {
+        return Err(format!(
+            "activity window must be positive, got {} frames",
+            contract.activity_window_frames.0
+        ));
+    }
+    if contract.activity_window_frames > encoded_duration {
+        return Err(format!(
+            "activity window {} frames exceeds encoded duration {} frames",
+            contract.activity_window_frames.0, encoded_duration.0
+        ));
+    }
+    if contract.maximum_trailing_inactive_frames < TimeCode::ZERO {
+        return Err(format!(
+            "maximum trailing inactive duration cannot be negative, got {} frames",
+            contract.maximum_trailing_inactive_frames.0
+        ));
+    }
+    if contract.minimum_active_integrated_lufs_hundredths > 0 {
+        return Err(format!(
+            "active integrated-loudness threshold cannot be positive, got {}",
+            contract.minimum_active_integrated_lufs_hundredths
         ));
     }
     let start = TimeCode(encoded_duration.0 - contract.terminal_window_frames.0);
@@ -1325,6 +1420,12 @@ fn audio_tail_peak_passes(measurement: &AudioLoudness, maximum_peak: i32) -> boo
     measurement
         .sample_peak_dbfs_hundredths
         .is_none_or(|peak| peak <= maximum_peak)
+}
+
+fn audio_activity_loudness_passes(measurement: &AudioLoudness, minimum_loudness: i32) -> bool {
+    measurement
+        .integrated_lufs_hundredths
+        .is_some_and(|loudness| loudness >= minimum_loudness)
 }
 
 fn verify_rendered_delivery_transcript(
@@ -2012,11 +2113,17 @@ fn rendered_audio_tail_assertion(result: &EvalDeliverableResult) -> AssertionRes
             "encoded audio tail",
             verification.passed,
             format!(
-                "frames={}..{}, sample_peak_dbfs_hundredths={:?}, maximum={}, sample_frames={}",
+                "terminal_frames={}..{}, terminal_sample_peak_dbfs_hundredths={:?}, terminal_maximum={}, trailing_inactive_frames={}, maximum_trailing_inactive_frames={}, activity_window_frames={}, minimum_active_integrated_lufs_hundredths={}, latest_active_window={:?}..{:?}, sample_frames={}",
                 verification.tail_start_frame,
                 verification.tail_end_frame,
                 verification.measurement.sample_peak_dbfs_hundredths,
                 verification.maximum_sample_peak_dbfs_hundredths,
+                verification.observed_trailing_inactive_frames,
+                verification.maximum_trailing_inactive_frames,
+                verification.activity_window_frames,
+                verification.minimum_active_integrated_lufs_hundredths,
+                verification.latest_active_window_start_frame,
+                verification.latest_active_window_end_frame,
                 verification.measurement.sample_frames,
             ),
         ),
@@ -3765,17 +3872,17 @@ fn evaluate_cuts_aligned_to_beat_set_at_least(
 ) -> AssertionResult {
     if tolerance_frames.0 < 0 || minimum_aligned_basis_points > 10_000 {
         return assertion_result(
-            "structural beat-aligned cuts",
+            "selected beat-set-aligned cuts",
             false,
             format!(
-                "invalid structural alignment contract: tolerance={} minimum_aligned_basis_points={minimum_aligned_basis_points}",
+                "invalid selected beat-set alignment contract: tolerance={} minimum_aligned_basis_points={minimum_aligned_basis_points}",
                 tolerance_frames.0
             ),
         );
     }
     let Some(beats) = outcome.context.timeline_beat_sets.get(beat_set) else {
         return assertion_result(
-            "structural beat-aligned cuts",
+            "selected beat-set-aligned cuts",
             false,
             format!("unknown project-frame beat set {beat_set:?}"),
         );
@@ -3787,7 +3894,7 @@ fn evaluate_cuts_aligned_to_beat_set_at_least(
         .find(|track| track.id == track_id)
     else {
         return assertion_result(
-            "structural beat-aligned cuts",
+            "selected beat-set-aligned cuts",
             false,
             format!("track {track_id} does not exist"),
         );
@@ -3801,10 +3908,10 @@ fn evaluate_cuts_aligned_to_beat_set_at_least(
     let total_cuts = media_clips.len().saturating_sub(1);
     if total_cuts == 0 || beats.is_empty() {
         return assertion_result(
-            "structural beat-aligned cuts",
+            "selected beat-set-aligned cuts",
             false,
             format!(
-                "track {track_id} internal cuts={total_cuts}; structural beat set {beat_set:?} contains {} frames",
+                "track {track_id} internal cuts={total_cuts}; selected beat set {beat_set:?} contains {} frames",
                 beats.len()
             ),
         );
@@ -3826,7 +3933,7 @@ fn evaluate_cuts_aligned_to_beat_set_at_least(
     let passed =
         aligned >= minimum_aligned_cuts && aligned_basis_points >= minimum_aligned_basis_points;
     assertion_result(
-        "structural beat-aligned cuts",
+        "selected beat-set-aligned cuts",
         passed,
         format!(
             "track {track_id} aligned {aligned}/{total_cuts} internal cuts ({aligned_basis_points} basis points) to {beat_set:?} within {} frames; required count>={minimum_aligned_cuts} and share>={minimum_aligned_basis_points}",
@@ -7934,6 +8041,9 @@ mod tests {
 
         assert!(audio_tail_peak_passes(&quiet, -100));
         assert!(audio_tail_peak_passes(&silent, -100));
+        assert!(!audio_activity_loudness_passes(&quiet, -100));
+        assert!(!audio_activity_loudness_passes(&silent, -100));
+        assert!(audio_activity_loudness_passes(&quiet, -2_000));
     }
 
     #[test]
@@ -7941,10 +8051,16 @@ mod tests {
         let invalid = EvalAudioTailSpec {
             terminal_window_frames: TimeCode::ZERO,
             maximum_sample_peak_dbfs_hundredths: -100,
+            activity_window_frames: TimeCode(5),
+            minimum_active_integrated_lufs_hundredths: -3_000,
+            maximum_trailing_inactive_frames: TimeCode(30),
         };
         let oversized = EvalAudioTailSpec {
             terminal_window_frames: TimeCode(61),
             maximum_sample_peak_dbfs_hundredths: -100,
+            activity_window_frames: TimeCode(5),
+            minimum_active_integrated_lufs_hundredths: -3_000,
+            maximum_trailing_inactive_frames: TimeCode(30),
         };
 
         assert!(
@@ -7994,6 +8110,9 @@ mod tests {
                 audio_tail: Some(EvalAudioTailSpec {
                     terminal_window_frames: TimeCode(30),
                     maximum_sample_peak_dbfs_hundredths: -100,
+                    activity_window_frames: TimeCode(5),
+                    minimum_active_integrated_lufs_hundredths: -3_000,
+                    maximum_trailing_inactive_frames: TimeCode(30),
                 }),
             },
             &document(),
@@ -8024,6 +8143,9 @@ mod tests {
             audio_tail: Some(EvalAudioTailSpec {
                 terminal_window_frames: TimeCode(30),
                 maximum_sample_peak_dbfs_hundredths: -100,
+                activity_window_frames: TimeCode(5),
+                minimum_active_integrated_lufs_hundredths: -3_000,
+                maximum_trailing_inactive_frames: TimeCode(30),
             }),
         };
         let document = document();
@@ -8061,6 +8183,12 @@ mod tests {
             },
             terminal_window_frames: TimeCode(30),
             maximum_sample_peak_dbfs_hundredths: -100,
+            activity_window_frames: TimeCode(5),
+            minimum_active_integrated_lufs_hundredths: -3_000,
+            maximum_trailing_inactive_frames: TimeCode(30),
+            observed_trailing_inactive_frames: TimeCode(35),
+            latest_active_window_start_frame: None,
+            latest_active_window_end_frame: None,
             passed: false,
         });
 

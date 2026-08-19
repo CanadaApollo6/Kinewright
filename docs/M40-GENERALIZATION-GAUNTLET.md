@@ -243,9 +243,11 @@ recorded separately.
 tested multi-source montage contracts. Human review showed that the premise was
 the problem: one music bed made disconnected worlds read as one story, neither
 source felt essential, and a quiet tail still did not sound like a resolved
-phrase. V4 is therefore a simpler 22-second trailer edit from one Tears of
-Steel battle source, cut to Scott Buckley's trailer cue "Vanguard" through its
-authored final tag and decay. All fixture versions remain pinned and openly
+phrase. V4 therefore moved to a simpler 22-second trailer edit from one Tears
+of Steel battle source and Scott Buckley's trailer cue "Vanguard". Human review
+still found its music unmotivated and its final seven seconds perceptually dead.
+V5 shortens that same licensed pairing to 18 seconds, locks cuts to four reviewed
+musical events, and retains only a short audible decay. All fixture versions remain pinned and openly
 licensed. The task is deliberately horizontal: g1 and g2 already exercise 9:16
 delivery, while g3 isolates source inspection, shot selection, beat sense,
 story construction, and music finishing.
@@ -287,15 +289,16 @@ effects, fades, or retiming. Those checks still allowed a forced cameo, did not
 fully veto baked source cuts, and did not require a musical endpoint or quiet
 encoded tail.
 
-The active v4 contract retains the useful cadence, source-clean, endpoint, and
+The active v5 contract retains the useful cadence, source-clean, endpoint, and
 encoded-delivery checks while removing the source quota entirely. Tears of
-Steel is the only visual source and must fill the entire 550-frame timeline in
-eight or nine disjoint scene-clean shots. The story target is explicit:
+Steel is the only visual source and must fill the entire 450-frame timeline in
+exactly five disjoint scene-clean shots. The story target is explicit:
 establish the human team and weapon, reveal the mechanical threat, escalate
 destruction, peak on confrontation, and resolve on a held survivor, team, or
-aftermath image. The cue ends within 15 source frames of its reviewed endpoint,
-which includes Vanguard's final tag plus decay. The fixture test proves an
-eight-shot schedule is source-feasible, beat-valid, cadence-valid, and safe
+aftermath image. The four internal cuts are locked to reviewed musical events
+at project frames 48, 126, 249, and 375, with the roles first lift, commitment,
+re-entry, and climax. The cue ends within two source frames of its reviewed
+endpoint after a short decay. The fixture test proves the five-shot schedule is source-feasible, beat-valid, cadence-valid, and safe
 across the 24 fps source, 25 fps project, and 30 fps music before model tokens
 are spent. Human review still owns story, rhythm, visual finish, audio finish,
 and delivery readiness. Captions are explicitly not applicable.
@@ -468,10 +471,21 @@ Music montage has one rejected historical preflight and one 34/34 machine-passin
 v2 recovery rejected in human review. One v3 machine diagnostic was withheld
 after independent review exposed source-cameo behavior, so it does not count.
 Two fresh hardened-v3 samples passed 40/40, but owner review rejected the
-multi-source premise. The first v4 single-source trailer sample now passes
-37/37 with 12 calls, 221,521 tokens, five of seven cuts on structural anchors,
--15.99 LUFS audio, and a one-frame music-end offset. Independent frame and cut
-inspection passed. Human review is pending, so the family still has no accepted
-single-source trailer sample.
+multi-source premise. The first v4 single-source trailer sample passed its old
+37/37 gate with 12 calls and 221,521 tokens, but owner review rejected the exact
+SHA-bound artifact: its music did not motivate the cuts or action, and its cue
+became perceptually inactive around 15 seconds while picture continued for
+almost seven seconds. No numeric ratings were supplied. The old bar/phrase-share
+and terminal-quiet checks are retired. The active recovery locks all cuts to
+four reviewed musical events and rejects more than 25 trailing inactive frames,
+so the family still has no accepted single-source trailer sample.
+The first replacement under that contract passes 37/37 with 13 calls, 7
+operations, and 238,496 tokens. Its five shot durations are 48, 78, 123, 126,
+and 75 frames; the music range resolves exactly to `6335..6875`; rendered audio
+measures -16.03 LUFS; and the encoded terminal-activity gate passes. Independent
+cut-neighborhood inspection found clean event boundaries and a continuous
+climax-to-resolution final shot. Its SHA-256 is
+`816ece8a11a69b1048a949420a597a1839726fd8a9bcd58d3fbf7f3d482f824c`.
+Human review remains pending.
 Event/multicam still needs two more machine samples, one more human-accepted
 output, and numeric ratings sufficient to evaluate the 4.0 mean-rating gate.
