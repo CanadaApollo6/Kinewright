@@ -623,6 +623,10 @@ impl Recovery {
     /// until `consume_pending` confirms the restore landed, so a failed
     /// restore can still be recovered at the next launch.
     pub(crate) fn show_dialog(&mut self, ctx: &egui::Context) -> Option<RestoreRequest> {
+        if std::env::var_os("KINEWRIGHT_SCREENSHOT_TO").is_some() {
+            self.pending.clear();
+            return None;
+        }
         let mut restore: Option<usize> = None;
         let mut discard: Option<usize> = None;
         if !self.pending.is_empty() {

@@ -104,8 +104,31 @@ pub(crate) struct KinewrightApp {
 impl KinewrightApp {
     // Construction keeps all channel subscriptions and coupled UI state initialization together.
     #[allow(clippy::too_many_lines)]
-    fn new(media: Arc<FfmpegMediaEngine>) -> Self {
-        let document = default_project_document();
+    fn new(media: Arc<FfmpegMediaEngine>, startup_path: Option<PathBuf>) -> Self {
+        let mut load_error = None;
+        let (name, document, project_path) = match startup_path {
+            Some(path) if path.is_file() => match load_document(&path) {
+                Ok(document) => {
+                    let name = project_name(Some(&path), "Project 1");
+                    (name, document, Some(path))
+                }
+                Err(error) => {
+                    load_error = Some((
+                        "Project",
+                        format!("Could not open {}: {error}", path.display()),
+                    ));
+                    ("Project 1".to_owned(), default_project_document(), None)
+                }
+            },
+            Some(path) => {
+                load_error = Some((
+                    "Project",
+                    format!("Startup project not found: {}", path.display()),
+                ));
+                ("Project 1".to_owned(), default_project_document(), None)
+            }
+            None => ("Project 1".to_owned(), default_project_document(), None),
+        };
         let frames = media.frames();
         let media_events = media.events();
         let visual_cache = crate::visual_cache::VisualCache::new(media.visual_asset_results());
@@ -113,16 +136,31 @@ impl KinewrightApp {
         let playback: Arc<dyn Playback> = media.clone();
         let analysis: Arc<dyn Analysis> = media.clone();
         let exporter: Arc<dyn Export> = media;
-        let project = ProjectSession::create(
+        let mut project = ProjectSession::create(
             1,
-            "Project 1",
+            name,
             document.clone(),
-            None,
+            project_path.clone(),
             &playback,
             &analysis,
             &exporter,
         )
-        .expect("default project session must be valid");
+        .expect("startup project session must be valid");
+        if project_path.is_some() {
+            project.saved_document = Some(Arc::clone(&project.document));
+        }
+        if std::env::var_os("KINEWRIGHT_SCREENSHOT_TO").is_some()
+            && let Some(clip) = project
+                .document
+                .tracks
+                .iter()
+                .flat_map(|track| &track.clips)
+                .find(|clip| clip.content.title().is_some())
+        {
+            project.selected_clip = Some(clip.id);
+        }
+        let screenshotting = std::env::var_os("KINEWRIGHT_SCREENSHOT_TO").is_some();
+        let assets = project.document.media_pool.clone();
         let error_log = ErrorLog::default();
         let claude_info = ClaudeCodeDriver.detect();
         let codex_info = CodexDriver.detect();
@@ -130,7 +168,7 @@ impl KinewrightApp {
         let resolution = document.resolution;
         let fps = document.fps;
         let error_log_open = error_log.len() > 0;
-        let app = Self {
+        let mut app = Self {
             projects: vec![project],
             focused_project: 0,
             next_project_id: 2,
@@ -207,6 +245,41 @@ impl KinewrightApp {
         app.playback
             .set_document(Arc::clone(&app.focused().document));
         app.playback.request_frame(TimeCode::ZERO);
+        let opened_path = app.focused().project_path.clone();
+        if let Some((source, message)) = load_error {
+            app.record_error(source, message);
+        } else if let Some(path) = opened_path {
+            let missing: Vec<String> = app
+                .focused()
+                .document
+                .media_pool
+                .iter()
+                .filter(|asset| !asset.path.is_file())
+                .map(|asset| format!("{} ({})", asset.name, asset.path.display()))
+                .collect();
+            if missing.is_empty() {
+                app.status = if screenshotting {
+                    "Ready".to_owned()
+                } else {
+                    format!("Opened {}", path.display())
+                };
+            } else {
+                app.record_error(
+                    "Media",
+                    format!("Missing media after open: {}", missing.join(", ")),
+                );
+                app.status = format!(
+                    "Opened {} — missing media: {}",
+                    path.display(),
+                    missing.join(", ")
+                );
+            }
+            if !screenshotting {
+                for asset in assets {
+                    app.request_asset_analysis(asset);
+                }
+            }
+        }
         app
     }
 
@@ -335,18 +408,7 @@ impl KinewrightApp {
     }
 
     fn open_project(&mut self, path: &Path) {
-        let loaded = fs::read_to_string(path)
-            .map_err(|error| error.to_string())
-            .and_then(|json| {
-                serde_json::from_str::<Document>(&json).map_err(|error| error.to_string())
-            })
-            .and_then(|document| {
-                document
-                    .validate()
-                    .map_err(|error| error.to_string())
-                    .map(|()| document)
-            });
-        let document = match loaded {
+        let document = match load_document(path) {
             Ok(document) => document,
             Err(error) => {
                 self.record_error(
@@ -1191,6 +1253,13 @@ fn default_project_document() -> Document {
     }
 }
 
+fn load_document(path: &Path) -> Result<Document, String> {
+    let json = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let document: Document = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    document.validate().map_err(|error| error.to_string())?;
+    Ok(document)
+}
+
 fn window_icon() -> Option<egui::IconData> {
     let image = image::load_from_memory(include_bytes!("../assets/kinewright-icon.png")).ok()?;
     let image = image.thumbnail(256, 256).to_rgba8();
@@ -1227,17 +1296,8 @@ pub(crate) fn run() -> eframe::Result {
             let media = Arc::new(
                 FfmpegMediaEngine::new_with_gpu(gpu).expect("FFmpeg media engine must initialize"),
             );
-            let mut app = KinewrightApp::new(media);
-            // `Kinewright project.kinewright` opens the project directly; this is
-            // also the hook file associations need.
-            if let Some(argument) = std::env::args().nth(1) {
-                let path = PathBuf::from(&argument);
-                if path.is_file() {
-                    app.open_project(&path);
-                } else {
-                    app.record_error("Project", format!("Startup project not found: {argument}"));
-                }
-            }
+            let startup = std::env::args().nth(1).map(PathBuf::from);
+            let app = KinewrightApp::new(media, startup);
             Ok(Box::new(app))
         }),
     )

@@ -15,6 +15,12 @@ Kinewright is a **native desktop** video editor written in Rust — the same fas
 
 > Early development. The editor works end to end — import, cut, composite, export, agent editing, transcript editing — but expect rough edges.
 
+<p align="center">
+  <img src="docs/assets/kinewright-editor.png" width="960" alt="Kinewright with a Tears of Steel cut on the timeline, program monitor, and agent chat">
+</p>
+
+<p align="center"><sub>Preview footage: <a href="https://mango.blender.org">Tears of Steel</a> clip, (CC) Blender Foundation | mango.blender.org, <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>. Music: <a href="https://www.scottbuckley.com.au/library/vanguard/">Vanguard</a> by Scott Buckley, <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.</sub></p>
+
 ## What makes it different
 
 - **Native on Windows and Linux.** One Rust desktop app on both platforms — `eframe` / `wgpu` / FFmpeg, not a browser tab. Same editor, same agent harness, same undo stack.

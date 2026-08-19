@@ -1,7 +1,8 @@
 use std::{
+    fs,
     path::PathBuf,
+    process,
     sync::Arc,
-    thread,
     time::{Duration, Instant},
 };
 
@@ -44,31 +45,39 @@ impl ScreenshotCapture {
         if let Some(image) = screenshot {
             let output = output.clone();
             self.output = None;
-            let _ = thread::Builder::new()
-                .name("kinewright-screenshot".to_owned())
-                .spawn(move || save_screenshot(&output, &image));
-            return;
+            match save_screenshot(&output, &image) {
+                Ok(()) => process::exit(0),
+                Err(error) => {
+                    eprintln!("screenshot failed: {error}");
+                    process::exit(1);
+                }
+            }
         }
 
         if !self.requested && ctx.cumulative_pass_nr() >= 2 && Instant::now() >= self.ready_at {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             self.requested = true;
-        } else if !self.requested {
+            ctx.request_repaint();
+        } else {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
 }
 
-fn save_screenshot(output: &PathBuf, image: &egui::ColorImage) {
-    let width = u32::try_from(image.size[0]).unwrap_or_default();
-    let height = u32::try_from(image.size[1]).unwrap_or_default();
+fn save_screenshot(output: &PathBuf, image: &egui::ColorImage) -> Result<(), String> {
+    let width = u32::try_from(image.size[0]).map_err(|error| error.to_string())?;
+    let height = u32::try_from(image.size[1]).map_err(|error| error.to_string())?;
     if width == 0 || height == 0 {
-        return;
+        return Err("screenshot capture was empty".to_owned());
+    }
+    if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let rgba = image
         .pixels
         .iter()
         .flat_map(eframe::egui::Color32::to_srgba_unmultiplied)
         .collect::<Vec<_>>();
-    let _ = image::save_buffer(output, &rgba, width, height, image::ColorType::Rgba8);
+    image::save_buffer(output, &rgba, width, height, image::ColorType::Rgba8)
+        .map_err(|error| error.to_string())
 }
