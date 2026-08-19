@@ -152,7 +152,7 @@ cargo run -p kinewright-agent --bin kinewright-eval -- `
 `g3` measures the missing composition layer: whether the model can survey one
 narrative source visually, choose a deliberate shot sequence, and recut it into
 a trailer against detected musical onsets without hand-authoring frame
-arithmetic. The active v7 contract is an 18-second action arc from Tears of
+arithmetic. The active v8 contract is an 18-second action arc from Tears of
 Steel. It establishes the human team and weapon, reveals the mechanical threat,
 escalates after a musical valley, peaks on confrontation, and resolves on a held
 image during a short audible decay. It is a recovery target, not
@@ -191,7 +191,7 @@ v2 rerun. V2 also anchored the music start without requiring a musical source
 endpoint or a quiet encoded tail, which left the published artifact ending
 inside a phrase.
 
-The active v7 contract keeps v4's single-source correction and fixes the music contract.
+The active v8 contract keeps v4's single-source correction and fixes the music contract.
 Tears of Steel must be the sole visual source and fill the complete video track
 through exactly five disjoint, scene-clean shots. Four human-reviewed musical
 events have explicit editorial roles: first lift, commitment, climax drive, and
@@ -247,7 +247,18 @@ windows for the climax and resolution roles. The first combined run passes
 SHA-256 is
 `eeeb83c18af6e5b7af19334b871939aa9bd0853a4eeabc194ae2e05a6cf136f4`.
 Encoded cut inspection confirms a clean frame-249 action in-point and a distinct
-stable close-up at frame 375. Human review of this exact artifact is pending.
+stable close-up at frame 375. Human review found the opening armored-balcony
+shot disconnected from the workshop team, machine, and story carried by the
+remaining four shots. No numeric ratings were supplied.
+
+V8 adds a reviewed connected-opening role at source frames 716..789. The first
+shot must establish the same workshop team, room, and machine continued by the
+following shots. The first run passes 40/40 with 16 tool calls, 12 operations,
+and 347,488 total tokens. Its rendered SHA-256 is
+`e5aacda303f81cffb3479455faaf554b4ae46f3ca23a9bbf3296448e93574660`.
+Encoded inspection confirms a workshop-wide opening, a motivated move inward
+to the device at frame 48, and the previously repaired clean climax and release
+cuts. Human review of this exact artifact is pending.
 
 Prepare the pack as above, then run:
 

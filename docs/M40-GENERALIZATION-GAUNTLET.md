@@ -289,7 +289,7 @@ effects, fades, or retiming. Those checks still allowed a forced cameo, did not
 fully veto baked source cuts, and did not require a musical endpoint or quiet
 encoded tail.
 
-The active v7 contract retains the useful cadence, source-clean, endpoint, and
+The active v8 contract retains the useful cadence, source-clean, endpoint, and
 encoded-delivery checks while removing the source quota entirely. Tears of
 Steel is the only visual source and must fill the entire 450-frame timeline in
 exactly five disjoint scene-clean shots. The story target is explicit:
@@ -508,6 +508,16 @@ SHA-256 is
 `eeeb83c18af6e5b7af19334b871939aa9bd0853a4eeabc194ae2e05a6cf136f4`.
 Encoded cut inspection confirms that the flash is gone, the climax remains
 before the release, and frame 375 cuts to a distinct stable close-up. Human
-review of this exact artifact is pending.
+review found the opening armored-balcony shot disconnected from the workshop
+team and story carried by the remaining four shots. No numeric ratings were
+supplied.
+
+V8 adds a reviewed connected-opening role at source frames 716..789 and scores
+the timeline-zero clip against it. The first run passes 40/40 with 16 calls, 12
+operations, and 347,488 tokens. The encoded artifact now moves from a wide view
+of the workshop team into their device at frame 48 while preserving the clean
+climax and release edges. Its SHA-256 is
+`e5aacda303f81cffb3479455faaf554b4ae46f3ca23a9bbf3296448e93574660`.
+Human review of this exact artifact is pending.
 Event/multicam still needs two more machine samples, one more human-accepted
 output, and numeric ratings sufficient to evaluate the 4.0 mean-rating gate.

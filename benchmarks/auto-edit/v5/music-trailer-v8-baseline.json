@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "kinewright-generalization-v5",
+  "task_id": "g3",
+  "suite_manifest": "benchmarks/auto-edit/v5/manifest.json",
+  "fixture_pack": "benchmarks/auto-edit/v5/music-fixture-pack-v4.json",
+  "ground_truth": "benchmarks/auto-edit/v5/music-ground-truth-v8.json",
+  "scope": {
+    "status": "single_source_trailer_connected_opening_candidate",
+    "families_executed": ["music_montage"],
+    "families_pending": [],
+    "note": "The v8 machine contract adds a reviewed connected-opening role to the existing climax, resolution, cut-edge, musical-ending, and delivery gates. Human review remains required for this exact artifact."
+  },
+  "supersedes": {
+    "contract": "music-ground-truth-v7.json",
+    "output_sha256": "eeeb83c18af6e5b7af19334b871939aa9bd0853a4eeabc194ae2e05a6cf136f4",
+    "human_status": "reviewed_rejected",
+    "ratings": null,
+    "note": "Owner review found the opening armored-balcony shot disconnected from the workshop team, machine, and story carried by the remaining four shots. The cut-edge and ending repairs were a major improvement. No numeric ratings were supplied."
+  },
+  "source_trace": {
+    "run_id": "kinewright-eval-20260819-034308-codex",
+    "filename": "target/evals/kinewright-eval-20260819-034308-codex/results.jsonl",
+    "sha256": "4543eea597039782bd52ba5a7faef3b93c826057a6f8c48ac3c2259a96826d6c",
+    "machine_report": "target/evals/kinewright-eval-20260819-034308-codex/machine-report.json",
+    "machine_report_sha256": "1625cf384e4183471a87e411462f69788d7127b5b05d8ff3a1c9f8093eabb940",
+    "note": "The raw trace, machine report, contact sheets, and MP4 remain generated local artifacts under target/evals."
+  },
+  "environment": {
+    "timestamp_utc": "2026-08-19T03:43:08Z",
+    "harness": "codex",
+    "harness_version": "codex-cli 0.148.0",
+    "model": "harness-default",
+    "os": "windows",
+    "architecture": "x86_64",
+    "kinewright_version": "0.1.0"
+  },
+  "machine_summary": {
+    "samples_passed": 1,
+    "samples_total": 1,
+    "assertions_passed": 40,
+    "assertions_total": 40,
+    "turns": 1,
+    "tool_calls": 16,
+    "tool_call_budget": 24,
+    "input_tokens": 345009,
+    "cached_input_tokens": 308224,
+    "uncached_input_tokens": 36785,
+    "output_tokens": 2479,
+    "reasoning_output_tokens": 858,
+    "total_tokens": 347488,
+    "cost_usd": null,
+    "wall_time_ms": 104893,
+    "operations_applied": 12
+  },
+  "deliverable": {
+    "profile": "youtube_1080p",
+    "resolution": [1920, 1080],
+    "duration_frames": 450,
+    "visual_shots": 5,
+    "music_clips": 1,
+    "cut_frames": [48, 126, 249, 375],
+    "shot_durations": [48, 78, 123, 126, 75],
+    "opening_source_range": {"start": 716, "end": 762},
+    "climax_source_range": {"start": 990, "end": 1111},
+    "resolution_source_range": {"start": 309, "end": 381},
+    "music_source_range": {"start": 6335, "end": 6875},
+    "proof_sample_frames": [0, 56, 112, 168, 224, 280, 336, 392, 449],
+    "proof_sha256": "b47eac60cdb3ed34a92946eb3e1f30c15ba2b6db06b6110e6b3a7415b70d97a9",
+    "output_bytes": 19410392,
+    "output_sha256": "e5aacda303f81cffb3479455faaf554b4ae46f3ca23a9bbf3296448e93574660",
+    "rendered_integrated_lufs_hundredths": -1603,
+    "rendered_sample_peak_dbfs_hundredths": -495,
+    "rendered_terminal_peak_dbfs_hundredths": -1852,
+    "independent_story_audit": {
+      "status": "passed",
+      "note": "The encoded opening holds on the white-shirted workshop team and their shared machine, then cuts inward to hands working on that device. It no longer introduces the isolated armored balcony figure."
+    },
+    "independent_cut_audit": {
+      "status": "passed",
+      "cut_neighborhoods": 4,
+      "frames_per_cut": 5,
+      "note": "The frame-48 cut moves cleanly from the workshop wide to the device close-up. Frame 249 opens directly on stable action, and frame 375 moves from action to a distinct stable close-up. No incoming handle contains a flash or baked source cut."
+    }
+  },
+  "machine_gap_audit": {
+    "status": "v8_hardened",
+    "changes": [
+      "Added a reviewed opening source window at 716..789 that contains the same workshop team, room, and machine continued by the following shots.",
+      "Added a clip_source_within assertion at timeline frame zero so an unrelated but technically valid establishing shot can no longer pass.",
+      "Kept exact cut-neighborhood proof and the reviewed climax and resolution roles unchanged."
+    ],
+    "model_recovery": {
+      "tool_calls": 16,
+      "edit_commits": 4,
+      "beat_montage_plans": 2,
+      "cut_neighborhood_reviews": 2,
+      "note": "The model revised and rechecked the edit inside the single allowed turn before producing the passing candidate."
+    }
+  },
+  "human_review": {
+    "status": "pending",
+    "review_template": "target/evals/kinewright-eval-20260819-034308-codex/human-review.json",
+    "accepted": null,
+    "ratings": null,
+    "note": "Review must bind to output SHA-256 e5aacda303f81cffb3479455faaf554b4ae46f3ca23a9bbf3296448e93574660. Captions are not applicable."
+  },
+  "benchmark_status": "in_progress"
+}

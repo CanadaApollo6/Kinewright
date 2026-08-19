@@ -98,11 +98,11 @@
     ]
   },
   "human_review": {
-    "status": "pending",
+    "status": "reviewed_rejected",
     "review_template": "target/evals/kinewright-eval-20260819-032203-codex/human-review.json",
-    "accepted": null,
+    "accepted": false,
     "ratings": null,
-    "note": "Review must bind to output SHA-256 eeeb83c18af6e5b7af19334b871939aa9bd0853a4eeabc194ae2e05a6cf136f4. Captions are not applicable."
+    "note": "Owner review found the opening armored-balcony shot disconnected from the workshop team, machine, and story carried by the remaining four shots. The cut-edge and ending repairs were a major improvement. No numeric ratings were supplied. Captions are not applicable."
   },
   "benchmark_status": "in_progress"
 }

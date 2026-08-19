@@ -145,9 +145,10 @@ until interview/documentary, event/multicam, and music-montage families each
 pass three model samples and their separate human gate.
 
 The recorded `g3` recovery baseline below is the separately pinned v2 music
-pack. The active recovery is v7: an 18-second, single-source Tears of
-Steel trailer cut to reviewed Vanguard musical events, exact cut-edge proof,
-reviewed climax/resolution source windows, and a short decay. Prepare or verify its inputs
+pack. The active recovery is v8: an 18-second, single-source Tears of
+Steel trailer cut to reviewed Vanguard musical events, a connected-opening
+role, exact cut-edge proof, reviewed climax/resolution source windows, and a
+short decay. Prepare or verify its inputs
 explicitly before the offline run:
 
 ```powershell
@@ -245,6 +246,16 @@ action window remains at frames 249..375, the release uses a distinct calm
 close-up, and exact encoded inspection finds neither the flash nor the final
 stutter. The candidate SHA-256 is
 `eeeb83c18af6e5b7af19334b871939aa9bd0853a4eeabc194ae2e05a6cf136f4`.
+Human review found the opening armored-balcony shot disconnected from the
+workshop team, machine, and story carried by the remaining four shots. No
+numeric ratings were supplied.
+
+V8 adds a reviewed connected-opening source window at 716..789 and scores the
+timeline-zero clip against it. The first run passes 40/40 with 16 calls, 12
+operations, and 347,488 tokens. The encoded artifact opens on the same workshop
+team and machine continued by shot two, while preserving the clean climax and
+release edges. Its SHA-256 is
+`e5aacda303f81cffb3479455faaf554b4ae46f3ca23a9bbf3296448e93574660`.
 Human review of this exact artifact is pending.
 
 The first corrected interview preflight is published at
