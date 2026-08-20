@@ -6,8 +6,8 @@
 #   source scripts/setup-ffmpeg.sh
 #
 # Executing the script still downloads and verifies the archive, then prints
-# the exports. Source it so cargo sees PKG_CONFIG_PATH, FFMPEG_DIR, and
-# LD_LIBRARY_PATH in the current process — matching setup-ffmpeg.ps1.
+# the exports. Source it so cargo sees PKG_CONFIG_PATH, FFMPEG_DIR, RUSTFLAGS,
+# and LD_LIBRARY_PATH in the current process — matching setup-ffmpeg.ps1.
 
 script_path="${BASH_SOURCE[0]:-$0}"
 script_dir="$(cd -- "$(dirname -- "$script_path")" && pwd)"
@@ -113,16 +113,35 @@ export FFMPEG_DIR="$ffmpeg_root"
 export PATH="$ffmpeg_bin${PATH:+:$PATH}"
 export LD_LIBRARY_PATH="$ffmpeg_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+# Native crates such as alsa-sys can publish /usr/lib as a global Cargo linker
+# search path. On rolling distributions that ship a newer FFmpeg ABI, that path
+# may otherwise win over ffmpeg-sys-next's pinned search path even though its
+# headers and pkg-config metadata came from FFMPEG_DIR. Put the pinned directory
+# first in rustc's native search order so one binary cannot mix those ABIs.
+ffmpeg_rust_link_flag="-Lnative=$ffmpeg_lib"
+case " ${RUSTFLAGS:-} " in
+    *" $ffmpeg_rust_link_flag "*) ;;
+    *) export RUSTFLAGS="$ffmpeg_rust_link_flag${RUSTFLAGS:+ $RUSTFLAGS}" ;;
+esac
+
 if [[ -n "${GITHUB_ENV:-}" ]]; then
     {
         echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
         echo "FFMPEG_DIR=$FFMPEG_DIR"
         echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+        echo "RUSTFLAGS=$RUSTFLAGS"
         echo "PATH=$PATH"
     } >> "$GITHUB_ENV"
 fi
 
 codec_version="$(pkg-config --modversion libavcodec)"
+case "$codec_version" in
+    62.*) ;;
+    *)
+        fail "Expected the pinned FFmpeg 8 libavcodec ABI 62, but pkg-config resolved $codec_version."
+        return 1 2>/dev/null || exit 1
+        ;;
+esac
 ffmpeg_version="$("$ffmpeg_bin/ffmpeg" -version)"
 ffmpeg_version="${ffmpeg_version%%$'\n'*}"
 

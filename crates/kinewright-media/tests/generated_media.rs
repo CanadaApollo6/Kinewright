@@ -362,7 +362,9 @@ fn title_export_pixels_match_preview_after_h264_redecode() {
     assert!(
         preview
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|pixel| pixel[..3] != [0, 0, 0])
             .count()
             > 500,
@@ -510,11 +512,13 @@ fn decode_stereo_audio(path: &Path) -> Vec<f32> {
     );
     output
         .stdout
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|stereo| {
             let left = f32::from_le_bytes(stereo[0..4].try_into().unwrap());
             let right = f32::from_le_bytes(stereo[4..8].try_into().unwrap());
-            (left + right) * 0.5
+            left.midpoint(right)
         })
         .collect()
 }
@@ -599,8 +603,10 @@ fn assert_title_frame_close(
     );
     let differences = preview
         .rgba
-        .chunks_exact(4)
-        .zip(exported.rgba.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(exported.rgba.as_chunks::<4>().0.iter())
         .flat_map(|(left, right)| (0..3).map(move |channel| left[channel].abs_diff(right[channel])))
         .collect::<Vec<_>>();
     let total = differences
@@ -735,21 +741,27 @@ fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
     assert!(
         first_clip
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|pixel| pixel[..3] != [0, 0, 0])
     );
     assert!(
         second_clip
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|pixel| pixel[..3] != [0, 0, 0])
     );
     assert_ne!(first_clip.rgba, second_clip.rgba);
     for gap in [gap_start, gap_end] {
         assert!(
             gap.rgba
-                .chunks_exact(4)
-                .all(|pixel| pixel == [0, 0, 0, 255])
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [0, 0, 0, 255])
         );
     }
 }
