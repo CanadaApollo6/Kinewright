@@ -106,7 +106,7 @@ impl CancellationRegistry {
     }
 
     pub(crate) fn cancel(&self, path: &Path) -> bool {
-        self.active.lock().ok().is_some_and(|active| {
+        self.active.lock().is_ok_and(|active| {
             active.get(path).is_some_and(|cancellation| {
                 cancellation.cancel();
                 true

@@ -902,8 +902,10 @@ fn frame_difference(previous: &[u8], current: &[u8]) -> f64 {
     let mut current_histogram = [0_u64; 64];
     let mut sad = 0_u64;
     for (before, after) in previous
-        .chunks_exact(4)
-        .zip(current.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(current.as_chunks::<4>().0.iter())
         .take(pixel_count)
     {
         let before_luma =

@@ -7388,7 +7388,7 @@ fn scope_data(image: &kinewright_core::RgbaImage, bins: usize) -> serde_json::Va
     let width = usize::try_from(image.width).unwrap_or(1).max(1);
     let mut pixel_count = 0_u64;
 
-    for (pixel_index, pixel) in image.pixels.chunks_exact(4).enumerate() {
+    for (pixel_index, pixel) in image.pixels.as_chunks::<4>().0.iter().enumerate() {
         let [red_value, green_value, blue_value, alpha] = [pixel[0], pixel[1], pixel[2], pixel[3]];
         if alpha == 0 {
             continue;
@@ -7477,7 +7477,7 @@ mod tracking_tests {
         let width = 32;
         let height = 20;
         let mut pixels = vec![0_u8; usize::try_from(width * height * 4).unwrap()];
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0.iter_mut() {
             pixel[3] = 255;
         }
         for y in center[1] - 2..=center[1] + 2 {
@@ -7779,8 +7779,10 @@ fn rgba_mean_absolute_difference_basis_points(
     let mut channels = 0_u128;
     for (left_pixel, right_pixel) in left
         .pixels
-        .chunks_exact(4)
-        .zip(right.pixels.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(right.pixels.as_chunks::<4>().0.iter())
     {
         for channel in 0..3 {
             difference = difference.saturating_add(u128::from(

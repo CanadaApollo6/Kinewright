@@ -221,7 +221,14 @@ mod tests {
         let first = rasterizer.rasterize(&title, (320, 180)).unwrap();
         let second = rasterizer.rasterize(&title, (320, 180)).unwrap();
         assert_eq!(first.rgba, second.rgba);
-        assert!(first.rgba.chunks_exact(4).any(|pixel| pixel[3] > 0));
+        assert!(
+            first
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] > 0)
+        );
     }
 
     #[test]
@@ -238,7 +245,7 @@ mod tests {
             right: i32::MIN,
             bottom: i32::MIN,
         };
-        for (index, pixel) in frame.rgba.chunks_exact(4).enumerate() {
+        for (index, pixel) in frame.rgba.as_chunks::<4>().0.iter().enumerate() {
             if pixel[3] == 0 {
                 continue;
             }

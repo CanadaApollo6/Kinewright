@@ -1442,7 +1442,9 @@ mod tests {
         assert!(
             output
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|pixel| pixel[..3] != [12, 18, 24]),
             "title layer did not change any compositor output pixels"
         );
