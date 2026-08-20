@@ -463,6 +463,11 @@ cargo run -p kinewright-agent --bin kinewright-eval -- `
   --loudness-contract '-1800,-1400,-100'
 ```
 
+For the active `g3` trailer, also pass
+`--audio-tail-contract '5,-1600,25,-3000,25'` so rerender recovery rechecks the
+encoded terminal decay and maximum inactive tail instead of only whole-program
+loudness.
+
 ## Exit gate
 
 M40 passes only when all three families are checked in and executable, each

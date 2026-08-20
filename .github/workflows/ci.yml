@@ -58,6 +58,6 @@ jobs:
         run: |
           source ./scripts/setup-ffmpeg.sh
           cargo build --workspace
+          readelf -d target/debug/kinewright-eval | grep -F '[libavcodec.so.62]'
           cargo test --workspace
           cargo clippy --workspace --all-targets -- -D warnings
-

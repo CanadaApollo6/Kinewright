@@ -9,8 +9,9 @@ build into `third_party/ffmpeg` — no system FFmpeg install is required.
 
 ### Prerequisites
 
-- A 64-bit GNU/Linux distribution with glibc 2.28 or newer (Ubuntu 22.04+,
-  Debian 12+, Fedora 39+, and current Arch all qualify).
+- A 64-bit GNU/Linux distribution with glibc 2.28 or newer. The dependency
+  installer supports Ubuntu 22.04+, Debian 12+, current Arch, CachyOS, and
+  Omarchy.
 - Rust installed by `rustup`, using `stable` (`rust-version = "1.92"`).
 - Python 3, `pkg-config`, a C/C++ toolchain, CMake, and the packages listed in
   `scripts/install-linux-deps.sh` (ALSA, Vulkan/Mesa, X11/Wayland, GTK 3,
@@ -32,8 +33,10 @@ cargo run -p kinewright-app
 `source` the setup script in the same shell as Cargo. It downloads the pinned
 FFmpeg 8.0 x86_64 shared GPL build (the same 8.0 ABI Windows links), verifies
 its SHA-256, extracts it to `third_party/ffmpeg`, and exports `FFMPEG_DIR`,
-`PKG_CONFIG_PATH`, `PATH`, and `LD_LIBRARY_PATH` for `ffmpeg-sys-next` and the
-FFmpeg CLI.
+`PKG_CONFIG_PATH`, `PATH`, `RUSTFLAGS`, and `LD_LIBRARY_PATH` for
+`ffmpeg-sys-next` and the FFmpeg CLI. The native linker flag keeps a newer
+system FFmpeg from taking precedence over the pinned ABI when another native
+crate publishes `/usr/lib` as a global Cargo search path.
 
 The script downloads this exact shared GPL build:
 
@@ -41,6 +44,19 @@ The script downloads this exact shared GPL build:
 - FFmpeg: `n8.0-latest`, linux64, shared, GPL
 - Archive: `ffmpeg-n8.0-latest-linux64-gpl-shared-8.0.tar.xz`
 - SHA-256: `c201d31f5c8a3b169345101c63ca70f71442848a271bec4a16ca29a1876e5cb1`
+
+#### Why FFmpeg 8 is pinned
+
+`ffmpeg-next` tracks FFmpeg's major/minor release line, and this workspace pins
+`ffmpeg-next = 8.0.0`. Windows and Linux therefore provision the same FFmpeg 8
+ABI instead of compiling against whichever incompatible version a host happens
+to ship. This keeps media behavior and release bundles reproducible and avoids
+mixing generated FFmpeg 8 bindings with a newer shared library.
+
+The host may still install and use another FFmpeg version. In particular,
+rolling Arch-family distributions such as CachyOS can move to a newer ABI
+without affecting Kinewright: the setup script prepends the bundled headers,
+libraries, and CLI, then verifies that `libavcodec` ABI 62 was selected.
 
 ### Environment variables
 
@@ -51,6 +67,7 @@ PKG_CONFIG_PATH=<repo>/third_party/ffmpeg/lib/pkgconfig
 FFMPEG_DIR=<repo>/third_party/ffmpeg
 PATH=<repo>/third_party/ffmpeg/bin:<existing PATH>
 LD_LIBRARY_PATH=<repo>/third_party/ffmpeg/lib:<existing LD_LIBRARY_PATH>
+RUSTFLAGS=-Lnative=<repo>/third_party/ffmpeg/lib <existing RUSTFLAGS>
 ```
 
 If the script is executed rather than sourced, it still provisions the archive

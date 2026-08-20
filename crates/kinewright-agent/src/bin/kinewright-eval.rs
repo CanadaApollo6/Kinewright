@@ -322,6 +322,7 @@ struct Options {
     artifact_directory: Option<PathBuf>,
     delivery_profile: DeliveryProfile,
     loudness_contract: Option<EvalLoudnessSpec>,
+    audio_tail_contract: Option<EvalAudioTailSpec>,
 }
 
 impl Options {
@@ -349,6 +350,7 @@ impl Options {
             artifact_directory: None,
             delivery_profile: DeliveryProfile::VerticalShort,
             loudness_contract: None,
+            audio_tail_contract: None,
         }
     }
 
@@ -419,6 +421,13 @@ impl Options {
                     "MIN_LUFS,MAX_LUFS,MAX_PEAK",
                 )?)?);
             }
+            "--audio-tail-contract" => {
+                self.audio_tail_contract = Some(parse_audio_tail_contract(&next_option_value(
+                    arguments,
+                    argument,
+                    "TERMINAL_FRAMES,MAX_PEAK,ACTIVITY_FRAMES,MIN_ACTIVE_LUFS,MAX_INACTIVE_FRAMES",
+                )?)?);
+            }
             "-h" | "--help" => {
                 print_usage();
                 return Err(EvalError::Agent("help requested".to_owned()));
@@ -454,7 +463,7 @@ impl Options {
 
 fn print_usage() {
     println!(
-        "Usage: KINEWRIGHT_EVAL=1 cargo run -p kinewright-agent --bin kinewright-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3|dialogue-pacing-v4|generalization-v5] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p kinewright-agent --bin kinewright-eval -- --prepare-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --verify-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --score-review PATH\n       cargo run -p kinewright-agent --bin kinewright-eval -- --rerender-document DOCUMENT --artifact-directory DIRECTORY [--delivery-profile vertical_short] [--loudness-contract MIN_LUFS,MAX_LUFS,MAX_PEAK]"
+        "Usage: KINEWRIGHT_EVAL=1 cargo run -p kinewright-agent --bin kinewright-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3|dialogue-pacing-v4|generalization-v5] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p kinewright-agent --bin kinewright-eval -- --prepare-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --verify-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --score-review PATH\n       cargo run -p kinewright-agent --bin kinewright-eval -- --rerender-document DOCUMENT --artifact-directory DIRECTORY [--delivery-profile vertical_short] [--loudness-contract MIN_LUFS,MAX_LUFS,MAX_PEAK] [--audio-tail-contract TERMINAL_FRAMES,MAX_PEAK,ACTIVITY_FRAMES,MIN_ACTIVE_LUFS,MAX_INACTIVE_FRAMES]"
     );
 }
 
@@ -506,6 +515,55 @@ fn parse_loudness_contract(value: &str) -> Result<EvalLoudnessSpec, EvalError> {
     })
 }
 
+fn parse_audio_tail_contract(value: &str) -> Result<EvalAudioTailSpec, EvalError> {
+    let values = value
+        .split(',')
+        .map(str::parse::<i64>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            EvalError::Agent("--audio-tail-contract values must be signed integers".to_owned())
+        })?;
+    let [
+        terminal_frames,
+        maximum_peak,
+        activity_frames,
+        minimum_active_lufs,
+        maximum_inactive_frames,
+    ] = values.as_slice()
+    else {
+        return Err(EvalError::Agent(
+            "--audio-tail-contract requires TERMINAL_FRAMES,MAX_PEAK,ACTIVITY_FRAMES,MIN_ACTIVE_LUFS,MAX_INACTIVE_FRAMES"
+                .to_owned(),
+        ));
+    };
+    let maximum_peak = i32::try_from(*maximum_peak).map_err(|_| {
+        EvalError::Agent("--audio-tail-contract MAX_PEAK is outside the i32 range".to_owned())
+    })?;
+    let minimum_active_lufs = i32::try_from(*minimum_active_lufs).map_err(|_| {
+        EvalError::Agent(
+            "--audio-tail-contract MIN_ACTIVE_LUFS is outside the i32 range".to_owned(),
+        )
+    })?;
+    if *terminal_frames <= 0
+        || maximum_peak > 0
+        || *activity_frames <= 0
+        || minimum_active_lufs > 0
+        || *maximum_inactive_frames < 0
+    {
+        return Err(EvalError::Agent(
+            "--audio-tail-contract requires positive windows, non-positive peak/loudness thresholds, and a non-negative inactive-frame limit"
+                .to_owned(),
+        ));
+    }
+    Ok(EvalAudioTailSpec {
+        terminal_window_frames: TimeCode(*terminal_frames),
+        maximum_sample_peak_dbfs_hundredths: maximum_peak,
+        activity_window_frames: TimeCode(*activity_frames),
+        minimum_active_integrated_lufs_hundredths: minimum_active_lufs,
+        maximum_trailing_inactive_frames: TimeCode(*maximum_inactive_frames),
+    })
+}
+
 fn rerender_document(document_path: &Path, options: &Options) -> Result<bool, EvalError> {
     let artifact_directory = options.artifact_directory.as_deref().ok_or_else(|| {
         EvalError::Agent("--artifact-directory is required for rerendering".to_owned())
@@ -535,7 +593,7 @@ fn rerender_document(document_path: &Path, options: &Options) -> Result<bool, Ev
             maximum_word_error_rate_basis_points: 10_000,
             maximum_caption_word_error_rate_basis_points: None,
             loudness: options.loudness_contract,
-            audio_tail: None,
+            audio_tail: options.audio_tail_contract,
         },
         &document,
         engine.as_ref(),
@@ -3794,7 +3852,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rerender_options_parse_delivery_and_loudness_contracts() {
+    fn rerender_options_parse_delivery_and_audio_contracts() {
         assert_eq!(
             parse_delivery_profile("vertical_short").unwrap(),
             DeliveryProfile::VerticalShort
@@ -3807,6 +3865,16 @@ mod tests {
         assert_eq!(contract.maximum_sample_peak_dbfs_hundredths, -100);
         assert!(parse_loudness_contract("-1400,-1800,-100").is_err());
         assert!(parse_loudness_contract("-1800,-1400,1").is_err());
+
+        let tail = parse_audio_tail_contract("5,-1600,25,-3000,25").unwrap();
+        assert_eq!(tail.terminal_window_frames, TimeCode(5));
+        assert_eq!(tail.maximum_sample_peak_dbfs_hundredths, -1_600);
+        assert_eq!(tail.activity_window_frames, TimeCode(25));
+        assert_eq!(tail.minimum_active_integrated_lufs_hundredths, -3_000);
+        assert_eq!(tail.maximum_trailing_inactive_frames, TimeCode(25));
+        assert!(parse_audio_tail_contract("0,-1600,25,-3000,25").is_err());
+        assert!(parse_audio_tail_contract("5,1,25,-3000,25").is_err());
+        assert!(parse_audio_tail_contract("5,-1600,25,-3000").is_err());
     }
 
     #[test]
