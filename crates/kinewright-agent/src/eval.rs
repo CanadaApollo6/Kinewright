@@ -229,10 +229,14 @@ pub enum EvalAssertion {
     /// Reject selected source envelopes that contain a detected source edit.
     /// Boundaries exactly at the source in/out marks are valid; only interior
     /// scene changes prove that one timeline clip contains multiple source
-    /// shots or a baked transition.
+    /// shots or a baked transition. `allowed_baked_sequence_starts` names
+    /// reviewed timeline slots that intentionally preserve a rapid source
+    /// sequence, such as a short activation burst.
     SourceRangesSceneClean {
         track: TrackId,
         scene_set: String,
+        #[serde(default)]
+        allowed_baked_sequence_starts: Vec<TimeCode>,
     },
     /// Reject media source ranges that overlap a manually reviewed exclusion
     /// such as a title slate, logo card, black frame, or embedded fade.
@@ -370,6 +374,21 @@ pub enum EvalAssertion {
     /// visual effects and no playback retiming.
     NoVisualTransitionsEffectsOrRetiming {
         track: TrackId,
+    },
+    /// Require one intentional, non-caption title card with exact timing and
+    /// declarative presentation. Freeze-frame padding on the same track is
+    /// rejected so a static source frame cannot impersonate a designed end card.
+    TitleCard {
+        track: TrackId,
+        timeline_start: TimeCode,
+        duration: TimeCode,
+        text: String,
+        font_size_token: u8,
+        color_token: u8,
+        position: TitlePosition,
+        background_scrim: bool,
+        fade_in_frames: TimeCode,
+        fade_out_frames: TimeCode,
     },
     /// Require an ordered source-phase arc on a target video track. The first
     /// media phase must use `opening_alias`, one contiguous interior pivot
@@ -2568,9 +2587,16 @@ fn evaluate_assertion(
             track,
             minimum_forward_gap_frames,
         } => evaluate_source_ranges_chronological(*track, *minimum_forward_gap_frames, outcome),
-        EvalAssertion::SourceRangesSceneClean { track, scene_set } => {
-            evaluate_source_ranges_scene_clean(*track, scene_set, outcome)
-        }
+        EvalAssertion::SourceRangesSceneClean {
+            track,
+            scene_set,
+            allowed_baked_sequence_starts,
+        } => evaluate_source_ranges_scene_clean(
+            *track,
+            scene_set,
+            allowed_baked_sequence_starts,
+            outcome,
+        ),
         EvalAssertion::SourceRangesAvoid {
             track,
             exclusion_set,
@@ -2774,6 +2800,30 @@ fn evaluate_assertion(
         EvalAssertion::NoVisualTransitionsEffectsOrRetiming { track } => {
             evaluate_no_visual_transitions_effects_or_retiming(*track, outcome)
         }
+        EvalAssertion::TitleCard {
+            track,
+            timeline_start,
+            duration,
+            text,
+            font_size_token,
+            color_token,
+            position,
+            background_scrim,
+            fade_in_frames,
+            fade_out_frames,
+        } => evaluate_title_card(
+            *track,
+            *timeline_start,
+            *duration,
+            text,
+            *font_size_token,
+            *color_token,
+            *position,
+            *background_scrim,
+            *fade_in_frames,
+            *fade_out_frames,
+            outcome,
+        ),
         EvalAssertion::SourcePhaseArc {
             track,
             opening_alias,
@@ -3546,6 +3596,7 @@ fn evaluate_source_ranges_chronological(
 fn evaluate_source_ranges_scene_clean(
     track_id: TrackId,
     scene_set: &str,
+    allowed_baked_sequence_starts: &[TimeCode],
     outcome: &EvalOutcome,
 ) -> AssertionResult {
     let Some(scene_boundaries) = outcome.context.scene_sets.get(scene_set) else {
@@ -3575,6 +3626,9 @@ fn evaluate_source_ranges_scene_clean(
         .collect::<BTreeMap<_, _>>();
     let mut crossings = Vec::new();
     for clip in track.clips.iter().filter(|clip| clip.content.is_media()) {
+        if allowed_baked_sequence_starts.contains(&clip.timeline_start) {
+            continue;
+        }
         for (_, boundary) in scene_boundaries
             .iter()
             .filter(|(asset, _)| *asset == clip.asset)
@@ -3600,7 +3654,7 @@ fn evaluate_source_ranges_scene_clean(
         crossings.is_empty(),
         if crossings.is_empty() {
             format!(
-                "every media source range on track {track_id} contains at most one detected source shot from {scene_set:?}"
+                "every non-exempt media source range on track {track_id} contains at most one detected source shot from {scene_set:?}; reviewed baked-sequence starts={allowed_baked_sequence_starts:?}"
             )
         } else {
             crossings.join("; ")
@@ -5738,6 +5792,116 @@ fn evaluate_no_visual_transitions_effects_or_retiming(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn evaluate_title_card(
+    track_id: TrackId,
+    timeline_start: TimeCode,
+    duration: TimeCode,
+    text: &str,
+    font_size_token: u8,
+    color_token: u8,
+    position: TitlePosition,
+    background_scrim: bool,
+    fade_in_frames: TimeCode,
+    fade_out_frames: TimeCode,
+    outcome: &EvalOutcome,
+) -> AssertionResult {
+    let Some(track) = outcome
+        .final_document
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+    else {
+        return assertion_result(
+            "title card",
+            false,
+            format!("track {track_id} does not exist"),
+        );
+    };
+    if track.kind != kinewright_core::TrackKind::Video {
+        return assertion_result(
+            "title card",
+            false,
+            format!(
+                "track {track_id} has kind {:?}; a title card requires video",
+                track.kind
+            ),
+        );
+    }
+
+    let title_clips = track
+        .clips
+        .iter()
+        .filter_map(|clip| match &clip.content {
+            ClipContent::Title(title) => Some((clip, title)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let freeze_count = track
+        .clips
+        .iter()
+        .filter(|clip| matches!(clip.content, ClipContent::Freeze(_)))
+        .count();
+    if title_clips.len() != 1 || freeze_count != 0 {
+        return assertion_result(
+            "title card",
+            false,
+            format!(
+                "track {track_id} has {} title clips and {freeze_count} freeze clips; expected exactly one title and no freeze padding",
+                title_clips.len()
+            ),
+        );
+    }
+
+    let (clip, title) = title_clips[0];
+    let observed_duration = outcome.final_document.clip_duration(clip);
+    let presentation_matches = title.text == text
+        && title.font_size_token == font_size_token
+        && title.color_token == color_token
+        && title.position == position
+        && title.background_scrim == background_scrim
+        && title.fade_in_frames == fade_in_frames
+        && title.fade_out_frames == fade_out_frames
+        && title.caption_preset.is_none();
+    let clip_is_plain = clip.effects.is_empty()
+        && clip.transition_in.is_none()
+        && clip.speed_percent == 100
+        && clip.audio_gain_tenth_db == 0
+        && clip.audio_fade_in_frames == TimeCode::ZERO
+        && clip.audio_fade_out_frames == TimeCode::ZERO;
+    let passed = clip.timeline_start == timeline_start
+        && observed_duration
+            .as_ref()
+            .is_ok_and(|observed| *observed == duration)
+        && presentation_matches
+        && clip_is_plain;
+    assertion_result(
+        "title card",
+        passed,
+        format!(
+            "track {track_id} clip {} starts at {}, duration={observed_duration:?}, text={:?}, font_size_token={}, color_token={}, position={}, scrim={}, fades={}/{} frames, caption_preset={:?}, effects={}, transition={}, speed={}%; expected start {}, duration {}, text={text:?}, font_size_token={font_size_token}, color_token={color_token}, position={}, scrim={background_scrim}, fades={}/{} frames",
+            clip.id,
+            clip.timeline_start.0,
+            title.text,
+            title.font_size_token,
+            title.color_token,
+            title.position.as_str(),
+            title.background_scrim,
+            title.fade_in_frames.0,
+            title.fade_out_frames.0,
+            title.caption_preset,
+            clip.effects.len(),
+            clip.transition_in.is_some(),
+            clip.speed_percent,
+            timeline_start.0,
+            duration.0,
+            position.as_str(),
+            fade_in_frames.0,
+            fade_out_frames.0,
+        ),
+    )
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn evaluate_source_phase_arc(
     track_id: TrackId,
@@ -6703,6 +6867,71 @@ mod tests {
     }
 
     #[test]
+    fn title_card_requires_exact_presentation_and_rejects_freeze_padding() {
+        let mut final_document = document();
+        final_document.tracks[0].clips.push(clip_fixture(
+            2,
+            AssetId::default(),
+            60,
+            0,
+            62,
+            ClipContent::Title(kinewright_core::Title {
+                text: "TEARS OF STEEL".to_owned(),
+                font_size_token: 2,
+                color_token: 0,
+                position: TitlePosition::Center,
+                background_scrim: false,
+                fade_in_frames: TimeCode(5),
+                fade_out_frames: TimeCode(15),
+                caption_preset: None,
+            }),
+        ));
+        final_document.duration = TimeCode(122);
+        let outcome = outcome_for(final_document.clone(), FixtureContext::default());
+        let result = evaluate_title_card(
+            TrackId(1),
+            TimeCode(60),
+            TimeCode(62),
+            "TEARS OF STEEL",
+            2,
+            0,
+            TitlePosition::Center,
+            false,
+            TimeCode(5),
+            TimeCode(15),
+            &outcome,
+        );
+        assert!(result.passed, "{result:?}");
+
+        final_document.tracks[0].clips.push(clip_fixture(
+            3,
+            AssetId(1),
+            122,
+            0,
+            1,
+            ClipContent::Freeze(kinewright_core::FreezeFrame {
+                source_frame: TimeCode::ZERO,
+            }),
+        ));
+        let outcome = outcome_for(final_document, FixtureContext::default());
+        let result = evaluate_title_card(
+            TrackId(1),
+            TimeCode(60),
+            TimeCode(62),
+            "TEARS OF STEEL",
+            2,
+            0,
+            TitlePosition::Center,
+            false,
+            TimeCode(5),
+            TimeCode(15),
+            &outcome,
+        );
+        assert!(!result.passed);
+        assert!(result.detail.contains("freeze clips"));
+    }
+
+    #[test]
     fn media_clip_count_rejects_too_short_and_too_long_media() {
         for (label, duration) in [("too short", 39_i64), ("too long", 81_i64)] {
             let mut final_document = document();
@@ -6790,9 +7019,21 @@ mod tests {
         );
 
         let crossing = outcome_for(document(), context.clone());
-        let result = evaluate_source_ranges_scene_clean(TrackId(1), "source-scenes", &crossing);
+        let result =
+            evaluate_source_ranges_scene_clean(TrackId(1), "source-scenes", &[], &crossing);
         assert!(!result.passed, "interior source edits passed: {result:?}");
         assert!(result.detail.contains("boundary 20"));
+
+        let result = evaluate_source_ranges_scene_clean(
+            TrackId(1),
+            "source-scenes",
+            &[TimeCode::ZERO],
+            &crossing,
+        );
+        assert!(
+            result.passed,
+            "reviewed baked sequence did not pass: {result:?}"
+        );
 
         let mut clean_document = document();
         clean_document.tracks[0].clips = vec![
@@ -6801,7 +7042,7 @@ mod tests {
             clip_fixture(3, AssetId(1), 40, 40, 60, ClipContent::Media),
         ];
         let clean = outcome_for(clean_document, context);
-        let result = evaluate_source_ranges_scene_clean(TrackId(1), "source-scenes", &clean);
+        let result = evaluate_source_ranges_scene_clean(TrackId(1), "source-scenes", &[], &clean);
         assert!(result.passed, "scene-aligned clips failed: {result:?}");
     }
 
@@ -6944,6 +7185,7 @@ mod tests {
             EvalAssertion::SourceRangesSceneClean {
                 track: TrackId(1),
                 scene_set: "source-scenes".to_owned(),
+                allowed_baked_sequence_starts: Vec::new(),
             },
             EvalAssertion::SourceRangesAvoid {
                 track: TrackId(1),
@@ -6973,6 +7215,18 @@ mod tests {
                 minimum_aligned_basis_points: 5_000,
             },
             EvalAssertion::NoVisualTransitionsEffectsOrRetiming { track: TrackId(1) },
+            EvalAssertion::TitleCard {
+                track: TrackId(1),
+                timeline_start: TimeCode(538),
+                duration: TimeCode(62),
+                text: "TEARS OF STEEL".to_owned(),
+                font_size_token: 2,
+                color_token: 0,
+                position: TitlePosition::Center,
+                background_scrim: false,
+                fade_in_frames: TimeCode(5),
+                fade_out_frames: TimeCode(15),
+            },
             EvalAssertion::SourcePhaseArc {
                 track: TrackId(1),
                 opening_alias: "opening".to_owned(),

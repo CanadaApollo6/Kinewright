@@ -152,13 +152,14 @@ cargo run -p kinewright-agent --bin kinewright-eval -- `
 `g3` measures the missing composition layer: whether the model can survey one
 narrative source visually, choose a deliberate shot sequence, and recut it into
 a trailer against detected musical onsets without hand-authoring frame
-arithmetic. The active v9 contract is an 18-second action arc from Tears of
+arithmetic. The active V10 contract is an 18-second action arc from Tears of
 Steel. It moves forward through one source chronology: tower-scale mechanical
-threat, device preparation, operator reveal, battle, and a later industrial
-aftermath held through a short audible decay. It is a recovery target, not a
-completed or human-accepted sample.
+threat, device preparation, a shorter operator reveal, a rapid activation
+bridge, and sustained battle. All photographed imagery ends at frame 388; a
+designed TEARS OF STEEL title card owns the remaining 62-frame musical decay.
+It is a recovery target, not a completed or human-accepted model sample.
 
-The recovery contract uses four general agent-facing primitives. One
+The recovery contract uses bounded inspection and planning primitives. One
 coverage-mode `get_source_shot_board` call replaces the redundant broad
 storyboard pass and returns up to 12 scene-derived candidate envelopes sampled
 across the full source range, with start, middle, and end evidence frames.
@@ -180,7 +181,10 @@ transitions, retime clips, or claim to score taste.
 renders exact outgoing and incoming frames at every hard cut, measures large
 secondary changes inside each incoming handle, and returns a blocking verdict.
 The model must repair a dirty edge and re-run the proof without exchanging the
-reviewed climax and resolution roles.
+reviewed story roles. V10 also exposes typed split, replacement, and title
+operations through capability discovery. The compact MCP surface carries them
+inside one revision-gated atomic edit plan, so the scorer verifies the committed
+document rather than mistaking operation names for separate transport calls.
 
 The v2 machine gate checked both visual sources, but that was not enough to
 prove a coherent arc: a required-source assertion could force an isolated Big
@@ -191,19 +195,18 @@ v2 rerun. V2 also anchored the music start without requiring a musical source
 endpoint or a quiet encoded tail, which left the published artifact ending
 inside a phrase.
 
-The active v9 contract keeps v4's single-source correction and fixes the music contract.
-Tears of Steel must be the sole visual source and fill the complete video track
-through exactly five disjoint, scene-clean shots. Four human-reviewed musical
-events have explicit editorial roles: first lift, commitment, climax drive, and
-release. The machine gate requires cuts at all four events, nonuniform cadence,
-a held resolution, five ordered semantic source windows, strictly forward
-source chronology, exact cut-edge cleanliness, source-audio exclusion,
-loudness, no more than one second of perceptually inactive audio at the end,
-and independent H.264/AAC MP4 probing. The fixture test proves the five-shot
-schedule is beat-valid, cadence-valid, mixed-frame-rate safe, chronological,
-and source-feasible before a model can spend tokens on it. Captions are
-intentionally not part of this instrumental task and are marked not applicable
-instead of receiving an invented score.
+The active V10 contract keeps V9's single-source chronology, endpoint, cadence,
+and delivery checks while separating story timing from musical timing. Three
+reviewed musical cuts remain exact at frames 48, 126, and 263. Frame 203 is an
+intentional off-beat story cut that shortens the operator and inserts a reviewed
+rapid activation sequence before the climax. Five photographed shots cover
+exactly frames 0..388; one declarative title clip covers 388..450 with exact
+text, style tokens, position, and 5/15-frame fades. The gate rejects source
+footage or freeze padding after frame 388, while allowing only the reviewed
+activation burst to contain source edits. Source-audio exclusion, loudness, no
+more than one second of perceptually inactive audio at the end, and independent
+H.264/AAC MP4 probing remain unchanged. Captions are intentionally not part of
+this instrumental task and are marked not applicable.
 
 The first v4 model sample passed the old 37/37 machine assertions in one turn with 12
 tool calls, 10 operations, and 221,521 total tokens. It uses eight Tears of
@@ -273,18 +276,33 @@ the output SHA-256 is
 `c5e7fe4d3c8184c7cf2f33ae49f6f4f2c42704c1190c44b1db42616d6380cda6`,
 and independent story and cut-neighborhood audits pass. A preceding 40/41
 attempt was withheld because its battle select crossed a detected source cut;
-it was never presented for human review. Human review of the v9 artifact is
-pending.
+it was never presented for human review. The exact published V9 SHA remains
+formally unscored. Owner review of its Linux reconstruction and subsequent
+ending studies nevertheless supplied clear direction: shorten the operator,
+stop trying to make continued action, a robot death, or a frozen source frame
+read as resolution, and give the musical decay a designed ending.
+
+V10 encodes that direction. A separately rendered title-card study was accepted
+with the feedback "By far, that is the best one"; because it includes an extra
+subtitle treatment, that acceptance is recorded as editorial direction rather
+than transferred to the scored output. The first clean Linux model run passes
+43/43 assertions in one turn with 19 tool calls, 9 operations, and 491,066 total
+tokens. Its exact five-shot source sequence is
+`165..211 -> 221..296 -> 482..556 -> 789..847 -> 987..1107`; photographed
+imagery ends at frame 388 and the title card completes frame 450. The rendered
+SHA-256 is
+`6b18008bf264dc38a41a9be15f9d1e158dfc397c2433e77994ac3594e6b4d023`.
+The machine record is published in `music-trailer-v10-baseline.json`; formal
+human review of that exact model artifact is pending.
 
 Prepare the pack as above, then run:
 
-```powershell
-& .\scripts\setup-ffmpeg.ps1
-$env:KINEWRIGHT_EVAL = '1'
-cargo run -p kinewright-agent --bin kinewright-eval -- `
-  --suite generalization-v5 `
-  --harness codex `
-  --only g3 `
+```bash
+source ./scripts/setup-ffmpeg.sh
+KINEWRIGHT_EVAL=1 cargo run -p kinewright-agent --bin kinewright-eval -- \
+  --suite generalization-v5 \
+  --harness codex \
+  --only g3 \
   --samples 1
 ```
 

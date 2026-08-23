@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "kinewright-generalization-v5",
+  "task_id": "g3",
+  "suite_manifest": "benchmarks/auto-edit/v5/manifest.json",
+  "fixture_pack": "benchmarks/auto-edit/v5/music-fixture-pack-v4.json",
+  "ground_truth": "benchmarks/auto-edit/v5/music-ground-truth-v10.json",
+  "scope": {
+    "status": "single_source_trailer_title_card_candidate",
+    "families_executed": ["music_montage"],
+    "families_pending": [],
+    "note": "V10 shortens the operator, inserts a reviewed activation bridge, ends photographed action at frame 388, and reserves the full musical decay for a purpose-built title card. Human review remains required for this exact model-rendered artifact."
+  },
+  "supersedes": {
+    "contract": "music-ground-truth-v9.json",
+    "output_sha256": "c5e7fe4d3c8184c7cf2f33ae49f6f4f2c42704c1190c44b1db42616d6380cda6",
+    "human_status": "pending_exact_artifact_editorial_direction_superseded",
+    "ratings": null,
+    "note": "Owner review of the reconstructed sequence and subsequent ending studies found the operator hold too long and every photographed ending variant unresolved: continued battle, a robot being shot during the fade, and a frozen final frame all failed to read as an ending. No numeric ratings were supplied, and the exact published V9 SHA remains formally unscored."
+  },
+  "source_trace": {
+    "run_id": "kinewright-eval-20260823-004847-codex",
+    "filename": "target/evals/kinewright-eval-20260823-004847-codex/results.jsonl",
+    "sha256": "582a6e4c84f7d64de10ed505476ae3ed1dde17f17261bc188185ae89d4bd32f7",
+    "machine_report": "target/evals/kinewright-eval-20260823-004847-codex/machine-report.json",
+    "machine_report_sha256": "51609d931663842ae6464021175cb22b2907e63016e1af97d6b592387fa882cd",
+    "note": "The raw trace, machine report, proof sheet, project document, and MP4 remain generated local artifacts under target/evals."
+  },
+  "environment": {
+    "timestamp_utc": "2026-08-23T00:48:47Z",
+    "harness": "codex",
+    "harness_version": "codex-cli 0.148.0",
+    "model": "harness-default",
+    "os": "linux",
+    "architecture": "x86_64",
+    "kinewright_version": "0.1.0"
+  },
+  "machine_summary": {
+    "samples_passed": 1,
+    "samples_total": 1,
+    "assertions_passed": 43,
+    "assertions_total": 43,
+    "turns": 1,
+    "tool_calls": 19,
+    "tool_call_budget": 24,
+    "input_tokens": 489416,
+    "cached_input_tokens": 445696,
+    "uncached_input_tokens": 43720,
+    "output_tokens": 1650,
+    "reasoning_output_tokens": 292,
+    "total_tokens": 491066,
+    "cost_usd": null,
+    "wall_time_ms": 85801,
+    "operations_applied": 9
+  },
+  "deliverable": {
+    "profile": "youtube_1080p",
+    "resolution": [1920, 1080],
+    "duration_frames": 450,
+    "photographed_frames": 388,
+    "visual_shots": 5,
+    "title_cards": 1,
+    "music_clips": 1,
+    "music_cut_frames": [48, 126, 263],
+    "story_cut_frames": [203],
+    "title_cut_frame": 388,
+    "shot_durations": [48, 78, 77, 60, 125],
+    "story_source_ranges": [
+      {"role": "threat", "start": 165, "end": 211},
+      {"role": "preparation", "start": 221, "end": 296},
+      {"role": "operator", "start": 482, "end": 556},
+      {"role": "activation", "start": 789, "end": 847},
+      {"role": "battle", "start": 987, "end": 1107}
+    ],
+    "title_card": {
+      "timeline_range": {"start": 388, "end": 450},
+      "text": "TEARS OF STEEL",
+      "font_size_token": 2,
+      "color_token": 0,
+      "position": "center",
+      "background_scrim": false,
+      "fade_in_frames": 5,
+      "fade_out_frames": 15
+    },
+    "music_source_range": {"start": 6335, "end": 6875},
+    "proof_sample_frames": [0, 56, 112, 168, 224, 280, 336, 392, 449],
+    "proof_sha256": "157131dc018ad366bf28627cb56951d579a864501e4218092d582d7eab7db70b",
+    "output_bytes": 18252066,
+    "output_sha256": "6b18008bf264dc38a41a9be15f9d1e158dfc397c2433e77994ac3594e6b4d023",
+    "rendered_integrated_lufs_hundredths": -1603,
+    "rendered_sample_peak_dbfs_hundredths": -495,
+    "rendered_terminal_peak_dbfs_hundredths": -1852,
+    "independent_story_audit": {
+      "status": "passed",
+      "note": "The encoded proof moves forward from threat to preparation, operator, a brief activation burst, and sustained battle, then replaces all photographed imagery with the title card at frame 388."
+    },
+    "independent_cut_audit": {
+      "status": "passed",
+      "cut_neighborhoods": 5,
+      "frames_per_cut": 3,
+      "note": "Independent encoded before/at/after inspection found clean composition changes at frames 48, 126, 203, 263, and 388. The reviewed source-edited activation burst is intentional and isolated to frames 203..263."
+    }
+  },
+  "machine_gap_audit": {
+    "status": "v10_hardened",
+    "withheld_intermediate": {
+      "run_id": "kinewright-eval-20260823-004508-codex",
+      "output_sha256": "6b18008bf264dc38a41a9be15f9d1e158dfc397c2433e77994ac3594e6b4d023",
+      "assertions_passed": 41,
+      "assertions_total": 43,
+      "reason": "The edit itself was correct and byte-identical to the passing rerun. Two benchmark-process assertions were invalid: the scene-clean gate treated the reviewed rapid activation sequence as accidental, and the tool gate demanded direct mutator calls even though the same typed operations were committed atomically through an edit plan. The candidate was withheld until those contract errors were fixed and rerun."
+    },
+    "changes": [
+      "Added an exact title_card assertion covering timing, text, tokens, position, fades, and rejection of freeze-frame padding.",
+      "Made the off-beat frame-203 activation bridge explicit while retaining exact musical cuts at frames 48, 126, and 263.",
+      "Allowed only the reviewed frame-203 baked activation sequence through the scene-clean gate; every other source clip remains scene-clean.",
+      "Kept title, split, and replacement operations available through capability discovery without prescribing whether the model commits them directly or in one atomic edit plan."
+    ]
+  },
+  "director_reference": {
+    "status": "accepted_editorial_direction",
+    "path": "target/evals/v10-title-card-preview/finished.mp4",
+    "output_sha256": "4caa077f41c40bae85a877f28435a586a9110e3df5df626f51caa036caa568a4",
+    "owner_feedback": "By far, that is the best one",
+    "note": "This separately rendered director reference established that a moving battle ending should give way to a designed title-card resolution. It is not the scored model artifact and includes an additional subtitle treatment, so its acceptance is not transferred to the model output."
+  },
+  "human_review": {
+    "status": "pending",
+    "review_template": "target/evals/kinewright-eval-20260823-004847-codex/human-review.json",
+    "accepted": null,
+    "ratings": null,
+    "note": "Review must bind to model output SHA-256 6b18008bf264dc38a41a9be15f9d1e158dfc397c2433e77994ac3594e6b4d023. The accepted director reference records direction only; captions are not applicable."
+  },
+  "benchmark_status": "in_progress"
+}

@@ -289,22 +289,20 @@ effects, fades, or retiming. Those checks still allowed a forced cameo, did not
 fully veto baked source cuts, and did not require a musical endpoint or quiet
 encoded tail.
 
-The active v9 contract retains the useful cadence, source-clean, endpoint, and
-encoded-delivery checks while making story chronology explicit. Tears of Steel
-is the only visual source and must fill the entire 450-frame timeline in exactly
-five disjoint scene-clean shots. Those shots must move forward through five
-reviewed source roles: tower-scale threat, device preparation, operator reveal,
-battle, and later industrial aftermath. The four internal cuts are locked to
-reviewed musical events at project frames 48, 126, 263, and 388. The cue ends
-within two source frames of its reviewed endpoint after a short decay. Exact
-cut-neighborhood proof rejects a secondary source cut inside an incoming
-handle. `source_ranges_chronological` additionally rejects any edit that moves
-backward through the narrative source, even when all selected ranges are
-disjoint. The fixture test proves the five-shot schedule is source-feasible,
-beat-valid, cadence-valid, chronological, and safe across the 24 fps source,
-25 fps project, and 30 fps music before model tokens are spent. Human review
-still owns story, rhythm, visual finish, audio finish, and delivery readiness.
-Captions are explicitly not applicable.
+The active V10 contract retains V9's useful cadence, chronology, endpoint, and
+encoded-delivery checks while distinguishing musical cuts from an editorial
+story cut. Tears of Steel is the only photographed source. Five source clips
+move forward through tower-scale threat, device preparation, a shorter operator
+reveal, a reviewed rapid activation burst, and sustained battle over frames
+0..388. Musical cuts remain exact at project frames 48, 126, and 263; frame 203
+is deliberately off-beat. At frame 388, every photographed image ends and one
+typed TEARS OF STEEL title clip fills the 62-frame decay through frame 450. Its
+text, style tokens, position, and 5/15-frame fades are exact, and source footage
+or freeze padding in that interval fails. Exact cut-neighborhood proof still
+rejects accidental secondary source cuts, with one explicit exception for the
+reviewed activation sequence. `source_ranges_chronological` still rejects any
+edit that moves backward through the narrative source. Human review owns story,
+rhythm, visual finish, audio finish, and delivery readiness; captions are N/A.
 
 The first machine-passing `g3` preflight is recorded in
 [`benchmarks/auto-edit/v5/music-montage-baseline.json`](../benchmarks/auto-edit/v5/music-montage-baseline.json).
@@ -484,9 +482,11 @@ multi-source premise. The first v4 single-source trailer sample passed its old
 SHA-bound artifact: its music did not motivate the cuts or action, and its cue
 became perceptually inactive around 15 seconds while picture continued for
 almost seven seconds. No numeric ratings were supplied. The old bar/phrase-share
-and terminal-quiet checks are retired. The active recovery locks all cuts to
-four reviewed musical events and rejects more than 25 trailing inactive frames,
-so the family still has no accepted single-source trailer sample.
+and terminal-quiet checks are retired. The active V10 recovery locks three cuts
+to reviewed musical events, reserves frame 203 for a story-motivated activation
+bridge, replaces photographed action with a title at frame 388, and rejects more
+than 25 trailing inactive frames. The family still has no formally accepted
+model-rendered single-source trailer sample.
 The first replacement under that contract passes 37/37 with 13 calls, 7
 operations, and 238,496 tokens. Its five shot durations are 48, 78, 123, 126,
 and 75 frames; the music range resolves exactly to `6335..6875`; rendered audio
@@ -535,8 +535,20 @@ five ordered semantic source windows. The first run passes 43/43 with 12 calls,
 `221..296`, `482..613`, `987..1107`, and `1285..1345`; independent story and
 cut-neighborhood audits pass. Its SHA-256 is
 `c5e7fe4d3c8184c7cf2f33ae49f6f4f2c42704c1190c44b1db42616d6380cda6`.
-One earlier v9 attempt stopped at 40/41 because its action select crossed a
-detected source boundary and was withheld before human review. The passing v9
-artifact still awaits human acceptance.
+One earlier V9 attempt stopped at 40/41 because its action select crossed a
+detected source boundary and was withheld before human review. The exact passing
+V9 SHA remains formally unscored. Review of its Linux reconstruction and the
+following ending studies found the operator too long and rejected continued
+battle, a robot death under the fade, and a frozen source frame as resolutions.
+
+V10 encodes the accepted title-card direction. The first clean Linux model run
+passes 43/43 assertions with 19 calls, 9 operations, and 491,066 total tokens.
+Its source ranges are `165..211`, `221..296`, `482..556`, `789..847`, and
+`987..1107`; the title replaces picture at frame 388. The 450-frame 1920x1080
+artifact measures -16.03 LUFS and has SHA-256
+`6b18008bf264dc38a41a9be15f9d1e158dfc397c2433e77994ac3594e6b4d023`.
+The exact model artifact remains pending human review. A separate director
+reference received the feedback "By far, that is the best one" and is recorded
+only as accepted editorial direction because it includes an extra subtitle.
 Event/multicam still needs two more machine samples, one more human-accepted
 output, and numeric ratings sufficient to evaluate the 4.0 mean-rating gate.

@@ -45,6 +45,19 @@ const MUSIC_PROJECT_BEAT_SET: &str = "music-bed-project-beats";
 const MUSIC_REVIEWED_EVENT_SET: &str = "music-bed-reviewed-events";
 const MUSIC_SOURCE_SCENE_SET: &str = "montage-source-scenes";
 const MUSIC_SOURCE_EXCLUSION_SET: &str = "montage-source-exclusions";
+const MUSIC_MONTAGE_PROMPT_V10: &str = r"Create a finished 18-second 1080p YouTube trailer edit using Tears of Steel as the only photographed source and Vanguard on music-bed as the only audio. Build one chronological action arc: establish the tower-scale mechanical threat, answer it with the workshop team's preparation, reveal the operator briefly, bridge into the machine activating, drive into the strongest battle, then end every photographed image at frame 388 on a purpose-built TEARS OF STEEL title card for the musical decay.
+
+Open exactly these ten capability schemas in one get_capability call: get_source_shot_board, plan_music_fit, get_music_structure, plan_beat_montage, split_clip, replace_clip, add_title, plan_audio_normalization, get_cut_neighborhoods, and get_editorial_readiness. Do not call get_source_storyboard. Call get_source_shot_board exactly once over the full Tears of Steel source with candidate_selection coverage, minimum_duration_frames 30, minimum_confidence_basis_points 1000, candidate_count 12, and max_width 160. Treat the board as scouting evidence and never cross a returned scene boundary.
+
+First call plan_music_fit on audio track 2 with music-bed, project range 0..450, preferred source start 6334, preferred source end 6875, maximum end drift 2 frames, minimum strength 10 percent, and overwrite mode. Inspect and commit that endpoint-anchored plan. Keep it unchanged as the sole audio: no loop, retime, duplication, source-video audio, or later trim. Call get_music_structure over 0..450 with minimum strength 10 percent, meter 4, 4 bars per phrase, and structural_only=false. Use frames 48, 126, and 263 as the three exact musical cut anchors. Frame 203 is deliberately a story cut, not a detected beat: it shortens the operator once the preparation is readable and reveals the activation before the climax.
+
+Build the initial photographed montage only over frames 0..388. Call plan_beat_montage on video track 1 with exactly four ordered selects and preferred anchors [48,126,263], shot bounds 40..140, minimum beat strength 10 percent, overwrite mode, cadence {minimum_duration_buckets:3, duration_bucket_frames:15, maximum_similar_run:3, similar_tolerance_frames:6}, and anchor repair with maximum_movement_frames 0 and locked_anchor_indices [0,1,2]. Select one threat shot inside source window 165..221, one preparation shot inside 221..309, one operator shot inside 482..635, and one sustained battle shot inside 987..1118. The initial durations must resolve to 48, 78, 137, and 125 project frames. Inspect and commit the montage.
+
+Then split the operator clip exactly at project frame 203. Reinspect the timeline to identify the new right-hand clip covering 203..263 and replace that clip with the exact activation select source 789..847 from Tears of Steel. This ordinary story edit is the reviewed exception to beat alignment; do not move frame 203 to a beat. The final five photographed shots must cover 0..388 with durations 48, 78, 77, 60, and 125 frames and move strictly forward through threat, preparation, operator, activation, and battle.
+
+At project frame 388 add one title clip on video track 1 for exactly 62 frames. Its text must be TEARS OF STEEL, font_size_token 2, color_token 0, position center, background_scrim false, fade_in_frames 5, fade_out_frames 15, and caption_preset null. The empty compositor background supplies black. Do not add a transition, subtitle, freeze frame, fallen-robot image, aftermath source clip, or any photographed media after frame 388. The title card is the resolution and must end at frame 450.
+
+Normalize only audio track 2 to -1600 LUFS hundredths with a -100 dBFS-hundredths sample-peak ceiling and 100-hundredths tolerance. Add no captions, source-video audio, visual effects, transitions, freeze frames, or retiming. Call get_cut_neighborhoods on video track 1 with frames_before 1, frames_after 3, cut_offset 0, cut_count 12, maximum_secondary_change_basis_points 1200, and max_width 160. Review the four photographed cut edges at 48, 126, 203, and 263; a CUT EDGE REVIEW FAILED result is blocking. Finally call get_editorial_readiness using youtube_1080p, check_silence=false, centered 50/50 focus, 10 storyboard frames, and 160-pixel cells. Confirm the whole sheet shows the chronological arc, no action after frame 388, and the centered title resolving to black. Do not queue export; the benchmark renders the verified snapshot. Keep working until readiness is true.";
 
 fn main() -> ExitCode {
     match run() {
@@ -1217,16 +1230,14 @@ fn event_multicam_assertions() -> Vec<EvalAssertion> {
 
 fn music_montage_definition() -> EvalDefinition {
     let truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
-        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v9.json"
+        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v10.json"
     ))
     .expect("checked-in v5 music ground truth must parse");
     EvalDefinition {
         name: "g3 single-source trailer edit",
         rationale: "Measures whether the agent can inspect one licensed narrative source, recut it into a coherent character-led trailer, and resolve a deliberate beat-aware edit on a trailer cue's authored final tag.",
         fixture_builder: fixture_real_music_montage,
-        prompts: &[
-            "Create a finished 18-second 1080p YouTube trailer edit using Tears of Steel as the only visual source and Vanguard on music-bed as the only audio. This is one conflict, not a montage of unrelated worlds. Build a chronological action arc: establish the mechanical threat, show the workshop team preparing its machine or weapon, reveal the operator, drive into the strongest battle before the closing bar, then cut away to a held empty aftermath during the decay. Open exactly these seven capability schemas in one get_capability call: get_source_shot_board, plan_music_fit, get_music_structure, plan_beat_montage, plan_audio_normalization, get_cut_neighborhoods, and get_editorial_readiness. Do not call get_source_storyboard. Call get_source_shot_board exactly once over the full Tears of Steel source with candidate_selection coverage, minimum_duration_frames 30, minimum_confidence_basis_points 1000, candidate_count 12, and max_width 160. Use that evidence to choose scene-clean shots and never cross a returned scene boundary. Treat the three source-board cells as scouting evidence; exact selected in-points still require timeline cut-edge proof. First call plan_music_fit on audio track 2 with music-bed, project range 0..450, preferred source start 6334, preferred source end 6875, maximum end drift 2 frames, minimum strength 10 percent, and overwrite mode. Inspect and commit the resolved endpoint-anchored plan. Keep it unchanged as the sole audio: no loop, retime, duplication, source-video audio, or later trim. The shorter endpoint retains an audible decay without a long perceptually dead tail. Call get_music_structure over 0..450 with minimum strength 10 percent, meter 4, 4 bars per phrase, and structural_only=false. The returned beat labels are heuristic evidence, not an editing score. Use exactly these four reviewed musical events as the internal cut anchors and do not substitute ordinary beats: frame 48 is the first lift and must move from the established mechanical threat into the human team's response; frame 126 is commitment and must reveal the operator and the machine or weapon the team prepared; frame 263 begins the climax drive and must start the strongest sustained battle, which must visually peak before frame 388; frame 388 is the release and must cut away from all action to a held empty industrial aftermath. Choose exactly five non-overlapping Tears of Steel shots in final story order. Shot one, timeline 0..48, must remain inside the reviewed threat window 165..221 and establish the tower-scale robot that motivates the team and battle; do not open on the armored balcony figure or reuse a later workshop image. The cut at frame 48 must answer that threat by moving forward in source time to the workshop team's hands and device. Shot two must stay inside the reviewed preparation window 221..309, and shot three must stay inside the reviewed operator window 482..635. Every shot must advance threat, preparation, reveal, battle, or aftermath. Every selected Tears of Steel source range must move forward as the timeline moves forward; never reuse a later image as the opening or return to an earlier source moment for the ending. Shot four, timeline 263..388, must contain fighting, firing, collision, destruction, or major robot movement; do not spend it on a person merely inspecting or holding a device. Shot five, timeline 388..450, must be a visibly empty aftermath later in source time than shot four and contain no fighting, firing, collision, people inspecting their arms, or major robot movement under the fading note. The exact cut schedule creates shot durations 48, 78, 137, 125, and 62 frames; select source envelopes long enough for those durations and hold the final resolution image through frame 450. Call plan_beat_montage on video track 1 over 0..450 with shot bounds 40..140, minimum beat strength 10 percent, overwrite mode, the ordered selects, preferred anchors [48,126,263,388], cadence {minimum_duration_buckets:3, duration_bucket_frames:15, maximum_similar_run:3, similar_tolerance_frames:6}, and anchor repair with maximum_movement_frames 0 and locked_anchor_indices [0,1,2,3]. If a source envelope is infeasible, revise the selected source range; never move a reviewed musical event. Inspect the resolved story order, anchors, deltas, and durations before committing. Normalize only track 2 to -1600 LUFS hundredths with a -100 dBFS-hundredths sample-peak ceiling and 100-hundredths tolerance. Add no captions, titles, transitions, model-authored fades, effects, or retiming. After the first visual commit, call get_cut_neighborhoods on video track 1 with frames_before 1, frames_after 3, cut_offset 0, cut_count 12, maximum_secondary_change_basis_points 1200, and max_width 160. Read each cut as its exact outgoing frame followed by the first three incoming frames. Revise any cut whose incoming cells switch shots, flash unrelated content, begin on a transitional frame, or whose outgoing and incoming compositions are so similar that the hard cut reads as a stutter. Specifically, frame 263 must open directly on one clean sustained-battle shot, and frame 388 must change to a clearly distinct empty aftermath later in source time. On this pinned source, shot one must stay inside threat window 165..221, shot two inside preparation window 221..309, shot three inside operator window 482..635, shot four inside battle window 987..1118, and shot five inside later aftermath window 1285..1345. Never repair an edge by exchanging any of those roles; reconfirm all five roles and chronological source order after every visual revision. A CUT EDGE REVIEW FAILED result is blocking, not advisory. After any visual revision, call get_cut_neighborhoods again and do not finish until its manifest reports clean true, issue_count 0, and all four cut edges are visually clean. Then call get_editorial_readiness using youtube_1080p, check_silence=false, centered 50/50 focus, 10 storyboard frames, and 160-pixel cells. Inspect the whole sheet and revise black frames, baked cuts, arbitrary ordering, action continuing after frame 388, a weak climax drive, or an unresolved ending. Do not queue export; the benchmark renders the verified snapshot. Keep working until readiness is true.",
-        ],
+        prompts: &[MUSIC_MONTAGE_PROMPT_V10],
         assertions: music_montage_assertions(),
         budgets: EvalBudgets {
             max_turns: 1,
@@ -1268,7 +1279,7 @@ fn music_montage_definition() -> EvalDefinition {
 #[allow(clippy::too_many_lines)]
 fn music_montage_assertions() -> Vec<EvalAssertion> {
     let truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
-        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v9.json"
+        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v10.json"
     ))
     .expect("checked-in v5 music ground truth must parse");
     let visual_aliases = truth
@@ -1291,15 +1302,16 @@ fn music_montage_assertions() -> Vec<EvalAssertion> {
         },
         EvalAssertion::ExactTrackMediaCoverage {
             track: TrackId(truth.video_track_id),
-            range: TimeCode(truth.timeline_range.start)..TimeCode(truth.timeline_range.end),
+            range: TimeCode(truth.timeline_range.start)
+                ..TimeCode(truth.title_card.timeline_range.start),
         },
         EvalAssertion::ExactTrackMediaCoverage {
             track: TrackId(truth.audio_track_id),
             range: TimeCode(truth.timeline_range.start)..TimeCode(truth.timeline_range.end),
         },
         EvalAssertion::ClipCount {
-            minimum: truth.minimum_visual_shots + 1,
-            maximum: truth.maximum_visual_shots + 1,
+            minimum: truth.minimum_visual_shots + 2,
+            maximum: truth.maximum_visual_shots + 2,
         },
         EvalAssertion::MediaClipCount {
             track: TrackId(truth.video_track_id),
@@ -1307,7 +1319,7 @@ fn music_montage_assertions() -> Vec<EvalAssertion> {
             maximum: truth.maximum_visual_shots,
             minimum_duration: TimeCode(truth.minimum_shot_frames),
             maximum_duration: TimeCode(truth.maximum_shot_frames),
-            reject_non_media: true,
+            reject_non_media: false,
         },
         EvalAssertion::RequiredAssetsOnTrack {
             track: TrackId(truth.video_track_id),
@@ -1324,6 +1336,11 @@ fn music_montage_assertions() -> Vec<EvalAssertion> {
         EvalAssertion::SourceRangesSceneClean {
             track: TrackId(truth.video_track_id),
             scene_set: MUSIC_SOURCE_SCENE_SET.to_owned(),
+            allowed_baked_sequence_starts: truth
+                .reviewed_story_events
+                .iter()
+                .map(|event| TimeCode(event.project_frame))
+                .collect(),
         },
         EvalAssertion::SourceRangesAvoid {
             track: TrackId(truth.video_track_id),
@@ -1352,17 +1369,17 @@ fn music_montage_assertions() -> Vec<EvalAssertion> {
         },
         EvalAssertion::ClipSourceWithin {
             track: TrackId(truth.video_track_id),
-            timeline_start: TimeCode(truth.reviewed_music_events[2].project_frame),
+            timeline_start: TimeCode(truth.reviewed_story_events[0].project_frame),
             asset_alias: primary_visual_alias.clone(),
-            source_window: TimeCode(truth.climax_source_window.start)
-                ..TimeCode(truth.climax_source_window.end),
+            source_window: TimeCode(truth.activation_source_window.start)
+                ..TimeCode(truth.activation_source_window.end),
         },
         EvalAssertion::ClipSourceWithin {
             track: TrackId(truth.video_track_id),
-            timeline_start: TimeCode(truth.reviewed_music_events[3].project_frame),
+            timeline_start: TimeCode(truth.reviewed_music_events[2].project_frame),
             asset_alias: primary_visual_alias,
-            source_window: TimeCode(truth.resolution_source_window.start)
-                ..TimeCode(truth.resolution_source_window.end),
+            source_window: TimeCode(truth.climax_source_window.start)
+                ..TimeCode(truth.climax_source_window.end),
         },
         EvalAssertion::ShotCadenceVariation {
             track: TrackId(truth.video_track_id),
@@ -1379,22 +1396,39 @@ fn music_montage_assertions() -> Vec<EvalAssertion> {
         EvalAssertion::NoVisualTransitionsEffectsOrRetiming {
             track: TrackId(truth.video_track_id),
         },
+        EvalAssertion::TitleCard {
+            track: TrackId(truth.title_card.track_id),
+            timeline_start: TimeCode(truth.title_card.timeline_range.start),
+            duration: TimeCode(
+                truth
+                    .title_card
+                    .timeline_range
+                    .end
+                    .saturating_sub(truth.title_card.timeline_range.start),
+            ),
+            text: truth.title_card.text.clone(),
+            font_size_token: truth.title_card.font_size_token,
+            color_token: truth.title_card.color_token,
+            position: truth.title_card.position,
+            background_scrim: truth.title_card.background_scrim,
+            fade_in_frames: TimeCode(truth.title_card.fade_in_frames),
+            fade_out_frames: TimeCode(truth.title_card.fade_out_frames),
+        },
         EvalAssertion::EdgeShotHolds {
             track: TrackId(truth.video_track_id),
             minimum_opening_shot_frames: TimeCode(truth.minimum_opening_shot_frames),
             minimum_closing_shot_frames: TimeCode(truth.minimum_closing_shot_frames),
-        },
-        EvalAssertion::BeatAlignedCuts {
-            track: TrackId(truth.video_track_id),
-            beat_set: MUSIC_PROJECT_BEAT_SET.to_owned(),
-            tolerance_frames: TimeCode(truth.beat_alignment_tolerance_frames),
         },
         EvalAssertion::CutsAlignedToBeatSetAtLeast {
             track: TrackId(truth.video_track_id),
             beat_set: MUSIC_REVIEWED_EVENT_SET.to_owned(),
             tolerance_frames: TimeCode(truth.beat_alignment_tolerance_frames),
             minimum_aligned_cuts: truth.reviewed_music_events.len(),
-            minimum_aligned_basis_points: 10_000,
+            minimum_aligned_basis_points: u16::try_from(
+                truth.reviewed_music_events.len().saturating_mul(10_000)
+                    / truth.minimum_visual_shots.saturating_sub(1),
+            )
+            .expect("checked-in music cut share fits basis points"),
         },
         EvalAssertion::MusicFit {
             track: TrackId(truth.audio_track_id),
@@ -2133,11 +2167,13 @@ struct MusicMontageGroundTruth {
     meter_beats: u8,
     phrase_bars: u8,
     reviewed_music_events: Vec<ReviewedMusicEvent>,
+    reviewed_story_events: Vec<ReviewedMusicEvent>,
+    title_card: GroundTruthTitleCard,
     opening_source_window: GroundTruthRange,
     preparation_source_window: GroundTruthRange,
     operator_source_window: GroundTruthRange,
+    activation_source_window: GroundTruthRange,
     climax_source_window: GroundTruthRange,
-    resolution_source_window: GroundTruthRange,
     music_preferred_source_start: i64,
     music_preferred_source_end: i64,
     music_maximum_end_drift_frames: i64,
@@ -2156,6 +2192,19 @@ struct MusicMontageGroundTruth {
 struct ReviewedMusicEvent {
     project_frame: i64,
     role: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GroundTruthTitleCard {
+    track_id: u64,
+    timeline_range: GroundTruthRange,
+    text: String,
+    font_size_token: u8,
+    color_token: u8,
+    position: TitlePosition,
+    background_scrim: bool,
+    fade_in_frames: i64,
+    fade_out_frames: i64,
 }
 
 fn music_fixture_alias(fixture_id: &str) -> Option<&'static str> {
@@ -2661,7 +2710,7 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
 #[allow(clippy::too_many_lines)]
 fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
     let truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
-        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v9.json"
+        "../../../../benchmarks/auto-edit/v5/music-ground-truth-v10.json"
     ))
     .map_err(|error| EvalError::Fixture(format!("invalid v5 music ground truth: {error}")))?;
     let project_fps = Rational::new(25, 1).expect("music fixture fps is valid");
@@ -2707,8 +2756,9 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
             .minimum_project_frames_per_visual_asset
             .saturating_mul(i64::try_from(truth.visual_asset_ids.len()).unwrap_or(i64::MAX))
             > truth
+                .title_card
                 .timeline_range
-                .end
+                .start
                 .saturating_sub(truth.timeline_range.start)
         || truth.minimum_source_separation_frames < 0
         || truth.minimum_forward_gap_frames < 0
@@ -2727,7 +2777,8 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
                 .saturating_add(truth.selection_headroom_frames)
         || !(2..=12).contains(&truth.meter_beats)
         || !(1..=16).contains(&truth.phrase_bars)
-        || truth.reviewed_music_events.len() + 1 != truth.minimum_visual_shots
+        || truth.reviewed_music_events.len() + truth.reviewed_story_events.len() + 1
+            != truth.minimum_visual_shots
         || truth.reviewed_music_events.iter().any(|event| {
             event.project_frame <= truth.timeline_range.start
                 || event.project_frame >= truth.timeline_range.end
@@ -2737,20 +2788,43 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
             .reviewed_music_events
             .windows(2)
             .any(|events| events[0].project_frame >= events[1].project_frame)
+        || truth.reviewed_story_events.is_empty()
+        || truth.reviewed_story_events.iter().any(|event| {
+            event.project_frame <= truth.timeline_range.start
+                || event.project_frame >= truth.title_card.timeline_range.start
+                || event.role.trim().is_empty()
+        })
+        || truth.title_card.track_id != truth.video_track_id
+        || truth.title_card.timeline_range.start <= truth.timeline_range.start
+        || truth.title_card.timeline_range.end != truth.timeline_range.end
+        || truth.title_card.text.trim().is_empty()
+        || truth.title_card.font_size_token > 2
+        || truth.title_card.color_token > 2
+        || truth.title_card.fade_in_frames < 0
+        || truth.title_card.fade_out_frames < 0
+        || truth
+            .title_card
+            .fade_in_frames
+            .saturating_add(truth.title_card.fade_out_frames)
+            > truth
+                .title_card
+                .timeline_range
+                .end
+                .saturating_sub(truth.title_card.timeline_range.start)
         || truth.opening_source_window.start < 0
         || truth.opening_source_window.end <= truth.opening_source_window.start
         || truth.preparation_source_window.start < 0
         || truth.preparation_source_window.end <= truth.preparation_source_window.start
         || truth.operator_source_window.start < 0
         || truth.operator_source_window.end <= truth.operator_source_window.start
+        || truth.activation_source_window.start < 0
+        || truth.activation_source_window.end <= truth.activation_source_window.start
         || truth.climax_source_window.start < 0
         || truth.climax_source_window.end <= truth.climax_source_window.start
-        || truth.resolution_source_window.start < 0
-        || truth.resolution_source_window.end <= truth.resolution_source_window.start
         || truth.opening_source_window.end > truth.preparation_source_window.start
         || truth.preparation_source_window.end > truth.operator_source_window.start
-        || truth.operator_source_window.end > truth.climax_source_window.start
-        || truth.climax_source_window.end > truth.resolution_source_window.start
+        || truth.operator_source_window.end > truth.activation_source_window.start
+        || truth.activation_source_window.end > truth.climax_source_window.start
         || truth.music_preferred_source_start < 0
         || truth.music_preferred_source_end <= truth.music_preferred_source_start
         || truth.music_maximum_end_drift_frames < 0
@@ -2875,8 +2949,8 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
         ("opening", &truth.opening_source_window),
         ("preparation", &truth.preparation_source_window),
         ("operator", &truth.operator_source_window),
+        ("activation", &truth.activation_source_window),
         ("climax", &truth.climax_source_window),
-        ("resolution", &truth.resolution_source_window),
     ] {
         if range.end > primary_visual.duration.0 {
             return Err(EvalError::Fixture(format!(
@@ -4290,6 +4364,10 @@ mod tests {
             }
         )));
         let music = &definitions[2];
+        assert_eq!(
+            tasks[2]["ground_truth"],
+            "benchmarks/auto-edit/v5/music-ground-truth-v10.json"
+        );
         let music_delivery = music.deliverable.unwrap();
         assert_eq!(music_delivery.profile, DeliveryProfile::Youtube1080p);
         assert_eq!(music_delivery.expected_transcript_word_set, None);
@@ -4314,8 +4392,8 @@ mod tests {
         assert!(music.assertions.iter().any(|assertion| matches!(
             assertion,
             EvalAssertion::ClipCount {
-                minimum: 6,
-                maximum: 6,
+                minimum: 7,
+                maximum: 7,
             }
         )));
         assert!(music.assertions.iter().any(|assertion| matches!(
@@ -4326,25 +4404,23 @@ mod tests {
                 maximum: 5,
                 minimum_duration: TimeCode(40),
                 maximum_duration: TimeCode(140),
-                reject_non_media: true,
+                reject_non_media: false,
             }
         )));
-        assert!(music.assertions.iter().any(|assertion| matches!(
-            assertion,
-            EvalAssertion::BeatAlignedCuts {
-                track: TrackId(1),
-                beat_set,
-                tolerance_frames: TimeCode(1),
-            } if beat_set == MUSIC_PROJECT_BEAT_SET
-        )));
+        assert!(
+            !music
+                .assertions
+                .iter()
+                .any(|assertion| matches!(assertion, EvalAssertion::BeatAlignedCuts { .. }))
+        );
         assert!(music.assertions.iter().any(|assertion| matches!(
             assertion,
             EvalAssertion::CutsAlignedToBeatSetAtLeast {
                 track: TrackId(1),
                 beat_set,
                 tolerance_frames: TimeCode(1),
-                minimum_aligned_cuts: 4,
-                minimum_aligned_basis_points: 10_000,
+                minimum_aligned_cuts: 3,
+                minimum_aligned_basis_points: 7_500,
             } if beat_set == MUSIC_REVIEWED_EVENT_SET
         )));
         assert!(music.assertions.iter().any(|assertion| matches!(
@@ -4380,7 +4456,7 @@ mod tests {
                 track: TrackId(1),
                 asset_alias,
                 minimum_clip_count: 5,
-                minimum_project_frames: TimeCode(450),
+                minimum_project_frames: TimeCode(388),
             } if asset_alias == "tears-of-steel"
         )));
         assert!(
@@ -4407,7 +4483,7 @@ mod tests {
             EvalAssertion::ExactTrackMediaCoverage {
                 track: TrackId(1),
                 range,
-            } if range == &(TimeCode::ZERO..TimeCode(450))
+            } if range == &(TimeCode::ZERO..TimeCode(388))
         )));
         assert!(music.assertions.iter().any(|assertion| matches!(
             assertion,
@@ -4421,6 +4497,7 @@ mod tests {
             EvalAssertion::SourceRangesSceneClean {
                 track: TrackId(1),
                 scene_set,
+                ..
             } if scene_set == MUSIC_SOURCE_SCENE_SET
         )));
         assert!(music.assertions.iter().any(|assertion| matches!(
@@ -4471,10 +4548,25 @@ mod tests {
         )));
         assert!(music.assertions.iter().any(|assertion| matches!(
             assertion,
+            EvalAssertion::TitleCard {
+                track: TrackId(1),
+                timeline_start: TimeCode(388),
+                duration: TimeCode(62),
+                text,
+                font_size_token: 2,
+                color_token: 0,
+                position: TitlePosition::Center,
+                background_scrim: false,
+                fade_in_frames: TimeCode(5),
+                fade_out_frames: TimeCode(15),
+            } if text == "TEARS OF STEEL"
+        )));
+        assert!(music.assertions.iter().any(|assertion| matches!(
+            assertion,
             EvalAssertion::EdgeShotHolds {
                 track: TrackId(1),
                 minimum_opening_shot_frames: TimeCode(48),
-                minimum_closing_shot_frames: TimeCode(60),
+                minimum_closing_shot_frames: TimeCode(125),
             }
         )));
         assert!(
@@ -4489,26 +4581,25 @@ mod tests {
             "candidate_selection coverage",
             "candidate_count 12",
             "minimum_confidence_basis_points 1000",
-            "Tears of Steel as the only visual source",
+            "Tears of Steel as the only photographed source",
             "preferred source start 6334",
             "preferred source end 6875",
             "maximum end drift 2 frames",
-            "without a long perceptually dead tail",
             "structural_only=false",
-            "Choose exactly five non-overlapping Tears of Steel shots",
-            "reviewed threat window 165..221",
-            "Every selected Tears of Steel source range must move forward",
-            "frame 48 is the first lift",
-            "frame 126 is commitment",
-            "frame 263 begins the climax drive",
-            "frame 388 is the release",
-            "do not spend it on a person merely inspecting or holding a device",
-            "contain no fighting, firing, collision, people inspecting their arms, or major robot movement under the fading note",
+            "preferred anchors [48,126,263]",
+            "source window 165..221",
+            "frame 203",
+            "exact activation select source 789..847",
+            "durations 48, 78, 77, 60, and 125 frames",
+            "At project frame 388 add one title clip",
+            "TEARS OF STEEL",
+            "fade_in_frames 5",
+            "fade_out_frames 15",
+            "Do not add a transition, subtitle, freeze frame",
             "cadence {minimum_duration_buckets:3, duration_bucket_frames:15, maximum_similar_run:3, similar_tolerance_frames:6}",
             "maximum_movement_frames 0",
-            "model-authored fades",
             "10 storyboard frames",
-            "never move a reviewed musical event",
+            "no action after frame 388",
         ] {
             assert!(
                 music_prompt.contains(required),
@@ -4598,13 +4689,13 @@ mod tests {
             29_728_929
         );
         let music_truth: MusicMontageGroundTruth = serde_json::from_str(include_str!(
-            "../../../../benchmarks/auto-edit/v5/music-ground-truth-v9.json"
+            "../../../../benchmarks/auto-edit/v5/music-ground-truth-v10.json"
         ))
         .unwrap();
         assert_eq!(music_truth.schema_version, 1);
         assert_eq!(
             music_truth.montage_id,
-            "tears-of-steel-single-source-vanguard-chronological-arc"
+            "tears-of-steel-single-source-vanguard-title-card-resolution"
         );
         assert_eq!(music_truth.project_fps, Rational::new(25, 1).unwrap());
         assert_eq!(
@@ -4631,27 +4722,34 @@ mod tests {
         assert_eq!(music_truth.similar_tolerance_frames, 6);
         assert_eq!(music_truth.meter_beats, 4);
         assert_eq!(music_truth.phrase_bars, 4);
-        assert_eq!(music_truth.reviewed_music_events.len(), 4);
+        assert_eq!(music_truth.reviewed_music_events.len(), 3);
         assert_eq!(music_truth.reviewed_music_events[0].project_frame, 48);
         assert_eq!(music_truth.reviewed_music_events[2].project_frame, 263);
-        assert_eq!(music_truth.reviewed_music_events[3].project_frame, 388);
+        assert_eq!(music_truth.reviewed_story_events.len(), 1);
+        assert_eq!(music_truth.reviewed_story_events[0].project_frame, 203);
+        assert_eq!(music_truth.title_card.track_id, 1);
+        assert_eq!(music_truth.title_card.timeline_range.start, 388);
+        assert_eq!(music_truth.title_card.timeline_range.end, 450);
+        assert_eq!(music_truth.title_card.text, "TEARS OF STEEL");
+        assert_eq!(music_truth.title_card.fade_in_frames, 5);
+        assert_eq!(music_truth.title_card.fade_out_frames, 15);
         assert_eq!(music_truth.opening_source_window.start, 165);
         assert_eq!(music_truth.opening_source_window.end, 221);
         assert_eq!(music_truth.preparation_source_window.start, 221);
         assert_eq!(music_truth.preparation_source_window.end, 309);
         assert_eq!(music_truth.operator_source_window.start, 482);
         assert_eq!(music_truth.operator_source_window.end, 635);
+        assert_eq!(music_truth.activation_source_window.start, 789);
+        assert_eq!(music_truth.activation_source_window.end, 847);
         assert_eq!(music_truth.climax_source_window.start, 987);
         assert_eq!(music_truth.climax_source_window.end, 1_118);
-        assert_eq!(music_truth.resolution_source_window.start, 1_285);
-        assert_eq!(music_truth.resolution_source_window.end, 1_345);
         assert_eq!(music_truth.minimum_clips_per_visual_asset, 5);
-        assert_eq!(music_truth.minimum_project_frames_per_visual_asset, 450);
+        assert_eq!(music_truth.minimum_project_frames_per_visual_asset, 388);
         assert_eq!(music_truth.music_preferred_source_start, 6_334);
         assert_eq!(music_truth.music_preferred_source_end, 6_875);
         assert_eq!(music_truth.music_maximum_end_drift_frames, 2);
         assert_eq!(music_truth.minimum_opening_shot_frames, 48);
-        assert_eq!(music_truth.minimum_closing_shot_frames, 60);
+        assert_eq!(music_truth.minimum_closing_shot_frames, 125);
         assert_eq!(music_truth.rendered_tail_window_frames, 5);
         assert_eq!(
             music_truth.rendered_tail_maximum_peak_dbfs_hundredths,
@@ -4879,6 +4977,59 @@ mod tests {
                     .unwrap()
                     .contains("source_ranges_chronological"))
         );
+    }
+
+    #[test]
+    fn published_v10_trailer_candidate_binds_title_resolution_and_pending_review() {
+        let baseline: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v5/music-trailer-v10-baseline.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            baseline["ground_truth"],
+            "benchmarks/auto-edit/v5/music-ground-truth-v10.json"
+        );
+        assert_eq!(baseline["environment"]["os"], "linux");
+        assert_eq!(baseline["machine_summary"]["assertions_passed"], 43);
+        assert_eq!(baseline["machine_summary"]["assertions_total"], 43);
+        assert_eq!(baseline["machine_summary"]["tool_calls"], 19);
+        assert_eq!(baseline["deliverable"]["photographed_frames"], 388);
+        assert_eq!(
+            baseline["deliverable"]["story_cut_frames"],
+            serde_json::json!([203])
+        );
+        assert_eq!(
+            baseline["deliverable"]["title_card"],
+            serde_json::json!({
+                "timeline_range": {"start": 388, "end": 450},
+                "text": "TEARS OF STEEL",
+                "font_size_token": 2,
+                "color_token": 0,
+                "position": "center",
+                "background_scrim": false,
+                "fade_in_frames": 5,
+                "fade_out_frames": 15
+            })
+        );
+        assert_eq!(
+            baseline["deliverable"]["story_source_ranges"][3],
+            serde_json::json!({"role": "activation", "start": 789, "end": 847})
+        );
+        assert_eq!(
+            baseline["deliverable"]["independent_story_audit"]["status"],
+            "passed"
+        );
+        assert_eq!(
+            baseline["deliverable"]["independent_cut_audit"]["status"],
+            "passed"
+        );
+        assert_eq!(
+            baseline["director_reference"]["status"],
+            "accepted_editorial_direction"
+        );
+        assert_eq!(baseline["human_review"]["status"], "pending");
+        assert!(baseline["human_review"]["accepted"].is_null());
+        assert_eq!(baseline["benchmark_status"], "in_progress");
     }
 
     #[test]

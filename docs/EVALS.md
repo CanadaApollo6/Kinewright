@@ -145,16 +145,17 @@ until interview/documentary, event/multicam, and music-montage families each
 pass three model samples and their separate human gate.
 
 The recorded `g3` recovery baseline below is the separately pinned v2 music
-pack. The active recovery is v9: an 18-second, single-source Tears of Steel
-trailer cut to reviewed Vanguard musical events, five chronologically ordered
-story roles, exact cut-edge proof, and a short decay. Prepare or verify its inputs
-explicitly before the offline run:
+pack. The active recovery is V10: an 18-second, single-source Tears of Steel
+trailer with three exact Vanguard musical cuts, one deliberate off-beat
+activation cut, five chronologically ordered photographed roles, and a title
+card replacing all source imagery during the short decay. Prepare or verify its
+inputs explicitly before the offline run:
 
-```powershell
-& .\scripts\setup-ffmpeg.ps1
-cargo run -p kinewright-agent --bin kinewright-eval -- `
+```bash
+source ./scripts/setup-ffmpeg.sh
+cargo run -p kinewright-agent --bin kinewright-eval -- \
   --prepare-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v4.json
-cargo run -p kinewright-agent --bin kinewright-eval -- `
+cargo run -p kinewright-agent --bin kinewright-eval -- \
   --verify-fixtures benchmarks/auto-edit/v5/music-fixture-pack-v4.json
 ```
 
@@ -268,8 +269,22 @@ narrative asset must move forward on the timeline. The first v9 run passes
 threat to preparation, operator, battle, and aftermath. Independent story and
 cut-edge audits pass. Its SHA-256 is
 `c5e7fe4d3c8184c7cf2f33ae49f6f4f2c42704c1190c44b1db42616d6380cda6`.
-An earlier 40/41 v9 attempt was withheld when its battle select crossed a
-detected source boundary. Human review of the passing v9 artifact is pending.
+An earlier 40/41 V9 attempt was withheld when its battle select crossed a
+detected source boundary. The exact published V9 artifact remains formally
+unscored, but review of the reconstructed sequence and subsequent ending studies
+found the operator too long and photographed endings unresolved.
+
+V10 shortens the operator at frame 203, inserts the exact reviewed activation
+sequence `789..847`, and ends all photographed imagery at frame 388. A centered
+TEARS OF STEEL title clip occupies frames 388..450 with exact 5-frame fade-in
+and 15-frame fade-out values; freeze padding and source media in that interval
+fail the gate. The first clean Linux sample passes 43/43 assertions with 19
+calls, 9 operations, and 491,066 total tokens. Its rendered SHA-256 is
+`6b18008bf264dc38a41a9be15f9d1e158dfc397c2433e77994ac3594e6b4d023`.
+`benchmarks/auto-edit/v5/music-trailer-v10-baseline.json` records the machine
+pass and keeps human review of that exact model artifact pending. A separate
+director reference established the accepted title-card direction but is not
+substituted for the scored output.
 
 The first corrected interview preflight is published at
 `benchmarks/auto-edit/v5/baseline.json`: 1/1 sample, 25/25 assertions, 7 tool
