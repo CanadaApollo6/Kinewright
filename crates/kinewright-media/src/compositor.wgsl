@@ -240,8 +240,11 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
             encode_bt709(linear_rgb.g),
             encode_bt709(linear_rgb.b),
         );
-        rgb *= exp2(params.exposure);
-        rgb += vec3<f32>(params.temperature * 0.1, params.tint * 0.08, -params.temperature * 0.1);
+        // `color_grade` is canonicalised to `primary_correction` before an
+        // effect reaches live project state, so its display-coded exposure,
+        // temperature, and tint block is unreachable and was removed. The
+        // `exposure`, `temperature`, and `tint` uniform slots are retained so
+        // the 48-float `LayerParams` ABI stays byte-identical.
         rgb += vec3<f32>(params.brightness);
         rgb = (rgb - vec3<f32>(0.5)) * params.contrast + vec3<f32>(0.5);
         let luminance = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
@@ -268,26 +271,56 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // Legacy display compatibility retains its established display-space
         // clamp. It is outside the managed primary sequence.
         rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
-        if params.key_threshold >= 0.0 {
-            let key_color = vec3<f32>(params.key_red, params.key_green, params.key_blue);
-            let distance = length(rgb - key_color) / 1.7320508;
-            let key_alpha = smoothstep(
-                max(0.0, params.key_threshold - params.key_softness),
-                min(1.0, params.key_threshold + params.key_softness + 0.00001),
-                distance,
-            );
-            alpha *= key_alpha;
-            let key_dominance = max(0.0, rgb.g - max(rgb.r, rgb.b));
-            rgb.g = max(
-                0.0,
-                rgb.g - key_dominance * params.key_spill * (1.0 - key_alpha),
-            );
-        }
         output_linear = vec3<f32>(
             decode_bt709(rgb.r),
             decode_bt709(rgb.g),
             decode_bt709(rgb.b),
         );
+    }
+    // CC1 2.2.4: alpha and keying are independent of colour correction, and
+    // 2.2.5: no colour stage clamps RGB.  The key distance therefore uses a
+    // LOCAL display-coded copy of the working value, while the colour that
+    // continues down the pipeline is never clamped.  This runs whether or not
+    // a legacy display stage is active, and after it so a legacy + key stack
+    // keeps its established behaviour.
+    if params.key_threshold >= 0.0 {
+        // Only the distance uses the clamped copy: the key colour is a
+        // display-coded 0..1 triple, so comparing against an over-range value
+        // would report a distance the operator cannot reason about.
+        let key_rgb = clamp(
+            vec3<f32>(
+                encode_bt709(output_linear.r),
+                encode_bt709(output_linear.g),
+                encode_bt709(output_linear.b),
+            ),
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        );
+        let key_color = vec3<f32>(params.key_red, params.key_green, params.key_blue);
+        let distance = length(key_rgb - key_color) / 1.7320508;
+        let key_alpha = smoothstep(
+            max(0.0, params.key_threshold - params.key_softness),
+            min(1.0, params.key_threshold + params.key_softness + 0.00001),
+            distance,
+        );
+        alpha *= key_alpha;
+        // Spill suppression keeps its established DISPLAY-CODED strength:
+        // moving the dominance to linear light would silently restrengthen
+        // every keyed project that was graded before CC1.  The encode here is
+        // the sign-preserving, UNCLAMPED one, so no value is crushed.
+        //
+        // A fully kept pixel (`key_alpha == 1`) has no suppression to apply,
+        // so it skips the round trip entirely and stays bit-identical; a fully
+        // keyed pixel is already alpha 0.  Only edge pixels pay the transfer
+        // round trip, and they get exactly the pre-CC1 amount.
+        if key_alpha < 1.0 {
+            let spill_r = encode_bt709(output_linear.r);
+            let spill_g = encode_bt709(output_linear.g);
+            let spill_b = encode_bt709(output_linear.b);
+            let key_dominance = max(0.0, spill_g - max(spill_r, spill_b));
+            let suppressed = spill_g - key_dominance * params.key_spill * (1.0 - key_alpha);
+            output_linear.g = decode_bt709(suppressed);
+        }
     }
     output_linear = mix(output_linear, vec3<f32>(params.fade_white), params.fade_mix);
     if params.fade_mix > 0.0 {

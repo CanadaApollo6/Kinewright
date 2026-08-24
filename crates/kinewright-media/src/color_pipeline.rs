@@ -107,6 +107,8 @@ pub enum ColorPipelineError {
     PrimaryDescriptorMismatch(String),
     /// The target transfer is not the CC1 BT.709 monitor transfer.
     UnsupportedMonitorTransfer(ColorTransfer),
+    /// The target transfer is not the CC1 BT.709 delivery transfer.
+    UnsupportedDeliveryTransfer(ColorTransfer),
 }
 
 impl fmt::Display for ColorPipelineError {
@@ -178,6 +180,9 @@ impl fmt::Display for ColorPipelineError {
             }
             Self::UnsupportedMonitorTransfer(value) => {
                 write!(formatter, "unsupported monitor transfer: {value:?}")
+            }
+            Self::UnsupportedDeliveryTransfer(value) => {
+                write!(formatter, "unsupported delivery transfer: {value:?}")
             }
         }
     }
@@ -870,6 +875,80 @@ pub fn encode_monitor_for_description(
     }
 }
 
+/// Encode a linear RGBA value using the requested monitoring description.
+///
+/// This is the RGBA form of [`encode_monitor_for_description`] used by the
+/// production compositor readback, so §2.2.6 monitor selection is made from
+/// project state instead of a hardcoded transform.
+///
+/// # Errors
+///
+/// Returns an error when the monitoring transfer is unknown or not the CC1
+/// BT.709 transfer.
+pub fn encode_monitor_rgba8_for_description(
+    linear_rgba: [f32; 4],
+    monitoring: &ColorDescription,
+) -> Result<[u8; 4], ColorPipelineError> {
+    match &monitoring.transfer {
+        ColorTransfer::Bt709 => Ok(encode_monitor_rgba8(linear_rgba)),
+        ColorTransfer::Unknown => Err(ColorPipelineError::UnknownTransfer),
+        value => Err(ColorPipelineError::UnsupportedMonitorTransfer(
+            value.clone(),
+        )),
+    }
+}
+
+/// Quantize one already-encoded delivery value to a 16-bit full-range code.
+///
+/// This is the single quantization allowed before codec packing: the value is
+/// clamped once and rounded once, in f32, at the delivery boundary.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn quantize_delivery16(value: f32) -> u16 {
+    let clamped = if value.is_nan() {
+        0.0
+    } else {
+        value.clamp(0.0, 1.0)
+    };
+    (clamped * 65_535.0).round() as u16
+}
+
+/// Apply BT.709 delivery encoding, then clamp and quantize RGB to 16-bit
+/// full range. Alpha is a real 16-bit destination channel and is quantized
+/// without a transfer.
+#[must_use]
+pub fn encode_delivery_rgba16(linear_rgba: [f32; 4]) -> [u16; 4] {
+    [
+        quantize_delivery16(encode_bt709(linear_rgba[0])),
+        quantize_delivery16(encode_bt709(linear_rgba[1])),
+        quantize_delivery16(encode_bt709(linear_rgba[2])),
+        quantize_delivery16(linear_rgba[3]),
+    ]
+}
+
+/// Encode a linear RGBA value using the requested delivery description.
+///
+/// CC1 delivers Rec.709 only. The description is checked so the delivery
+/// target can never be a `libavfilter` or codec default, and the result is
+/// full-range 16-bit so the only 8-bit quantization in the export path is the
+/// YUV420P conversion itself.
+///
+/// # Errors
+///
+/// Returns an error when the delivery transfer is unknown or not the CC1
+/// BT.709 transfer.
+pub fn encode_delivery_for_description(
+    linear_rgba: [f32; 4],
+    delivery: &ColorDescription,
+) -> Result<[u16; 4], ColorPipelineError> {
+    match &delivery.transfer {
+        ColorTransfer::Bt709 => Ok(encode_delivery_rgba16(linear_rgba)),
+        ColorTransfer::Unknown => Err(ColorPipelineError::UnknownTransfer),
+        value => Err(ColorPipelineError::UnsupportedDeliveryTransfer(
+            value.clone(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1460,6 +1539,63 @@ mod tests {
             Err(ColorPipelineError::UnsupportedMonitorTransfer(
                 ColorTransfer::Srgb
             ))
+        );
+        assert_eq!(
+            encode_monitor_rgba8_for_description([0.5, 0.5, 0.5, 1.0], &monitoring),
+            Err(ColorPipelineError::UnsupportedMonitorTransfer(
+                ColorTransfer::Srgb
+            ))
+        );
+    }
+
+    #[test]
+    fn delivery_encoding_quantizes_mid_gray_once_at_sixteen_bits() {
+        // One BT.709 OETF in f32, one clamp, one rounding.  Mid-gray linear
+        // 0.5 encodes to 1.099 * 0.5^0.45 - 0.099 and must land on the exact
+        // 16-bit full-range code, not on an 8-bit code re-promoted to 16 bits.
+        let encoded = encode_bt709(0.5);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let expected = (encoded * 65_535.0).round() as u16;
+        assert_eq!(expected, 46_236);
+        assert_eq!(
+            encode_delivery_rgba16([0.5, 0.5, 0.5, 1.0]),
+            [expected, expected, expected, 65_535]
+        );
+
+        // The 8-bit monitor code for the same value is 180; a delivery path
+        // that quantized to 8 bits first would produce 180 * 257 = 46260.
+        assert_eq!(encode_monitor_rgb8([0.5; 3]), [180; 3]);
+        assert_ne!(expected, 46_260);
+
+        // Only the final step clamps.
+        assert_eq!(
+            encode_delivery_rgba16([-1.0, 0.0, 2.0, 1.5]),
+            [0, 0, 65_535, 65_535]
+        );
+        assert_eq!(
+            encode_delivery_rgba16([f32::NAN, 1.0, f32::INFINITY, f32::NAN]),
+            [0, 65_535, 65_535, 0]
+        );
+    }
+
+    #[test]
+    fn delivery_description_cannot_silently_select_another_transfer() {
+        let mut delivery = rec709(ColorRange::Limited, ColorTransfer::Bt709);
+        assert_eq!(
+            encode_delivery_for_description([0.5, 0.5, 0.5, 1.0], &delivery),
+            Ok(encode_delivery_rgba16([0.5, 0.5, 0.5, 1.0]))
+        );
+        delivery.transfer = ColorTransfer::Srgb;
+        assert_eq!(
+            encode_delivery_for_description([0.5, 0.5, 0.5, 1.0], &delivery),
+            Err(ColorPipelineError::UnsupportedDeliveryTransfer(
+                ColorTransfer::Srgb
+            ))
+        );
+        delivery.transfer = ColorTransfer::Unknown;
+        assert_eq!(
+            encode_delivery_for_description([0.5, 0.5, 0.5, 1.0], &delivery),
+            Err(ColorPipelineError::UnknownTransfer)
         );
     }
 }

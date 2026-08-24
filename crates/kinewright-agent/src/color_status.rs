@@ -7,14 +7,49 @@ use std::{
 
 use kinewright_core::{
     AssetId, Clip, ClipContent, ClipId, ColorDescription, ColorSourceError, ColorSourceProfile,
-    ColorSourceProfileAssumption, ColorWhitePoint, Document, Effect, EffectId,
-    MediaAvailabilityStatus, MediaError, MediaKind, Operation, ParamValue, TimeCode,
-    TimelineRevision, TrackKind, apply_batch, classify_source_with_assumption, effect_descriptor,
+    ColorSourceProfileAssumption, ColorWhitePoint, Document, Effect, EffectCompatibilityStage,
+    EffectId, MediaAvailabilityStatus, MediaError, MediaKind, Operation, ParamValue, TimeCode,
+    TimelineRevision, TrackKind, apply_batch, classify_source_with_assumption,
+    effect_compatibility_stage, effect_descriptor,
 };
 use serde_json::{Value, json};
 use thiserror::Error;
 
 const PRIMARY_CORRECTION_EFFECT_NAME: &str = "primary_correction";
+
+/// Every `ColorSourceProfileAssumption` variant a caller may request. The
+/// enum is deliberately bounded; adding a variant must add an entry here.
+const AVAILABLE_PROFILE_ASSUMPTIONS: [&str; 1] = ["d65"];
+
+/// Serialise an applied assumption through its own serde representation so the
+/// status surface cannot drift from the enum.
+fn assumption_value(assumption: ColorSourceProfileAssumption) -> Value {
+    serde_json::to_value(assumption).unwrap_or(Value::Null)
+}
+
+/// Reject `raw_only` combined with an explicit `profile_assumption`.
+///
+/// `raw_only` means "classify with no assumption at all". Silently discarding
+/// the caller's explicit assumption would return evidence that answers a
+/// different question from the one that was asked.
+#[must_use]
+pub(crate) fn raw_only_conflict(args: &ColorContextArgs) -> Option<Value> {
+    if !args.raw_only || args.profile_assumption.is_none() {
+        return None;
+    }
+    Some(json!({
+        "code": "raw_only_conflicts_with_profile_assumption",
+        "message": "raw_only=true classifies the source with no assumption, so an explicit profile_assumption cannot also be honoured; send exactly one of them.",
+        "details": {
+            "raw_only": true,
+            "profile_assumption": args.profile_assumption.map_or(Value::Null, assumption_value),
+            "asset_ids": args.asset_ids.iter().map(|asset| asset.0).collect::<Vec<_>>(),
+            "recovery": "Send raw_only=true with no profile_assumption for unassumed classifier evidence, or omit raw_only to apply the explicit assumption.",
+        },
+        "evidence_only": true,
+        "applied": false,
+    }))
+}
 
 /// Canonical CC1 stage names exposed to human and agent evidence surfaces.
 pub(crate) const CC1_STAGE_NAMES: [&str; 8] = [
@@ -95,13 +130,107 @@ pub(crate) struct ColorContextArgs {
 pub(crate) struct PrimaryCorrectionPlan {
     pub expected_revision: TimelineRevision,
     pub clip_id: ClipId,
+    /// The node the proposal targets: either the clip's existing last
+    /// `primary_correction` node or the freshly allocated id for a new one.
     pub effect_id: EffectId,
+    /// Whether the plan allocates a new node. A clip that already carries a
+    /// managed primary is corrected in place rather than stacked.
+    pub created_new_node: bool,
     pub source_profile: ColorSourceProfile,
     pub profile_assumption: Option<ColorSourceProfileAssumption>,
     pub requested_parameters: BTreeMap<String, i64>,
     pub resolved_parameters: BTreeMap<String, i64>,
     pub operations: Vec<Operation>,
     pub existing_primary_node_count: usize,
+    /// Non-fatal advisories, such as an ambiguous multi-primary clip.
+    pub warnings: Vec<String>,
+    /// True when every requested control already holds the requested value, in
+    /// which case `operations` is empty rather than a neutral no-op node.
+    pub no_change: bool,
+}
+
+impl PrimaryCorrectionPlan {
+    /// The node this proposal actually publishes.
+    ///
+    /// A no-op proposal that would have created a node never allocates one, so
+    /// reporting `effect_id` there would publish a phantom id that no operation
+    /// creates and that a later plan is free to reuse.
+    #[must_use]
+    pub fn target_effect_id(&self) -> Option<EffectId> {
+        if self.no_change && !self.created_new_node && self.existing_primary_node_count == 0 {
+            return None;
+        }
+        Some(self.effect_id)
+    }
+}
+
+/// The managed primary-correction node a new proposal for one clip would
+/// target, with the static parameter values a delta composes against.
+#[derive(Debug, Clone)]
+pub(crate) struct ExistingPrimaryNode {
+    pub effect_id: EffectId,
+    /// Static values of every descriptor parameter, defaulting to the
+    /// descriptor neutral when the node does not carry the control.
+    pub parameters: BTreeMap<String, i64>,
+    /// Descriptor parameters that carry keyframes on this node. Composing a
+    /// delta against an animated control is ambiguous, so callers report it.
+    pub keyframed: Vec<String>,
+    /// How many `primary_correction` nodes the clip carries. More than one is
+    /// ambiguous; `effect_id` is the last in compositor evaluation order.
+    pub node_count: usize,
+}
+
+/// Resolve the existing managed primary node for `clip_id`, if any.
+///
+/// Returns `None` when the clip carries no `primary_correction` node, in which
+/// case a proposal starts from the descriptor neutral.
+#[must_use]
+pub(crate) fn existing_primary_node(
+    document: &Document,
+    clip_id: ClipId,
+) -> Option<ExistingPrimaryNode> {
+    let descriptor = effect_descriptor(PRIMARY_CORRECTION_EFFECT_NAME)?;
+    let clip = document
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .find(|clip| clip.id == clip_id)?;
+    let primaries = clip
+        .effects
+        .iter()
+        .filter(|effect| effect.name == PRIMARY_CORRECTION_EFFECT_NAME)
+        .collect::<Vec<_>>();
+    // The compositor evaluates the chain in order, so the last node is the one
+    // a correction has to move.
+    let effect = primaries.last()?;
+    let parameters = descriptor
+        .parameters
+        .iter()
+        .map(|parameter| {
+            let value = match effect.parameters.get(parameter.name) {
+                Some(ParamValue::Integer(value)) => *value,
+                _ => parameter.neutral,
+            };
+            (parameter.name.to_owned(), value)
+        })
+        .collect();
+    let keyframed = descriptor
+        .parameters
+        .iter()
+        .filter(|parameter| {
+            effect
+                .keyframes
+                .get(parameter.name)
+                .is_some_and(|curve| !curve.keyframes.is_empty())
+        })
+        .map(|parameter| parameter.name.to_owned())
+        .collect();
+    Some(ExistingPrimaryNode {
+        effect_id: effect.id,
+        parameters,
+        keyframed,
+        node_count: primaries.len(),
+    })
 }
 
 #[derive(Debug, Error)]
@@ -193,6 +322,19 @@ pub(crate) enum ColorProofError {
         stage: &'static str,
         message: String,
     },
+    #[error(
+        "active rendered layer clip {clip} source asset {asset} is not managed CC1-compatible: {error}"
+    )]
+    UnsupportedActiveLayerSource {
+        clip: ClipId,
+        asset: AssetId,
+        error: ColorSourceError,
+        /// Non-blocking post-primary compatibility warnings collected across
+        /// every active layer of the refused composite. They are only reachable
+        /// here: a blocking source refuses the proof, so the success payload's
+        /// `unsupported_layer_warnings` is never produced for this composite.
+        layer_warnings: Vec<Value>,
+    },
     #[error(transparent)]
     Primary(#[from] PrimaryPlanError),
 }
@@ -215,6 +357,7 @@ impl ColorProofError {
             Self::RenderFailed { .. } => "color_proof_render_failed",
             Self::UnsupportedDecoderFormat { .. } => "unsupported_decoder_format",
             Self::InvalidImage { .. } => "color_proof_invalid_image",
+            Self::UnsupportedActiveLayerSource { .. } => "active_layer_needs_color_override",
             Self::Primary(error) => error.code(),
         }
     }
@@ -262,6 +405,22 @@ impl ColorProofError {
                 "declared_bit_depth": declared_bit_depth,
                 "decoder_bit_depth": decoder_bit_depth,
                 "reason": reason,
+            }),
+            Self::UnsupportedActiveLayerSource {
+                clip,
+                asset,
+                error,
+                layer_warnings,
+            } => json!({
+                "clip_id": clip,
+                "asset_id": asset,
+                "code": error.code(),
+                "field": error.field(),
+                "observed": error.observed(),
+                "allowed": error.allowed_values(),
+                "recovery": error.recovery_action(),
+                "message": error.actionable_message(),
+                "unsupported_layer_warnings": layer_warnings,
             }),
             Self::Primary(error) => error.details(),
         }
@@ -337,7 +496,10 @@ impl PrimaryPlanError {
                 "allowed": error.allowed_values(),
                 "recovery": error.recovery_action(),
             }),
-            Self::UnknownParameter { name } => json!({"parameter": name}),
+            Self::UnknownParameter { name } => json!({
+                "parameter": name,
+                "allowed_parameters": primary_parameter_documentation(),
+            }),
             Self::ParameterOutOfRange {
                 name,
                 value,
@@ -349,6 +511,45 @@ impl PrimaryPlanError {
             }
         }
     }
+}
+
+/// The exact CC1 primary controls, derived from the Core descriptor so the
+/// tool description and the `unknown_primary_parameter` recovery evidence can
+/// never drift from the values Core actually validates.
+#[must_use]
+pub(crate) fn primary_parameter_documentation() -> Vec<Value> {
+    effect_descriptor(PRIMARY_CORRECTION_EFFECT_NAME).map_or_else(Vec::new, |descriptor| {
+        descriptor
+            .parameters
+            .iter()
+            .map(|parameter| {
+                json!({
+                    "name": parameter.name,
+                    "min": parameter.min,
+                    "max": parameter.max,
+                    "neutral": parameter.neutral,
+                })
+            })
+            .collect()
+    })
+}
+
+/// One-line `name=min..=max, neutral N` summary of every CC1 primary control.
+#[must_use]
+pub(crate) fn primary_parameter_summary() -> String {
+    effect_descriptor(PRIMARY_CORRECTION_EFFECT_NAME).map_or_else(String::new, |descriptor| {
+        descriptor
+            .parameters
+            .iter()
+            .map(|parameter| {
+                format!(
+                    "{}={}..={}, neutral {}",
+                    parameter.name, parameter.min, parameter.max, parameter.neutral
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
 }
 
 /// Render the complete CC1 metadata/status surface without probing, mutating,
@@ -423,6 +624,10 @@ pub(crate) fn color_context_value_with_options(
                         "input": {
                             "bit_depth": asset.color_description.bit_depth,
                             "range": asset.color_description.range,
+                            // §5 requires the source raster alongside the
+                            // input format. `null` means the probe did not
+                            // report a resolution; it is never invented.
+                            "raster": asset.resolution,
                         },
                     },
                 },
@@ -430,14 +635,21 @@ pub(crate) fn color_context_value_with_options(
         })
         .collect::<Vec<_>>();
 
+    // CC1 §5 observability is a *visual* colour surface. Audio-track clips can
+    // never occupy a colour stage, so they are excluded rather than listed
+    // without an ordering. Video tracks composite in ascending document order,
+    // which is exactly the order `kinewright_media::visual_layers_at` uses to
+    // build the `render_color_proof` manifest.
     let clips = document
         .tracks
         .iter()
-        .flat_map(|track| {
+        .filter(|track| track.kind == TrackKind::Video)
+        .enumerate()
+        .flat_map(|(z_order, track)| {
             track
                 .clips
                 .iter()
-                .map(move |clip| clip_status(track.id.0, track.kind, clip))
+                .map(move |clip| clip_status(track.id.0, z_order, clip))
         })
         .collect::<Vec<_>>();
     let legacy_stage_warnings = legacy_stage_warnings_for_document(document);
@@ -483,6 +695,13 @@ pub(crate) fn color_context_value_with_options(
             "raw_only_requires_explicit_assumption": true,
             "raw_only_available": true,
         },
+        // `get_color_context` reads persisted metadata only. It never renders
+        // or samples a frame, so there is no sampled region to report and the
+        // marker is explicit rather than absent.
+        "sampling_region": Value::Null,
+        "sampling_region_note": "get_color_context is metadata-only; call render_color_proof for a rendered frame, or get_video_scopes_v2, whose top-level `roi` key reports the region actually sampled.",
+        "layer_scope": "video_tracks_only",
+        "z_order_convention": "ascending video-track document index; a higher z_order composites above a lower one",
         "assets": assets,
         "clips": clips,
         "legacy_stage_warnings": legacy_stage_warnings,
@@ -510,11 +729,16 @@ fn referenced_visual_assets(document: &Document) -> BTreeSet<AssetId> {
 
 /// Return every post-primary compatibility warning for a document in stable
 /// clip/effect order so status and proof manifests agree.
+///
+/// The colour layer scope is video tracks only, matching the `clips` list this
+/// sits beside: an effect on an audio clip is never part of the CC1 managed
+/// image chain and must not raise a colour compatibility warning.
 #[must_use]
 pub(crate) fn legacy_stage_warnings_for_document(document: &Document) -> Vec<Value> {
     document
         .tracks
         .iter()
+        .filter(|track| track.kind == TrackKind::Video)
         .flat_map(|track| track.clips.iter().flat_map(legacy_stage_warnings))
         .collect()
 }
@@ -539,16 +763,18 @@ fn source_status(
             "status": "supported",
             "supported_profile": profile.id(),
             "profile_assumption": {
-                "selected": if profile_assumption.is_some()
-                    && description.white_point == ColorWhitePoint::Unknown
-                {
-                    json!("d65")
+                // Serialise the assumption that was actually applied rather
+                // than a hardcoded name, so a future assumption variant cannot
+                // be silently reported as d65.  An assumption only changes the
+                // classification when the raw white point is unknown.
+                "selected": if description.white_point == ColorWhitePoint::Unknown {
+                    profile_assumption.map_or(Value::Null, assumption_value)
                 } else {
                     Value::Null
                 },
                 "source": assumption_source.unwrap_or("metadata"),
                 "required": false,
-                "available": ["d65"],
+                "available": AVAILABLE_PROFILE_ASSUMPTIONS,
             },
             "blocking_reason": Value::Null,
         }),
@@ -560,12 +786,30 @@ fn source_status(
                 "profile_assumption": {
                     "selected": Value::Null,
                     "required": assumption_required,
-                    "available": ["d65"],
+                    "available": AVAILABLE_PROFILE_ASSUMPTIONS,
                 },
                 "blocking_reason": blocking_reason(&error),
             })
         }
     }
+}
+
+/// Classify one source-backed active proof layer with exactly the normative
+/// assumption the managed renderer executes, returning both the status
+/// evidence and the blocking classifier error when there is one.
+///
+/// Non-selected active layers are composited into the same BEFORE/AFTER
+/// raster as the selected clip, so their source profile is part of the proof's
+/// claim and must be reported rather than silently assumed supported.
+#[must_use]
+pub(crate) fn active_layer_source_classification(
+    description: &ColorDescription,
+) -> (Value, Option<ColorSourceError>) {
+    let assumption = normative_d65_assumption(description);
+    let assumption_source = assumption.map(|_| "application_profile_assumption");
+    let status = source_status(description, assumption, assumption_source);
+    let error = classify_source_with_assumption(description, assumption).err();
+    (status, error)
 }
 
 fn normative_d65_assumption(
@@ -608,23 +852,95 @@ fn blocking_reason(error: &ColorSourceError) -> Value {
     })
 }
 
-fn clip_status(track_id: u64, track_kind: TrackKind, clip: &kinewright_core::Clip) -> Value {
-    let primary_nodes = clip
-        .effects
-        .iter()
-        .enumerate()
-        .filter(|(_, effect)| effect.name == PRIMARY_CORRECTION_EFFECT_NAME)
-        .map(|(effect_index, effect)| primary_node(effect_index, effect))
-        .collect::<Vec<_>>();
-    let legacy_stage_warnings = legacy_stage_warnings(clip);
+fn clip_status(track_id: u64, z_order: usize, clip: &kinewright_core::Clip) -> Value {
     json!({
         "track_id": track_id,
-        "track_kind": track_kind,
+        "track_kind": TrackKind::Video,
+        "z_order": z_order,
         "clip_id": clip.id.0,
         "asset_id": clip.asset.0,
         "content": clip_content_name(&clip.content),
-        "primary_nodes": primary_nodes,
-        "legacy_stage_warnings": legacy_stage_warnings,
+        "timeline_start": clip.timeline_start.0,
+        // The complete ordered chain, not just the primary nodes: a legacy
+        // stage between two primaries changes the result and must be visible.
+        "effects": effect_chain_manifest(&clip.effects),
+        "primary_nodes": primary_node_manifest(&clip.effects),
+        "legacy_stage_warnings": legacy_stage_warnings(clip),
+        // Occlusion is frame-dependent and this surface is not a sampled
+        // render; the marker is explicit rather than silently omitted.
+        "active_at_frame": Value::Null,
+    })
+}
+
+/// Ordered evaluated effect-chain manifest shared by `get_color_context` and
+/// the `render_color_proof` layer manifest so the two colour surfaces can
+/// never describe a different chain for the same clip.
+///
+/// The vector order is the compositor evaluation order and is intentionally
+/// retained: two `primary_correction` nodes with equal values are not
+/// interchangeable because the managed pipeline applies them serially.
+#[must_use]
+pub(crate) fn effect_chain_manifest(effects: &[Effect]) -> Vec<Value> {
+    effects
+        .iter()
+        .enumerate()
+        .map(|(effect_index, effect)| {
+            let primary_parameters = if effect.name == PRIMARY_CORRECTION_EFFECT_NAME {
+                resolved_primary_parameters(effect)
+                    .map_or(Value::Null, |parameters| json!(parameters))
+            } else {
+                Value::Null
+            };
+            json!({
+                "effect_index": effect_index,
+                "effect_id": effect.id.0,
+                "name": effect.name,
+                "parameters": effect.parameters,
+                "primary_parameters": primary_parameters,
+                "keyframes": effect.keyframes,
+                "compatibility_stage": effect_compatibility_stage(&effect.name)
+                    .map_or(Value::Null, |stage| json!(stage.issue_code())),
+            })
+        })
+        .collect()
+}
+
+/// Keep the primary-only view derived from the same ordered chain above.
+#[must_use]
+pub(crate) fn primary_node_manifest(effects: &[Effect]) -> Vec<Value> {
+    effect_chain_manifest(effects)
+        .into_iter()
+        .filter(|effect| !effect["primary_parameters"].is_null())
+        .map(|effect| {
+            json!({
+                "effect_id": effect["effect_id"],
+                "effect_index": effect["effect_index"],
+                "name": effect["name"],
+                "parameters": effect["primary_parameters"],
+                "keyframes": effect["keyframes"],
+            })
+        })
+        .collect()
+}
+
+/// Every descriptor control resolved against the stored effect, falling back
+/// to the descriptor neutral for controls the effect does not carry.
+fn resolved_primary_parameters(effect: &Effect) -> Option<BTreeMap<&'static str, ParamValue>> {
+    effect_descriptor(PRIMARY_CORRECTION_EFFECT_NAME).map(|descriptor| {
+        descriptor
+            .parameters
+            .iter()
+            .map(|parameter| {
+                (
+                    parameter.name,
+                    effect
+                        .parameters
+                        .get(parameter.name)
+                        .cloned()
+                        .unwrap_or(ParamValue::Integer(parameter.neutral)),
+                )
+            })
+            .collect()
     })
 }
 
@@ -636,57 +952,32 @@ fn clip_content_name(content: &ClipContent) -> &'static str {
     }
 }
 
-fn primary_node(effect_index: usize, effect: &Effect) -> Value {
-    let parameters = effect_descriptor(PRIMARY_CORRECTION_EFFECT_NAME)
-        .map(|descriptor| {
-            descriptor
-                .parameters
-                .iter()
-                .map(|parameter| {
-                    (
-                        parameter.name,
-                        effect
-                            .parameters
-                            .get(parameter.name)
-                            .cloned()
-                            .unwrap_or(ParamValue::Integer(parameter.neutral)),
-                    )
-                })
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
-    json!({
-        "effect_id": effect.id.0,
-        "effect_index": effect_index,
-        "name": effect.name,
-        "parameters": parameters,
-        "keyframes": effect.keyframes,
-    })
-}
-
+/// Classify one effect through Core's single source of truth so agent status,
+/// QA, and delivery conformance cannot report different codes for the same
+/// effect. `color_grade` deliberately has no arm here: Core canonicalises that
+/// wire name to `primary_correction` on load, so it can never reach this
+/// function.
 fn legacy_warning(effect_index: usize, effect: &Effect) -> Option<Value> {
-    let (code, message) = match effect.name.as_str() {
-        "brightness" | "contrast" | "saturation" => (
-            "legacy_display_effect",
+    let stage = effect_compatibility_stage(&effect.name)?;
+    let (compatibility_stage, message) = match stage {
+        EffectCompatibilityStage::LegacyDisplayCoded => (
+            "legacy_display_coded",
             "legacy display-coded colour semantics are outside CC1 managed conformance",
         ),
-        "color_grade" => (
-            "legacy_color_grade",
-            "legacy color_grade must be migrated or explicitly retained as a compatibility stage",
-        ),
-        "look_lut" | "cube_lut" => (
-            "legacy_lut_stage",
+        EffectCompatibilityStage::PostPrimaryLut => (
+            "post_primary_lut",
             "legacy LUT stage is post-primary and outside CC1 managed conformance",
         ),
-        _ => return None,
     };
     Some(json!({
-        "code": code,
+        "code": stage.issue_code(),
         "effect_id": effect.id.0,
         "effect_index": effect_index,
         "name": effect.name,
         "message": message,
         "stage": "post_primary_legacy",
+        "compatibility_stage": compatibility_stage,
+        "inspector_warning": stage.inspector_warning(),
     }))
 }
 
@@ -761,7 +1052,6 @@ pub(crate) fn plan_primary_correction(
         }
     }
 
-    let effect_id = next_effect_id(document)?;
     let neutral_parameters = descriptor
         .parameters
         .iter()
@@ -772,56 +1062,99 @@ pub(crate) fn plan_primary_correction(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let mut resolved_parameters = neutral_parameters
-        .iter()
-        .map(|(name, value)| {
-            let ParamValue::Integer(value) = value else {
-                unreachable!("primary descriptor neutrals are integers")
-            };
-            (name.clone(), *value)
-        })
-        .collect::<BTreeMap<_, _>>();
+
+    // A managed clip carries at most one primary correction. Stacking a second
+    // node silently compounds two white-balance/exposure transforms, so an
+    // existing node is corrected in place instead.
+    let existing = existing_primary_node(document, args.clip_id);
+    let existing_primary_node_count = existing.as_ref().map_or(0, |node| node.node_count);
+    let mut warnings = Vec::new();
+    let (effect_id, created_new_node, current_parameters) = match existing {
+        Some(node) => {
+            if node.node_count > 1 {
+                warnings.push(format!(
+                    "clip {} already carries {} primary_correction nodes; this proposal targets the last node ({}) in compositor evaluation order",
+                    clip.id, node.node_count, node.effect_id
+                ));
+            }
+            for name in node
+                .keyframed
+                .iter()
+                .filter(|name| args.parameters.contains_key(*name))
+            {
+                warnings.push(format!(
+                    "clip {} node {} keyframes {name}; this proposal writes the static value, which automation overrides at render time",
+                    clip.id, node.effect_id
+                ));
+            }
+            (node.effect_id, false, node.parameters)
+        }
+        None => (
+            next_effect_id(document)?,
+            true,
+            descriptor
+                .parameters
+                .iter()
+                .map(|parameter| (parameter.name.to_owned(), parameter.neutral))
+                .collect::<BTreeMap<_, _>>(),
+        ),
+    };
+
+    let mut resolved_parameters = current_parameters.clone();
     for (name, value) in &args.parameters {
         resolved_parameters.insert(name.clone(), *value);
     }
-    let effect = Effect {
-        id: effect_id,
-        name: PRIMARY_CORRECTION_EFFECT_NAME.to_owned(),
-        parameters: neutral_parameters,
-        keyframes: BTreeMap::new(),
-    };
-    let mut operations = vec![Operation::AddEffect {
-        clip: args.clip_id,
-        effect,
-    }];
-    operations.extend(
-        args.parameters
-            .iter()
-            .map(|(name, value)| Operation::SetEffectParam {
-                clip: args.clip_id,
-                effect: effect_id,
-                name: name.clone(),
-                value: ParamValue::Integer(*value),
-            }),
-    );
+    // Only controls whose value actually moves are written. An unchanged
+    // control produces no operation, so an empty proposal stays empty.
+    let changed = args
+        .parameters
+        .iter()
+        .filter(|(name, value)| current_parameters.get(*name) != Some(*value))
+        .map(|(name, value)| Operation::SetEffectParam {
+            clip: args.clip_id,
+            effect: effect_id,
+            name: name.clone(),
+            value: ParamValue::Integer(*value),
+        })
+        .collect::<Vec<_>>();
 
-    let mut candidate = document.clone();
-    apply_batch(&mut candidate, &operations)
-        .map_err(|error| PrimaryPlanError::CoreRejected(error.to_string()))?;
+    let mut operations = Vec::new();
+    if !changed.is_empty() {
+        if created_new_node {
+            operations.push(Operation::AddEffect {
+                clip: args.clip_id,
+                effect: Effect {
+                    id: effect_id,
+                    name: PRIMARY_CORRECTION_EFFECT_NAME.to_owned(),
+                    parameters: neutral_parameters,
+                    keyframes: BTreeMap::new(),
+                },
+            });
+        }
+        operations.extend(changed);
+    }
+    let no_change = operations.is_empty();
+
+    // Core rejects an empty batch, and a no-op proposal is a legitimate answer
+    // rather than a rejection: there is simply nothing to validate.
+    if !operations.is_empty() {
+        let mut candidate = document.clone();
+        apply_batch(&mut candidate, &operations)
+            .map_err(|error| PrimaryPlanError::CoreRejected(error.to_string()))?;
+    }
     Ok(PrimaryCorrectionPlan {
         expected_revision: args.expected_revision,
         clip_id: args.clip_id,
         effect_id,
+        created_new_node: created_new_node && !no_change,
         source_profile,
         profile_assumption,
         requested_parameters: args.parameters.clone(),
         resolved_parameters,
         operations,
-        existing_primary_node_count: clip
-            .effects
-            .iter()
-            .filter(|effect| effect.name == PRIMARY_CORRECTION_EFFECT_NAME)
-            .count(),
+        existing_primary_node_count,
+        warnings,
+        no_change,
     })
 }
 
@@ -1106,5 +1439,334 @@ mod tests {
             ),
             Err(PrimaryPlanError::UnsupportedSource { .. })
         ));
+    }
+    #[test]
+    fn raw_only_with_an_explicit_assumption_is_a_typed_conflict() {
+        assert!(raw_only_conflict(&ColorContextArgs::default()).is_none());
+        assert!(
+            raw_only_conflict(&ColorContextArgs {
+                profile_assumption: Some(ColorSourceProfileAssumption::D65),
+                raw_only: false,
+                asset_ids: Vec::new(),
+            })
+            .is_none()
+        );
+        let conflict = raw_only_conflict(&ColorContextArgs {
+            profile_assumption: Some(ColorSourceProfileAssumption::D65),
+            raw_only: true,
+            asset_ids: vec![AssetId(1)],
+        })
+        .expect("raw_only plus an explicit assumption must be rejected");
+        assert_eq!(
+            conflict["code"],
+            "raw_only_conflicts_with_profile_assumption"
+        );
+        assert_eq!(conflict["details"]["profile_assumption"], "d65");
+        assert_eq!(conflict["details"]["asset_ids"], json!([1]));
+    }
+
+    #[test]
+    fn legacy_warnings_use_the_core_compatibility_stage_codes() {
+        let warning = |name: &str| {
+            legacy_warning(
+                0,
+                &Effect {
+                    id: EffectId(1),
+                    name: name.to_owned(),
+                    parameters: BTreeMap::new(),
+                    keyframes: BTreeMap::new(),
+                },
+            )
+        };
+        for name in ["brightness", "contrast", "saturation"] {
+            let value = warning(name).unwrap();
+            assert_eq!(value["code"], "legacy_colour_semantics");
+            assert_eq!(value["compatibility_stage"], "legacy_display_coded");
+        }
+        for name in ["look_lut", "cube_lut"] {
+            assert_eq!(warning(name).unwrap()["code"], "legacy_lut_stage");
+        }
+        // Core canonicalises color_grade to primary_correction on load, so the
+        // dead arm is gone and neither name is a compatibility stage.
+        assert!(warning("color_grade").is_none());
+        assert!(warning("primary_correction").is_none());
+        assert!(warning("opacity").is_none());
+    }
+
+    #[test]
+    fn status_reports_video_only_layers_with_z_order_and_the_full_chain() {
+        let mut document = document();
+        document.tracks[0].clips[0].effects.push(Effect {
+            id: EffectId(1),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        });
+        document.tracks[0].clips[0].effects.push(Effect {
+            id: EffectId(2),
+            name: "look_lut".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        });
+        // An audio clip must not appear in a colour layer list at all, and its
+        // effects are not part of the CC1 image chain: a legacy-named effect
+        // there must not produce a colour compatibility warning either.
+        document.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![Clip {
+                id: ClipId(2),
+                asset: AssetId(1),
+                source_range: kinewright_core::TimeCode(0)..kinewright_core::TimeCode(100),
+                content: ClipContent::Media,
+                timeline_start: kinewright_core::TimeCode(0),
+                effects: vec![Effect {
+                    id: EffectId(3),
+                    name: "look_lut".to_owned(),
+                    parameters: BTreeMap::new(),
+                    keyframes: BTreeMap::new(),
+                }],
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: kinewright_core::TimeCode(0),
+                audio_fade_out_frames: kinewright_core::TimeCode(0),
+                speed_percent: 100,
+            }],
+        });
+
+        let value = color_context_value(TimelineRevision(0), &document);
+        let clips = value["clips"].as_array().unwrap();
+        assert_eq!(clips.len(), 1, "audio-track clips are not colour layers");
+        assert_eq!(clips[0]["z_order"], 0);
+        assert_eq!(clips[0]["track_kind"], "Video");
+        assert_eq!(clips[0]["active_at_frame"], Value::Null);
+        let effects = clips[0]["effects"].as_array().unwrap();
+        assert_eq!(effects.len(), 2, "the full ordered chain must be visible");
+        assert_eq!(effects[0]["effect_index"], 0);
+        assert_eq!(effects[0]["name"], "primary_correction");
+        assert_eq!(effects[1]["name"], "look_lut");
+        assert_eq!(effects[1]["compatibility_stage"], "legacy_lut_stage");
+        assert_eq!(clips[0]["primary_nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            value["assets"][0]["source"]["formats"]["input"]["raster"],
+            json!([1920, 1080])
+        );
+        assert_eq!(value["sampling_region"], Value::Null);
+        assert_eq!(value["layer_scope"], "video_tracks_only");
+
+        let warnings = value["legacy_stage_warnings"].as_array().unwrap();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "only the video clip's legacy stage is a colour warning: {warnings:?}"
+        );
+        assert_eq!(warnings[0]["effect_id"], 2);
+        assert!(
+            warnings.iter().all(|warning| warning["effect_id"] != 3),
+            "an effect on an audio clip is outside the colour layer scope"
+        );
+    }
+
+    #[test]
+    fn an_existing_primary_node_is_corrected_in_place() {
+        let mut document = document();
+        document.tracks[0].clips[0].effects.push(Effect {
+            id: EffectId(5),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                ParamValue::Integer(250),
+            )]),
+            keyframes: BTreeMap::new(),
+        });
+        let plan = plan_primary_correction(
+            &document,
+            TimelineRevision(0),
+            &PrimaryCorrectionPlanArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                profile_assumption: None,
+                parameters: BTreeMap::from([("exposure_milli_stops".to_owned(), 900)]),
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.existing_primary_node_count, 1);
+        assert_eq!(plan.effect_id, EffectId(5));
+        assert!(!plan.created_new_node);
+        assert!(!plan.no_change);
+        assert!(plan.warnings.is_empty());
+        assert_eq!(plan.operations.len(), 1);
+        assert!(matches!(
+            plan.operations[0],
+            Operation::SetEffectParam {
+                effect: EffectId(5),
+                ..
+            }
+        ));
+        assert_eq!(plan.resolved_parameters["exposure_milli_stops"], 900);
+
+        // Requesting the value the node already holds proposes nothing.
+        let unchanged = plan_primary_correction(
+            &document,
+            TimelineRevision(0),
+            &PrimaryCorrectionPlanArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                profile_assumption: None,
+                parameters: BTreeMap::from([("exposure_milli_stops".to_owned(), 250)]),
+            },
+        )
+        .unwrap();
+        assert!(unchanged.no_change);
+        assert!(unchanged.operations.is_empty());
+        // The targeted node still exists, so it is still the honest answer.
+        assert_eq!(unchanged.target_effect_id(), Some(EffectId(5)));
+
+        // Two primaries: target the last one and warn.
+        document.tracks[0].clips[0].effects.push(Effect {
+            id: EffectId(6),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        });
+        let ambiguous = plan_primary_correction(
+            &document,
+            TimelineRevision(0),
+            &PrimaryCorrectionPlanArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                profile_assumption: None,
+                parameters: BTreeMap::from([("tint_percent".to_owned(), 4)]),
+            },
+        )
+        .unwrap();
+        assert_eq!(ambiguous.existing_primary_node_count, 2);
+        assert_eq!(ambiguous.effect_id, EffectId(6));
+        assert_eq!(ambiguous.warnings.len(), 1);
+        assert!(ambiguous.warnings[0].contains("2 primary_correction nodes"));
+    }
+
+    /// A proposal that changes nothing and has no node to target never
+    /// allocates an effect id, so it must not publish one.
+    #[test]
+    fn a_no_op_plan_on_an_ungraded_clip_publishes_no_target_effect_id() {
+        let document = document();
+        let plan = plan_primary_correction(
+            &document,
+            TimelineRevision(0),
+            &PrimaryCorrectionPlanArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                // The descriptor neutral: nothing moves.
+                parameters: BTreeMap::from([("exposure_milli_stops".to_owned(), 0)]),
+                profile_assumption: None,
+            },
+        )
+        .unwrap();
+
+        assert!(plan.no_change);
+        assert!(!plan.created_new_node);
+        assert_eq!(plan.existing_primary_node_count, 0);
+        assert!(plan.operations.is_empty());
+        assert_eq!(
+            plan.target_effect_id(),
+            None,
+            "no operation allocates {:?}, so it must not be published",
+            plan.effect_id
+        );
+    }
+
+    /// Composing a proposal against an animated control is ambiguous. The plan
+    /// still writes the static value, and says so.
+    #[test]
+    fn a_keyframed_target_parameter_is_reported_as_a_warning() {
+        let mut document = document();
+        document.tracks[0].clips[0].effects.push(Effect {
+            id: EffectId(5),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                ParamValue::Integer(250),
+            )]),
+            keyframes: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                kinewright_core::AutomationCurve {
+                    keyframes: vec![kinewright_core::Keyframe {
+                        at: kinewright_core::TimeCode::ZERO,
+                        value: 250,
+                        interpolation: kinewright_core::KeyframeInterpolation::default(),
+                    }],
+                },
+            )]),
+        });
+
+        let plan = plan_primary_correction(
+            &document,
+            TimelineRevision(0),
+            &PrimaryCorrectionPlanArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                parameters: BTreeMap::from([("exposure_milli_stops".to_owned(), 900)]),
+                profile_assumption: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(plan.effect_id, EffectId(5));
+        assert_eq!(plan.warnings.len(), 1);
+        assert!(
+            plan.warnings[0].contains("keyframes exposure_milli_stops")
+                && plan.warnings[0].contains("static value"),
+            "{:?}",
+            plan.warnings
+        );
+
+        // A control the proposal does not touch raises nothing.
+        let untouched = plan_primary_correction(
+            &document,
+            TimelineRevision(0),
+            &PrimaryCorrectionPlanArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                parameters: BTreeMap::from([("tint_percent".to_owned(), 4)]),
+                profile_assumption: None,
+            },
+        )
+        .unwrap();
+        assert!(untouched.warnings.is_empty());
+    }
+
+    #[test]
+    fn unknown_parameter_errors_list_every_allowed_control() {
+        let error = plan_primary_correction(
+            &document(),
+            TimelineRevision(0),
+            &PrimaryCorrectionPlanArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                profile_assumption: None,
+                parameters: BTreeMap::from([("gamma".to_owned(), 1)]),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "unknown_primary_parameter");
+        let allowed = error.details()["allowed_parameters"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(allowed.len(), 10);
+        assert!(
+            allowed
+                .iter()
+                .any(|entry| entry["name"] == "exposure_milli_stops"
+                    && entry["min"] == -5_000
+                    && entry["max"] == 5_000
+                    && entry["neutral"] == 0)
+        );
+        let summary = primary_parameter_summary();
+        assert!(summary.contains("exposure_milli_stops=-5000..=5000, neutral 0"));
+        assert!(summary.contains("contrast_pivot_basis_points=0..=10000, neutral 5000"));
     }
 }

@@ -144,9 +144,26 @@ pub fn search_capabilities(
         .collect()
 }
 
+/// Capabilities whose kind cannot be inferred from their name prefix.
+///
+/// Name prefixes are a convenience, not a contract: `analyze_color_shot` and
+/// `render_color_proof` are read-only evidence tools that would otherwise be
+/// advertised as `Action` and be filtered out of an inspection-only search.
+/// Every entry here must agree with the tool's own `read_only()` annotation.
+const CAPABILITY_KIND_OVERRIDES: &[(&str, CapabilityKind)] = &[
+    ("analyze_color_shot", CapabilityKind::Inspector),
+    ("render_color_proof", CapabilityKind::Inspector),
+];
+
 fn capability_kind(name: &str, operation_names: &BTreeSet<String>) -> CapabilityKind {
     if operation_names.contains(name) {
         return CapabilityKind::EditOperation;
+    }
+    if let Some((_, kind)) = CAPABILITY_KIND_OVERRIDES
+        .iter()
+        .find(|(override_name, _)| *override_name == name)
+    {
+        return *kind;
     }
     if name.starts_with("plan_") {
         return CapabilityKind::Planner;
@@ -588,5 +605,50 @@ mod tests {
         assert_eq!(plan.operations, vec![operation]);
         assert_eq!(plan.preview.operation_count, 1);
         assert_eq!(store.get(plan.id).unwrap().id, plan.id);
+    }
+    #[test]
+    fn read_only_capabilities_are_never_advertised_as_actions() {
+        let tools = crate::server::capability_registry_tools();
+        let capabilities = capabilities(&tools);
+        assert!(!capabilities.is_empty());
+        for tool in &tools {
+            let read_only = tool
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.read_only_hint)
+                == Some(true);
+            if !read_only {
+                continue;
+            }
+            let Some(capability) = capabilities
+                .iter()
+                .find(|capability| capability.name == tool.name.as_ref())
+            else {
+                continue;
+            };
+            assert!(
+                matches!(
+                    capability.kind,
+                    CapabilityKind::Inspector | CapabilityKind::Planner
+                ),
+                "{} is annotated read_only but is advertised as {:?}",
+                capability.name,
+                capability.kind
+            );
+        }
+        let kind_of = |name: &str| {
+            capabilities
+                .iter()
+                .find(|capability| capability.name == name)
+                .map(|capability| capability.kind)
+        };
+        assert_eq!(
+            kind_of("analyze_color_shot"),
+            Some(CapabilityKind::Inspector)
+        );
+        assert_eq!(
+            kind_of("render_color_proof"),
+            Some(CapabilityKind::Inspector)
+        );
     }
 }

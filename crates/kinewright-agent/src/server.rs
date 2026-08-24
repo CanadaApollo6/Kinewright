@@ -20,23 +20,22 @@ use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use kinewright_core::{
     Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AudioBus, AudioBusId,
     AudioLoudness, AutomationCurve, BeatMontageCadenceContract, BeatMontageSelect, BeatStatus,
-    CaptionCue, CaptionMotion, CaptionPreset, Clip, ClipContent, ClipId, Command, Core,
-    DeliveryAspect, DeliveryProfile, DeliveryVariant, Document, Effect, EffectId, Event, Export,
-    ExportCancellation, Keyframe, KeyframeInterpolation, MUSIC_STRUCTURE_DEFAULT_METER_BEATS,
-    MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId, MediaAsset, MediaAvailabilityKind,
-    MediaCacheFamily, MediaCacheInventory, MediaKind, Operation, ParamValue, Playback, Query,
-    QueryResult, ReframeFocusBounds, RelinkCandidate, SceneStatus, SilenceStatus,
-    SpeakerAngleAssignment, SpeakerMulticamSettings, SubjectCenterBasisPointSample,
+    CaptionCue, CaptionMotion, CaptionPreset, Clip, ClipContent, ClipId, ColorSourceError, Command,
+    Core, DeliveryAspect, DeliveryProfile, DeliveryVariant, Document, Effect, EffectId, Event,
+    Export, ExportCancellation, Keyframe, KeyframeInterpolation,
+    MUSIC_STRUCTURE_DEFAULT_METER_BEATS, MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId,
+    MediaAsset, MediaAvailabilityKind, MediaCacheFamily, MediaCacheInventory, MediaKind, Operation,
+    ParamValue, Playback, Query, QueryResult, ReframeFocusBounds, RelinkCandidate, SceneStatus,
+    SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings, SubjectCenterBasisPointSample,
     SubjectFocusBasisPointConstraint, SubjectReframeSettings, SyncGroupId, ThreePointMode,
     TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange,
     TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, Track, TrackId, TrackKind,
     TranscriptStatus, animated_caption_operations_at, apply_batch, authored_caption_cues,
     beat_montage_plan, beat_montage_plan_near_anchors_with_report, beat_montage_plan_with_anchors,
     beat_pacing_plan, caption_cues, dedup_timeline_words, delivery_conformance,
-    document_for_delivery_profile, document_for_delivery_variant, effect_descriptor,
-    is_filler_word, map_source_range_to_project, music_fit_plan_with_end_anchor,
-    music_structure_analysis, plan_speaker_multicam,
-    plan_subject_reframe_basis_points_with_containment, qa_document,
+    document_for_delivery_profile, document_for_delivery_variant, is_filler_word,
+    map_source_range_to_project, music_fit_plan_with_end_anchor, music_structure_analysis,
+    plan_speaker_multicam, plan_subject_reframe_basis_points_with_containment, qa_document,
     validate_beat_montage_plan_cadence,
 };
 use rmcp::{
@@ -63,8 +62,10 @@ use crate::{
     },
     color_status::{
         CC1_STAGE_NAMES, ColorContextArgs, ColorProofError, PrimaryCorrectionPlanArgs,
-        PrimaryPlanError, RenderColorProofArgs, color_context_value_with_assumptions,
-        color_context_value_with_options, legacy_stage_warnings, plan_primary_correction,
+        PrimaryPlanError, RenderColorProofArgs, active_layer_source_classification,
+        color_context_value_with_assumptions, color_context_value_with_options,
+        effect_chain_manifest, legacy_stage_warnings, plan_primary_correction,
+        primary_node_manifest, primary_parameter_summary, raw_only_conflict,
     },
     export_queue::{ExportJobId, ExportQueue, ExportQueueError, QueueExportRequest},
     pacing::{DialoguePacingGap, dialogue_pacing_gaps},
@@ -1492,15 +1493,17 @@ impl KinewrightMcp {
     }
 
     fn color_context(&self, args: &ColorContextArgs) -> Result<CallToolResult, McpError> {
+        if let Some(conflict) = raw_only_conflict(args) {
+            return Ok(error_structured(
+                conflict["message"].as_str().unwrap_or_default().to_owned(),
+                conflict,
+            ));
+        }
         let (revision, document) = self.snapshot()?;
         let value = if args.raw_only {
-            color_context_value_with_options(
-                revision,
-                &document,
-                args.profile_assumption,
-                &args.asset_ids,
-                true,
-            )
+            // `raw_only_conflict` above already refused `raw_only` combined with
+            // an explicit assumption, so there is no assumption left to forward.
+            color_context_value_with_options(revision, &document, None, &args.asset_ids, true)
         } else {
             color_context_value_with_assumptions(
                 revision,
@@ -1552,6 +1555,14 @@ impl KinewrightMcp {
             "timeline_revision": plan.expected_revision.0,
             "clip_id": plan.clip_id.0,
             "effect_id": plan.effect_id.0,
+            // Null when the proposal changes nothing and would have had to
+            // create the node: no operation allocates that id, so publishing it
+            // would name a node that does not exist and may later be reused.
+            "target_effect_id": plan.target_effect_id().map(|effect| effect.0),
+            "created_new_node": plan.created_new_node,
+            "existing_primary_node_count": plan.existing_primary_node_count,
+            "no_change": plan.no_change,
+            "warnings": plan.warnings,
             "source_profile": plan.source_profile.id(),
             "profile_assumption": plan.profile_assumption,
             "evidence_only": true,
@@ -1560,7 +1571,8 @@ impl KinewrightMcp {
                 "primary_node_count": plan.existing_primary_node_count,
             },
             "after": {
-                "primary_node_count": plan.existing_primary_node_count + 1,
+                "primary_node_count": plan.existing_primary_node_count
+                    + usize::from(plan.created_new_node),
             },
             "requested_parameters": plan.requested_parameters,
             "resolved_parameters": plan.resolved_parameters,
@@ -1665,6 +1677,8 @@ impl KinewrightMcp {
             };
         let mut active_rendered_layers = Vec::new();
         let mut active_rendered_sources = Vec::new();
+        let mut unsupported_layer_warnings = Vec::new();
+        let mut blocking_layer_source: Option<(ClipId, AssetId, ColorSourceError)> = None;
         let mut selected_clip_is_rendered = false;
         for layer in active_visual_layers {
             let (track_id, clip_id, asset_id) = match &layer {
@@ -1726,6 +1740,11 @@ impl KinewrightMcp {
                     },
                     "legacy_stage_warnings": legacy_stage_warnings(timeline_clip),
                 }));
+                unsupported_layer_warnings.extend(Self::layer_compatibility_warnings(
+                    track_id,
+                    timeline_clip,
+                    None,
+                ));
                 continue;
             };
             if timeline_clip.asset != asset_id {
@@ -1774,6 +1793,24 @@ impl KinewrightMcp {
                     }));
                 }
             };
+            // Every active layer is composited into the same BEFORE/AFTER
+            // raster, so a non-selected layer's source profile is part of the
+            // proof's claim and is classified with the same normative
+            // assumption rather than left unreported.
+            let (layer_source_status, layer_source_error) =
+                active_layer_source_classification(&timeline_asset.color_description);
+            if let Some(error) = layer_source_error
+                && blocking_layer_source.is_none()
+            {
+                // The full warning list is only known once every layer has been
+                // classified, so the refusal is assembled after the loop.
+                blocking_layer_source = Some((timeline_clip.id, timeline_asset.id, error));
+            }
+            unsupported_layer_warnings.extend(Self::layer_compatibility_warnings(
+                track_id,
+                timeline_clip,
+                Some(timeline_asset.id),
+            ));
             active_rendered_layers.push(serde_json::json!({
                 "track_id": track_id.0,
                 "clip_id": clip_id.0,
@@ -1786,6 +1823,7 @@ impl KinewrightMcp {
                     "raw_description": timeline_asset.color_description,
                     "provenance": timeline_asset.color_description.provenance,
                     "confidence_basis_points": timeline_asset.color_description.confidence_basis_points,
+                    "status": layer_source_status,
                 },
                 "source_fingerprint": timeline_asset.source_fingerprint,
                 "availability": availability,
@@ -1807,6 +1845,21 @@ impl KinewrightMcp {
             // once.
             active_rendered_sources.push((track_id, timeline_clip, timeline_asset, availability));
         }
+        // A proof whose composite includes an unsupported source cannot honestly
+        // claim managed CC1 conformance, so it fails with the exact
+        // asset/field/observed/allowed evidence instead of rendering. The
+        // non-blocking layer warnings ride along: this error path is the only
+        // place they can still be reported for this composite.
+        if let Some((clip, asset, error)) = blocking_layer_source {
+            return Ok(color_proof_error_result(
+                ColorProofError::UnsupportedActiveLayerSource {
+                    clip,
+                    asset,
+                    error,
+                    layer_warnings: unsupported_layer_warnings,
+                },
+            ));
+        }
         if !selected_clip_is_rendered {
             return Ok(color_proof_error_result(ColorProofError::RenderFailed {
                 stage: "selected_visual_layer",
@@ -1818,7 +1871,12 @@ impl KinewrightMcp {
         }
 
         let mut candidate = (*document).clone();
-        if let Err(error) = apply_batch(&mut candidate, &plan.operations) {
+        // A request that changes nothing produces no operations at all. Core
+        // rejects an empty batch, and an identical BEFORE/AFTER is the honest
+        // proof of a no-op request.
+        if !plan.operations.is_empty()
+            && let Err(error) = apply_batch(&mut candidate, &plan.operations)
+        {
             return Ok(color_proof_error_result(ColorProofError::RenderFailed {
                 stage: "candidate_document",
                 message: error.to_string(),
@@ -1953,6 +2011,7 @@ impl KinewrightMcp {
             "clip_id": args.clip_id.0,
             "asset_id": asset.id.0,
             "active_rendered_layers": active_rendered_layers,
+            "unsupported_layer_warnings": unsupported_layer_warnings,
             "active_rendered_sources": active_rendered_sources.iter().map(|(track_id, active_clip, active_asset, availability)| {
                 serde_json::json!({
                     "track_id": track_id.0,
@@ -4336,6 +4395,41 @@ impl KinewrightMcp {
             .clips
             .iter()
             .find(|clip| clip.id == clip_id)
+    }
+
+    /// Every non-blocking reason one active proof layer falls outside the
+    /// managed CC1 claim: each post-primary compatibility stage on the layer's
+    /// effect chain.
+    ///
+    /// This covers non-selected layers too, so a proof can never present an
+    /// unqualified managed claim for a composite that contains one.
+    ///
+    /// A blocking source profile is deliberately not reported here. It refuses
+    /// the proof outright, so it is carried by the
+    /// `active_layer_needs_color_override` error rather than by a warning that
+    /// no successful response could ever contain.
+    fn layer_compatibility_warnings(
+        track_id: TrackId,
+        clip: &Clip,
+        asset: Option<AssetId>,
+    ) -> Vec<serde_json::Value> {
+        let mut warnings = Vec::new();
+        warnings.extend(legacy_stage_warnings(clip).into_iter().map(|warning| {
+            serde_json::json!({
+                "track_id": track_id.0,
+                "clip_id": clip.id.0,
+                "asset_id": asset.map_or(serde_json::Value::Null, |asset| {
+                    serde_json::json!(asset.0)
+                }),
+                "code": warning["code"].clone(),
+                "blocking": false,
+                "message": warning["message"].clone(),
+                "effect_id": warning["effect_id"].clone(),
+                "effect_index": warning["effect_index"].clone(),
+                "name": warning["name"].clone(),
+            })
+        }));
+        warnings
     }
 
     #[allow(clippy::too_many_lines)]
@@ -7291,7 +7385,10 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "plan_primary_correction",
-            "Validate an exact integer CC1 primary-correction request against the current revision, visual clip type, and Core descriptor, then return unapplied AddEffect/SetEffectParam operations. This is evidence-only and never mutates the document.",
+            format!(
+                "Validate an exact integer CC1 primary-correction request against the current revision, visual clip type, and Core descriptor, then return unapplied AddEffect/SetEffectParam operations. A clip that already carries a primary_correction node is corrected in place instead of stacking a second node. This is evidence-only and never mutates the document. Controls: {}.",
+                primary_parameter_summary()
+            ),
             schema_object::<PrimaryCorrectionPlanArgs>(),
         )
         .with_annotations(read_only()),
@@ -8188,77 +8285,27 @@ fn error_structured(text: impl Into<String>, value: serde_json::Value) -> CallTo
     result
 }
 
-/// Serialize the exact effect chain consumed by the production visual
-/// resolver for one proof frame.
+/// Ordered production effect manifest for one resolved visual layer.
 ///
 /// `visual_layers_at` evaluates clip-local automation before handing effects
 /// to the compositor, so the returned parameters are the values actually
-/// rendered at that frame. The vector order is intentionally retained; two
-/// primary nodes with the same values are not interchangeable because the
-/// managed pipeline applies them serially.
+/// rendered at that frame. The shared `color_status` helper owns the shape so
+/// the proof manifest and `get_color_context` can never disagree.
 fn proof_effect_manifest(effects: &[Effect]) -> Vec<serde_json::Value> {
-    effects
-        .iter()
-        .enumerate()
-        .map(|(effect_index, effect)| {
-            let primary_parameters = if effect.name == "primary_correction" {
-                effect_descriptor("primary_correction")
-                    .map(|descriptor| {
-                        descriptor
-                            .parameters
-                            .iter()
-                            .map(|parameter| {
-                                (
-                                    parameter.name,
-                                    effect
-                                        .parameters
-                                        .get(parameter.name)
-                                        .cloned()
-                                        .unwrap_or(ParamValue::Integer(parameter.neutral)),
-                                )
-                            })
-                            .collect::<BTreeMap<_, _>>()
-                    })
-                    .map_or_else(
-                        || serde_json::Value::Null,
-                        |parameters| serde_json::json!(parameters),
-                    )
-            } else {
-                serde_json::Value::Null
-            };
-            serde_json::json!({
-                "effect_index": effect_index,
-                "effect_id": effect.id.0,
-                "name": effect.name,
-                "parameters": effect.parameters,
-                "primary_parameters": primary_parameters,
-                // The production resolver has already evaluated keyframes;
-                // retaining the empty map makes that fact explicit and keeps
-                // this shape compatible with the colour-status primary-node
-                // evidence surface.
-                "keyframes": effect.keyframes,
-            })
-        })
-        .collect()
+    effect_chain_manifest(effects)
 }
 
 /// Keep the primary-only view aligned with `get_color_context` while retaining
 /// the complete ordered effect chain above. This is intentionally derived from
 /// the same frame-evaluated effects, never from the raw clip vector.
 fn proof_primary_node_manifest(effects: &[Effect]) -> Vec<serde_json::Value> {
-    proof_effect_manifest(effects)
-        .into_iter()
-        .filter(|effect| !effect["primary_parameters"].is_null())
-        .map(|effect| {
-            serde_json::json!({
-                "effect_id": effect["effect_id"],
-                "effect_index": effect["effect_index"],
-                "name": effect["name"],
-                "parameters": effect["primary_parameters"],
-                "keyframes": effect["keyframes"],
-            })
-        })
-        .collect()
+    primary_node_manifest(effects)
+}
+
+/// The complete internal capability registry, for crate-level contract tests.
+#[cfg(test)]
+pub(crate) fn capability_registry_tools() -> Vec<Tool> {
+    KinewrightMcp::capability_tools().expect("the capability registry must build")
 }
 
 fn paths_resolve_equal(left: &Path, right: &Path) -> bool {
@@ -9855,6 +9902,10 @@ mod tests {
         thumbnail_frames: BTreeMap<TimeCode, RgbaImage>,
         candidate_thumbnail_frames: BTreeMap<TimeCode, RgbaImage>,
         candidate_effect_id: Option<EffectId>,
+        /// Distinguish the candidate document by a stored primary parameter
+        /// value rather than by node identity, so a proposal that corrects an
+        /// existing node in place is still recognised as the candidate.
+        candidate_primary_exposure_milli_stops: Option<i64>,
         render_error: Option<String>,
         proof_error: Option<MediaError>,
     }
@@ -10045,6 +10096,12 @@ mod tests {
                     clip.effects.iter().any(|effect| {
                         effect.name == "primary_correction"
                             && self.candidate_effect_id.is_none_or(|id| effect.id == id)
+                            && self
+                                .candidate_primary_exposure_milli_stops
+                                .is_none_or(|value| {
+                                    effect.parameters.get("exposure_milli_stops")
+                                        == Some(&ParamValue::Integer(value))
+                                })
                     })
                 });
             if candidate && let Some(image) = self.candidate_thumbnail_frames.get(&t) {
@@ -12126,6 +12183,107 @@ mod tests {
     }
 
     #[test]
+    fn cc1_color_proof_blocks_an_unsupported_non_selected_active_layer() {
+        let (seed_core, playback, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed)) =
+            seed_core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let managed_source = ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: ColorMatrix::Bt709,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: ColorProvenance::StreamMetadata,
+        };
+        let mut document = (*seed).clone();
+        document.media_pool[0].color_description = managed_source;
+
+        // A second, non-selected video track composites into the same proof
+        // raster with a source the managed pipeline cannot classify.
+        let mut overlay_asset = document.media_pool[0].clone();
+        overlay_asset.id = AssetId(2);
+        overlay_asset.name = "unsupported-overlay".to_owned();
+        overlay_asset.path = PathBuf::from("unsupported-overlay.mp4");
+        overlay_asset.color_description = ColorDescription::unknown();
+        document.media_pool.push(overlay_asset);
+        let mut overlay_clip = document.tracks[0].clips[0].clone();
+        overlay_clip.id = ClipId(4);
+        overlay_clip.asset = AssetId(2);
+        // A non-blocking post-primary stage on the same refused composite. The
+        // error is the only place it can still be reported, because the
+        // successful payload that normally carries it is never produced.
+        overlay_clip.effects.push(Effect {
+            id: EffectId(41),
+            name: "look_lut".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        });
+        document.tracks.push(Track {
+            id: TrackId(9),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![overlay_clip],
+        });
+        document.validate().unwrap();
+
+        let media = Arc::new(NoopMedia {
+            thumbnail_frames: BTreeMap::from([(
+                TimeCode(12),
+                RgbaImage {
+                    width: 2,
+                    height: 2,
+                    pixels: [32, 32, 32, 255].repeat(4),
+                },
+            )]),
+            ..NoopMedia::default()
+        });
+        let service = KinewrightMcp::new(
+            Core::spawn(document).unwrap(),
+            playback,
+            media,
+            ConfirmationBroker::default(),
+        );
+        let result = service
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(12),
+                profile_assumption: None,
+                parameters: BTreeMap::from([("exposure_milli_stops".to_owned(), 500)]),
+            })
+            .unwrap();
+
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "active_layer_needs_color_override");
+        assert_eq!(structured["details"]["clip_id"], 4);
+        assert_eq!(structured["details"]["asset_id"], 2);
+        assert!(structured["details"]["field"].is_string());
+        assert!(structured["details"]["observed"].is_string());
+        assert!(structured["details"]["allowed"].is_string());
+
+        // Non-blocking layer warnings ride along on the refusal instead of
+        // being dropped with the success payload.
+        let warnings = structured["details"]["unsupported_layer_warnings"]
+            .as_array()
+            .expect("the refusal carries the non-blocking layer warnings");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0]["code"], "legacy_lut_stage");
+        assert_eq!(warnings[0]["clip_id"], 4);
+        assert_eq!(warnings[0]["asset_id"], 2);
+        assert_eq!(warnings[0]["effect_id"], 41);
+        assert_eq!(
+            warnings[0]["blocking"], false,
+            "the blocking source is the error, never a warning"
+        );
+    }
+
+    #[test]
     fn m41_cache_status_and_scoped_clear_are_typed_and_proxy_failure_is_explicit() {
         let (core, playback, _) = fixture();
         let media = Arc::new(NoopMedia {
@@ -12587,7 +12745,10 @@ mod tests {
         let media = Arc::new(NoopMedia {
             thumbnail_frames: BTreeMap::from([(TimeCode(12), before.clone())]),
             candidate_thumbnail_frames: BTreeMap::from([(TimeCode(12), after.clone())]),
-            candidate_effect_id: Some(EffectId(9)),
+            // The fixture clip already carries primary node 6, so the plan
+            // corrects it in place instead of stacking a second node.
+            candidate_effect_id: Some(EffectId(6)),
+            candidate_primary_exposure_milli_stops: Some(1_000),
             ..NoopMedia::default()
         });
         let service =
@@ -12748,7 +12909,35 @@ mod tests {
                 .len(),
             10
         );
-        assert_eq!(value["operations"].as_array().unwrap().len(), 2);
+        // The clip already carries primary node 6, so the proposal corrects it
+        // in place: one SetEffectParam and no second AddEffect.
+        let operations = value["operations"].as_array().unwrap();
+        assert_eq!(operations.len(), 1);
+        assert!(operations[0].get("AddEffect").is_none());
+        assert_eq!(operations[0]["SetEffectParam"]["effect"], 6);
+        assert_eq!(
+            operations[0]["SetEffectParam"]["name"],
+            "exposure_milli_stops"
+        );
+        assert_eq!(operations[0]["SetEffectParam"]["value"], 1_000);
+        assert_eq!(
+            value["unsupported_layer_warnings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "the two post-primary LUT stages must be reported: {}",
+            value["unsupported_layer_warnings"]
+        );
+        assert_eq!(
+            value["unsupported_layer_warnings"][0]["code"],
+            "legacy_lut_stage"
+        );
+        assert_eq!(value["unsupported_layer_warnings"][0]["blocking"], false);
+        assert_eq!(
+            value["active_rendered_layers"][0]["source"]["status"]["status"],
+            "supported"
+        );
         assert_eq!(value["cells"][0]["cell"], "before");
         assert_eq!(value["cells"][1]["cell"], "after");
         assert_eq!(value["objective"]["max_channel_delta_code_values"], 223);

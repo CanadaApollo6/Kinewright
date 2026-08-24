@@ -573,20 +573,23 @@ impl Analysis for FfmpegMediaEngine {
         // collide with another branch.
         let mut renderer = FrameRenderer::new(self.gpu.clone());
         let resolution = document.resolution;
-        let frame = renderer.render(
-            &document,
-            at,
-            resolution,
-            RenderScale::FullResolution,
-            DecodeStrategy::Seek,
-        )?;
+        // Bind the scale once so the render and the claim it produces cannot
+        // drift apart.
+        let scale = RenderScale::FullResolution;
+        let frame = renderer.render(&document, at, resolution, scale, DecodeStrategy::Seek)?;
         Ok(MonitorProof {
             image: RgbaImage {
                 width: frame.width,
                 height: frame.height,
                 pixels: (*frame.rgba).clone(),
             },
-            metadata: self.gpu.monitor_proof_metadata(),
+            // CC1 5: a proof may only claim the full raster when it was
+            // requested at full scale AND came back at the document raster.
+            metadata: self.gpu.monitor_proof_metadata_for(
+                scale,
+                (frame.width, frame.height),
+                resolution,
+            ),
         })
     }
 

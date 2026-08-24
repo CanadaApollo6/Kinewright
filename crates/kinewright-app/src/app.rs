@@ -119,6 +119,12 @@ pub(crate) struct KinewrightApp {
     screenshot: crate::screenshot::ScreenshotCapture,
     pub(crate) recording: Option<crate::recording::ActiveRecording>,
     pub(crate) record_dialog: crate::recording::RecordDialog,
+    /// Monotonic identity for one live control gesture (a slider drag).
+    ///
+    /// The counter is part of every coalesce key, so a second drag over the
+    /// same control opens its own undo entry instead of merging into the
+    /// previous gesture's entry.
+    edit_gesture: u64,
 }
 
 impl KinewrightApp {
@@ -270,6 +276,7 @@ impl KinewrightApp {
                 delivery_aspect: None,
                 focus_x_percent: 50,
                 focus_y_percent: 50,
+                conformance_cache: None,
             },
             export_job: None,
             help_open: false,
@@ -279,6 +286,7 @@ impl KinewrightApp {
             screenshot: crate::screenshot::ScreenshotCapture::from_environment(),
             recording: None,
             record_dialog: crate::recording::RecordDialog::default(),
+            edit_gesture: 0,
         };
         app.playback
             .set_document(Arc::clone(&app.focused().document));
@@ -689,6 +697,49 @@ impl KinewrightApp {
         }
     }
 
+    /// Open a new live-gesture identity and return it.
+    pub(crate) fn begin_edit_gesture(&mut self) -> u64 {
+        self.edit_gesture = self.edit_gesture.wrapping_add(1);
+        self.edit_gesture
+    }
+
+    #[must_use]
+    pub(crate) const fn edit_gesture(&self) -> u64 {
+        self.edit_gesture
+    }
+
+    /// Send one batch that belongs to a live gesture such as a dragged slider.
+    ///
+    /// Consecutive batches that share `coalesce_key` collapse into a single
+    /// undo entry whose undo target is the document from before the gesture,
+    /// while every batch still advances the revision so the preview updates.
+    pub(crate) fn send_operations_coalesced(
+        &mut self,
+        operations: Vec<Operation>,
+        coalesce_key: String,
+    ) {
+        let count = operations.len();
+        if count == 0 {
+            return;
+        }
+        if self
+            .focused()
+            .core
+            .send(Command::DoBatchCoalesced {
+                operations,
+                coalesce_key,
+            })
+            .is_err()
+        {
+            self.record_error(
+                "Operations",
+                "Core actor stopped while applying the live edit",
+            );
+        } else {
+            self.status = format!("Applying {count} live edits\u{2026}");
+        }
+    }
+
     fn request_asset_analysis(&self, asset: MediaAsset) {
         self.analysis.request_transcription(asset.clone());
         self.analysis.request_silence_detection(asset.clone());
@@ -898,8 +949,22 @@ impl KinewrightApp {
                     if project_index == self.focused_project {
                         if let Some(operation) = last_op {
                             self.status = operation_status(&operation);
-                        } else if let Some(JournalCommand::DoBatch(operations)) = journal_command {
-                            self.status = format!("Applied {} linked edits", operations.len());
+                        } else {
+                            match journal_command {
+                                Some(JournalCommand::DoBatch(operations)) => {
+                                    self.status =
+                                        format!("Applied {} linked edits", operations.len());
+                                }
+                                Some(JournalCommand::DoBatchCoalesced { operations, .. }) => {
+                                    // Live slider drags coalesce into one undo entry; the
+                                    // status reflects the gesture rather than the frame count.
+                                    self.status = format!(
+                                        "Adjusting {} linked edit(s) as one undo step",
+                                        operations.len()
+                                    );
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }

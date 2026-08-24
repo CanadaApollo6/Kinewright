@@ -5,7 +5,10 @@
     "rec709_video",
     "srgb_full"
   ],
-  "source_depths_bits": [8, 10],
+  "source_depths_bits": [
+    8,
+    10
+  ],
   "working": {
     "primaries": "bt709",
     "transfer": "linear",
@@ -51,9 +54,12 @@
     "linear_cpu_gpu_max": 0.0015,
     "linear_cpu_gpu_p99": 0.00075,
     "linear_cpu_gpu_mean": 0.00025,
+    "linear_over_range_p99": 0.0009765625,
+    "linear_over_range_mean": 0.0009765625,
     "delivery_codec_max_code": 4,
     "delivery_codec_p99_code": 2,
-    "delivery_codec_mean_code": 1.0
+    "delivery_codec_mean_code": 1.0,
+    "no_clamp_recovery_max": 0.0015
   },
   "required_evidence": [
     "migration",
@@ -69,12 +75,16 @@
   ],
   "gpu_contexts": {
     "software": "required: lavapipe/llvmpipe adapter with exact backend+adapter provenance",
+    "software_unavailable_opt_in": "optional: set KINEWRIGHT_CC1_ALLOW_HARDWARE_GPU=1 to run the default lane on the physical adapter when no lavapipe/llvmpipe adapter exists; evidence then records software_fallback=false, gpu_claim=true, lane=hardware_optin",
     "hardware": "required on a physical-GPU lane: run cc1_gpu_compositor_matches_canonical_cpu_reference_on_hardware --ignored --nocapture"
   },
   "identity_ramp_gate": {
     "max_code": 1,
     "p99_code": 1,
     "mean_code": 0.25,
+    "swscale_linear_max": 0.0015,
+    "swscale_linear_p99": 0.00075,
+    "swscale_linear_mean": 0.00025,
     "alpha": "exact",
     "native_plane_round_trip": "exact"
   }

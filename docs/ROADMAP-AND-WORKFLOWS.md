@@ -182,7 +182,11 @@ The first three cycle intentions are:
    implementation contract and remaining hands-on platform smoke gate are recorded
    in `CC2-SCOPES-AND-MATCHING.md`.
 
-The next primary colour slice is **CC3 curves and wheels**.
+The next primary colour slice is **CC3 curves and wheels**; its implementation
+contract is `CC3-CURVES-AND-WHEELS.md`. Before CC3 started, a six-lane review of
+CC1 and CC2 (2026-08-24) fixed the defects recorded in `CHANGELOG.md` and
+hardened both fixture suites so that every control has an analytic expected
+value and no parity case is vacuous.
 
 Within that cadence, three workstreams remain active:
 
@@ -221,10 +225,13 @@ The present implementation includes the first managed SDR vertical slice, with
 deliberate limits that define the remaining colour work:
 
 - Clip effects are typed and serializable, with static values and keyframes.
-- Brightness, contrast, saturation, exposure, temperature, and tint are available;
-  four built-in looks and `.cube` LUT loading also exist. File-backed LUTs are
-  currently a core/agent capability and intentionally lack a human file-picker
-  workflow.
+- The managed `primary_correction` node is the only current-generation colour
+  control. The older display-coded `brightness`, `contrast`, and `saturation`
+  effects load for compatibility only, are not offered for new insertion, and
+  report `legacy_colour_semantics`; `color_grade` is canonicalized to
+  `primary_correction` on load. Four built-in looks and `.cube` LUT loading also
+  exist as post-primary compatibility stages. File-backed LUTs are currently a
+  core/agent capability and intentionally lack a human file-picker workflow.
 - Managed preview, isolated full-resolution proof, and export share the production
   visual-layer resolution and compositor semantics.
 - CC2 scopes are measured at the named managed post-composite monitoring stage and
@@ -246,12 +253,14 @@ deliberate limits that define the remaining colour work:
   information rather than silently falling back to an implicit transform.
 - The managed cache accounts for high-precision working bytes and returns an
   oversized current frame without retaining it beyond the configured bound.
-- The primary node supplies exposure, temperature, tint, contrast, pivot,
-  saturation, shadows, midtones, highlights, and hue with stable defaults, limits,
-  serialization, undo/redo, editor controls, agent planning, and proof manifests.
-- Effect parameters are flattened into fixed compositor inputs rather than a true
-  ordered colour-node stack; multiple creative LUT stages are therefore not a
-  supported grading model.
+- The primary node supplies exposure, temperature, tint, contrast, contrast
+  pivot, blacks, shadows, highlights, whites, and saturation with stable defaults,
+  limits, serialization, undo/redo, editor controls, agent planning, and proof
+  manifests. There is no hue or midtone control yet; those belong to CC3.
+- `primary_correction` nodes execute in serialized `clip.effects` order as an
+  ordered node stack. Only the legacy display-coded effects, built-in looks, and
+  `.cube` LUTs are still flattened into fixed compositor inputs; multiple creative
+  LUT stages are therefore not a supported grading model until CC4.
 
 Those limits determine the remaining implementation order. With CC2 scopes and
 shot matching complete, CC3 expands the correction model with curves and wheels.

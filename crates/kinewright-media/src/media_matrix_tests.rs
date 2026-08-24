@@ -843,7 +843,15 @@ fn build_mixed_document(assets: &[MediaAsset]) -> (Document, HashSet<AssetId>) {
     (document, included)
 }
 
-fn validate_mixed_export(directory: &MatrixDirectory, assets: &[MediaAsset]) -> HashSet<AssetId> {
+/// Export the mixed hostile document, or report that no adapter exists.
+///
+/// Returns `None` only when neither a physical nor a software adapter can be
+/// acquired; the caller prints an explicit skip rather than silently claiming
+/// export coverage.
+fn validate_mixed_export(
+    directory: &MatrixDirectory,
+    assets: &[MediaAsset],
+) -> Option<HashSet<AssetId>> {
     let (document, included) = build_mixed_document(assets);
     assert_eq!(
         included.len(),
@@ -851,9 +859,15 @@ fn validate_mixed_export(directory: &MatrixDirectory, assets: &[MediaAsset]) -> 
         "every matrix asset must be exported"
     );
     let output = directory.path("mixed-hostile-export.mp4");
-    let gpu = GpuContext::headless(false)
-        .or_else(|_| GpuContext::headless(true))
-        .unwrap();
+    let gpu = match GpuContext::headless(false).or_else(|_| GpuContext::headless(true)) {
+        Ok(gpu) => gpu,
+        Err(error) => {
+            eprintln!(
+                "SKIPPED mixed hostile export: no physical or software wgpu adapter is available ({error})"
+            );
+            return None;
+        }
+    };
     let (progress, updates) = crossbeam_channel::unbounded();
     let settings = ExportSettings {
         fps: document.fps,
@@ -886,7 +900,7 @@ fn validate_mixed_export(directory: &MatrixDirectory, assets: &[MediaAsset]) -> 
         ),
         &exported,
     );
-    included
+    Some(included)
 }
 
 fn validate_matrix(directory: &MatrixDirectory, cases: &[MatrixCase], note: Option<&str>) {
@@ -937,16 +951,28 @@ fn validate_matrix(directory: &MatrixDirectory, cases: &[MatrixCase], note: Opti
             if case.has_video { "pass" } else { "n/a" },
             if case.has_video { "pass" } else { "n/a" },
             if case.has_audio { "pass" } else { "n/a" },
-            if included.contains(&asset.id) {
-                "pass"
-            } else {
-                "fail"
+            match &included {
+                Some(included) if included.contains(&asset.id) => "pass",
+                Some(_) => "fail",
+                None => "skipped (no wgpu adapter)",
             },
         );
     }
     if let Some(note) = note {
         println!("matrix note: {note}");
     }
+}
+
+/// These fixtures are `#[ignore]`d so a default run cannot report a pass for
+/// work it did not do; the environment opt-in is still required because
+/// `--ignored` alone does not mean the operator asked for a long or hardware
+/// dependent lane.
+fn require_env_opt_in(variable: &str, purpose: &str) {
+    assert_eq!(
+        std::env::var_os(variable).as_deref(),
+        Some(OsStr::new("1")),
+        "set {variable}=1 for {purpose}"
+    );
 }
 
 #[test]
@@ -959,16 +985,15 @@ fn fast_media_matrix_covers_hostile_probe_decode_audio_seek_and_export() {
     let broken = directory.path("truncated.mp4");
     fs::write(&broken, b"incomplete media container").unwrap();
     let error = probe_path(&broken, AssetId(999)).unwrap_err().to_string();
-    assert!(error.contains("truncated.mp4"));
-    assert!(error.contains("truncated") || error.contains("unsupported"));
+    // Naming the file already implies the "truncated" substring, so the
+    // second, weaker assertion is not a separate check.
+    assert!(error.contains("truncated.mp4"), "probe error: {error}");
 }
 
 #[test]
+#[ignore = "long-running 4K/HEVC matrix; run with KINEWRIGHT_MEDIA_MATRIX=1 and --ignored"]
 fn full_media_matrix_covers_4k_hevc_and_long_gop_sources() {
-    if std::env::var_os("KINEWRIGHT_MEDIA_MATRIX").as_deref() != Some(OsStr::new("1")) {
-        eprintln!("skipped: set KINEWRIGHT_MEDIA_MATRIX=1 for the full hostile-media matrix");
-        return;
-    }
+    require_env_opt_in("KINEWRIGHT_MEDIA_MATRIX", "the full hostile-media matrix");
     initialize_ffmpeg().unwrap();
     let directory = MatrixDirectory::new("m8-focused");
     let (mut cases, mut note) = generate_fast_matrix(&directory);
@@ -1093,11 +1118,9 @@ fn milliseconds(duration: Duration) -> f64 {
 }
 
 #[test]
+#[ignore = "performance measurement; run with KINEWRIGHT_PERF_TEST=1 and --ignored"]
 fn proxy_preview_performance_on_heavy_matrix_media() {
-    if std::env::var_os("KINEWRIGHT_PERF_TEST").as_deref() != Some(OsStr::new("1")) {
-        eprintln!("skipped: set KINEWRIGHT_PERF_TEST=1 for proxy preview measurements");
-        return;
-    }
+    require_env_opt_in("KINEWRIGHT_PERF_TEST", "proxy preview measurements");
     initialize_ffmpeg().unwrap();
     let directory = MatrixDirectory::new("m8-focused");
     let mut cases = Vec::new();

@@ -594,6 +594,12 @@ pub const POST_PRIMARY_LUT_EFFECT_NAMES: &[&str] = &["look_lut", "cube_lut"];
 
 /// Colour compatibility stage occupied by an effect outside the CC1 managed
 /// primary correction.
+///
+/// Only colour-transform stages are classified here. Alpha/keying operations
+/// such as `chroma_key` produce coverage rather than a display-coded colour
+/// transform: they are outside colour compatibility staging entirely, are
+/// compatible with the managed working space, and therefore return `None`
+/// from [`effect_compatibility_stage`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectCompatibilityStage {
     /// Historical display-coded controls retained for project compatibility.
@@ -642,15 +648,21 @@ pub fn is_legacy_display_effect(name: &str) -> bool {
 
 /// Classify colour effects that remain supported outside the CC1 managed
 /// primary correction.
+///
+/// [`LEGACY_DISPLAY_EFFECT_NAMES`] and [`POST_PRIMARY_LUT_EFFECT_NAMES`] are
+/// the single source of truth so QA, delivery conformance, the inspector, and
+/// the compositor cannot drift apart. Effects that are absent from both lists
+/// (including alpha-only operations such as `chroma_key`) are managed-path
+/// compatible and are not reported as compatibility stages.
 #[must_use]
 pub fn effect_compatibility_stage(name: &str) -> Option<EffectCompatibilityStage> {
-    match name {
-        "brightness" | "contrast" | "saturation" => {
-            Some(EffectCompatibilityStage::LegacyDisplayCoded)
-        }
-        "look_lut" | "cube_lut" => Some(EffectCompatibilityStage::PostPrimaryLut),
-        _ => None,
+    if LEGACY_DISPLAY_EFFECT_NAMES.contains(&name) {
+        return Some(EffectCompatibilityStage::LegacyDisplayCoded);
     }
+    if POST_PRIMARY_LUT_EFFECT_NAMES.contains(&name) {
+        return Some(EffectCompatibilityStage::PostPrimaryLut);
+    }
+    None
 }
 
 #[must_use]

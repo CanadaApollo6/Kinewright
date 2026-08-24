@@ -152,10 +152,14 @@ impl WorkingFrame {
     }
 
     pub(crate) fn upload_bytes(&self) -> Vec<u8> {
-        self.pixels
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect()
+        // This runs once per layer per rendered frame, so the exact upload
+        // size is reserved up front instead of letting the iterator's size
+        // hint drive repeated reallocation.
+        let mut bytes = Vec::with_capacity(self.pixels.len().saturating_mul(2));
+        for value in self.pixels.iter() {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes
     }
 
     pub(crate) fn byte_len(&self) -> usize {
@@ -165,17 +169,35 @@ impl WorkingFrame {
 
 pub(crate) trait CachedFrame: Clone {
     fn byte_len(&self) -> usize;
+
+    /// Identify the shared pixel allocation behind this frame.
+    ///
+    /// A decoder that holds one decoded picture across several grid frames
+    /// inserts `Arc` clones of the same buffer. Those clones cost one
+    /// allocation, not one per grid frame, so cache byte accounting must
+    /// count each distinct buffer once. Every live clone keeps its
+    /// allocation alive, so the address is a stable identity for as long as
+    /// the cache holds it.
+    fn shared_buffer_id(&self) -> usize;
 }
 
 impl CachedFrame for FrameTexture {
     fn byte_len(&self) -> usize {
         self.rgba.len()
     }
+
+    fn shared_buffer_id(&self) -> usize {
+        Arc::as_ptr(&self.rgba) as usize
+    }
 }
 
 impl CachedFrame for WorkingFrame {
     fn byte_len(&self) -> usize {
         self.byte_len()
+    }
+
+    fn shared_buffer_id(&self) -> usize {
+        Arc::as_ptr(&self.pixels) as usize
     }
 }
 
@@ -243,6 +265,33 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "actual {actual} expected {expected} (tol {tolerance})"
         );
+    }
+
+    #[test]
+    fn upload_bytes_are_tightly_packed_little_endian_half_floats() {
+        let frame = WorkingFrame {
+            width: 2,
+            height: 1,
+            pixels: Arc::new(vec![
+                f16::from_f32(1.5),
+                f16::from_f32(-0.25),
+                f16::from_f32(0.0),
+                f16::from_f32(1.0),
+                f16::from_f32(2.0),
+                f16::from_f32(0.5),
+                f16::from_f32(0.25),
+                f16::from_f32(1.0),
+            ]),
+        };
+        let bytes = frame.upload_bytes();
+        assert_eq!(bytes.len(), frame.byte_len());
+        assert_eq!(bytes.len(), 16);
+        let expected = frame
+            .pixels
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(bytes, expected);
     }
 
     #[allow(clippy::cast_precision_loss)]

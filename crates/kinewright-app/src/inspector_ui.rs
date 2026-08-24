@@ -17,7 +17,122 @@ use crate::{
 
 const INSPECTOR_MAX_HEIGHT: f32 = 360.0;
 
+/// Edits gathered from one inspector frame.
+///
+/// A dragged slider emits one operation per frame so the preview stays live.
+/// `coalesce_key` marks those frames so the whole drag lands in a single undo
+/// entry; a frame that also carries a discrete edit (a button, a typed value)
+/// drops the key and becomes an ordinary batch.
+#[derive(Debug, Default)]
+pub(crate) struct InspectorEdits {
+    operations: Vec<Operation>,
+    coalesce_key: Option<String>,
+    /// Set on the frame a drag begins so the app opens a fresh gesture
+    /// identity. Without it a second drag over the same control would merge
+    /// into the previous drag's undo entry.
+    gesture_started: bool,
+}
+
+impl InspectorEdits {
+    /// Record a discrete edit. Discrete edits are never coalesced.
+    fn push(&mut self, operation: Operation) {
+        self.coalesce_key = None;
+        self.operations.push(operation);
+    }
+
+    fn extend(&mut self, operations: impl IntoIterator<Item = Operation>) {
+        let before = self.operations.len();
+        self.operations.extend(operations);
+        if self.operations.len() != before {
+            self.coalesce_key = None;
+        }
+    }
+
+    /// Record one frame of a live control gesture.
+    fn push_live(&mut self, operation: Operation, coalesce_key: String) {
+        if self.operations.is_empty() {
+            self.coalesce_key = Some(coalesce_key);
+        }
+        self.operations.push(operation);
+    }
+
+    /// Record one frame of a live control gesture that needs several
+    /// operations to express a single value, such as a speed change that also
+    /// retimes the linked audio.
+    fn extend_live(
+        &mut self,
+        operations: impl IntoIterator<Item = Operation>,
+        coalesce_key: String,
+    ) {
+        let before = self.operations.len();
+        self.operations.extend(operations);
+        if before == 0 && self.operations.len() != before {
+            self.coalesce_key = Some(coalesce_key);
+        }
+    }
+
+    fn begin_gesture(&mut self) {
+        self.gesture_started = true;
+    }
+
+    #[cfg(test)]
+    fn operations(&self) -> &[Operation] {
+        &self.operations
+    }
+
+    #[cfg(test)]
+    fn coalesce_key(&self) -> Option<&str> {
+        self.coalesce_key.as_deref()
+    }
+}
+
+/// Stable per-parameter coalesce key for one live primary-correction drag.
+fn primary_coalesce_key(clip: ClipId, effect: EffectId, parameter: &str) -> String {
+    format!("primary:{}:{}:{parameter}", clip.0, effect.0)
+}
+
+/// Stable coalesce key for one live clip-speed drag.
+fn speed_coalesce_key(clip: ClipId) -> String {
+    format!("speed:{}", clip.0)
+}
+
+/// Stable coalesce key for one live audio-gain drag.
+fn audio_gain_coalesce_key(clip: ClipId) -> String {
+    format!("audio_gain:{}", clip.0)
+}
+
+/// Whether a slider change belongs to a drag gesture that is still one undo
+/// entry.
+///
+/// egui reports the frame the pointer is released as `changed() == true` with
+/// `dragged() == false`, so testing `dragged()` alone drops the final value out
+/// of the gesture and files it as a second undo entry. `drag_stopped()` marks
+/// exactly that release frame, and it carries the same coalesce key so the
+/// whole drag — release included — stays one entry.
+fn is_live_drag(slider: &egui::Response) -> bool {
+    slider.dragged() || slider.drag_stopped()
+}
+
 impl KinewrightApp {
+    /// Route one inspector frame's edits to the core actor.
+    fn submit_inspector_edits(&mut self, edits: InspectorEdits) {
+        if edits.gesture_started {
+            // Open the new gesture even when this frame produced no operation:
+            // a mouse-down without movement still ends the previous gesture.
+            self.begin_edit_gesture();
+        }
+        if edits.operations.is_empty() {
+            return;
+        }
+        match edits.coalesce_key {
+            Some(key) => {
+                let gesture = self.edit_gesture();
+                self.send_operations_coalesced(edits.operations, format!("{key}#{gesture}"));
+            }
+            None => self.send_operations(edits.operations),
+        }
+    }
+
     pub(crate) fn inspector_dock(&mut self, ui: &mut egui::Ui) {
         let id = ui.make_persistent_id("inspector-panel");
         let mut state =
@@ -115,36 +230,43 @@ impl KinewrightApp {
             data_row(ui, "Raster", &format!("{width} × {height}"));
         }
 
-        let mut pending = Vec::new();
+        let mut pending = InspectorEdits::default();
         ui.add_space(space::TWO);
         ui.strong("Speed");
         let mut speed_percent = clip.speed_percent;
-        let speed_changed = ui
-            .add(
-                egui::Slider::new(&mut speed_percent, 10..=1000)
-                    .integer()
-                    .custom_formatter(|value, _| format!("{:.2}x", value / 100.0))
-                    .custom_parser(|text| {
-                        text.trim()
-                            .trim_end_matches(['x', 'X'])
-                            .parse::<f64>()
-                            .ok()
-                            .map(|value| value * 100.0)
-                    }),
-            )
-            .changed();
+        let speed = ui.add(
+            egui::Slider::new(&mut speed_percent, 10..=1000)
+                .integer()
+                .custom_formatter(|value, _| format!("{:.2}x", value / 100.0))
+                .custom_parser(|text| {
+                    text.trim()
+                        .trim_end_matches(['x', 'X'])
+                        .parse::<f64>()
+                        .ok()
+                        .map(|value| value * 100.0)
+                }),
+        );
+        if speed.drag_started() {
+            pending.begin_gesture();
+        }
         if clip.speed_percent != 100 {
             ui.colored_label(
                 color::TEXT_MUTED,
                 "Audio is muted while the speed is not 1.00x",
             );
         }
-        if speed_changed {
+        if speed.changed() {
             match crate::timeline_ui::clip_speed_operations(
                 &self.focused().document,
                 clip.id,
                 speed_percent,
             ) {
+                // A drag emits one batch per frame so the preview stays live;
+                // the shared key files the whole drag as one undo entry
+                // instead of one per frame.
+                Ok(operations) if is_live_drag(&speed) => {
+                    pending.extend_live(operations, speed_coalesce_key(clip.id));
+                }
                 Ok(operations) => pending.extend(operations),
                 Err(error) => self.record_error("Operations", error),
             }
@@ -160,14 +282,16 @@ impl KinewrightApp {
             let mut gain_tenth_db = audio_clip.audio_gain_tenth_db;
             let mut fade_in_frames = audio_clip.audio_fade_in_frames.0;
             let mut fade_out_frames = audio_clip.audio_fade_out_frames.0;
-            let mut changed = ui
-                .add(
-                    egui::Slider::new(&mut gain_tenth_db, -600..=120)
-                        .text("Gain")
-                        .integer()
-                        .custom_formatter(|value, _| format!("{:+.1} dB", value / 10.0)),
-                )
-                .changed();
+            let gain = ui.add(
+                egui::Slider::new(&mut gain_tenth_db, -600..=120)
+                    .text("Gain")
+                    .integer()
+                    .custom_formatter(|value, _| format!("{:+.1} dB", value / 10.0)),
+            );
+            if gain.drag_started() {
+                pending.begin_gesture();
+            }
+            let mut changed = gain.changed();
             ui.horizontal(|ui| {
                 ui.label("Fade in");
                 changed |= ui
@@ -209,18 +333,26 @@ impl KinewrightApp {
                 });
             }
             if changed {
-                pending.push(clip_audio_operation(
+                let operation = clip_audio_operation(
                     audio_clip.id,
                     gain_tenth_db,
                     fade_in_frames,
                     fade_out_frames,
-                ));
+                );
+                // Only a live gain drag coalesces. A fade edit or Reset click
+                // cannot happen while the gain slider is dragged, so the gain
+                // response alone decides.
+                if is_live_drag(&gain) {
+                    pending.push_live(operation, audio_gain_coalesce_key(audio_clip.id));
+                } else {
+                    pending.push(operation);
+                }
             }
         }
 
         effects_section(ui, clip, &mut pending);
         transition_section(ui, &self.focused().document, clip, &mut pending);
-        self.send_operations(pending);
+        self.submit_inspector_edits(pending);
     }
 
     fn freeze_clip_inspector(
@@ -251,10 +383,10 @@ impl KinewrightApp {
             "Duration",
             &frame_readout(duration, self.focused().document.fps),
         );
-        let mut pending = Vec::new();
+        let mut pending = InspectorEdits::default();
         effects_section(ui, clip, &mut pending);
         transition_section(ui, &self.focused().document, clip, &mut pending);
-        self.send_operations(pending);
+        self.submit_inspector_edits(pending);
     }
 
     #[allow(clippy::too_many_lines)]
@@ -468,7 +600,7 @@ impl KinewrightApp {
     }
 }
 
-fn effects_section(ui: &mut egui::Ui, clip: &Clip, pending: &mut Vec<Operation>) {
+fn effects_section(ui: &mut egui::Ui, clip: &Clip, pending: &mut InspectorEdits) {
     ui.add_space(space::TWO);
     ui.strong("Effects");
     for effect in &clip.effects {
@@ -548,7 +680,7 @@ fn primary_correction_section(
     ui: &mut egui::Ui,
     clip: &Clip,
     effect: &Effect,
-    pending: &mut Vec<Operation>,
+    pending: &mut InspectorEdits,
 ) {
     let Some(descriptor) = EFFECT_DESCRIPTORS
         .iter()
@@ -587,22 +719,52 @@ fn primary_correction_section(
                     ParamValue::Boolean(_) | ParamValue::Text(_) => None,
                 })
                 .unwrap_or(parameter.neutral);
+            let keyframed = parameter_is_keyframed(effect, parameter.name);
             ui.horizontal(|ui| {
-                let changed = ui
-                    .add(
-                        egui::Slider::new(&mut value, parameter.min..=parameter.max)
-                            .text(primary_parameter_label(parameter.name))
-                            .integer(),
-                    )
-                    .changed();
+                let mut slider = ui.add(
+                    egui::Slider::new(&mut value, parameter.min..=parameter.max)
+                        .text(primary_parameter_label(parameter.name))
+                        .integer(),
+                );
+                if keyframed {
+                    slider = slider.on_hover_text(
+                        "Automation drives this parameter. The slider shows the static value; \
+                         clear the keyframes to grade it directly.",
+                    );
+                }
                 ui.monospace(primary_parameter_readout(parameter.name, value));
-                if changed {
-                    pending.push(effect_param_operation(
-                        clip.id,
-                        effect.id,
-                        parameter.name,
-                        value,
-                    ));
+                if slider.drag_started() {
+                    pending.begin_gesture();
+                }
+                if slider.changed() {
+                    let operation =
+                        effect_param_operation(clip.id, effect.id, parameter.name, value);
+                    if is_live_drag(&slider) {
+                        // One batch per frame keeps the preview live; the key
+                        // keeps the whole drag as one undo entry.
+                        pending.push_live(
+                            operation,
+                            primary_coalesce_key(clip.id, effect.id, parameter.name),
+                        );
+                    } else {
+                        pending.push(operation);
+                    }
+                }
+                if keyframed {
+                    ui.colored_label(color::STATUS_WARNING, "KEYFRAMED");
+                    if ui
+                        .small_button("Clear keyframes")
+                        .on_hover_text(
+                            "Remove this parameter's automation so the slider value applies.",
+                        )
+                        .clicked()
+                    {
+                        pending.push(clear_keyframes_operation(
+                            clip.id,
+                            effect.id,
+                            parameter.name,
+                        ));
+                    }
                 }
             });
         }
@@ -622,15 +784,26 @@ fn primary_reset_operations(
             parameter.name,
             parameter.neutral,
         ));
-        if effect.keyframes.contains_key(parameter.name) {
-            operations.push(Operation::ClearEffectKeyframes {
-                clip,
-                effect: effect.id,
-                name: parameter.name.to_owned(),
-            });
+        if parameter_is_keyframed(effect, parameter.name) {
+            operations.push(clear_keyframes_operation(clip, effect.id, parameter.name));
         }
     }
     operations
+}
+
+/// True when automation, not the static parameter value, drives the render.
+/// The inspector badges these parameters so a slider that appears inert is
+/// explained instead of looking broken.
+fn parameter_is_keyframed(effect: &Effect, parameter: &str) -> bool {
+    effect.keyframes.contains_key(parameter)
+}
+
+fn clear_keyframes_operation(clip: ClipId, effect: EffectId, name: &str) -> Operation {
+    Operation::ClearEffectKeyframes {
+        clip,
+        effect,
+        name: name.to_owned(),
+    }
 }
 
 fn primary_parameter_label(name: &str) -> &str {
@@ -696,7 +869,7 @@ fn transition_section(
     ui: &mut egui::Ui,
     document: &kinewright_core::Document,
     clip: &Clip,
-    pending: &mut Vec<Operation>,
+    pending: &mut InspectorEdits,
 ) {
     ui.add_space(space::TWO);
     ui.strong("Transition in");
@@ -1073,6 +1246,152 @@ mod tests {
             effect: EffectId(8),
             name: "shadows_percent".to_owned(),
         }));
+    }
+
+    #[test]
+    fn live_slider_frames_coalesce_while_discrete_edits_stay_separate() {
+        let key = primary_coalesce_key(ClipId(3), EffectId(8), "exposure_milli_stops");
+        assert_eq!(key, "primary:3:8:exposure_milli_stops");
+
+        let mut edits = InspectorEdits::default();
+        edits.begin_gesture();
+        for value in [10, 20, 30] {
+            edits.push_live(
+                effect_param_operation(ClipId(3), EffectId(8), "exposure_milli_stops", value),
+                key.clone(),
+            );
+        }
+        assert_eq!(edits.operations().len(), 3);
+        assert_eq!(edits.coalesce_key(), Some(key.as_str()));
+        assert!(edits.gesture_started);
+
+        // A discrete edit in the same frame is never folded into a drag.
+        edits.push(clear_keyframes_operation(
+            ClipId(3),
+            EffectId(8),
+            "exposure_milli_stops",
+        ));
+        assert_eq!(edits.coalesce_key(), None);
+        assert_eq!(edits.operations().len(), 4);
+
+        // A frame with no drag stays an ordinary batch.
+        let mut typed = InspectorEdits::default();
+        typed.push(effect_param_operation(
+            ClipId(3),
+            EffectId(8),
+            "exposure_milli_stops",
+            40,
+        ));
+        assert_eq!(typed.coalesce_key(), None);
+        assert!(!typed.gesture_started);
+    }
+
+    /// egui reports the release frame of a drag as `changed() == true` with
+    /// `dragged() == false`. Gating coalescing on `dragged()` alone therefore
+    /// files the final value of every drag as a second undo entry.
+    #[test]
+    fn the_release_frame_of_a_drag_keeps_the_gesture_key() {
+        let key = primary_coalesce_key(ClipId(3), EffectId(8), "exposure_milli_stops");
+
+        // Frames 1..n of the drag, then the release frame, all share one key.
+        let mut edits = InspectorEdits::default();
+        edits.begin_gesture();
+        for value in [10, 20] {
+            edits.push_live(
+                effect_param_operation(ClipId(3), EffectId(8), "exposure_milli_stops", value),
+                key.clone(),
+            );
+        }
+        edits.push_live(
+            effect_param_operation(ClipId(3), EffectId(8), "exposure_milli_stops", 30),
+            key.clone(),
+        );
+        assert_eq!(edits.operations().len(), 3);
+        assert_eq!(
+            edits.coalesce_key(),
+            Some(key.as_str()),
+            "the release frame must not open a second undo entry"
+        );
+    }
+
+    /// The Speed and Audio-Gain sliders coalesce like the primary controls, on
+    /// their own keys so two different controls never merge.
+    #[test]
+    fn speed_and_audio_gain_drags_coalesce_on_their_own_keys() {
+        assert_eq!(speed_coalesce_key(ClipId(3)), "speed:3");
+        assert_eq!(audio_gain_coalesce_key(ClipId(7)), "audio_gain:7");
+        assert_ne!(
+            speed_coalesce_key(ClipId(3)),
+            audio_gain_coalesce_key(ClipId(3)),
+            "two controls on one clip must not merge into one undo entry"
+        );
+        assert_ne!(
+            speed_coalesce_key(ClipId(3)),
+            primary_coalesce_key(ClipId(3), EffectId(8), "exposure_milli_stops")
+        );
+
+        // A speed change is several operations per frame; they still form one
+        // coalesced batch.
+        let mut edits = InspectorEdits::default();
+        edits.begin_gesture();
+        edits.extend_live(
+            [
+                Operation::SetClipSpeed {
+                    clip: ClipId(3),
+                    speed_percent: 200,
+                },
+                Operation::SetClipSpeed {
+                    clip: ClipId(4),
+                    speed_percent: 200,
+                },
+            ],
+            speed_coalesce_key(ClipId(3)),
+        );
+        assert_eq!(edits.operations().len(), 2);
+        assert_eq!(edits.coalesce_key(), Some("speed:3"));
+
+        // Yielding no operation leaves no key behind to attach to a later edit.
+        let mut empty = InspectorEdits::default();
+        empty.extend_live(Vec::new(), speed_coalesce_key(ClipId(3)));
+        assert_eq!(empty.coalesce_key(), None);
+        assert!(empty.operations().is_empty());
+
+        let mut gain = InspectorEdits::default();
+        gain.push_live(
+            clip_audio_operation(ClipId(7), -120, 0, 0),
+            audio_gain_coalesce_key(ClipId(7)),
+        );
+        assert_eq!(gain.coalesce_key(), Some("audio_gain:7"));
+    }
+
+    #[test]
+    fn keyframed_primary_parameters_are_badged_and_clearable() {
+        let effect = Effect {
+            id: EffectId(8),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                AutomationCurve {
+                    keyframes: vec![Keyframe {
+                        at: TimeCode::ZERO,
+                        value: 250,
+                        interpolation: KeyframeInterpolation::Linear,
+                    }],
+                },
+            )]),
+        };
+
+        assert!(parameter_is_keyframed(&effect, "exposure_milli_stops"));
+        assert!(!parameter_is_keyframed(&effect, "saturation_percent"));
+        assert_eq!(
+            clear_keyframes_operation(ClipId(3), effect.id, "exposure_milli_stops"),
+            Operation::ClearEffectKeyframes {
+                clip: ClipId(3),
+                effect: EffectId(8),
+                name: "exposure_milli_stops".to_owned(),
+            }
+        );
     }
 
     #[test]

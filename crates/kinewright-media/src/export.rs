@@ -186,7 +186,12 @@ fn export_to_temporary(
             map_frames_with_rounding(output_at, settings.fps, document.fps, FrameRounding::Floor)
                 .map_err(|error| MediaError::Backend(error.to_string()))?;
         let project_at = TimeCode(project_at.0.min(document.duration.0.saturating_sub(1)));
-        let composed = renderer.render(
+        // CC1 3/5: export selects the delivery transform, not the monitor
+        // transform.  The compositor applies the BT.709 OETF in f32 and
+        // quantizes once at 16 bits, so the full->limited conversion below
+        // operates on 16-bit codes and the only 8-bit quantization in the
+        // whole path is the YUV420P output itself.
+        let composed = renderer.render_delivery(
             document,
             project_at,
             settings.resolution,
@@ -194,12 +199,12 @@ fn export_to_temporary(
             crate::render::DecodeStrategy::Sequential,
         )?;
         let mut rgba = ffmpeg::frame::Video::new(
-            ffmpeg::format::Pixel::RGBA,
+            DELIVERY_INTERMEDIATE_PIXEL,
             settings.resolution.0,
             settings.resolution.1,
         );
         stamp_rgba_color(&mut rgba);
-        copy_rgba_to_frame(&composed.rgba, &mut rgba)?;
+        copy_rgba64_to_frame(&composed.rgba64le, &mut rgba)?;
         let mut yuv = delivery_filter.run(&rgba)?;
         stamp_yuv420p_color(&mut yuv);
         yuv.set_pts(Some(i64::try_from(output_frame).unwrap_or(i64::MAX)));
@@ -278,7 +283,7 @@ fn delivery_filter_graph(resolution: (u32, u32)) -> Result<DeliveryFilter, Media
         .ok_or_else(|| MediaError::Backend("FFmpeg format filter is unavailable".to_owned()))?;
     let mut graph = ffmpeg::filter::Graph::new();
     let args = format!(
-        "video_size={}x{}:pix_fmt=rgba:time_base=1/1:pixel_aspect=1/1:colorspace=gbr:range=jpeg",
+        "video_size={}x{}:pix_fmt=rgba64le:time_base=1/1:pixel_aspect=1/1:colorspace=gbr:range=jpeg",
         resolution.0, resolution.1
     );
     let mut source_context = graph
@@ -329,10 +334,21 @@ fn find_codec(name: &str, expected_id: ffmpeg::codec::Id) -> Result<ffmpeg::Code
     Ok(codec)
 }
 
-fn copy_rgba_to_frame(rgba: &[u8], frame: &mut ffmpeg::frame::Video) -> Result<(), MediaError> {
+/// Copy the compositor's RGBA64LE delivery readback into the filter graph's
+/// input frame. Eight bytes per pixel: the delivery values are already
+/// BT.709-coded 16-bit full-range codes and must not be requantized here.
+fn copy_rgba64_to_frame(rgba: &[u8], frame: &mut ffmpeg::frame::Video) -> Result<(), MediaError> {
+    copy_packed_rows(rgba, frame, DELIVERY_INTERMEDIATE_BYTES_PER_PIXEL)
+}
+
+fn copy_packed_rows(
+    rgba: &[u8],
+    frame: &mut ffmpeg::frame::Video,
+    bytes_per_pixel: usize,
+) -> Result<(), MediaError> {
     let row_bytes = usize::try_from(frame.width())
         .unwrap_or_default()
-        .saturating_mul(4);
+        .saturating_mul(bytes_per_pixel);
     let height = usize::try_from(frame.height()).unwrap_or_default();
     if rgba.len() != row_bytes.saturating_mul(height) {
         return Err(MediaError::Backend(
@@ -349,6 +365,11 @@ fn copy_rgba_to_frame(rgba: &[u8], frame: &mut ffmpeg::frame::Video) -> Result<(
     }
     Ok(())
 }
+
+/// The delivery intermediate handed to `libavfilter`. 16-bit full-range RGBA
+/// keeps the compositor's single quantization intact until YUV420P.
+const DELIVERY_INTERMEDIATE_PIXEL: ffmpeg::format::Pixel = ffmpeg::format::Pixel::RGBA64LE;
+const DELIVERY_INTERMEDIATE_BYTES_PER_PIXEL: usize = 8;
 
 /// Stamp the full-range RGB intermediate produced by the compositor. RGB has
 /// identity matrix coefficients and full-range samples; its primaries and
@@ -600,7 +621,11 @@ fn validate_delivery_description(color: &ColorDescription) -> Result<(), MediaEr
         || !matches!(&color.matrix, ColorMatrix::Bt709)
         || !matches!(&color.range, ColorRange::Limited)
         || !matches!(&color.white_point, ColorWhitePoint::D65)
-        || !matches!(&color.bit_depth, ColorBitDepth::Eight)
+        // Core's `ColorBitDepth` equality normalises numeric and named
+        // integer depths, so `Integer(8)` is accepted here exactly as
+        // `delivery_conformance` accepts it. A `matches!` pattern would
+        // reject the numeric spelling and disagree with Core.
+        || color.bit_depth != ColorBitDepth::Eight
     {
         return Err(MediaError::Backend(
             "unsupported delivery colour: the current H.264/YUV420P path requires explicit 8-bit SDR Rec.709 (BT.709 primaries, transfer, and matrix; limited range; D65; nonzero confidence; application_default or user_override provenance)".to_owned(),
@@ -655,6 +680,7 @@ fn replace_output(temporary: &Path, out: &Path) -> Result<(), MediaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color_pipeline::encode_delivery_rgba16;
     use kinewright_core::{ColorContext, DeliveryProfile, ExportCancellation};
 
     #[test]
@@ -747,7 +773,7 @@ mod tests {
 
     #[test]
     fn stamps_rgb_and_yuv_frames_with_their_explicit_ranges() {
-        let mut rgba = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGBA, 2, 2);
+        let mut rgba = ffmpeg::frame::Video::new(DELIVERY_INTERMEDIATE_PIXEL, 2, 2);
         stamp_rgba_color(&mut rgba);
         assert_eq!(rgba.color_space(), ffmpeg::color::Space::RGB);
         assert_eq!(rgba.color_range(), ffmpeg::color::Range::JPEG);
@@ -766,5 +792,52 @@ mod tests {
             yuv.color_transfer_characteristic(),
             ffmpeg::color::TransferCharacteristic::BT709
         );
+    }
+
+    #[test]
+    fn delivery_filter_converts_sixteen_bit_full_range_rgb_to_limited_yuv420p() {
+        crate::initialize_ffmpeg().expect("FFmpeg initializes");
+        let resolution = (16_u32, 16_u32);
+        let mut filter = delivery_filter_graph(resolution).expect("delivery filter graph");
+
+        // Mid-gray at the compositor's single 16-bit quantization. An 8-bit
+        // intermediate could not represent this code at all.
+        let code = encode_delivery_rgba16([0.5, 0.5, 0.5, 1.0]);
+        assert_eq!(code[0], 46_236);
+        let pixels = std::iter::repeat_n(code, 16 * 16)
+            .flatten()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        let mut rgba = ffmpeg::frame::Video::new(DELIVERY_INTERMEDIATE_PIXEL, 16, 16);
+        stamp_rgba_color(&mut rgba);
+        copy_rgba64_to_frame(&pixels, &mut rgba).expect("RGBA64LE frame copy");
+        let yuv = filter
+            .run(&rgba)
+            .expect("explicit BT.709 limited conversion");
+
+        assert_eq!(yuv.format(), ffmpeg::format::Pixel::YUV420P);
+        // Full-range 0.70551 -> limited luma 16 + 219 * 0.70551 = 170.5.
+        let luma = i32::from(yuv.data(0)[0]);
+        assert!(
+            (169..=172).contains(&luma),
+            "limited-range luma was {luma}, expected the 16..235 mapping of full-range mid-gray"
+        );
+        assert!(
+            i32::from(yuv.data(1)[0]).abs_diff(128) <= 1,
+            "neutral gray must stay neutral in chroma"
+        );
+    }
+
+    #[test]
+    fn delivery_intermediate_is_the_sixteen_bit_full_range_rgba_contract() {
+        // `libavfilter` only warns when an input frame's pixel format differs
+        // from the configured buffer source, so the export path's single
+        // quantization depends on this constant and the compositor readback
+        // agreeing. Keep them pinned together.
+        assert_eq!(DELIVERY_INTERMEDIATE_PIXEL, ffmpeg::format::Pixel::RGBA64LE);
+        assert_eq!(DELIVERY_INTERMEDIATE_BYTES_PER_PIXEL, 8);
+        let frame = ffmpeg::frame::Video::new(DELIVERY_INTERMEDIATE_PIXEL, 16, 16);
+        assert!(frame.stride(0) >= 16 * DELIVERY_INTERMEDIATE_BYTES_PER_PIXEL);
     }
 }

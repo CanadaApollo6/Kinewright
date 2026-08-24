@@ -9,6 +9,34 @@ All notable changes to Kinewright are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Added
+- CC1/CC2 review hardening (2026-08-24): a six-lane audit of the managed SDR
+  primary and scopes work found and fixed a sign inversion in the agent
+  `plan_shot_match` tint proposal, an unreported display-range clamp when a
+  `chroma_key` effect was present (keying is now an alpha-only stage that never
+  clamps working RGB), export applying the monitoring encode plus an 8-bit
+  quantization before the delivery range conversion (export now hands a 16-bit
+  RGBA64 delivery frame to the encoder and quantizes once), a monitoring encode
+  that was hardcoded instead of selected from the monitoring description, a
+  human Export dialog that never ran `delivery_conformance`, one undo entry and
+  revision bump per UI frame while dragging a primary slider (the Core actor
+  gained `DoBatchCoalesced`), a scope panel that could strand on "Rendering"
+  after a superseded worker, endpoint-anchored waveform/parade row and
+  vectorscope bucketing that starved the black row, histogram bin counts above
+  256 that could never place code 255 in the final bin, `ColorBitDepth::Integer(8)`
+  not comparing equal to `Eight`, `ColorPipelineState` defaulting to
+  `managed_sdr_v1` instead of `legacy`, CC0 migration stamping managed state over
+  custom monitor/delivery targets, a stale `legacy_display_effect` code on the
+  agent status surface, CC2 agent payloads of ~285 KB for a 2×1 frame (analysis and
+  matching responses are now ~7-15 KB by default with `include_grids` opt-in;
+  `get_video_scopes_v2` keeps grids on by default at ~146 KB, half the old size), uncapped `plan_shot_match` candidate
+  renders, silent proposal clamping, proxy evidence reported as full resolution
+  inside matching responses, and an export queue that did not re-verify source
+  identity after encoding. The CC1 fixture suite was rewritten so every control
+  has an analytic expected value, the parity raster exercises highlights/whites,
+  manifest tolerances are asserted against code constants, and GPU fixtures can
+  run on a hardware adapter (`KINEWRIGHT_CC1_ALLOW_HARDWARE_GPU=1`) with honest
+  provenance when no software fallback is installed. `docs/CC3-CURVES-AND-WHEELS.md`
+  records the next colour slice's implementation contract.
 - Native Linux x86_64 desktop builds: pinned FFmpeg 8.0 shared GPL provisioning,
   Vulkan/ALSA/GTK dependencies, x11grab/v4l2/Pulse recording, a staged tarball
   with bundled libav libraries, and Linux CI/release jobs alongside Windows.

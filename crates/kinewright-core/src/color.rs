@@ -6,6 +6,8 @@
 //! `Other(String)` fallback keeps project files readable when a decoder learns
 //! about a value newer than this version of the core model.
 
+use std::hash::{Hash, Hasher};
+
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as DeError};
 use thiserror::Error;
@@ -155,11 +157,17 @@ color_tag! {
 /// `Legacy` is retained for projects whose pre-CC1 context cannot be proven to
 /// be the exact CC0 application default. `Other` keeps a newer pipeline state
 /// readable without pretending that this version can execute its semantics.
+///
+/// Per the CC1 contract (§4), an absent pipeline state means `legacy`, so
+/// `Legacy` is also the type-level default. Only a context whose working,
+/// monitoring, and delivery descriptions all match the managed SDR targets is
+/// stamped [`ColorPipelineState::ManagedSdrV1`]; see
+/// [`ColorContext::sdr_rec709`] for the target the first CC1 save writes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema, Default)]
 #[schemars(with = "String")]
 pub enum ColorPipelineState {
-    Legacy,
     #[default]
+    Legacy,
     ManagedSdrV1,
     Other(String),
 }
@@ -367,7 +375,13 @@ impl<'de> Deserialize<'de> for ColorPipelineState {
 /// The source sample representation. Integer depths are named for the common
 /// video cases, while `Integer` and `Other` keep less common/future values
 /// representable without changing the project schema.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema, Default)]
+///
+/// CC1 §2.1 requires the named integer variants to be equivalent to their
+/// numeric form, so `Integer(8) == Eight`, `Integer(10) == Ten`, and so on.
+/// Equality and hashing therefore run through the canonical integer form, and
+/// [`ColorBitDepth::integer`] plus the deserializer normalise a numeric depth
+/// to its named variant when one exists.
+#[derive(Debug, Clone, JsonSchema, Default)]
 #[schemars(schema_with = "color_bit_depth_schema")]
 pub enum ColorBitDepth {
     #[default]
@@ -380,6 +394,78 @@ pub enum ColorBitDepth {
     Float32,
     Integer(u16),
     Other(String),
+}
+
+/// Canonical comparison form for [`ColorBitDepth`].
+///
+/// The named integer variants and their numeric spellings collapse onto the
+/// same value so equality and hashing stay consistent with CC1 §2.1.
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum CanonicalBitDepth<'a> {
+    Unknown,
+    Integer(u16),
+    Float16,
+    Float32,
+    Other(&'a str),
+}
+
+impl ColorBitDepth {
+    /// Construct an integer depth, normalising the common video depths to
+    /// their named variants.
+    #[must_use]
+    pub const fn integer(bits: u16) -> Self {
+        match bits {
+            8 => Self::Eight,
+            10 => Self::Ten,
+            12 => Self::Twelve,
+            16 => Self::Sixteen,
+            other => Self::Integer(other),
+        }
+    }
+
+    /// The integer sample depth, if this value describes integer samples.
+    ///
+    /// Float and unknown/opaque depths return `None`, as do integer depths
+    /// that cannot be a real sample depth (`> 255`).
+    #[must_use]
+    pub fn integer_bits(&self) -> Option<u8> {
+        match self {
+            Self::Eight => Some(8),
+            Self::Ten => Some(10),
+            Self::Twelve => Some(12),
+            Self::Sixteen => Some(16),
+            Self::Integer(bits) => u8::try_from(*bits).ok(),
+            _ => None,
+        }
+    }
+
+    fn canonical(&self) -> CanonicalBitDepth<'_> {
+        match self {
+            Self::Unknown => CanonicalBitDepth::Unknown,
+            Self::Eight => CanonicalBitDepth::Integer(8),
+            Self::Ten => CanonicalBitDepth::Integer(10),
+            Self::Twelve => CanonicalBitDepth::Integer(12),
+            Self::Sixteen => CanonicalBitDepth::Integer(16),
+            Self::Float16 => CanonicalBitDepth::Float16,
+            Self::Float32 => CanonicalBitDepth::Float32,
+            Self::Integer(bits) => CanonicalBitDepth::Integer(*bits),
+            Self::Other(value) => CanonicalBitDepth::Other(value.as_str()),
+        }
+    }
+}
+
+impl PartialEq for ColorBitDepth {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonical() == other.canonical()
+    }
+}
+
+impl Eq for ColorBitDepth {}
+
+impl Hash for ColorBitDepth {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.canonical().hash(state);
+    }
 }
 
 fn color_bit_depth_schema(generator: &mut SchemaGenerator) -> Schema {
@@ -428,13 +514,7 @@ impl<'de> Deserialize<'de> for ColorBitDepth {
         }
 
         match WireValue::deserialize(deserializer)? {
-            WireValue::Integer(bits) => Ok(match bits {
-                8 => Self::Eight,
-                10 => Self::Ten,
-                12 => Self::Twelve,
-                16 => Self::Sixteen,
-                other => Self::Integer(other),
-            }),
+            WireValue::Integer(bits) => Ok(Self::integer(bits)),
             WireValue::Text(value) => Ok(match value.as_str() {
                 "unknown" => Self::Unknown,
                 "float16" => Self::Float16,
@@ -684,12 +764,12 @@ fn validate_source_fields(
 
     match &description.bit_depth {
         ColorBitDepth::Unknown => Err(ColorSourceError::UnknownBitDepth),
-        ColorBitDepth::Eight
-        | ColorBitDepth::Ten
-        | ColorBitDepth::Twelve
-        | ColorBitDepth::Sixteen => Ok(()),
-        ColorBitDepth::Integer(bits) if (8..=16).contains(bits) => Ok(()),
-        value => Err(ColorSourceError::UnsupportedBitDepth(value.clone())),
+        // CC1 §2.1: named and numeric integer depths are equivalent, and only
+        // 8..=16 integer samples enter the managed path.
+        value => match value.integer_bits() {
+            Some(bits) if (8..=16).contains(&bits) => Ok(()),
+            _ => Err(ColorSourceError::UnsupportedBitDepth(value.clone())),
+        },
     }
 }
 
@@ -697,9 +777,11 @@ fn validate_source_fields(
 ///
 /// The three stages remain separate even while their defaults are fixed. The
 /// pipeline state is explicit on new project JSON. When reading a pre-CC1
-/// context whose state is absent, the custom deserializer migrates only the
-/// exact old CC0 application default; a custom or incompatible context remains
-/// `Legacy` so later conformance can block it rather than guessing.
+/// context whose state is absent, the custom deserializer migrates the old CC0
+/// working placeholder (CC1 §4.2) but only stamps `managed_sdr_v1` when the
+/// migrated working, monitoring, and delivery descriptions all match the
+/// managed SDR targets; a custom or incompatible context remains `Legacy` so
+/// later conformance can block it rather than guessing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct ColorContext {
     /// The versioned semantics of the working/monitoring/delivery descriptions.
@@ -755,8 +837,8 @@ impl<'de> Deserialize<'de> for ColorContext {
                 let current = Self::sdr_rec709();
                 let monitoring_matches_default = legacy.monitoring_matches_cc0_default();
                 let delivery_matches_default = legacy.delivery_matches_cc0_default();
-                Self {
-                    pipeline_state: ColorPipelineState::ManagedSdrV1,
+                let migrated = Self {
+                    pipeline_state: ColorPipelineState::Legacy,
                     working: current.working,
                     monitoring: if monitoring_matches_default {
                         current.monitoring
@@ -768,6 +850,24 @@ impl<'de> Deserialize<'de> for ColorContext {
                     } else {
                         legacy.delivery.clone()
                     },
+                };
+                // CC1 §4: `managed_sdr_v1` is a claim about the whole
+                // pipeline, so it is only stamped when working, monitoring,
+                // and delivery all match the managed SDR targets after the
+                // migration. A project-custom monitoring or delivery target
+                // keeps the migrated working description but stays `legacy`
+                // so conformance blocks it with the exact incompatible field
+                // instead of silently claiming the managed contract.
+                let managed = migrated.working_matches_managed_sdr()
+                    && migrated.monitoring_matches_managed_sdr()
+                    && migrated.delivery_matches_managed_sdr();
+                Self {
+                    pipeline_state: if managed {
+                        ColorPipelineState::ManagedSdrV1
+                    } else {
+                        ColorPipelineState::Legacy
+                    },
+                    ..migrated
                 }
             }
             None => legacy,
@@ -939,7 +1039,12 @@ mod tests {
         let migrated: ColorContext =
             serde_json::from_value(old).expect("custom CC0 context should remain readable");
 
-        assert_eq!(migrated.pipeline_state, ColorPipelineState::ManagedSdrV1);
+        assert_eq!(
+            migrated.pipeline_state,
+            ColorPipelineState::Legacy,
+            "custom monitoring/delivery targets must not be stamped managed_sdr_v1"
+        );
+        assert!(!migrated.is_managed_sdr_compatible());
         assert_eq!(
             migrated.working,
             ColorContext::sdr_rec709().working,
@@ -952,6 +1057,52 @@ mod tests {
         );
         assert_eq!(migrated.delivery.transfer, ColorTransfer::Bt1886);
         assert_eq!(migrated.delivery.provenance, ColorProvenance::UserOverride);
+    }
+
+    #[test]
+    fn custom_monitoring_target_migrates_working_but_remains_legacy() {
+        let mut old = old_cc0_context_json();
+        old["monitoring"]["transfer"] = json!("bt1886");
+        old["monitoring"]["provenance"] = json!("user_override");
+
+        let migrated: ColorContext =
+            serde_json::from_value(old).expect("custom monitoring should remain readable");
+
+        assert_eq!(migrated.pipeline_state, ColorPipelineState::Legacy);
+        assert_eq!(migrated.working, ColorContext::sdr_rec709().working);
+        assert!(migrated.working_matches_managed_sdr());
+        assert!(!migrated.monitoring_matches_managed_sdr());
+        assert!(migrated.delivery_matches_managed_sdr());
+        assert_eq!(migrated.monitoring.transfer, ColorTransfer::Bt1886);
+    }
+
+    #[test]
+    fn custom_delivery_target_migrates_working_but_remains_legacy() {
+        let mut old = old_cc0_context_json();
+        old["delivery"]["range"] = json!("full");
+        old["delivery"]["provenance"] = json!("user_override");
+
+        let migrated: ColorContext =
+            serde_json::from_value(old).expect("custom delivery should remain readable");
+
+        assert_eq!(migrated.pipeline_state, ColorPipelineState::Legacy);
+        assert_eq!(migrated.working, ColorContext::sdr_rec709().working);
+        assert!(!migrated.delivery_matches_managed_sdr());
+        assert_eq!(migrated.delivery.range, ColorRange::Full);
+    }
+
+    #[test]
+    fn absent_pipeline_state_is_legacy_per_cc1_section_4() {
+        #[derive(Debug, Deserialize)]
+        struct Wire {
+            #[serde(default)]
+            pipeline_state: ColorPipelineState,
+        }
+
+        assert_eq!(ColorPipelineState::default(), ColorPipelineState::Legacy);
+        let decoded: Wire =
+            serde_json::from_value(json!({})).expect("absent pipeline state should decode");
+        assert_eq!(decoded.pipeline_state, ColorPipelineState::Legacy);
     }
 
     #[test]
@@ -1061,6 +1212,97 @@ mod tests {
         assert_eq!(error.observed(), "Bt2020");
         assert!(error.allowed_values().contains("bt709"));
         assert!(error.actionable_message().contains("relink"));
+    }
+
+    #[test]
+    fn named_and_numeric_integer_bit_depths_are_equivalent() {
+        use std::collections::hash_map::DefaultHasher;
+
+        fn hash_of(value: &ColorBitDepth) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        for (bits, named) in [
+            (8_u16, ColorBitDepth::Eight),
+            (10, ColorBitDepth::Ten),
+            (12, ColorBitDepth::Twelve),
+            (16, ColorBitDepth::Sixteen),
+        ] {
+            let numeric = ColorBitDepth::Integer(bits);
+            assert_eq!(numeric, named, "CC1 §2.1 equivalence for {bits} bits");
+            assert_eq!(named, numeric);
+            assert_eq!(
+                hash_of(&numeric),
+                hash_of(&named),
+                "Hash must stay consistent with Eq for {bits} bits"
+            );
+            assert_eq!(ColorBitDepth::integer(bits), named);
+            assert_eq!(numeric.integer_bits(), u8::try_from(bits).ok());
+            assert_eq!(named.integer_bits(), u8::try_from(bits).ok());
+
+            let encoded = serde_json::to_value(&numeric).expect("depth should serialize");
+            assert_eq!(encoded, json!(bits));
+            let decoded: ColorBitDepth =
+                serde_json::from_value(encoded).expect("depth should deserialize");
+            assert_eq!(decoded, named);
+            assert_eq!(decoded, numeric);
+        }
+
+        assert_eq!(ColorBitDepth::integer(17), ColorBitDepth::Integer(17));
+        assert_eq!(ColorBitDepth::Integer(17).integer_bits(), Some(17));
+        assert_eq!(ColorBitDepth::Integer(300).integer_bits(), None);
+        assert_eq!(ColorBitDepth::Float16.integer_bits(), None);
+        assert_eq!(ColorBitDepth::Unknown.integer_bits(), None);
+        assert_ne!(ColorBitDepth::Eight, ColorBitDepth::Ten);
+        assert_ne!(ColorBitDepth::Float16, ColorBitDepth::Sixteen);
+        assert_ne!(
+            ColorBitDepth::Other("eight".to_owned()),
+            ColorBitDepth::Eight
+        );
+    }
+
+    #[test]
+    fn numeric_and_named_source_bit_depths_classify_identically() {
+        let rec709 = ColorContext::sdr_rec709().delivery;
+        for depth in [
+            ColorBitDepth::Eight,
+            ColorBitDepth::Integer(8),
+            ColorBitDepth::Ten,
+            ColorBitDepth::Integer(10),
+            ColorBitDepth::Integer(9),
+            ColorBitDepth::Sixteen,
+            ColorBitDepth::Integer(16),
+        ] {
+            let description = ColorDescription {
+                bit_depth: depth.clone(),
+                ..rec709.clone()
+            };
+            assert_eq!(
+                classify_source(&description),
+                Ok(ColorSourceProfile::Rec709Video),
+                "depth {depth:?} must be accepted"
+            );
+        }
+
+        for depth in [
+            ColorBitDepth::Integer(17),
+            ColorBitDepth::Integer(7),
+            ColorBitDepth::Integer(300),
+            ColorBitDepth::Float16,
+            ColorBitDepth::Float32,
+        ] {
+            let description = ColorDescription {
+                bit_depth: depth.clone(),
+                ..rec709.clone()
+            };
+            assert_eq!(
+                classify_source(&description),
+                Err(ColorSourceError::UnsupportedBitDepth(depth.clone())),
+                "depth {depth:?} must be rejected"
+            );
+        }
     }
 
     #[test]

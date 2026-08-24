@@ -510,28 +510,24 @@ fn bit_depth_from_pixel(pixel: ffmpeg::format::Pixel) -> ColorBitDepth {
 }
 
 fn declared_integer_depth(description: &ColorDescription) -> Result<u8, String> {
-    match &description.bit_depth {
-        ColorBitDepth::Eight => Ok(8),
-        ColorBitDepth::Ten => Ok(10),
-        ColorBitDepth::Twelve => Ok(12),
-        ColorBitDepth::Sixteen => Ok(16),
-        ColorBitDepth::Integer(bits) if (8..=16).contains(bits) => {
-            u8::try_from(*bits).map_err(|_| "source integer bit depth is invalid".to_owned())
-        }
-        ColorBitDepth::Unknown => Err("source integer bit depth is unknown".to_owned()),
-        other => Err(format!("unsupported source integer bit depth: {other:?}")),
+    if let Some(bits) = integer_depth_value(&description.bit_depth) {
+        return Ok(bits);
     }
+    if matches!(description.bit_depth, ColorBitDepth::Unknown) {
+        return Err("source integer bit depth is unknown".to_owned());
+    }
+    Err(format!(
+        "unsupported source integer bit depth: {:?}",
+        description.bit_depth
+    ))
 }
 
+/// The integer sample depths this decoder can expand.
+///
+/// Core owns the named/numeric mapping, so a new named depth cannot be
+/// silently dropped here; this adds only the range the expansion supports.
 fn integer_depth_value(depth: &ColorBitDepth) -> Option<u8> {
-    match depth {
-        ColorBitDepth::Eight => Some(8),
-        ColorBitDepth::Ten => Some(10),
-        ColorBitDepth::Twelve => Some(12),
-        ColorBitDepth::Sixteen => Some(16),
-        ColorBitDepth::Integer(bits) if (8..=16).contains(bits) => u8::try_from(*bits).ok(),
-        _ => None,
-    }
+    depth.integer_bits().filter(|bits| (8..=16).contains(bits))
 }
 
 fn decoder_format_name(pixel: ffmpeg::format::Pixel) -> String {

@@ -263,43 +263,23 @@ async fn ripple_marker_position_renders_through_the_real_mcp_server() {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
-    let generated = GeneratedMedia::ffmpeg(
-        "m3",
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=320x180:rate=30000/1001",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:sample_rate=48000",
-            "-frames:v",
-            "60",
-            "-t",
-            "2.002",
-            "-c:v",
-            "libx264",
-            "-vf",
-            "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
-            "-pix_fmt",
-            "yuv420p",
-            "-g",
-            "60",
-            "-color_primaries",
-            "bt709",
-            "-color_trc",
-            "bt709",
-            "-colorspace",
-            "bt709",
-            "-color_range",
-            "tv",
-            "-c:a",
-            "aac",
-            "-shortest",
-        ],
-        "mp4",
-    );
+    let mut arguments = vec![
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=30000/1001",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=48000",
+        "-frames:v",
+        "60",
+        "-t",
+        "2.002",
+    ];
+    arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
+    arguments.extend(["-c:a", "aac", "-shortest"]);
+    let generated = GeneratedMedia::ffmpeg("m3", &arguments, "mp4");
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let mut document = single_clip_document(asset);
@@ -432,6 +412,236 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
     let beats = invoke_capability(&client, "get_timeline_beats", json!({"min_strength": 0})).await;
     assert_eq!(beats.is_error, Some(false));
     assert!(beats.structured_content.as_ref().unwrap()["beats"].is_array());
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// The encoder settings and complete BT.709 source-colour tagging every
+/// managed fixture in this file shares.
+///
+/// The colour tools classify a source from exactly these fields, so the
+/// fixtures have to agree on them exactly; only the inputs and the container
+/// tail differ between them.
+const MANAGED_BT709_ENCODE_ARGUMENTS: [&str; 16] = [
+    "-c:v",
+    "libx264",
+    "-vf",
+    "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+    "-pix_fmt",
+    "yuv420p",
+    "-g",
+    "60",
+    "-color_primaries",
+    "bt709",
+    "-color_trc",
+    "bt709",
+    "-colorspace",
+    "bt709",
+    "-color_range",
+    "tv",
+];
+
+/// Generate one managed BT.709 fixture clip for the colour tools.
+fn managed_color_media() -> GeneratedMedia {
+    let mut arguments = vec![
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=30",
+        "-frames:v",
+        "60",
+    ];
+    arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
+    GeneratedMedia::ffmpeg("cc-color", &arguments, "mp4")
+}
+
+/// Split the single fixture clip into two shots so `plan_shot_match` has one
+/// explicit reference and one explicit candidate.
+fn two_shot_color_document(asset: &MediaAsset) -> Document {
+    let mut document = single_clip_document(asset.clone());
+    let half = TimeCode(asset.duration.0 / 2);
+    document.tracks[0].clips[0].source_range = TimeCode::ZERO..half;
+    let mut second = document.tracks[0].clips[0].clone();
+    second.id = ClipId(2);
+    second.source_range = half..asset.duration;
+    second.timeline_start = half;
+    document.tracks[0].clips.push(second);
+    document
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cc1_color_context_plan_and_commit_advance_the_revision_exactly_once() {
+    let generated = managed_color_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let context = invoke_capability(&client, "get_color_context", json!({})).await;
+    assert_eq!(context.is_error, Some(false));
+    let context = context
+        .structured_content
+        .as_ref()
+        .expect("get_color_context must publish machine-readable status");
+    let revision = context["timeline_revision"].as_u64().unwrap();
+    assert_eq!(revision, 0);
+    // CC1 §5: video-only layers, ordered chain, source raster, sampling marker.
+    assert_eq!(context["sampling_region"], json!(null));
+    assert_eq!(context["layer_scope"], "video_tracks_only");
+    assert_eq!(context["clips"][0]["z_order"], 0);
+    assert!(context["clips"][0]["effects"].is_array());
+    assert_eq!(
+        context["assets"][0]["source"]["formats"]["input"]["raster"],
+        json!([320, 180])
+    );
+    assert_eq!(
+        context["assets"][0]["source"]["status"]["status"],
+        "supported"
+    );
+
+    let plan = invoke_capability(
+        &client,
+        "plan_primary_correction",
+        json!({
+            "expected_revision": revision,
+            "clip_id": 1,
+            "parameters": {"exposure_milli_stops": 500}
+        }),
+    )
+    .await;
+    assert_eq!(plan.is_error, Some(false));
+    let plan = plan
+        .structured_content
+        .as_ref()
+        .expect("plan_primary_correction must publish exact operations")
+        .clone();
+    assert_eq!(plan["applied"], false);
+    assert_eq!(plan["no_change"], false);
+    assert_eq!(plan["created_new_node"], true);
+    assert_eq!(plan["existing_primary_node_count"], 0);
+    let target_effect_id = plan["target_effect_id"].as_u64().unwrap();
+    assert_eq!(query_document(&core).tracks[0].clips[0].effects.len(), 0);
+
+    let prepared = prepare_plan(&client, revision, plan["operations"].clone()).await;
+    assert_eq!(prepared.is_error, Some(false));
+    let committed = client
+        .call_tool(commit_request(revision, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false));
+
+    let after = query_document(&core);
+    let effects = &after.tracks[0].clips[0].effects;
+    assert_eq!(effects.len(), 1);
+    assert_eq!(effects[0].name, "primary_correction");
+    assert_eq!(effects[0].id.0, target_effect_id);
+    assert_eq!(
+        effects[0].parameters["exposure_milli_stops"],
+        ParamValue::Integer(500)
+    );
+
+    let after_context = invoke_capability(&client, "get_color_context", json!({})).await;
+    assert_eq!(
+        after_context.structured_content.as_ref().unwrap()["timeline_revision"]
+            .as_u64()
+            .unwrap(),
+        revision + 1,
+        "one committed plan must advance the revision exactly once"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cc2_scope_tools_are_read_only_over_the_live_endpoint() {
+    let generated = managed_color_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let core = Core::spawn(two_shot_color_document(&asset)).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let before = query_document(&core);
+    let revision = invoke_capability(&client, "get_color_context", json!({}))
+        .await
+        .structured_content
+        .as_ref()
+        .unwrap()["timeline_revision"]
+        .as_u64()
+        .unwrap();
+
+    let scopes = invoke_capability(
+        &client,
+        "get_video_scopes_v2",
+        json!({"expected_revision": revision, "timecode": 5}),
+    )
+    .await;
+    assert_eq!(scopes.is_error, Some(false));
+    let scopes = scopes.structured_content.as_ref().unwrap();
+    assert_eq!(scopes["full_resolution"], true);
+    assert_eq!(scopes["stage"], "monitoring_post_composite");
+    // The typed core evidence is the single source of truth for grids.
+    assert!(scopes["core_evidence"]["waveform"].is_object());
+    assert!(scopes.get("waveform").is_none());
+
+    let analysis = invoke_capability(
+        &client,
+        "analyze_color_shot",
+        json!({"expected_revision": revision, "clip_id": 1}),
+    )
+    .await;
+    assert_eq!(analysis.is_error, Some(false));
+    let analysis = analysis.structured_content.as_ref().unwrap();
+    assert_eq!(analysis["applied"], false);
+    assert_eq!(analysis["full_resolution"], true);
+    assert_eq!(analysis["grids_omitted"], true);
+    assert!(
+        serde_json::to_vec(analysis).unwrap().len() < 20_000,
+        "analyze_color_shot must stay compact by default"
+    );
+
+    let matched = invoke_capability(
+        &client,
+        "plan_shot_match",
+        json!({
+            "expected_revision": revision,
+            "reference_clip_id": 1,
+            "candidate_clip_ids": [2]
+        }),
+    )
+    .await;
+    assert_eq!(matched.is_error, Some(false));
+    let matched = matched.structured_content.as_ref().unwrap();
+    assert_eq!(matched["applied"], false);
+    assert_eq!(matched["full_resolution"], true);
+    assert_eq!(matched["candidate_limit"], 16);
+    assert!(matched["editable_operations"].is_array());
+
+    assert_eq!(
+        query_document(&core),
+        before,
+        "CC2 evidence tools must never mutate the timeline"
+    );
+    assert_eq!(
+        invoke_capability(&client, "get_color_context", json!({}))
+            .await
+            .structured_content
+            .as_ref()
+            .unwrap()["timeline_revision"]
+            .as_u64()
+            .unwrap(),
+        revision,
+        "read-only scope tools must leave the revision unchanged"
+    );
 
     client.cancel().await.unwrap();
     server.shutdown();

@@ -22,7 +22,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::color_status::{PrimaryCorrectionPlanArgs, plan_primary_correction};
+use crate::color_status::{
+    ExistingPrimaryNode, PrimaryCorrectionPlanArgs, existing_primary_node, plan_primary_correction,
+};
 
 /// Hard upper bounds are part of the agent contract.  Scope tools must fail
 /// closed rather than allowing a caller to accidentally request a long-
@@ -38,6 +40,65 @@ const DEFAULT_WAVEFORM_COLUMNS: usize = 64;
 const MAX_WAVEFORM_COLUMNS: usize = 256;
 const MAX_VECTOR_BINS: usize = 64;
 
+/// One `plan_shot_match` call renders one full-resolution monitor proof per
+/// candidate.  The candidate list is therefore capped exactly like the
+/// temporal sample budget, and the cap is enforced before any render.
+pub(crate) const MAX_SHOT_MATCH_CANDIDATES: usize = 16;
+
+/// The exact stage vocabulary this tool accepts.  The first entry is the
+/// canonical CC2 name; the second is Core's own serde alias for the same
+/// `ScopeStage::MonitoringPostComposite` value.  Nothing else is accepted:
+/// a friendly alias for a stage the backend cannot prove is a silent
+/// misattribution of evidence.
+const SUPPORTED_SCOPE_STAGES: [&str; 2] =
+    ["monitoring_post_composite", "monitoring/post-composite"];
+
+/// BT.709 EOTF (CC2 §3.1) constants, decoding a normalized 8-bit monitoring
+/// code back to scene-referred linear light.  These match
+/// `kinewright_media::color_pipeline::decode_bt709` exactly.
+const BT709_EOTF_BREAKPOINT: f64 = 0.081;
+const BT709_EOTF_LINEAR_SLOPE: f64 = 4.5;
+const BT709_EOTF_OFFSET: f64 = 0.099;
+const BT709_EOTF_SCALE: f64 = 1.099;
+const BT709_EOTF_EXPONENT: f64 = 0.45;
+
+/// BT.709 linear-light luminance weights, used to fold linearised channel
+/// means into one exposure observation.
+const BT709_LUMA_RED: f64 = 0.212_6;
+const BT709_LUMA_GREEN: f64 = 0.715_2;
+const BT709_LUMA_BLUE: f64 = 0.072_2;
+
+/// The CC1 managed white-balance model (`kinewright_media::color_pipeline`,
+/// `PrimaryCorrection::apply`) is exactly:
+///
+/// ```text
+/// red_gain   = 1 + 0.1 * (temperature_percent / 100)
+/// blue_gain  = 1 - 0.1 * (temperature_percent / 100)
+/// green_gain = 1 - 0.1 * (tint_percent / 100)
+/// ```
+///
+/// so one *percent* of either control moves its channel by
+/// `0.1 / 100 = 0.001` of linear gain.  Both derivations below use that
+/// single constant rather than restating the model.
+const CC1_WHITE_BALANCE_GAIN_PER_PERCENT: f64 = 0.001;
+
+/// Full 8-bit code range used to normalize the measured channel means.
+const CODE_VALUE_MAXIMUM: f64 = 255.0;
+
+/// Decode one normalized BT.709 display code to linear light (CC2 §3.1).
+///
+/// Scope means are gamma-encoded 8-bit monitoring codes.  Treating them as a
+/// linear-light quantity understates a needed exposure change by roughly a
+/// factor of two, so every gain proposal linearises first.
+fn bt709_eotf(encoded: f64) -> f64 {
+    let encoded = encoded.clamp(0.0, 1.0);
+    if encoded < BT709_EOTF_BREAKPOINT {
+        encoded / BT709_EOTF_LINEAR_SLOPE
+    } else {
+        ((encoded + BT709_EOTF_OFFSET) / BT709_EOTF_SCALE).powf(1.0 / BT709_EOTF_EXPONENT)
+    }
+}
+
 /// Canonical request envelope for `get_video_scopes_v2`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct VideoScopesV2Args {
@@ -45,9 +106,10 @@ pub(crate) struct VideoScopesV2Args {
     /// the immutable evidence snapshot must still be at this revision.
     #[serde(default)]
     pub expected_revision: Option<TimelineRevision>,
-    /// Named managed-pipeline stage.  The current backend can prove the
-    /// post-compositor monitor boundary; aliases for that named boundary are
-    /// accepted and retained verbatim in provenance.
+    /// Named managed-pipeline stage.  Exactly one stage is provable today:
+    /// `monitoring_post_composite` (Core's `monitoring/post-composite` serde
+    /// alias is also accepted).  Anything else fails closed.
+    #[serde(default = "default_scope_stage")]
     pub stage: String,
     /// One exact project frame.  Omit this when `range` or `frames` is used.
     #[serde(default, alias = "frame")]
@@ -84,6 +146,11 @@ pub(crate) struct VideoScopesV2Args {
     /// result.
     #[serde(default)]
     pub columns: Option<u16>,
+    /// Include the waveform/parade/vectorscope density grids.  They dominate
+    /// the payload, so they default to `true` only for this dedicated scope
+    /// tool.  Statistics, clipping, and histograms are always returned.
+    #[serde(default)]
+    pub include_grids: Option<bool>,
 }
 
 /// A half-open exact project-frame range.
@@ -145,6 +212,11 @@ pub(crate) struct AnalyzeColorShotArgs {
     pub bins: Option<u16>,
     #[serde(default)]
     pub columns: Option<u16>,
+    /// Include the waveform/parade/vectorscope density grids.  Diagnosis needs
+    /// statistics, clipping, and histograms, so the grids default to `false`
+    /// here and the response records `grids_omitted`.
+    #[serde(default)]
+    pub include_grids: Option<bool>,
 }
 
 /// A clip/frame selector used by the explicit reference and candidate forms.
@@ -185,10 +257,15 @@ pub(crate) struct PlanShotMatchArgs {
     pub bins: Option<u16>,
     #[serde(default)]
     pub columns: Option<u16>,
+    /// Include the waveform/parade/vectorscope density grids.  A match plan
+    /// renders one proof per candidate, so the grids default to `false` and
+    /// the response records `grids_omitted`.
+    #[serde(default)]
+    pub include_grids: Option<bool>,
 }
 
 fn default_scope_stage() -> String {
-    "post_compositor".to_owned()
+    SUPPORTED_SCOPE_STAGES[0].to_owned()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -265,6 +342,16 @@ impl NormalizedRoi {
             return Err(ScopeError::invalid_roi(
                 "ROI must have positive width and height",
             ));
+        }
+        // Core quantizes the ROI to basis points, so a positive-but-subquantum
+        // extent silently collapses to an empty region.  Reject it here, at the
+        // agent boundary, naming the offending field and the quantum.
+        for (field, extent) in [("width", right - left), ("height", bottom - top)] {
+            if normalized_basis_points(extent) == 0 {
+                return Err(ScopeError::invalid_roi(format!(
+                    "ROI {field} {extent} rounds to 0 of {SCOPE_BASIS_POINTS} basis points; the scope ROI quantum is 1/{SCOPE_BASIS_POINTS} of the raster, so {field} must round to at least 1 basis point"
+                )));
+            }
         }
         Ok(Self {
             left,
@@ -359,6 +446,13 @@ impl SamplingResolution {
                 "renderer": "analysis.thumbnail_for_document",
                 "full_resolution": false,
                 "max_width": self.max_width,
+                // The proxy path returns a bare raster with no backend
+                // metadata, so there is nothing to attribute.  Reporting the
+                // request back as if it were backend provenance would fabricate
+                // evidence, so both fields are explicit instead.
+                "backend": Value::Null,
+                "adapter": Value::Null,
+                "provenance": "proxy_unverified_by_backend",
             })
         } else {
             json!({
@@ -375,11 +469,19 @@ impl SamplingResolution {
 struct ScopeRequest {
     stage: String,
     frames: Vec<TimeCode>,
+    /// The half-open range the caller asked for, retained verbatim so the
+    /// response can distinguish it from the frames actually sampled.
+    requested_range: Option<(TimeCode, TimeCode)>,
+    /// The spacing actually used for a range, whether explicit or derived.
+    step_frames: Option<TimeCode>,
+    /// Whether `step_frames` came from the caller or from the bounded default.
+    step_source: &'static str,
     roi: NormalizedRoi,
     resolution: SamplingResolution,
     histogram_bins: usize,
     waveform_columns: usize,
     vector_bins: usize,
+    include_grids: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -434,7 +536,8 @@ impl ScopeError {
         )
         .with_details(json!({
             "stage": stage,
-            "supported_stages": ["monitoring_post_composite"],
+            "supported_stages": SUPPORTED_SCOPE_STAGES,
+            "default_stage": SUPPORTED_SCOPE_STAGES[0],
         }))
     }
 
@@ -524,6 +627,9 @@ pub(crate) fn video_scopes_v2(
         args.max_width,
         args.bins,
         args.columns,
+        // The dedicated scope tool is the one surface whose whole purpose is
+        // the density grids, so they are included unless the caller opts out.
+        args.include_grids.unwrap_or(true),
     )?;
     let rendered = render_samples(document, analysis, &request)?;
     scope_response(revision, document, &request, &rendered)
@@ -561,6 +667,9 @@ pub(crate) fn analyze_color_shot(
         args.max_width,
         args.bins,
         args.columns,
+        // Diagnosis needs statistics, clipping, and histograms; the density
+        // grids are opt-in so a routine analysis stays a small payload.
+        args.include_grids.unwrap_or(false),
     )?;
     ensure_frames_in_clip(&request.frames, clip, duration)?;
     let rendered = render_samples(document, analysis, &request)?;
@@ -574,7 +683,12 @@ pub(crate) fn analyze_color_shot(
         "requested_stage": args.stage,
         "evidence_only": true,
         "applied": false,
-        "shot": shot_evidence(&rendered, &evidence, request.roi),
+        // Marked at every level: a proxy sample must never be readable as a
+        // full-resolution proof from any nesting depth of this response.
+        "resolution": request.resolution.value(),
+        "full_resolution": !request.resolution.proxy,
+        "grids_omitted": !request.include_grids,
+        "shot": shot_evidence(&rendered, &evidence, &request),
         "scopes": value,
         "assumptions": assumptions(document, clip.asset, &request),
         "confidence": confidence(&evidence),
@@ -624,14 +738,18 @@ pub(crate) fn plan_shot_match(
         args.max_width,
         args.bins,
         args.columns,
+        args.include_grids.unwrap_or(false),
     )?;
     let reference_rendered = render_samples(document, analysis, &request)?;
     let reference_scope_evidence = measure_core_scopes(&request, &reference_rendered)?;
     let reference_stats = shot_stats(&reference_scope_evidence);
     let reference_evidence = json!({
-        "summary": shot_evidence(&reference_rendered, &reference_scope_evidence, request.roi),
-        "scope_evidence": serde_json::to_value(&reference_scope_evidence)
-            .map_err(|error| ScopeError::new("scope_serialization_failed", error.to_string()))?,
+        "summary": shot_evidence(&reference_rendered, &reference_scope_evidence, &request),
+        // Routed through the same override `scope_response` applies, so the
+        // reference cannot report `full_resolution: true` for a proxy sample.
+        "scope_evidence": core_evidence_value(&request, &reference_scope_evidence)?,
+        "resolution": request.resolution.value(),
+        "full_resolution": !request.resolution.proxy,
     });
 
     let mut candidate_evidence = Vec::with_capacity(candidates.len());
@@ -662,6 +780,7 @@ pub(crate) fn plan_shot_match(
             args.max_width,
             args.bins,
             args.columns,
+            args.include_grids.unwrap_or(false),
         )?;
         let rendered = render_samples(document, analysis, &candidate_request)?;
         let candidate_scope_evidence = measure_core_scopes(&candidate_request, &rendered)?;
@@ -670,7 +789,14 @@ pub(crate) fn plan_shot_match(
         let scope_comparison =
             compare_scope_evidence(&reference_scope_evidence, &candidate_scope_evidence)
                 .map_err(|error| ScopeError::new("scope_comparison_failed", error.to_string()))?;
-        let proposed_parameters = match_parameters(reference_stats, stats);
+        // The scopes measured this candidate through whatever grade it already
+        // carries, so the match term is a delta on top of that node. Read the
+        // node from the staged document the plan will be validated against and
+        // compose, or the proposal would overwrite the existing grade with the
+        // delta alone.
+        let existing = existing_primary_node(&operation_document, candidate.clip_id);
+        let proposal = match_parameters(reference_stats, stats, existing.as_ref());
+        let proposed_parameters = proposal.parameters.clone();
         let plan_args = PrimaryCorrectionPlanArgs {
             expected_revision: revision,
             clip_id: candidate.clip_id,
@@ -685,18 +811,35 @@ pub(crate) fn plan_shot_match(
                 format!("could not serialize candidate operations: {error}"),
             )
         })?;
-        apply_batch(&mut operation_document, &plan.operations).map_err(|error| {
-            ScopeError::new(
-                "shot_match_plan_rejected",
-                format!("Core rejected candidate operations: {error}"),
-            )
-        })?;
+        // An already-matching candidate proposes nothing; Core rejects an empty
+        // batch, so there is simply nothing to stage for the next candidate.
+        if !plan.operations.is_empty() {
+            apply_batch(&mut operation_document, &plan.operations).map_err(|error| {
+                ScopeError::new(
+                    "shot_match_plan_rejected",
+                    format!("Core rejected candidate operations: {error}"),
+                )
+            })?;
+        }
         candidate_operations.push(json!({
             "clip_id": candidate.clip_id.0,
             "expected_revision": revision.0,
             "parameters": proposed_parameters,
+            "proposal_details": proposal.details,
             "operations": operations,
             "operation_visibility": "exact_unapplied_primary_correction_operations",
+            "existing_primary_node_count": plan.existing_primary_node_count,
+            // Null when the proposal changes nothing and no node exists: the
+            // planner's fresh id is never allocated by any operation here.
+            "target_effect_id": plan.target_effect_id().map(|effect| effect.0),
+            "created_new_node": plan.created_new_node,
+            "no_change": plan.no_change,
+            // The written values are absolute. `composed` says whether they
+            // already include the node's prior grade.
+            "composed": proposal.composed,
+            "current_parameters": proposal.details["current_parameters"].clone(),
+            "delta_parameters": proposal.details["delta_parameters"].clone(),
+            "warnings": plan.warnings,
             "evidence_only": true,
             "applied": false,
         }));
@@ -704,10 +847,14 @@ pub(crate) fn plan_shot_match(
             "clip_id": candidate.clip_id.0,
             "asset_id": clip.asset.0,
             "project_frame": frame.0,
-            "shot": shot_evidence(&rendered, &candidate_scope_evidence, candidate_request.roi),
+            "shot": shot_evidence(&rendered, &candidate_scope_evidence, &candidate_request),
             "signed_deltas": deltas,
-            "scope_comparison": serde_json::to_value(scope_comparison).map_err(|error| ScopeError::new("scope_comparison_failed", error.to_string()))?,
+            "scope_comparison": comparison_value(&candidate_request, &scope_comparison)?,
+            "scope_evidence": core_evidence_value(&candidate_request, &candidate_scope_evidence)?,
             "proposed_parameters": proposed_parameters,
+            "proposal_details": proposal.details,
+            "resolution": candidate_request.resolution.value(),
+            "full_resolution": !candidate_request.resolution.proxy,
             "confidence": confidence(&candidate_scope_evidence),
             "assumptions": assumptions(document, clip.asset, &candidate_request),
         }));
@@ -726,6 +873,12 @@ pub(crate) fn plan_shot_match(
         "applied": false,
         "reference_retained": true,
         "match_scope": request.roi.value(),
+        // Marked at every level: top-level, reference evidence, each candidate,
+        // each sample, and inside the typed core evidence.
+        "resolution": request.resolution.value(),
+        "full_resolution": !request.resolution.proxy,
+        "grids_omitted": !request.include_grids,
+        "candidate_limit": MAX_SHOT_MATCH_CANDIDATES,
         "stage": ScopeStage::MonitoringPostComposite.as_str(),
         "requested_stage": args.stage,
         "assumptions": assumptions(document, reference_clip.asset, &request),
@@ -761,6 +914,19 @@ fn resolve_candidates(args: &PlanShotMatchArgs) -> Result<Vec<ShotSelectorArgs>,
         })
         .collect::<Vec<_>>();
     candidates.extend(args.candidate_shots.clone());
+    // Each candidate costs one full-resolution monitor proof, so the list is
+    // capped before any render rather than after the first few have already
+    // been paid for.
+    if candidates.len() > MAX_SHOT_MATCH_CANDIDATES {
+        return Err(ScopeError::excessive(format!(
+            "plan_shot_match requested {} candidate shots, above the {MAX_SHOT_MATCH_CANDIDATES} candidate limit; each candidate renders one managed monitor proof",
+            candidates.len()
+        ))
+        .with_details(json!({
+            "max": MAX_SHOT_MATCH_CANDIDATES,
+            "requested": candidates.len(),
+        })));
+    }
     let mut seen = BTreeSet::new();
     for candidate in &candidates {
         if !seen.insert(candidate.clip_id) {
@@ -773,12 +939,13 @@ fn resolve_candidates(args: &PlanShotMatchArgs) -> Result<Vec<ShotSelectorArgs>,
     Ok(candidates)
 }
 
+/// Accept only the exact CC2 stage vocabulary.
+///
+/// Friendly aliases such as `post_compositor` or `monitor` used to be accepted
+/// and then silently reported as `monitoring_post_composite`, which lets a
+/// caller believe a stage was measured that the backend cannot prove.
 fn validate_stage(stage: &str) -> Result<(), ScopeError> {
-    let normalized = stage.trim().to_ascii_lowercase();
-    if matches!(
-        normalized.as_str(),
-        "monitoring_post_composite" | "monitoring/post-composite" | "post_compositor" | "monitor"
-    ) {
+    if SUPPORTED_SCOPE_STAGES.contains(&stage) {
         Ok(())
     } else {
         Err(ScopeError::unsupported_stage(stage.to_owned()))
@@ -799,14 +966,16 @@ fn build_scope_request(
     max_width: Option<u32>,
     bins: Option<u16>,
     columns: Option<u16>,
+    include_grids: bool,
 ) -> Result<ScopeRequest, ScopeError> {
-    let frames = select_frames(
+    let selection = select_frames(
         document.duration,
         timecode,
         range,
         explicit_frames,
         step_frames,
     )?;
+    let frames = selection.frames;
     let roi = NormalizedRoi::validate(roi)?;
     let resolution = SamplingResolution::parse(resolution, proxy_sampling, max_width)?;
     let histogram_bins = match bins {
@@ -834,21 +1003,44 @@ fn build_scope_request(
     Ok(ScopeRequest {
         stage: stage.to_owned(),
         frames,
+        requested_range: range.map(|range| (range.start, range.end)),
+        step_frames: selection.step_frames,
+        step_source: selection.step_source,
         roi,
         resolution,
         histogram_bins,
         waveform_columns,
         vector_bins,
+        include_grids,
     })
 }
 
+/// The frames a request resolves to plus the spacing that produced them.
+#[derive(Debug)]
+struct FrameSelection {
+    frames: Vec<TimeCode>,
+    step_frames: Option<TimeCode>,
+    step_source: &'static str,
+}
+
+impl FrameSelection {
+    fn explicit(frames: Vec<TimeCode>) -> Self {
+        Self {
+            frames,
+            step_frames: None,
+            step_source: "not_applicable",
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 fn select_frames(
     duration: TimeCode,
     timecode: Option<TimeCode>,
     range: Option<&ScopeRangeArgs>,
     explicit_frames: Option<&[TimeCode]>,
     step_frames: Option<TimeCode>,
-) -> Result<Vec<TimeCode>, ScopeError> {
+) -> Result<FrameSelection, ScopeError> {
     let selector_count = usize::from(timecode.is_some())
         .saturating_add(usize::from(range.is_some()))
         .saturating_add(usize::from(explicit_frames.is_some()));
@@ -870,7 +1062,7 @@ fn select_frames(
                 frame.0, duration.0
             )));
         }
-        return Ok(vec![frame]);
+        return Ok(FrameSelection::explicit(vec![frame]));
     }
     if let Some(frames) = explicit_frames {
         if frames.is_empty() {
@@ -900,13 +1092,13 @@ fn select_frames(
                 )));
             }
         }
-        return Ok(frames.to_vec());
+        return Ok(FrameSelection::explicit(frames.to_vec()));
     }
     let Some(range) = range else {
         if duration <= TimeCode::ZERO {
             return Err(ScopeError::invalid_range("project duration is empty"));
         }
-        return Ok(vec![TimeCode::ZERO]);
+        return Ok(FrameSelection::explicit(vec![TimeCode::ZERO]));
     };
     if range.start < TimeCode::ZERO || range.end <= range.start || range.end > duration {
         return Err(ScopeError::invalid_range(format!(
@@ -915,18 +1107,21 @@ fn select_frames(
         )));
     }
     let span = range.end.0.saturating_sub(range.start.0);
-    let step = if let Some(step) = step_frames {
+    let (step, step_source) = if let Some(step) = step_frames {
         if step.0 <= 0 {
             return Err(ScopeError::invalid_range("step_frames must be positive"));
         }
-        step.0
+        (step.0, "explicit")
     } else {
         // A range without an explicit step still has a deterministic bounded
         // default.  Explicit steps are never clamped or reinterpreted.
-        span.saturating_add(i64::try_from(MAX_SCOPE_SAMPLES).unwrap_or(i64::MAX) - 1)
-            / i64::try_from(MAX_SCOPE_SAMPLES).unwrap_or(1)
-    }
-    .max(1);
+        (
+            span.saturating_add(i64::try_from(MAX_SCOPE_SAMPLES).unwrap_or(i64::MAX) - 1)
+                / i64::try_from(MAX_SCOPE_SAMPLES).unwrap_or(1),
+            "bounded_default",
+        )
+    };
+    let step = step.max(1);
     let count =
         usize::try_from((span.saturating_add(step).saturating_sub(1)) / step).unwrap_or(usize::MAX);
     if count == 0 {
@@ -945,7 +1140,11 @@ fn select_frames(
             .checked_add(step)
             .ok_or_else(|| ScopeError::invalid_range("temporal sample frame overflowed"))?;
     }
-    Ok(frames)
+    Ok(FrameSelection {
+        frames,
+        step_frames: Some(TimeCode(step)),
+        step_source,
+    })
 }
 
 fn render_samples(
@@ -1031,6 +1230,70 @@ fn full_provenance(metadata: &MonitorProofMetadata) -> Value {
     })
 }
 
+/// Grid scopes whose density arrays dominate the serialized payload.
+const DENSITY_GRID_KEYS: [&str; 3] = ["waveform", "parade", "vectorscope"];
+
+/// Serialize Core scope evidence with the two agent-owned overrides applied:
+/// the honest proxy/full-resolution marker, and the optional omission of the
+/// density grids.
+///
+/// Core measures whatever raster it is handed and therefore always marks it
+/// `full_resolution`.  Only the agent knows whether that raster came from the
+/// managed monitor proof or from an explicit proxy request, so the override is
+/// applied at *every* level a caller could read.
+fn core_evidence_value(
+    request: &ScopeRequest,
+    evidence: &ScopeEvidence,
+) -> Result<Value, ScopeError> {
+    let mut value = serde_json::to_value(evidence).map_err(|error| {
+        ScopeError::new(
+            "scope_serialization_failed",
+            format!("could not serialize core scope evidence: {error}"),
+        )
+    })?;
+    if request.resolution.proxy
+        && let Some(metadata) = value.get_mut("metadata")
+    {
+        metadata["full_resolution"] = Value::Bool(false);
+    }
+    if !request.include_grids
+        && let Some(object) = value.as_object_mut()
+    {
+        for key in DENSITY_GRID_KEYS {
+            object.remove(key);
+        }
+    }
+    value["grids_omitted"] = Value::Bool(!request.include_grids);
+    value["omitted_grids"] = if request.include_grids {
+        json!([])
+    } else {
+        json!(DENSITY_GRID_KEYS)
+    };
+    value["full_resolution"] = Value::Bool(!request.resolution.proxy);
+    Ok(value)
+}
+
+/// Drop the density-grid deltas from a scope comparison when the request did
+/// not ask for grids, so a comparison cannot reintroduce the payload the
+/// evidence itself omitted.
+fn comparison_value(
+    request: &ScopeRequest,
+    comparison: &kinewright_core::ScopeComparison,
+) -> Result<Value, ScopeError> {
+    let mut value = serde_json::to_value(comparison)
+        .map_err(|error| ScopeError::new("scope_comparison_failed", error.to_string()))?;
+    if !request.include_grids
+        && let Some(object) = value.as_object_mut()
+    {
+        for key in DENSITY_GRID_KEYS {
+            object.remove(key);
+        }
+    }
+    value["grids_omitted"] = Value::Bool(!request.include_grids);
+    value["full_resolution"] = Value::Bool(!request.resolution.proxy);
+    Ok(value)
+}
+
 fn scope_response(
     revision: TimelineRevision,
     document: &Document,
@@ -1038,21 +1301,7 @@ fn scope_response(
     rendered: &[RenderedSample],
 ) -> Result<Value, ScopeError> {
     let core_evidence = measure_core_scopes(request, rendered)?;
-    let mut core_value = serde_json::to_value(&core_evidence).map_err(|error| {
-        ScopeError::new(
-            "scope_serialization_failed",
-            format!("could not serialize core scope evidence: {error}"),
-        )
-    })?;
-    // The core engine measures the raster it receives and therefore marks that
-    // raster as full-resolution.  The agent additionally records whether the
-    // raster came from the full-resolution monitor proof or an explicit proxy
-    // request so a proxy result can never be mistaken for delivery evidence.
-    if request.resolution.proxy
-        && let Some(metadata) = core_value.get_mut("metadata")
-    {
-        metadata["full_resolution"] = Value::Bool(false);
-    }
+    let core_value = core_evidence_value(request, &core_evidence)?;
     let mut samples = Vec::with_capacity(rendered.len());
     for sample in rendered {
         let evidence = measure_core_scopes(request, std::slice::from_ref(sample))?;
@@ -1064,14 +1313,26 @@ fn scope_response(
         "requested_stage": request.stage,
         "render_stage": ScopeStage::MonitoringPostComposite.as_str(),
         "resolution": request.resolution.value(),
+        "full_resolution": !request.resolution.proxy,
         "roi": request.roi.value(),
         "temporal": {
             "frames": request.frames.iter().map(|frame| frame.0).collect::<Vec<_>>(),
-            "range": {
-                "start": request.frames.first().map_or(0, |frame| frame.0),
-                "end": request.frames.last().map_or(0, |frame| frame.0.saturating_add(1)),
+            // The requested span and the span actually covered by samples are
+            // different facts.  A step larger than one frame leaves the tail of
+            // the request unsampled, so both are reported separately and the
+            // ambiguous single `range` key is gone.
+            "requested_range": request.requested_range.map_or(Value::Null, |(start, end)| json!({
+                "start": start.0,
+                "end": end.0,
                 "half_open": true,
+            })),
+            "sampled_frames": {
+                "first": request.frames.first().map_or(Value::Null, |frame| json!(frame.0)),
+                "last": request.frames.last().map_or(Value::Null, |frame| json!(frame.0)),
+                "count": request.frames.len(),
             },
+            "step_frames": request.step_frames.map_or(Value::Null, |step| json!(step.0)),
+            "step_source": request.step_source,
             "sample_count": request.frames.len(),
             "maximum_samples": MAX_SCOPE_SAMPLES,
         },
@@ -1085,17 +1346,17 @@ fn scope_response(
                 "resolution": sample.provenance,
             })).collect::<Vec<_>>(),
         },
-        "waveform": core_value["waveform"].clone(),
-        "rgb_parade": core_value["parade"].clone(),
-        "vectorscope": core_value["vectorscope"].clone(),
-        "histogram": core_value["histograms"].clone(),
-        "clipping": core_value["clipping"].clone(),
         "gamut": {"out_of_range_pixels": 0, "out_of_range_basis_points": 0, "definition": "RGBA8 monitor proof is display-clamped; source/working gamut requires a named high-precision stage"},
+        // `core_evidence` is the single typed source of truth.  The former
+        // top-level waveform/rgb_parade/vectorscope/histogram/clipping aliases
+        // repeated the same arrays verbatim and roughly doubled the payload.
         "core_evidence": core_value,
+        "grids_omitted": !request.include_grids,
         "sample_results": samples,
     });
-    // Retain an explicit source of truth for callers that use the typed core
-    // evidence fields while keeping the compact agent aliases above.
+    // `core_evidence` above is the only copy of the scope arrays, so name the
+    // engine that produced them explicitly rather than leaving callers to infer
+    // it from the typed field shapes.
     value["provenance"]["scope_engine"] = json!("kinewright_core::measure_scopes");
     Ok(value)
 }
@@ -1143,8 +1404,9 @@ fn sample_value(sample: &RenderedSample, evidence: &ScopeEvidence, proxy: bool) 
 }
 
 fn shot_stats(evidence: &ScopeEvidence) -> ShotStats {
-    let mean =
-        |channel: kinewright_core::ChannelStatistics| f64::from(channel.mean) * 255.0 / 1_000_000.0;
+    let mean = |channel: kinewright_core::ChannelStatistics| {
+        f64::from(channel.mean) * CODE_VALUE_MAXIMUM / 1_000_000.0
+    };
     let means = [
         mean(evidence.statistics.red),
         mean(evidence.statistics.green),
@@ -1154,34 +1416,62 @@ fn shot_stats(evidence: &ScopeEvidence) -> ShotStats {
     let count = evidence.metadata.visible_pixel_count;
     let chroma =
         (means[0].max(means[1]).max(means[2]) - means[0].min(means[1]).min(means[2])).max(0.0);
+    // Every gain proposal is computed in linear light, so the display-coded
+    // channel means are decoded once here and reused.
+    let linear = [
+        bt709_eotf(means[0] / CODE_VALUE_MAXIMUM),
+        bt709_eotf(means[1] / CODE_VALUE_MAXIMUM),
+        bt709_eotf(means[2] / CODE_VALUE_MAXIMUM),
+    ];
+    let linear_luma =
+        BT709_LUMA_RED * linear[0] + BT709_LUMA_GREEN * linear[1] + BT709_LUMA_BLUE * linear[2];
     ShotStats {
         count,
         means,
         chroma,
+        linear,
+        linear_luma,
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ShotStats {
     count: u64,
+    /// Red, green, blue, and luma means as 8-bit display codes.
     means: [f64; 4],
+    /// Spread of the three channel means; a colour-cast indicator, not a
+    /// saturation measurement.
     chroma: f64,
+    /// Red, green, and blue means decoded to linear light through the BT.709
+    /// EOTF.
+    linear: [f64; 3],
+    /// BT.709-weighted linear luminance of `linear`.
+    linear_luma: f64,
 }
 
 fn shot_evidence(
     rendered: &[RenderedSample],
     evidence: &ScopeEvidence,
-    roi: NormalizedRoi,
+    request: &ScopeRequest,
 ) -> Value {
     let stats = shot_stats(evidence);
     json!({
         "sample_count": rendered.len(),
         "frames": rendered.iter().map(|sample| sample.frame.0).collect::<Vec<_>>(),
-        "mean_code_values": {"red": stats.means[0], "green": stats.means[1], "blue": stats.means[2], "luma": stats.means[3]},
-        "mean_normalized": {"red": stats.means[0] / 255.0, "green": stats.means[1] / 255.0, "blue": stats.means[2] / 255.0, "luma": stats.means[3] / 255.0},
+        // The two `luma` fields are different quantities and must not be
+        // compared or converted into each other: the display-coded means carry
+        // the integer luma statistic the scope engine measured, while the
+        // linear-light means apply BT.709 weights to the *linearised* RGB
+        // means. Linearising is non-linear, so weighting-then-linearising and
+        // linearising-then-weighting do not agree.
+        "mean_code_values": {"red": stats.means[0], "green": stats.means[1], "blue": stats.means[2], "luma": stats.means[3], "luma_basis": "integer_luma_code"},
+        "mean_normalized": {"red": stats.means[0] / CODE_VALUE_MAXIMUM, "green": stats.means[1] / CODE_VALUE_MAXIMUM, "blue": stats.means[2] / CODE_VALUE_MAXIMUM, "luma": stats.means[3] / CODE_VALUE_MAXIMUM, "luma_basis": "integer_luma_code"},
+        "mean_linear_light": {"red": stats.linear[0], "green": stats.linear[1], "blue": stats.linear[2], "luma": stats.linear_luma, "luma_basis": "bt709_weights_on_linearised_means"},
         "chroma_mean_code_values": stats.chroma,
         "pixel_count": stats.count,
-        "roi": roi.value(),
+        "roi": request.roi.value(),
+        "resolution": request.resolution.value(),
+        "full_resolution": !request.resolution.proxy,
         "clipping": evidence.clipping,
         "scope_statistics": evidence.statistics,
     })
@@ -1214,59 +1504,268 @@ fn signed_deltas(reference: ShotStats, candidate: ShotStats) -> Value {
         "red_basis_points": signed_round((candidate.means[0] - reference.means[0]) * 10_000.0 / 255.0),
         "green_basis_points": signed_round((candidate.means[1] - reference.means[1]) * 10_000.0 / 255.0),
         "blue_basis_points": signed_round((candidate.means[2] - reference.means[2]) * 10_000.0 / 255.0),
-        "luma_basis_points": signed_round((candidate.means[3] - reference.means[3]) * 10_000.0 / 255.0),
+        "luma_basis_points": signed_round((candidate.means[3] - reference.means[3]) * 10_000.0 / CODE_VALUE_MAXIMUM),
+        // Chroma is the spread of the three channel means, so it moves with any
+        // colour cast.  It is reported as evidence and is deliberately never
+        // turned into a saturation proposal.
+        "chroma_code_values": signed_round(candidate.chroma - reference.chroma),
+        "linear_luma_ratio_basis_points": signed_round(
+            linear_ratio(reference.linear_luma, candidate.linear_luma).map_or(0.0, |ratio| (ratio - 1.0) * 10_000.0)
+        ),
         "sign_convention": "candidate minus reference; proposed correction moves candidate toward reference",
     })
 }
 
-fn match_parameters(reference: ShotStats, candidate: ShotStats) -> BTreeMap<String, i64> {
-    let exposure = if candidate.means[3] <= 0.5 || reference.means[3] <= 0.5 {
-        0
-    } else {
-        signed_round((reference.means[3] / candidate.means[3]).log2() * 1_000.0)
+/// The bounded, unapplied starting proposal for one candidate shot.
+struct MatchProposal {
+    /// Exactly the controls that are proposed, as **absolute** values already
+    /// composed with any existing grade and clamped to the Core descriptor
+    /// range. `SetEffectParam` writes absolute values, so these are what the
+    /// operation carries.
+    parameters: BTreeMap<String, i64>,
+    /// Per-control `current`/`delta`/`requested`/`value`/`clamped`/`min`/`max`
+    /// evidence, plus the `composed`, `composition_model`, `current_parameters`
+    /// and `delta_parameters` summary, so neither the clamp nor the
+    /// composition is ever silent.
+    details: Value,
+    /// True when the proposal was composed against an existing
+    /// `primary_correction` node rather than starting from neutral.
+    composed: bool,
+}
+
+/// `reference / candidate`, or `None` when either side is non-positive.
+///
+/// A zero or negative linear mean means the ROI carried no measurable signal
+/// on that axis; proposing a gain from it would be inventing evidence.
+fn linear_ratio(reference: f64, candidate: f64) -> Option<f64> {
+    (reference > 0.0 && candidate > 0.0 && reference.is_finite() && candidate.is_finite())
+        .then(|| reference / candidate)
+}
+
+/// Inclusive Core descriptor bounds for one primary control.
+///
+/// Read from `EFFECT_DESCRIPTORS` rather than hardcoded so the clamp reported
+/// to the caller is exactly the range Core will validate against.
+fn primary_parameter_bounds(name: &str) -> (i64, i64) {
+    kinewright_core::effect_descriptor("primary_correction")
+        .and_then(|descriptor| {
+            descriptor
+                .parameter(name)
+                .map(|parameter| (parameter.min, parameter.max))
+        })
+        .unwrap_or((i64::MIN, i64::MAX))
+}
+
+/// Derive a bounded, first-order starting proposal that moves one candidate
+/// shot toward the reference shot.
+///
+/// This is deliberately *not* a solve.  It is a single first-order step in the
+/// exact CC1 managed model, computed from linearised channel means, and every
+/// term is reported with its raw value so a human or agent can see what was
+/// clamped.
+///
+/// # Exposure
+///
+/// The managed model multiplies linear light by
+/// `2^(exposure_milli_stops / 1000)`.  Matching the candidate's linear luma to
+/// the reference's therefore needs
+/// `exposure_milli_stops = 1000 * log2(reference_linear_luma / candidate_linear_luma)`.
+/// A candidate darker than the reference yields a positive proposal.
+///
+/// # Temperature
+///
+/// The model scales red by `1 + 0.001 * temperature_percent` and blue by
+/// `1 - 0.001 * temperature_percent` (see
+/// [`CC1_WHITE_BALANCE_GAIN_PER_PERCENT`]).  Writing `p` for the proposal and
+/// `k` for that per-percent gain, the candidate's red/blue ratio after
+/// correction is `(candR / candB) * (1 + k*p) / (1 - k*p)`.  Setting that equal
+/// to `refR / refB` and expanding to first order in `p`:
+///
+/// ```text
+/// (1 + k*p) / (1 - k*p) ~= 1 + 2*k*p
+/// 1 + 2*k*p             =  (refR/refB) / (candR/candB)
+/// p                     =  ((refR/refB) / (candR/candB) - 1) / (2*k)
+/// ```
+///
+/// A blue-cast candidate has a red/blue ratio below the reference's, so the
+/// right-hand side is positive: the proposal warms the shot.
+///
+/// # Tint
+///
+/// The model scales green by `1 - 0.001 * tint_percent`.  Red and blue move in
+/// opposite directions under the temperature term, so their mid-point is
+/// unchanged **exactly** only for a neutral red/blue balance
+/// (`candR == candB`); for any other balance a first-order residual of order
+/// `k * temperature_percent * (candR - candB) / (candR + candB)` remains in the
+/// mid-point, and the tint proposal absorbs it.  Writing
+/// `g_cand = candG / mid(candR, candB)` and likewise for the reference, the
+/// correction must satisfy `g_cand * (1 - k*p) = g_ref`, so
+///
+/// ```text
+/// p = (1 - g_ref / g_cand) / k
+/// ```
+///
+/// A too-green candidate has `g_cand > g_ref`, so the proposal is **positive** —
+/// which is what reduces green in this model.  The previous implementation used
+/// `reference - candidate` here and therefore made a green cast greener.
+///
+/// # Saturation
+///
+/// No saturation is proposed.  The available chroma statistic is the spread of
+/// the three channel means, which already moves with any colour cast, so a
+/// saturation term derived from it double-counts the white-balance correction.
+///
+/// # Composition with an existing grade
+///
+/// Every term above is a **delta**: it describes how much further the shot has
+/// to move from where the scopes just measured it.  The scopes measure the
+/// monitoring output, so a clip that already carries a `primary_correction`
+/// node was measured *through* that grade.  Emitting the delta as the node's
+/// absolute value would therefore discard the existing grade entirely.
+///
+/// When `existing` is supplied, each control is composed as
+/// `existing + delta` **before** clamping, which is the documented first-order
+/// additive model for these three controls, and the composed value is what the
+/// proposal writes.  Composing before the clamp matters: clamping the delta
+/// first and adding afterwards can land outside the descriptor range.
+fn match_parameters(
+    reference: ShotStats,
+    candidate: ShotStats,
+    existing: Option<&ExistingPrimaryNode>,
+) -> MatchProposal {
+    let gain_per_percent = CC1_WHITE_BALANCE_GAIN_PER_PERCENT;
+
+    let exposure = linear_ratio(reference.linear_luma, candidate.linear_luma)
+        .map(|ratio| ratio.log2() * 1_000.0);
+
+    let reference_red_blue = linear_ratio(reference.linear[0], reference.linear[2]);
+    let candidate_red_blue = linear_ratio(candidate.linear[0], candidate.linear[2]);
+    let temperature = match (reference_red_blue, candidate_red_blue) {
+        (Some(reference_ratio), Some(candidate_ratio)) if candidate_ratio > 0.0 => {
+            Some((reference_ratio / candidate_ratio - 1.0) / (2.0 * gain_per_percent))
+        }
+        _ => None,
     };
-    let saturation = signed_round((reference.chroma - candidate.chroma) * 100.0 / 128.0);
-    let temperature = signed_round(
-        ((reference.means[0] - reference.means[2]) - (candidate.means[0] - candidate.means[2]))
-            * 100.0
-            / 255.0,
-    );
-    let tint = signed_round(
-        ((reference.means[1] - f64::midpoint(reference.means[0], reference.means[2]))
-            - (candidate.means[1] - f64::midpoint(candidate.means[0], candidate.means[2])))
-            * 100.0
-            / 255.0,
-    );
+
+    let green_over_mid = |stats: &ShotStats| {
+        let mid = f64::midpoint(stats.linear[0], stats.linear[2]);
+        linear_ratio(stats.linear[1], mid)
+    };
+    let tint = match (green_over_mid(&reference), green_over_mid(&candidate)) {
+        (Some(reference_ratio), Some(candidate_ratio)) if candidate_ratio > 0.0 => {
+            Some((1.0 - reference_ratio / candidate_ratio) / gain_per_percent)
+        }
+        _ => None,
+    };
+
+    let composed = existing.is_some();
     let mut parameters = BTreeMap::new();
-    if exposure != 0 {
-        parameters.insert(
-            "exposure_milli_stops".to_owned(),
-            exposure.clamp(-5_000, 5_000),
+    let mut current_parameters = serde_json::Map::new();
+    let mut delta_parameters = serde_json::Map::new();
+    let mut controls = serde_json::Map::new();
+    for (name, raw) in [
+        ("exposure_milli_stops", exposure),
+        ("temperature_percent", temperature),
+        ("tint_percent", tint),
+    ] {
+        let Some(raw_delta) = raw.filter(|value| value.is_finite()) else {
+            continue;
+        };
+        let delta = signed_round(raw_delta);
+        if delta == 0 {
+            // Nothing to move: the composed value would equal the value the
+            // node already holds, so the proposal stays empty for this control.
+            continue;
+        }
+        let current = existing.map_or(0, |node| {
+            node.parameters.get(name).copied().unwrap_or_default()
+        });
+        // First-order additive composition, before the clamp: clamping the
+        // delta on its own and adding afterwards can leave the descriptor range.
+        let requested = current.saturating_add(delta);
+        let (min, max) = primary_parameter_bounds(name);
+        let value = requested.clamp(min, max);
+        let keyframed = existing.is_some_and(|node| node.keyframed.iter().any(|key| key == name));
+        parameters.insert(name.to_owned(), value);
+        current_parameters.insert(name.to_owned(), json!(current));
+        delta_parameters.insert(name.to_owned(), json!(delta));
+        controls.insert(
+            name.to_owned(),
+            json!({
+                "current": current,
+                "delta": delta,
+                "requested": requested,
+                "value": value,
+                "clamped": value != requested,
+                "min": min,
+                "max": max,
+                // The raw first-order term before rounding. It is a delta, not
+                // the value written: `requested` is `current + delta`.
+                "unrounded_delta": raw_delta,
+                "composed": composed,
+                "keyframed": keyframed,
+            }),
         );
     }
-    if temperature != 0 {
-        parameters.insert(
-            "temperature_percent".to_owned(),
-            temperature.clamp(-100, 100),
-        );
+    let mut details = controls;
+    details.insert("composed".to_owned(), json!(composed));
+    details.insert(
+        "composition_model".to_owned(),
+        json!(if composed {
+            "existing_plus_delta_first_order_additive"
+        } else {
+            "absolute_delta_from_neutral"
+        }),
+    );
+    details.insert(
+        "current_parameters".to_owned(),
+        Value::Object(current_parameters),
+    );
+    details.insert(
+        "delta_parameters".to_owned(),
+        Value::Object(delta_parameters),
+    );
+    MatchProposal {
+        parameters,
+        details: Value::Object(details),
+        composed,
     }
-    if tint != 0 {
-        parameters.insert("tint_percent".to_owned(), tint.clamp(-100, 100));
-    }
-    if saturation != 0 {
-        parameters.insert("saturation_percent".to_owned(), saturation.clamp(-100, 100));
-    }
-    parameters
 }
 
 fn assumptions(document: &Document, asset: AssetId, request: &ScopeRequest) -> Value {
     let color_description = document.asset(asset).map(|asset| &asset.color_description);
-    json!([
-        "RGBA8 scope values are measured after the named managed compositor boundary",
-        "candidate-minus-reference deltas are signed display-code evidence, not a flattened LUT",
-        {"asset_id": asset.0, "source_color_description": color_description},
-        {"roi": request.roi.value(), "sampling": request.resolution.value()},
-    ])
+    let mut entries = vec![
+        json!("RGBA8 scope values are measured after the named managed compositor boundary"),
+        json!(
+            "candidate-minus-reference deltas are signed display-code evidence, not a flattened LUT"
+        ),
+        json!({
+            "proposal_basis": "linearised channel means of 8-bit monitoring codes; first-order bounded starting proposal, not a solve",
+        }),
+        json!({
+            "saturation_proposal": "omitted",
+            "reason": "the available chroma statistic is the spread of the three channel means, which already moves with any colour cast; a saturation term derived from it would double-count the white-balance proposal",
+            "chroma_delta_role": "evidence_only",
+        }),
+        json!({"asset_id": asset.0, "source_color_description": color_description}),
+        json!({"roi": request.roi.value(), "sampling": request.resolution.value()}),
+    ];
+    if request.resolution.proxy {
+        entries.push(json!({
+            "proxy_sampling": "shares_live_playback_renderer",
+            "detail": "Proxy samples come from the same thumbnail renderer the live playback path uses, so they are not isolated from playback state and carry no backend/adapter attribution. Isolating the proxy renderer is engine work outside this tool.",
+            "backend": Value::Null,
+            "provenance": "proxy_unverified_by_backend",
+        }));
+    }
+    if !request.include_grids {
+        entries.push(json!({
+            "grids_omitted": true,
+            "omitted_grids": DENSITY_GRID_KEYS,
+            "recovery": "Send include_grids=true to receive the waveform, parade, and vectorscope density grids.",
+        }));
+    }
+    Value::Array(entries)
 }
 
 fn visual_clip(document: &Document, clip_id: ClipId) -> Result<&Clip, ScopeError> {
@@ -1636,31 +2135,33 @@ mod tests {
 
     #[test]
     fn temporal_ranges_are_half_open_and_bounded() {
+        let selection = select_frames(
+            TimeCode(10),
+            None,
+            Some(&ScopeRangeArgs {
+                start: TimeCode(2),
+                end: TimeCode(8),
+            }),
+            None,
+            Some(TimeCode(2)),
+        )
+        .unwrap();
         assert_eq!(
-            select_frames(
-                TimeCode(10),
-                None,
-                Some(&ScopeRangeArgs {
-                    start: TimeCode(2),
-                    end: TimeCode(8)
-                }),
-                None,
-                Some(TimeCode(2))
-            )
-            .unwrap(),
+            selection.frames,
             vec![TimeCode(2), TimeCode(4), TimeCode(6)]
         );
-        assert_eq!(
-            select_frames(
-                TimeCode(10),
-                None,
-                None,
-                Some(&[TimeCode(0), TimeCode(9)]),
-                None
-            )
-            .unwrap(),
-            vec![TimeCode(0), TimeCode(9)]
-        );
+        assert_eq!(selection.step_frames, Some(TimeCode(2)));
+        assert_eq!(selection.step_source, "explicit");
+        let explicit = select_frames(
+            TimeCode(10),
+            None,
+            None,
+            Some(&[TimeCode(0), TimeCode(9)]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(explicit.frames, vec![TimeCode(0), TimeCode(9)]);
+        assert_eq!(explicit.step_frames, None);
         assert_eq!(
             select_frames(
                 TimeCode(10),
@@ -1691,6 +2192,49 @@ mod tests {
     }
 
     #[test]
+    fn roi_rejects_a_subquantum_extent_by_field_name() {
+        let error = NormalizedRoi::validate(Some(&ScopeRoiArgs {
+            x: Some(0.5),
+            y: Some(0.0),
+            width: Some(0.000_01),
+            height: Some(1.0),
+            left: None,
+            top: None,
+            right: None,
+            bottom: None,
+        }))
+        .unwrap_err();
+        assert_eq!(error.code(), "invalid_roi");
+        assert!(error.to_string().contains("width"), "{error}");
+        assert!(error.to_string().contains("basis point"), "{error}");
+    }
+
+    #[test]
+    fn only_the_exact_stage_vocabulary_is_accepted() {
+        assert!(validate_stage("monitoring_post_composite").is_ok());
+        assert!(validate_stage("monitoring/post-composite").is_ok());
+        for rejected in [
+            "post_compositor",
+            "monitor",
+            " monitoring_post_composite ",
+            "MONITORING_POST_COMPOSITE",
+            "delivery",
+        ] {
+            let error = validate_stage(rejected).unwrap_err();
+            assert_eq!(
+                error.code(),
+                "unsupported_stage",
+                "{rejected} must fail closed"
+            );
+            assert_eq!(
+                error.details()["supported_stages"],
+                json!(["monitoring_post_composite", "monitoring/post-composite"])
+            );
+        }
+        assert_eq!(default_scope_stage(), "monitoring_post_composite");
+    }
+
+    #[test]
     fn scope_math_reports_channels_and_signed_deltas() {
         let roi = NormalizedRoi::FULL.core().unwrap();
         let request = CoreScopeRequest {
@@ -1700,20 +2244,129 @@ mod tests {
         };
         let evidence = measure_scopes(&[ScopeFrame::new(0, &image())], &request).unwrap();
         let stats = shot_stats(&evidence);
-        assert!(stats.means[0] > 0.0 && stats.means[2] > 0.0);
-        let delta = signed_deltas(
-            stats,
-            ShotStats {
-                means: [2.0, 2.0, 2.0, 2.0],
-                count: 1,
-                chroma: 0.0,
-            },
+        // The fixture is one dark pixel (10,20,30) and one bright pixel
+        // (240,220,200), so every channel mean sits near the midpoint.
+        assert!((stats.means[0] - 125.0).abs() < 1.0, "{:?}", stats.means);
+        assert!((stats.means[1] - 120.0).abs() < 1.0, "{:?}", stats.means);
+        assert!((stats.means[2] - 115.0).abs() < 1.0, "{:?}", stats.means);
+        // Linearising a mid-grey code must land well below the coded value.
+        assert!(
+            stats.linear[0] < 0.30 && stats.linear[0] > 0.15,
+            "{:?}",
+            stats.linear
         );
-        assert!(delta["red_code_values"].is_number());
+        assert!(stats.linear_luma > 0.0 && stats.linear_luma < 0.30);
+
+        let darker = ShotStats {
+            means: [2.0, 2.0, 2.0, 2.0],
+            count: 1,
+            chroma: 0.0,
+            linear: [0.001, 0.001, 0.001],
+            linear_luma: 0.001,
+        };
+        let delta = signed_deltas(stats, darker);
+        // Candidate minus reference: the darker candidate is negative on every
+        // channel, and the sign is asserted rather than merely "is a number".
+        assert!(delta["red_code_values"].as_i64().unwrap() < -100);
+        assert!(delta["green_code_values"].as_i64().unwrap() < -100);
+        assert!(delta["blue_code_values"].as_i64().unwrap() < -100);
+        assert!(delta["luma_code_values"].as_i64().unwrap() < -100);
+        assert!(delta["red_basis_points"].as_i64().unwrap() < -4_000);
+        // The reference is chromatic and the candidate is neutral, so the
+        // chroma delta is negative evidence.
+        assert!(delta["chroma_code_values"].as_i64().unwrap() < 0);
         assert!(serde_json::to_value(evidence).unwrap()["parade"]["red"].is_object());
     }
 
+    fn flat_stats(red: f64, green: f64, blue: f64) -> ShotStats {
+        let means = [
+            red,
+            green,
+            blue,
+            0.2126 * red + 0.7152 * green + 0.0722 * blue,
+        ];
+        let chroma =
+            (means[0].max(means[1]).max(means[2]) - means[0].min(means[1]).min(means[2])).max(0.0);
+        let linear = [
+            bt709_eotf(red / CODE_VALUE_MAXIMUM),
+            bt709_eotf(green / CODE_VALUE_MAXIMUM),
+            bt709_eotf(blue / CODE_VALUE_MAXIMUM),
+        ];
+        ShotStats {
+            count: 2,
+            means,
+            chroma,
+            linear_luma: BT709_LUMA_RED * linear[0]
+                + BT709_LUMA_GREEN * linear[1]
+                + BT709_LUMA_BLUE * linear[2],
+            linear,
+        }
+    }
+
     #[test]
+    fn match_parameters_move_a_candidate_toward_the_reference() {
+        let reference = flat_stats(128.0, 128.0, 128.0);
+
+        // A green cast must produce a POSITIVE tint, because the CC1 model uses
+        // green_gain = 1 - 0.1 * tint.
+        let green_cast = match_parameters(reference, flat_stats(128.0, 150.0, 128.0), None);
+        let tint = green_cast.parameters["tint_percent"];
+        assert!(
+            tint > 0,
+            "green cast must propose a positive tint, got {tint}"
+        );
+        assert!(!green_cast.parameters.contains_key("saturation_percent"));
+
+        // A blue cast must warm the shot with a POSITIVE temperature.
+        let blue_cast = match_parameters(reference, flat_stats(110.0, 128.0, 150.0), None);
+        let temperature = blue_cast.parameters["temperature_percent"];
+        assert!(
+            temperature > 0,
+            "blue cast must propose a positive temperature, got {temperature}"
+        );
+
+        // A warm candidate must cool down.
+        let warm_cast = match_parameters(reference, flat_stats(150.0, 128.0, 110.0), None);
+        assert!(warm_cast.parameters["temperature_percent"] < 0);
+
+        // A dark candidate must be brightened.
+        let dark = match_parameters(reference, flat_stats(64.0, 64.0, 64.0), None);
+        let exposure = dark.parameters["exposure_milli_stops"];
+        assert!(
+            exposure > 0,
+            "dark candidate must propose a positive exposure, got {exposure}"
+        );
+        // 128 -> 64 in code is roughly a 2.4 stop linear change, far more than
+        // the ~1 stop a naive gamma-coded log2 ratio would have proposed.
+        assert!(exposure > 1_500, "linearised exposure was {exposure}");
+
+        // No difference proposes nothing at all.
+        assert!(
+            match_parameters(reference, reference, None)
+                .parameters
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn clamped_proposals_report_the_raw_request() {
+        // An extreme cast saturates the +-100 percent temperature range.
+        let proposal = match_parameters(
+            flat_stats(250.0, 128.0, 20.0),
+            flat_stats(20.0, 128.0, 250.0),
+            None,
+        );
+        let details = &proposal.details["temperature_percent"];
+        assert_eq!(details["max"], 100);
+        assert_eq!(details["min"], -100);
+        assert_eq!(details["clamped"], true);
+        assert_eq!(details["value"], 100);
+        assert!(details["requested"].as_i64().unwrap() > 100);
+        assert_eq!(proposal.parameters["temperature_percent"], 100);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
     fn shot_match_is_read_only_full_resolution_and_revision_gated() {
         let document = Arc::new(two_shot_document());
         let original = (*document).clone();
@@ -1750,26 +2403,61 @@ mod tests {
             max_width: None,
             bins: None,
             columns: None,
+            include_grids: None,
         };
         let result = plan_shot_match(&document, TimelineRevision(7), &analysis, &args).unwrap();
         assert_eq!(result["reference_shot"]["clip_id"], 1);
         assert_eq!(result["reference_retained"], true);
         assert_eq!(result["applied"], false);
+        assert_eq!(result["full_resolution"], true);
+        assert_eq!(result["resolution"]["full_resolution"], true);
         assert_eq!(
             result["reference_shot"]["evidence"]["scope_evidence"]["metadata"]["full_resolution"],
             true
         );
+        assert_eq!(
+            result["reference_shot"]["evidence"]["full_resolution"],
+            true
+        );
+        assert_eq!(result["candidates"][0]["full_resolution"], true);
         assert!(
             result["candidates"][0]["signed_deltas"]["luma_code_values"]
                 .as_i64()
                 .is_some_and(|delta| delta > 0)
         );
+
+        // The candidate (100,120,140) is darker, bluer, and greener than the
+        // reference (40,50,60) is... in fact it is brighter, so the proposal
+        // must darken it while correcting the blue cast.
+        let parameters = &result["candidates"][0]["proposed_parameters"];
+        assert!(
+            parameters["exposure_milli_stops"].as_i64().unwrap() < 0,
+            "brighter candidate must be darkened: {parameters}"
+        );
+        assert!(parameters.get("saturation_percent").is_none());
+        assert!(
+            result["candidates"][0]["proposal_details"]["exposure_milli_stops"]["clamped"]
+                .as_bool()
+                .is_some()
+        );
+
         let operations = result["editable_operations"][0]["operations"]
             .as_array()
             .unwrap();
         assert!(!operations.is_empty());
         assert!(operations[0].get("AddEffect").is_some());
         assert_eq!(result["editable_operations"][0]["expected_revision"], 7);
+        assert_eq!(
+            result["editable_operations"][0]["existing_primary_node_count"],
+            0
+        );
+        assert_eq!(result["editable_operations"][0]["created_new_node"], true);
+        assert_eq!(result["editable_operations"][0]["no_change"], false);
+        assert!(
+            result["editable_operations"][0]["target_effect_id"]
+                .as_u64()
+                .is_some()
+        );
         assert_eq!(*document, original);
 
         let stale = plan_shot_match(&document, TimelineRevision(8), &analysis, &args).unwrap_err();
@@ -1781,14 +2469,446 @@ mod tests {
             &analysis,
             &PlanShotMatchArgs {
                 stage: "delivery".to_owned(),
-                ..args
+                ..args.clone()
             },
         )
         .unwrap_err();
         assert_eq!(unsupported.code(), "unsupported_stage");
+
+        let alias_rejected = plan_shot_match(
+            &document,
+            TimelineRevision(7),
+            &analysis,
+            &PlanShotMatchArgs {
+                stage: "post_compositor".to_owned(),
+                ..args
+            },
+        )
+        .unwrap_err();
+        assert_eq!(alias_rejected.code(), "unsupported_stage");
     }
 
     #[test]
+    fn shot_match_signs_are_asserted_for_synthetic_casts() {
+        // Reference is neutral mid-grey; the candidate carries an explicit cast
+        // in each variant below.
+        let document = Arc::new(two_shot_document());
+        let base = |red: u8, green: u8, blue: u8| RgbaImage {
+            width: 2,
+            height: 1,
+            pixels: vec![red, green, blue, 255, red, green, blue, 255],
+        };
+        let plan = |candidate: RgbaImage| {
+            let analysis = StubAnalysis {
+                frames: BTreeMap::from([
+                    (TimeCode(0), base(128, 128, 128)),
+                    (TimeCode(30), candidate),
+                ]),
+            };
+            plan_shot_match(
+                &document,
+                TimelineRevision(7),
+                &analysis,
+                &PlanShotMatchArgs {
+                    expected_revision: TimelineRevision(7),
+                    reference_clip_id: Some(ClipId(1)),
+                    reference_shot: None,
+                    candidate_clip_ids: vec![ClipId(2)],
+                    candidate_shots: Vec::new(),
+                    stage: "monitoring_post_composite".to_owned(),
+                    roi: None,
+                    resolution: None,
+                    proxy_sampling: false,
+                    max_width: None,
+                    bins: None,
+                    columns: None,
+                    include_grids: None,
+                },
+            )
+            .unwrap()
+        };
+        let operations_for = |value: &Value| {
+            value["editable_operations"][0]["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|operation| operation.get("SetEffectParam").cloned())
+                .map(|operation| {
+                    (
+                        operation["name"].as_str().unwrap().to_owned(),
+                        operation["value"].as_i64().unwrap(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+
+        let green = plan(base(128, 150, 128));
+        let green_ops = operations_for(&green);
+        assert!(
+            green_ops["tint_percent"] > 0,
+            "green candidate must get a positive tint: {green_ops:?}"
+        );
+        assert!(!green_ops.contains_key("saturation_percent"));
+        assert_eq!(
+            green["candidates"][0]["proposed_parameters"]["tint_percent"],
+            green_ops["tint_percent"]
+        );
+
+        let blue = plan(base(110, 128, 150));
+        let blue_ops = operations_for(&blue);
+        assert!(
+            blue_ops["temperature_percent"] > 0,
+            "blue candidate must get a positive temperature: {blue_ops:?}"
+        );
+
+        let dark = plan(base(64, 64, 64));
+        let dark_ops = operations_for(&dark);
+        assert!(
+            dark_ops["exposure_milli_stops"] > 0,
+            "dark candidate must get a positive exposure: {dark_ops:?}"
+        );
+
+        // Confidence and assumptions are part of the contract.
+        let confidence = &dark["candidates"][0]["confidence"];
+        assert!(confidence["basis_points"].as_u64().unwrap() <= 10_000);
+        assert!(["low", "medium", "high"].contains(&confidence["label"].as_str().unwrap()));
+        let assumptions = dark["candidates"][0]["assumptions"].as_array().unwrap();
+        assert!(assumptions.iter().any(|entry| {
+            entry["proposal_basis"]
+                == "linearised channel means of 8-bit monitoring codes; first-order bounded starting proposal, not a solve"
+        }));
+        assert!(
+            assumptions
+                .iter()
+                .any(|entry| entry["saturation_proposal"] == "omitted")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn shot_match_targets_an_existing_primary_node_without_stacking() {
+        let mut document = two_shot_document();
+        // A non-neutral grade the scopes already measured through. The match
+        // term is a delta on top of these values, so the proposal has to
+        // compose rather than overwrite them.
+        document.tracks[0].clips[1]
+            .effects
+            .push(kinewright_core::Effect {
+                id: kinewright_core::EffectId(9),
+                name: "primary_correction".to_owned(),
+                parameters: BTreeMap::from([
+                    (
+                        "exposure_milli_stops".to_owned(),
+                        kinewright_core::ParamValue::Integer(500),
+                    ),
+                    (
+                        "temperature_percent".to_owned(),
+                        kinewright_core::ParamValue::Integer(40),
+                    ),
+                ]),
+                keyframes: BTreeMap::from([(
+                    "exposure_milli_stops".to_owned(),
+                    kinewright_core::AutomationCurve {
+                        keyframes: vec![kinewright_core::Keyframe {
+                            at: TimeCode::ZERO,
+                            value: 500,
+                            interpolation: kinewright_core::KeyframeInterpolation::default(),
+                        }],
+                    },
+                )]),
+            });
+        let document = Arc::new(document);
+        let analysis = StubAnalysis {
+            frames: BTreeMap::from([
+                (
+                    TimeCode(0),
+                    RgbaImage {
+                        width: 2,
+                        height: 1,
+                        pixels: vec![128, 128, 128, 255, 128, 128, 128, 255],
+                    },
+                ),
+                (
+                    TimeCode(30),
+                    RgbaImage {
+                        width: 2,
+                        height: 1,
+                        pixels: vec![64, 64, 64, 255, 64, 64, 64, 255],
+                    },
+                ),
+            ]),
+        };
+        let result = plan_shot_match(
+            &document,
+            TimelineRevision(7),
+            &analysis,
+            &PlanShotMatchArgs {
+                expected_revision: TimelineRevision(7),
+                reference_clip_id: Some(ClipId(1)),
+                reference_shot: None,
+                candidate_clip_ids: vec![ClipId(2)],
+                candidate_shots: Vec::new(),
+                stage: "monitoring_post_composite".to_owned(),
+                roi: None,
+                resolution: None,
+                proxy_sampling: false,
+                max_width: None,
+                bins: None,
+                columns: None,
+                include_grids: None,
+            },
+        )
+        .unwrap();
+        let operations = result["editable_operations"][0]["operations"]
+            .as_array()
+            .unwrap();
+        assert!(
+            operations
+                .iter()
+                .all(|operation| operation.get("AddEffect").is_none()),
+            "an existing primary node must be corrected in place: {operations:?}"
+        );
+        assert_eq!(
+            result["editable_operations"][0]["existing_primary_node_count"],
+            1
+        );
+        assert_eq!(result["editable_operations"][0]["created_new_node"], false);
+        assert_eq!(result["editable_operations"][0]["target_effect_id"], 9);
+        assert!(
+            operations
+                .iter()
+                .all(|operation| operation["SetEffectParam"]["effect"] == 9)
+        );
+
+        // The candidate is half the reference's code value, so the match term
+        // is a large positive exposure delta and nothing else moves.
+        let entry = &result["editable_operations"][0];
+        assert_eq!(entry["composed"], true);
+        assert_eq!(entry["current_parameters"]["exposure_milli_stops"], 500);
+        let delta = entry["delta_parameters"]["exposure_milli_stops"]
+            .as_i64()
+            .expect("the exposure delta is reported");
+        assert!(delta > 1_500, "exposure delta was {delta}");
+        let composed = entry["parameters"]["exposure_milli_stops"]
+            .as_i64()
+            .expect("the composed exposure is proposed");
+        assert_eq!(
+            composed,
+            500 + delta,
+            "an existing grade composes with the delta instead of being discarded"
+        );
+
+        let details = &entry["proposal_details"]["exposure_milli_stops"];
+        assert_eq!(details["current"], 500);
+        assert_eq!(details["delta"], delta);
+        assert_eq!(details["requested"], composed);
+        assert_eq!(details["value"], composed);
+        assert_eq!(details["composed"], true);
+        assert_eq!(details["keyframed"], true);
+        assert_eq!(
+            entry["proposal_details"]["composition_model"],
+            "existing_plus_delta_first_order_additive"
+        );
+
+        // The written operation carries the composed absolute value, not the
+        // bare delta.
+        let exposure_operation = operations
+            .iter()
+            .find(|operation| operation["SetEffectParam"]["name"] == "exposure_milli_stops")
+            .expect("the exposure control is written");
+        assert_eq!(exposure_operation["SetEffectParam"]["value"], composed);
+
+        // A control whose delta rounds to zero is left exactly as the operator
+        // graded it: no operation, no entry in the proposal.
+        assert!(entry["parameters"].get("temperature_percent").is_none());
+        assert!(
+            operations
+                .iter()
+                .all(|operation| operation["SetEffectParam"]["name"] != "temperature_percent")
+        );
+
+        // Composing against an animated control is ambiguous, so the plan says
+        // it targets the static value instead of failing silently.
+        let warnings = entry["warnings"].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|warning| {
+                let warning = warning.as_str().unwrap_or_default();
+                warning.contains("keyframes exposure_milli_stops")
+                    && warning.contains("static value")
+            }),
+            "a keyframed target parameter must be reported: {warnings:?}"
+        );
+    }
+
+    /// A proposal that changes nothing and would have had to create the node
+    /// never allocates an effect id, so it must not publish one.
+    #[test]
+    fn a_no_op_shot_match_publishes_no_target_effect_id() {
+        let document = Arc::new(two_shot_document());
+        // Identical shots: every match term rounds to zero.
+        let frame = RgbaImage {
+            width: 2,
+            height: 1,
+            pixels: vec![128, 128, 128, 255, 128, 128, 128, 255],
+        };
+        let analysis = StubAnalysis {
+            frames: BTreeMap::from([(TimeCode(0), frame.clone()), (TimeCode(30), frame)]),
+        };
+        let result = plan_shot_match(
+            &document,
+            TimelineRevision(7),
+            &analysis,
+            &PlanShotMatchArgs {
+                expected_revision: TimelineRevision(7),
+                reference_clip_id: Some(ClipId(1)),
+                reference_shot: None,
+                candidate_clip_ids: vec![ClipId(2)],
+                candidate_shots: Vec::new(),
+                stage: "monitoring_post_composite".to_owned(),
+                roi: None,
+                resolution: None,
+                proxy_sampling: false,
+                max_width: None,
+                bins: None,
+                columns: None,
+                include_grids: None,
+            },
+        )
+        .unwrap();
+
+        let entry = &result["editable_operations"][0];
+        assert_eq!(entry["no_change"], true);
+        assert_eq!(entry["created_new_node"], false);
+        assert_eq!(entry["existing_primary_node_count"], 0);
+        assert_eq!(
+            entry["target_effect_id"],
+            Value::Null,
+            "no operation allocates this id, so it must not be published"
+        );
+        assert_eq!(entry["composed"], false);
+        assert!(entry["operations"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn shot_match_rejects_more_than_the_candidate_cap_before_rendering() {
+        let document = Arc::new(two_shot_document());
+        let analysis = StubAnalysis {
+            frames: BTreeMap::from([(TimeCode(0), image())]),
+        };
+        let error = plan_shot_match(
+            &document,
+            TimelineRevision(7),
+            &analysis,
+            &PlanShotMatchArgs {
+                expected_revision: TimelineRevision(7),
+                reference_clip_id: Some(ClipId(1)),
+                reference_shot: None,
+                candidate_clip_ids: (2..=18).map(ClipId).collect(),
+                candidate_shots: Vec::new(),
+                stage: "monitoring_post_composite".to_owned(),
+                roi: None,
+                resolution: None,
+                proxy_sampling: false,
+                max_width: None,
+                bins: None,
+                columns: None,
+                include_grids: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "excessive_sample_request");
+        assert_eq!(error.details()["max"], 16);
+        assert_eq!(error.details()["requested"], 17);
+    }
+
+    #[test]
+    fn shot_match_marks_a_proxy_sample_at_every_level() {
+        let document = Arc::new(two_shot_document());
+        let analysis = StubAnalysis {
+            frames: BTreeMap::from([
+                (
+                    TimeCode(0),
+                    RgbaImage {
+                        width: 2,
+                        height: 1,
+                        pixels: vec![128, 128, 128, 255, 128, 128, 128, 255],
+                    },
+                ),
+                (
+                    TimeCode(30),
+                    RgbaImage {
+                        width: 2,
+                        height: 1,
+                        pixels: vec![64, 64, 64, 255, 64, 64, 64, 255],
+                    },
+                ),
+            ]),
+        };
+        let result = plan_shot_match(
+            &document,
+            TimelineRevision(7),
+            &analysis,
+            &PlanShotMatchArgs {
+                expected_revision: TimelineRevision(7),
+                reference_clip_id: Some(ClipId(1)),
+                reference_shot: None,
+                candidate_clip_ids: vec![ClipId(2)],
+                candidate_shots: Vec::new(),
+                stage: "monitoring_post_composite".to_owned(),
+                roi: None,
+                resolution: Some("proxy".to_owned()),
+                proxy_sampling: false,
+                max_width: Some(64),
+                bins: None,
+                columns: None,
+                include_grids: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(result["full_resolution"], false);
+        assert_eq!(result["resolution"]["full_resolution"], false);
+        assert_eq!(result["resolution"]["backend"], Value::Null);
+        assert_eq!(
+            result["resolution"]["provenance"],
+            "proxy_unverified_by_backend"
+        );
+        assert_eq!(
+            result["reference_shot"]["evidence"]["full_resolution"],
+            false
+        );
+        assert_eq!(
+            result["reference_shot"]["evidence"]["scope_evidence"]["metadata"]["full_resolution"],
+            false
+        );
+        assert_eq!(
+            result["reference_shot"]["evidence"]["scope_evidence"]["full_resolution"],
+            false
+        );
+        assert_eq!(
+            result["reference_shot"]["evidence"]["summary"]["full_resolution"],
+            false
+        );
+        assert_eq!(result["candidates"][0]["full_resolution"], false);
+        assert_eq!(result["candidates"][0]["shot"]["full_resolution"], false);
+        assert_eq!(
+            result["candidates"][0]["scope_evidence"]["metadata"]["full_resolution"],
+            false
+        );
+        assert_eq!(
+            result["candidates"][0]["scope_comparison"]["full_resolution"],
+            false
+        );
+        assert!(
+            result["candidates"][0]["assumptions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["provenance"] == "proxy_unverified_by_backend")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
     fn temporal_shot_analysis_and_proxy_provenance_are_explicit() {
         let document = Arc::new(two_shot_document());
         let analysis = StubAnalysis {
@@ -1832,10 +2952,23 @@ mod tests {
                 max_width: None,
                 bins: None,
                 columns: None,
+                include_grids: None,
             },
         )
         .unwrap();
-        assert_eq!(analysis_value["scopes"]["temporal"]["sample_count"], 2);
+        let temporal = &analysis_value["scopes"]["temporal"];
+        assert_eq!(temporal["sample_count"], 2);
+        // The requested span and the sampled span are separate facts.
+        assert_eq!(temporal["requested_range"]["start"], 0);
+        assert_eq!(temporal["requested_range"]["end"], 20);
+        assert_eq!(temporal["step_frames"], 10);
+        assert_eq!(temporal["step_source"], "explicit");
+        assert_eq!(temporal["sampled_frames"]["first"], 0);
+        assert_eq!(temporal["sampled_frames"]["last"], 10);
+        assert_eq!(temporal["sampled_frames"]["count"], 2);
+        assert!(temporal.get("range").is_none());
+        assert_eq!(analysis_value["full_resolution"], true);
+        assert_eq!(analysis_value["grids_omitted"], true);
 
         let proxy_value = video_scopes_v2(
             &document,
@@ -1854,10 +2987,12 @@ mod tests {
                 max_width: Some(512),
                 bins: Some(16),
                 columns: Some(8),
+                include_grids: None,
             },
         )
         .unwrap();
         assert_eq!(proxy_value["resolution"]["full_resolution"], false);
+        assert_eq!(proxy_value["full_resolution"], false);
         assert_eq!(
             proxy_value["core_evidence"]["metadata"]["full_resolution"],
             false
@@ -1866,7 +3001,14 @@ mod tests {
             proxy_value["sample_results"][0]["metadata"]["full_resolution"],
             false
         );
-        assert_eq!(proxy_value["vectorscope"]["size"], 16);
+        assert_eq!(proxy_value["core_evidence"]["vectorscope"]["size"], 16);
+        // The typed core evidence is the single source of truth; the old
+        // top-level aliases duplicated it verbatim.
+        assert!(proxy_value.get("waveform").is_none());
+        assert!(proxy_value.get("rgb_parade").is_none());
+        assert!(proxy_value.get("vectorscope").is_none());
+        assert!(proxy_value.get("histogram").is_none());
+        assert_eq!(proxy_value["grids_omitted"], false);
 
         assert_eq!(
             SamplingResolution::parse(Some("full_resolution"), true, None)
@@ -1874,5 +3016,116 @@ mod tests {
                 .code(),
             "invalid_request"
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn evidence_payloads_stay_small_by_default() {
+        let document = Arc::new(two_shot_document());
+        let analysis = StubAnalysis {
+            frames: BTreeMap::from([
+                (
+                    TimeCode(0),
+                    RgbaImage {
+                        width: 2,
+                        height: 1,
+                        pixels: vec![128, 128, 128, 255, 128, 128, 128, 255],
+                    },
+                ),
+                (
+                    TimeCode(30),
+                    RgbaImage {
+                        width: 2,
+                        height: 1,
+                        pixels: vec![64, 64, 64, 255, 64, 64, 64, 255],
+                    },
+                ),
+            ]),
+        };
+        let analysis_value = analyze_color_shot(
+            &document,
+            TimelineRevision(3),
+            &analysis,
+            &AnalyzeColorShotArgs {
+                expected_revision: TimelineRevision(3),
+                clip_id: ClipId(1),
+                stage: "monitoring_post_composite".to_owned(),
+                timecode: None,
+                range: None,
+                frames: None,
+                step_frames: None,
+                roi: None,
+                resolution: None,
+                proxy_sampling: false,
+                max_width: None,
+                bins: None,
+                columns: None,
+                include_grids: None,
+            },
+        )
+        .unwrap();
+        let analysis_bytes = serde_json::to_vec(&analysis_value).unwrap().len();
+        assert!(
+            analysis_bytes < 20_000,
+            "analyze_color_shot default payload was {analysis_bytes} bytes"
+        );
+        // Statistics, clipping, and histograms survive the default omission.
+        assert!(analysis_value["scopes"]["core_evidence"]["histograms"].is_object());
+        assert!(analysis_value["scopes"]["core_evidence"]["clipping"].is_object());
+        assert!(analysis_value["scopes"]["core_evidence"]["statistics"].is_object());
+        assert!(analysis_value["scopes"]["core_evidence"]["waveform"].is_null());
+
+        let plan = plan_shot_match(
+            &document,
+            TimelineRevision(7),
+            &analysis,
+            &PlanShotMatchArgs {
+                expected_revision: TimelineRevision(7),
+                reference_clip_id: Some(ClipId(1)),
+                reference_shot: None,
+                candidate_clip_ids: vec![ClipId(2)],
+                candidate_shots: Vec::new(),
+                stage: "monitoring_post_composite".to_owned(),
+                roi: None,
+                resolution: None,
+                proxy_sampling: false,
+                max_width: None,
+                bins: None,
+                columns: None,
+                include_grids: None,
+            },
+        )
+        .unwrap();
+        let plan_bytes = serde_json::to_vec(&plan).unwrap().len();
+        assert!(
+            plan_bytes < 20_000,
+            "plan_shot_match default payload was {plan_bytes} bytes"
+        );
+
+        // Opting in restores the grids and is expected to be much larger.
+        let with_grids = analyze_color_shot(
+            &document,
+            TimelineRevision(3),
+            &analysis,
+            &AnalyzeColorShotArgs {
+                expected_revision: TimelineRevision(3),
+                clip_id: ClipId(1),
+                stage: "monitoring_post_composite".to_owned(),
+                timecode: None,
+                range: None,
+                frames: None,
+                step_frames: None,
+                roi: None,
+                resolution: None,
+                proxy_sampling: false,
+                max_width: None,
+                bins: None,
+                columns: None,
+                include_grids: Some(true),
+            },
+        )
+        .unwrap();
+        assert!(with_grids["scopes"]["core_evidence"]["waveform"].is_object());
+        assert!(serde_json::to_vec(&with_grids).unwrap().len() > analysis_bytes);
     }
 }

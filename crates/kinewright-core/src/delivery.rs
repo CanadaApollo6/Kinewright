@@ -268,11 +268,14 @@ pub fn delivery_conformance(
             range: None,
         });
     }
-    if !delivery_color_supported(&settings.delivery_color) {
+    if let Some(mismatch) = delivery_color_mismatch(&settings.delivery_color) {
         issues.push(QaIssue {
             severity: QaSeverity::Error,
             code: "unsupported_delivery_color".to_owned(),
-            message: "Current libx264/YUV420P export requires explicit 8-bit SDR Rec.709 delivery colour metadata (BT.709 primaries, transfer, and matrix; limited range; D65; nonzero confidence; application-default or user-override provenance).".to_owned(),
+            message: format!(
+                "Current libx264/YUV420P export requires explicit 8-bit SDR Rec.709 delivery colour metadata: field={}, observed={}, allowed={}. Reset the delivery colour target explicitly.",
+                mismatch.field, mismatch.observed, mismatch.allowed,
+            ),
             asset: None,
             track: None,
             clip: None,
@@ -405,19 +408,86 @@ fn append_managed_source_issues(document: &Document, issues: &mut Vec<QaIssue>) 
     }
 }
 
-fn delivery_color_supported(color: &ColorDescription) -> bool {
-    color.confidence_is_valid()
-        && color.confidence_basis_points > 0
-        && matches!(
-            &color.provenance,
-            ColorProvenance::ApplicationDefault | ColorProvenance::UserOverride
-        )
-        && matches!(&color.primaries, ColorPrimaries::Bt709)
-        && matches!(&color.transfer, ColorTransfer::Bt709)
-        && matches!(&color.matrix, ColorMatrix::Bt709)
-        && matches!(&color.range, ColorRange::Limited)
-        && matches!(&color.white_point, ColorWhitePoint::D65)
-        && matches!(&color.bit_depth, ColorBitDepth::Eight)
+/// The first delivery-colour field that the current export contract rejects.
+///
+/// This carries the same three facts as [`ColorSourceError`] — the field, the
+/// observed value, and the allowed values — so a rejection is diagnosable
+/// rather than one opaque sentence.
+///
+/// They are not, however, *reported* the same way. [`QaIssue`] has no
+/// structured detail map, so both `unsupported_delivery_color` and
+/// `unsupported_source_color` format the three facts into `message` as
+/// `field=..., observed=..., allowed=...`. Consumers that want them as data
+/// must parse that text or classify the description themselves; the tests that
+/// assert on these issues match the message substrings for that reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeliveryColorMismatch {
+    field: &'static str,
+    observed: String,
+    allowed: &'static str,
+}
+
+fn delivery_color_mismatch(color: &ColorDescription) -> Option<DeliveryColorMismatch> {
+    let mismatch =
+        |field: &'static str, observed: String, allowed: &'static str| DeliveryColorMismatch {
+            field,
+            observed,
+            allowed,
+        };
+
+    if !matches!(&color.primaries, ColorPrimaries::Bt709) {
+        return Some(mismatch(
+            "primaries",
+            format!("{:?}", color.primaries),
+            "bt709",
+        ));
+    }
+    if !matches!(&color.transfer, ColorTransfer::Bt709) {
+        return Some(mismatch(
+            "transfer",
+            format!("{:?}", color.transfer),
+            "bt709",
+        ));
+    }
+    if !matches!(&color.matrix, ColorMatrix::Bt709) {
+        return Some(mismatch("matrix", format!("{:?}", color.matrix), "bt709"));
+    }
+    if !matches!(&color.range, ColorRange::Limited) {
+        return Some(mismatch("range", format!("{:?}", color.range), "limited"));
+    }
+    if !matches!(&color.white_point, ColorWhitePoint::D65) {
+        return Some(mismatch(
+            "white_point",
+            format!("{:?}", color.white_point),
+            "d65",
+        ));
+    }
+    // CC1 §2.1: `Integer(8)` and `Eight` are the same declared depth.
+    if color.bit_depth != ColorBitDepth::Eight {
+        return Some(mismatch(
+            "bit_depth",
+            format!("{:?}", color.bit_depth),
+            "8 (named eight or integer 8)",
+        ));
+    }
+    if !matches!(
+        &color.provenance,
+        ColorProvenance::ApplicationDefault | ColorProvenance::UserOverride
+    ) {
+        return Some(mismatch(
+            "provenance",
+            format!("{:?}", color.provenance),
+            "application_default or user_override",
+        ));
+    }
+    if !color.confidence_is_valid() || color.confidence_basis_points == 0 {
+        return Some(mismatch(
+            "confidence_basis_points",
+            color.confidence_basis_points.to_string(),
+            "1..=10000",
+        ));
+    }
+    None
 }
 
 /// Materialize a non-destructive delivery document from a master cut.
@@ -1104,6 +1174,161 @@ mod tests {
                 .iter()
                 .any(|issue| issue.code == "source_color_profile_assumption")
         );
+    }
+
+    fn report_for_delivery_color(
+        mutate: impl FnOnce(&mut ColorDescription),
+    ) -> DeliveryConformanceReport {
+        let mut document = fixture();
+        document.media_pool[0].path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        mutate(&mut document.color_context.delivery);
+        delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
+            .expect("unsupported delivery colour must be reported, not returned as an error")
+    }
+
+    /// `(field, observed, allowed, delivery description)` for every field the
+    /// current export contract can reject.
+    fn unsupported_delivery_color_cases()
+    -> Vec<(&'static str, &'static str, &'static str, ColorDescription)> {
+        let supported = ColorContext::sdr_rec709().delivery;
+        vec![
+            (
+                "primaries",
+                "Bt2020",
+                "bt709",
+                ColorDescription {
+                    primaries: ColorPrimaries::Bt2020,
+                    ..supported.clone()
+                },
+            ),
+            (
+                "transfer",
+                "Smpte2084",
+                "bt709",
+                ColorDescription {
+                    transfer: ColorTransfer::Smpte2084,
+                    ..supported.clone()
+                },
+            ),
+            (
+                "matrix",
+                "Rgb",
+                "bt709",
+                ColorDescription {
+                    matrix: ColorMatrix::Rgb,
+                    ..supported.clone()
+                },
+            ),
+            (
+                "range",
+                "Full",
+                "limited",
+                ColorDescription {
+                    range: ColorRange::Full,
+                    ..supported.clone()
+                },
+            ),
+            (
+                "white_point",
+                "D50",
+                "d65",
+                ColorDescription {
+                    white_point: ColorWhitePoint::D50,
+                    ..supported.clone()
+                },
+            ),
+            (
+                "bit_depth",
+                "Ten",
+                "8 (named eight or integer 8)",
+                ColorDescription {
+                    bit_depth: ColorBitDepth::Ten,
+                    ..supported.clone()
+                },
+            ),
+            (
+                "provenance",
+                "Inferred",
+                "application_default or user_override",
+                ColorDescription {
+                    provenance: ColorProvenance::Inferred,
+                    ..supported.clone()
+                },
+            ),
+            (
+                "confidence_basis_points",
+                "0",
+                "1..=10000",
+                ColorDescription {
+                    confidence_basis_points: 0,
+                    ..supported
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn unsupported_delivery_color_names_the_mismatching_field_observed_and_allowed() {
+        for (field, observed, allowed, delivery) in unsupported_delivery_color_cases() {
+            let report = report_for_delivery_color(|color| *color = delivery);
+            let issue = report
+                .issues
+                .iter()
+                .find(|issue| issue.code == "unsupported_delivery_color")
+                .unwrap_or_else(|| panic!("delivery colour field {field} must block export"));
+
+            assert_eq!(issue.severity, QaSeverity::Error);
+            assert!(!report.export_ready());
+            for expected in [
+                format!("field={field}"),
+                format!("observed={observed}"),
+                format!("allowed={allowed}"),
+            ] {
+                assert!(
+                    issue.message.contains(&expected),
+                    "expected {expected} in {}",
+                    issue.message
+                );
+            }
+            assert!(issue.message.contains("Reset"));
+        }
+    }
+
+    #[test]
+    fn unsupported_delivery_color_reports_only_the_first_mismatching_field() {
+        let report = report_for_delivery_color(|color| {
+            color.primaries = ColorPrimaries::Bt2020;
+            color.transfer = ColorTransfer::Smpte2084;
+        });
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "unsupported_delivery_color")
+            .expect("multiple mismatches must still block");
+
+        assert!(issue.message.contains("field=primaries"));
+        assert!(!issue.message.contains("field=transfer"));
+    }
+
+    #[test]
+    fn numeric_integer_eight_delivery_depth_is_accepted_like_the_named_variant() {
+        let mut document = fixture();
+        document.media_pool[0].path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        document.color_context.delivery.bit_depth = ColorBitDepth::Integer(8);
+
+        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
+            .expect("numeric integer depth should produce a report");
+
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "unsupported_delivery_color"),
+            "CC1 §2.1 makes Integer(8) equivalent to Eight"
+        );
+        assert!(report.export_ready());
     }
 
     #[test]

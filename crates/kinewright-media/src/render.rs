@@ -5,17 +5,19 @@ use std::{
 
 use kinewright_core::{
     AssetId, ClipId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
-    ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Document,
+    ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Document, Effect,
     FrameTexture, MediaError, MediaSourceFingerprint, Rational, TimeCode, Title,
+    classify_source_with_assumption,
 };
 
 use crate::{
     TimelineVisualLayer,
     cache::FrameCache,
-    compositor::{Compositor, CompositorLayer, GpuContext},
+    compositor::{Compositor, CompositorLayer, DeliveryFrame, GpuContext},
     decode::VideoDecoder,
     derived_cache::CacheStats,
     frame::WorkingFrame,
+    timeline::TransitionRenderParams,
     visual_layers_at,
 };
 
@@ -213,6 +215,16 @@ impl FrameRenderer {
             .sum()
     }
 
+    /// Composite one project frame for the document's monitoring target.
+    ///
+    /// CC1 2.2.6 requires the monitor transform to be selected from the
+    /// monitoring `ColorDescription`, so the document's own description is
+    /// handed to the compositor rather than a compositor default.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the colour context, decode, or GPU
+    /// readback fails.
     pub(crate) fn render(
         &mut self,
         document: &Document,
@@ -221,6 +233,62 @@ impl FrameRenderer {
         scale: RenderScale,
         strategy: DecodeStrategy,
     ) -> Result<FrameTexture, MediaError> {
+        let decoded_layers =
+            self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+        let layers = decoded_layers
+            .iter()
+            .map(|(frame, effects, transition)| CompositorLayer {
+                frame,
+                effects,
+                transition: *transition,
+            })
+            .collect::<Vec<_>>();
+        self.compositor
+            .render_monitor(resolution, &layers, &document.color_context.monitoring)
+    }
+
+    /// Composite one project frame for the document's delivery target.
+    ///
+    /// CC1 5 permits only the final target, raster, and codec quantization to
+    /// differ between preview/proof and export. Everything up to the output
+    /// transform is the same production path as [`Self::render`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the colour context, decode, or GPU
+    /// readback fails.
+    pub(crate) fn render_delivery(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+        strategy: DecodeStrategy,
+    ) -> Result<DeliveryFrame, MediaError> {
+        let decoded_layers =
+            self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+        let layers = decoded_layers
+            .iter()
+            .map(|(frame, effects, transition)| CompositorLayer {
+                frame,
+                effects,
+                transition: *transition,
+            })
+            .collect::<Vec<_>>();
+        self.compositor
+            .render_delivery(resolution, &layers, &document.color_context.delivery)
+    }
+
+    /// Decode and stage every visual layer for one project frame, in
+    /// production z-order, before any output transform is selected.
+    fn decoded_layers(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+        strategy: DecodeStrategy,
+    ) -> Result<Vec<(WorkingFrame, Vec<Effect>, TransitionRenderParams)>, MediaError> {
         validate_managed_context(document)?;
         let layer_specs = visual_layers_at(document, project_at)?;
         let mut decoded_layers = Vec::with_capacity(layer_specs.len());
@@ -263,15 +331,7 @@ impl FrameRenderer {
                 }
             }
         }
-        let layers = decoded_layers
-            .iter()
-            .map(|(frame, effects, transition)| CompositorLayer {
-                frame,
-                effects,
-                transition: *transition,
-            })
-            .collect::<Vec<_>>();
-        self.compositor.render(resolution, &layers)
+        Ok(decoded_layers)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -456,6 +516,30 @@ impl FrameRenderer {
     }
 }
 
+/// Render the CC1 2.1 structured source-colour status for one asset.
+///
+/// The spec requires the asset, the unsupported field, the observed value,
+/// the allowed values, and a recovery action. Core owns the classifier and
+/// the allowed-value policy, so this only formats its structured accessors;
+/// a supported description still reports so, because the wrapped failure may
+/// be a decoder-format problem rather than a metadata problem.
+fn managed_source_color_status(
+    description: &ColorDescription,
+    assumption: Option<ColorSourceProfileAssumption>,
+) -> String {
+    match classify_source_with_assumption(description, assumption) {
+        Ok(profile) => format!("source_profile={profile:?}, source_color=supported"),
+        Err(error) => format!(
+            "source_color={}, field={}, observed={}, allowed={}, recovery={}",
+            error.code(),
+            error.field(),
+            error.observed(),
+            error.allowed_values(),
+            error.recovery_action(),
+        ),
+    }
+}
+
 fn contextual_managed_decode_error(
     asset: AssetId,
     path: &Path,
@@ -463,6 +547,7 @@ fn contextual_managed_decode_error(
     assumption: Option<ColorSourceProfileAssumption>,
     error: MediaError,
 ) -> MediaError {
+    let status = managed_source_color_status(description, assumption);
     match error {
         MediaError::UnsupportedDecoderFormat {
             path: error_path,
@@ -476,12 +561,12 @@ fn contextual_managed_decode_error(
             declared_bit_depth,
             decoder_bit_depth,
             reason: format!(
-                "managed decode for asset {asset} ({}; description={description:?}, assumption={assumption:?}) failed: {reason}",
+                "managed decode for asset {asset} ({}) failed: {reason} [{status}, assumption={assumption:?}, description={description:?}]. Recovery: apply an explicit supported source-colour override, transcode to a supported integer format, or relink to compatible media.",
                 path.display()
             ),
         },
         error => MediaError::Backend(format!(
-            "managed decode for asset {asset} ({}; description={description:?}, assumption={assumption:?}) failed: {error}",
+            "managed decode for asset {asset} ({}) failed: {error} [{status}, assumption={assumption:?}, description={description:?}]. Recovery: apply an explicit supported source-colour override, transcode to a supported integer format, or relink to compatible media.",
             path.display()
         )),
     }
@@ -553,15 +638,13 @@ mod tests {
     use super::*;
     use crate::{
         decode::probe_path,
+        gpu_test_support::fixture_gpu_or_skip,
         initialize_ffmpeg,
         test_support::{GeneratedMedia, single_clip_document},
     };
 
     fn test_renderer() -> Option<FrameRenderer> {
-        let gpu = GpuContext::headless(true)
-            .or_else(|_| GpuContext::headless(false))
-            .ok()?;
-        Some(FrameRenderer::new(gpu))
+        Some(FrameRenderer::new(fixture_gpu_or_skip()?))
     }
 
     fn working_frame_with_bytes(bytes: usize) -> WorkingFrame {
@@ -580,7 +663,6 @@ mod tests {
     #[test]
     fn title_bytes_are_reserved_before_video_cache_growth() {
         let Some(mut renderer) = test_renderer() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
         renderer.cache_budget = 100;
@@ -598,7 +680,6 @@ mod tests {
     #[test]
     fn oversized_title_is_rendered_without_being_cached() {
         let Some(mut renderer) = test_renderer() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
         renderer.cache_budget = 100;
@@ -812,11 +893,7 @@ mod tests {
     #[test]
     fn thumbnail_for_document_reopens_same_id_after_relink() {
         initialize_ffmpeg().expect("FFmpeg should initialize for relink identity fixture");
-        let Some(gpu) = GpuContext::headless(true)
-            .or_else(|_| GpuContext::headless(false))
-            .ok()
-        else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
+        let Some(gpu) = fixture_gpu_or_skip() else {
             return;
         };
         let red = generated_solid_source("source-identity-red", "red");
@@ -879,5 +956,89 @@ mod tests {
         let cached_frames = usize::try_from(prefetch_frames(bytes) + 1).unwrap();
         assert_eq!(cached_frames, 7);
         assert!(bytes.saturating_mul(cached_frames) < FRAME_CACHE_BYTE_BUDGET);
+    }
+
+    fn unsupported_source() -> ColorDescription {
+        ColorDescription {
+            primaries: ColorPrimaries::Bt2020,
+            transfer: ColorTransfer::Smpte2084,
+            matrix: ColorMatrix::Bt2020Ncl,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Ten,
+            confidence_basis_points: 10_000,
+            provenance: ColorProvenance::StreamMetadata,
+        }
+    }
+
+    #[test]
+    fn managed_decode_error_names_asset_field_observed_allowed_and_recovery() {
+        // CC1 2.1: the error must name the asset, the unsupported field, the
+        // observed value, and the allowed values, plus a recovery action.
+        let error = contextual_managed_decode_error(
+            AssetId(7),
+            Path::new("/media/hdr-master.mov"),
+            &unsupported_source(),
+            None,
+            MediaError::Backend("managed source profile rejected".to_owned()),
+        );
+        let message = error.to_string();
+        assert!(message.contains("asset 7"), "{message}");
+        assert!(message.contains("/media/hdr-master.mov"), "{message}");
+        assert!(
+            message.contains("source_color=unsupported_source_"),
+            "{message}"
+        );
+        assert!(message.contains("field="), "{message}");
+        assert!(message.contains("observed="), "{message}");
+        assert!(message.contains("allowed="), "{message}");
+        assert!(message.contains("recovery="), "{message}");
+        assert!(
+            message.contains("Apply an explicit supported source-colour override"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn managed_decode_error_keeps_the_typed_decoder_format_variant_and_its_fields() {
+        let error = contextual_managed_decode_error(
+            AssetId(3),
+            Path::new("/media/ten-bit.mov"),
+            &unsupported_source(),
+            None,
+            MediaError::UnsupportedDecoderFormat {
+                path: "/media/ten-bit.mov".into(),
+                format: "yuv420p10le".to_owned(),
+                declared_bit_depth: Some(10),
+                decoder_bit_depth: Some(8),
+                reason: "swscale would discard the declared depth".to_owned(),
+            },
+        );
+        assert_eq!(error.recovery_code(), Some("unsupported_decoder_format"));
+        let message = error.to_string();
+        assert!(message.contains("unsupported_decoder_format"), "{message}");
+        assert!(message.contains("asset 3"), "{message}");
+        assert!(message.contains("field=primaries"), "{message}");
+        assert!(message.contains("observed=Bt2020"), "{message}");
+        assert!(message.contains("allowed=bt709"), "{message}");
+        assert!(message.contains("Recovery:"), "{message}");
+    }
+
+    #[test]
+    fn managed_decode_error_reports_a_supported_source_profile_when_metadata_is_fine() {
+        let mut description = unsupported_source();
+        description.primaries = ColorPrimaries::Bt709;
+        description.transfer = ColorTransfer::Bt709;
+        description.matrix = ColorMatrix::Bt709;
+        let error = contextual_managed_decode_error(
+            AssetId(1),
+            Path::new("/media/ok.mov"),
+            &description,
+            None,
+            MediaError::Backend("decoder could not open the stream".to_owned()),
+        );
+        let message = error.to_string();
+        assert!(message.contains("source_color=supported"), "{message}");
+        assert!(message.contains("source_profile="), "{message}");
     }
 }

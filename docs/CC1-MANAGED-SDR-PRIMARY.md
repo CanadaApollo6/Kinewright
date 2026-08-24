@@ -367,8 +367,9 @@ writes `managed_sdr_v1`. The migration rules are:
 4. Existing standalone `brightness`, `contrast`, and `saturation` effects are not
    silently translated to linear-light primary controls because their old shader
    semantics were display-coded and are not mathematically equivalent. They are
-   retained as `legacy_display_effect` entries/status, rendered only by the
-   compatibility path, and cause CC1 conformance to report `legacy_colour_semantics`
+   retained as legacy display-coded compatibility entries, rendered only by the
+   compatibility path, and cause CC1 conformance, colour status, and proof
+   manifests alike to report `legacy_colour_semantics`
    until the editor accepts a visible conversion proof. No silent visual change is
    allowed.
 5. Existing built-in looks and external `.cube` LUTs remain compatibility stages
@@ -442,7 +443,15 @@ working/monitor/delivery descriptions, control values, and output hashes.
    software GPU (lavapipe/WARP where available), one supported hardware GPU in
    an explicit/manual lane when available, production monitor proof, and decoded
    H.264/YUV420P delivery. The hardware test is ignored by default so ordinary
-   CI does not claim hardware coverage without a physical adapter.
+   CI does not claim hardware coverage without a physical adapter. When no
+   software fallback adapter exists, the default-lane GPU fixtures fail with an
+   explicit message rather than skipping; setting
+   `KINEWRIGHT_CC1_ALLOW_HARDWARE_GPU=1` lets them run on the hardware adapter
+   with the evidence lane recorded as `hardware_optin` and honest
+   `software_fallback=false`/`gpu_claim=true` provenance. The parity raster must
+   contain samples that exercise every control, including highlights, whites,
+   over-range, and negative values; a non-neutral control case that changes
+   fewer than 5% of the CPU-reference samples fails as vacuous.
 
 ### 6.2 Numeric gate
 
@@ -461,10 +470,19 @@ For uncompressed RGBA8 monitor/proof frames:
 
 For linear working values before final encoding, the CPU/GPU comparison includes
 the normative `Rgba16Float` storage quantization and uses f32 arithmetic on both
-paths. On finite, in-gamut samples with absolute linear values `<= 2`, the gate
-is maximum absolute error `<= 1.5e-3`, P99 `<= 7.5e-4`, and mean absolute error
-`<= 2.5e-4`. This is intentionally a half-float bound (roughly one to two ULPs
-around unity), not a promise that an unproven RGBA32F blend path is available.
+paths. The gate is banded by the magnitude of the CPU-reference value, because a
+half-float ULP doubles at 1.0: on finite samples with absolute linear values
+`<= 1`, maximum absolute error `<= 1.5e-3`, P99 `<= 7.5e-4`, and mean absolute
+error `<= 2.5e-4`; on samples with absolute values in `(1, 2]`, the maximum stays
+`<= 1.5e-3` while P99 and mean are `<= 9.765625e-4` (exactly one half-float ULP
+in that band). Samples above `2` are excluded from the linear gate, counted, and
+remain subject to the monitor-code, finiteness, and monotonicity gates. Both
+bands are asserted and recorded in the manifest. This is intentionally a
+half-float bound (one to two ULPs), not a promise that an unproven RGBA32F blend
+path is available; the 2026-08-24 review measured that a hardware Vulkan adapter
+rounds the f32-to-f16 store toward zero while the CPU reference rounds to
+nearest, so roughly 40% of samples differ by exactly one ULP and the over-range
+band cannot meet the sub-ULP P99 that the in-gamut band meets.
 The fixture also records first, median, and 99th-percentile luma, clipping in
 basis points, and max/P99/mean absolute channel differences as required by the
 roadmap.

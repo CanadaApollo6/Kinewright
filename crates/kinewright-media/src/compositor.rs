@@ -9,14 +9,17 @@ use std::{
 
 use half::f16;
 use kinewright_core::{
-    Effect, EffectParameterDescriptor, EffectUniform, FrameTexture, MediaError,
-    MonitorProofMetadata, MonitorProofRenderKind, ParamValue, effect_descriptor,
+    ColorContext, ColorDescription, Effect, EffectParameterDescriptor, EffectUniform, FrameTexture,
+    MediaError, MonitorProofMetadata, MonitorProofRenderKind, ParamValue, effect_descriptor,
 };
 
 use crate::{
-    color_pipeline::{PrimaryCorrection, encode_monitor_rgba8},
+    color_pipeline::{
+        PrimaryCorrection, encode_delivery_for_description, encode_monitor_rgba8_for_description,
+    },
     frame::WorkingFrame,
     lut::{CubeLut, parse_cube_lut},
+    render::RenderScale,
     timeline::TransitionRenderParams,
 };
 
@@ -143,16 +146,56 @@ impl GpuContext {
         Ok(context)
     }
 
+    /// Describe a monitor proof rendered at the document's full raster.
+    ///
+    /// Test-only: fixtures that only need the adapter provenance render a
+    /// 1x1 document raster at full scale by construction. Production callers
+    /// go through [`Self::monitor_proof_metadata_for`], which derives the
+    /// claim instead of asserting it.
+    #[cfg(test)]
     pub(crate) fn monitor_proof_metadata(&self) -> MonitorProofMetadata {
+        self.monitor_proof_metadata_for(RenderScale::FullResolution, (1, 1), (1, 1))
+    }
+
+    /// Describe a monitor proof, deriving `full_resolution` from the render
+    /// scale that was requested and the raster that came back.
+    ///
+    /// CC1 5 says a thumbnail, proxy, or stale cache cannot establish
+    /// conformance. Comparing the rendered raster against the document raster
+    /// alone is not enough to prove that: a proxy render is sized from the
+    /// document too, so the two agree whenever the proxy bound does not bite
+    /// (a 1280-wide or smaller document, for instance). The requested scale is
+    /// the part that says whether a proxy path was taken at all, so both must
+    /// hold.
+    pub(crate) fn monitor_proof_metadata_for(
+        &self,
+        scale: RenderScale,
+        rendered: (u32, u32),
+        document: (u32, u32),
+    ) -> MonitorProofMetadata {
         MonitorProofMetadata {
             render_kind: MonitorProofRenderKind::GpuPreview,
             backend: self.provenance.backend.clone(),
             adapter: self.provenance.adapter.clone(),
             software_fallback: self.provenance.software_fallback,
             gpu_claim: self.provenance.gpu_claim,
-            full_resolution: true,
+            full_resolution: matches!(scale, RenderScale::FullResolution) && rendered == document,
         }
     }
+}
+
+/// A composited frame encoded for the CC1 delivery target.
+///
+/// RGBA64LE, full range, BT.709 transfer coded, quantized exactly once at 16
+/// bits so the export path's only 8-bit quantization is the YUV420P step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryFrame {
+    /// Raster width in pixels.
+    pub width: u32,
+    /// Raster height in pixels.
+    pub height: u32,
+    /// Interleaved little-endian 16-bit RGBA samples.
+    pub rgba64le: Vec<u8>,
 }
 
 pub struct CompositorLayer<'a, F = FrameTexture> {
@@ -214,10 +257,133 @@ pub struct Compositor {
     sampler: wgpu::Sampler,
     pipeline: wgpu::RenderPipeline,
     lut_cache: Mutex<HashMap<PathBuf, CachedCubeLut>>,
+    /// Per-layer source textures are recycled across `render` calls. Playback
+    /// composites the same raster every frame, so allocating and destroying a
+    /// texture per layer per frame is pure overhead; `write_texture` still
+    /// replaces the full contents, so no stale pixels can survive.
+    texture_pool: Mutex<TexturePool>,
+}
+
+/// The number of distinct (width, height, format) shapes the pool retains.
+/// A resized preview or a proxy/full-raster switch must not accumulate
+/// textures for every raster the session has ever used.
+const TEXTURE_POOL_MAX_SHAPES: usize = 8;
+
+/// The number of idle textures retained per shape. This bounds the pool by
+/// the deepest layer stack that has actually been composited at that shape.
+const TEXTURE_POOL_MAX_PER_SHAPE: usize = 8;
+
+/// The total GPU memory the recycling pool may hold in idle textures.
+///
+/// The count bounds alone say nothing about size: eight shapes of eight
+/// `Rgba16Float` 3840x2160 textures is roughly 4 GiB of resident VRAM held
+/// purely as a reuse optimization, which is more than many cards have. 256 MiB
+/// still covers a deep layer stack at one working raster (a 4K `Rgba16Float`
+/// source texture is about 31.6 MiB) while staying a small fraction of a
+/// modern GPU's memory.
+const TEXTURE_POOL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TexturePoolKey {
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+}
+
+/// Bytes one idle texture of this shape occupies. Every pooled format is
+/// uncompressed with a 1x1 block, so the block copy size is the pixel stride.
+fn texture_pool_bytes(key: TexturePoolKey) -> u64 {
+    let bytes_per_pixel = u64::from(key.format.block_copy_size(None).unwrap_or(8));
+    u64::from(key.width)
+        .saturating_mul(u64::from(key.height))
+        .saturating_mul(bytes_per_pixel)
+}
+
+/// Idle source textures kept for recycling, bounded by shape count, per-shape
+/// depth, and total bytes, and evicted least-recently-used shape first.
+#[derive(Default)]
+struct TexturePool {
+    shapes: HashMap<TexturePoolKey, Vec<wgpu::Texture>>,
+    /// Every retained shape, least recently used first.
+    recency: Vec<TexturePoolKey>,
+    bytes: u64,
+}
+
+impl TexturePool {
+    fn touch(&mut self, key: TexturePoolKey) {
+        if let Some(index) = self.recency.iter().position(|candidate| *candidate == key) {
+            self.recency.remove(index);
+        }
+        self.recency.push(key);
+    }
+
+    fn take(&mut self, key: TexturePoolKey) -> Option<wgpu::Texture> {
+        let texture = self.shapes.get_mut(&key)?.pop()?;
+        self.bytes = self.bytes.saturating_sub(texture_pool_bytes(key));
+        self.touch(key);
+        Some(texture)
+    }
+
+    fn store(&mut self, key: TexturePoolKey, texture: wgpu::Texture) {
+        self.touch(key);
+        let textures = self.shapes.entry(key).or_default();
+        if textures.len() >= TEXTURE_POOL_MAX_PER_SHAPE {
+            texture.destroy();
+            return;
+        }
+        textures.push(texture);
+        self.bytes = self.bytes.saturating_add(texture_pool_bytes(key));
+    }
+
+    fn over_budget(&self) -> bool {
+        self.bytes > TEXTURE_POOL_MAX_BYTES || self.shapes.len() > TEXTURE_POOL_MAX_SHAPES
+    }
+
+    fn drop_shape(&mut self, key: TexturePoolKey) {
+        for texture in self.shapes.remove(&key).unwrap_or_default() {
+            self.bytes = self.bytes.saturating_sub(texture_pool_bytes(key));
+            texture.destroy();
+        }
+    }
+
+    /// Bring the pool back inside its budgets.
+    ///
+    /// `hot` names the shapes the frame that just finished used. Clearing the
+    /// whole pool on the ninth shape would throw those away and guarantee a
+    /// reallocation on the very next frame, so cold shapes go first and their
+    /// textures are explicitly destroyed rather than left for a later drop.
+    fn evict(&mut self, hot: &[TexturePoolKey]) {
+        let mut index = 0;
+        while self.over_budget() && index < self.recency.len() {
+            let key = self.recency[index];
+            if hot.contains(&key) {
+                index += 1;
+                continue;
+            }
+            self.recency.remove(index);
+            self.drop_shape(key);
+        }
+        // One shape can exceed the byte budget on its own at a large raster.
+        // Trim idle depth from the least recently used shapes rather than
+        // leaving the budget broken; a trimmed texture is simply recreated on
+        // demand.
+        let mut index = 0;
+        while self.bytes > TEXTURE_POOL_MAX_BYTES && index < self.recency.len() {
+            let key = self.recency[index];
+            match self.shapes.get_mut(&key).and_then(Vec::pop) {
+                Some(texture) => {
+                    self.bytes = self.bytes.saturating_sub(texture_pool_bytes(key));
+                    texture.destroy();
+                }
+                None => index += 1,
+            }
+        }
+    }
 }
 
 struct LayerResources {
-    _texture: wgpu::Texture,
+    texture: wgpu::Texture,
+    pool_key: TexturePoolKey,
     _lut_texture: wgpu::Texture,
     _uniform: wgpu::Buffer,
     _primary: wgpu::Buffer,
@@ -446,10 +612,16 @@ impl Compositor {
             sampler,
             pipeline,
             lut_cache: Mutex::new(HashMap::new()),
+            texture_pool: Mutex::new(TexturePool::default()),
         }
     }
 
-    /// Composite the supplied bottom-to-top layers into one RGBA frame.
+    /// Composite the supplied bottom-to-top layers into one monitor RGBA8
+    /// frame using the CC1 default monitoring description.
+    ///
+    /// This is a thin wrapper over [`Self::render_monitor`]; callers that own
+    /// project state should pass their document's monitoring description so
+    /// CC1 2.2.6 target selection is never a compositor default.
     ///
     /// # Errors
     ///
@@ -459,7 +631,64 @@ impl Compositor {
         resolution: (u32, u32),
         layers: &[CompositorLayer<'_, F>],
     ) -> Result<FrameTexture, MediaError> {
+        self.render_monitor(resolution, layers, &ColorContext::sdr_rec709().monitoring)
+    }
+
+    /// Composite the supplied bottom-to-top layers and encode the result with
+    /// the supplied monitoring description (CC1 3, monitoring branch).
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error for invalid dimensions, an unsupported
+    /// monitoring transfer, or a GPU mapping failure.
+    pub fn render_monitor<F: CompositorInput>(
+        &self,
+        resolution: (u32, u32),
+        layers: &[CompositorLayer<'_, F>],
+        monitoring: &ColorDescription,
+    ) -> Result<FrameTexture, MediaError> {
         let (width, height) = resolution;
+        let (output, resources, encoder) = self.composite(width, height, layers)?;
+        let readback = self.readback_for(width, height, &output, encoder, monitoring);
+        self.release_layer_textures(resources);
+        readback
+    }
+
+    /// Composite the supplied bottom-to-top layers and encode the result with
+    /// the supplied delivery description (CC1 3, delivery branch).
+    ///
+    /// The result is RGBA64LE: the BT.709 OETF is applied in f32 and the
+    /// value is quantized exactly once, at 16 bits, so the only 8-bit
+    /// quantization left in the export path is the YUV420P conversion.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error for invalid dimensions, an unsupported delivery
+    /// transfer, or a GPU mapping failure.
+    pub fn render_delivery<F: CompositorInput>(
+        &self,
+        resolution: (u32, u32),
+        layers: &[CompositorLayer<'_, F>],
+        delivery: &ColorDescription,
+    ) -> Result<DeliveryFrame, MediaError> {
+        let (width, height) = resolution;
+        let (output, resources, encoder) = self.composite(width, height, layers)?;
+        let readback = self.readback_rgba16(width, height, &output, encoder, delivery);
+        self.release_layer_textures(resources);
+        readback
+    }
+
+    /// Record one composite pass into an `Rgba16Float` render target.
+    ///
+    /// The layer resources are returned alongside the encoder because the
+    /// bind groups they own must outlive the queue submission performed by
+    /// the readback, and their pooled textures are recycled afterwards.
+    fn composite<F: CompositorInput>(
+        &self,
+        width: u32,
+        height: u32,
+        layers: &[CompositorLayer<'_, F>],
+    ) -> Result<(wgpu::Texture, Vec<LayerResources>, wgpu::CommandEncoder), MediaError> {
         if width == 0 || height == 0 {
             return Err(MediaError::Backend(
                 "compositor output resolution must be non-zero".to_owned(),
@@ -479,10 +708,16 @@ impl Compositor {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let resources = layers
-            .iter()
-            .map(|layer| self.layer_resources(layer))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut resources = Vec::with_capacity(layers.len());
+        for layer in layers {
+            match self.layer_resources(layer) {
+                Ok(resource) => resources.push(resource),
+                Err(error) => {
+                    self.release_layer_textures(resources);
+                    return Err(error);
+                }
+            }
+        }
         let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .gpu
@@ -513,7 +748,50 @@ impl Compositor {
                 pass.draw(0..4, 0..1);
             }
         }
-        self.readback(width, height, &output, encoder)
+        Ok((output, resources, encoder))
+    }
+
+    /// Take a source texture of the requested shape from the recycling pool,
+    /// creating one when the pool has none.
+    fn acquire_layer_texture(&self, key: TexturePoolKey) -> wgpu::Texture {
+        if let Ok(mut pool) = self.texture_pool.lock()
+            && let Some(texture) = pool.take(key)
+        {
+            return texture;
+        }
+        self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Kinewright compositor source"),
+            size: wgpu::Extent3d {
+                width: key.width,
+                height: key.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: key.format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    }
+
+    /// Return this frame's source textures to the recycling pool.
+    ///
+    /// A poisoned lock or a full pool simply destroys the textures; recycling
+    /// is an optimization and must never change rendered output.
+    fn release_layer_textures(&self, resources: Vec<LayerResources>) {
+        let Ok(mut pool) = self.texture_pool.lock() else {
+            return;
+        };
+        let mut hot = Vec::new();
+        for resource in resources {
+            let key = resource.pool_key;
+            if !hot.contains(&key) {
+                hot.push(key);
+            }
+            pool.store(key, resource.texture);
+        }
+        pool.evict(&hot);
     }
 
     #[allow(clippy::too_many_lines)]
@@ -531,20 +809,12 @@ impl Compositor {
                 "invalid compositor input frame".to_owned(),
             ));
         }
-        let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Kinewright compositor source"),
-            size: wgpu::Extent3d {
-                width: layer.frame.width(),
-                height: layer.frame.height(),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
+        let pool_key = TexturePoolKey {
+            width: layer.frame.width(),
+            height: layer.frame.height(),
             format: F::FORMAT,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+        };
+        let texture = self.acquire_layer_texture(pool_key);
         self.gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -582,7 +852,7 @@ impl Compositor {
         let lut_bytes = cube_lut
             .rgba
             .iter()
-            .flat_map(|value| value.to_ne_bytes())
+            .flat_map(|value| value.to_le_bytes())
             .collect::<Vec<_>>();
         self.gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -664,7 +934,8 @@ impl Compositor {
                 ],
             });
         Ok(LayerResources {
-            _texture: texture,
+            texture,
+            pool_key,
             _lut_texture: lut_texture,
             _uniform: uniform,
             _primary: primary,
@@ -740,13 +1011,20 @@ impl Compositor {
         Ok(lut)
     }
 
-    fn readback(
+    /// Copy the `Rgba16Float` render target back and visit every pixel as
+    /// linear f32 RGBA.
+    ///
+    /// The output transform is the caller's: this helper deliberately owns no
+    /// colour policy, so monitoring and delivery encodings stay selected from
+    /// their `ColorDescription`.
+    fn for_each_linear_pixel(
         &self,
         width: u32,
         height: u32,
         output: &wgpu::Texture,
         mut encoder: wgpu::CommandEncoder,
-    ) -> Result<FrameTexture, MediaError> {
+        mut visit: impl FnMut([f32; 4]) -> Result<(), MediaError>,
+    ) -> Result<(), MediaError> {
         let row_bytes = width.saturating_mul(8);
         let padded_row_bytes = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -793,13 +1071,8 @@ impl Compositor {
             .map_err(|_| MediaError::Backend("wgpu readback callback stopped".to_owned()))?
             .map_err(|error| MediaError::Backend(format!("wgpu readback map failed: {error}")))?;
         let mapped = slice.get_mapped_range();
-        let mut rgba = Vec::with_capacity(
-            usize::try_from(width)
-                .unwrap_or_default()
-                .saturating_mul(usize::try_from(height).unwrap_or_default())
-                .saturating_mul(4),
-        );
-        for row in 0..usize::try_from(height).unwrap_or_default() {
+        let mut outcome = Ok(());
+        'rows: for row in 0..usize::try_from(height).unwrap_or_default() {
             let start = row.saturating_mul(usize::try_from(padded_row_bytes).unwrap_or_default());
             let end = start.saturating_add(usize::try_from(row_bytes).unwrap_or_default());
             for pixel in mapped[start..end].as_chunks::<8>().0 {
@@ -809,15 +1082,92 @@ impl Compositor {
                     f16::from_le_bytes([pixel[4], pixel[5]]).to_f32(),
                     f16::from_le_bytes([pixel[6], pixel[7]]).to_f32(),
                 ];
-                rgba.extend_from_slice(&encode_monitor_rgba8(linear));
+                if let Err(error) = visit(linear) {
+                    outcome = Err(error);
+                    break 'rows;
+                }
             }
         }
         drop(mapped);
         buffer.unmap();
+        outcome
+    }
+
+    /// Encode the composited working surface for the supplied monitoring
+    /// description (CC1 2.2.6).
+    ///
+    /// The BT.709 OETF is applied in f32 and RGB is clamped and quantized
+    /// exactly once, here, at the display boundary.
+    ///
+    /// Deliberately no `powf` lookup table: a 4096-entry LUT was rejected
+    /// because interpolation error near black, where the OETF slope is 4.5,
+    /// does not provably stay inside the CC1 6.2 monitor gate (max <= 2,
+    /// P99 <= 1, mean <= 0.5) against the CPU reference. The exact math stays.
+    fn readback_for(
+        &self,
+        width: u32,
+        height: u32,
+        output: &wgpu::Texture,
+        encoder: wgpu::CommandEncoder,
+        monitoring: &ColorDescription,
+    ) -> Result<FrameTexture, MediaError> {
+        let mut rgba = Vec::with_capacity(
+            usize::try_from(width)
+                .unwrap_or_default()
+                .saturating_mul(usize::try_from(height).unwrap_or_default())
+                .saturating_mul(4),
+        );
+        self.for_each_linear_pixel(width, height, output, encoder, |linear| {
+            let monitor_code =
+                encode_monitor_rgba8_for_description(linear, monitoring).map_err(|error| {
+                    MediaError::Backend(format!(
+                        "managed monitoring encode rejected (transfer={:?}): {error}",
+                        monitoring.transfer
+                    ))
+                })?;
+            rgba.extend_from_slice(&monitor_code);
+            Ok(())
+        })?;
         Ok(FrameTexture {
             width,
             height,
             rgba: Arc::new(rgba),
+        })
+    }
+
+    /// Encode the composited working surface for the supplied delivery
+    /// description as RGBA64LE (CC1 3, delivery branch).
+    fn readback_rgba16(
+        &self,
+        width: u32,
+        height: u32,
+        output: &wgpu::Texture,
+        encoder: wgpu::CommandEncoder,
+        delivery: &ColorDescription,
+    ) -> Result<DeliveryFrame, MediaError> {
+        let mut rgba64le = Vec::with_capacity(
+            usize::try_from(width)
+                .unwrap_or_default()
+                .saturating_mul(usize::try_from(height).unwrap_or_default())
+                .saturating_mul(8),
+        );
+        self.for_each_linear_pixel(width, height, output, encoder, |linear| {
+            let delivery_code =
+                encode_delivery_for_description(linear, delivery).map_err(|error| {
+                    MediaError::Backend(format!(
+                        "managed delivery encode rejected (transfer={:?}): {error}",
+                        delivery.transfer
+                    ))
+                })?;
+            for channel in delivery_code {
+                rgba64le.extend_from_slice(&channel.to_le_bytes());
+            }
+            Ok(())
+        })?;
+        Ok(DeliveryFrame {
+            width,
+            height,
+            rgba64le,
         })
     }
 
@@ -833,137 +1183,21 @@ impl Compositor {
         layers: &[CompositorLayer<'_, WorkingFrame>],
     ) -> Result<Vec<f32>, MediaError> {
         let (width, height) = resolution;
-        if width == 0 || height == 0 {
-            return Err(MediaError::Backend(
-                "compositor output resolution must be non-zero".to_owned(),
-            ));
-        }
-        let output = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Kinewright compositor working evidence output"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: OUTPUT_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let resources = layers
-            .iter()
-            .map(|layer| self.layer_resources(layer))
-            .collect::<Result<Vec<_>, _>>()?;
-        let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Kinewright compositor working evidence commands"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Kinewright compositor working evidence pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &output_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            for resource in &resources {
-                pass.set_bind_group(0, &resource.bind_group, &[]);
-                pass.draw(0..4, 0..1);
-            }
-        }
-        self.readback_working(width, height, &output, encoder)
-    }
-
-    #[cfg(test)]
-    fn readback_working(
-        &self,
-        width: u32,
-        height: u32,
-        output: &wgpu::Texture,
-        mut encoder: wgpu::CommandEncoder,
-    ) -> Result<Vec<f32>, MediaError> {
-        let row_bytes = width.saturating_mul(8);
-        let padded_row_bytes = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer_size = u64::from(padded_row_bytes).saturating_mul(u64::from(height));
-        let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Kinewright compositor working evidence readback"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: output,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_row_bytes),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.gpu.queue.submit([encoder.finish()]);
-        let slice = buffer.slice(..);
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        self.gpu
-            .device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|error| MediaError::Backend(format!("wgpu readback poll failed: {error}")))?;
-        receiver
-            .recv()
-            .map_err(|_| MediaError::Backend("wgpu readback callback stopped".to_owned()))?
-            .map_err(|error| MediaError::Backend(format!("wgpu readback map failed: {error}")))?;
-        let mapped = slice.get_mapped_range();
+        let (output, resources, encoder) = self.composite(width, height, layers)?;
         let mut values = Vec::with_capacity(
             usize::try_from(width)
                 .unwrap_or_default()
                 .saturating_mul(usize::try_from(height).unwrap_or_default())
                 .saturating_mul(4),
         );
-        for row in 0..usize::try_from(height).unwrap_or_default() {
-            let start = row.saturating_mul(usize::try_from(padded_row_bytes).unwrap_or_default());
-            let end = start.saturating_add(usize::try_from(row_bytes).unwrap_or_default());
-            for pixel in mapped[start..end].as_chunks::<8>().0 {
-                values.extend([
-                    f16::from_le_bytes([pixel[0], pixel[1]]).to_f32(),
-                    f16::from_le_bytes([pixel[2], pixel[3]]).to_f32(),
-                    f16::from_le_bytes([pixel[4], pixel[5]]).to_f32(),
-                    f16::from_le_bytes([pixel[6], pixel[7]]).to_f32(),
-                ]);
-            }
-        }
-        drop(mapped);
-        buffer.unmap();
-        Ok(values)
+        let readback = self
+            .for_each_linear_pixel(width, height, &output, encoder, |linear| {
+                values.extend(linear);
+                Ok(())
+            })
+            .map(|()| values);
+        self.release_layer_textures(resources);
+        readback
     }
 }
 
@@ -1020,7 +1254,7 @@ impl LayerParams {
         let mut bytes = [0_u8; UNIFORM_BYTES];
         for (index, value) in values.into_iter().enumerate() {
             let start = index * 4;
-            bytes[start..start + 4].copy_from_slice(&value.to_ne_bytes());
+            bytes[start..start + 4].copy_from_slice(&value.to_le_bytes());
         }
         bytes
     }
@@ -1073,25 +1307,32 @@ fn primary_buffer_bytes(effects: &[Effect]) -> Result<Vec<u8>, MediaError> {
             PRIMARY_HEADER_BYTES.saturating_add(node_index.saturating_mul(PRIMARY_NODE_BYTES));
         for (index, value) in values.into_iter().enumerate() {
             let start = offset.saturating_add(index.saturating_mul(4));
-            bytes[start..start + 4].copy_from_slice(&value.to_ne_bytes());
+            bytes[start..start + 4].copy_from_slice(&value.to_le_bytes());
         }
     }
     Ok(bytes)
 }
 
+/// Report whether a layer needs the display-coded legacy compatibility branch.
+///
+/// `chroma_key` is deliberately absent: CC1 2.2.4 makes alpha and keying
+/// independent of colour correction, and the legacy branch clamps RGB to
+/// 0..1, which 2.2.5 forbids for a colour stage. Keying has its own shader
+/// branch that never encodes, clamps, or decodes the colour that continues
+/// down the pipeline.
+///
+/// `color_grade` is also absent: `Effect` deserialization canonicalises that
+/// name to `primary_correction`, so no live project state can carry it.
+/// Does this layer need the shader's legacy display-coded branch?
+///
+/// Both compatibility stages run there: the historical display-coded controls
+/// and the post-primary LUTs. Core owns the classification, so the routing
+/// here cannot drift from what QA, delivery conformance, and the inspector
+/// report about the same effect.
 fn legacy_stage_active(effects: &[Effect]) -> bool {
-    effects.iter().any(|effect| {
-        matches!(
-            effect.name.as_str(),
-            "color_grade"
-                | "brightness"
-                | "contrast"
-                | "saturation"
-                | "look_lut"
-                | "cube_lut"
-                | "chroma_key"
-        )
-    })
+    effects
+        .iter()
+        .any(|effect| kinewright_core::effect_compatibility_stage(&effect.name).is_some())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1133,13 +1374,18 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                         params.reframe_focus_y = value / 10_000.0;
                     }
                 }
-                EffectUniform::Exposure => params.exposure += value / 1_000.0,
-                EffectUniform::Temperature => params.temperature += value / 100.0,
-                EffectUniform::Tint => params.tint += value / 100.0,
+                // `color_grade` is canonicalised to `primary_correction`
+                // before an effect enters live project state, so these three
+                // display-coded uniforms are unreachable and the shader no
+                // longer reads them. Their uniform slots stay in
+                // `LayerParams` so the 48-float ABI is byte-identical.
+                EffectUniform::Exposure
+                | EffectUniform::Temperature
+                | EffectUniform::Tint
                 // CC1 primary nodes are serialized separately and executed
                 // in order by the shader's storage-buffer loop. They must
                 // never be flattened into the legacy display controls.
-                EffectUniform::PrimaryExposure
+                | EffectUniform::PrimaryExposure
                 | EffectUniform::PrimaryTemperature
                 | EffectUniform::PrimaryTint
                 | EffectUniform::PrimaryContrast
@@ -1190,9 +1436,6 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
     params.crop_bottom = params.crop_bottom.clamp(0.0, 0.45);
     params.reframe_focus_x = params.reframe_focus_x.clamp(0.0, 1.0);
     params.reframe_focus_y = params.reframe_focus_y.clamp(0.0, 1.0);
-    params.exposure = params.exposure.clamp(-5.0, 5.0);
-    params.temperature = params.temperature.clamp(-1.0, 1.0);
-    params.tint = params.tint.clamp(-1.0, 1.0);
     params.lut_intensity = params.lut_intensity.clamp(0.0, 1.0);
     params.external_lut_intensity = params.external_lut_intensity.clamp(0.0, 1.0);
     params.mask_center_x = params.mask_center_x.clamp(0.0, 1.0);
@@ -1216,9 +1459,10 @@ fn parameter_value(effect: &Effect, descriptor: &EffectParameterDescriptor) -> f
 mod tests {
     use std::collections::BTreeMap;
 
-    use kinewright_core::{EffectId, ParamValue, Title};
+    use kinewright_core::{EFFECT_DESCRIPTORS, EffectId, ParamValue, Title};
 
     use super::*;
+    use crate::gpu_test_support::fixture_gpu_or_skip;
 
     fn solid(width: u32, height: u32, rgba: [u8; 4]) -> FrameTexture {
         FrameTexture {
@@ -1233,14 +1477,12 @@ mod tests {
     }
 
     /// Prefer the deterministic software fallback adapter (WARP on CI); use a
-    /// real adapter when no fallback exists (developer machines); skip only
-    /// when the environment has no usable adapter at all. The pixel assertions
-    /// carry tolerances, so hardware adapters remain valid test targets.
+    /// real adapter when the operator opts in (developer machines). The pixel
+    /// assertions carry tolerances, so hardware adapters remain valid test
+    /// targets. Missing every adapter fails loudly unless skipping was
+    /// explicitly permitted; see [`fixture_gpu_or_skip`].
     fn fallback() -> Option<Compositor> {
-        let gpu = GpuContext::headless(true)
-            .or_else(|_| GpuContext::headless(false))
-            .ok()?;
-        Some(Compositor::new(gpu))
+        Some(Compositor::new(fixture_gpu_or_skip()?))
     }
 
     #[test]
@@ -1258,11 +1500,7 @@ mod tests {
 
     #[test]
     fn headless_context_preserves_adapter_provenance() {
-        let Some(gpu) = GpuContext::headless(true)
-            .or_else(|_| GpuContext::headless(false))
-            .ok()
-        else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
+        let Some(gpu) = fixture_gpu_or_skip() else {
             return;
         };
         let metadata = gpu.monitor_proof_metadata();
@@ -1303,7 +1541,7 @@ mod tests {
 
     fn primary_f32(bytes: &[u8], offset: usize) -> f32 {
         let end = offset.saturating_add(std::mem::size_of::<f32>());
-        f32::from_ne_bytes(bytes[offset..end].try_into().expect("f32-aligned bytes"))
+        f32::from_le_bytes(bytes[offset..end].try_into().expect("f32-aligned bytes"))
     }
 
     fn crop(id: u64, left: i64, right: i64, top: i64, bottom: i64) -> Effect {
@@ -1370,7 +1608,7 @@ mod tests {
         let bytes = primary_buffer_bytes(&[first, second]).expect("valid primary nodes");
 
         assert_eq!(bytes.len(), PRIMARY_HEADER_BYTES + 2 * PRIMARY_NODE_BYTES);
-        assert_eq!(u32::from_ne_bytes(bytes[0..4].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(bytes[0..4].try_into().unwrap()), 2);
         assert!(bytes[4..PRIMARY_HEADER_BYTES].iter().all(|byte| *byte == 0));
 
         let first_values = [
@@ -1397,7 +1635,6 @@ mod tests {
     #[test]
     fn primary_correction_nodes_execute_in_order_on_gpu() {
         let Some(compositor) = fallback() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
         let input = solid(4, 4, [64, 128, 192, 255]);
@@ -1425,7 +1662,6 @@ mod tests {
     #[test]
     fn solid_color_effects_are_deterministic_on_fallback_adapter() {
         let Some(compositor) = fallback() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
         let input = solid(4, 4, [64, 128, 192, 255]);
@@ -1446,7 +1682,6 @@ mod tests {
     #[test]
     fn contrast_saturation_opacity_and_transform_are_deterministic() {
         let Some(compositor) = fallback() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
 
@@ -1513,7 +1748,6 @@ mod tests {
     #[test]
     fn crop_top_uses_uv_zero_as_the_top_row() {
         let Some(compositor) = fallback() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
         let red = solid(8, 8, [255, 0, 0, 255]);
@@ -1539,7 +1773,6 @@ mod tests {
     #[test]
     fn reframe_cover_crop_tracks_an_explicit_horizontal_focal_point() {
         let Some(compositor) = fallback() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
         let mut pixels = Vec::new();
@@ -1627,7 +1860,6 @@ mod tests {
     #[test]
     fn crop_all_edges_keeps_only_the_center_rectangle() {
         let Some(compositor) = fallback() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
         let red = solid(8, 8, [255, 0, 0, 255]);
@@ -1657,7 +1889,6 @@ mod tests {
     #[test]
     fn crop_transparency_wins_over_mid_fade_alpha_forcing() {
         let Some(compositor) = fallback() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
         let green = solid(8, 8, [0, 255, 0, 255]);
@@ -1692,7 +1923,6 @@ mod tests {
     #[test]
     fn crop_then_transform_composes_on_the_transformed_quad() {
         let Some(compositor) = fallback() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
         let red = solid(8, 8, [255, 0, 0, 255]);
@@ -1727,13 +1957,38 @@ mod tests {
     }
 
     #[test]
-    fn color_grade_and_look_lut_execute_in_the_shared_compositor() {
+    fn legacy_color_grade_name_has_no_compositor_branch_of_its_own() {
+        // `Effect` deserialization canonicalises `color_grade` to
+        // `primary_correction`, so the compositor's legacy display-coded
+        // branch must not be reachable for it and its uniforms must stay
+        // neutral.
+        let legacy = effect_with(1, "color_grade", &[("exposure_milli_stops", 1_000)]);
+        assert!(!legacy_stage_active(std::slice::from_ref(&legacy)));
+        let params = params_for(
+            std::slice::from_ref(&legacy),
+            TransitionRenderParams::default(),
+        );
+        assert!(params.exposure.abs() < f32::EPSILON);
+        assert!(params.temperature.abs() < f32::EPSILON);
+        assert!(params.tint.abs() < f32::EPSILON);
+
+        let mut canonical = legacy;
+        canonical.name = "primary_correction".to_owned();
+        assert_eq!(
+            primary_buffer_bytes(std::slice::from_ref(&canonical))
+                .expect("canonical primary node")
+                .len(),
+            PRIMARY_HEADER_BYTES + PRIMARY_NODE_BYTES
+        );
+    }
+
+    #[test]
+    fn primary_exposure_and_look_lut_execute_in_the_shared_compositor() {
         let Some(compositor) = fallback() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
         let gray = solid(4, 4, [64, 64, 64, 255]);
-        let exposure = effect_with(1, "color_grade", &[("exposure_milli_stops", 1_000)]);
+        let exposure = effect_with(1, "primary_correction", &[("exposure_milli_stops", 1_000)]);
         let output = compositor
             .render(
                 (4, 4),
@@ -1744,7 +1999,9 @@ mod tests {
                 }],
             )
             .unwrap();
-        assert_pixel_close(pixel(&output, 0, 0), [128, 128, 128, 255], 3);
+        // +1 stop in linear light, not the old display-coded doubling: the
+        // BT.709 monitor code for 2 * decode_bt709(64/255) is ~97.
+        assert_pixel_close(pixel(&output, 0, 0), [97, 97, 97, 255], 3);
 
         let red = solid(4, 4, [255, 0, 0, 255]);
         let monochrome = effect_with(
@@ -1768,7 +2025,6 @@ mod tests {
     #[test]
     fn external_cube_lut_is_sampled_in_red_fastest_order() {
         let Some(compositor) = fallback() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
         let unique = SystemTime::now()
@@ -1823,7 +2079,6 @@ mod tests {
     #[test]
     fn masks_and_chroma_key_create_real_alpha_for_lower_layers() {
         let Some(compositor) = fallback() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
         let blue = solid(8, 8, [0, 0, 255, 255]);
@@ -1859,6 +2114,9 @@ mod tests {
 
         let green = solid(8, 8, [0, 255, 0, 255]);
         let key = effect_with(2, "chroma_key", &[("threshold_percent", 15)]);
+        // CC1 2.2.4: keying is coverage, not colour correction, so it must
+        // not put the layer through the legacy display-coded branch.
+        assert!(!legacy_stage_active(std::slice::from_ref(&key)));
         let output = compositor
             .render(
                 (8, 8),
@@ -1879,10 +2137,485 @@ mod tests {
         assert_pixel_close(pixel(&output, 4, 4), [0, 0, 255, 255], 3);
     }
 
+    /// Build a one-pixel-per-texel linear working frame.
+    fn working(width: u32, height: u32, rgba: [f32; 4]) -> WorkingFrame {
+        let pixels = std::iter::repeat_n(rgba, usize::try_from(width * height).unwrap())
+            .flatten()
+            .map(f16::from_f32)
+            .collect::<Vec<_>>();
+        WorkingFrame {
+            width,
+            height,
+            pixels: Arc::new(pixels),
+        }
+    }
+
+    #[test]
+    fn chroma_key_alone_never_clamps_the_working_colour_it_passes_through() {
+        // This asserts an over-range half-float value survives the actual
+        // render target; either adapter class demonstrates that.
+        let Some(gpu) = fixture_gpu_or_skip() else {
+            return;
+        };
+        let compositor = Compositor::new(gpu);
+
+        // Far enough from the default green key colour that alpha stays 1,
+        // and over-range in red so a display-space round trip would clip it.
+        let over_range = working(4, 4, [1.5, 0.2, 0.2, 1.0]);
+        let key = effect_with(1, "chroma_key", &[("threshold_percent", 15)]);
+        assert!(!legacy_stage_active(std::slice::from_ref(&key)));
+
+        let keyed = compositor
+            .render_working(
+                (4, 4),
+                &[CompositorLayer {
+                    frame: &over_range,
+                    effects: std::slice::from_ref(&key),
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .expect("chroma-key working-surface readback");
+        let unkeyed = compositor
+            .render_working(
+                (4, 4),
+                &[CompositorLayer {
+                    frame: &over_range,
+                    effects: &[],
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .expect("neutral working-surface readback");
+
+        // CC1 2.2.5: no colour stage clamps RGB, and CC1 2.2.4: keying does
+        // not change the colour of pixels it keeps.
+        assert!(
+            keyed[0] > 1.4,
+            "chroma_key clamped an over-range working value: {:?}",
+            &keyed[0..4]
+        );
+        assert!(
+            (keyed[3] - 1.0).abs() < 1e-3,
+            "keyed alpha was {}",
+            keyed[3]
+        );
+        for (index, (keyed_value, unkeyed_value)) in
+            keyed.iter().zip(unkeyed.iter()).enumerate().take(16)
+        {
+            assert!(
+                (keyed_value - unkeyed_value).abs() < 1e-3,
+                "chroma_key changed channel {index}: {keyed_value} vs {unkeyed_value}"
+            );
+        }
+    }
+
+    /// CC1 5: only a genuine full-scale render at the document raster may
+    /// claim `full_resolution`. Comparing rasters alone is not enough, because
+    /// a proxy render of a document already at or below the proxy bound comes
+    /// back at exactly the document raster.
+    #[test]
+    fn monitor_proof_claims_full_resolution_only_for_a_full_scale_render() {
+        let Some(gpu) = fixture_gpu_or_skip() else {
+            return;
+        };
+        let proxy = RenderScale::Proxy { max_width: 1280 };
+        assert_eq!(proxy.output_resolution((640, 360)), (640, 360));
+        assert!(
+            !gpu.monitor_proof_metadata_for(proxy, (640, 360), (640, 360))
+                .full_resolution,
+            "a proxy render must never claim the full raster"
+        );
+        assert!(
+            gpu.monitor_proof_metadata_for(RenderScale::FullResolution, (640, 360), (640, 360))
+                .full_resolution
+        );
+        assert!(
+            !gpu.monitor_proof_metadata_for(RenderScale::FullResolution, (320, 180), (640, 360))
+                .full_resolution,
+            "a short render must never claim the full raster"
+        );
+    }
+
+    /// CC1 2.2.4: keying does not change the colour of pixels it keeps. A kept
+    /// pixel with a NEGATIVE working channel is the sharp case: the old
+    /// `max(0.0, ...)` spill clamp reduced to `max(0.0, g)` at `key_alpha == 1`
+    /// and quietly crushed the sign.
+    #[test]
+    fn chroma_key_keeps_a_negative_green_working_value_bit_identical() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+
+        // Display-coded distance from the default green key is about 0.70,
+        // well past the default 0.15/0.10 band, so this pixel is fully kept.
+        let negative_green = working(4, 4, [0.3, -0.05, 0.2, 1.0]);
+        let key = effect_with(1, "chroma_key", &[("threshold_percent", 15)]);
+        assert!(!legacy_stage_active(std::slice::from_ref(&key)));
+
+        let keyed = compositor
+            .render_working(
+                (4, 4),
+                &[CompositorLayer {
+                    frame: &negative_green,
+                    effects: std::slice::from_ref(&key),
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .expect("chroma-key working-surface readback");
+        let unkeyed = compositor
+            .render_working(
+                (4, 4),
+                &[CompositorLayer {
+                    frame: &negative_green,
+                    effects: &[],
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .expect("neutral working-surface readback");
+
+        assert!(
+            keyed[1] < 0.0,
+            "chroma_key crushed a negative working green to {}",
+            keyed[1]
+        );
+        // A kept pixel is not attenuated by coverage, so the over-range red
+        // survives at full strength. (The composited alpha is always 1: layers
+        // blend over an opaque black clear.)
+        assert!(
+            keyed[0] > 0.29,
+            "the pixel should be fully kept, red was {}",
+            keyed[0]
+        );
+        for (index, (keyed_value, unkeyed_value)) in
+            keyed.iter().zip(unkeyed.iter()).enumerate().take(16)
+        {
+            assert_eq!(
+                keyed_value.to_bits(),
+                unkeyed_value.to_bits(),
+                "chroma_key changed channel {index}: {keyed_value} vs {unkeyed_value}"
+            );
+        }
+    }
+
+    /// An edge pixel keeps the pre-CC1 DISPLAY-CODED spill strength. Moving the
+    /// dominance into linear light would silently restrengthen spill in every
+    /// project that was keyed before CC1, so the expected value below is
+    /// written out from the display-space formula by hand.
+    #[test]
+    fn chroma_key_edge_pixel_gets_the_display_coded_spill_amount() {
+        // The layer blends over an opaque black clear with
+        // `src.rgb * srcAlpha`, so the readback is the working colour scaled
+        // by coverage and the readback alpha is always 1.
+        const EXPECTED_KEY_ALPHA: f32 = 0.132_483_8;
+        const EXPECTED_GREEN_LINEAR: f32 = 0.080_793_0;
+        const EXPECTED_RED: f32 = 0.05 * EXPECTED_KEY_ALPHA;
+        const EXPECTED_GREEN: f32 = EXPECTED_GREEN_LINEAR * EXPECTED_KEY_ALPHA;
+        // The pre-fix linear-dominance form would have left green at 0.10962
+        // linear, i.e. 0.014523 after coverage.
+        const LINEAR_DOMINANCE_GREEN: f32 = 0.109_62 * EXPECTED_KEY_ALPHA;
+
+        let Some(compositor) = fallback() else {
+            return;
+        };
+
+        // Working linear (0.05, 0.5, 0.05).  BT.709 display codes:
+        //   e(0.05) = 1.099 * 0.05^0.45 - 0.099 = 0.1864627
+        //   e(0.50) = 1.099 * 0.50^0.45 - 0.099 = 0.7055147
+        // Distance from the (0, 1, 0) key colour:
+        //   |(0.1864627, -0.2944853, 0.1864627)| / sqrt(3) = 0.2282206
+        // threshold 50% and softness 100% give the band [0.0, 1.0], so
+        //   key_alpha = d * d * (3 - 2 * d) = 0.1324838
+        // Spill at 100%:
+        //   dominance = 0.7055147 - 0.1864627               = 0.5190520
+        //   g_display = 0.7055147 - dominance * (1 - alpha)  = 0.2552297
+        //   g_linear  = ((0.2552297 + 0.099) / 1.099)^(1/0.45) = 0.0807930
+        // The pre-fix linear-dominance form would have produced 0.1096, which
+        // the tolerance below excludes.
+        let edge = working(4, 4, [0.05, 0.5, 0.05, 1.0]);
+        let key = effect_with(
+            1,
+            "chroma_key",
+            &[
+                ("threshold_percent", 50),
+                ("softness_percent", 100),
+                ("spill_percent", 100),
+            ],
+        );
+        let keyed = compositor
+            .render_working(
+                (4, 4),
+                &[CompositorLayer {
+                    frame: &edge,
+                    effects: std::slice::from_ref(&key),
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .expect("chroma-key edge working-surface readback");
+
+        let [red, green, blue, ..] = keyed[0..4] else {
+            panic!("four channels");
+        };
+        // Coverage is real: the edge pixel is neither fully keyed nor fully
+        // kept, so it is attenuated to about 13% of its working colour.
+        assert!(
+            (red - EXPECTED_RED).abs() < 2.0e-4,
+            "edge red was {red}, expected {EXPECTED_RED}"
+        );
+        assert!(
+            (blue - EXPECTED_RED).abs() < 2.0e-4,
+            "spill suppression changed blue: {blue}"
+        );
+        assert!(
+            (green - EXPECTED_GREEN).abs() < 2.0e-4,
+            "edge green was {green}, expected {EXPECTED_GREEN} (linear-dominance spill would give {LINEAR_DOMINANCE_GREEN})"
+        );
+    }
+
+    /// The compositor must not keep a private opinion about which effects run
+    /// in the legacy display-coded shader branch: core owns the classification
+    /// that QA, delivery conformance, and the inspector already report.
+    #[test]
+    fn legacy_shader_routing_agrees_with_core_effect_classification() {
+        let mut routed = Vec::new();
+        for descriptor in EFFECT_DESCRIPTORS {
+            let candidate = effect_with(1, descriptor.name, &[]);
+            let active = legacy_stage_active(std::slice::from_ref(&candidate));
+            assert_eq!(
+                active,
+                kinewright_core::effect_compatibility_stage(descriptor.name).is_some(),
+                "{} routes to the legacy branch as {active} but core disagrees",
+                descriptor.name
+            );
+            if active {
+                routed.push(descriptor.name);
+            }
+        }
+        routed.sort_unstable();
+        // Both compatibility stages go through the legacy branch: the
+        // display-coded controls and the post-primary LUTs.
+        assert_eq!(
+            routed,
+            [
+                "brightness",
+                "contrast",
+                "cube_lut",
+                "look_lut",
+                "saturation"
+            ]
+        );
+    }
+
+    /// The pool is a reuse optimization, so it must be bounded by the memory it
+    /// actually holds, not by a texture count that says nothing at 4K.
+    #[test]
+    fn texture_pool_holds_its_byte_budget_and_keeps_the_hot_shape() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        // Pool accounting is derived entirely from the key, so a 1x1
+        // placeholder can stand in for a 4K texture. That keeps this a test of
+        // the budget policy instead of a several-gigabyte allocation.
+        let placeholder = || {
+            compositor
+                .gpu
+                .device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("texture pool budget probe"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: OUTPUT_FORMAT,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                })
+        };
+        // 3840 * 2160 * 8 bytes is about 63 MiB, so exactly four of these fit
+        // in the budget and a fifth does not.
+        let shape = |index: u32| TexturePoolKey {
+            width: 3_840 - index,
+            height: 2_160,
+            format: OUTPUT_FORMAT,
+        };
+        assert!(texture_pool_bytes(shape(0)) * 4 <= TEXTURE_POOL_MAX_BYTES);
+        assert!(texture_pool_bytes(shape(0)) * 5 > TEXTURE_POOL_MAX_BYTES);
+
+        let mut pool = TexturePool::default();
+        let shapes = (0..6_u32).map(shape).collect::<Vec<_>>();
+        for key in &shapes {
+            // One frame at this shape returns two layer textures.
+            pool.store(*key, placeholder());
+            pool.store(*key, placeholder());
+            pool.evict(std::slice::from_ref(key));
+            assert!(
+                pool.bytes <= TEXTURE_POOL_MAX_BYTES,
+                "pool held {} bytes after shape {}x{}",
+                pool.bytes,
+                key.width,
+                key.height
+            );
+            assert!(pool.shapes.len() <= TEXTURE_POOL_MAX_SHAPES);
+            // Eviction must never take the shape the frame just used: doing so
+            // guarantees a reallocation on the next frame at the same raster.
+            assert!(
+                pool.shapes
+                    .get(key)
+                    .is_some_and(|textures| !textures.is_empty()),
+                "the hot shape was evicted"
+            );
+        }
+        assert!(pool.take(*shapes.last().expect("six shapes")).is_some());
+
+        // A single shape can bust the budget on its own; it is trimmed rather
+        // than left over budget, and the per-shape depth cap still applies.
+        let mut pool = TexturePool::default();
+        let key = shape(0);
+        for _ in 0..(TEXTURE_POOL_MAX_PER_SHAPE + 3) {
+            pool.store(key, placeholder());
+        }
+        assert_eq!(pool.shapes[&key].len(), TEXTURE_POOL_MAX_PER_SHAPE);
+        pool.evict(std::slice::from_ref(&key));
+        assert!(pool.bytes <= TEXTURE_POOL_MAX_BYTES);
+        assert!(
+            !pool.shapes[&key].is_empty(),
+            "trimming must not empty the only shape"
+        );
+    }
+
+    #[test]
+    fn layer_textures_are_recycled_without_leaking_pixels_between_frames() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let pooled = |compositor: &Compositor| -> usize {
+            compositor
+                .texture_pool
+                .lock()
+                .expect("texture pool lock")
+                .shapes
+                .values()
+                .map(Vec::len)
+                .sum()
+        };
+
+        assert_eq!(pooled(&compositor), 0);
+        let red = solid(4, 4, [255, 0, 0, 255]);
+        let output = compositor
+            .render(
+                (4, 4),
+                &[CompositorLayer {
+                    frame: &red,
+                    effects: &[],
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .unwrap();
+        assert_pixel_close(pixel(&output, 0, 0), [255, 0, 0, 255], 2);
+        assert_eq!(pooled(&compositor), 1, "the layer texture was not recycled");
+
+        // The recycled texture is fully overwritten, so no red survives.
+        let blue = solid(4, 4, [0, 0, 255, 255]);
+        let output = compositor
+            .render(
+                (4, 4),
+                &[CompositorLayer {
+                    frame: &blue,
+                    effects: &[],
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .unwrap();
+        assert_pixel_close(pixel(&output, 0, 0), [0, 0, 255, 255], 2);
+        assert_eq!(pooled(&compositor), 1, "the pool grew for one reused shape");
+
+        // Two layers of the same shape need two distinct live textures.
+        let output = compositor
+            .render(
+                (4, 4),
+                &[
+                    CompositorLayer {
+                        frame: &red,
+                        effects: &[],
+                        transition: TransitionRenderParams::default(),
+                    },
+                    CompositorLayer {
+                        frame: &blue,
+                        effects: &[],
+                        transition: TransitionRenderParams::default(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_pixel_close(pixel(&output, 0, 0), [0, 0, 255, 255], 2);
+        assert_eq!(pooled(&compositor), 2);
+
+        // A different shape is a different pool key, and the pool stays
+        // bounded by the shape budget.
+        for width in 1..=(u32::try_from(TEXTURE_POOL_MAX_SHAPES).unwrap() + 4) {
+            let frame = solid(width, 2, [8, 8, 8, 255]);
+            compositor
+                .render(
+                    (4, 4),
+                    &[CompositorLayer {
+                        frame: &frame,
+                        effects: &[],
+                        transition: TransitionRenderParams::default(),
+                    }],
+                )
+                .unwrap();
+        }
+        let shapes = compositor
+            .texture_pool
+            .lock()
+            .expect("texture pool lock")
+            .shapes
+            .len();
+        assert!(
+            shapes <= TEXTURE_POOL_MAX_SHAPES,
+            "texture pool retained {shapes} shapes"
+        );
+    }
+
+    #[test]
+    fn chroma_key_still_composites_after_an_active_legacy_display_stage() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let blue = solid(8, 8, [0, 0, 255, 255]);
+        let green = solid(8, 8, [0, 255, 0, 255]);
+        // A legacy display stage plus a key must still key: the key branch
+        // runs after the legacy branch so the stacked behaviour is preserved.
+        let effects = [
+            effect(1, "saturation", "percent", 0),
+            effect_with(2, "chroma_key", &[("threshold_percent", 15)]),
+        ];
+        assert!(legacy_stage_active(&effects));
+        let output = compositor
+            .render(
+                (8, 8),
+                &[
+                    CompositorLayer {
+                        frame: &blue,
+                        effects: &[],
+                        transition: TransitionRenderParams::default(),
+                    },
+                    CompositorLayer {
+                        frame: &green,
+                        effects: &effects,
+                        transition: TransitionRenderParams::default(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_pixel_close(pixel(&output, 4, 4), [0, 0, 255, 255], 3);
+    }
+
     #[test]
     fn z_order_and_crossfade_alpha_blend_bottom_to_top() {
         let Some(compositor) = fallback() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
         let red = solid(2, 2, [255, 0, 0, 255]);
@@ -1942,7 +2675,6 @@ mod tests {
     #[test]
     fn rasterized_title_is_composited_by_the_existing_layer_pipeline() {
         let Some(compositor) = fallback() else {
-            eprintln!("skipped: no usable wgpu adapter in this environment");
             return;
         };
         let background = solid(320, 180, [12, 18, 24, 255]);

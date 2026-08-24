@@ -12,8 +12,9 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender};
 use kinewright_core::{
-    Analysis, DeliveryConformanceReport, DeliveryProfile, Document, Export, ExportCancellation,
-    ExportMediaPreflightReport, ExportProgress, MediaError, delivery_conformance,
+    Analysis, AssetId, DeliveryConformanceReport, DeliveryProfile, Document, Export,
+    ExportCancellation, ExportMediaPreflightIssue, ExportMediaPreflightReport, ExportProgress,
+    MediaAvailabilityKind, MediaError, MediaSourceFingerprint, delivery_conformance,
     document_for_delivery_profile, export_media_preflight,
 };
 use schemars::JsonSchema;
@@ -127,6 +128,10 @@ pub enum ExportQueueError {
     WorkerThread(#[source] std::io::Error),
     #[error("the export queue worker is unavailable")]
     WorkerUnavailable,
+    #[error(
+        "a source file changed between the export preflight and the finished encode, so the output cannot be trusted: {0}"
+    )]
+    SourceIdentityChanged(String),
 }
 
 #[derive(Clone)]
@@ -156,6 +161,122 @@ struct WorkItem {
     profile: DeliveryProfile,
     overwrite: bool,
     cancellation: ExportCancellation,
+    /// The live source identity observed when this job passed preflight.
+    ///
+    /// Verifying only before the encode is a time-of-check/time-of-use gap: a
+    /// source can be replaced while the encode runs, producing an output whose
+    /// contents do not match the fingerprints the job was admitted under.
+    verified_sources: BTreeMap<AssetId, MediaSourceFingerprint>,
+}
+
+/// Run the export media preflight and snapshot the live source identity it
+/// observed, from a single availability pass.
+///
+/// `export_media_preflight` already asks the backend for one
+/// `media_availability` status per timeline-referenced source, and each status
+/// carries the fingerprint the backend just hashed. Calling the preflight and
+/// then a separate identity snapshot asked the backend to hash every source
+/// twice for the same answer, so the pass is done once here and both results
+/// are derived from it.
+///
+/// The observed fingerprint is preferred when the backend supplies one; the
+/// persisted project fingerprint is the fallback so a backend that does not
+/// re-hash still produces a stable, comparable value.
+///
+/// A core-level change that made `export_media_preflight` itself return the
+/// observed fingerprints would let the worker's pre-encode preflight feed the
+/// post-encode drift check too, removing the last redundant pass. That is a
+/// `kinewright-core` API change and is out of scope here.
+fn preflight_with_source_identities(
+    document: &Document,
+    analysis: &dyn Analysis,
+) -> (
+    ExportMediaPreflightReport,
+    BTreeMap<AssetId, MediaSourceFingerprint>,
+) {
+    let mut checked_assets = Vec::new();
+    let mut issues = Vec::new();
+    let mut identities = BTreeMap::new();
+    for asset in document.timeline_referenced_media_assets() {
+        checked_assets.push(asset.id);
+        let status = analysis.media_availability(asset);
+        identities.insert(
+            asset.id,
+            status
+                .observed_fingerprint
+                .clone()
+                .unwrap_or_else(|| asset.source_fingerprint.clone()),
+        );
+        if status.kind != MediaAvailabilityKind::OnlineVerified {
+            issues.push(ExportMediaPreflightIssue {
+                asset: asset.id,
+                asset_name: asset.name.clone(),
+                availability: status,
+            });
+        }
+    }
+    (
+        ExportMediaPreflightReport {
+            checked_assets,
+            issues,
+        },
+        identities,
+    )
+}
+
+/// Return a description of the first source whose live identity no longer
+/// matches the identity the job was admitted under, or `None` when every
+/// source still matches.
+///
+/// What each half of the check actually guards:
+///
+/// * The `kind` test carries the check: a source that was replaced, truncated,
+///   or unlinked while the encode ran no longer classifies as
+///   `OnlineVerified`, because that kind means the backend just re-read the
+///   file and matched the persisted fingerprint.
+/// * The fingerprint comparison is a consistency assertion on top of it. It
+///   catches a backend that reports `OnlineVerified` while handing back a
+///   different observed fingerprint, and an asset that entered the timeline
+///   after the job was admitted (`None` below), which the `kind` test alone
+///   would accept.
+fn source_identity_drift(
+    document: &Document,
+    analysis: &dyn Analysis,
+    verified: &BTreeMap<AssetId, MediaSourceFingerprint>,
+) -> Option<String> {
+    for asset in document.timeline_referenced_media_assets() {
+        let status = analysis.media_availability(asset);
+        if status.kind != MediaAvailabilityKind::OnlineVerified {
+            return Some(format!(
+                "{} ({:?}): {}",
+                asset.name,
+                status.kind,
+                status
+                    .reason
+                    .as_deref()
+                    .unwrap_or("no backend reason was provided")
+            ));
+        }
+        let observed = status
+            .observed_fingerprint
+            .unwrap_or_else(|| asset.source_fingerprint.clone());
+        match verified.get(&asset.id) {
+            Some(expected) if *expected == observed => {}
+            Some(_) => {
+                return Some(format!(
+                    "{} no longer matches the fingerprint verified at preflight",
+                    asset.name
+                ));
+            }
+            None => {
+                return Some(format!(
+                    "{} was not part of the verified preflight set",
+                    asset.name
+                ));
+            }
+        }
+    }
+    None
 }
 
 impl ExportQueue {
@@ -213,6 +334,7 @@ impl ExportQueue {
     ///
     /// Returns an error for an unsafe path, invalid delivery document,
     /// conformance failure, id exhaustion, or stopped worker.
+    #[allow(clippy::too_many_lines)]
     pub fn enqueue(
         &self,
         document: &Document,
@@ -253,8 +375,10 @@ impl ExportQueue {
             document_for_delivery_profile(document, profile, focus_x_percent, focus_y_percent)
                 .map_err(|error| ExportQueueError::InvalidDelivery(error.to_string()))?,
         );
-        let media_preflight =
-            export_media_preflight(&delivery_document, self.state.analysis.as_ref());
+        // One availability pass produces both the admission gate and the
+        // identities the post-encode drift check compares against.
+        let (media_preflight, verified_sources) =
+            preflight_with_source_identities(&delivery_document, self.state.analysis.as_ref());
         if !media_preflight.export_ready() {
             return Err(ExportQueueError::MediaPreflight(Box::new(media_preflight)));
         }
@@ -305,6 +429,7 @@ impl ExportQueue {
             profile,
             overwrite,
             cancellation,
+            verified_sources,
         };
         if let Err(error) = self.work_tx.try_send(work) {
             lock_jobs(&self.state).remove(&id);
@@ -385,6 +510,7 @@ fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
         .name(format!("kinewright-export-progress-{}", work.id.0))
         .spawn(move || monitor_progress(&progress_state, progress_id, &progress_rx, &stop_rx));
 
+    let document = Arc::clone(&work.document);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         state
             .exporter
@@ -400,7 +526,26 @@ fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
         return;
     }
     match result {
-        Ok(Ok(())) => mark_completed(state, work.id),
+        // Close the time-of-check/time-of-use gap: a source that was swapped
+        // while the encode ran would otherwise produce a job reported as
+        // completed against fingerprints the output does not actually contain.
+        Ok(Ok(())) => {
+            match source_identity_drift(&document, state.analysis.as_ref(), &work.verified_sources)
+            {
+                None => mark_completed(state, work.id),
+                Some(reason) => {
+                    let quarantine = quarantine_untrusted_output(&work.output_path);
+                    mark_failed(
+                        state,
+                        work.id,
+                        format!(
+                            "{}; {quarantine}",
+                            ExportQueueError::SourceIdentityChanged(reason)
+                        ),
+                    );
+                }
+            }
+        }
         Ok(Err(MediaError::Cancelled)) => mark_cancelled(state, work.id),
         Ok(Err(error)) => mark_failed(state, work.id, error.to_string()),
         Err(payload) => mark_failed(
@@ -446,6 +591,39 @@ fn mark_running(state: &Arc<QueueState>, id: ExportJobId) -> bool {
     }
     job.record.state = ExportJobState::Running;
     true
+}
+
+/// Move an untrusted encode out of the path the caller asked for.
+///
+/// A drift-failed job has already written a complete-looking file at the
+/// requested output. Leaving it there means the next thing to read that path —
+/// a person, a script, a re-queued job that reuses the name — picks up a file
+/// the queue has explicitly refused to vouch for. It is renamed to
+/// `<output>.untrusted`, or deleted when the rename is impossible, and the
+/// final location is reported in the failure so nothing has to be guessed.
+fn quarantine_untrusted_output(output_path: &Path) -> String {
+    if !output_path.exists() {
+        return "the encode left no output file to quarantine".to_owned();
+    }
+    let mut quarantined = output_path.as_os_str().to_owned();
+    quarantined.push(".untrusted");
+    let quarantined = PathBuf::from(quarantined);
+    match fs::rename(output_path, &quarantined) {
+        Ok(()) => format!(
+            "the untrusted output was moved to {}",
+            quarantined.display()
+        ),
+        Err(rename_error) => match fs::remove_file(output_path) {
+            Ok(()) => format!(
+                "the untrusted output at {} could not be renamed ({rename_error}) and was deleted",
+                output_path.display()
+            ),
+            Err(remove_error) => format!(
+                "the untrusted output at {} could not be renamed ({rename_error}) or deleted ({remove_error}); do not use it",
+                output_path.display()
+            ),
+        },
+    }
 }
 
 fn mark_completed(state: &Arc<QueueState>, id: ExportJobId) {
@@ -640,6 +818,21 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(asset, Self::status(kind));
+        }
+
+        /// Seed the live fingerprint the backend reports for one source.
+        fn set_observed_fingerprint(&self, asset: AssetId, content_sha256: &str) {
+            self.statuses.lock().unwrap().insert(
+                asset,
+                MediaAvailabilityStatus {
+                    kind: MediaAvailabilityKind::OnlineVerified,
+                    observed_fingerprint: Some(MediaSourceFingerprint {
+                        content_sha256: Some(content_sha256.to_owned()),
+                        byte_len: Some(u64::try_from(content_sha256.len()).unwrap()),
+                    }),
+                    reason: Some("test availability".to_owned()),
+                },
+            );
         }
     }
 
@@ -1422,5 +1615,112 @@ mod tests {
 
     fn cleanup_directory(path: &Path) {
         let _ = fs::remove_dir_all(path);
+    }
+    /// Swap one source's live identity from inside the encode so the queue has
+    /// to observe the change after the exporter returns.
+    struct SourceSwappingExporter {
+        analysis: Arc<AvailabilityAnalysis>,
+        asset: AssetId,
+        replacement_sha256: &'static str,
+    }
+
+    impl Export for SourceSwappingExporter {
+        fn export(
+            &self,
+            _out: &Path,
+            _settings: kinewright_core::ExportSettings,
+            _progress: kinewright_core::ProgressSink,
+        ) -> Result<(), MediaError> {
+            unreachable!("tests exercise immutable document export")
+        }
+
+        fn export_document(
+            &self,
+            _document: Arc<Document>,
+            out: &Path,
+            _settings: kinewright_core::ExportSettings,
+            _progress: kinewright_core::ProgressSink,
+        ) -> Result<(), MediaError> {
+            // A real encoder leaves a complete-looking file behind, which is
+            // exactly what makes a drift failure dangerous.
+            fs::write(out, b"untrusted encode").unwrap();
+            self.analysis
+                .set_observed_fingerprint(self.asset, self.replacement_sha256);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_source_swapped_mid_encode_fails_the_job_instead_of_completing_it() {
+        let analysis = Arc::new(AvailabilityAnalysis::default());
+        analysis.set_observed_fingerprint(AssetId(1), "aa");
+        analysis.set_observed_fingerprint(AssetId(2), "bb");
+        let exporter = Arc::new(SourceSwappingExporter {
+            analysis: Arc::clone(&analysis),
+            asset: AssetId(1),
+            replacement_sha256: "cc",
+        });
+        let queue = ExportQueue::new(exporter, analysis).unwrap();
+        let directory = test_directory("toctou-swap");
+        let output = directory.join("swapped.mp4");
+        let quarantined = directory.join("swapped.mp4.untrusted");
+
+        let job = queue
+            .enqueue(
+                &media_document_with_video_audio_and_unused(),
+                request(output.clone(), false),
+            )
+            .unwrap();
+        let terminal = wait_for_terminal(&queue, job.id);
+
+        assert_eq!(terminal.state, ExportJobState::Failed);
+        let error = terminal.error.unwrap();
+        assert!(
+            error.contains("changed between the export preflight and the finished encode"),
+            "{error}"
+        );
+        assert!(error.contains("source-1"), "{error}");
+
+        // The untrusted encode must not be left where the caller asked for a
+        // trusted one, and the failure has to name where it went.
+        assert!(
+            !output.exists(),
+            "a drift-failed encode must not stay at the requested output path"
+        );
+        assert!(
+            quarantined.exists(),
+            "the untrusted output must be retained"
+        );
+        assert!(
+            error.contains(&quarantined.display().to_string()),
+            "the failure must name the quarantined path: {error}"
+        );
+        cleanup_directory(&directory);
+    }
+
+    #[test]
+    fn an_unchanged_source_still_completes_after_the_encode() {
+        let analysis = Arc::new(AvailabilityAnalysis::default());
+        analysis.set_observed_fingerprint(AssetId(1), "aa");
+        analysis.set_observed_fingerprint(AssetId(2), "bb");
+        let queue = ExportQueue::new(
+            Arc::new(RecordingExporter::new(Duration::ZERO)),
+            Arc::clone(&analysis) as Arc<dyn Analysis>,
+        )
+        .unwrap();
+        let directory = test_directory("toctou-stable");
+
+        let job = queue
+            .enqueue(
+                &media_document_with_video_audio_and_unused(),
+                request(directory.join("stable.mp4"), false),
+            )
+            .unwrap();
+
+        assert_eq!(
+            wait_for_terminal(&queue, job.id).state,
+            ExportJobState::Completed
+        );
+        cleanup_directory(&directory);
     }
 }

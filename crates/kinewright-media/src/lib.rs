@@ -29,6 +29,9 @@ mod media_matrix_tests;
 #[cfg(test)]
 mod cc1_fixtures;
 
+#[cfg(test)]
+mod gpu_test_support;
+
 use ffmpeg_next as ffmpeg;
 use kinewright_core::MediaError;
 
@@ -37,8 +40,8 @@ pub use cache::select_frame_for_position;
 pub use clock::{frame_to_samples, samples_to_frame};
 pub use compositor::{
     COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE,
-    COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, Compositor, CompositorLayer, GpuContext,
-    compositor_required_limits,
+    COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, Compositor, CompositorLayer,
+    DeliveryFrame, GpuContext, compositor_required_limits,
 };
 pub use derived::{
     BeatDetectionConfig, DEFAULT_BEAT_MINIMUM_INTERVAL_MILLISECONDS,

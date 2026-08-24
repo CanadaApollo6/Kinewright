@@ -429,6 +429,18 @@ fn effect_documentation() -> String {
             .expect("writing effect documentation to a String cannot fail");
         }
         documentation.push(')');
+        // Legacy compatibility stages remain loadable but are outside the CC1
+        // managed conformance claim; advertising them as ordinary effects
+        // invites an agent to reach for them instead of primary_correction.
+        // `color_grade` is a wire alias Core canonicalises to
+        // `primary_correction` on load, so it is labelled as such rather than
+        // as a separate effect.
+        if effect.name == "color_grade" {
+            documentation.push_str(" [alias of primary_correction]");
+        } else if kinewright_core::effect_compatibility_stage(effect.name).is_some() {
+            documentation
+                .push_str(" [legacy - outside CC1 managed conformance; prefer primary_correction]");
+        }
     }
     documentation.push_str(
         ". cube_lut additionally requires parameters.path as a non-empty text path to a 3D .cube file; intensity_percent remains integer-automatable.",
@@ -726,7 +738,10 @@ mod tests {
 
     #[test]
     fn effect_documentation_includes_all_crop_parameters() {
-        let documentation = effect_documentation();
+        let documentation = effect_documentation()
+            .strip_prefix("Supported effects: ")
+            .expect("documentation must keep its stable prefix")
+            .to_owned();
         assert!(documentation.contains(
             "crop(left_percent=0..=45, neutral 0, right_percent=0..=45, neutral 0, top_percent=0..=45, neutral 0, bottom_percent=0..=45, neutral 0)"
         ));
@@ -762,5 +777,42 @@ mod tests {
                 definition.tool.name
             );
         }
+    }
+    #[test]
+    fn legacy_colour_effects_are_labelled_in_the_effect_documentation() {
+        const LEGACY_LABEL: &str =
+            " [legacy - outside CC1 managed conformance; prefer primary_correction]";
+        let documentation = effect_documentation();
+        // The label itself contains a semicolon, so locate each entry by its
+        // name and closing parenthesis rather than by splitting on separators.
+        let suffix_after = |name: &str| {
+            let start = documentation
+                .find(&format!("{name}("))
+                .unwrap_or_else(|| panic!("{name} must be documented"));
+            let close = start
+                + documentation[start..]
+                    .find(')')
+                    .expect("every entry closes its parameter list")
+                + 1;
+            documentation[close..].to_owned()
+        };
+        for name in [
+            "brightness",
+            "contrast",
+            "saturation",
+            "look_lut",
+            "cube_lut",
+        ] {
+            assert!(
+                suffix_after(name).starts_with(LEGACY_LABEL),
+                "{name} must be labelled as a compatibility stage"
+            );
+        }
+        assert!(
+            suffix_after("color_grade").starts_with(" [alias of primary_correction]"),
+            "color_grade is a wire alias Core canonicalises to primary_correction"
+        );
+        let primary = suffix_after("primary_correction");
+        assert!(!primary.starts_with(LEGACY_LABEL), "{primary}");
     }
 }

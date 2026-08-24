@@ -39,6 +39,21 @@ impl std::fmt::Display for TimelineRevision {
 pub enum Command {
     Do(Operation),
     DoBatch(Vec<Operation>),
+    /// Apply one atomic batch and merge it into the newest history entry when
+    /// that entry was opened with the same coalesce key.
+    ///
+    /// Live controls such as a dragged slider send one batch per UI frame so
+    /// the preview keeps up. Coalescing keeps the whole gesture as a single
+    /// undo step whose undo target stays the document from before the gesture
+    /// began; the timeline revision still advances for every accepted batch.
+    ///
+    /// The key is chosen by the caller and must identify one gesture. Two
+    /// separate gestures over the same control must use different keys, so the
+    /// second gesture opens its own undo entry.
+    DoBatchCoalesced {
+        operations: Vec<Operation>,
+        coalesce_key: String,
+    },
     /// Apply one operation only if the caller planned it against the current revision.
     DoIfRevision {
         expected: TimelineRevision,
@@ -186,6 +201,15 @@ impl Core {
 struct HistoryEntry {
     document: Arc<Document>,
     operations: Vec<Operation>,
+    /// Set only while a live coalescing gesture owns this entry.
+    ///
+    /// Every command that changes which entry sits on top of the undo stack
+    /// closes the gesture that entry may have belonged to: `do_operation` and
+    /// `do_batch` push an entry with no key, `redo` pushes one with no key,
+    /// and `undo` clears the key of the entry it re-exposes. A gesture
+    /// therefore never resumes across a history boundary, so a later batch
+    /// that happens to reuse the key opens a fresh entry.
+    coalesce_key: Option<String>,
 }
 
 struct CoreState {
@@ -214,6 +238,7 @@ impl CoreState {
         self.undo.push(HistoryEntry {
             document: before,
             operations: vec![operation.clone()],
+            coalesce_key: None,
         });
         self.redo.clear();
         self.op_log.push(operation);
@@ -229,7 +254,41 @@ impl CoreState {
         self.undo.push(HistoryEntry {
             document: before,
             operations: operations.clone(),
+            coalesce_key: None,
         });
+        self.redo.clear();
+        self.op_log.extend(operations);
+        self.document = Arc::new(after);
+        self.increment_revision();
+        Ok(Arc::clone(&self.document))
+    }
+
+    /// Apply a batch that belongs to one live gesture.
+    ///
+    /// When the newest undo entry belongs to the same gesture the entry is
+    /// reused: it keeps its pre-gesture document, so undo still restores the
+    /// state from before the gesture, and only the live document (the entry's
+    /// implicit "after" snapshot) advances.
+    fn do_batch_coalesced(
+        &mut self,
+        operations: Vec<Operation>,
+        coalesce_key: &str,
+    ) -> Result<Arc<Document>, BatchError> {
+        let before = Arc::clone(&self.document);
+        let mut after = (*before).clone();
+        apply_batch(&mut after, &operations)?;
+        match self.undo.last_mut() {
+            Some(entry) if entry.coalesce_key.as_deref() == Some(coalesce_key) => {
+                // Appending keeps a faithful operation replay from the entry's
+                // unchanged pre-gesture document for branch rebases.
+                entry.operations.extend(operations.iter().cloned());
+            }
+            _ => self.undo.push(HistoryEntry {
+                document: before,
+                operations: operations.clone(),
+                coalesce_key: Some(coalesce_key.to_owned()),
+            }),
+        }
         self.redo.clear();
         self.op_log.extend(operations);
         self.document = Arc::new(after);
@@ -242,7 +301,15 @@ impl CoreState {
             self.redo.push(HistoryEntry {
                 document: Arc::clone(&self.document),
                 operations: entry.operations,
+                coalesce_key: None,
             });
+            // The entry the pop re-exposes belongs to an older, already
+            // finished gesture. Leaving its key set would let a later gesture
+            // that reuses the key merge across this undo boundary and swallow
+            // the older entry's undo target.
+            if let Some(exposed) = self.undo.last_mut() {
+                exposed.coalesce_key = None;
+            }
             self.document = entry.document;
             self.increment_revision();
         }
@@ -254,6 +321,7 @@ impl CoreState {
             self.undo.push(HistoryEntry {
                 document: Arc::clone(&self.document),
                 operations: entry.operations,
+                coalesce_key: None,
             });
             self.document = entry.document;
             self.increment_revision();
@@ -323,6 +391,10 @@ fn execute_command(state: &mut CoreState, command: Command) -> Event {
     match command {
         Command::Do(operation) => execute_operation(state, operation),
         Command::DoBatch(operations) => execute_batch(state, operations),
+        Command::DoBatchCoalesced {
+            operations,
+            coalesce_key,
+        } => execute_batch_coalesced(state, operations, &coalesce_key),
         Command::DoIfRevision {
             expected,
             operation,
@@ -387,6 +459,31 @@ fn execute_batch(state: &mut CoreState, mut operations: Vec<Operation>) -> Event
             revision: state.revision,
             last_op: None,
             journal_command: Some(JournalCommand::DoBatch(operations)),
+        },
+        Err(error) => Event::BatchRejected { operations, error },
+    }
+}
+
+fn execute_batch_coalesced(
+    state: &mut CoreState,
+    mut operations: Vec<Operation>,
+    coalesce_key: &str,
+) -> Event {
+    for operation in &mut operations {
+        operation.canonicalize_legacy_effect_names();
+    }
+    match state.do_batch_coalesced(operations.clone(), coalesce_key) {
+        // The journal keeps the coalesce key: replaying the gesture as a run
+        // of ordinary batches would rebuild it as one undo entry per frame, so
+        // a journaled Undo would unwind one frame instead of the gesture.
+        Ok(doc) => Event::DocumentChanged {
+            doc,
+            revision: state.revision,
+            last_op: None,
+            journal_command: Some(JournalCommand::DoBatchCoalesced {
+                operations,
+                coalesce_key: coalesce_key.to_owned(),
+            }),
         },
         Err(error) => Event::BatchRejected { operations, error },
     }
@@ -789,6 +886,176 @@ mod tests {
         assert!(state.undo.is_empty());
         assert!(state.redo.is_empty());
         assert!(state.op_log.is_empty());
+    }
+
+    fn single_clip_core_with_effect() -> Core {
+        let core = Core::spawn(generated_document(&[30], &[0])).unwrap();
+        core.request(Command::Do(Operation::AddEffect {
+            clip: ClipId(1),
+            effect: Effect {
+                id: EffectId(1),
+                name: "primary_correction".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::new(),
+            },
+        }))
+        .unwrap();
+        core
+    }
+
+    fn coalesced_param(core: &Core, key: &str, value: i64) -> Arc<Document> {
+        let Event::DocumentChanged { doc, .. } = core
+            .request(Command::DoBatchCoalesced {
+                operations: vec![Operation::SetEffectParam {
+                    clip: ClipId(1),
+                    effect: EffectId(1),
+                    name: "exposure_milli_stops".to_owned(),
+                    value: ParamValue::Integer(value),
+                }],
+                coalesce_key: key.to_owned(),
+            })
+            .unwrap()
+        else {
+            panic!("expected an accepted coalesced batch");
+        };
+        doc
+    }
+
+    fn exposure(document: &Document) -> Option<i64> {
+        match document
+            .clip(ClipId(1))?
+            .effects
+            .first()?
+            .parameters
+            .get("exposure_milli_stops")?
+        {
+            ParamValue::Integer(value) => Some(*value),
+            ParamValue::Boolean(_) | ParamValue::Text(_) => None,
+        }
+    }
+
+    fn undo_document(core: &Core) -> Arc<Document> {
+        let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
+            panic!("expected an undo document");
+        };
+        doc
+    }
+
+    /// One dragged slider must stay one undo step even though every UI frame
+    /// sends its own batch so the live preview keeps up.
+    #[test]
+    fn coalesced_batches_under_one_key_form_a_single_undo_entry() {
+        let core = single_clip_core_with_effect();
+        let Event::QueryResult(QueryResult::Snapshot {
+            revision: before_revision,
+            document: before_drag,
+        }) = core.request(Command::Query(Query::Snapshot)).unwrap()
+        else {
+            panic!("expected a pre-drag snapshot");
+        };
+        assert_eq!(exposure(&before_drag), None);
+
+        let key = "primary:1:1:exposure_milli_stops#1";
+        for value in 1..=50 {
+            coalesced_param(&core, key, value);
+        }
+
+        let Event::QueryResult(QueryResult::Snapshot {
+            revision: after_revision,
+            document: after_drag,
+        }) = core.request(Command::Query(Query::Snapshot)).unwrap()
+        else {
+            panic!("expected a post-drag snapshot");
+        };
+        assert_eq!(exposure(&after_drag), Some(50));
+        // Every coalesced batch still advances the revision so dependent
+        // renders and revision-guarded agent edits observe live state.
+        assert_eq!(after_revision.0, before_revision.0 + 50);
+
+        // One undo returns to the exact pre-drag document.
+        let undone = undo_document(&core);
+        assert_eq!(*undone, *before_drag);
+        // The next undo unwinds the edit before the drag, proving the fifty
+        // batches produced exactly one history entry.
+        let before_effect = undo_document(&core);
+        assert!(
+            before_effect
+                .clip(ClipId(1))
+                .is_some_and(|clip| clip.effects.is_empty())
+        );
+    }
+
+    #[test]
+    fn a_different_coalesce_key_opens_a_new_undo_entry() {
+        let core = single_clip_core_with_effect();
+        for value in [10, 11, 12] {
+            coalesced_param(&core, "primary:1:1:exposure_milli_stops#1", value);
+        }
+        for value in [20, 21, 22] {
+            coalesced_param(&core, "primary:1:1:exposure_milli_stops#2", value);
+        }
+
+        assert_eq!(exposure(&undo_document(&core)), Some(12));
+        assert_eq!(exposure(&undo_document(&core)), None);
+    }
+
+    /// An ordinary batch or single operation closes the gesture, so a later
+    /// batch that reuses the key cannot merge into the finished entry.
+    #[test]
+    fn a_non_coalesced_command_closes_the_coalescing_gesture() {
+        let core = single_clip_core_with_effect();
+        let key = "primary:1:1:exposure_milli_stops#1";
+        coalesced_param(&core, key, 10);
+        core.request(Command::DoBatch(vec![Operation::SetEffectParam {
+            clip: ClipId(1),
+            effect: EffectId(1),
+            name: "saturation_percent".to_owned(),
+            value: ParamValue::Integer(5),
+        }]))
+        .unwrap();
+        coalesced_param(&core, key, 30);
+
+        assert_eq!(exposure(&undo_document(&core)), Some(10));
+        assert_eq!(exposure(&undo_document(&core)), Some(10));
+        assert_eq!(exposure(&undo_document(&core)), None);
+    }
+
+    /// Undo re-exposes an older entry that may still carry the key of a
+    /// gesture that finished long ago. A new gesture reusing that key must
+    /// open its own entry instead of merging into the re-exposed one, which
+    /// would destroy the older entry's undo target.
+    #[test]
+    fn undo_closes_the_gesture_on_the_entry_it_re_exposes() {
+        let core = single_clip_core_with_effect();
+        let first_key = "primary:1:1:exposure_milli_stops#1";
+        coalesced_param(&core, first_key, 10);
+        coalesced_param(&core, "primary:1:1:exposure_milli_stops#2", 20);
+
+        // Undo drops the second gesture and re-exposes the first one's entry.
+        assert_eq!(exposure(&undo_document(&core)), Some(10));
+
+        // A fresh gesture that happens to reuse the first key must not merge
+        // into that re-exposed entry.
+        coalesced_param(&core, first_key, 30);
+        assert_eq!(exposure(&undo_document(&core)), Some(10));
+        assert_eq!(exposure(&undo_document(&core)), None);
+    }
+
+    #[test]
+    fn coalesced_history_replays_faithfully_through_applied_operations() {
+        let core = single_clip_core_with_effect();
+        for value in [1, 2, 3] {
+            coalesced_param(&core, "primary:1:1:exposure_milli_stops#1", value);
+        }
+        let Event::QueryResult(QueryResult::AppliedOperations(applied)) = core
+            .request(Command::Query(Query::AppliedOperations))
+            .unwrap()
+        else {
+            panic!("expected the applied operation list");
+        };
+        let mut replayed = generated_document(&[30], &[0]);
+        apply_batch(&mut replayed, &applied).unwrap();
+        assert_eq!(exposure(&replayed), Some(3));
     }
 
     fn generated_document(lengths: &[u16], gaps: &[u8]) -> Document {

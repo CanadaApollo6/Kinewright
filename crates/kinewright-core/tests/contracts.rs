@@ -8,13 +8,15 @@ use std::{
 use kinewright_core::{
     AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, Clip, ClipContent, ClipId,
     ColorBitDepth, ColorContext, ColorDescription, ColorMatrix, ColorPipelineState, ColorPrimaries,
-    ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Command, Core, Document, Effect,
-    EffectId, EffectUniform, Event, FreezeFrame, JournalCommand, Keyframe, KeyframeInterpolation,
+    ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Command, Core, Document,
+    EFFECT_DESCRIPTORS, Effect, EffectCompatibilityStage, EffectId, EffectUniform, Event,
+    FreezeFrame, JournalCommand, Keyframe, KeyframeInterpolation, LEGACY_DISPLAY_EFFECT_NAMES,
     LinkId, Marker, MarkerId, MediaAsset, MediaBin, MediaKind, MediaSourceFingerprint, OpError,
-    Operation, ParamValue, Rational, RelinkCandidate, SourceSelect, StringOut, StringOutId,
-    SyncGroup, SyncGroupId, SyncGroupMember, TRANSITION_DESCRIPTORS, ThreePointMode, TimeCode,
-    Title, TitlePosition, Track, TrackId, TrackKind, Transition, effect_compatibility_stage,
-    effect_descriptor, is_legacy_display_effect, transition_descriptor,
+    Operation, POST_PRIMARY_LUT_EFFECT_NAMES, ParamValue, Query, QueryResult, Rational,
+    RelinkCandidate, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember,
+    TRANSITION_DESCRIPTORS, ThreePointMode, TimeCode, Title, TitlePosition, Track, TrackId,
+    TrackKind, Transition, effect_compatibility_stage, effect_descriptor, is_legacy_display_effect,
+    transition_descriptor,
 };
 use proptest::prelude::*;
 use schemars::schema_for;
@@ -867,6 +869,141 @@ fn relink_operation_journals_replays_and_undoes_redoes_without_filesystem_access
         panic!("relink should redo");
     };
     assert_eq!(&*redone, &*relinked);
+}
+
+fn current_document(core: &Core) -> Document {
+    let Event::QueryResult(QueryResult::Document(doc)) =
+        core.request(Command::Query(Query::Document)).unwrap()
+    else {
+        panic!("expected the current document");
+    };
+    (*doc).clone()
+}
+
+fn undo_once(core: &Core) -> Document {
+    let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
+        panic!("expected an undo document");
+    };
+    (*doc).clone()
+}
+
+/// Drain a core's undo stack, returning how many undo steps actually moved the
+/// document. That count is the history depth: a coalesced gesture contributes
+/// exactly one step no matter how many frames it sent.
+///
+/// This consumes the core's history, so call it last.
+fn drained_history_depth(core: &Core) -> usize {
+    let mut depth = 0;
+    let mut previous = current_document(core);
+    loop {
+        let undone = undo_once(core);
+        if undone == previous {
+            return depth;
+        }
+        previous = undone;
+        depth += 1;
+        assert!(depth < 1_000, "undo stack did not drain");
+    }
+}
+
+/// A coalescing gesture must survive the journal with its history granularity
+/// intact. Replaying the frames as ordinary batches would rebuild one undo
+/// entry per frame, so the journaled Undo that follows the gesture would
+/// unwind a single frame and the recovered document would diverge from the
+/// document the user actually had.
+#[test]
+fn coalesced_gesture_replays_to_the_same_document_and_history_depth() {
+    let initial = document_with_one_clip();
+    initial.validate().unwrap();
+
+    let key = "drag:clip:1";
+    // One edit before the gesture, a five-frame drag under one key, then the
+    // undo and redo the user performed while the journal was still recording.
+    let mut script = vec![Command::Do(Operation::AddMarker {
+        marker: Marker {
+            id: MarkerId(1),
+            position: TimeCode(5),
+            label: "start".to_owned(),
+            color_token: 0,
+        },
+    })];
+    for frame in 1..=5_i64 {
+        script.push(Command::DoBatchCoalesced {
+            operations: vec![Operation::MoveClip {
+                clip: ClipId(1),
+                to_track: TrackId(1),
+                to: TimeCode(10 + frame),
+            }],
+            coalesce_key: key.to_owned(),
+        });
+    }
+    script.push(Command::Undo);
+    script.push(Command::Redo);
+
+    let live = Core::spawn(initial.clone()).unwrap();
+    let mut live_documents = Vec::new();
+    let mut journal = Vec::new();
+    for command in script {
+        let Event::DocumentChanged {
+            doc,
+            journal_command: Some(journaled),
+            ..
+        } = live.request(command).unwrap()
+        else {
+            panic!("every scripted command should be accepted and journaled");
+        };
+        live_documents.push((*doc).clone());
+        // The journal must survive a JSON round trip, and the coalesced frames
+        // must keep their key rather than degrading to plain batches.
+        let encoded = serde_json::to_string(&journaled).unwrap();
+        journal.push(serde_json::from_str::<JournalCommand>(&encoded).unwrap());
+    }
+    let coalesced_records = journal
+        .iter()
+        .filter(|command| {
+            matches!(
+                command,
+                JournalCommand::DoBatchCoalesced { coalesce_key, .. } if coalesce_key == key
+            )
+        })
+        .count();
+    assert_eq!(coalesced_records, 5);
+
+    let replayed = Core::spawn(initial.clone()).unwrap();
+    for (index, command) in journal.into_iter().enumerate() {
+        let Event::DocumentChanged { doc, .. } = replayed.request(command.into()).unwrap() else {
+            panic!("journaled command {index} should replay");
+        };
+        assert_eq!(
+            *doc, live_documents[index],
+            "replayed document diverged at journal record {index}"
+        );
+    }
+
+    // The drag plus the marker is two undo steps on both sides; the scripted
+    // undo and redo cancel out.
+    let live_depth = drained_history_depth(&live);
+    let replayed_depth = drained_history_depth(&replayed);
+    assert_eq!(live_depth, 2);
+    assert_eq!(replayed_depth, live_depth);
+}
+
+/// Older journals contain no coalesced records, so they must still parse.
+#[test]
+fn journal_command_json_stays_backward_compatible_with_pre_coalesce_records() {
+    let legacy = r#"{"DoBatch":[{"MoveClip":{"clip":1,"to_track":1,"to":12}}]}"#;
+    let parsed: JournalCommand = serde_json::from_str(legacy).unwrap();
+    assert_eq!(
+        parsed,
+        JournalCommand::DoBatch(vec![Operation::MoveClip {
+            clip: ClipId(1),
+            to_track: TrackId(1),
+            to: TimeCode(12),
+        }])
+    );
+    for legacy in [r#""Undo""#, r#""Redo""#] {
+        serde_json::from_str::<JournalCommand>(legacy).unwrap();
+    }
 }
 
 #[test]
@@ -2233,6 +2370,48 @@ fn legacy_display_effects_are_explicitly_classified_for_compatibility() {
 }
 
 #[test]
+fn compatibility_stage_classification_matches_the_published_effect_name_lists() {
+    for name in LEGACY_DISPLAY_EFFECT_NAMES {
+        assert_eq!(
+            effect_compatibility_stage(name),
+            Some(EffectCompatibilityStage::LegacyDisplayCoded),
+            "{name} is published as a legacy display-coded effect"
+        );
+        assert!(is_legacy_display_effect(name));
+    }
+    for name in POST_PRIMARY_LUT_EFFECT_NAMES {
+        assert_eq!(
+            effect_compatibility_stage(name),
+            Some(EffectCompatibilityStage::PostPrimaryLut),
+            "{name} is published as a post-primary LUT stage"
+        );
+    }
+    assert!(
+        LEGACY_DISPLAY_EFFECT_NAMES
+            .iter()
+            .all(|name| !POST_PRIMARY_LUT_EFFECT_NAMES.contains(name)),
+        "an effect must occupy at most one compatibility stage"
+    );
+
+    // Every other built-in effect must be unclassified, so the lists stay the
+    // single source of truth for QA, delivery, the inspector, and the
+    // compositor. `chroma_key` is an alpha/keying operation: it produces
+    // coverage rather than a display-coded colour transform, so it is
+    // deliberately outside colour compatibility staging.
+    for descriptor in EFFECT_DESCRIPTORS {
+        let published = LEGACY_DISPLAY_EFFECT_NAMES.contains(&descriptor.name)
+            || POST_PRIMARY_LUT_EFFECT_NAMES.contains(&descriptor.name);
+        assert_eq!(
+            effect_compatibility_stage(descriptor.name).is_some(),
+            published,
+            "{} must be classified exactly as the published lists say",
+            descriptor.name
+        );
+    }
+    assert!(effect_compatibility_stage("chroma_key").is_none());
+}
+
+#[test]
 fn legacy_color_grade_add_is_canonical_before_history_journal_and_save() {
     let initial = document_with_one_clip();
     let submitted = Operation::AddEffect {
@@ -2401,8 +2580,7 @@ fn legacy_serialized_color_grade_journal_replays_to_canonical_state() {
     ));
 }
 
-#[test]
-fn primary_correction_operations_validate_bounds_and_keyframes() {
+fn document_with_neutral_primary_correction() -> Document {
     let descriptor = effect_descriptor("primary_correction").expect("CC1 descriptor");
     let mut doc = document_with_one_clip();
     Operation::AddEffect {
@@ -2425,7 +2603,18 @@ fn primary_correction_operations_validate_bounds_and_keyframes() {
     }
     .apply(&mut doc)
     .unwrap();
+    doc
+}
 
+#[test]
+fn primary_correction_operations_validate_bounds_and_keyframes() {
+    let descriptor = effect_descriptor("primary_correction").expect("CC1 descriptor");
+    let mut doc = document_with_neutral_primary_correction();
+
+    assert!(
+        !descriptor.parameters.is_empty(),
+        "the CC1 primary descriptor must expose controls to bound"
+    );
     for parameter in descriptor.parameters {
         for value in [parameter.min, parameter.max] {
             Operation::SetEffectParam {
@@ -2438,18 +2627,31 @@ fn primary_correction_operations_validate_bounds_and_keyframes() {
             .unwrap();
         }
 
-        let before = doc.clone();
-        assert!(
-            Operation::SetEffectParam {
+        for actual in [parameter.min - 1, parameter.max + 1] {
+            let before = doc.clone();
+            let error = Operation::SetEffectParam {
                 clip: ClipId(1),
                 effect: EffectId(7),
                 name: parameter.name.to_owned(),
-                value: ParamValue::Integer(parameter.min - 1),
+                value: ParamValue::Integer(actual),
             }
             .apply(&mut doc)
-            .is_err()
-        );
-        assert_eq!(doc, before);
+            .expect_err("out-of-range primary parameter must be rejected atomically");
+
+            assert_eq!(
+                error,
+                OpError::EffectParamOutOfRange {
+                    effect: "primary_correction".to_owned(),
+                    name: parameter.name.to_owned(),
+                    min: parameter.min,
+                    max: parameter.max,
+                    actual,
+                },
+                "unexpected typed error for {} = {actual}",
+                parameter.name
+            );
+            assert_eq!(doc, before);
+        }
     }
 
     let curve = AutomationCurve {

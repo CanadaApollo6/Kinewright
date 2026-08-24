@@ -84,13 +84,16 @@ allocation and must be at least 1. The hard upper bounds are:
 
 | Output | Default | Maximum |
 | --- | ---: | ---: |
-| RGB/luma histogram bins | 256 | 4,096 |
-| luma waveform columns × rows | 64 × 256 | 2,048 × 1,024 |
-| RGB parade columns × rows per channel | 64 × 256 | 2,048 × 1,024 |
-| vectorscope side length | 256 | 1,024 |
+| RGB/luma histogram bins | 256 | 256 |
+| luma waveform columns × rows | 64 × 256 | 2,048 × 256 |
+| RGB parade columns × rows per channel | 64 × 256 | 2,048 × 256 |
+| vectorscope side length | 256 | 511 |
 
 These bounds apply to every request, including agent-provided values. Grid
-length arithmetic is checked before allocation. The defaults are a stable API
+length arithmetic is checked before allocation. Row and vectorscope maxima are
+the code counts they bucket (256 luma codes; 511 signed chroma values), so
+every row and cell can be populated and the uniform bucketing below never
+leaves dead rows; columns map from ROI width and keep the larger bound. The defaults are a stable API
 default, not a claim about display pixel dimensions.
 
 RGB and Rec.709 luma summary codes use a 16-bit fixed scale: an 8-bit code `v`
@@ -124,18 +127,30 @@ content, or sample an implicit time range. `ScopeEvidence` includes:
   Basis points use integer floor (`count * 10_000 / visible_count`), so a rate
   is never overstated by rounding.
 - `ScopeHistograms`: separate RGB and luma arrays with the requested bin count.
-  A code maps to `floor(code * bins / 256)`; code 255 is always in the final
-  bin.
+  A code maps to `floor(code * bins / 256)`; because `bins <= 256`, code 255 is
+  always in the final bin. Bin counts above 256 are rejected: 8-bit input can
+  never populate more than 256 bins, and a sparser grid would silently leave the
+  top bins dead.
 - `LumaWaveform`: row-major density, with each source ROI column mapped to a
-  configured column by floor scaling. Row zero is high code/white and the last
-  row is low code/black.
+  configured column by floor scaling (`floor(x_in_roi * columns / roi_width)`).
+  Rows use uniform bucketing `row = floor((255 - code) * rows / 256)`, so row
+  zero is high code/white, the last row is low code/black, every row covers the
+  same number of codes (within one), and `rows = 256` is the identity
+  `255 - code`. The mapping is not endpoint-anchored: the black row holds the
+  darkest `256 / rows` codes, not only code 0.
 - `RgbParade`: separate red, green, and blue row-major density grids using the
   same column and vertical mapping as the waveform.
 - `VectorscopeDensity`: square row-major chroma density. The exact integer
   axes are `U = B - R` and `V = 2*G - R - B`, each clamped to `[-255, 255]`.
-  Neutral is the centre; horizontal position maps U from left to right and
-  vertical position maps V from bottom to top. No colour-space conversion or
-  skin-tone preference is implied.
+  An axis value maps to a cell by uniform bucketing
+  `index = floor((value + 255) * size / 511)`, so neutral lands at
+  `floor(255 * size / 511)` (the exact centre for odd sizes, the lower-centre
+  cell for even sizes) and every cell covers the same number of values within
+  one. Horizontal position maps U from left to right and vertical position maps
+  V from bottom to top (row zero is the positive V edge). `V` spans
+  `[-510, 510]` before clamping, so highly saturated green/magenta values
+  saturate at the top/bottom edge; that clamp is deliberate and recorded here.
+  No colour-space conversion or skin-tone preference is implied.
 
 Density cells and histogram bins are `u64` counts. Counts and channel sums are
 checked for overflow; a hostile input fails instead of wrapping.
@@ -147,7 +162,11 @@ checked for overflow; a hostile input fails instead of wrapping.
 the same named stage, normalized ROI, and each configured output resolution.
 Source dimensions and project-frame identities may differ and are retained as
 reference/candidate metadata. A mismatch returns a typed error rather than
-resampling or silently comparing unlike grids.
+resampling or silently comparing unlike grids. Each input is also checked for
+internal consistency before comparison (`ScopeEvidence::validate_shape`): every
+histogram length must equal its bin count and every density grid must equal
+`columns * rows` or `size * size`, otherwise `MalformedEvidence` names the
+offending side and field. Deserialized evidence is never trusted by shape.
 
 `ScopeComparison` records both endpoints and signed candidate-minus-reference
 deltas. Positive means the candidate metric is numerically higher; negative
@@ -173,9 +192,42 @@ operation.
   current-minus-reference deltas. Capturing evidence has no operation side effect.
 - `get_video_scopes_v2` with bounded full-resolution/default or explicit-proxy
   sampling, exact frames or a half-open temporal range, named stage, and ROI.
+  The response carries one typed `core_evidence` object (no duplicated
+  top-level grid aliases), an `include_grids` request switch (default `true`
+  here, `false` for the analysis/matching tools, reported as `grids_omitted`),
+  and separate `requested_range`, `step_frames`/`step_source`, and
+  `sampled_frames` temporal fields. The only accepted stage values are the
+  canonical `monitoring_post_composite` (optional, defaulted) and the core
+  serde alias `monitoring/post-composite`; anything else, including `monitor`
+  or `post_compositor`, fails with `unsupported_stage`.
 - Evidence-only `analyze_color_shot` and `plan_shot_match` tools with revision,
   confidence basis, assumptions, retained reference evidence, signed deltas, and
-  exact unapplied `primary_correction` operations for every candidate.
+  exact unapplied `primary_correction` operations for every candidate. The
+  proposal is a first-order bounded starting point derived from the linearised
+  (BT.709 EOTF) channel means of the monitoring codes: exposure from the linear
+  luma ratio, temperature and tint from the CC1 ±10% gain model with the
+  documented sign convention (a green cast yields a positive `tint_percent`).
+  `saturation_percent` is never proposed; the chroma delta is evidence only.
+  Every control reports `proposal_details` (`requested`, `value`, `clamped`,
+  `min`, `max`, `current`, `delta`, `unrounded_delta`, `composed`, `keyframed`)
+  so a bound clamp is visible. A candidate that already carries a
+  `primary_correction` node receives `SetEffectParam` against that node
+  (`target_effect_id`, `existing_primary_node_count`) rather than a stacked
+  second node; the emitted values are composed as `existing + delta`
+  (first-order additive, `composition_model:
+  "existing_plus_delta_first_order_additive"`, with `current_parameters` and
+  `delta_parameters` reported) so the prior grade is never discarded, and a
+  keyframed target parameter produces a warning because the static value is
+  what the proposal writes. An unchanged candidate returns `operations: []`
+  with `no_change: true`; `target_effect_id` is `null` only when no node
+  exists and none would be created. Shot summaries label their luma basis
+  (`integer_luma_code` for code-domain means, `bt709_weights_on_linearised_means`
+  for linear-light means) because the two are not inter-convertible. At most 16 candidates are accepted per call
+  (`excessive_sample_request` before any render). Proxy sampling is marked
+  `full_resolution: false` at the top level, in every candidate, and inside
+  `core_evidence`, and reports `backend: null` with
+  `provenance: "proxy_unverified_by_backend"` because it shares the live
+  playback renderer rather than the isolated proof renderer.
 - Analytic fixtures for ramps/primaries, transparent pixels, ROI boundaries,
   temporal samples, comparison signs, malformed buffers, overflow bounds, and
   empty measurements.
@@ -214,7 +266,15 @@ confidence/assumptions, and exact revision-gated operations while proving the
 source document is unchanged; stale revisions and unsupported stages fail closed.
 
 The remaining hands-on gate is platform smoke testing of the interactive panel on
-Windows and Omarchy. Automated Linux workspace verification covers compilation,
+Windows and Omarchy. The 2026-08-24 review hardened this gate: the core suite now
+asserts exact parade/vectorscope cells, sub-frame ROI exclusion, half-up mean
+rounding, negative and typed-error comparison cases, every resolution bound, and
+hostile frame/buffer inputs with hand-written expected values; the agent suite
+asserts the signed value of every proposed control for synthetic green, blue, and
+dark casts, proxy marking at every level, the candidate cap, and no-stacking; the
+app suite proves a superseded worker cannot strand the panel; and two live-MCP
+integration tests exercise the CC1 and CC2 tools over the real endpoint.
+Automated Linux workspace verification covers compilation,
 math, state transitions, tool schemas, and the two-shot no-hidden-change contract;
 it does not claim a human judgement about whether a proposed match is aesthetically
 preferred.
