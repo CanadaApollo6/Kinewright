@@ -801,7 +801,9 @@ mod tests {
     fn mean_channel(pixels: &[u8], channel: usize) -> f32 {
         let count = u16::try_from(pixels.len() / 4).expect("test image fits in u16");
         pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|pixel| f32::from(pixel[channel]))
             .sum::<f32>()
             / f32::from(count)

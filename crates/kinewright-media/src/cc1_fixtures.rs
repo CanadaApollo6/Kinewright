@@ -529,7 +529,9 @@ fn decode_actual_ramp(
 fn monitor_ramp(frame: &WorkingFrame) -> Vec<u8> {
     frame
         .pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|rgba| {
             encode_monitor_rgba8([
                 rgba[0].to_f32(),
@@ -569,7 +571,7 @@ fn expected_ramp_monitor(spec: &RampSpec) -> Vec<u8> {
 }
 
 fn assert_monotonic_ramp(rgba: &[u8], width: u32) {
-    let pixels = rgba.chunks_exact(4).collect::<Vec<_>>();
+    let pixels = rgba.as_chunks::<4>().0;
     assert_eq!(pixels.len(), usize::try_from(width).expect("ramp width"));
     for channel in 0..3 {
         for pair in pixels.windows(2) {
@@ -584,7 +586,7 @@ fn assert_monotonic_ramp(rgba: &[u8], width: u32) {
 }
 
 fn assert_neutral_pixels(rgba: &[u8], fixture: &str) {
-    for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+    for (index, pixel) in rgba.as_chunks::<4>().0.iter().enumerate() {
         let spread = pixel[0]
             .max(pixel[1])
             .max(pixel[2])
@@ -599,8 +601,10 @@ fn assert_neutral_pixels(rgba: &[u8], fixture: &str) {
 fn abs_code_diff_rgb(actual: &[u8], expected: &[u8]) -> DiffMetrics {
     assert_eq!(actual.len(), expected.len());
     let mut differences = actual
-        .chunks_exact(4)
-        .zip(expected.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(expected.as_chunks::<4>().0.iter())
         .flat_map(|(actual, expected)| {
             assert_eq!(actual[3], expected[3], "GPU/source alpha must remain exact");
             actual[..3]
@@ -627,7 +631,7 @@ fn abs_code_diff_rgb(actual: &[u8], expected: &[u8]) -> DiffMetrics {
 fn monitor_luma_and_clipping(rgba: &[u8]) -> Value {
     let mut lumas = Vec::with_capacity(rgba.len() / 4);
     let mut clipped_channels = 0_u64;
-    for pixel in rgba.chunks_exact(4) {
+    for pixel in rgba.as_chunks::<4>().0 {
         lumas.push(
             0.2126 * f64::from(pixel[0])
                 + 0.7152 * f64::from(pixel[1])
@@ -686,7 +690,12 @@ fn abs_float_diff_in_domain(actual: &[f32], expected: &[f32]) -> BoundedFloatDif
     let mut actual_rgb = Vec::new();
     let mut expected_rgb = Vec::new();
     let mut excluded = 0;
-    for (actual_pixel, expected_pixel) in actual.chunks_exact(4).zip(expected.chunks_exact(4)) {
+    for (actual_pixel, expected_pixel) in actual
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(expected.as_chunks::<4>().0.iter())
+    {
         assert!(
             (actual_pixel[3] - expected_pixel[3]).abs() <= 1.0e-6,
             "production alpha changed: actual={} expected={}",
@@ -829,7 +838,9 @@ fn working_frame(width: u32, height: u32, rgb: &[[f32; 3]]) -> WorkingFrame {
 fn cpu_reference_monitor(frame: &WorkingFrame, corrections: &[PrimaryCorrection]) -> Vec<u8> {
     frame
         .pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|rgba| {
             let corrected = apply_primary_corrections(
                 [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()],
@@ -886,7 +897,9 @@ fn assert_gpu_control_case(
     let monitor_metric = abs_code_diff_rgb(&actual, &expected);
     let expected_linear = frame
         .pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|rgba| {
             let output = correction
                 .apply_checked([rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()])
@@ -1310,7 +1323,9 @@ fn cc1_identity_ramps_decode_actual_sources_to_working_and_monitor() {
         }
         let working_values = frame
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|rgba| [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()])
             .collect::<Vec<_>>();
         let expected_working = (0..width)

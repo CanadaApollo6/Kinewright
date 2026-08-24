@@ -46,7 +46,7 @@ impl WorkingFrame {
         }
 
         let mut pixels = Vec::with_capacity(expected / 2);
-        for rgba in bytes.chunks_exact(8) {
+        for rgba in bytes.as_chunks::<8>().0 {
             let red = f32::from(u16::from_le_bytes([rgba[0], rgba[1]])) / rgb_max;
             let green = f32::from(u16::from_le_bytes([rgba[2], rgba[3]])) / rgb_max;
             let blue = f32::from(u16::from_le_bytes([rgba[4], rgba[5]])) / rgb_max;
@@ -108,7 +108,7 @@ impl WorkingFrame {
             ));
         }
         let mut pixels = Vec::with_capacity(expected);
-        for rgba in frame.rgba.chunks_exact(4) {
+        for rgba in frame.rgba.as_chunks::<4>().0 {
             pixels.push(f16::from_f32(decode_srgb(f32::from(rgba[0]) / 255.0)));
             pixels.push(f16::from_f32(decode_srgb(f32::from(rgba[1]) / 255.0)));
             pixels.push(f16::from_f32(decode_srgb(f32::from(rgba[2]) / 255.0)));
@@ -137,7 +137,7 @@ impl WorkingFrame {
             return Ok(());
         }
         let pixels = Arc::make_mut(&mut self.pixels);
-        for rgba in pixels.chunks_exact_mut(4) {
+        for rgba in pixels.as_chunks_mut::<4>().0 {
             let mut rgb = [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()];
             for correction in &corrections {
                 rgb = correction.apply_checked(rgb).map_err(|error| {
@@ -265,7 +265,7 @@ mod tests {
         .expect("8-bit full RGBA64 ramp");
 
         let mut previous = f32::NEG_INFINITY;
-        for (code, rgba) in frame.pixels.chunks_exact(4).enumerate() {
+        for (code, rgba) in frame.pixels.as_chunks::<4>().0.iter().enumerate() {
             let expected = decode_bt709(code as f32 / f32::from(u8::MAX));
             assert_close(rgba[0].to_f32(), expected, 1.0e-3);
             assert_close(rgba[1].to_f32(), expected, 1.0e-3);

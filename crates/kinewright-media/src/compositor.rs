@@ -802,7 +802,7 @@ impl Compositor {
         for row in 0..usize::try_from(height).unwrap_or_default() {
             let start = row.saturating_mul(usize::try_from(padded_row_bytes).unwrap_or_default());
             let end = start.saturating_add(usize::try_from(row_bytes).unwrap_or_default());
-            for pixel in mapped[start..end].chunks_exact(8) {
+            for pixel in mapped[start..end].as_chunks::<8>().0 {
                 let linear = [
                     f16::from_le_bytes([pixel[0], pixel[1]]).to_f32(),
                     f16::from_le_bytes([pixel[2], pixel[3]]).to_f32(),
@@ -952,7 +952,7 @@ impl Compositor {
         for row in 0..usize::try_from(height).unwrap_or_default() {
             let start = row.saturating_mul(usize::try_from(padded_row_bytes).unwrap_or_default());
             let end = start.saturating_add(usize::try_from(row_bytes).unwrap_or_default());
-            for pixel in mapped[start..end].chunks_exact(8) {
+            for pixel in mapped[start..end].as_chunks::<8>().0 {
                 values.extend([
                     f16::from_le_bytes([pixel[0], pixel[1]]).to_f32(),
                     f16::from_le_bytes([pixel[2], pixel[3]]).to_f32(),
