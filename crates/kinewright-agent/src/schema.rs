@@ -1,14 +1,15 @@
 use std::{borrow::Cow, fmt::Write, sync::Arc};
 
 use kinewright_core::{
-    EFFECT_DESCRIPTORS, Operation, TITLE_PARAMETER_DESCRIPTORS, TRANSITION_DESCRIPTORS,
-    TimelineRevision,
+    COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN, COLOR_CURVE_MAX_POINTS,
+    COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS, ColorCurveChannel, EFFECT_DESCRIPTORS,
+    Operation, TITLE_PARAMETER_DESCRIPTORS, TRANSITION_DESCRIPTORS, TimelineRevision,
 };
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 64] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 66] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -18,6 +19,8 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 64] = [
     "discard_edit_plan",
     "get_color_context",
     "plan_primary_correction",
+    "plan_color_wheels",
+    "plan_color_curves",
     "render_color_proof",
     "get_media_status",
     "get_cache_status",
@@ -417,16 +420,25 @@ fn effect_documentation() -> String {
         }
         write!(documentation, "{}(", effect.name)
             .expect("writing effect documentation to a String cannot fail");
-        for (parameter_index, parameter) in effect.parameters.iter().enumerate() {
-            if parameter_index != 0 {
-                documentation.push_str(", ");
+        // CC3 §2.4: `color_curves` owns 133 generated parameters. Enumerating
+        // them adds several kilobytes to every AddEffect/SetEffectParam tool
+        // description and measurably degrades M36 runtime efficiency, so the
+        // three generating patterns are described instead. Every bound below
+        // is read from the Core descriptor, so the summary cannot drift.
+        if effect.name == COLOR_CURVES_EFFECT_NAME {
+            documentation.push_str(&color_curves_pattern_documentation());
+        } else {
+            for (parameter_index, parameter) in effect.parameters.iter().enumerate() {
+                if parameter_index != 0 {
+                    documentation.push_str(", ");
+                }
+                write!(
+                    documentation,
+                    "{}={}..={}, neutral {}",
+                    parameter.name, parameter.min, parameter.max, parameter.neutral
+                )
+                .expect("writing effect documentation to a String cannot fail");
             }
-            write!(
-                documentation,
-                "{}={}..={}, neutral {}",
-                parameter.name, parameter.min, parameter.max, parameter.neutral
-            )
-            .expect("writing effect documentation to a String cannot fail");
         }
         documentation.push(')');
         // Legacy compatibility stages remain loadable but are outside the CC1
@@ -446,6 +458,27 @@ fn effect_documentation() -> String {
         ". cube_lut additionally requires parameters.path as a non-empty text path to a 3D .cube file; intensity_percent remains integer-automatable.",
     );
     documentation
+}
+
+/// The canonical CC3 curves effect name, kept local so the compact-description
+/// special case is greppable from the schema module.
+const COLOR_CURVES_EFFECT_NAME: &str = "color_curves";
+
+/// A compact pattern description of the 133 `color_curves` parameters.
+///
+/// Deliberately never enumerates the generated names: see CC3 §2.4 and the
+/// tool-schema-bloat risk in CC3 §13.
+fn color_curves_pattern_documentation() -> String {
+    let curves = ColorCurveChannel::ALL
+        .map(ColorCurveChannel::name)
+        .join("|");
+    let last_index = COLOR_CURVE_MAX_POINTS.saturating_sub(1);
+    format!(
+        "{{curve}}_point_count={COLOR_CURVE_MIN_POINTS}..={COLOR_CURVE_MAX_POINTS}, neutral {COLOR_CURVE_MIN_POINTS} for curve in {curves}; \
+{{curve}}_x{{j}}/{{curve}}_y{{j}} for j=0..={last_index} in {COLOR_CURVE_COORDINATE_MIN}..={COLOR_CURVE_COORDINATE_MAX} basis points of the grade709 range, \
+neutral 0 at j=0 and {COLOR_CURVE_WHITE_BASIS_POINTS} otherwise; x must strictly increase over j<point_count and points at j>=point_count are ignored; \
+bypass=0..=1, neutral 0. Prefer plan_color_curves, which accepts [[x, y], ...] lists and expands them"
+    )
 }
 
 fn transition_documentation() -> String {
@@ -745,6 +778,73 @@ mod tests {
         assert!(documentation.contains(
             "crop(left_percent=0..=45, neutral 0, right_percent=0..=45, neutral 0, top_percent=0..=45, neutral 0, bottom_percent=0..=45, neutral 0)"
         ));
+    }
+
+    /// CC3 §2.4 and §13: `color_curves` owns 133 generated parameters. The
+    /// tool description must summarise the three patterns instead of listing
+    /// them, or every AddEffect/SetEffectParam listing grows by several
+    /// kilobytes and violates M36's runtime-efficiency posture.
+    #[test]
+    fn color_curves_documentation_is_a_compact_pattern_not_133_entries() {
+        let documentation = effect_documentation();
+        let entry = |name: &str| {
+            let start = documentation
+                .find(&format!("{name}("))
+                .unwrap_or_else(|| panic!("{name} must be documented"));
+            let close = start
+                + documentation[start..]
+                    .find(')')
+                    .expect("every entry closes its parameter list")
+                + 1;
+            documentation[start..close].to_owned()
+        };
+
+        let descriptor = EFFECT_DESCRIPTORS
+            .iter()
+            .find(|effect| effect.name == "color_curves")
+            .expect("Core must register color_curves");
+        assert_eq!(descriptor.parameters.len(), 133);
+        let enumerated = descriptor
+            .parameters
+            .iter()
+            .map(|parameter| {
+                format!(
+                    "{}={}..={}, neutral {}, ",
+                    parameter.name, parameter.min, parameter.max, parameter.neutral
+                )
+                .len()
+            })
+            .sum::<usize>();
+        assert!(
+            enumerated > 4_096,
+            "enumerating the descriptor would cost {enumerated} bytes"
+        );
+
+        let curves = entry("color_curves");
+        assert!(
+            curves.len() < 1_024,
+            "the color_curves entry must stay under 1 KB, was {} bytes: {curves}",
+            curves.len()
+        );
+        // The compact form still states every bound an author needs, and
+        // reads them from the Core descriptor rather than restating literals.
+        assert!(curves.contains("{curve}_point_count=2..=16"));
+        assert!(curves.contains("master|red|green|blue"));
+        assert!(curves.contains("{curve}_x{j}/{curve}_y{j}"));
+        assert!(curves.contains("j=0..=15"));
+        assert!(curves.contains("-2000..=12000"));
+        assert!(curves.contains("bypass=0..=1"));
+        assert!(curves.contains("plan_color_curves"));
+        assert!(
+            !curves.contains("master_x0"),
+            "the generated parameter names must not be enumerated"
+        );
+
+        // Thirteen controls is cheap, so color_wheels stays enumerated.
+        let wheels = entry("color_wheels");
+        assert!(wheels.contains("lift_master_basis_points=-2000..=2000, neutral 0"));
+        assert!(wheels.contains("gain_blue_thousandths=0..=4000, neutral 1000"));
+        assert!(wheels.contains("bypass=0..=1, neutral 0"));
     }
 
     #[test]

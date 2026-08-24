@@ -558,6 +558,149 @@ async fn cc1_color_context_plan_and_commit_advance_the_revision_exactly_once() {
     server.shutdown();
 }
 
+/// CC3 §8/§10.3 fixture 11: `plan_color_wheels` is evidence-only over the real
+/// transport, its exact operations survive prepare/commit, and the resulting
+/// node is visible in the ordered `color_nodes` manifest afterwards.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn cc3_color_wheels_plan_and_commit_create_the_ordered_node() {
+    let generated = managed_color_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let context = invoke_capability(&client, "get_color_context", json!({})).await;
+    let context = context.structured_content.as_ref().unwrap();
+    let revision = context["timeline_revision"].as_u64().unwrap();
+    assert_eq!(revision, 0);
+    assert_eq!(
+        context["clips"][0]["color_nodes"].as_array().unwrap().len(),
+        0
+    );
+
+    let plan = invoke_capability(
+        &client,
+        "plan_color_wheels",
+        json!({
+            "expected_revision": revision,
+            "clip_id": 1,
+            "parameters": {"gain_red_thousandths": 1_200, "lift_master_basis_points": -500}
+        }),
+    )
+    .await;
+    assert_eq!(plan.is_error, Some(false));
+    let plan = plan
+        .structured_content
+        .as_ref()
+        .expect("plan_color_wheels must publish exact operations")
+        .clone();
+    assert_eq!(plan["applied"], false);
+    assert_eq!(plan["evidence_only"], true);
+    assert_eq!(plan["no_change"], false);
+    assert_eq!(plan["created_new_node"], true);
+    assert_eq!(plan["existing_color_node_count"], 0);
+    assert_eq!(plan["kind"], "color_wheels");
+    let target_effect_id = plan["target_effect_id"].as_u64().unwrap();
+    assert_eq!(query_document(&core).tracks[0].clips[0].effects.len(), 0);
+
+    // A stale revision fails closed before anything is prepared.
+    let stale = invoke_capability(
+        &client,
+        "plan_color_wheels",
+        json!({
+            "expected_revision": revision + 9,
+            "clip_id": 1,
+            "parameters": {"gain_red_thousandths": 1_200}
+        }),
+    )
+    .await;
+    assert_eq!(stale.is_error, Some(true));
+
+    let prepared = prepare_plan(&client, revision, plan["operations"].clone()).await;
+    assert_eq!(prepared.is_error, Some(false));
+    let committed = client
+        .call_tool(commit_request(revision, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false));
+
+    let after = query_document(&core);
+    let effects = &after.tracks[0].clips[0].effects;
+    assert_eq!(effects.len(), 1);
+    assert_eq!(effects[0].name, "color_wheels");
+    assert_eq!(effects[0].id.0, target_effect_id);
+    assert_eq!(
+        effects[0].parameters["gain_red_thousandths"],
+        ParamValue::Integer(1_200)
+    );
+    assert_eq!(
+        effects[0].parameters["lift_master_basis_points"],
+        ParamValue::Integer(-500)
+    );
+
+    let after_context = invoke_capability(&client, "get_color_context", json!({})).await;
+    let after_context = after_context.structured_content.as_ref().unwrap();
+    assert_eq!(
+        after_context["timeline_revision"].as_u64().unwrap(),
+        revision + 1,
+        "one committed plan must advance the revision exactly once"
+    );
+    let nodes = after_context["clips"][0]["color_nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0]["stage_index"], 0);
+    assert_eq!(nodes[0]["kind"], "color_wheels");
+    assert_eq!(nodes[0]["effect_id"], target_effect_id);
+    assert_eq!(nodes[0]["bypass"], 0);
+    assert_eq!(nodes[0]["active"], true);
+    assert_eq!(nodes[0]["inactive_reason"], json!(null));
+    assert_eq!(nodes[0]["parameters"]["gain_red_thousandths"], 1_200);
+    assert_eq!(nodes[0]["parameters"]["gamma_master_thousandths"], 1_000);
+
+    // The same clip now takes a curves node in place beside the wheels node.
+    let curves = invoke_capability(
+        &client,
+        "plan_color_curves",
+        json!({
+            "expected_revision": revision + 1,
+            "clip_id": 1,
+            "curves": {"master": [[0, 0], [5_000, 6_000], [10_000, 10_000]]}
+        }),
+    )
+    .await;
+    assert_eq!(curves.is_error, Some(false));
+    let curves = curves.structured_content.as_ref().unwrap().clone();
+    assert_eq!(curves["existing_color_node_count"], 1);
+    assert_eq!(curves["created_new_node"], true);
+    let prepared = prepare_plan(&client, revision + 1, curves["operations"].clone()).await;
+    assert_eq!(prepared.is_error, Some(false));
+    let committed = client
+        .call_tool(commit_request(revision + 1, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false));
+
+    let final_context = invoke_capability(&client, "get_color_context", json!({})).await;
+    let final_context = final_context.structured_content.as_ref().unwrap();
+    let nodes = final_context["clips"][0]["color_nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[1]["stage_index"], 1);
+    assert_eq!(nodes[1]["kind"], "color_curves");
+    assert_eq!(
+        nodes[1]["curves"]["master"]["points"],
+        json!([[0, 0], [5_000, 6_000], [10_000, 10_000]])
+    );
+    assert_eq!(nodes[1]["curves"]["master"]["truncated"], false);
+    assert_eq!(nodes[1]["active"], true);
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cc2_scope_tools_are_read_only_over_the_live_endpoint() {
     let generated = managed_color_media();

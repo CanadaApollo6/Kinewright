@@ -46,22 +46,40 @@ struct LayerParams {
     _uniform_padding: vec2<f32>,
 };
 
-struct PrimaryNode {
-    values: array<vec4<f32>, 3>,
+// CC3 3.2: ONE read-only storage buffer carries the whole ordered managed
+// colour-node stack -- primary, wheels, and curves -- plus the curve payload
+// region.  Keep the host ABI explicit:
+//
+//   header.x  active node count (inactive nodes are never written, CC3 3.3)
+//   header.y  word index, into `words`, where the curve payload region starts
+//   header.z  ABI version, currently 1
+//   header.w  reserved, 0
+//
+// `words` begins at byte 16, so `words[0]` is the buffer's word 4 and node
+// record `i` occupies `words[i * 16 .. i * 16 + 16]`:
+//
+//   [kind, payload_word_offset, bypass, reserved, v0 .. v11]
+//
+// `kind` and `payload_word_offset` are stored as f32 and read with
+// `u32(round(w))`; `bypass` is 0.0 or 1.0.  Every stored word offset is an
+// index into `words`, which is what `curve_eval` consumes directly.
+struct GradeBuffer {
+    header: vec4<u32>,
+    words: array<f32>,
 };
 
-struct PrimaryBuffer {
-    // Keep the host ABI explicit: the count occupies the first u32 of a
-    // 16-byte header, and the node array begins immediately at byte 16.
-    header: vec4<u32>,
-    nodes: array<PrimaryNode>,
-};
+// Node record stride, in words.
+const GRADE_NODE_STRIDE: u32 = 16u;
+// Offset of `v0` inside a node record, in words.
+const GRADE_NODE_VALUES: u32 = 4u;
+// `[count, x0, y0, m0, ... x15, y15, m15]` for one curve.
+const GRADE_CURVE_SLOT_WORDS: u32 = 49u;
 
 @group(0) @binding(0) var layer_texture: texture_2d<f32>;
 @group(0) @binding(1) var layer_sampler: sampler;
 @group(0) @binding(2) var<uniform> params: LayerParams;
 @group(0) @binding(3) var lut_texture: texture_3d<f32>;
-@group(0) @binding(4) var<storage, read> primary_buffer: PrimaryBuffer;
+@group(0) @binding(4) var<storage, read> grade_buffer: GradeBuffer;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -144,16 +162,24 @@ fn smooth_weight(start: f32, end: f32, value: f32) -> f32 {
     return smoothstep(start, end, value);
 }
 
-fn apply_primary_node(linear_rgb: vec3<f32>, node: PrimaryNode) -> vec3<f32> {
-    let first = node.values[0];
-    let second = node.values[1];
-    let third = node.values[2];
-    let temperature = first.y;
-    let tint = first.z;
+// CC1 managed primary correction.  `values` is the word index of `v0` inside
+// the node record; the arithmetic below is unchanged from the CC1 node loop,
+// so a primary-only stack renders bit-identically across the CC3 ABI change.
+fn apply_primary_node(linear_rgb: vec3<f32>, values: u32) -> vec3<f32> {
+    let exposure = grade_buffer.words[values];
+    let temperature = grade_buffer.words[values + 1u];
+    let tint = grade_buffer.words[values + 2u];
+    let contrast = grade_buffer.words[values + 3u];
+    let pivot_value = grade_buffer.words[values + 4u];
+    let blacks = grade_buffer.words[values + 5u];
+    let shadows = grade_buffer.words[values + 6u];
+    let highlights = grade_buffer.words[values + 7u];
+    let whites = grade_buffer.words[values + 8u];
+    let saturation = grade_buffer.words[values + 9u];
     let red_gain = 1.0 + 0.1 * temperature;
     let green_gain = 1.0 - 0.1 * tint;
     let blue_gain = 1.0 - 0.1 * temperature;
-    let exposure_gain = exp2(first.x);
+    let exposure_gain = exp2(exposure);
     var corrected = vec3<f32>(
         linear_rgb.r * red_gain * exposure_gain,
         linear_rgb.g * green_gain * exposure_gain,
@@ -167,20 +193,20 @@ fn apply_primary_node(linear_rgb: vec3<f32>, node: PrimaryNode) -> vec3<f32> {
         let highlight_weight = smooth_weight(0.50, 0.85, bounded);
         let white_weight = smooth_weight(0.75, 1.0, bounded);
         corrected[channel] = value
-            + 0.25 * second.y * black_weight
-            + 0.20 * second.z * shadow_weight
-            + 0.20 * second.w * highlight_weight
-            + 0.25 * third.x * white_weight;
+            + 0.25 * blacks * black_weight
+            + 0.20 * shadows * shadow_weight
+            + 0.20 * highlights * highlight_weight
+            + 0.25 * whites * white_weight;
     }
-    let pivot = second.x;
-    let contrast_scale = 1.0 + first.w;
+    let pivot = pivot_value;
+    let contrast_scale = 1.0 + contrast;
     corrected = vec3<f32>(
         pivot + (corrected.r - pivot) * contrast_scale,
         pivot + (corrected.g - pivot) * contrast_scale,
         pivot + (corrected.b - pivot) * contrast_scale,
     );
     let luminance = dot(corrected, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let saturation_scale = 1.0 + third.y;
+    let saturation_scale = 1.0 + saturation;
     return vec3<f32>(
         luminance + (corrected.r - luminance) * saturation_scale,
         luminance + (corrected.g - luminance) * saturation_scale,
@@ -188,10 +214,118 @@ fn apply_primary_node(linear_rgb: vec3<f32>, node: PrimaryNode) -> vec3<f32> {
     );
 }
 
-fn apply_primary_nodes(input_rgb: vec3<f32>) -> vec3<f32> {
+// CC3 2.1: the grading encoding.  Copied verbatim from the CC3 contract; it
+// is an exact analytic bijection on all of R and is deliberately NOT CC1's
+// rounded `encode_bt709`/`decode_bt709` monitor pair.
+fn grade709_encode(v: f32) -> f32 {
+    let s = sign(v); let a = abs(v);
+    if a < 0.018053969 { return s * 4.5 * a; }
+    return s * (1.0992968 * pow(a, 0.45) - 0.0992968);
+}
+
+fn grade709_decode(v: f32) -> f32 {
+    let s = sign(v); let a = abs(v);
+    if a < 0.08124286 { return s * a / 4.5; }
+    return s * pow((a + 0.0992968) / 1.0992968, 2.2222223);
+}
+
+// CC3 2.3: monotone cubic Hermite evaluation with linear extrapolation from
+// the host-limited end tangents.  `base` is the word index of one curve slot.
+fn curve_eval(base: u32, x: f32) -> f32 {
+    let count = u32(round(grade_buffer.words[base]));
+    if count < 2u { return x; }
+    let first = base + 1u;
+    let last  = base + 1u + (count - 1u) * 3u;
+    if x <  grade_buffer.words[first] {
+        return grade_buffer.words[first + 1u]
+             + grade_buffer.words[first + 2u] * (x - grade_buffer.words[first]);
+    }
+    if x >= grade_buffer.words[last] {
+        return grade_buffer.words[last + 1u]
+             + grade_buffer.words[last + 2u] * (x - grade_buffer.words[last]);
+    }
+    var segment = 0u;
+    for (var i = 0u; i + 1u < count; i = i + 1u) {
+        let xi = grade_buffer.words[base + 1u + i * 3u];
+        let xn = grade_buffer.words[base + 1u + (i + 1u) * 3u];
+        if x >= xi && x < xn { segment = i; }
+    }
+    let o0 = base + 1u + segment * 3u;
+    let o1 = o0 + 3u;
+    let x0 = grade_buffer.words[o0];      let y0 = grade_buffer.words[o0 + 1u];
+    let m0 = grade_buffer.words[o0 + 2u]; let x1 = grade_buffer.words[o1];
+    let y1 = grade_buffer.words[o1 + 1u]; let m1 = grade_buffer.words[o1 + 2u];
+    let h = x1 - x0;
+    let t = (x - x0) / h;
+    let t2 = t * t; let t3 = t2 * t;
+    return (2.0*t3 - 3.0*t2 + 1.0) * y0
+         + (t3 - 2.0*t2 + t) * h * m0
+         + (-2.0*t3 + 3.0*t2) * y1
+         + (t3 - t2) * h * m1;
+}
+
+// CC3 2.2: ASC CDL slope/offset/power evaluated per channel in `grade709`.
+// `base` is the word index of `v0`: v0..v2 slope, v3..v5 offset, v6..v8 power.
+//
+// The odd extension `sgn(y) * |y| ^ p` replaces ASC CDL's `[0, 1]` clamp so
+// recoverable undershoot and over-range highlights survive the node.  `pow`
+// requires a non-negative base, so the magnitude is raised and the sign is
+// restored afterwards; WGSL `sign(0.0)` is 0, which is exactly `sgn(0) = 0`.
+fn apply_wheels_node(base: u32, rgb: vec3<f32>) -> vec3<f32> {
+    var result = rgb;
+    for (var channel = 0u; channel < 3u; channel++) {
+        let slope = grade_buffer.words[base + channel];
+        let offset = grade_buffer.words[base + 3u + channel];
+        let power = grade_buffer.words[base + 6u + channel];
+        let y = grade709_encode(result[channel]) * slope + offset;
+        result[channel] = grade709_decode(sign(y) * pow(abs(y), power));
+    }
+    return result;
+}
+
+// CC3 2.3: per-channel curves first, then the master curve applied
+// identically to all three channels, all inside `grade709`.  `payload_base` is
+// the word index of the node's red slot; the four slots are ordered red,
+// green, blue, master.
+fn apply_curves_node(payload_base: u32, rgb: vec3<f32>) -> vec3<f32> {
+    let master = payload_base + 3u * GRADE_CURVE_SLOT_WORDS;
+    var encoded = vec3<f32>(
+        grade709_encode(rgb.r),
+        grade709_encode(rgb.g),
+        grade709_encode(rgb.b),
+    );
+    for (var channel = 0u; channel < 3u; channel++) {
+        let shaped = curve_eval(payload_base + channel * GRADE_CURVE_SLOT_WORDS, encoded[channel]);
+        encoded[channel] = curve_eval(master, shaped);
+    }
+    return vec3<f32>(
+        grade709_decode(encoded.r),
+        grade709_decode(encoded.g),
+        grade709_decode(encoded.b),
+    );
+}
+
+// CC3 3.1: one ordered node stack executed in serialized `clip.effects` order.
+// The renderer must not flatten, reorder, or merge nodes, and no RGB clamp
+// occurs between them.  Inactive nodes are never written to the buffer
+// (CC3 3.3); the `bypass` word is still honoured so a stale buffer cannot
+// silently apply a bypassed node.
+fn apply_color_nodes(input_rgb: vec3<f32>) -> vec3<f32> {
     var corrected = input_rgb;
-    for (var index = 0u; index < primary_buffer.header.x; index++) {
-        corrected = apply_primary_node(corrected, primary_buffer.nodes[index]);
+    for (var index = 0u; index < grade_buffer.header.x; index++) {
+        let base = index * GRADE_NODE_STRIDE;
+        if grade_buffer.words[base + 2u] >= 1.0 {
+            continue;
+        }
+        let kind = u32(round(grade_buffer.words[base]));
+        let values = base + GRADE_NODE_VALUES;
+        if kind == 1u {
+            corrected = apply_primary_node(corrected, values);
+        } else if kind == 2u {
+            corrected = apply_wheels_node(values, corrected);
+        } else if kind == 3u {
+            corrected = apply_curves_node(u32(round(grade_buffer.words[base + 1u])), corrected);
+        }
     }
     return corrected;
 }
@@ -229,8 +363,8 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if params.input_linear > 0.5 {
         linear_rgb = sampled.rgb;
     }
-    if primary_buffer.header.x > 0u {
-        linear_rgb = apply_primary_nodes(linear_rgb);
+    if grade_buffer.header.x > 0u {
+        linear_rgb = apply_color_nodes(linear_rgb);
     }
     var output_linear = linear_rgb;
     var alpha = clamp(sampled.a * params.opacity, 0.0, 1.0);

@@ -6,11 +6,16 @@ use std::{
 };
 
 use kinewright_core::{
-    AssetId, Clip, ClipContent, ClipId, ColorDescription, ColorSourceError, ColorSourceProfile,
-    ColorSourceProfileAssumption, ColorWhitePoint, Document, Effect, EffectCompatibilityStage,
-    EffectId, MediaAvailabilityStatus, MediaError, MediaKind, Operation, ParamValue, TimeCode,
-    TimelineRevision, TrackKind, apply_batch, classify_source_with_assumption,
-    effect_compatibility_stage, effect_descriptor,
+    AssetId, COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN, COLOR_CURVE_MAX_POINTS,
+    COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS, COLOR_NODE_BYPASS_PARAMETER,
+    COLOR_NODE_LIMIT_PER_LAYER, Clip, ClipContent, ClipId, ColorCurveChannel, ColorDescription,
+    ColorNodeKind, ColorSourceError, ColorSourceProfile, ColorSourceProfileAssumption,
+    ColorWheelChannel, ColorWheelControl, ColorWheelsParams, ColorWhitePoint, CurvePoints,
+    Document, Effect, EffectCompatibilityStage, EffectId, MANAGED_COLOR_NODE_NAMES,
+    MediaAvailabilityStatus, MediaError, MediaKind, Operation, ParamValue, ResolvedCurves,
+    TimeCode, TimelineRevision, TrackKind, apply_batch, classify_color_node,
+    classify_source_with_assumption, effect_compatibility_stage, effect_descriptor,
+    managed_color_node_count,
 };
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -864,7 +869,9 @@ fn clip_status(track_id: u64, z_order: usize, clip: &kinewright_core::Clip) -> V
         // The complete ordered chain, not just the primary nodes: a legacy
         // stage between two primaries changes the result and must be visible.
         "effects": effect_chain_manifest(&clip.effects),
-        "primary_nodes": primary_node_manifest(&clip.effects),
+        // CC3 §8: the ordered managed colour-node stack, in `clip.effects`
+        // order, with per-node bypass, activity, and resolved values.
+        "color_nodes": color_node_manifest(&clip.effects),
         "legacy_stage_warnings": legacy_stage_warnings(clip),
         // Occlusion is frame-dependent and this surface is not a sampled
         // render; the marker is explicit rather than silently omitted.
@@ -897,27 +904,15 @@ pub(crate) fn effect_chain_manifest(effects: &[Effect]) -> Vec<Value> {
                 "name": effect.name,
                 "parameters": effect.parameters,
                 "primary_parameters": primary_parameters,
+                // CC3 §8: flag the managed colour nodes of the chain so a
+                // reader knows which entries have a fully resolved,
+                // bypass-aware description in the sibling `color_nodes` list
+                // without duplicating that payload here.
+                "color_node_kind": classify_color_node(effect)
+                    .map_or(Value::Null, |kind| json!(kind.effect_name())),
                 "keyframes": effect.keyframes,
                 "compatibility_stage": effect_compatibility_stage(&effect.name)
                     .map_or(Value::Null, |stage| json!(stage.issue_code())),
-            })
-        })
-        .collect()
-}
-
-/// Keep the primary-only view derived from the same ordered chain above.
-#[must_use]
-pub(crate) fn primary_node_manifest(effects: &[Effect]) -> Vec<Value> {
-    effect_chain_manifest(effects)
-        .into_iter()
-        .filter(|effect| !effect["primary_parameters"].is_null())
-        .map(|effect| {
-            json!({
-                "effect_id": effect["effect_id"],
-                "effect_index": effect["effect_index"],
-                "name": effect["name"],
-                "parameters": effect["primary_parameters"],
-                "keyframes": effect["keyframes"],
             })
         })
         .collect()
@@ -994,46 +989,8 @@ pub(crate) fn plan_primary_correction(
             actual: actual_revision,
         });
     }
-    let Some(track) = document
-        .tracks
-        .iter()
-        .find(|track| track.clips.iter().any(|clip| clip.id == args.clip_id))
-    else {
-        return Err(PrimaryPlanError::MissingClip(args.clip_id));
-    };
-    let Some(clip) = track.clips.iter().find(|clip| clip.id == args.clip_id) else {
-        return Err(PrimaryPlanError::MissingClip(args.clip_id));
-    };
-    if track.kind != TrackKind::Video
-        || !matches!(clip.content, ClipContent::Media | ClipContent::Freeze(_))
-    {
-        return Err(PrimaryPlanError::WrongClipType {
-            clip: clip.id,
-            track: track.kind,
-            content: clip_content_name(&clip.content),
-        });
-    }
-    let Some(asset) = document.asset(clip.asset) else {
-        return Err(PrimaryPlanError::MissingAsset {
-            clip: clip.id,
-            asset: clip.asset,
-        });
-    };
-    if !matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo) {
-        return Err(PrimaryPlanError::WrongAssetKind {
-            clip: clip.id,
-            asset: asset.id,
-            kind: asset.kind,
-        });
-    }
-
-    let (source_profile, profile_assumption) =
-        managed_source_profile(&asset.color_description, args.profile_assumption).map_err(
-            |error| PrimaryPlanError::UnsupportedSource {
-                clip: clip.id,
-                error,
-            },
-        )?;
+    let (clip, source_profile, profile_assumption) =
+        managed_color_clip(document, args.clip_id, args.profile_assumption)?;
 
     let Some(descriptor) = effect_descriptor(PRIMARY_CORRECTION_EFFECT_NAME) else {
         return Err(PrimaryPlanError::MissingDescriptor);
@@ -1090,7 +1047,7 @@ pub(crate) fn plan_primary_correction(
             (node.effect_id, false, node.parameters)
         }
         None => (
-            next_effect_id(document)?,
+            next_effect_id(document).ok_or(PrimaryPlanError::EffectIdExhausted)?,
             true,
             descriptor
                 .parameters
@@ -1158,7 +1115,11 @@ pub(crate) fn plan_primary_correction(
     })
 }
 
-fn next_effect_id(document: &Document) -> Result<EffectId, PrimaryPlanError> {
+/// The next unused effect id in the whole document.
+///
+/// Ids are document-wide, so a proposal must not reuse one that another clip
+/// already carries. `None` means the id space is exhausted.
+fn next_effect_id(document: &Document) -> Option<EffectId> {
     document
         .tracks
         .iter()
@@ -1169,7 +1130,1356 @@ fn next_effect_id(document: &Document) -> Result<EffectId, PrimaryPlanError> {
         .unwrap_or(0)
         .checked_add(1)
         .map(EffectId)
-        .ok_or(PrimaryPlanError::EffectIdExhausted)
+}
+
+// ---------------------------------------------------------------------------
+// CC3 §8 — managed colour-node planners (`plan_color_wheels`, `plan_color_curves`)
+// ---------------------------------------------------------------------------
+
+/// Why a clip cannot receive a managed colour node.
+///
+/// The CC1 primary planner and the CC3 wheels/curves planners share this
+/// preamble verbatim so the three surfaces can never disagree about which
+/// clips are eligible or which source profile a proposal assumes.
+#[derive(Debug, Clone)]
+pub(crate) enum ColorClipRejection {
+    MissingClip(ClipId),
+    WrongClipType {
+        clip: ClipId,
+        track: TrackKind,
+        content: &'static str,
+    },
+    MissingAsset {
+        clip: ClipId,
+        asset: AssetId,
+    },
+    WrongAssetKind {
+        clip: ClipId,
+        asset: AssetId,
+        kind: MediaKind,
+    },
+    UnsupportedSource {
+        clip: ClipId,
+        error: ColorSourceError,
+    },
+}
+
+/// Resolve one managed-colour-eligible clip and the source profile a proposal
+/// against it assumes.
+fn managed_color_clip(
+    document: &Document,
+    clip_id: ClipId,
+    profile_assumption: Option<ColorSourceProfileAssumption>,
+) -> Result<
+    (
+        &Clip,
+        ColorSourceProfile,
+        Option<ColorSourceProfileAssumption>,
+    ),
+    ColorClipRejection,
+> {
+    let Some(track) = document
+        .tracks
+        .iter()
+        .find(|track| track.clips.iter().any(|clip| clip.id == clip_id))
+    else {
+        return Err(ColorClipRejection::MissingClip(clip_id));
+    };
+    let Some(clip) = track.clips.iter().find(|clip| clip.id == clip_id) else {
+        return Err(ColorClipRejection::MissingClip(clip_id));
+    };
+    if track.kind != TrackKind::Video
+        || !matches!(clip.content, ClipContent::Media | ClipContent::Freeze(_))
+    {
+        return Err(ColorClipRejection::WrongClipType {
+            clip: clip.id,
+            track: track.kind,
+            content: clip_content_name(&clip.content),
+        });
+    }
+    let Some(asset) = document.asset(clip.asset) else {
+        return Err(ColorClipRejection::MissingAsset {
+            clip: clip.id,
+            asset: clip.asset,
+        });
+    };
+    if !matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo) {
+        return Err(ColorClipRejection::WrongAssetKind {
+            clip: clip.id,
+            asset: asset.id,
+            kind: asset.kind,
+        });
+    }
+    let (source_profile, applied_assumption) =
+        managed_source_profile(&asset.color_description, profile_assumption).map_err(|error| {
+            ColorClipRejection::UnsupportedSource {
+                clip: clip.id,
+                error,
+            }
+        })?;
+    Ok((clip, source_profile, applied_assumption))
+}
+
+impl From<ColorClipRejection> for PrimaryPlanError {
+    fn from(rejection: ColorClipRejection) -> Self {
+        match rejection {
+            ColorClipRejection::MissingClip(clip) => Self::MissingClip(clip),
+            ColorClipRejection::WrongClipType {
+                clip,
+                track,
+                content,
+            } => Self::WrongClipType {
+                clip,
+                track,
+                content,
+            },
+            ColorClipRejection::MissingAsset { clip, asset } => Self::MissingAsset { clip, asset },
+            ColorClipRejection::WrongAssetKind { clip, asset, kind } => {
+                Self::WrongAssetKind { clip, asset, kind }
+            }
+            ColorClipRejection::UnsupportedSource { clip, error } => {
+                Self::UnsupportedSource { clip, error }
+            }
+        }
+    }
+}
+
+impl From<ColorClipRejection> for ColorNodePlanError {
+    fn from(rejection: ColorClipRejection) -> Self {
+        match rejection {
+            ColorClipRejection::MissingClip(clip) => Self::MissingClip(clip),
+            ColorClipRejection::WrongClipType {
+                clip,
+                track,
+                content,
+            } => Self::WrongClipType {
+                clip,
+                track,
+                content,
+            },
+            ColorClipRejection::MissingAsset { clip, asset } => Self::MissingAsset { clip, asset },
+            ColorClipRejection::WrongAssetKind { clip, asset, kind } => {
+                Self::WrongAssetKind { clip, asset, kind }
+            }
+            ColorClipRejection::UnsupportedSource { clip, error } => {
+                Self::UnsupportedSource { clip, error }
+            }
+        }
+    }
+}
+
+/// Arguments for the evidence-only `color_wheels` planner (CC3 §8).
+#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ColorWheelsPlanArgs {
+    /// Exact timeline revision returned by the preceding inspection.
+    pub expected_revision: TimelineRevision,
+    /// Stable visual media clip id to receive the wheels node.
+    pub clip_id: ClipId,
+    /// Optional explicit D65 assumption for a complete BT.709 source whose
+    /// raw white point is unknown.
+    #[serde(default)]
+    pub profile_assumption: Option<ColorSourceProfileAssumption>,
+    /// Integer CC3 §4.1 controls. Omitted controls resolve to descriptor
+    /// neutrals; `bypass` is a 0/1 token.
+    pub parameters: BTreeMap<String, i64>,
+    /// Stack a second `color_wheels` node instead of correcting the clip's
+    /// existing one in place. Ordered node stacks are legal, so this is an
+    /// explicit opt-in rather than the default.
+    #[serde(default)]
+    pub append: bool,
+}
+
+/// One curve of a `plan_color_curves` request: `[[x, y], ...]` in basis points.
+type CurvePointRequest = Vec<[i64; 2]>;
+
+/// The ergonomic `curves` request object (CC3 §8).
+///
+/// Unknown keys are rejected rather than ignored: a typo like `reds` would
+/// otherwise silently plan nothing for the curve the caller meant.
+#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ColorCurvesRequest {
+    /// Master curve points, applied identically to all three channels.
+    #[serde(default)]
+    pub master: Option<CurvePointRequest>,
+    #[serde(default)]
+    pub red: Option<CurvePointRequest>,
+    #[serde(default)]
+    pub green: Option<CurvePointRequest>,
+    #[serde(default)]
+    pub blue: Option<CurvePointRequest>,
+}
+
+impl ColorCurvesRequest {
+    /// Every requested curve in `ColorCurveChannel::ALL` order.
+    fn requested(&self) -> Vec<(ColorCurveChannel, &CurvePointRequest)> {
+        ColorCurveChannel::ALL
+            .into_iter()
+            .filter_map(|curve| self.points(curve).map(|points| (curve, points)))
+            .collect()
+    }
+
+    fn points(&self, curve: ColorCurveChannel) -> Option<&CurvePointRequest> {
+        match curve {
+            ColorCurveChannel::Master => self.master.as_ref(),
+            ColorCurveChannel::Red => self.red.as_ref(),
+            ColorCurveChannel::Green => self.green.as_ref(),
+            ColorCurveChannel::Blue => self.blue.as_ref(),
+        }
+    }
+}
+
+/// Arguments for the evidence-only `color_curves` planner (CC3 §8).
+#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ColorCurvesPlanArgs {
+    /// Exact timeline revision returned by the preceding inspection.
+    pub expected_revision: TimelineRevision,
+    /// Stable visual media clip id to receive the curves node.
+    pub clip_id: ClipId,
+    /// Optional explicit D65 assumption for a complete BT.709 source whose
+    /// raw white point is unknown.
+    #[serde(default)]
+    pub profile_assumption: Option<ColorSourceProfileAssumption>,
+    /// Point lists per curve. 2..=16 points, coordinates in -2000..=12000
+    /// basis points of the grade709 range, strictly increasing in x.
+    pub curves: ColorCurvesRequest,
+    /// Explicit `bypass` token for the node, `0` or `1`.
+    #[serde(default)]
+    pub bypass: Option<i64>,
+    /// Stack a second `color_curves` node instead of editing the clip's
+    /// existing one in place.
+    #[serde(default)]
+    pub append: bool,
+}
+
+/// The validated, unapplied CC3 node proposal returned by both planners.
+#[derive(Debug, Clone)]
+pub(crate) struct ColorNodePlan {
+    pub kind: ColorNodeKind,
+    pub expected_revision: TimelineRevision,
+    pub clip_id: ClipId,
+    /// The node the proposal targets: the clip's existing last node of this
+    /// kind, or the freshly allocated id for a new one.
+    pub effect_id: EffectId,
+    /// Whether the plan actually allocates a new node.
+    pub created_new_node: bool,
+    /// Whether the plan edits a node that already exists.
+    pub targets_existing_node: bool,
+    pub source_profile: ColorSourceProfile,
+    pub profile_assumption: Option<ColorSourceProfileAssumption>,
+    /// The request expanded to the exact integer parameters it names.
+    pub requested_parameters: BTreeMap<String, i64>,
+    /// Every parameter the targeted node carries after the proposal, with
+    /// descriptor neutrals merged in.
+    pub resolved_parameters: BTreeMap<String, i64>,
+    /// Curves only: the request echoed back per curve.
+    pub requested_curves: BTreeMap<&'static str, Vec<[i64; 2]>>,
+    /// Curves only: every curve's resolved point list after the proposal.
+    pub resolved_curves: BTreeMap<&'static str, Vec<[i64; 2]>>,
+    pub operations: Vec<Operation>,
+    /// Every managed colour node the clip already carries, of any kind.
+    pub existing_color_node_count: usize,
+    /// Nodes of the requested kind the clip already carries.
+    pub existing_nodes_of_kind: usize,
+    /// Non-fatal advisories, such as a keyframed target control.
+    pub warnings: Vec<String>,
+    /// What the proposal takes as given, stated rather than implied.
+    pub assumptions: Vec<String>,
+    /// True when every requested control already holds the requested value.
+    pub no_change: bool,
+}
+
+impl ColorNodePlan {
+    /// The node this proposal actually publishes.
+    ///
+    /// A no-op proposal that would have created a node never allocates one, so
+    /// reporting `effect_id` there would publish a phantom id that no
+    /// operation creates and that a later plan is free to reuse.
+    #[must_use]
+    pub fn target_effect_id(&self) -> Option<EffectId> {
+        if self.no_change && !self.created_new_node && !self.targets_existing_node {
+            return None;
+        }
+        Some(self.effect_id)
+    }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum ColorNodePlanError {
+    #[error("timeline revision conflict: expected {expected}, actual {actual}")]
+    RevisionConflict {
+        expected: TimelineRevision,
+        actual: TimelineRevision,
+    },
+    #[error("clip {0} does not exist")]
+    MissingClip(ClipId),
+    #[error("clip {clip} is not a visual media clip (track={track:?}, content={content})")]
+    WrongClipType {
+        clip: ClipId,
+        track: TrackKind,
+        content: &'static str,
+    },
+    #[error("clip {clip} references missing asset {asset}")]
+    MissingAsset { clip: ClipId, asset: AssetId },
+    #[error("asset {asset} on clip {clip} is not video-capable ({kind:?})")]
+    WrongAssetKind {
+        clip: ClipId,
+        asset: AssetId,
+        kind: MediaKind,
+    },
+    #[error("clip {clip} source is not managed CC1-compatible: {error}")]
+    UnsupportedSource {
+        clip: ClipId,
+        error: ColorSourceError,
+    },
+    #[error("unknown {effect} parameter {name}")]
+    UnknownParameter { effect: &'static str, name: String },
+    #[error("{effect} parameter {name}={value} is outside the inclusive range {min}..={max}")]
+    ParameterOutOfRange {
+        effect: &'static str,
+        name: String,
+        value: i64,
+        min: i64,
+        max: i64,
+    },
+    #[error(
+        "color_curves {curve} curve declares {observed} points, outside the inclusive range {min}..={max}"
+    )]
+    CurvePointCount {
+        curve: &'static str,
+        observed: usize,
+        min: usize,
+        max: usize,
+    },
+    #[error(
+        "color_curves {curve} point {index} {axis}={value} is outside the inclusive range {min}..={max}"
+    )]
+    CurveCoordinateOutOfRange {
+        curve: &'static str,
+        index: usize,
+        axis: &'static str,
+        value: i64,
+        min: i64,
+        max: i64,
+    },
+    #[error(
+        "color_curves {curve} point {index} x={x} does not strictly increase past point {previous_index} x={previous_x}"
+    )]
+    CurveOrder {
+        curve: &'static str,
+        index: usize,
+        previous_index: usize,
+        previous_x: i64,
+        x: i64,
+    },
+    #[error("clip {clip} already carries {actual} managed colour nodes; the limit is {limit}")]
+    TooManyColorNodes {
+        clip: ClipId,
+        actual: usize,
+        limit: usize,
+    },
+    #[error("the Core {0} descriptor is unavailable")]
+    MissingDescriptor(&'static str),
+    #[error("could not allocate a fresh effect id")]
+    EffectIdExhausted,
+    #[error("Core rejected the evidence-only colour node plan: {0}")]
+    CoreRejected(String),
+}
+
+impl ColorNodePlanError {
+    /// Stable machine-readable recovery code for structured agent responses.
+    #[must_use]
+    pub(crate) const fn code(&self) -> &'static str {
+        match self {
+            Self::RevisionConflict { .. } => "revision_conflict",
+            Self::MissingClip(_) => "clip_not_found",
+            Self::WrongClipType { .. } => "unsupported_clip_type",
+            Self::MissingAsset { .. } => "asset_not_found",
+            Self::WrongAssetKind { .. } => "unsupported_asset_kind",
+            Self::UnsupportedSource { .. } => "needs_color_override",
+            Self::UnknownParameter { .. } => "unknown_color_node_parameter",
+            Self::ParameterOutOfRange { .. } => "color_node_parameter_out_of_range",
+            Self::CurvePointCount { .. } => "invalid_curve_point_count",
+            Self::CurveCoordinateOutOfRange { .. } => "curve_coordinate_out_of_range",
+            Self::CurveOrder { .. } => "invalid_curve_points",
+            Self::TooManyColorNodes { .. } => "too_many_color_nodes",
+            Self::MissingDescriptor(_) => "missing_color_node_descriptor",
+            Self::EffectIdExhausted => "effect_id_exhausted",
+            Self::CoreRejected(_) => "color_node_plan_core_rejected",
+        }
+    }
+
+    /// Structured `field`/`observed`/`allowed`/`recovery_action` evidence, in
+    /// the CC1/CC2 shape.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn details(&self) -> Value {
+        match self {
+            Self::RevisionConflict { expected, actual } => json!({
+                "field": "expected_revision",
+                "observed": expected.0,
+                "allowed": actual.0,
+                "recovery_action": "Re-inspect with get_color_context and resend the plan at the current timeline_revision.",
+                "expected_revision": expected.0,
+                "actual_revision": actual.0,
+            }),
+            Self::MissingClip(clip) => json!({
+                "field": "clip_id",
+                "observed": clip.0,
+                "allowed": "an existing visual media or freeze clip id",
+                "recovery_action": "Call get_timeline_state or get_color_context for the current clip ids.",
+                "clip_id": clip.0,
+            }),
+            Self::WrongClipType {
+                clip,
+                track,
+                content,
+            } => json!({
+                "field": "clip_id",
+                "observed": {"clip_id": clip.0, "track_kind": track, "content": content},
+                "allowed": "a video-track media or freeze clip",
+                "recovery_action": "Target a video-track media or freeze clip; titles and audio clips have no managed colour stage.",
+                "clip_id": clip.0,
+                "track_kind": track,
+                "content": content,
+            }),
+            Self::MissingAsset { clip, asset } => json!({
+                "field": "clip_id",
+                "observed": {"clip_id": clip.0, "asset_id": asset.0},
+                "allowed": "a clip whose asset is present in the media pool",
+                "recovery_action": "Call get_media_status; relink or re-import the missing asset first.",
+                "clip_id": clip.0,
+                "asset_id": asset.0,
+            }),
+            Self::WrongAssetKind { clip, asset, kind } => json!({
+                "field": "clip_id",
+                "observed": {"clip_id": clip.0, "asset_id": asset.0, "media_kind": kind},
+                "allowed": ["Video", "AudioVideo"],
+                "recovery_action": "Target a clip backed by a video-capable asset.",
+                "clip_id": clip.0,
+                "asset_id": asset.0,
+                "media_kind": kind,
+            }),
+            Self::UnsupportedSource { clip, error } => json!({
+                "field": error.field(),
+                "observed": error.observed(),
+                "allowed": error.allowed_values(),
+                "recovery_action": error.recovery_action(),
+                "clip_id": clip.0,
+                "code": error.code(),
+                "message": error.actionable_message(),
+            }),
+            Self::UnknownParameter { effect, name } => json!({
+                "field": "parameters",
+                "observed": name,
+                "allowed": color_node_parameter_documentation(effect),
+                "recovery_action": format!("Send one of the documented {effect} control names."),
+                "parameter": name,
+            }),
+            Self::ParameterOutOfRange {
+                effect,
+                name,
+                value,
+                min,
+                max,
+            } => json!({
+                "field": name,
+                "observed": value,
+                "allowed": {"min": min, "max": max},
+                "recovery_action": format!("Send {name} as an integer in {min}..={max}; see the {effect} descriptor."),
+                "parameter": name,
+                "min": min,
+                "max": max,
+            }),
+            Self::CurvePointCount {
+                curve,
+                observed,
+                min,
+                max,
+            } => json!({
+                "field": format!("curves.{curve}"),
+                "observed": observed,
+                "allowed": {"min": min, "max": max},
+                "recovery_action": format!("Send {min}..={max} points for the {curve} curve."),
+                "curve": curve,
+                "point_count": observed,
+            }),
+            Self::CurveCoordinateOutOfRange {
+                curve,
+                index,
+                axis,
+                value,
+                min,
+                max,
+            } => json!({
+                "field": format!("curves.{curve}[{index}].{axis}"),
+                "observed": value,
+                "allowed": {"min": min, "max": max},
+                "recovery_action": format!("Send curve coordinates as integers in {min}..={max} basis points of the grade709 range."),
+                "curve": curve,
+                "index": index,
+                "axis": axis,
+            }),
+            Self::CurveOrder {
+                curve,
+                index,
+                previous_index,
+                previous_x,
+                x,
+            } => json!({
+                "field": format!("curves.{curve}[{index}].x"),
+                "observed": x,
+                "allowed": format!("strictly greater than curves.{curve}[{previous_index}].x = {previous_x}"),
+                "recovery_action": "Sort the curve points by x and keep every x strictly increasing; equal x is rejected.",
+                "curve": curve,
+                "index": index,
+                "previous_index": previous_index,
+                "previous_x": previous_x,
+                "x": x,
+            }),
+            Self::TooManyColorNodes {
+                clip,
+                actual,
+                limit,
+            } => json!({
+                "field": "clip_id",
+                "observed": actual,
+                "allowed": {"max": limit},
+                "recovery_action": "Edit an existing colour node in place (omit append) or remove one before stacking another.",
+                "clip_id": clip.0,
+            }),
+            Self::MissingDescriptor(effect) => json!({
+                "field": "effect",
+                "observed": effect,
+                "allowed": MANAGED_COLOR_NODE_NAMES,
+                "recovery_action": "This build does not register the requested colour node; upgrade Kinewright.",
+            }),
+            Self::EffectIdExhausted => json!({
+                "field": "effect_id",
+                "observed": "exhausted",
+                "allowed": "an unused effect id",
+                "recovery_action": "The project has exhausted effect ids; remove unused effects.",
+            }),
+            Self::CoreRejected(message) => json!({
+                "field": "operations",
+                "observed": message,
+                "allowed": "a batch Core accepts against a clone of the analyzed document",
+                "recovery_action": "Re-inspect with get_color_context and resend a request Core validates.",
+            }),
+        }
+    }
+}
+
+/// Every control of one managed colour node, derived from the Core descriptor
+/// so the tool description and the recovery evidence can never drift.
+#[must_use]
+pub(crate) fn color_node_parameter_documentation(effect: &str) -> Vec<Value> {
+    effect_descriptor(effect).map_or_else(Vec::new, |descriptor| {
+        descriptor
+            .parameters
+            .iter()
+            .map(|parameter| {
+                json!({
+                    "name": parameter.name,
+                    "min": parameter.min,
+                    "max": parameter.max,
+                    "neutral": parameter.neutral,
+                })
+            })
+            .collect()
+    })
+}
+
+/// One-line `name=min..=max, neutral N` summary of every `color_wheels`
+/// control. Thirteen entries, so enumeration stays cheap (CC3 §2.4).
+#[must_use]
+pub(crate) fn color_wheels_parameter_summary() -> String {
+    effect_descriptor(ColorNodeKind::Wheels.effect_name()).map_or_else(String::new, |descriptor| {
+        descriptor
+            .parameters
+            .iter()
+            .map(|parameter| {
+                format!(
+                    "{}={}..={}, neutral {}",
+                    parameter.name, parameter.min, parameter.max, parameter.neutral
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+}
+
+/// The compact `color_curves` request contract. The 133 stored parameters are
+/// deliberately never enumerated (CC3 §2.4, M36).
+#[must_use]
+pub(crate) fn color_curves_request_summary() -> String {
+    format!(
+        "curves.{{master|red|green|blue}} = [[x, y], ...] with {COLOR_CURVE_MIN_POINTS}..={COLOR_CURVE_MAX_POINTS} points; x and y are integers in {COLOR_CURVE_COORDINATE_MIN}..={COLOR_CURVE_COORDINATE_MAX} basis points of the grade709 range where 0 is black and 10000 is display white; x must strictly increase. The planner expands each list to {{curve}}_point_count and {{curve}}_x{{j}}/{{curve}}_y{{j}} integer parameters. bypass is a 0..=1 token."
+    )
+}
+
+/// One managed colour node a proposal for a clip would target.
+struct ExistingColorNode<'a> {
+    effect: &'a Effect,
+    /// How many nodes of this kind the clip carries. `effect` is the last one
+    /// in compositor evaluation order.
+    node_count: usize,
+}
+
+/// Resolve the clip's last managed colour node of `kind`, if any.
+fn existing_color_node(
+    document: &Document,
+    clip_id: ClipId,
+    kind: ColorNodeKind,
+) -> Option<ExistingColorNode<'_>> {
+    let clip = document
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .find(|clip| clip.id == clip_id)?;
+    let name = kind.effect_name();
+    let matching = clip
+        .effects
+        .iter()
+        .filter(|effect| effect.name == name)
+        .collect::<Vec<_>>();
+    let effect = *matching.last()?;
+    Some(ExistingColorNode {
+        effect,
+        node_count: matching.len(),
+    })
+}
+
+/// The stored static integer of one descriptor parameter, or its neutral.
+fn stored_parameter(effect: Option<&Effect>, name: &str, neutral: i64) -> i64 {
+    match effect.and_then(|effect| effect.parameters.get(name)) {
+        Some(ParamValue::Integer(value)) => *value,
+        _ => neutral,
+    }
+}
+
+/// Descriptor parameters of `effect` that carry automation.
+fn keyframed_parameters(effect: Option<&Effect>, names: &[&str]) -> Vec<String> {
+    let Some(effect) = effect else {
+        return Vec::new();
+    };
+    names
+        .iter()
+        .filter(|name| {
+            effect
+                .keyframes
+                .get(**name)
+                .is_some_and(|curve| !curve.keyframes.is_empty())
+        })
+        .map(|name| (*name).to_owned())
+        .collect()
+}
+
+/// Validate and construct an unapplied `color_wheels` proposal (CC3 §8).
+///
+/// Nothing is sent to Core: the operations are proved valid against a clone of
+/// the analyzed document and returned for the caller to submit through
+/// `prepare_edit_plan`.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn plan_color_wheels(
+    document: &Document,
+    actual_revision: TimelineRevision,
+    args: &ColorWheelsPlanArgs,
+) -> Result<ColorNodePlan, ColorNodePlanError> {
+    if args.expected_revision != actual_revision {
+        return Err(ColorNodePlanError::RevisionConflict {
+            expected: args.expected_revision,
+            actual: actual_revision,
+        });
+    }
+    let kind = ColorNodeKind::Wheels;
+    let effect_name = kind.effect_name();
+    let (clip, source_profile, profile_assumption) =
+        managed_color_clip(document, args.clip_id, args.profile_assumption)?;
+    let Some(descriptor) = effect_descriptor(effect_name) else {
+        return Err(ColorNodePlanError::MissingDescriptor(effect_name));
+    };
+    for (name, value) in &args.parameters {
+        let Some(parameter) = descriptor.parameter(name) else {
+            return Err(ColorNodePlanError::UnknownParameter {
+                effect: effect_name,
+                name: name.clone(),
+            });
+        };
+        if !(parameter.min..=parameter.max).contains(value) {
+            return Err(ColorNodePlanError::ParameterOutOfRange {
+                effect: effect_name,
+                name: name.clone(),
+                value: *value,
+                min: parameter.min,
+                max: parameter.max,
+            });
+        }
+    }
+
+    let existing_color_node_count = managed_color_node_count(&clip.effects);
+    let existing = existing_color_node(document, args.clip_id, kind);
+    let existing_nodes_of_kind = existing.as_ref().map_or(0, |node| node.node_count);
+    let target = if args.append { None } else { existing.as_ref() };
+    let target_effect = target.map(|node| node.effect);
+
+    let mut warnings = Vec::new();
+    let mut assumptions = vec![
+        "Omitted color_wheels controls resolve to their descriptor neutrals; the node is the exact identity while every control is neutral (CC3 §3.3).".to_owned(),
+    ];
+    if let Some(node) = target
+        && node.node_count > 1
+    {
+        warnings.push(format!(
+            "clip {} already carries {} color_wheels nodes; this proposal targets the last node ({}) in compositor evaluation order",
+            args.clip_id, node.node_count, node.effect.id
+        ));
+    }
+    for name in keyframed_parameters(
+        target_effect,
+        &descriptor
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name)
+            .collect::<Vec<_>>(),
+    )
+    .into_iter()
+    .filter(|name| args.parameters.contains_key(name))
+    {
+        warnings.push(format!(
+            "clip {} node {} keyframes {name}; this proposal writes the static value, which automation overrides at render time",
+            args.clip_id,
+            target_effect.map_or(0, |effect| effect.id.0)
+        ));
+    }
+    if args.append && existing_nodes_of_kind > 0 {
+        assumptions.push(format!(
+            "append=true stacks a new color_wheels node after the clip's existing {existing_nodes_of_kind}; ordered nodes compose serially and are not merged (CC3 §3.1)."
+        ));
+    }
+
+    let current = descriptor
+        .parameters
+        .iter()
+        .map(|parameter| {
+            (
+                parameter.name.to_owned(),
+                stored_parameter(target_effect, parameter.name, parameter.neutral),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut resolved_parameters = current.clone();
+    for (name, value) in &args.parameters {
+        resolved_parameters.insert(name.clone(), *value);
+    }
+
+    let changed = args
+        .parameters
+        .iter()
+        .filter(|(name, value)| current.get(*name) != Some(*value))
+        .map(|(name, value)| (name.clone(), *value))
+        .collect::<Vec<_>>();
+
+    let (effect_id, created_new_node, operations) = if let Some(effect) = target_effect {
+        let operations = changed
+            .iter()
+            .map(|(name, value)| Operation::SetEffectParam {
+                clip: args.clip_id,
+                effect: effect.id,
+                name: name.clone(),
+                value: ParamValue::Integer(*value),
+            })
+            .collect::<Vec<_>>();
+        (effect.id, false, operations)
+    } else {
+        let effect_id = next_effect_id(document).ok_or(ColorNodePlanError::EffectIdExhausted)?;
+        // CC3 §2.4: an omitted parameter resolves to its neutral, so a new
+        // node stores only the controls the caller actually moved.
+        let parameters = changed
+            .iter()
+            .filter(|(name, value)| {
+                descriptor
+                    .parameter(name)
+                    .is_none_or(|parameter| parameter.neutral != *value)
+            })
+            .map(|(name, value)| (name.clone(), ParamValue::Integer(*value)))
+            .collect::<BTreeMap<_, _>>();
+        let operations = if parameters.is_empty() {
+            Vec::new()
+        } else {
+            if existing_color_node_count >= COLOR_NODE_LIMIT_PER_LAYER {
+                return Err(ColorNodePlanError::TooManyColorNodes {
+                    clip: args.clip_id,
+                    actual: existing_color_node_count + 1,
+                    limit: COLOR_NODE_LIMIT_PER_LAYER,
+                });
+            }
+            vec![Operation::AddEffect {
+                clip: args.clip_id,
+                effect: Effect {
+                    id: effect_id,
+                    name: effect_name.to_owned(),
+                    parameters,
+                    keyframes: BTreeMap::new(),
+                },
+            }]
+        };
+        let created = !operations.is_empty();
+        (effect_id, created, operations)
+    };
+
+    let no_change = operations.is_empty();
+    if !operations.is_empty() {
+        let mut candidate = document.clone();
+        apply_batch(&mut candidate, &operations)
+            .map_err(|error| ColorNodePlanError::CoreRejected(error.to_string()))?;
+    }
+    Ok(ColorNodePlan {
+        kind,
+        expected_revision: args.expected_revision,
+        clip_id: args.clip_id,
+        effect_id,
+        created_new_node,
+        targets_existing_node: target_effect.is_some(),
+        source_profile,
+        profile_assumption,
+        requested_parameters: args.parameters.clone(),
+        resolved_parameters,
+        requested_curves: BTreeMap::new(),
+        resolved_curves: BTreeMap::new(),
+        operations,
+        existing_color_node_count,
+        existing_nodes_of_kind,
+        warnings,
+        assumptions,
+        no_change,
+    })
+}
+
+/// Validate one requested curve against CC3 §2.3 count, bounds, and ordering.
+fn validate_requested_curve(
+    curve: ColorCurveChannel,
+    points: &[[i64; 2]],
+) -> Result<(), ColorNodePlanError> {
+    if points.len() < COLOR_CURVE_MIN_POINTS || points.len() > COLOR_CURVE_MAX_POINTS {
+        return Err(ColorNodePlanError::CurvePointCount {
+            curve: curve.name(),
+            observed: points.len(),
+            min: COLOR_CURVE_MIN_POINTS,
+            max: COLOR_CURVE_MAX_POINTS,
+        });
+    }
+    for (index, [x, y]) in points.iter().enumerate() {
+        for (axis, value) in [("x", *x), ("y", *y)] {
+            if !(COLOR_CURVE_COORDINATE_MIN..=COLOR_CURVE_COORDINATE_MAX).contains(&value) {
+                return Err(ColorNodePlanError::CurveCoordinateOutOfRange {
+                    curve: curve.name(),
+                    index,
+                    axis,
+                    value,
+                    min: COLOR_CURVE_COORDINATE_MIN,
+                    max: COLOR_CURVE_COORDINATE_MAX,
+                });
+            }
+        }
+        if index > 0 && *x <= points[index - 1][0] {
+            return Err(ColorNodePlanError::CurveOrder {
+                curve: curve.name(),
+                index,
+                previous_index: index - 1,
+                previous_x: points[index - 1][0],
+                x: *x,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The `{curve}_point_count` and active coordinate parameters one point list
+/// expands to (CC3 §2.4). Points at index `>= point_count` are omitted.
+fn curve_parameters(curve: ColorCurveChannel, points: &[[i64; 2]]) -> BTreeMap<String, i64> {
+    let minimum = i64::try_from(COLOR_CURVE_MIN_POINTS).unwrap_or(2);
+    let mut parameters = BTreeMap::from([(
+        curve.point_count_parameter().to_owned(),
+        i64::try_from(points.len()).unwrap_or(minimum),
+    )]);
+    for (index, [x, y]) in points.iter().enumerate() {
+        if let Some(name) = curve.x_parameter(index) {
+            parameters.insert(name.to_owned(), *x);
+        }
+        if let Some(name) = curve.y_parameter(index) {
+            parameters.insert(name.to_owned(), *y);
+        }
+    }
+    parameters
+}
+
+/// The point list one `color_curves` effect currently stores for `curve`.
+fn stored_curve_points(effect: Option<&Effect>, curve: ColorCurveChannel) -> Vec<[i64; 2]> {
+    let Some(effect) = effect else {
+        let white = i64::from(COLOR_CURVE_WHITE_BASIS_POINTS);
+        return vec![[0, 0], [white, white]];
+    };
+    CurvePoints::from_effect(effect, curve)
+        .points
+        .into_iter()
+        .map(|(x, y)| [i64::from(x), i64::from(y)])
+        .collect()
+}
+
+/// Ordered `SetEffectParam` operations that move one curve of an existing node
+/// from its stored points to `target`.
+///
+/// Core validates the strictly-increasing `x` rule on every individual
+/// `SetEffectParam` against the map the change would produce, so the write
+/// order is part of the contract:
+///
+/// 1. Collapse `{curve}_point_count` to two. A prefix of a valid point list is
+///    still strictly increasing, so this step can never be rejected.
+/// 2. Move points 0 and 1. With stored `a0 < a1` and requested `b0 < b1`, at
+///    least one of the two write orders is legal: if neither `b0 < a1` nor
+///    `a0 < b1` held, then `b0 >= a1 > a0 >= b1` would give `b0 > b1`, which
+///    contradicts the validated request.
+/// 3. Write points 2.. while they are still inactive, so they are not examined.
+/// 4. Restore `{curve}_point_count` to the requested count.
+fn curve_operations(
+    clip: ClipId,
+    effect_id: EffectId,
+    effect: &Effect,
+    curve: ColorCurveChannel,
+    target: &[[i64; 2]],
+) -> Vec<Operation> {
+    if stored_curve_points(Some(effect), curve) == target {
+        return Vec::new();
+    }
+    let descriptors = curve.parameters();
+    let stored = |name: &str| {
+        let neutral = descriptors
+            .iter()
+            .find(|parameter| parameter.name == name)
+            .map_or(0, |parameter| parameter.neutral);
+        stored_parameter(Some(effect), name, neutral)
+    };
+    let operation = |name: &str, value: i64| Operation::SetEffectParam {
+        clip,
+        effect: effect_id,
+        name: name.to_owned(),
+        value: ParamValue::Integer(value),
+    };
+    let minimum = i64::try_from(COLOR_CURVE_MIN_POINTS).unwrap_or(2);
+    let count = i64::try_from(target.len()).unwrap_or(minimum);
+    let point_count = curve.point_count_parameter();
+    let declared = stored(point_count);
+
+    let mut operations = Vec::new();
+    let mut active_count = declared;
+    if declared > minimum {
+        operations.push(operation(point_count, minimum));
+        active_count = minimum;
+    }
+    // `x_parameter(1)` always exists; the saturating fallback simply keeps
+    // the natural index order if a future descriptor ever shrinks.
+    let stored_x1 = curve.x_parameter(1).map_or(i64::MAX, &stored);
+    let leading_order = if target[0][0] < stored_x1 {
+        [0_usize, 1]
+    } else {
+        [1, 0]
+    };
+    for index in leading_order.into_iter().chain(2..target.len()) {
+        for (name, value) in [
+            (curve.x_parameter(index), target[index][0]),
+            (curve.y_parameter(index), target[index][1]),
+        ] {
+            let Some(name) = name else { continue };
+            if stored(name) != value {
+                operations.push(operation(name, value));
+            }
+        }
+    }
+    if active_count != count {
+        operations.push(operation(point_count, count));
+    }
+    operations
+}
+
+/// Validate and construct an unapplied `color_curves` proposal (CC3 §8).
+#[allow(clippy::too_many_lines)]
+pub(crate) fn plan_color_curves(
+    document: &Document,
+    actual_revision: TimelineRevision,
+    args: &ColorCurvesPlanArgs,
+) -> Result<ColorNodePlan, ColorNodePlanError> {
+    if args.expected_revision != actual_revision {
+        return Err(ColorNodePlanError::RevisionConflict {
+            expected: args.expected_revision,
+            actual: actual_revision,
+        });
+    }
+    let kind = ColorNodeKind::Curves;
+    let effect_name = kind.effect_name();
+    let (clip, source_profile, profile_assumption) =
+        managed_color_clip(document, args.clip_id, args.profile_assumption)?;
+    let Some(descriptor) = effect_descriptor(effect_name) else {
+        return Err(ColorNodePlanError::MissingDescriptor(effect_name));
+    };
+    let requested = args.curves.requested();
+    for (curve, points) in &requested {
+        validate_requested_curve(*curve, points)?;
+    }
+    if let Some(bypass) = args.bypass {
+        let Some(parameter) = descriptor.parameter(COLOR_NODE_BYPASS_PARAMETER) else {
+            return Err(ColorNodePlanError::MissingDescriptor(effect_name));
+        };
+        if !(parameter.min..=parameter.max).contains(&bypass) {
+            return Err(ColorNodePlanError::ParameterOutOfRange {
+                effect: effect_name,
+                name: COLOR_NODE_BYPASS_PARAMETER.to_owned(),
+                value: bypass,
+                min: parameter.min,
+                max: parameter.max,
+            });
+        }
+    }
+
+    let existing_color_node_count = managed_color_node_count(&clip.effects);
+    let existing = existing_color_node(document, args.clip_id, kind);
+    let existing_nodes_of_kind = existing.as_ref().map_or(0, |node| node.node_count);
+    let target = if args.append { None } else { existing.as_ref() };
+    let target_effect = target.map(|node| node.effect);
+
+    let mut warnings = Vec::new();
+    let mut assumptions = vec![
+        "Points at index >= {curve}_point_count are omitted from the stored parameter map; they resolve to their neutrals and are ignored by rendering (CC3 §2.4).".to_owned(),
+    ];
+    if let Some(node) = target
+        && node.node_count > 1
+    {
+        warnings.push(format!(
+            "clip {} already carries {} color_curves nodes; this proposal targets the last node ({}) in compositor evaluation order",
+            args.clip_id, node.node_count, node.effect.id
+        ));
+    }
+    let unspecified = ColorCurveChannel::ALL
+        .into_iter()
+        .filter(|curve| args.curves.points(*curve).is_none())
+        .map(ColorCurveChannel::name)
+        .collect::<Vec<_>>();
+    if !unspecified.is_empty() {
+        assumptions.push(if target_effect.is_some() {
+            format!(
+                "the {} curve(s) are not named in this request, so node {} keeps its current points for them; send them explicitly to change them",
+                unspecified.join(", "),
+                target_effect.map_or(0, |effect| effect.id.0)
+            )
+        } else {
+            format!(
+                "the {} curve(s) are not named in this request, so the new node leaves them at the structural identity (0,0)-(10000,10000)",
+                unspecified.join(", ")
+            )
+        });
+    }
+    if args.append && existing_nodes_of_kind > 0 {
+        assumptions.push(format!(
+            "append=true stacks a new color_curves node after the clip's existing {existing_nodes_of_kind}; ordered nodes compose serially and are not merged (CC3 §3.1)."
+        ));
+    }
+
+    let mut requested_parameters = BTreeMap::new();
+    for (curve, points) in &requested {
+        requested_parameters.extend(curve_parameters(*curve, points));
+    }
+    if let Some(bypass) = args.bypass {
+        requested_parameters.insert(COLOR_NODE_BYPASS_PARAMETER.to_owned(), bypass);
+    }
+    for name in keyframed_parameters(
+        target_effect,
+        &descriptor
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name)
+            .collect::<Vec<_>>(),
+    )
+    .into_iter()
+    .filter(|name| requested_parameters.contains_key(name))
+    {
+        warnings.push(format!(
+            "clip {} node {} keyframes {name}; this proposal writes the static value, which automation overrides at render time",
+            args.clip_id,
+            target_effect.map_or(0, |effect| effect.id.0)
+        ));
+    }
+
+    let mut requested_curves = BTreeMap::new();
+    for (curve, points) in &requested {
+        requested_curves.insert(curve.name(), (*points).clone());
+    }
+    let mut resolved_curves = BTreeMap::new();
+    for curve in ColorCurveChannel::ALL {
+        let points = args
+            .curves
+            .points(curve)
+            .cloned()
+            .unwrap_or_else(|| stored_curve_points(target_effect, curve));
+        resolved_curves.insert(curve.name(), points);
+    }
+    let mut resolved_parameters = BTreeMap::new();
+    for curve in ColorCurveChannel::ALL {
+        resolved_parameters.extend(curve_parameters(curve, &resolved_curves[curve.name()]));
+    }
+    resolved_parameters.insert(
+        COLOR_NODE_BYPASS_PARAMETER.to_owned(),
+        args.bypass
+            .unwrap_or_else(|| stored_parameter(target_effect, COLOR_NODE_BYPASS_PARAMETER, 0)),
+    );
+
+    let (effect_id, created_new_node, operations) = if let Some(effect) = target_effect {
+        let mut operations = Vec::new();
+        for (curve, points) in &requested {
+            operations.extend(curve_operations(
+                args.clip_id,
+                effect.id,
+                effect,
+                *curve,
+                points,
+            ));
+        }
+        if let Some(bypass) = args.bypass
+            && stored_parameter(Some(effect), COLOR_NODE_BYPASS_PARAMETER, 0) != bypass
+        {
+            operations.push(Operation::SetEffectParam {
+                clip: args.clip_id,
+                effect: effect.id,
+                name: COLOR_NODE_BYPASS_PARAMETER.to_owned(),
+                value: ParamValue::Integer(bypass),
+            });
+        }
+        (effect.id, false, operations)
+    } else {
+        let effect_id = next_effect_id(document).ok_or(ColorNodePlanError::EffectIdExhausted)?;
+        // CC3 §2.4: store only the parameters that move off their neutrals.
+        let parameters = requested_parameters
+            .iter()
+            .filter(|(name, value)| {
+                descriptor
+                    .parameter(name)
+                    .is_none_or(|parameter| parameter.neutral != **value)
+            })
+            .map(|(name, value)| (name.clone(), ParamValue::Integer(*value)))
+            .collect::<BTreeMap<_, _>>();
+        let operations = if parameters.is_empty() {
+            Vec::new()
+        } else {
+            if existing_color_node_count >= COLOR_NODE_LIMIT_PER_LAYER {
+                return Err(ColorNodePlanError::TooManyColorNodes {
+                    clip: args.clip_id,
+                    actual: existing_color_node_count + 1,
+                    limit: COLOR_NODE_LIMIT_PER_LAYER,
+                });
+            }
+            vec![Operation::AddEffect {
+                clip: args.clip_id,
+                effect: Effect {
+                    id: effect_id,
+                    name: effect_name.to_owned(),
+                    parameters,
+                    keyframes: BTreeMap::new(),
+                },
+            }]
+        };
+        let created = !operations.is_empty();
+        (effect_id, created, operations)
+    };
+
+    let no_change = operations.is_empty();
+    if !operations.is_empty() {
+        let mut candidate = document.clone();
+        apply_batch(&mut candidate, &operations)
+            .map_err(|error| ColorNodePlanError::CoreRejected(error.to_string()))?;
+    }
+    Ok(ColorNodePlan {
+        kind,
+        expected_revision: args.expected_revision,
+        clip_id: args.clip_id,
+        effect_id,
+        created_new_node,
+        targets_existing_node: target_effect.is_some(),
+        source_profile,
+        profile_assumption,
+        requested_parameters,
+        resolved_parameters,
+        requested_curves,
+        resolved_curves,
+        operations,
+        existing_color_node_count,
+        existing_nodes_of_kind,
+        warnings,
+        assumptions,
+        no_change,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// CC3 §8 — the ordered `color_nodes` manifest
+// ---------------------------------------------------------------------------
+
+/// One managed colour node of the ordered CC1/CC3 stack, fully resolved.
+///
+/// `effects` must already be keyframe-evaluated when the caller renders a
+/// frame (`render_color_proof` passes `visual_layers_at` output); the stored
+/// static values are the honest answer for the metadata-only
+/// `get_color_context` surface.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub(crate) fn color_node_value(effect_index: usize, effect: &Effect) -> Option<Value> {
+    let kind = classify_color_node(effect)?;
+    let mut warnings = Vec::new();
+    let (bypass, inactive_reason, parameters, curves) = match kind {
+        // CC1 primaries have neither a bypass control nor a neutral
+        // short-circuit, so they are always evaluated (CC3 §3.3).
+        ColorNodeKind::Primary => (
+            0,
+            None,
+            resolved_descriptor_parameters(effect, kind.effect_name()),
+            Value::Null,
+        ),
+        ColorNodeKind::Wheels => {
+            let resolved = ColorWheelsParams::from_effect(effect);
+            let mut parameters = BTreeMap::new();
+            for control in ColorWheelControl::ALL {
+                for channel in ColorWheelChannel::ALL {
+                    parameters.insert(
+                        control.parameter_name(channel).to_owned(),
+                        resolved.control(control, channel),
+                    );
+                }
+            }
+            parameters.insert(
+                COLOR_NODE_BYPASS_PARAMETER.to_owned(),
+                resolved.bypass_token,
+            );
+            (
+                resolved.bypass_token,
+                resolved.inactive_reason(),
+                parameters,
+                Value::Null,
+            )
+        }
+        ColorNodeKind::Curves => {
+            let resolved = ResolvedCurves::from_effect(effect);
+            let mut parameters = BTreeMap::new();
+            let mut curves = serde_json::Map::new();
+            for curve in ColorCurveChannel::ALL {
+                let points = resolved.curve(curve);
+                parameters.insert(
+                    curve.point_count_parameter().to_owned(),
+                    i64::try_from(points.points.len()).unwrap_or_default(),
+                );
+                for (index, (x, y)) in points.points.iter().enumerate() {
+                    if let Some(name) = curve.x_parameter(index) {
+                        parameters.insert(name.to_owned(), i64::from(*x));
+                    }
+                    if let Some(name) = curve.y_parameter(index) {
+                        parameters.insert(name.to_owned(), i64::from(*y));
+                    }
+                }
+                curves.insert(
+                    curve.name().to_owned(),
+                    json!({
+                        "points": points.points.iter().map(|(x, y)| json!([x, y])).collect::<Vec<_>>(),
+                        "point_count": points.points.len(),
+                        "declared_point_count": points.declared_point_count,
+                        "truncated": points.truncated,
+                        "structural_identity": points.is_structural_identity(),
+                    }),
+                );
+            }
+            parameters.insert(
+                COLOR_NODE_BYPASS_PARAMETER.to_owned(),
+                resolved.bypass_token,
+            );
+            // A bypassed node renders as the exact identity (CC3 §5), so its
+            // truncation changes no pixel. Core QA and the inspector both
+            // suppress the warning there; the agent surface must agree or the
+            // three descriptions of one node disagree.
+            let truncated = if resolved.bypass() {
+                Vec::new()
+            } else {
+                resolved.truncated_curves()
+            };
+            if !truncated.is_empty() {
+                let names = truncated
+                    .iter()
+                    .map(|curve| curve.name())
+                    .collect::<Vec<_>>();
+                warnings.push(json!({
+                    "code": "curve_truncated_by_automation",
+                    "effect_id": effect.id.0,
+                    "stage_index": effect_index,
+                    "curves": names,
+                    "message": format!(
+                        "effect {} resolves {} without strictly increasing x, so each curve is truncated to its longest valid prefix (CC3 §3.4)",
+                        effect.id,
+                        names.join(", "),
+                    ),
+                }));
+            }
+            (
+                resolved.bypass_token,
+                resolved.inactive_reason(),
+                parameters,
+                Value::Object(curves),
+            )
+        }
+    };
+    Some(json!({
+        // Position in `clip.effects`, which is the compositor evaluation order.
+        "stage_index": effect_index,
+        "effect_index": effect_index,
+        "effect_id": effect.id.0,
+        "kind": kind.effect_name(),
+        "name": effect.name,
+        "bypass": bypass,
+        // CC1 primaries carry no bypass control (CC3 §5 applies to CC3 nodes).
+        "supports_bypass": kind != ColorNodeKind::Primary,
+        "active": inactive_reason.is_none(),
+        "inactive_reason": inactive_reason.map_or(Value::Null, |reason| json!(reason.as_str())),
+        "parameters": parameters,
+        "curves": curves,
+        "keyframes": effect.keyframes,
+        "warnings": warnings,
+    }))
+}
+
+/// The ordered managed colour-node stack of one effect chain (CC3 §8).
+///
+/// Shared by `get_color_context` and the `render_color_proof` layer manifest
+/// so the two colour surfaces can never describe a different node stack.
+#[must_use]
+pub(crate) fn color_node_manifest(effects: &[Effect]) -> Vec<Value> {
+    effects
+        .iter()
+        .enumerate()
+        .filter_map(|(effect_index, effect)| color_node_value(effect_index, effect))
+        .collect()
+}
+
+/// Every descriptor control resolved against the stored effect, falling back
+/// to the descriptor neutral for controls the effect does not carry.
+fn resolved_descriptor_parameters(effect: &Effect, name: &str) -> BTreeMap<String, i64> {
+    effect_descriptor(name).map_or_else(BTreeMap::new, |descriptor| {
+        descriptor
+            .parameters
+            .iter()
+            .map(|parameter| {
+                (
+                    parameter.name.to_owned(),
+                    stored_parameter(Some(effect), parameter.name, parameter.neutral),
+                )
+            })
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -1251,7 +2561,7 @@ mod tests {
         );
         assert_eq!(value["assets"][0]["managed_blocking"], false);
         assert_eq!(
-            value["clips"][0]["primary_nodes"].as_array().unwrap().len(),
+            value["clips"][0]["color_nodes"].as_array().unwrap().len(),
             0
         );
         assert_eq!(value["ordered_stage_names"].as_array().unwrap().len(), 8);
@@ -1546,9 +2856,20 @@ mod tests {
         assert_eq!(effects.len(), 2, "the full ordered chain must be visible");
         assert_eq!(effects[0]["effect_index"], 0);
         assert_eq!(effects[0]["name"], "primary_correction");
+        assert_eq!(effects[0]["color_node_kind"], "primary_correction");
         assert_eq!(effects[1]["name"], "look_lut");
+        assert_eq!(effects[1]["color_node_kind"], Value::Null);
         assert_eq!(effects[1]["compatibility_stage"], "legacy_lut_stage");
-        assert_eq!(clips[0]["primary_nodes"].as_array().unwrap().len(), 1);
+        let color_nodes = clips[0]["color_nodes"].as_array().unwrap();
+        assert_eq!(
+            color_nodes.len(),
+            1,
+            "look_lut is not a managed colour node"
+        );
+        assert_eq!(color_nodes[0]["stage_index"], 0);
+        assert_eq!(color_nodes[0]["kind"], "primary_correction");
+        assert_eq!(color_nodes[0]["active"], true);
+        assert_eq!(color_nodes[0]["inactive_reason"], Value::Null);
         assert_eq!(
             value["assets"][0]["source"]["formats"]["input"]["raster"],
             json!([1920, 1080])
@@ -1768,5 +3089,774 @@ mod tests {
         let summary = primary_parameter_summary();
         assert!(summary.contains("exposure_milli_stops=-5000..=5000, neutral 0"));
         assert!(summary.contains("contrast_pivot_basis_points=0..=10000, neutral 5000"));
+    }
+
+    // -----------------------------------------------------------------------
+    // CC3 §8 — plan_color_wheels
+    // -----------------------------------------------------------------------
+
+    fn wheels_args(parameters: BTreeMap<String, i64>) -> ColorWheelsPlanArgs {
+        ColorWheelsPlanArgs {
+            expected_revision: TimelineRevision(0),
+            clip_id: ClipId(1),
+            profile_assumption: None,
+            parameters,
+            append: false,
+        }
+    }
+
+    fn curves_args(curves: ColorCurvesRequest) -> ColorCurvesPlanArgs {
+        ColorCurvesPlanArgs {
+            expected_revision: TimelineRevision(0),
+            clip_id: ClipId(1),
+            profile_assumption: None,
+            curves,
+            bypass: None,
+            append: false,
+        }
+    }
+
+    fn wheels_node(id: u64, parameters: BTreeMap<String, ParamValue>) -> Effect {
+        Effect {
+            id: EffectId(id),
+            name: "color_wheels".to_owned(),
+            parameters,
+            keyframes: BTreeMap::new(),
+        }
+    }
+
+    fn curves_node(id: u64, parameters: BTreeMap<String, ParamValue>) -> Effect {
+        Effect {
+            id: EffectId(id),
+            name: "color_curves".to_owned(),
+            parameters,
+            keyframes: BTreeMap::new(),
+        }
+    }
+
+    fn integers<const N: usize>(entries: [(&str, i64); N]) -> BTreeMap<String, ParamValue> {
+        entries
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), ParamValue::Integer(value)))
+            .collect()
+    }
+
+    /// CC3 §10.3 fixture 11: the planner is bound to the analyzed revision,
+    /// fails closed on a stale one, and never touches the document.
+    #[test]
+    fn color_wheels_plan_is_revision_bound_and_never_applies() {
+        let document = document();
+        let args = ColorWheelsPlanArgs {
+            expected_revision: TimelineRevision(7),
+            ..wheels_args(BTreeMap::from([("gain_red_thousandths".to_owned(), 1_200)]))
+        };
+        let plan =
+            plan_color_wheels(&document, TimelineRevision(7), &args).expect("valid wheels plan");
+        assert_eq!(plan.expected_revision, TimelineRevision(7));
+        assert!(!plan.no_change);
+        assert!(document.clip(ClipId(1)).unwrap().effects.is_empty());
+
+        let stale = plan_color_wheels(&document, TimelineRevision(8), &args).unwrap_err();
+        assert_eq!(stale.code(), "revision_conflict");
+        assert_eq!(stale.details()["observed"], 7);
+        assert_eq!(stale.details()["allowed"], 8);
+        assert!(document.clip(ClipId(1)).unwrap().effects.is_empty());
+    }
+
+    /// A new node stores only the controls the caller moved: CC3 §4.1 resolves
+    /// every omitted parameter to its neutral, so writing the other twelve
+    /// would be noise in project JSON and in the reviewed plan.
+    #[test]
+    fn color_wheels_plan_emits_one_exact_add_effect_for_a_new_node() {
+        let document = document();
+        let plan = plan_color_wheels(
+            &document,
+            TimelineRevision(0),
+            &wheels_args(BTreeMap::from([
+                ("gain_red_thousandths".to_owned(), 1_200),
+                ("lift_master_basis_points".to_owned(), -500),
+                // A control requested at its neutral moves nothing.
+                ("gamma_blue_thousandths".to_owned(), 1_000),
+            ])),
+        )
+        .expect("valid wheels plan");
+
+        assert_eq!(
+            plan.operations,
+            vec![Operation::AddEffect {
+                clip: ClipId(1),
+                effect: Effect {
+                    id: EffectId(1),
+                    name: "color_wheels".to_owned(),
+                    parameters: integers([
+                        ("gain_red_thousandths", 1_200),
+                        ("lift_master_basis_points", -500),
+                    ]),
+                    keyframes: BTreeMap::new(),
+                },
+            }]
+        );
+        assert!(plan.created_new_node);
+        assert!(!plan.targets_existing_node);
+        assert_eq!(plan.target_effect_id(), Some(EffectId(1)));
+        assert_eq!(plan.existing_color_node_count, 0);
+        assert_eq!(plan.existing_nodes_of_kind, 0);
+        // Thirteen resolved controls: twelve wheels plus bypass.
+        assert_eq!(plan.resolved_parameters.len(), 13);
+        assert_eq!(plan.resolved_parameters["gain_red_thousandths"], 1_200);
+        assert_eq!(plan.resolved_parameters["gain_blue_thousandths"], 1_000);
+        assert_eq!(plan.resolved_parameters["lift_master_basis_points"], -500);
+        assert_eq!(plan.resolved_parameters["lift_green_basis_points"], 0);
+        assert_eq!(plan.resolved_parameters["bypass"], 0);
+    }
+
+    /// CC2's review rule: an existing node of the requested kind is corrected
+    /// in place, and `append` is the explicit opt-out.
+    #[test]
+    fn color_wheels_plan_targets_an_existing_node_unless_append() {
+        let mut document = document();
+        document.tracks[0].clips[0].effects.push(wheels_node(
+            5,
+            integers([("gain_red_thousandths", 1_200), ("bypass", 1)]),
+        ));
+
+        let plan = plan_color_wheels(
+            &document,
+            TimelineRevision(0),
+            &wheels_args(BTreeMap::from([
+                ("gain_red_thousandths".to_owned(), 1_300),
+                ("gamma_master_thousandths".to_owned(), 900),
+                ("bypass".to_owned(), 0),
+            ])),
+        )
+        .expect("valid wheels plan");
+
+        assert_eq!(
+            plan.operations,
+            vec![
+                Operation::SetEffectParam {
+                    clip: ClipId(1),
+                    effect: EffectId(5),
+                    name: "bypass".to_owned(),
+                    value: ParamValue::Integer(0),
+                },
+                Operation::SetEffectParam {
+                    clip: ClipId(1),
+                    effect: EffectId(5),
+                    name: "gain_red_thousandths".to_owned(),
+                    value: ParamValue::Integer(1_300),
+                },
+                Operation::SetEffectParam {
+                    clip: ClipId(1),
+                    effect: EffectId(5),
+                    name: "gamma_master_thousandths".to_owned(),
+                    value: ParamValue::Integer(900),
+                },
+            ]
+        );
+        assert!(!plan.created_new_node);
+        assert!(plan.targets_existing_node);
+        assert_eq!(plan.effect_id, EffectId(5));
+        assert_eq!(plan.existing_nodes_of_kind, 1);
+        assert_eq!(plan.existing_color_node_count, 1);
+
+        let appended = plan_color_wheels(
+            &document,
+            TimelineRevision(0),
+            &ColorWheelsPlanArgs {
+                append: true,
+                ..wheels_args(BTreeMap::from([("gain_red_thousandths".to_owned(), 1_300)]))
+            },
+        )
+        .expect("valid appended wheels plan");
+        assert!(appended.created_new_node);
+        assert!(!appended.targets_existing_node);
+        assert_eq!(appended.effect_id, EffectId(6));
+        assert_eq!(
+            appended.operations,
+            vec![Operation::AddEffect {
+                clip: ClipId(1),
+                effect: wheels_node(6, integers([("gain_red_thousandths", 1_300)])),
+            }]
+        );
+        assert_eq!(appended.existing_nodes_of_kind, 1);
+        assert!(
+            appended
+                .assumptions
+                .iter()
+                .any(|entry| entry.contains("append=true")),
+            "{:?}",
+            appended.assumptions
+        );
+
+        // Requesting the value the node already holds proposes nothing, and
+        // the targeted node is still the honest answer.
+        let unchanged = plan_color_wheels(
+            &document,
+            TimelineRevision(0),
+            &wheels_args(BTreeMap::from([("gain_red_thousandths".to_owned(), 1_200)])),
+        )
+        .unwrap();
+        assert!(unchanged.no_change);
+        assert!(unchanged.operations.is_empty());
+        assert_eq!(unchanged.target_effect_id(), Some(EffectId(5)));
+    }
+
+    /// A no-op proposal on an ungraded clip never allocates an effect id, so
+    /// it must not publish one.
+    #[test]
+    fn a_no_op_color_wheels_plan_publishes_no_target_effect_id() {
+        let plan = plan_color_wheels(
+            &document(),
+            TimelineRevision(0),
+            &wheels_args(BTreeMap::from([(
+                "gamma_master_thousandths".to_owned(),
+                1_000,
+            )])),
+        )
+        .unwrap();
+        assert!(plan.no_change);
+        assert!(plan.operations.is_empty());
+        assert_eq!(plan.target_effect_id(), None);
+    }
+
+    #[test]
+    fn color_wheels_plan_rejects_unknown_and_out_of_range_controls() {
+        let document = document();
+        let unknown = plan_color_wheels(
+            &document,
+            TimelineRevision(0),
+            &wheels_args(BTreeMap::from([("gain_red_percent".to_owned(), 120)])),
+        )
+        .unwrap_err();
+        assert_eq!(unknown.code(), "unknown_color_node_parameter");
+        let details = unknown.details();
+        assert_eq!(details["field"], "parameters");
+        assert_eq!(details["observed"], "gain_red_percent");
+        let allowed = details["allowed"].as_array().unwrap();
+        assert_eq!(allowed.len(), 13);
+        assert!(
+            allowed
+                .iter()
+                .any(|entry| entry["name"] == "gain_red_thousandths"
+                    && entry["min"] == 0
+                    && entry["max"] == 4_000
+                    && entry["neutral"] == 1_000)
+        );
+        assert!(
+            details["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("color_wheels")
+        );
+
+        let out_of_range = plan_color_wheels(
+            &document,
+            TimelineRevision(0),
+            &wheels_args(BTreeMap::from([(
+                "lift_master_basis_points".to_owned(),
+                -2_001,
+            )])),
+        )
+        .unwrap_err();
+        assert_eq!(out_of_range.code(), "color_node_parameter_out_of_range");
+        let details = out_of_range.details();
+        assert_eq!(details["field"], "lift_master_basis_points");
+        assert_eq!(details["observed"], -2_001);
+        assert_eq!(details["allowed"], json!({"min": -2_000, "max": 2_000}));
+    }
+
+    /// Composing a proposal against an animated control is ambiguous. The plan
+    /// still writes the static value, and says so.
+    #[test]
+    fn a_keyframed_color_wheels_target_is_reported_as_a_warning() {
+        let mut document = document();
+        let mut node = wheels_node(5, integers([("gain_red_thousandths", 1_200)]));
+        node.keyframes.insert(
+            "gain_red_thousandths".to_owned(),
+            kinewright_core::AutomationCurve {
+                keyframes: vec![kinewright_core::Keyframe {
+                    at: kinewright_core::TimeCode::ZERO,
+                    value: 1_200,
+                    interpolation: kinewright_core::KeyframeInterpolation::Hold,
+                }],
+            },
+        );
+        document.tracks[0].clips[0].effects.push(node);
+
+        let plan = plan_color_wheels(
+            &document,
+            TimelineRevision(0),
+            &wheels_args(BTreeMap::from([("gain_red_thousandths".to_owned(), 1_400)])),
+        )
+        .unwrap();
+        assert_eq!(plan.warnings.len(), 1);
+        assert!(
+            plan.warnings[0].contains("keyframes gain_red_thousandths")
+                && plan.warnings[0].contains("static value"),
+            "{:?}",
+            plan.warnings
+        );
+
+        // A control the proposal does not touch raises nothing.
+        let untouched = plan_color_wheels(
+            &document,
+            TimelineRevision(0),
+            &wheels_args(BTreeMap::from([(
+                "gain_blue_thousandths".to_owned(),
+                1_100,
+            )])),
+        )
+        .unwrap();
+        assert!(untouched.warnings.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // CC3 §8 — plan_color_curves
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn color_curves_plan_expands_a_three_point_master_curve_and_never_applies() {
+        let document = document();
+        let plan = plan_color_curves(
+            &document,
+            TimelineRevision(0),
+            &curves_args(ColorCurvesRequest {
+                master: Some(vec![[0, 0], [5_000, 6_000], [10_000, 10_000]]),
+                ..ColorCurvesRequest::default()
+            }),
+        )
+        .expect("valid curves plan");
+
+        assert_eq!(
+            plan.requested_parameters,
+            BTreeMap::from([
+                ("master_point_count".to_owned(), 3),
+                ("master_x0".to_owned(), 0),
+                ("master_y0".to_owned(), 0),
+                ("master_x1".to_owned(), 5_000),
+                ("master_y1".to_owned(), 6_000),
+                ("master_x2".to_owned(), 10_000),
+                ("master_y2".to_owned(), 10_000),
+            ])
+        );
+        // CC3 §2.4: only the parameters that move off their neutrals are
+        // stored. `master_x0`/`master_y0` are neutral at 0 and point 2 lands
+        // exactly on the neutral (10000, 10000).
+        assert_eq!(
+            plan.operations,
+            vec![Operation::AddEffect {
+                clip: ClipId(1),
+                effect: curves_node(
+                    1,
+                    integers([
+                        ("master_point_count", 3),
+                        ("master_x1", 5_000),
+                        ("master_y1", 6_000),
+                    ]),
+                ),
+            }]
+        );
+        assert_eq!(
+            plan.resolved_curves["master"],
+            vec![[0, 0], [5_000, 6_000], [10_000, 10_000]]
+        );
+        for curve in ["red", "green", "blue"] {
+            assert_eq!(
+                plan.resolved_curves[curve],
+                vec![[0, 0], [10_000, 10_000]],
+                "{curve} stays at the structural identity"
+            );
+        }
+        assert_eq!(plan.resolved_parameters["red_point_count"], 2);
+        assert_eq!(plan.resolved_parameters["bypass"], 0);
+        assert!(
+            plan.assumptions
+                .iter()
+                .any(|entry| entry.contains("structural identity")),
+            "{:?}",
+            plan.assumptions
+        );
+        assert!(document.clip(ClipId(1)).unwrap().effects.is_empty());
+
+        let stale = plan_color_curves(
+            &document,
+            TimelineRevision(3),
+            &curves_args(ColorCurvesRequest {
+                master: Some(vec![[0, 0], [5_000, 6_000], [10_000, 10_000]]),
+                ..ColorCurvesRequest::default()
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(stale.code(), "revision_conflict");
+    }
+
+    #[test]
+    fn color_curves_plan_reports_count_bounds_and_ordering_violations() {
+        let document = document();
+        let plan = |curves| plan_color_curves(&document, TimelineRevision(0), &curves_args(curves));
+
+        let seventeen = (0..17)
+            .map(|index| [i64::from(index) * 500, 0])
+            .collect::<Vec<_>>();
+        let error = plan(ColorCurvesRequest {
+            master: Some(seventeen),
+            ..ColorCurvesRequest::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.code(), "invalid_curve_point_count");
+        let details = error.details();
+        assert_eq!(details["field"], "curves.master");
+        assert_eq!(details["observed"], 17);
+        assert_eq!(details["allowed"], json!({"min": 2, "max": 16}));
+
+        let error = plan(ColorCurvesRequest {
+            red: Some(vec![[0, 0], [5_000, 5_000], [5_000, 9_000]]),
+            ..ColorCurvesRequest::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.code(), "invalid_curve_points");
+        let details = error.details();
+        assert_eq!(details["field"], "curves.red[2].x");
+        assert_eq!(details["observed"], 5_000);
+        assert_eq!(details["previous_x"], 5_000);
+        assert_eq!(details["index"], 2);
+        assert_eq!(details["curve"], "red");
+        assert_eq!(
+            details["allowed"],
+            "strictly greater than curves.red[1].x = 5000"
+        );
+
+        let error = plan(ColorCurvesRequest {
+            blue: Some(vec![[0, 0], [10_000, 12_001]]),
+            ..ColorCurvesRequest::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.code(), "curve_coordinate_out_of_range");
+        let details = error.details();
+        assert_eq!(details["field"], "curves.blue[1].y");
+        assert_eq!(details["observed"], 12_001);
+        assert_eq!(details["allowed"], json!({"min": -2_000, "max": 12_000}));
+        assert_eq!(details["axis"], "y");
+    }
+
+    /// Editing an existing node in place must never produce an intermediate
+    /// parameter map Core rejects, and curves the caller did not name keep
+    /// their points.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn color_curves_plan_edits_an_existing_node_in_a_core_valid_order() {
+        let mut document = document();
+        document.tracks[0].clips[0].effects.push(curves_node(
+            9,
+            integers([
+                ("master_point_count", 4),
+                ("master_x1", 3_000),
+                ("master_y1", 3_000),
+                ("master_x2", 6_000),
+                ("master_y2", 6_000),
+                ("master_x3", 10_000),
+                ("master_y3", 10_000),
+                ("red_point_count", 3),
+                ("red_x1", 4_000),
+                ("red_y1", 4_000),
+            ]),
+        ));
+
+        // Shrinking from four points to two: the active prefix is collapsed
+        // first so no single SetEffectParam ever sees a crossing x.
+        let plan = plan_color_curves(
+            &document,
+            TimelineRevision(0),
+            &curves_args(ColorCurvesRequest {
+                master: Some(vec![[2_000, 1_000], [10_000, 10_000]]),
+                ..ColorCurvesRequest::default()
+            }),
+        )
+        .expect("valid curves plan");
+        let set = |name: &str, value: i64| Operation::SetEffectParam {
+            clip: ClipId(1),
+            effect: EffectId(9),
+            name: name.to_owned(),
+            value: ParamValue::Integer(value),
+        };
+        assert_eq!(
+            plan.operations,
+            vec![
+                set("master_point_count", 2),
+                set("master_x0", 2_000),
+                set("master_y0", 1_000),
+                set("master_x1", 10_000),
+                set("master_y1", 10_000),
+            ]
+        );
+        assert!(!plan.created_new_node);
+        assert!(plan.targets_existing_node);
+        assert_eq!(plan.effect_id, EffectId(9));
+        // An unnamed curve keeps whatever the node already stores.
+        assert_eq!(
+            plan.resolved_curves["red"],
+            vec![[0, 0], [4_000, 4_000], [10_000, 10_000]]
+        );
+        assert!(
+            plan.assumptions
+                .iter()
+                .any(|entry| entry.contains("keeps its current points")),
+            "{:?}",
+            plan.assumptions
+        );
+
+        // Moving point 0 past the stored point 1 must write point 1 first.
+        document.tracks[0].clips[0].effects = vec![curves_node(
+            9,
+            integers([("master_x1", 4_000), ("master_y1", 4_000)]),
+        )];
+        let reordered = plan_color_curves(
+            &document,
+            TimelineRevision(0),
+            &curves_args(ColorCurvesRequest {
+                master: Some(vec![[5_000, 2_000], [9_000, 9_000]]),
+                ..ColorCurvesRequest::default()
+            }),
+        )
+        .expect("valid curves plan");
+        assert_eq!(
+            reordered.operations,
+            vec![
+                set("master_x1", 9_000),
+                set("master_y1", 9_000),
+                set("master_x0", 5_000),
+                set("master_y0", 2_000),
+            ],
+            "writing master_x0=5000 while master_x1 is still 4000 would be rejected"
+        );
+
+        // append stacks a second node instead.
+        let appended = plan_color_curves(
+            &document,
+            TimelineRevision(0),
+            &ColorCurvesPlanArgs {
+                append: true,
+                ..curves_args(ColorCurvesRequest {
+                    master: Some(vec![[5_000, 2_000], [9_000, 9_000]]),
+                    ..ColorCurvesRequest::default()
+                })
+            },
+        )
+        .expect("valid appended curves plan");
+        assert!(appended.created_new_node);
+        assert_eq!(appended.effect_id, EffectId(10));
+        assert_eq!(
+            appended.operations,
+            vec![Operation::AddEffect {
+                clip: ClipId(1),
+                effect: curves_node(
+                    10,
+                    integers([
+                        ("master_x0", 5_000),
+                        ("master_y0", 2_000),
+                        ("master_x1", 9_000),
+                        ("master_y1", 9_000),
+                    ]),
+                ),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_keyframed_color_curves_target_is_reported_as_a_warning() {
+        let mut document = document();
+        let mut node = curves_node(9, integers([("master_x1", 4_000), ("master_y1", 4_000)]));
+        node.keyframes.insert(
+            "master_y1".to_owned(),
+            kinewright_core::AutomationCurve {
+                keyframes: vec![kinewright_core::Keyframe {
+                    at: kinewright_core::TimeCode::ZERO,
+                    value: 4_000,
+                    interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                }],
+            },
+        );
+        document.tracks[0].clips[0].effects.push(node);
+
+        let plan = plan_color_curves(
+            &document,
+            TimelineRevision(0),
+            &curves_args(ColorCurvesRequest {
+                master: Some(vec![[0, 0], [4_000, 7_000], [10_000, 10_000]]),
+                ..ColorCurvesRequest::default()
+            }),
+        )
+        .unwrap();
+        assert_eq!(plan.warnings.len(), 1, "{:?}", plan.warnings);
+        assert!(
+            plan.warnings[0].contains("keyframes master_y1")
+                && plan.warnings[0].contains("static value"),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CC3 §8 — the ordered `color_nodes` manifest
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn color_nodes_report_ordered_stages_with_bypass_and_inactive_reasons() {
+        let mut document = document();
+        document.tracks[0].clips[0].effects = vec![
+            Effect {
+                id: EffectId(1),
+                name: "primary_correction".to_owned(),
+                parameters: integers([("exposure_milli_stops", 250)]),
+                keyframes: BTreeMap::new(),
+            },
+            wheels_node(
+                2,
+                integers([("lift_master_basis_points", -300), ("bypass", 1)]),
+            ),
+            curves_node(3, integers([("master_x1", 5_000), ("master_y1", 6_000)])),
+            // A neutral node is inactive for a different, reported reason.
+            wheels_node(4, BTreeMap::new()),
+            Effect {
+                id: EffectId(5),
+                name: "look_lut".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::new(),
+            },
+        ];
+
+        let value = color_context_value(TimelineRevision(0), &document);
+        let nodes = value["clips"][0]["color_nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 4, "look_lut is not a managed colour node");
+
+        assert_eq!(nodes[0]["stage_index"], 0);
+        assert_eq!(nodes[0]["kind"], "primary_correction");
+        assert_eq!(nodes[0]["active"], true);
+        assert_eq!(nodes[0]["inactive_reason"], Value::Null);
+        assert_eq!(nodes[0]["supports_bypass"], false);
+        assert_eq!(nodes[0]["parameters"]["exposure_milli_stops"], 250);
+        assert_eq!(nodes[0]["parameters"]["contrast_pivot_basis_points"], 5_000);
+
+        assert_eq!(nodes[1]["stage_index"], 1);
+        assert_eq!(nodes[1]["kind"], "color_wheels");
+        assert_eq!(nodes[1]["bypass"], 1);
+        assert_eq!(nodes[1]["active"], false);
+        assert_eq!(nodes[1]["inactive_reason"], "bypassed");
+        assert_eq!(nodes[1]["parameters"].as_object().unwrap().len(), 13);
+        assert_eq!(nodes[1]["parameters"]["lift_master_basis_points"], -300);
+        assert_eq!(nodes[1]["parameters"]["gain_blue_thousandths"], 1_000);
+
+        assert_eq!(nodes[2]["stage_index"], 2);
+        assert_eq!(nodes[2]["kind"], "color_curves");
+        assert_eq!(nodes[2]["bypass"], 0);
+        assert_eq!(nodes[2]["active"], true);
+        assert_eq!(nodes[2]["inactive_reason"], Value::Null);
+        assert_eq!(
+            nodes[2]["curves"]["master"]["points"],
+            json!([[0, 0], [5_000, 6_000]])
+        );
+        assert_eq!(nodes[2]["curves"]["master"]["declared_point_count"], 2);
+        assert_eq!(nodes[2]["curves"]["master"]["truncated"], false);
+        assert_eq!(nodes[2]["curves"]["red"]["structural_identity"], true);
+        assert_eq!(nodes[2]["parameters"]["master_x1"], 5_000);
+        assert_eq!(nodes[2]["warnings"], json!([]));
+
+        assert_eq!(nodes[3]["stage_index"], 3);
+        assert_eq!(nodes[3]["bypass"], 0);
+        assert_eq!(nodes[3]["active"], false);
+        assert_eq!(nodes[3]["inactive_reason"], "neutral");
+    }
+
+    /// CC3 §3.4: automation that leaves a point list without strictly
+    /// increasing x truncates the curve and is reported, never rendered as an
+    /// error.
+    #[test]
+    fn a_curve_truncated_by_automation_is_reported_on_its_node() {
+        let mut document = document();
+        document.tracks[0].clips[0].effects = vec![curves_node(
+            3,
+            integers([
+                ("master_point_count", 3),
+                ("master_x1", 5_000),
+                ("master_y1", 6_000),
+                ("master_x2", 4_000),
+                ("master_y2", 9_000),
+            ]),
+        )];
+
+        let value = color_context_value(TimelineRevision(0), &document);
+        let node = &value["clips"][0]["color_nodes"][0];
+        assert_eq!(node["curves"]["master"]["truncated"], true);
+        assert_eq!(node["curves"]["master"]["declared_point_count"], 3);
+        assert_eq!(node["curves"]["master"]["point_count"], 2);
+        assert_eq!(
+            node["curves"]["master"]["points"],
+            json!([[0, 0], [5_000, 6_000]])
+        );
+        let warnings = node["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0]["code"], "curve_truncated_by_automation");
+        assert_eq!(warnings[0]["curves"], json!(["master"]));
+        assert_eq!(warnings[0]["effect_id"], 3);
+        assert_eq!(warnings[0]["stage_index"], 0);
+    }
+
+    /// A bypassed node renders as the exact identity (CC3 §5), so its
+    /// truncation changes no pixel. Core QA and the inspector both suppress the
+    /// warning there, and the agent surface has to agree: three descriptions of
+    /// the same node that disagree are worse than none.
+    ///
+    /// `color_node_value` is handed frame-evaluated effects by
+    /// `render_color_proof`, which is how a declared sixteen-point curve with
+    /// omitted coordinates reaches it while the stored document stays legal.
+    #[test]
+    fn a_bypassed_node_reports_no_truncation_warning() {
+        let mut document = document();
+        document.tracks[0].clips[0].effects = vec![curves_node(
+            3,
+            integers([("master_point_count", 16), (COLOR_NODE_BYPASS_PARAMETER, 1)]),
+        )];
+
+        let value = color_context_value(TimelineRevision(0), &document);
+        let node = &value["clips"][0]["color_nodes"][0];
+        assert_eq!(node["bypass"], 1);
+        assert_eq!(node["inactive_reason"], "bypassed");
+        assert_eq!(
+            node["curves"]["master"]["truncated"], true,
+            "the resolved shape is still described faithfully",
+        );
+        assert_eq!(
+            node["warnings"].as_array().map(Vec::len),
+            Some(0),
+            "a bypassed node is the exact identity and warns about nothing",
+        );
+
+        // Releasing the bypass restores the warning.
+        document.tracks[0].clips[0].effects[0].parameters.insert(
+            COLOR_NODE_BYPASS_PARAMETER.to_owned(),
+            ParamValue::Integer(0),
+        );
+        let value = color_context_value(TimelineRevision(0), &document);
+        let warnings = value["clips"][0]["color_nodes"][0]["warnings"]
+            .as_array()
+            .expect("warnings are an array")
+            .clone();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0]["code"], "curve_truncated_by_automation");
+    }
+
+    /// The planner's "no node yet" baseline is the structural identity core
+    /// defines, not a second copy of its coordinates.
+    #[test]
+    fn the_absent_node_baseline_is_the_core_structural_identity() {
+        let identity: Vec<[i64; 2]> = CurvePoints::identity()
+            .points
+            .into_iter()
+            .map(|(x, y)| [i64::from(x), i64::from(y)])
+            .collect();
+        for curve in ColorCurveChannel::ALL {
+            assert_eq!(stored_curve_points(None, curve), identity);
+        }
     }
 }

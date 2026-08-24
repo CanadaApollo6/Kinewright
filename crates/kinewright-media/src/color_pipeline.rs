@@ -10,8 +10,10 @@
 use std::fmt;
 
 use kinewright_core::{
-    ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorRange, ColorTransfer,
-    ColorWhitePoint, Effect, ParamValue, effect_descriptor,
+    COLOR_CURVE_MIN_POINTS, COLOR_NODE_LIMIT_PER_LAYER, ColorBitDepth, ColorCurveChannel,
+    ColorDescription, ColorMatrix, ColorNodeKind, ColorPrimaries, ColorRange, ColorTransfer,
+    ColorWheelsParams, ColorWhitePoint, CurvePoints, Effect, ParamValue, ResolvedCurves,
+    active_color_nodes, effect_descriptor, managed_color_node_count,
 };
 
 pub use kinewright_core::{
@@ -109,6 +111,14 @@ pub enum ColorPipelineError {
     UnsupportedMonitorTransfer(ColorTransfer),
     /// The target transfer is not the CC1 BT.709 delivery transfer.
     UnsupportedDeliveryTransfer(ColorTransfer),
+    /// A layer carries more managed colour nodes than CC3 §3.1 allows.  The
+    /// limit is a typed error, never a silent truncation.
+    TooManyColorNodes {
+        /// The observed managed node count, active or bypassed.
+        count: usize,
+        /// The inclusive per-layer limit.
+        limit: usize,
+    },
 }
 
 impl fmt::Display for ColorPipelineError {
@@ -184,6 +194,10 @@ impl fmt::Display for ColorPipelineError {
             Self::UnsupportedDeliveryTransfer(value) => {
                 write!(formatter, "unsupported delivery transfer: {value:?}")
             }
+            Self::TooManyColorNodes { count, limit } => write!(
+                formatter,
+                "too_many_color_nodes: {count} managed colour nodes exceed the per-layer limit of {limit}"
+            ),
         }
     }
 }
@@ -806,7 +820,9 @@ impl PrimaryCorrection {
 }
 
 /// Apply serialized primary nodes in vector order without an RGB clamp between
-/// nodes.  This is the reference for the later compositor integration seam.
+/// nodes.  This is the CC1 compatibility spelling of [`apply_color_nodes`] for
+/// a stack that contains only `primary_correction` nodes; it additionally
+/// re-validates each node's integer controls.
 ///
 /// # Errors
 ///
@@ -816,9 +832,475 @@ pub fn apply_primary_corrections(
     corrections: &[PrimaryCorrection],
 ) -> Result<[f32; 3], ColorPipelineError> {
     for correction in corrections {
-        linear_rgb = correction.apply_checked(linear_rgb)?;
+        correction.validate()?;
+        linear_rgb = apply_color_node(&ColorNode::Primary(*correction), linear_rgb);
     }
     Ok(linear_rgb)
+}
+
+// ---------------------------------------------------------------------------
+// CC3 §2: the `grade709` working encoding.
+// ---------------------------------------------------------------------------
+
+/// CC3 §2.1 `ALPHA`: the precise BT.709 alpha, not the rounded 1.099.
+const GRADE709_ALPHA: f32 = 1.099_296_8;
+/// CC3 §2.1 `BETA`: the precise BT.709 linear-segment breakpoint.
+///
+/// Written with the contract's own digits so the constant can be checked
+/// against CC3 §2.1 by eye; `0.018_053_969` and the shorter `0.018_053_97`
+/// are the same `f32`.
+#[allow(clippy::excessive_precision)]
+const GRADE709_BETA: f32 = 0.018_053_969;
+/// CC3 §2.1 `BETA_E` = `4.5 * BETA`, the encoded-side breakpoint.
+const GRADE709_BETA_ENCODED: f32 = 0.081_242_86;
+/// CC3 §2.1 `K` = `ALPHA - 1`.
+const GRADE709_K: f32 = 0.099_296_8;
+/// CC3 §2.1 `INV`: the f32 nearest of `1 / 0.45`.
+const GRADE709_INVERSE_EXPONENT: f32 = 2.222_222_3;
+/// The BT.709 OETF exponent.
+const GRADE709_EXPONENT: f32 = 0.45;
+/// The BT.709 near-black slope.
+const GRADE709_SLOPE: f32 = 4.5;
+
+/// Basis points per unit of the `grade709` range (CC3 §2.3).
+const CURVE_BASIS_POINTS_PER_UNIT: f32 = 10_000.0;
+/// Thousandths per unit of a `color_wheels` gain or gamma control (CC3 §4.1).
+const WHEEL_THOUSANDTHS_PER_UNIT: f32 = 1_000.0;
+/// Basis points per unit of a `color_wheels` lift control (CC3 §4.1).
+const WHEEL_BASIS_POINTS_PER_UNIT: f32 = 10_000.0;
+
+/// The CC3 sign function: `sgn(0) = 0`, and `sgn(NaN) = 0`.
+///
+/// [`f32::signum`] is deliberately not used; it returns `±1` at zero and would
+/// break `E(0) = 0`, the identity that makes the CC3 §10.3 identity gate
+/// bit-identical rather than tolerance-bounded.  WGSL `sign` already matches
+/// this definition.
+fn grade709_sign(value: f32) -> f32 {
+    if value > 0.0 {
+        1.0
+    } else if value < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+/// Encode a scene-linear value into the CC3 `grade709` grading space (§2.1).
+///
+/// This is a grading parameterization, **not** a monitor or delivery
+/// transform: [`encode_bt709`] keeps the rounded broadcast constants and
+/// remains the normative monitor encoding.  `grade709_encode` is odd, strictly
+/// increasing, and an exact analytic inverse of [`grade709_decode`], so the
+/// pair round-trips over negatives and over-range highlights without a clamp.
+#[must_use]
+pub fn grade709_encode(x: f32) -> f32 {
+    let sign = grade709_sign(x);
+    let magnitude = x.abs();
+    if magnitude < GRADE709_BETA {
+        sign * GRADE709_SLOPE * magnitude
+    } else {
+        sign * (GRADE709_ALPHA * magnitude.powf(GRADE709_EXPONENT) - GRADE709_K)
+    }
+}
+
+/// Decode a CC3 `grade709` value back to scene-linear light (§2.1).
+///
+/// The exact analytic inverse of [`grade709_encode`]; see that function for why
+/// this pair is distinct from [`decode_bt709`].
+#[must_use]
+pub fn grade709_decode(e: f32) -> f32 {
+    let sign = grade709_sign(e);
+    let magnitude = e.abs();
+    if magnitude < GRADE709_BETA_ENCODED {
+        sign * magnitude / GRADE709_SLOPE
+    } else {
+        sign * ((magnitude + GRADE709_K) / GRADE709_ALPHA).powf(GRADE709_INVERSE_EXPONENT)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CC3 §2.2: `color_wheels`.
+// ---------------------------------------------------------------------------
+
+/// The CC3 `color_wheels` node resolved to ASC CDL slope/offset/power triples.
+///
+/// Master combines multiplicatively for gain and power and additively for
+/// lift, exactly as CC3 §2.2 states.  The values are per channel in red,
+/// green, blue order and are evaluated in `grade709`, never in scene-linear
+/// light.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColorWheels {
+    slope: [f32; 3],
+    offset: [f32; 3],
+    power: [f32; 3],
+}
+
+impl ColorWheels {
+    /// Resolve the twelve stored integers into SOP coefficients (CC3 §2.2).
+    ///
+    /// The caller passes parameters resolved from a *keyframe-evaluated*
+    /// effect; this type performs no automation evaluation and no bypass or
+    /// neutrality test.  [`resolve_color_nodes`] owns the CC3 §3.3 skip.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn from_params(params: &ColorWheelsParams) -> Self {
+        let gain = params.gain_thousandths;
+        let gamma = params.gamma_thousandths;
+        let lift = params.lift_basis_points;
+        let gain_master = gain.master as f32 / WHEEL_THOUSANDTHS_PER_UNIT;
+        let gamma_master = gamma.master as f32 / WHEEL_THOUSANDTHS_PER_UNIT;
+        let slope = |channel: i64| channel as f32 / WHEEL_THOUSANDTHS_PER_UNIT * gain_master;
+        let power = |channel: i64| channel as f32 / WHEEL_THOUSANDTHS_PER_UNIT * gamma_master;
+        let offset = |channel: i64| (channel + lift.master) as f32 / WHEEL_BASIS_POINTS_PER_UNIT;
+        Self {
+            slope: [slope(gain.red), slope(gain.green), slope(gain.blue)],
+            offset: [offset(lift.red), offset(lift.green), offset(lift.blue)],
+            power: [power(gamma.red), power(gamma.green), power(gamma.blue)],
+        }
+    }
+
+    /// The resolved per-channel slope, in red, green, blue order.
+    #[must_use]
+    pub const fn slope(&self) -> [f32; 3] {
+        self.slope
+    }
+
+    /// The resolved per-channel offset, in red, green, blue order.
+    #[must_use]
+    pub const fn offset(&self) -> [f32; 3] {
+        self.offset
+    }
+
+    /// The resolved per-channel power, in red, green, blue order.
+    #[must_use]
+    pub const fn power(&self) -> [f32; 3] {
+        self.power
+    }
+
+    /// Evaluate slope/offset/power per channel in `grade709` (CC3 §2.2).
+    ///
+    /// No stage clamps.  The CC3 deviation from ASC CDL v1.2 is deliberate:
+    /// `y` is not clamped to `[0, 1]` before the power step, and the odd
+    /// extension `sgn(y)·|y|^p` keeps recoverable undershoot and over-range
+    /// highlights alive.  `power` is always strictly positive, so `|0|^p = 0`
+    /// and no NaN is produced; `slope` may be exactly `0`, which makes the
+    /// channel a legal constant.
+    #[must_use]
+    pub fn apply(&self, linear_rgb: [f32; 3]) -> [f32; 3] {
+        std::array::from_fn(|channel| {
+            let encoded = grade709_encode(linear_rgb[channel]);
+            let shifted = encoded * self.slope[channel] + self.offset[channel];
+            let powered = grade709_sign(shifted) * shifted.abs().powf(self.power[channel]);
+            grade709_decode(powered)
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CC3 §2.3: `color_curves`.
+// ---------------------------------------------------------------------------
+
+/// One CC3 curve with its Fritsch--Carlson tangents already solved (§2.3).
+///
+/// This is the CPU *reference* implementation.  It is written from the CC3
+/// §2.3 equations alone and deliberately shares no code with the compositor's
+/// production host-side solve, so the parity fixtures compare two independent
+/// implementations of the written contract (CC3 §3.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColorCurve {
+    xs: Vec<f32>,
+    ys: Vec<f32>,
+    tangents: Vec<f32>,
+}
+
+impl ColorCurve {
+    /// Convert resolved basis-point coordinates to `grade709` units and solve
+    /// the monotone tangents (CC3 §2.3 steps 1--3).
+    ///
+    /// The caller passes a [`CurvePoints`] already resolved by Core, so the
+    /// CC3 §3.4 truncation of a non-increasing automated prefix has happened
+    /// before this point and the `x` sequence is strictly increasing.  A list
+    /// shorter than two points is treated as the identity curve.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn from_points(points: &CurvePoints) -> Self {
+        let count = points.points.len();
+        if count < COLOR_CURVE_MIN_POINTS {
+            return Self::from_points(&CurvePoints::identity());
+        }
+        let xs: Vec<f32> = points
+            .points
+            .iter()
+            .map(|(x, _)| *x as f32 / CURVE_BASIS_POINTS_PER_UNIT)
+            .collect();
+        let ys: Vec<f32> = points
+            .points
+            .iter()
+            .map(|(_, y)| *y as f32 / CURVE_BASIS_POINTS_PER_UNIT)
+            .collect();
+
+        // Step 1: secant slopes.  A non-positive span cannot occur for a
+        // Core-resolved curve; guarding it keeps a hand-built point list from
+        // producing an infinity instead of a flat segment.
+        let deltas: Vec<f32> = xs
+            .windows(2)
+            .zip(ys.windows(2))
+            .map(|(x, y)| {
+                let span = x[1] - x[0];
+                if span > 0.0 {
+                    (y[1] - y[0]) / span
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+
+        // Step 2: initial tangents.
+        let mut tangents = Vec::with_capacity(count);
+        tangents.push(deltas[0]);
+        // The contract writes the interior tangent as a literal average.
+        // `f32::midpoint` takes a different branch for huge magnitudes, and a
+        // reference implementation must not carry a second rounding rule.
+        #[allow(clippy::manual_midpoint)]
+        tangents.extend(deltas.windows(2).map(|pair| (pair[0] + pair[1]) / 2.0));
+        tangents.push(deltas[count - 2]);
+
+        // Step 3: the Fritsch--Carlson limiter, forward and in place.  The
+        // visitation order is normative: index `i + 1` is read after index `i`
+        // has already been rewritten.
+        for (index, delta) in deltas.iter().copied().enumerate() {
+            if delta == 0.0 {
+                tangents[index] = 0.0;
+                tangents[index + 1] = 0.0;
+                continue;
+            }
+            let a = tangents[index] / delta;
+            let b = tangents[index + 1] / delta;
+            if a < 0.0 {
+                tangents[index] = 0.0;
+            }
+            if b < 0.0 {
+                tangents[index + 1] = 0.0;
+            }
+            if a >= 0.0 && b >= 0.0 && a * a + b * b > 9.0 {
+                let tau = 3.0 / (a * a + b * b).sqrt();
+                tangents[index] = tau * a * delta;
+                tangents[index + 1] = tau * b * delta;
+            }
+        }
+
+        Self { xs, ys, tangents }
+    }
+
+    /// The point abscissae in `grade709` units.
+    #[must_use]
+    pub fn xs(&self) -> &[f32] {
+        &self.xs
+    }
+
+    /// The point ordinates in `grade709` units.
+    #[must_use]
+    pub fn ys(&self) -> &[f32] {
+        &self.ys
+    }
+
+    /// The solved, limited tangents.  Tangents are dimensionless (`dy/dx`).
+    #[must_use]
+    pub fn tangents(&self) -> &[f32] {
+        &self.tangents
+    }
+
+    /// Evaluate the curve at one `grade709` coordinate (CC3 §2.3).
+    ///
+    /// Inside the point domain this is the cubic Hermite basis written out in
+    /// the contract; outside it the curve extrapolates linearly with the
+    /// limited end tangents, so over-range values stay alive instead of being
+    /// silently clamped.
+    #[must_use]
+    pub fn evaluate(&self, x: f32) -> f32 {
+        let last = self.xs.len() - 1;
+        if x < self.xs[0] {
+            return self.ys[0] + self.tangents[0] * (x - self.xs[0]);
+        }
+        if x >= self.xs[last] {
+            return self.ys[last] + self.tangents[last] * (x - self.xs[last]);
+        }
+        let mut segment = 0;
+        for index in 0..last {
+            if x >= self.xs[index] && x < self.xs[index + 1] {
+                segment = index;
+            }
+        }
+        let x0 = self.xs[segment];
+        let y0 = self.ys[segment];
+        let m0 = self.tangents[segment];
+        let x1 = self.xs[segment + 1];
+        let y1 = self.ys[segment + 1];
+        let m1 = self.tangents[segment + 1];
+        let h = x1 - x0;
+        let t = (x - x0) / h;
+        let t2 = t * t;
+        let t3 = t2 * t;
+        (2.0 * t3 - 3.0 * t2 + 1.0) * y0
+            + (t3 - 2.0 * t2 + t) * h * m0
+            + (-2.0 * t3 + 3.0 * t2) * y1
+            + (t3 - t2) * h * m1
+    }
+}
+
+/// The four curves of one CC3 `color_curves` node (§2.3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColorCurves {
+    master: ColorCurve,
+    red: ColorCurve,
+    green: ColorCurve,
+    blue: ColorCurve,
+}
+
+impl ColorCurves {
+    /// Solve all four curves of a Core-resolved `color_curves` node.
+    ///
+    /// The caller passes curves resolved from a *keyframe-evaluated* effect;
+    /// this type performs no automation evaluation and no bypass or neutrality
+    /// test.  [`resolve_color_nodes`] owns the CC3 §3.3 skip.
+    #[must_use]
+    pub fn from_resolved(resolved: &ResolvedCurves) -> Self {
+        Self {
+            master: ColorCurve::from_points(&resolved.master),
+            red: ColorCurve::from_points(&resolved.red),
+            green: ColorCurve::from_points(&resolved.green),
+            blue: ColorCurve::from_points(&resolved.blue),
+        }
+    }
+
+    /// One solved curve.
+    #[must_use]
+    pub const fn curve(&self, curve: ColorCurveChannel) -> &ColorCurve {
+        match curve {
+            ColorCurveChannel::Master => &self.master,
+            ColorCurveChannel::Red => &self.red,
+            ColorCurveChannel::Green => &self.green,
+            ColorCurveChannel::Blue => &self.blue,
+        }
+    }
+
+    /// Evaluate the per-channel curves and then the master curve, in
+    /// `grade709` (CC3 §2.3).
+    ///
+    /// The fourth curve is `master`, not `luma`: it is applied identically to
+    /// each channel after that channel's own curve, which keeps the
+    /// per-channel monotonicity guarantee that a `y'/y` chroma rescale would
+    /// destroy.
+    #[must_use]
+    pub fn apply(&self, linear_rgb: [f32; 3]) -> [f32; 3] {
+        let encoded = [
+            self.red.evaluate(grade709_encode(linear_rgb[0])),
+            self.green.evaluate(grade709_encode(linear_rgb[1])),
+            self.blue.evaluate(grade709_encode(linear_rgb[2])),
+        ];
+        encoded.map(|value| grade709_decode(self.master.evaluate(value)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CC3 §3.1: the ordered node stack.
+// ---------------------------------------------------------------------------
+
+/// One resolved node of the CC1/CC3 ordered colour-correction stack (§3.1).
+///
+/// `primary_correction`, `color_wheels`, and `color_curves` form **one**
+/// ordered stack executed in `clip.effects` vector order.  There is no fixed
+/// inter-kind precedence, and the reference must not flatten, reorder, or
+/// merge nodes.
+///
+/// The curve variant is much larger than the other two because it owns four
+/// solved point lists.  Boxing it is deliberately not done: a layer holds at
+/// most sixteen nodes, the stack is resolved once per frame rather than per
+/// pixel, and an indirection would sit inside the per-pixel dispatch.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub enum ColorNode {
+    /// The CC1 managed SDR primary correction.
+    Primary(PrimaryCorrection),
+    /// The CC3 ASC CDL slope/offset/power wheels.
+    Wheels(ColorWheels),
+    /// The CC3 master/red/green/blue curves.
+    Curves(ColorCurves),
+}
+
+impl ColorNode {
+    /// The Core node-kind tag for this resolved node.
+    #[must_use]
+    pub const fn kind(&self) -> ColorNodeKind {
+        match self {
+            Self::Primary(_) => ColorNodeKind::Primary,
+            Self::Wheels(_) => ColorNodeKind::Wheels,
+            Self::Curves(_) => ColorNodeKind::Curves,
+        }
+    }
+}
+
+fn apply_color_node(node: &ColorNode, linear_rgb: [f32; 3]) -> [f32; 3] {
+    match node {
+        ColorNode::Primary(correction) => correction.apply(linear_rgb),
+        ColorNode::Wheels(wheels) => wheels.apply(linear_rgb),
+        ColorNode::Curves(curves) => curves.apply(linear_rgb),
+    }
+}
+
+/// Resolve the ordered colour-node stack of one *keyframe-evaluated* effect
+/// list (CC3 §3.1, §3.3).
+///
+/// Keyframes must already have been resolved by the caller
+/// (`Effect::evaluated_at`).  Nodes that Core reports inactive — bypassed or
+/// neutral — are dropped entirely rather than evaluated as an approximate
+/// identity, which is what makes the CC3 §10.3 identity gate bit-identical.
+/// `primary_correction` has no bypass control and no neutral short-circuit, so
+/// it is always included, exactly as CC1 specifies.  Effects that are not
+/// managed colour nodes are ignored.
+///
+/// # Errors
+///
+/// Returns [`ColorPipelineError::TooManyColorNodes`] when the layer carries
+/// more than [`COLOR_NODE_LIMIT_PER_LAYER`] managed nodes — CC3 §3.1 requires a
+/// typed error, never a silent truncation — and any
+/// [`PrimaryCorrection::from_effect`] error for a malformed primary node.
+pub fn resolve_color_nodes(effects: &[Effect]) -> Result<Vec<ColorNode>, ColorPipelineError> {
+    let count = managed_color_node_count(effects);
+    if count > COLOR_NODE_LIMIT_PER_LAYER {
+        return Err(ColorPipelineError::TooManyColorNodes {
+            count,
+            limit: COLOR_NODE_LIMIT_PER_LAYER,
+        });
+    }
+    let mut nodes = Vec::with_capacity(count);
+    for (index, kind) in active_color_nodes(effects) {
+        let effect = &effects[index];
+        nodes.push(match kind {
+            ColorNodeKind::Primary => ColorNode::Primary(PrimaryCorrection::from_effect(effect)?),
+            ColorNodeKind::Wheels => ColorNode::Wheels(ColorWheels::from_params(
+                &ColorWheelsParams::from_effect(effect),
+            )),
+            ColorNodeKind::Curves => ColorNode::Curves(ColorCurves::from_resolved(
+                &ResolvedCurves::from_effect(effect),
+            )),
+        });
+    }
+    Ok(nodes)
+}
+
+/// Apply a resolved node stack in vector order, with no RGB clamp between
+/// nodes (CC3 §3.1).
+///
+/// Each node consumes scene-linear working RGB and produces scene-linear
+/// working RGB.  An empty stack is the exact identity.
+#[must_use]
+pub fn apply_color_nodes(nodes: &[ColorNode], rgb: [f32; 3]) -> [f32; 3] {
+    let mut linear_rgb = rgb;
+    for node in nodes {
+        linear_rgb = apply_color_node(node, linear_rgb);
+    }
+    linear_rgb
 }
 
 fn smoothstep(start: f32, end: f32, value: f32) -> f32 {
@@ -1596,6 +2078,529 @@ mod tests {
         assert_eq!(
             encode_delivery_for_description([0.5, 0.5, 0.5, 1.0], &delivery),
             Err(ColorPipelineError::UnknownTransfer)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CC3 curves and wheels.
+    // -----------------------------------------------------------------------
+
+    /// The CC3 §10.2 parity raster levels: negatives, the 0..1 range, the
+    /// `grade709` breakpoint itself, and six levels above display white.
+    const CC3_RASTER_LEVELS: [f32; 24] = [
+        -0.50,
+        -0.25,
+        -0.10,
+        -0.02,
+        -0.005,
+        0.0,
+        0.002,
+        0.005,
+        GRADE709_BETA,
+        0.03,
+        0.06,
+        0.10,
+        0.18,
+        0.25,
+        0.35,
+        0.50,
+        0.65,
+        0.80,
+        0.90,
+        1.00,
+        1.20,
+        1.50,
+        2.50,
+        4.00,
+    ];
+
+    fn color_node_effect(id: u64, name: &str, parameters: Vec<(String, i64)>) -> Effect {
+        Effect {
+            id: kinewright_core::EffectId(id),
+            name: name.to_owned(),
+            parameters: parameters
+                .into_iter()
+                .map(|(name, value)| (name, ParamValue::Integer(value)))
+                .collect(),
+            keyframes: BTreeMap::new(),
+        }
+    }
+
+    fn wheels_effect_with_id(id: u64, parameters: &[(&str, i64)]) -> Effect {
+        color_node_effect(
+            id,
+            "color_wheels",
+            parameters
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), *value))
+                .collect(),
+        )
+    }
+
+    fn wheels_effect(parameters: &[(&str, i64)]) -> Effect {
+        wheels_effect_with_id(2, parameters)
+    }
+
+    fn wheels(parameters: &[(&str, i64)]) -> ColorWheels {
+        ColorWheels::from_params(&ColorWheelsParams::from_effect(&wheels_effect(parameters)))
+    }
+
+    /// A `color_curves` effect whose `curve` carries `points` and whose other
+    /// three curves stay at the structural identity.
+    fn curve_effect(curve: ColorCurveChannel, points: &[(i32, i32)], bypass: i64) -> Effect {
+        let mut parameters = vec![(
+            curve.point_count_parameter().to_owned(),
+            i64::try_from(points.len()).expect("point count"),
+        )];
+        for (index, (x, y)) in points.iter().enumerate() {
+            parameters.push((
+                curve.x_parameter(index).expect("x name").to_owned(),
+                i64::from(*x),
+            ));
+            parameters.push((
+                curve.y_parameter(index).expect("y name").to_owned(),
+                i64::from(*y),
+            ));
+        }
+        parameters.push((
+            kinewright_core::COLOR_NODE_BYPASS_PARAMETER.to_owned(),
+            bypass,
+        ));
+        color_node_effect(3, "color_curves", parameters)
+    }
+
+    fn curve_points(points: &[(i32, i32)]) -> CurvePoints {
+        CurvePoints {
+            points: points.to_vec(),
+            declared_point_count: points.len(),
+            truncated: false,
+        }
+    }
+
+    fn solved_curve(points: &[(i32, i32)]) -> ColorCurve {
+        ColorCurve::from_points(&curve_points(points))
+    }
+
+    /// Only `curve` is non-identity; the other three stay structural identity.
+    fn one_curve(curve: ColorCurveChannel, points: &[(i32, i32)]) -> ColorCurves {
+        let mut resolved = ResolvedCurves {
+            master: CurvePoints::identity(),
+            red: CurvePoints::identity(),
+            green: CurvePoints::identity(),
+            blue: CurvePoints::identity(),
+            bypass_token: 0,
+        };
+        let slot = match curve {
+            ColorCurveChannel::Master => &mut resolved.master,
+            ColorCurveChannel::Red => &mut resolved.red,
+            ColorCurveChannel::Green => &mut resolved.green,
+            ColorCurveChannel::Blue => &mut resolved.blue,
+        };
+        *slot = curve_points(points);
+        ColorCurves::from_resolved(&resolved)
+    }
+
+    fn bits(values: [f32; 3]) -> [u32; 3] {
+        values.map(f32::to_bits)
+    }
+
+    #[test]
+    fn grade709_matches_the_contract_anchors() {
+        // Every value is CC3 §2.1's worked-anchor table, normative to 2e-5.
+        const TOLERANCE: f32 = 2e-5;
+
+        assert_close(grade709_encode(0.18), 0.408_848, TOLERANCE);
+
+        // gain_red = 1200 -> slope_red = 1.2, every other control neutral.
+        assert_close(
+            wheels(&[("gain_red_thousandths", 1_200)]).apply([0.18; 3])[0],
+            0.250_771,
+            TOLERANCE,
+        );
+
+        // lift_master = -500 -> offset -0.05; gamma_master = 1200 -> power 1.2.
+        assert_close(
+            wheels(&[
+                ("lift_master_basis_points", -500),
+                ("gamma_master_thousandths", 1_200),
+            ])
+            .apply([0.18; 3])[0],
+            0.100_923,
+            TOLERANCE,
+        );
+
+        // master curve (0,0) (5000,6000) (10000,10000).
+        assert_close(
+            one_curve(
+                ColorCurveChannel::Master,
+                &[(0, 0), (5_000, 6_000), (10_000, 10_000)],
+            )
+            .apply([0.18; 3])[0],
+            0.262_441,
+            TOLERANCE,
+        );
+    }
+
+    #[test]
+    fn grade709_is_a_strictly_increasing_bijection_over_the_raster() {
+        let mut previous = f32::NEG_INFINITY;
+        for level in CC3_RASTER_LEVELS {
+            let encoded = grade709_encode(level);
+            assert!(
+                encoded > previous,
+                "E is not strictly increasing at {level}: {encoded} <= {previous}"
+            );
+            previous = encoded;
+
+            let decoded = grade709_decode(encoded);
+            let tolerance = 1e-6 * level.abs().max(1.0);
+            assert!(
+                (decoded - level).abs() <= tolerance,
+                "D(E({level})) = {decoded} (tol {tolerance})"
+            );
+        }
+    }
+
+    #[test]
+    fn grade709_and_wheels_preserve_zero_exactly() {
+        // sgn(0) = 0, so E(0) = 0 and D(0) = 0 with no rounding at all.
+        assert_eq!(grade709_encode(0.0).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(grade709_encode(-0.0).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(grade709_decode(0.0).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(grade709_decode(-0.0).to_bits(), 0.0_f32.to_bits());
+
+        // A wheels node with zero offset maps 0 to 0: y = 0*slope + 0 = 0,
+        // z = sgn(0)*|0|^p = 0, D(0) = 0, for any slope and any p > 0.
+        let node = wheels(&[
+            ("gain_red_thousandths", 1_200),
+            ("gamma_master_thousandths", 100),
+            ("gamma_blue_thousandths", 4_000),
+        ]);
+        assert_eq!(bits(node.apply([0.0; 3])), bits([0.0; 3]));
+    }
+
+    #[test]
+    fn fritsch_carlson_limits_tangents_above_the_radius_three_circle() {
+        // Points (0,0) (1250,1250) (2500,11250) are x = 0, 0.125, 0.25 and
+        // y = 0, 0.125, 1.125 -- all exact in f32.
+        //   delta   = [1.0, 8.0]
+        //   step 2  -> m = [1.0, (1.0 + 8.0)/2 = 4.5, 8.0]
+        //   i = 0: delta = 1, a = 1.0, b = 4.5, a^2 + b^2 = 21.25 > 9
+        //          tau  = 3 / sqrt(21.25) = 0.650_791_373
+        //          m[0] = tau * 1.0 * 1.0 = 0.650_791_373
+        //          m[1] = tau * 4.5 * 1.0 = 2.928_561_181
+        //   i = 1: delta = 8, a = m[1]/8 = 0.366_070_148, b = 1.0,
+        //          a^2 + b^2 = 1.134 <= 9, so nothing more is limited.
+        let curve = solved_curve(&[(0, 0), (1_250, 1_250), (2_500, 11_250)]);
+        assert_close(curve.tangents()[0], 0.650_791_4, 1e-6);
+        assert_close(curve.tangents()[1], 2.928_561_2, 1e-6);
+        assert_close(curve.tangents()[2], 8.0, 1e-6);
+    }
+
+    #[test]
+    fn fritsch_carlson_leaves_the_radius_three_boundary_unlimited() {
+        // Points (0,0) (2500,0) (5000,625) (7500,3750) are x = 0, 0.25, 0.5,
+        // 0.75 and y = 0, 0, 0.0625, 0.375 -- all exact in f32.
+        //   delta   = [0.0, 0.25, 1.25]
+        //   step 2  -> m = [0.0, 0.125, 0.75, 1.25]
+        //   i = 0: delta == 0 -> m[0] = 0, m[1] = 0
+        //   i = 1: delta = 0.25, a = 0/0.25 = 0, b = 0.75/0.25 = 3 exactly,
+        //          a^2 + b^2 = 9 exactly, and 9 > 9 is false: no limiting.
+        //   i = 2: delta = 1.25, a = 0.75/1.25 = 0.6, b = 1.0, sum = 1.36.
+        let curve = solved_curve(&[(0, 0), (2_500, 0), (5_000, 625), (7_500, 3_750)]);
+        let expected = [0.0_f32, 0.0, 0.75, 1.25];
+        assert_eq!(
+            curve
+                .tangents()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn zero_slope_plateau_zeroes_both_tangents_and_stays_monotone() {
+        // Points (0,0) (2500,5000) (5000,5000) (10000,10000) are x = 0, 0.25,
+        // 0.5, 1.0 and y = 0, 0.5, 0.5, 1.0.
+        //   delta   = [2.0, 0.0, 1.0]
+        //   step 2  -> m = [2.0, 1.0, 0.5, 1.0]
+        //   i = 0: delta = 2, a = 1.0, b = 0.5, sum = 1.25 <= 9
+        //   i = 1: delta == 0 -> m[1] = 0, m[2] = 0
+        //   i = 2: delta = 1, a = 0.0, b = 1.0, sum = 1.0 <= 9
+        let curve = solved_curve(&[(0, 0), (2_500, 5_000), (5_000, 5_000), (10_000, 10_000)]);
+        let expected = [2.0_f32, 0.0, 0.0, 1.0];
+        assert_eq!(
+            curve
+                .tangents()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+
+        // Both endpoints of the plateau segment are 0.5 with zero tangents, so
+        // the Hermite basis is the constant 0.5 across it.
+        for sample in [0.25_f32, 0.3, 0.375, 0.45, 0.499] {
+            assert_close(curve.evaluate(sample), 0.5, 1e-6);
+        }
+
+        let mut previous = f32::NEG_INFINITY;
+        for step in 0_i16..=200 {
+            let sample = -0.2 + f32::from(step) * 0.01;
+            let value = curve.evaluate(sample);
+            assert!(
+                value >= previous,
+                "curve descends at {sample}: {value} < {previous}"
+            );
+            previous = value;
+        }
+    }
+
+    #[test]
+    fn sixteen_point_collinear_curve_is_identity_without_a_short_circuit() {
+        const COORDINATES: [i32; 16] = [
+            -2_000, -1_000, 0, 1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 8_000, 9_000,
+            10_000, 10_500, 11_000, 12_000,
+        ];
+        let points: Vec<(i32, i32)> = COORDINATES.iter().map(|x| (*x, *x)).collect();
+        let curve = ColorCurve::from_points(&curve_points(&points));
+
+        // dy and dx are the same f32, so every secant slope is exactly 1.0,
+        // the averages are exactly 1.0, and a = b = 1 never trips the limiter.
+        for tangent in curve.tangents() {
+            assert_eq!(tangent.to_bits(), 1.0_f32.to_bits());
+        }
+        for sample in [-0.25_f32, -0.2, -0.05, 0.0, 0.18, 0.5, 0.999, 1.0, 1.2, 1.5] {
+            assert_close(curve.evaluate(sample), sample, 1e-6);
+        }
+
+        // The curve is mathematically identity but not *structurally* identity,
+        // so CC3 §3.3 must still evaluate the node.
+        let effect = curve_effect(ColorCurveChannel::Master, &points, 0);
+        assert_eq!(
+            resolve_color_nodes(std::slice::from_ref(&effect))
+                .expect("collinear curve resolves")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn curves_extrapolate_with_the_limited_end_tangents() {
+        // (0,0) (5000,6000) (10000,10000): delta = [1.2, 0.8], m = [1.2, 1.0,
+        // 0.8], and neither segment trips the limiter.
+        let curve = solved_curve(&[(0, 0), (5_000, 6_000), (10_000, 10_000)]);
+        assert_close(curve.tangents()[0], 1.2, 1e-6);
+        assert_close(curve.tangents()[1], 1.0, 1e-6);
+        assert_close(curve.tangents()[2], 0.8, 1e-6);
+
+        // y = y[0] + m[0] * (x - x[0]) = 0.0 + 1.2 * (-0.2 - 0.0) = -0.24
+        assert_close(curve.evaluate(-0.2), -0.24, 1e-6);
+        // y = y[n-1] + m[n-1] * (x - x[n-1]) = 1.0 + 0.8 * (1.5 - 1.0) = 1.4
+        assert_close(curve.evaluate(1.5), 1.4, 1e-6);
+    }
+
+    #[test]
+    fn color_nodes_are_per_channel_independent() {
+        let sample = [0.18_f32, 0.35, 0.90];
+
+        let neutral_curves = one_curve(ColorCurveChannel::Master, &[(0, 0), (10_000, 10_000)]);
+        let red_curves = one_curve(
+            ColorCurveChannel::Red,
+            &[(0, 0), (5_000, 6_000), (10_000, 10_000)],
+        );
+        let baseline = neutral_curves.apply(sample);
+        let changed = red_curves.apply(sample);
+        assert_eq!(changed[1].to_bits(), baseline[1].to_bits());
+        assert_eq!(changed[2].to_bits(), baseline[2].to_bits());
+        assert!((changed[0] - baseline[0]).abs() > 1e-3);
+
+        let baseline = wheels(&[]).apply(sample);
+        let changed = wheels(&[("gain_red_thousandths", 1_200)]).apply(sample);
+        assert_eq!(changed[1].to_bits(), baseline[1].to_bits());
+        assert_eq!(changed[2].to_bits(), baseline[2].to_bits());
+        assert!((changed[0] - baseline[0]).abs() > 1e-3);
+    }
+
+    #[test]
+    fn color_wheels_stay_finite_and_documented_at_the_control_bounds() {
+        // gain_master = 0 -> slope 0 on every channel.  With offset 0 the node
+        // is the constant 0: y = 0, z = sgn(0)*|0|^1 = 0, D(0) = 0.
+        let zero_gain = wheels(&[("gain_master_thousandths", 0)]);
+        assert_eq!(bits(zero_gain.slope()), bits([0.0; 3]));
+        for level in [-0.5_f32, 0.18, 4.0] {
+            assert_eq!(bits(zero_gain.apply([level; 3])), bits([0.0; 3]));
+        }
+
+        // gain_master = 0 with lift_master = 500 -> y = 0.05 for every input,
+        // power 1, and |0.05| < BETA_E, so the output is 0.05 / 4.5.
+        let lifted = wheels(&[
+            ("gain_master_thousandths", 0),
+            ("lift_master_basis_points", 500),
+        ]);
+        for level in [-0.5_f32, 0.18, 4.0] {
+            assert_close(lifted.apply([level; 3])[0], 0.011_111_111, 1e-7);
+        }
+
+        // Both gamma controls at their minimum give the documented minimum
+        // power of 0.1 * 0.1 = 0.01.
+        let flat = wheels(&[
+            ("gamma_master_thousandths", 100),
+            ("gamma_red_thousandths", 100),
+            ("gamma_green_thousandths", 100),
+            ("gamma_blue_thousandths", 100),
+        ]);
+        assert_close(flat.power()[0], 0.01, 1e-7);
+        // y = E(0.18) = 0.408_848_126; z = y^0.01 = 0.991_095_764;
+        // D(z) = ((z + K) / ALPHA)^INV = 0.982_089_168
+        assert_close(flat.apply([0.18; 3])[0], 0.982_089, 2e-5);
+        // y = E(2.5) = 1.526_281; z = y^0.01 = 1.004_463_252; D(z) = 1.009_044_8
+        assert_close(flat.apply([2.5; 3])[0], 1.009_045, 2e-5);
+
+        // Both gain controls at their maximum give the documented maximum
+        // slope of 4 * 4 = 16.
+        let gain_max = wheels(&[
+            ("gain_master_thousandths", 4_000),
+            ("gain_red_thousandths", 4_000),
+        ]);
+        assert_close(gain_max.slope()[0], 16.0, 1e-6);
+        // y = E(-0.5) * 16 = -11.272_690; power 1; D(y) = -180.363_045
+        assert_close(gain_max.apply([-0.5; 3])[0], -180.363_05, 3e-3);
+        // y = E(0.18) * 16 = 6.541_570; D(y) = 54.425_152
+        assert_close(gain_max.apply([0.18; 3])[0], 54.425_15, 1e-3);
+        // y = E(4.0) * 16 = 31.236_505; D(y) = 1710.256_596
+        assert_close(gain_max.apply([4.0; 3])[0], 1_710.256_6, 3e-2);
+
+        // Both gamma controls at their maximum give the documented maximum
+        // power of 4 * 4 = 16.
+        let gamma_max = wheels(&[
+            ("gamma_master_thousandths", 4_000),
+            ("gamma_red_thousandths", 4_000),
+        ]);
+        assert_close(gamma_max.power()[0], 16.0, 1e-6);
+        // y = E(0.18) = 0.408_848; z = y^16 = 1.229_899e-6; D(z) = 1.354_502e-7
+        assert_close(gamma_max.apply([0.18; 3])[0], 1.354_502e-7, 1e-11);
+        // The odd extension keeps undershoot signed: z = -|E(-0.5)|^16.
+        assert_close(gamma_max.apply([-0.5; 3])[0], -8.358_053e-4, 1e-8);
+        // Maximum slope and maximum power together on the largest raster
+        // level would exceed the f32 range; on an in-gamut sample they do not.
+        // y = E(0.18) * 16 = 6.541_570; z = y^16 = 3.263_60e26 (approximately)
+        let loud = wheels(&[
+            ("gain_master_thousandths", 4_000),
+            ("gain_red_thousandths", 4_000),
+            ("gamma_master_thousandths", 4_000),
+            ("gamma_red_thousandths", 4_000),
+        ]);
+        assert_close(loud.apply([0.18; 3])[0], 8.140_69e28, 1e25);
+        for level in CC3_RASTER_LEVELS {
+            assert!(
+                gain_max
+                    .apply([level; 3])
+                    .iter()
+                    .all(|value| value.is_finite()),
+                "maximum gain is not finite at {level}"
+            );
+            assert!(
+                gamma_max
+                    .apply([level; 3])
+                    .iter()
+                    .all(|value| value.is_finite()),
+                "maximum gamma is not finite at {level}"
+            );
+        }
+    }
+
+    #[test]
+    fn node_order_is_the_clip_effects_order_and_changes_the_result() {
+        let wheels_node = wheels_effect(&[("gain_red_thousandths", 1_200)]);
+        let curves_node = curve_effect(
+            ColorCurveChannel::Master,
+            &[(0, 0), (5_000, 6_000), (10_000, 10_000)],
+            0,
+        );
+
+        let wheels_first = resolve_color_nodes(&[wheels_node.clone(), curves_node.clone()])
+            .expect("wheels then curves");
+        let curves_first =
+            resolve_color_nodes(&[curves_node, wheels_node]).expect("curves then wheels");
+        assert_eq!(wheels_first.len(), 2);
+        assert_eq!(curves_first.len(), 2);
+        assert_eq!(wheels_first[0].kind(), ColorNodeKind::Wheels);
+        assert_eq!(curves_first[0].kind(), ColorNodeKind::Curves);
+
+        // wheels then curves, red: D(E(0.18)*1.2) = 0.250_770_15, then the
+        // master curve on E of that gives D(...) = 0.355_061_1.
+        let sample = [0.18_f32; 3];
+        assert_close(apply_color_nodes(&wheels_first, sample)[0], 0.355_061, 2e-5);
+        // curves then wheels, red: the master curve gives 0.262_430_5, then
+        // D(E(0.262_430_5) * 1.2) = 0.369_891_6.
+        assert_close(apply_color_nodes(&curves_first, sample)[0], 0.369_892, 2e-5);
+        assert!(
+            (apply_color_nodes(&wheels_first, sample)[0]
+                - apply_color_nodes(&curves_first, sample)[0])
+                .abs()
+                > 1e-2
+        );
+    }
+
+    #[test]
+    fn inactive_nodes_are_skipped_bit_identically() {
+        let sample = [0.18_f32, -0.05, 2.5];
+        let baseline = apply_color_nodes(&[], sample);
+        assert_eq!(bits(baseline), bits(sample));
+
+        let identity = [(0, 0), (10_000, 10_000)];
+        let shaped = [(0, 0), (5_000, 6_000), (10_000, 10_000)];
+        let inactive = [
+            wheels_effect(&[]),
+            wheels_effect(&[("gain_red_thousandths", 1_200), ("bypass", 1)]),
+            curve_effect(ColorCurveChannel::Master, &identity, 0),
+            curve_effect(ColorCurveChannel::Master, &shaped, 1),
+        ];
+        for effect in &inactive {
+            let nodes = resolve_color_nodes(std::slice::from_ref(effect)).expect("inactive node");
+            assert!(nodes.is_empty(), "{} was not skipped", effect.name);
+            assert_eq!(bits(apply_color_nodes(&nodes, sample)), bits(sample));
+        }
+    }
+
+    #[test]
+    fn resolve_color_nodes_rejects_more_than_the_per_layer_limit() {
+        let effects: Vec<Effect> = (0..17)
+            .map(|id| wheels_effect_with_id(id, &[("gain_red_thousandths", 1_200)]))
+            .collect();
+        assert_eq!(
+            resolve_color_nodes(&effects),
+            Err(ColorPipelineError::TooManyColorNodes {
+                count: 17,
+                limit: COLOR_NODE_LIMIT_PER_LAYER,
+            })
+        );
+        assert_eq!(
+            resolve_color_nodes(&effects[..COLOR_NODE_LIMIT_PER_LAYER])
+                .expect("sixteen nodes are legal")
+                .len(),
+            COLOR_NODE_LIMIT_PER_LAYER
+        );
+    }
+
+    #[test]
+    fn apply_primary_corrections_agrees_with_the_node_stack() {
+        let first = PrimaryCorrection {
+            exposure_milli_stops: 500,
+            saturation_percent: 20,
+            ..PrimaryCorrection::default()
+        };
+        let second = PrimaryCorrection {
+            contrast_percent: 15,
+            ..PrimaryCorrection::default()
+        };
+        let sample = [0.18_f32, 0.35, 0.90];
+        let nodes = [ColorNode::Primary(first), ColorNode::Primary(second)];
+        assert_eq!(
+            bits(apply_primary_corrections(sample, &[first, second]).expect("valid controls")),
+            bits(apply_color_nodes(&nodes, sample))
         );
     }
 }

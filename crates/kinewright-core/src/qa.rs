@@ -154,6 +154,23 @@ pub fn qa_document(document: &Document) -> QaReport {
                         None,
                     ));
                 }
+                if let Some(truncation) = curve_truncation(effect) {
+                    let at = TimeCode(clip.timeline_start.0.saturating_add(truncation.at.0));
+                    issues.push(issue(
+                        QaSeverity::Warning,
+                        "curve_truncated_by_automation",
+                        format!(
+                            "Clip {} effect {} resolves {} at frame {}: automation left the point list without strictly increasing x, so the curve is truncated to its longest valid prefix (CC3 §3.4).",
+                            clip.id,
+                            effect.id,
+                            truncation.curves.join(", "),
+                            at.0
+                        ),
+                        Some(track.id),
+                        Some(clip.id),
+                        Some(at..TimeCode(at.0.saturating_add(1))),
+                    ));
+                }
             }
             has_audible_media |= matches!(clip.content, ClipContent::Media)
                 && clip.speed_percent == 100
@@ -419,6 +436,68 @@ fn saturating_i32(value: i64) -> i32 {
     } else {
         i32::MAX
     })
+}
+
+/// The frames a bounded `color_curves` truncation scan examines.
+///
+/// The scan evaluates each `color_curves` node at frame zero plus every
+/// keyframe frame of that node's curve parameters. That covers the static
+/// document, every whole-curve step (CC3 §6 policy 1 keyframes are `Hold`, so
+/// the resolved list only changes at a keyframe), and every crossing that is
+/// present at a keyframe under point-wise interpolation. A crossing that
+/// exists strictly between two keyframes - possible when two coordinates use
+/// different keyframe frames or easings - is still handled correctly at render
+/// time by the §3.4 truncation rule; QA simply does not sample every frame of
+/// the clip. The scan is bounded to this many distinct frames so a document
+/// with pathological automation cannot make a QA pass unbounded.
+const CURVE_TRUNCATION_SCAN_FRAME_LIMIT: usize = 256;
+
+struct CurveTruncation {
+    at: TimeCode,
+    curves: Vec<String>,
+}
+
+/// Report the first frame at which a `color_curves` node's evaluated curves
+/// are truncated by the CC3 §3.4 rule.
+///
+/// A bypassed node is the exact identity, so its truncation is not reported.
+fn curve_truncation(effect: &Effect) -> Option<CurveTruncation> {
+    if crate::classify_color_node(effect) != Some(crate::ColorNodeKind::Curves) {
+        return None;
+    }
+    let mut frames = vec![TimeCode::ZERO];
+    for (name, curve) in &effect.keyframes {
+        // `bypass` is node-owned rather than curve-owned, but it decides
+        // whether a truncation is reportable at all, so a node that is
+        // bypassed at frame zero and live later must still be scanned at the
+        // frame the bypass releases.
+        if crate::ColorCurveChannel::owning(name).is_none()
+            && name != crate::COLOR_NODE_BYPASS_PARAMETER
+        {
+            continue;
+        }
+        for keyframe in &curve.keyframes {
+            frames.push(keyframe.at);
+        }
+    }
+    frames.sort_unstable();
+    frames.dedup();
+    frames.truncate(CURVE_TRUNCATION_SCAN_FRAME_LIMIT);
+    for at in frames {
+        let resolved = crate::ResolvedCurves::from_effect(&effect.evaluated_at(at));
+        if resolved.bypass() || !resolved.truncated() {
+            continue;
+        }
+        return Some(CurveTruncation {
+            at,
+            curves: resolved
+                .truncated_curves()
+                .into_iter()
+                .map(|curve| format!("the {} curve", curve.name()))
+                .collect(),
+        });
+    }
+    None
 }
 
 fn issue(

@@ -189,7 +189,12 @@ Tangents are solved once per curve, on the host, in a single forward pass. Let
 ```
 
 The forward, in-place ordering of step 3 is part of the contract; a different
-visitation order produces different tangents for some inputs. Tangents are
+visitation order produces different tangents for some inputs. Both
+implementations treat a non-positive `x` span in step 1 as a zero secant
+rather than dividing: Core guarantees strictly increasing `x` for every
+resolved curve (§3.4), so the branch is unreachable in production, and it exists
+only so that a hand-built point list can never produce an infinite or NaN
+tangent that would poison the GPU buffer. Tangents are
 dimensionless (`dy/dx`), so they are identical whether the points are expressed
 in basis points or in `grade709` units.
 
@@ -302,6 +307,17 @@ struct GradeBuffer {
   master. Coordinates are in `grade709` units; tangents are dimensionless.
 - Worst case: `16 + 16*64 + 16*4*49*4 = 13584` bytes.
   `COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE` becomes `16384`.
+- Offset convention: every stored word offset (`header.y` and each record's
+  `payload_word_offset`) is an index into `words`, i.e. the absolute word index
+  minus the four header words, so `curve_eval(base, x)` reads
+  `words[base]` directly. Therefore `header.y == 16 * active_node_count` and
+  the first payload byte is `16 + 64 * active_node_count`.
+- An empty stack (no active node) is written as the 16-byte header with
+  `count = 0` plus one all-zero 64-byte record (80 bytes total) so the
+  runtime-sized binding stays valid; the shader loops zero times.
+- More than 16 managed nodes on one layer is rejected by Core at edit time
+  (`TooManyColorNodes`); the serializer re-checks defensively and fails with a
+  message prefixed `too_many_color_nodes:`.
 
 **Tangents are solved on the host, not per pixel, and not baked into a LUT.**
 Rejected alternative: baking each curve to a fixed-size f32 LUT — rejected
@@ -417,8 +433,20 @@ every row.
 | `bypass` | boolean token | 0 | 1 | 0 | `1` makes the node the identity. |
 
 Combined bounds are therefore `slope ∈ [0, 16]`, `offset ∈ [-0.4, 0.4]`, and
-`power ∈ [0.01, 16]`. All are finite and produce finite output for every finite
-input.
+`power ∈ [0.01, 16]`. Every bound is finite, and no combination produces NaN for
+a finite input. Finite *output* is guaranteed for every §10.2 raster sample when
+at most one of `slope` or `power` sits at its maximum; the simultaneous extreme
+(`slope = 16` and `power = 16`) on linear `4.0` is mathematically ≈ 1.1e53 and
+overflows f32 to `+inf` on the CPU reference, which the final monitor clamp
+resolves to code 255. The GPU working surface is `Rgba16Float`: a hardware
+adapter saturates an out-of-range f32 store to ±65504 and maps a true f32
+infinity to NaN, which the monitor encode resolves to code 0 (measured on the
+RTX 3080 Vulkan lane). That divergence is confined to this documented extreme,
+which is therefore excluded from the parity raster; the boundary fixture
+asserts the CPU `+inf`, asserts the GPU value is at or beyond the half-float
+limit (no early clamp), and asserts the GPU monitor code is a clamp extreme
+(0 or 255), never a mid-range value. Implementations must not clamp early to
+avoid it.
 
 ### 4.2 `color_curves`
 
@@ -456,11 +484,16 @@ is reported in every manifest with `"bypass": 1, "active": false` plus the reaso
 effect, by zeroing controls, or by a UI-only flag.
 
 **Reset** of a node is the existing pattern in
-`crates/kinewright-app/src/inspector_ui.rs::primary_reset_operations`: one
-`SetEffectParam` per descriptor parameter set to its neutral, plus
-`ClearEffectKeyframes` for each parameter that has automation, emitted as one
-batch. Curve reset emits the same ops restricted to one curve's 33 parameters.
-No new operation kinds are introduced by CC3.
+`crates/kinewright-app/src/inspector_ui.rs::color_node_reset_operations` (the
+generalized successor of the CC1 primary reset): one `SetEffectParam` per
+descriptor parameter set to its neutral, plus `ClearEffectKeyframes` for each
+parameter that has automation, emitted as one batch. Curve reset emits the same
+ops restricted to one curve's 33 parameters. Because Core validates strict `x`
+against every intermediate document, a curve reset must order its coordinate
+writes the same way §8's planner does (collapse the count, move points 0 and 1
+in the legal order, write inactive indices, restore the count); a
+descriptor-order batch is rejected whenever the stored `x1 <= 0`. No new
+operation kinds are introduced by CC3.
 
 ## 6. Keyframing
 
@@ -529,9 +562,17 @@ keyframe.
 ## 8. Agent surface
 
 `plan_primary_correction` is unchanged. Two planners are added, both modelled on
-it exactly: revision-gated, evidence-only, returning `AddEffect` +
-`SetEffectParam` operations that the caller must submit through the ordinary edit
-plan path. Neither applies anything.
+it exactly: revision-gated, evidence-only, returning exact operations that the
+caller must submit through the ordinary edit plan path. Neither applies
+anything. A new node is created by one `AddEffect` whose parameter map carries
+only the requested non-neutral values (no redundant trailing `SetEffectParam`);
+an existing node is edited with `SetEffectParam` only. For curves the emitted
+`SetEffectParam` order is itself part of the contract, because Core validates
+strict `x` ordering against every intermediate document: the planner collapses
+`{curve}_point_count` to 2, moves points 0 and 1 in whichever of the two orders
+is legal, writes points at index `>= 2` while they are inactive, then restores
+the count. `plan_color_curves` takes `bypass` as its own argument because it has
+no free-form parameter map.
 
 - `plan_color_wheels` — arguments: `expected_revision`, `clip_id`, optional
   `profile_assumption`, and a `parameters` map of the §4.1 names to integers.
@@ -622,10 +663,16 @@ hashes.
 ```
 
 crossed with 8 channel patterns (neutral, R, G, B, C, M, Y, and the skewed
-`(L, L/2, L/4)`), giving 192 samples. The fixture asserts its own coverage:
-minimum level `<= -0.25`, maximum `>= 4.0`, at least 5 negative levels, at least
-6 levels above 1.0, and at least 8 levels in `(0.5, 1.0]`. A raster that fails
-coverage fails the suite.
+`(L, L/2, L/4)`), giving 192 samples. The fixture asserts its own coverage,
+counted over the **distinct linear channel values** present in the raster (the
+skewed pattern contributes `L/2` and `L/4`): minimum value `<= -0.25`, maximum
+`>= 4.0`, at least 5 negative values, at least 6 values above 1.0, at least 8
+values in the closed interval `[0.5, 1.0]`, and at least 7 in the half-open
+`(0.5, 1.0]`. (Counted over the 24 levels alone the list has only 4 above 1.0
+and 4 in `(0.5, 1.0]`; the first draft of this contract overstated that.) A
+raster that fails coverage fails the suite. The documented `slope = 16 ∧
+power = 16` extreme is deliberately excluded from the parity raster because it
+is non-finite by design (see §4.1); it has its own boundary fixture.
 
 ### 10.3 Required fixtures
 
@@ -643,12 +690,18 @@ coverage fails the suite.
    `slope > 0`.
 4. **Boundary.** Every §4 control at minimum, maximum, and one interior value,
    each with a written-out expected value on at least three raster samples
-   (a negative, 0.18, and 2.5). Output is finite everywhere, no NaN, over-range
-   input survives, and a curve whose points sit at `-2000` and `12000` on the
-   diagonal is identity within `LINEAR_CPU_GPU_MAX`. `gain_* = 0` produces the
-   documented constant, not an error.
-5. **Per-channel independence.** Changing only `*_red_*` or only the red curve
-   leaves green and blue outputs bit-identical.
+   (a negative, 0.18, and 2.5). Output is finite on the whole §10.2 raster for
+   each control at its bound individually, never NaN for any combination
+   (the documented `slope = 16, power = 16` f32 overflow to `+inf` is asserted
+   as `+inf`, not excused), over-range input survives, and a curve whose points
+   sit at `-2000` and `12000` on the diagonal is identity within
+   `LINEAR_CPU_GPU_MAX`. `gain_* = 0` produces the documented constant, not an
+   error.
+5. **Per-channel independence.** Between two *active* nodes that differ only in
+   `*_red_*` controls or only in the red curve, green and blue outputs (and
+   their monitor codes) are bit-identical on CPU and GPU. (Comparing against a
+   node-removed baseline would be wrong: removing the node also removes the
+   `E`/`D` round trip on green and blue.)
 6. **Collinear identity.** A 16-point curve with all points on the diagonal is
    identity within `LINEAR_CPU_GPU_MAX` (it does not take the §3.3 short-circuit).
 7. **Ordering.** `[wheels, curves]` and `[curves, wheels]` with the same non-neutral
@@ -676,8 +729,11 @@ coverage fails the suite.
     revision, and leave the source document byte-identical. Manifests list ordered
     stages with bypass flags and resolved curve points.
 12. **Proof parity.** A clip with all three node kinds renders identically through
-    preview and the full-raster monitor proof, and the proof manifest's ordered
-    stage names match `clip.effects`.
+    preview and the full-raster monitor proof (media fixture, which also checks
+    the CPU-reference monitor gate, provenance, and the serialized
+    `clip.effects` order), and the `render_color_proof` manifest's ordered
+    `color_nodes` stage names, bypass flags, and resolved curve points match
+    `clip.effects` (agent test; media exposes no stage manifest of its own).
 
 ## 11. Explicit deferrals
 

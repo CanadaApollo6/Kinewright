@@ -30,6 +30,9 @@ mod media_matrix_tests;
 mod cc1_fixtures;
 
 #[cfg(test)]
+mod cc3_fixtures;
+
+#[cfg(test)]
 mod gpu_test_support;
 
 use ffmpeg_next as ffmpeg;

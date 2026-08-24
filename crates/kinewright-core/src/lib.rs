@@ -59,9 +59,21 @@ pub use delivery::{
 };
 pub use editorial::ThreePointMode;
 pub use effect::{
-    EFFECT_DESCRIPTORS, EffectCompatibilityStage, EffectDescriptor, EffectParameterDescriptor,
-    EffectUniform, LEGACY_DISPLAY_EFFECT_NAMES, POST_PRIMARY_LUT_EFFECT_NAMES,
-    effect_compatibility_stage, effect_descriptor, is_audio_effect, is_legacy_display_effect,
+    COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN, COLOR_CURVE_MAX_POINTS,
+    COLOR_CURVE_MIN_POINTS, COLOR_CURVE_PARAMETER_COUNT, COLOR_CURVE_WHITE_BASIS_POINTS,
+    COLOR_CURVES_PARAMETER_COUNT, COLOR_NODE_BYPASS_PARAMETER, COLOR_NODE_LIMIT_PER_LAYER,
+    COLOR_WHEEL_GAIN_MAX_THOUSANDTHS, COLOR_WHEEL_GAIN_MIN_THOUSANDTHS,
+    COLOR_WHEEL_GAMMA_MAX_THOUSANDTHS, COLOR_WHEEL_GAMMA_MIN_THOUSANDTHS,
+    COLOR_WHEEL_LIFT_MAX_BASIS_POINTS, COLOR_WHEEL_LIFT_MIN_BASIS_POINTS,
+    COLOR_WHEEL_UNITY_THOUSANDTHS, ColorCurveChannel, ColorCurveOrderViolation,
+    ColorNodeInactiveReason, ColorNodeKind, ColorWheelChannel, ColorWheelControl,
+    ColorWheelControlSet, ColorWheelsParams, CurvePoints, EFFECT_DESCRIPTORS,
+    EffectCompatibilityStage, EffectDescriptor, EffectParameterDescriptor, EffectUniform,
+    LEGACY_DISPLAY_EFFECT_NAMES, MANAGED_COLOR_NODE_NAMES, POST_PRIMARY_LUT_EFFECT_NAMES,
+    ResolvedCurves, active_color_nodes, classify_color_node, color_curve_order_violation,
+    color_curve_parameter_names, color_node_inactive_reason, effect_compatibility_stage,
+    effect_descriptor, is_audio_effect, is_legacy_display_effect, is_managed_color_node,
+    managed_color_node_count,
 };
 pub use journal::JournalCommand;
 pub use media::{

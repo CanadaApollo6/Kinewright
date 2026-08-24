@@ -9,6 +9,24 @@ All notable changes to Kinewright are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Added
+- CC3 curves and wheels: two new ordered managed colour nodes. `color_wheels`
+  applies ASC CDL-style slope/offset/power per channel with master controls;
+  `color_curves` applies master/red/green/blue monotone cubic Hermite curves
+  (Fritsch-Carlson tangents, linear extrapolation) with 2..=16 integer points.
+  Both evaluate inside an exact, invertible `grade709` grading encoding, never
+  clamp, execute in `clip.effects` order together with `primary_correction`, are
+  skipped bit-identically when neutral or bypassed, and are serialized as plain
+  integer parameters with typed validation (`InvalidCurvePoints`,
+  `NonHoldKeyframeParameter`, `CurvePointCountAnimatedWithPoints`,
+  `TooManyColorNodes`), a `curve_truncated_by_automation` QA warning, and a
+  16-node-per-layer limit. The GPU compositor gained a tagged node-stack storage
+  buffer (16 KiB binding) with host-solved curve tangents; the CPU reference
+  implements the same contract independently. The inspector adds trackball
+  wheels and a curve editor with coalesced undo, bypass, per-node reset, and
+  keyframe badges; the agent gains evidence-only `plan_color_wheels` and
+  `plan_color_curves` planners and an ordered `color_nodes` manifest, with the
+  133-parameter curves descriptor summarized compactly in tool documentation.
+  Exit evidence lives in `cc3_fixtures.rs` and `docs/CC3-CURVES-AND-WHEELS.md`.
 - CC1/CC2 review hardening (2026-08-24): a six-lane audit of the managed SDR
   primary and scopes work found and fixed a sign inversion in the agent
   `plan_shot_match` tint proposal, an unreported display-range clamp when a

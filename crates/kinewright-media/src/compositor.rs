@@ -9,8 +9,11 @@ use std::{
 
 use half::f16;
 use kinewright_core::{
-    ColorContext, ColorDescription, Effect, EffectParameterDescriptor, EffectUniform, FrameTexture,
-    MediaError, MonitorProofMetadata, MonitorProofRenderKind, ParamValue, effect_descriptor,
+    COLOR_NODE_LIMIT_PER_LAYER, ColorContext, ColorCurveChannel, ColorDescription, ColorNodeKind,
+    ColorWheelChannel, ColorWheelsParams, CurvePoints, Effect, EffectParameterDescriptor,
+    EffectUniform, FrameTexture, MediaError, MonitorProofMetadata, MonitorProofRenderKind,
+    ParamValue, ResolvedCurves, classify_color_node, color_node_inactive_reason, effect_descriptor,
+    managed_color_node_count,
 };
 
 use crate::{
@@ -27,18 +30,44 @@ const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const UNIFORM_FLOATS: usize = 48;
 const UNIFORM_SIZE: u64 = UNIFORM_FLOATS as u64 * 4;
 const UNIFORM_BYTES: usize = UNIFORM_FLOATS * 4;
-const PRIMARY_HEADER_BYTES: usize = 16;
-const PRIMARY_NODE_BYTES: usize = 48;
+/// `vec4<u32>` header of the CC3 grade buffer: active node count, curve
+/// payload word offset, ABI version, reserved.
+const GRADE_HEADER_BYTES: usize = 16;
+/// Node record stride in words (CC3 3.2): `[kind, payload_word_offset,
+/// bypass, reserved, v0 .. v11]`.
+const GRADE_NODE_WORDS: usize = 16;
+/// Node record stride in bytes.
+const GRADE_NODE_BYTES: usize = GRADE_NODE_WORDS * 4;
+/// Word offset of `v0` inside a node record.
+const GRADE_NODE_VALUE_OFFSET: usize = 4;
+/// `v0 .. v11`, the per-kind value block of a node record.
+const GRADE_NODE_VALUE_WORDS: usize = 12;
+/// One curve slot: `[count, x0, y0, m0, ... x15, y15, m15]`.
+const GRADE_CURVE_SLOT_WORDS: usize = 49;
+/// A curve node owns four slots, ordered red, green, blue, master.
+const GRADE_CURVE_PAYLOAD_WORDS: usize = 4 * GRADE_CURVE_SLOT_WORDS;
+/// The storage-buffer ABI version written into `header.z`.
+const GRADE_ABI_VERSION: u32 = 1;
+/// The `grade709` range of one curve-coordinate basis point.
+const CURVE_BASIS_POINT_SCALE: f32 = 10_000.0;
 
-/// The compositor's primary-correction ABI uses one read-only storage buffer
+/// The compositor's managed colour-node ABI uses one read-only storage buffer
 /// in the fragment stage.  Keep this requirement next to the bind-group
 /// layout so native device setup cannot accidentally negotiate it away.
+/// CC3 3.2 keeps this at `1` deliberately: a second fragment-stage storage
+/// binding is not available on every supported downlevel backend.
 pub const COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE: u32 = 1;
 
-/// The smallest primary buffer contains its 16-byte header and one 48-byte
-/// neutral node.  A device must be able to bind at least that much storage.
-pub const COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE: u64 =
-    (PRIMARY_HEADER_BYTES + PRIMARY_NODE_BYTES) as u64;
+/// CC3 3.2's worst case is sixteen nodes that are all curve nodes:
+/// `16 + 16 * 64 + 16 * 4 * 49 * 4 = 13584` bytes.  The negotiated limit is
+/// the next power of two so the ABI has headroom for a future value block.
+pub const COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE: u64 = 16_384;
+
+/// The largest buffer [`grade_buffer_bytes`] can produce, asserted against the
+/// negotiated binding size by `grade_buffer_worst_case_fits_the_binding_size`.
+const GRADE_BUFFER_WORST_CASE_BYTES: usize = GRADE_HEADER_BYTES
+    + COLOR_NODE_LIMIT_PER_LAYER * GRADE_NODE_BYTES
+    + COLOR_NODE_LIMIT_PER_LAYER * GRADE_CURVE_PAYLOAD_WORDS * 4;
 
 /// Add the minimum limits required by the production compositor to a device
 /// request. This deliberately preserves stronger caller requirements while
@@ -386,7 +415,7 @@ struct LayerResources {
     pool_key: TexturePoolKey,
     _lut_texture: wgpu::Texture,
     _uniform: wgpu::Buffer,
-    _primary: wgpu::Buffer,
+    _grade: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
 
@@ -887,14 +916,14 @@ impl Compositor {
         } else {
             0.0
         };
-        let primary_bytes = primary_buffer_bytes(layer.effects)?;
-        let primary = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Kinewright primary correction nodes"),
-            size: u64::try_from(primary_bytes.len()).unwrap_or(u64::MAX),
+        let grade_bytes = grade_buffer_bytes(layer.effects)?;
+        let grade = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Kinewright managed colour nodes"),
+            size: u64::try_from(grade_bytes.len()).unwrap_or(u64::MAX),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.gpu.queue.write_buffer(&primary, 0, &primary_bytes);
+        self.gpu.queue.write_buffer(&grade, 0, &grade_bytes);
         let uniform = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Kinewright compositor layer parameters"),
             size: UNIFORM_SIZE,
@@ -929,7 +958,7 @@ impl Compositor {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: primary.as_entire_binding(),
+                        resource: grade.as_entire_binding(),
                     },
                 ],
             });
@@ -938,7 +967,7 @@ impl Compositor {
             pool_key,
             _lut_texture: lut_texture,
             _uniform: uniform,
-            _primary: primary,
+            _grade: grade,
             bind_group,
         })
     }
@@ -1260,57 +1289,294 @@ impl LayerParams {
     }
 }
 
-/// Serialize primary nodes into a storage buffer without collapsing adjacent
-/// nodes. The order in the document's effect vector is the execution order in
-/// the shader. A single neutral node keeps the storage binding valid when no
-/// primary effect is present.
+/// One managed colour node resolved to the words the shader reads.
+struct GradeNodeRecord {
+    kind: ColorNodeKind,
+    /// `v0 .. v11` of the node record. Primary uses `v0..v9` exactly as CC1
+    /// wrote them; wheels use `v0..v2` slope, `v3..v5` offset, `v6..v8` power;
+    /// curves leave the whole block zero and carry a payload instead.
+    values: [f32; GRADE_NODE_VALUE_WORDS],
+    /// The `4 * 49` curve payload words, empty for every other kind.
+    payload: Vec<f32>,
+}
+
+/// Serialize the ordered managed colour-node stack into one storage buffer
+/// (CC3 3.2).
+///
+/// Nodes are never collapsed, reordered, or merged: the order in the
+/// document's effect vector is the execution order in the shader. Inactive
+/// nodes — bypassed or neutral — are not written at all (CC3 3.3), which is
+/// what makes the identity gate bit-identical rather than tolerance-bounded.
+/// A single zeroed node record keeps the storage binding valid when the stack
+/// resolves to nothing.
+///
+/// The layout, little-endian throughout:
+///
+/// ```text
+/// byte 0    header: [active_count, payload_word_offset, abi_version, 0] as u32
+/// byte 16   words[0]: node record 0, then record 1, ... stride 64 bytes
+///           record = [kind, payload_word_offset, bypass, reserved, v0 .. v11] as f32
+/// byte 16 + 64 * active_count
+///           curve payloads, 196 words each, in node-record order
+///           slot = [count, x0, y0, m0, ... x15, y15, m15], red, green, blue, master
+/// ```
+///
+/// Every stored word offset is an index into `words` (that is, into the buffer
+/// with its 16-byte header removed), because that is what the shader's
+/// `curve_eval` consumes directly.
+///
+/// # Errors
+///
+/// Returns `too_many_color_nodes` when the layer carries more than
+/// [`COLOR_NODE_LIMIT_PER_LAYER`] managed nodes — Core rejects that on the
+/// edit path, so this is a defensive gate — and a backend error when a
+/// `primary_correction` node cannot be resolved.
 #[allow(clippy::cast_precision_loss)]
-fn primary_buffer_bytes(effects: &[Effect]) -> Result<Vec<u8>, MediaError> {
-    let mut corrections = Vec::new();
-    for effect in effects
-        .iter()
-        .filter(|effect| effect.name == "primary_correction")
-    {
-        corrections.push(PrimaryCorrection::from_effect(effect).map_err(|error| {
-            MediaError::Backend(format!("managed primary correction failed: {error}"))
-        })?);
+pub(crate) fn grade_buffer_bytes(effects: &[Effect]) -> Result<Vec<u8>, MediaError> {
+    let managed = managed_color_node_count(effects);
+    if managed > COLOR_NODE_LIMIT_PER_LAYER {
+        return Err(MediaError::Backend(format!(
+            "too_many_color_nodes: layer carries {managed} managed colour nodes, \
+             at most {COLOR_NODE_LIMIT_PER_LAYER} are allowed"
+        )));
     }
-    let count = u32::try_from(corrections.len()).map_err(|_| {
-        MediaError::Backend("too many primary correction nodes for one compositor layer".to_owned())
-    })?;
-    // `PrimaryBuffer` is a storage struct with a 16-byte `vec4<u32>` header
-    // followed by tightly packed `PrimaryNode` values.  Each node contains
-    // three `vec4<f32>` values, so its WGSL array stride is 48 bytes.
-    let node_count = corrections.len().max(1);
-    let mut bytes = vec![
-        0_u8;
-        PRIMARY_HEADER_BYTES
-            .saturating_add(node_count.saturating_mul(PRIMARY_NODE_BYTES))
-    ];
-    bytes[0..4].copy_from_slice(&count.to_le_bytes());
-    for (node_index, correction) in corrections.iter().enumerate() {
-        let values = [
-            correction.exposure_milli_stops as f32 / 1_000.0,
-            correction.temperature_percent as f32 / 100.0,
-            correction.tint_percent as f32 / 100.0,
-            correction.contrast_percent as f32 / 100.0,
-            correction.contrast_pivot_basis_points as f32 / 10_000.0,
-            correction.blacks_percent as f32 / 100.0,
-            correction.shadows_percent as f32 / 100.0,
-            correction.highlights_percent as f32 / 100.0,
-            correction.whites_percent as f32 / 100.0,
-            correction.saturation_percent as f32 / 100.0,
-            0.0,
-            0.0,
-        ];
-        let offset =
-            PRIMARY_HEADER_BYTES.saturating_add(node_index.saturating_mul(PRIMARY_NODE_BYTES));
-        for (index, value) in values.into_iter().enumerate() {
-            let start = offset.saturating_add(index.saturating_mul(4));
-            bytes[start..start + 4].copy_from_slice(&value.to_le_bytes());
+    let mut records = Vec::new();
+    for effect in effects {
+        let Some(kind) = classify_color_node(effect) else {
+            continue;
+        };
+        // CC3 3.3: an inactive node is the exact identity and must not reach
+        // the GPU buffer.  Keyframes are already resolved by the caller.
+        if color_node_inactive_reason(effect).is_some() {
+            continue;
+        }
+        records.push(match kind {
+            ColorNodeKind::Primary => GradeNodeRecord {
+                kind,
+                values: primary_node_values(effect)?,
+                payload: Vec::new(),
+            },
+            ColorNodeKind::Wheels => GradeNodeRecord {
+                kind,
+                values: wheels_node_values(&ColorWheelsParams::from_effect(effect)),
+                payload: Vec::new(),
+            },
+            ColorNodeKind::Curves => GradeNodeRecord {
+                kind,
+                values: [0.0; GRADE_NODE_VALUE_WORDS],
+                payload: curve_payload_words(&ResolvedCurves::from_effect(effect)),
+            },
+        });
+    }
+
+    let count = records.len();
+    let payload_word_offset = count.saturating_mul(GRADE_NODE_WORDS);
+    // A zero-node stack still allocates one record so the runtime-sized
+    // `array<f32>` binding stays valid; the shader skips it on `header.x`.
+    let record_words = count.max(1).saturating_mul(GRADE_NODE_WORDS);
+    let payload_words: usize = records.iter().map(|record| record.payload.len()).sum();
+    let mut words = vec![0.0_f32; record_words.saturating_add(payload_words)];
+    let mut next_payload = payload_word_offset;
+    for (index, record) in records.iter().enumerate() {
+        let base = index * GRADE_NODE_WORDS;
+        words[base] = record.kind.storage_buffer_tag() as f32;
+        words[base + 1] = if record.payload.is_empty() {
+            0.0
+        } else {
+            next_payload as f32
+        };
+        // Bypassed nodes are filtered out above, so the shader's honoured
+        // bypass word is always inactive in a buffer this function produced.
+        words[base + 2] = 0.0;
+        words[base + 3] = 0.0;
+        let values = base + GRADE_NODE_VALUE_OFFSET;
+        words[values..values + GRADE_NODE_VALUE_WORDS].copy_from_slice(&record.values);
+        if !record.payload.is_empty() {
+            // `record_words == payload_word_offset` whenever a record exists,
+            // so the stored offset indexes `words` directly.
+            let end = next_payload.saturating_add(record.payload.len());
+            words[next_payload..end].copy_from_slice(&record.payload);
+            next_payload = end;
         }
     }
+
+    let mut bytes = Vec::with_capacity(GRADE_HEADER_BYTES + words.len() * 4);
+    let header = [
+        u32::try_from(count).unwrap_or(u32::MAX),
+        u32::try_from(payload_word_offset).unwrap_or(u32::MAX),
+        GRADE_ABI_VERSION,
+        0,
+    ];
+    for value in header {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    for word in words {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    debug_assert!(
+        bytes.len() <= GRADE_BUFFER_WORST_CASE_BYTES,
+        "grade buffer exceeded the CC3 worst case"
+    );
     Ok(bytes)
+}
+
+/// CC1 primary values, `v0 .. v9`, byte-identical to the pre-CC3 serializer.
+#[allow(clippy::cast_precision_loss)]
+fn primary_node_values(effect: &Effect) -> Result<[f32; GRADE_NODE_VALUE_WORDS], MediaError> {
+    let correction = PrimaryCorrection::from_effect(effect).map_err(|error| {
+        MediaError::Backend(format!("managed primary correction failed: {error}"))
+    })?;
+    Ok([
+        correction.exposure_milli_stops as f32 / 1_000.0,
+        correction.temperature_percent as f32 / 100.0,
+        correction.tint_percent as f32 / 100.0,
+        correction.contrast_percent as f32 / 100.0,
+        correction.contrast_pivot_basis_points as f32 / 10_000.0,
+        correction.blacks_percent as f32 / 100.0,
+        correction.shadows_percent as f32 / 100.0,
+        correction.highlights_percent as f32 / 100.0,
+        correction.whites_percent as f32 / 100.0,
+        correction.saturation_percent as f32 / 100.0,
+        0.0,
+        0.0,
+    ])
+}
+
+/// CC3 2.2 slope/offset/power, resolved per channel:
+/// `slope = (gain_c / 1000) * (gain_master / 1000)`,
+/// `offset = (lift_c + lift_master) / 10000`,
+/// `power = (gamma_c / 1000) * (gamma_master / 1000)`.
+///
+/// Master composes multiplicatively for gain and power — exponents compose by
+/// multiplication, so `(x^a)^b = x^(a*b)` is exact — and additively for lift.
+#[allow(clippy::cast_precision_loss)]
+fn wheels_node_values(params: &ColorWheelsParams) -> [f32; GRADE_NODE_VALUE_WORDS] {
+    let master_gain = params.gain_thousandths.master as f32 / 1_000.0;
+    let master_gamma = params.gamma_thousandths.master as f32 / 1_000.0;
+    let master_lift = params.lift_basis_points.master;
+    let mut values = [0.0; GRADE_NODE_VALUE_WORDS];
+    for (index, channel) in [
+        ColorWheelChannel::Red,
+        ColorWheelChannel::Green,
+        ColorWheelChannel::Blue,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        values[index] = params.gain_thousandths.channel(channel) as f32 / 1_000.0 * master_gain;
+        values[index + 3] =
+            (params.lift_basis_points.channel(channel) + master_lift) as f32 / 10_000.0;
+        values[index + 6] =
+            params.gamma_thousandths.channel(channel) as f32 / 1_000.0 * master_gamma;
+    }
+    values
+}
+
+/// The four `[count, x, y, m ...]` slots of a curve node, ordered red, green,
+/// blue, master (CC3 3.2). Unused point slots stay zero.
+fn curve_payload_words(curves: &ResolvedCurves) -> Vec<f32> {
+    let mut payload = Vec::with_capacity(GRADE_CURVE_PAYLOAD_WORDS);
+    for channel in [
+        ColorCurveChannel::Red,
+        ColorCurveChannel::Green,
+        ColorCurveChannel::Blue,
+        ColorCurveChannel::Master,
+    ] {
+        payload.extend_from_slice(&curve_slot_words(curves.curve(channel)));
+    }
+    payload
+}
+
+/// One curve slot: the point count, then `x`, `y`, and the host-solved tangent
+/// of each point, in `grade709` units.
+#[allow(clippy::cast_precision_loss)]
+fn curve_slot_words(points: &CurvePoints) -> [f32; GRADE_CURVE_SLOT_WORDS] {
+    let mut slot = [0.0; GRADE_CURVE_SLOT_WORDS];
+    let xs = points
+        .points
+        .iter()
+        .map(|(x, _)| *x as f32 / CURVE_BASIS_POINT_SCALE)
+        .collect::<Vec<_>>();
+    let ys = points
+        .points
+        .iter()
+        .map(|(_, y)| *y as f32 / CURVE_BASIS_POINT_SCALE)
+        .collect::<Vec<_>>();
+    let tangents = fritsch_carlson_tangents(&xs, &ys);
+    slot[0] = xs.len() as f32;
+    for (index, ((x, y), tangent)) in xs.iter().zip(&ys).zip(&tangents).enumerate() {
+        let base = 1 + index * 3;
+        slot[base] = *x;
+        slot[base + 1] = *y;
+        slot[base + 2] = *tangent;
+    }
+    slot
+}
+
+/// Solve monotone cubic Hermite tangents with Fritsch-Carlson limiting
+/// (CC3 2.3 steps 1-3), on the host, once per curve.
+///
+/// The forward, in-place ordering of the limiting pass is part of the
+/// contract: a different visitation order produces different tangents for some
+/// inputs, because step `i` reads the `m[i]` that step `i - 1` may have
+/// rewritten. The arithmetic is f32 for the same reason the shader's is —
+/// the buffer stores f32 and the fixture gate compares the two.
+///
+/// This is production code. The CPU reference in `color_pipeline.rs`
+/// implements the same written algorithm independently and must not call this
+/// function, so parity fixtures compare two implementations of the contract
+/// rather than one implementation with itself.
+fn fritsch_carlson_tangents(xs: &[f32], ys: &[f32]) -> Vec<f32> {
+    let count = xs.len().min(ys.len());
+    if count < 2 {
+        return vec![0.0; count];
+    }
+    // Core guarantees strictly increasing `x` (CC3 3.4), so the span is
+    // always positive in production. The guard is defence in depth shared with
+    // the CPU reference: a zero or negative span must never turn into an
+    // infinite or NaN tangent that would poison the storage buffer.
+    let deltas = (0..count - 1)
+        .map(|index| {
+            let span = xs[index + 1] - xs[index];
+            if span > 0.0 {
+                (ys[index + 1] - ys[index]) / span
+            } else {
+                0.0
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut tangents = Vec::with_capacity(count);
+    tangents.push(deltas[0]);
+    for index in 1..count - 1 {
+        // CC3 2.3 step 2 is normative as written.  `f32::midpoint` rounds
+        // differently at the extremes, and the independent CPU reference
+        // transcribes the same literal expression, so the two must not drift.
+        #[allow(clippy::manual_midpoint)]
+        tangents.push((deltas[index - 1] + deltas[index]) / 2.0);
+    }
+    tangents.push(deltas[count - 2]);
+    for index in 0..count - 1 {
+        let delta = deltas[index];
+        if delta == 0.0 {
+            tangents[index] = 0.0;
+            tangents[index + 1] = 0.0;
+            continue;
+        }
+        let a = tangents[index] / delta;
+        let b = tangents[index + 1] / delta;
+        if a < 0.0 {
+            tangents[index] = 0.0;
+        }
+        if b < 0.0 {
+            tangents[index + 1] = 0.0;
+        }
+        if a >= 0.0 && b >= 0.0 && a * a + b * b > 9.0 {
+            let tau = 3.0 / (a * a + b * b).sqrt();
+            tangents[index] = tau * a * delta;
+            tangents[index + 1] = tau * b * delta;
+        }
+    }
+    tangents
 }
 
 /// Report whether a layer needs the display-coded legacy compatibility branch.
@@ -1408,7 +1674,8 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                 | EffectUniform::DuckThreshold
                 | EffectUniform::DuckReduction
                 | EffectUniform::DuckAttack
-                | EffectUniform::DuckRelease => {}
+                | EffectUniform::DuckRelease
+                | EffectUniform::ColorNode => {}
                 EffectUniform::LutPreset => params.lut_preset = value,
                 EffectUniform::LutIntensity => params.lut_intensity = value / 100.0,
                 EffectUniform::ExternalLutIntensity => {
@@ -1492,10 +1759,296 @@ mod tests {
             limits.max_storage_buffers_per_shader_stage,
             COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE
         );
+        // CC3 3.2 keeps exactly one fragment-stage storage binding and raises
+        // the binding size instead, because a second storage binding is not
+        // available on every supported downlevel backend.
+        assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, 1);
         assert_eq!(
             limits.max_storage_buffer_binding_size,
             COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE
         );
+        assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE, 16_384);
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn grade_buffer_worst_case_fits_the_negotiated_binding_size() {
+        // CC3 3.2's worst case, written out: sixteen curve nodes.
+        assert_eq!(GRADE_BUFFER_WORST_CASE_BYTES, 13_584);
+        assert!(
+            GRADE_BUFFER_WORST_CASE_BYTES as u64 <= COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE
+        );
+        let stack = (0..COLOR_NODE_LIMIT_PER_LAYER)
+            .map(|index| {
+                curves(
+                    index as u64 + 1,
+                    "master",
+                    &[(0, 0), (5_000, 6_000), (10_000, 10_000)],
+                )
+            })
+            .collect::<Vec<_>>();
+        let bytes = grade_buffer_bytes(&stack).expect("sixteen curve nodes fit the buffer");
+        assert_eq!(bytes.len(), GRADE_BUFFER_WORST_CASE_BYTES);
+        assert_eq!(grade_header(&bytes, 0), 16);
+        assert_eq!(grade_header(&bytes, 1), 256);
+        // Every curve node points at its own 196-word payload slice.
+        for index in 0..COLOR_NODE_LIMIT_PER_LAYER {
+            let base = index * GRADE_NODE_WORDS;
+            assert!((grade_word(&bytes, base) - 3.0).abs() < 1e-6);
+            let expected = 256 + index * GRADE_CURVE_PAYLOAD_WORDS;
+            assert!(
+                (grade_word(&bytes, base + 1) - expected as f32).abs() < 1e-6,
+                "node {index} payload offset"
+            );
+        }
+    }
+
+    #[test]
+    fn grade_buffer_rejects_more_than_sixteen_managed_nodes() {
+        let stack = (0..=COLOR_NODE_LIMIT_PER_LAYER)
+            .map(|index| {
+                effect_with(
+                    index as u64 + 1,
+                    "primary_correction",
+                    &[("exposure_milli_stops", 100)],
+                )
+            })
+            .collect::<Vec<_>>();
+        let error = grade_buffer_bytes(&stack).expect_err("seventeen nodes are rejected");
+        let MediaError::Backend(message) = error else {
+            panic!("expected a backend error");
+        };
+        assert!(
+            message.starts_with("too_many_color_nodes:"),
+            "unexpected message: {message}"
+        );
+        assert!(message.contains("17"), "unexpected message: {message}");
+        assert!(message.contains("16"), "unexpected message: {message}");
+        // A bypassed node still occupies one of the sixteen slots, so the
+        // count is of managed nodes, not of active ones.
+        let mut bypassed = stack.clone();
+        for effect in &mut bypassed {
+            effect.name = "color_wheels".to_owned();
+            effect.parameters.clear();
+            effect
+                .parameters
+                .insert("bypass".to_owned(), ParamValue::Integer(1));
+        }
+        assert!(grade_buffer_bytes(&bypassed).is_err());
+        assert!(grade_buffer_bytes(&stack[..COLOR_NODE_LIMIT_PER_LAYER]).is_ok());
+    }
+
+    #[test]
+    fn inactive_color_nodes_are_never_written_to_the_grade_buffer() {
+        // CC3 3.3: a neutral node, a structurally identical curve node, and a
+        // bypassed non-neutral node of each kind are all the exact identity.
+        let stack = [
+            wheels(1, &[]),
+            curves(2, "master", &[(0, 0), (10_000, 10_000)]),
+            wheels(3, &[("gain_red_thousandths", 1_200), ("bypass", 1)]),
+            curves(4, "master", &[(0, 0), (5_000, 6_000), (10_000, 10_000)]),
+        ];
+        let mut bypassed_curves = stack[3].clone();
+        bypassed_curves
+            .parameters
+            .insert("bypass".to_owned(), ParamValue::Integer(1));
+        let stack = [
+            stack[0].clone(),
+            stack[1].clone(),
+            stack[2].clone(),
+            bypassed_curves,
+        ];
+        let bytes = grade_buffer_bytes(&stack).expect("inactive nodes serialize");
+        assert_eq!(grade_header(&bytes, 0), 0);
+        assert_eq!(grade_header(&bytes, 1), 0);
+        // One zeroed record keeps the runtime-sized storage binding valid.
+        assert_eq!(bytes.len(), GRADE_HEADER_BYTES + GRADE_NODE_BYTES);
+        assert!(bytes[GRADE_HEADER_BYTES..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn inactive_color_nodes_render_bit_identically_to_an_empty_stack() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let frame = linear_frame([0.18, 0.18, 0.18]);
+        let primary = effect_with(1, "primary_correction", &[("exposure_milli_stops", 1_000)]);
+        let baseline = render_linear(&compositor, &frame, std::slice::from_ref(&primary));
+        let mut bypassed_curves = curves(5, "master", &[(0, 0), (5_000, 6_000), (10_000, 10_000)]);
+        bypassed_curves
+            .parameters
+            .insert("bypass".to_owned(), ParamValue::Integer(1));
+        let padded = render_linear(
+            &compositor,
+            &frame,
+            &[
+                primary,
+                wheels(2, &[]),
+                curves(3, "master", &[(0, 0), (10_000, 10_000)]),
+                wheels(4, &[("gain_red_thousandths", 1_200), ("bypass", 1)]),
+                bypassed_curves,
+            ],
+        );
+        assert_eq!(baseline.len(), padded.len());
+        for (index, (expected, actual)) in baseline.iter().zip(&padded).enumerate() {
+            assert_eq!(
+                expected.to_bits(),
+                actual.to_bits(),
+                "channel {index}: {expected} != {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn primary_only_stack_keeps_its_cc1_analytic_anchor() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        // CC1: a one-stop exposure with every other control neutral is a pure
+        // linear-light doubling, so the anchor is written out rather than
+        // captured.  `f16` storage makes the input exactly 0.17993164.
+        let frame = linear_frame([0.18, 0.18, 0.18]);
+        let expected = f32::from(f16::from_f32(0.18)) * 2.0;
+        let linear = render_linear(
+            &compositor,
+            &frame,
+            &[effect_with(
+                1,
+                "primary_correction",
+                &[("exposure_milli_stops", 1_000)],
+            )],
+        );
+        for (channel, value) in linear.iter().take(3).enumerate() {
+            assert!(
+                (value - expected).abs() < 1.5e-3,
+                "primary channel {channel} is {value} not {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn wheels_node_matches_the_cc3_gain_anchor() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        // CC3 2.1: 0.18 linear with `gain_red_thousandths = 1200` and every
+        // other control neutral resolves to 0.250771 on red.  Green and blue
+        // take the identity `slope = 1, offset = 0, power = 1` path, which is
+        // an exact `grade709` round trip.
+        let frame = linear_frame([0.18, 0.18, 0.18]);
+        let linear = render_linear(
+            &compositor,
+            &frame,
+            &[wheels(1, &[("gain_red_thousandths", 1_200)])],
+        );
+        assert!(
+            (linear[0] - 0.250_771).abs() < 1.5e-3,
+            "red is {} not 0.250771",
+            linear[0]
+        );
+        for (channel, value) in linear.iter().take(3).enumerate().skip(1) {
+            assert!(
+                (value - 0.18).abs() < 1.5e-3,
+                "channel {channel} is {value} not 0.18"
+            );
+        }
+    }
+
+    #[test]
+    fn curves_node_matches_the_cc3_master_anchor() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        // CC3 2.1: 0.18 linear through the master curve
+        // (0,0) (5000,6000) (10000,10000) resolves to 0.262441 on every
+        // channel, because the master curve is applied identically per
+        // channel and the untouched red/green/blue curves are the identity.
+        let frame = linear_frame([0.18, 0.18, 0.18]);
+        let linear = render_linear(
+            &compositor,
+            &frame,
+            &[curves(
+                1,
+                "master",
+                &[(0, 0), (5_000, 6_000), (10_000, 10_000)],
+            )],
+        );
+        for (channel, value) in linear.iter().take(3).enumerate() {
+            assert!(
+                (value - 0.262_441).abs() < 1.5e-3,
+                "channel {channel} is {value} not 0.262441"
+            );
+        }
+    }
+
+    #[test]
+    fn wheels_and_curves_are_order_dependent() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        // CC3 3.1: there is no fixed inter-kind precedence, so the two orders
+        // are both correct and must differ.  Written out: slope acts on the
+        // `grade709` value, so `curve(1.2 * e)` and `1.2 * curve(e)` differ
+        // wherever the curve is not linear.
+        let frame = linear_frame([0.18, 0.18, 0.18]);
+        let wheels_node = wheels(1, &[("gain_red_thousandths", 1_200)]);
+        let curves_node = curves(2, "master", &[(0, 0), (5_000, 6_000), (10_000, 10_000)]);
+        let wheels_first = render_linear(
+            &compositor,
+            &frame,
+            &[wheels_node.clone(), curves_node.clone()],
+        );
+        let curves_first = render_linear(&compositor, &frame, &[curves_node, wheels_node]);
+        assert!(
+            (wheels_first[0] - curves_first[0]).abs() > 1e-2,
+            "orders should differ: {} vs {}",
+            wheels_first[0],
+            curves_first[0]
+        );
+        // Green is untouched by the red-only slope, so both orders agree there.
+        assert!((wheels_first[1] - curves_first[1]).abs() < 1.5e-3);
+    }
+
+    #[test]
+    fn fritsch_carlson_limits_a_steep_tangent() {
+        // Points (0,0) (1,0.1) (2,10.1): delta = [0.1, 10], so the initial
+        // tangents are m = [0.1, 5.05, 10].  At i = 0, a = 1 and b = 50.5, so
+        // a^2 + b^2 = 2551.25 > 9 and tau = 3 / sqrt(2551.25) = 0.05939417.
+        // m0 becomes 0.3 / sqrt(2551.25) = 0.00593942 and m1 becomes
+        // 15.15 / sqrt(2551.25) = 0.29994086.  At i = 1 the rewritten m1 gives
+        // a = 0.02999409 and b = 1, whose square sum is 1.0009, so nothing
+        // else is limited.
+        let tangents = fritsch_carlson_tangents(&[0.0, 1.0, 2.0], &[0.0, 0.1, 10.1]);
+        assert!((tangents[0] - 0.005_939_42).abs() < 1e-7, "{tangents:?}");
+        assert!((tangents[1] - 0.299_940_86).abs() < 1e-6, "{tangents:?}");
+        assert!((tangents[2] - 10.0).abs() < 1e-6, "{tangents:?}");
+    }
+
+    #[test]
+    fn fritsch_carlson_flattens_a_plateau_in_forward_order() {
+        // Points (0,0) (1,1) (2,1) (3,2): delta = [1, 0, 1] and the initial
+        // tangents are m = [1, 0.5, 0.5, 1].  i = 0 leaves them alone
+        // (a = 1, b = 0.5).  i = 1 has a zero delta, so m1 and m2 both become
+        // 0.  i = 2 then reads the rewritten m2 = 0, giving a = 0 and b = 1,
+        // which needs no limiting.  Visiting the segments in any other order
+        // would not zero the plateau's shared endpoints the same way.
+        let tangents = fritsch_carlson_tangents(&[0.0, 1.0, 2.0, 3.0], &[0.0, 1.0, 1.0, 2.0]);
+        assert_eq!(tangents, vec![1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn fritsch_carlson_reproduces_the_identity_curve_exactly() {
+        assert_eq!(
+            fritsch_carlson_tangents(&[0.0, 1.0], &[0.0, 1.0]),
+            vec![1.0, 1.0]
+        );
+        // A descending y between two ascending segments has its sign-crossing
+        // tangents zeroed, which is what keeps a monotone point sequence
+        // monotone.
+        let tangents = fritsch_carlson_tangents(&[0.0, 1.0, 2.0], &[0.0, 1.0, 0.5]);
+        assert!((tangents[0] - 1.0).abs() < 1e-6, "{tangents:?}");
+        assert!(tangents[1].abs() < 1e-6, "{tangents:?}");
+        assert!((tangents[2] + 0.5).abs() < 1e-6, "{tangents:?}");
     }
 
     #[test]
@@ -1539,9 +2092,73 @@ mod tests {
         }
     }
 
-    fn primary_f32(bytes: &[u8], offset: usize) -> f32 {
+    fn grade_word(bytes: &[u8], word: usize) -> f32 {
+        let offset = GRADE_HEADER_BYTES + word * 4;
         let end = offset.saturating_add(std::mem::size_of::<f32>());
         f32::from_le_bytes(bytes[offset..end].try_into().expect("f32-aligned bytes"))
+    }
+
+    fn grade_header(bytes: &[u8], index: usize) -> u32 {
+        let offset = index * 4;
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("header word"))
+    }
+
+    fn wheels(id: u64, parameters: &[(&str, i64)]) -> Effect {
+        effect_with(id, "color_wheels", parameters)
+    }
+
+    /// A `color_curves` effect with one channel's point list expanded into the
+    /// integer parameters CC3 4.2 defines.
+    fn curves(id: u64, channel: &str, points: &[(i64, i64)]) -> Effect {
+        let count = i64::try_from(points.len()).expect("curve point count");
+        let mut parameters = vec![(format!("{channel}_point_count"), count)];
+        for (index, (x, y)) in points.iter().enumerate() {
+            parameters.push((format!("{channel}_x{index}"), *x));
+            parameters.push((format!("{channel}_y{index}"), *y));
+        }
+        Effect {
+            id: EffectId(id),
+            name: "color_curves".to_owned(),
+            parameters: parameters
+                .into_iter()
+                .map(|(name, value)| (name, ParamValue::Integer(value)))
+                .collect(),
+            keyframes: BTreeMap::new(),
+        }
+    }
+
+    /// A solid scene-linear working frame, so a rendered value can be compared
+    /// against a hand-derived CC3 anchor without a transfer round trip on the
+    /// input side.  `f16` storage is the normative working surface, so the
+    /// anchors below are evaluated at the quantized input, not at the literal.
+    fn linear_frame(rgb: [f32; 3]) -> WorkingFrame {
+        let mut pixels = Vec::with_capacity(4 * 4 * 4);
+        for _ in 0..16 {
+            pixels.extend(rgb.map(f16::from_f32));
+            pixels.push(f16::from_f32(1.0));
+        }
+        WorkingFrame {
+            width: 4,
+            height: 4,
+            pixels: Arc::new(pixels),
+        }
+    }
+
+    fn render_linear(
+        compositor: &Compositor,
+        frame: &WorkingFrame,
+        effects: &[Effect],
+    ) -> Vec<f32> {
+        compositor
+            .render_working(
+                (frame.width, frame.height),
+                &[CompositorLayer {
+                    frame,
+                    effects,
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .expect("production GPU working-surface readback")
     }
 
     fn crop(id: u64, left: i64, right: i64, top: i64, bottom: i64) -> Effect {
@@ -1580,7 +2197,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_buffer_matches_wgsl_header_and_tight_node_stride() {
+    fn grade_buffer_matches_wgsl_header_and_node_record_stride() {
         let first = effect_with(
             1,
             "primary_correction",
@@ -1605,30 +2222,112 @@ mod tests {
                 ("saturation_percent", -70),
             ],
         );
-        let bytes = primary_buffer_bytes(&[first, second]).expect("valid primary nodes");
+        let bytes = grade_buffer_bytes(&[first, second]).expect("valid primary nodes");
 
-        assert_eq!(bytes.len(), PRIMARY_HEADER_BYTES + 2 * PRIMARY_NODE_BYTES);
-        assert_eq!(u32::from_le_bytes(bytes[0..4].try_into().unwrap()), 2);
-        assert!(bytes[4..PRIMARY_HEADER_BYTES].iter().all(|byte| *byte == 0));
+        assert_eq!(bytes.len(), GRADE_HEADER_BYTES + 2 * GRADE_NODE_BYTES);
+        assert_eq!(grade_header(&bytes, 0), 2);
+        // No curve node, so the payload region begins one word past the last
+        // record and is never dereferenced.
+        assert_eq!(grade_header(&bytes, 1), 32);
+        assert_eq!(grade_header(&bytes, 2), GRADE_ABI_VERSION);
+        assert_eq!(grade_header(&bytes, 3), 0);
 
+        // CC1 regression: `v0 .. v9` are byte-for-byte what the pre-CC3
+        // serializer wrote, so a primary-only stack renders unchanged.
         let first_values = [
             1.0, 0.25, -0.1, -0.2, 0.42, 0.3, -0.4, 0.5, -0.6, 0.7, 0.0, 0.0,
         ];
         let second_values = [-1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, -0.7, 0.0, 0.0];
-        for (index, expected) in first_values.into_iter().enumerate() {
+        for (record, expected) in [first_values, second_values].into_iter().enumerate() {
+            let base = record * GRADE_NODE_WORDS;
+            assert!((grade_word(&bytes, base) - 1.0).abs() < 1e-6, "kind tag");
+            assert!(grade_word(&bytes, base + 1).abs() < 1e-6, "payload offset");
+            assert!(grade_word(&bytes, base + 2).abs() < 1e-6, "bypass");
+            assert!(grade_word(&bytes, base + 3).abs() < 1e-6, "reserved");
+            for (index, expected) in expected.into_iter().enumerate() {
+                let word = base + GRADE_NODE_VALUE_OFFSET + index;
+                assert!(
+                    (grade_word(&bytes, word) - expected).abs() < 1e-6,
+                    "word {word} is {} not {expected}",
+                    grade_word(&bytes, word)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grade_buffer_lays_out_a_wheels_then_curves_stack_word_for_word() {
+        let bytes = grade_buffer_bytes(&[
+            wheels(1, &[("gain_red_thousandths", 1_200)]),
+            curves(2, "master", &[(0, 0), (5_000, 6_000), (10_000, 10_000)]),
+        ])
+        .expect("valid two-node stack");
+
+        // Two records plus one 196-word curve payload.
+        assert_eq!(
+            bytes.len(),
+            GRADE_HEADER_BYTES + 2 * GRADE_NODE_BYTES + GRADE_CURVE_PAYLOAD_WORDS * 4
+        );
+        assert_eq!(grade_header(&bytes, 0), 2);
+        assert_eq!(grade_header(&bytes, 1), 32);
+        assert_eq!(grade_header(&bytes, 2), GRADE_ABI_VERSION);
+
+        // Record 0: wheels.  `gain_red = 1200` with a neutral master is a
+        // slope of 1.2 on red only; offsets are 0 and powers are 1.
+        let wheels_words = [
+            2.0, 0.0, 0.0, 0.0, // kind, payload offset, bypass, reserved
+            1.2, 1.0, 1.0, // slope
+            0.0, 0.0, 0.0, // offset
+            1.0, 1.0, 1.0, // power
+            0.0, 0.0, 0.0, // unused v9 .. v11
+        ];
+        for (word, expected) in wheels_words.into_iter().enumerate() {
             assert!(
-                (primary_f32(&bytes, PRIMARY_HEADER_BYTES + index * 4) - expected).abs() < 1e-6
+                (grade_word(&bytes, word) - expected).abs() < 1e-6,
+                "wheels word {word} is {} not {expected}",
+                grade_word(&bytes, word)
             );
         }
-        for (index, expected) in second_values.into_iter().enumerate() {
-            assert!(
-                (primary_f32(
-                    &bytes,
-                    PRIMARY_HEADER_BYTES + PRIMARY_NODE_BYTES + index * 4
-                ) - expected)
-                    .abs()
-                    < 1e-6
-            );
+
+        // Record 1: curves, pointing at the first payload word.
+        assert!((grade_word(&bytes, 16) - 3.0).abs() < 1e-6);
+        assert!((grade_word(&bytes, 17) - 32.0).abs() < 1e-6);
+        assert!(grade_word(&bytes, 18).abs() < 1e-6);
+        for word in 19..32 {
+            assert!(grade_word(&bytes, word).abs() < 1e-6, "word {word}");
+        }
+
+        // Red, green, and blue are the untouched structural identity, whose
+        // tangents are both 1.  Master is (0,0) (0.5,0.6) (1,1), whose
+        // hand-solved tangents are 1.2, 1.0, and 0.8: no delta is zero and
+        // neither `a^2 + b^2` exceeds 9, so the limiter never fires.
+        let mut identity = vec![0.0; GRADE_CURVE_SLOT_WORDS];
+        identity[0] = 2.0;
+        identity[3] = 1.0;
+        identity[4] = 1.0;
+        identity[5] = 1.0;
+        identity[6] = 1.0;
+        let mut master = vec![0.0; GRADE_CURVE_SLOT_WORDS];
+        master[0] = 3.0;
+        master[3] = 1.2;
+        master[4] = 0.5;
+        master[5] = 0.6;
+        master[6] = 1.0;
+        master[7] = 1.0;
+        master[8] = 1.0;
+        master[9] = 0.8;
+        for (slot, expected) in [&identity, &identity, &identity, &master]
+            .into_iter()
+            .enumerate()
+        {
+            let base = 32 + slot * GRADE_CURVE_SLOT_WORDS;
+            for (index, expected) in expected.iter().enumerate() {
+                assert!(
+                    (grade_word(&bytes, base + index) - expected).abs() < 1e-6,
+                    "curve slot {slot} word {index} is {} not {expected}",
+                    grade_word(&bytes, base + index)
+                );
+            }
         }
     }
 
@@ -1975,10 +2674,10 @@ mod tests {
         let mut canonical = legacy;
         canonical.name = "primary_correction".to_owned();
         assert_eq!(
-            primary_buffer_bytes(std::slice::from_ref(&canonical))
+            grade_buffer_bytes(std::slice::from_ref(&canonical))
                 .expect("canonical primary node")
                 .len(),
-            PRIMARY_HEADER_BYTES + PRIMARY_NODE_BYTES
+            GRADE_HEADER_BYTES + GRADE_NODE_BYTES
         );
     }
 

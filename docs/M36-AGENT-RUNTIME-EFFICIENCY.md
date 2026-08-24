@@ -92,10 +92,16 @@ served by the runtime. The M36 regression test records:
 
 | Surface | Tools | Serialized metadata | Input schemas | Descriptions |
 |---|---:|---:|---:|---:|
-| Internal capability registry | 85 | 585,247 B | 543,414 B | 27,949 B |
-| Served MCP runtime | 7 | 5,305 B | 3,171 B | 982 B |
+| Internal capability registry (M36 baseline) | 85 | 585,247 B | 543,414 B | 27,949 B |
+| Served MCP runtime (M36 baseline) | 7 | 5,305 B | 3,171 B | 982 B |
+| Internal capability registry (2026-08-24, after CC1-CC3) | 113 | 1,007,001 B | not re-split | not re-split |
+| Served MCP runtime (2026-08-24) | 7 | 5,660 B | not re-split | not re-split |
 
-That is a 99.1% reduction in initially advertised serialized tool metadata.
+That is a 99.1% reduction in initially advertised serialized tool metadata at
+the M36 baseline and 99.4% at the 2026-08-24 measurement. The registry grew
+with the colour tools; the served surface stays at seven tools. The
+`color_curves` descriptor (133 parameters) is summarized as a compact pattern in
+tool documentation, keeping roughly 18.8 KB out of the registry.
 It is not yet a claim of 99.1% fewer provider tokens. Providers transform,
 cache, and meter tool definitions differently. A controlled benchmark between
 the pre-M36 revision and the current runtime is the acceptance gate for model-

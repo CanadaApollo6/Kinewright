@@ -61,11 +61,13 @@ use crate::{
         plan_shot_match, video_scopes_v2,
     },
     color_status::{
-        CC1_STAGE_NAMES, ColorContextArgs, ColorProofError, PrimaryCorrectionPlanArgs,
-        PrimaryPlanError, RenderColorProofArgs, active_layer_source_classification,
+        CC1_STAGE_NAMES, ColorContextArgs, ColorCurvesPlanArgs, ColorNodePlan, ColorNodePlanError,
+        ColorProofError, ColorWheelsPlanArgs, PrimaryCorrectionPlanArgs, PrimaryPlanError,
+        RenderColorProofArgs, active_layer_source_classification,
         color_context_value_with_assumptions, color_context_value_with_options,
-        effect_chain_manifest, legacy_stage_warnings, plan_primary_correction,
-        primary_node_manifest, primary_parameter_summary, raw_only_conflict,
+        color_curves_request_summary, color_node_manifest, color_wheels_parameter_summary,
+        effect_chain_manifest, legacy_stage_warnings, plan_color_curves, plan_color_wheels,
+        plan_primary_correction, primary_parameter_summary, raw_only_conflict,
     },
     export_queue::{ExportJobId, ExportQueue, ExportQueueError, QueueExportRequest},
     pacing::{DialoguePacingGap, dialogue_pacing_gaps},
@@ -671,6 +673,18 @@ impl KinewrightMcp {
                 let args: PrimaryCorrectionPlanArgs =
                     decode_args("plan_primary_correction", arguments)?;
                 self.primary_correction_plan(&args)
+            }
+            "plan_color_wheels" => {
+                let args: ColorWheelsPlanArgs = decode_args("plan_color_wheels", arguments)?;
+                self.color_node_plan("plan_color_wheels", |document, revision| {
+                    plan_color_wheels(document, revision, &args)
+                })
+            }
+            "plan_color_curves" => {
+                let args: ColorCurvesPlanArgs = decode_args("plan_color_curves", arguments)?;
+                self.color_node_plan("plan_color_curves", |document, revision| {
+                    plan_color_curves(document, revision, &args)
+                })
             }
             "render_color_proof" => {
                 let args: RenderColorProofArgs = decode_args("render_color_proof", arguments)?;
@@ -1588,6 +1602,85 @@ impl KinewrightMcp {
         ))
     }
 
+    /// Render one evidence-only CC3 colour-node proposal (CC3 §8).
+    ///
+    /// Both CC3 planners share this response shape so an agent that learned
+    /// `plan_color_wheels` can read a `plan_color_curves` result unchanged.
+    fn color_node_plan<Plan>(&self, tool: &str, plan: Plan) -> Result<CallToolResult, McpError>
+    where
+        Plan: FnOnce(&Document, TimelineRevision) -> Result<ColorNodePlan, ColorNodePlanError>,
+    {
+        let (actual_revision, document) = self.snapshot()?;
+        let plan = match plan(&document, actual_revision) {
+            Ok(plan) => plan,
+            Err(ColorNodePlanError::RevisionConflict { expected, actual }) => {
+                return Ok(revision_conflict_text(expected, actual));
+            }
+            Err(error) => {
+                return Ok(error_structured(
+                    format!("{tool} rejected: {error}"),
+                    serde_json::json!({
+                        "code": error.code(),
+                        "message": error.to_string(),
+                        "details": error.details(),
+                        "evidence_only": true,
+                        "applied": false,
+                    }),
+                ));
+            }
+        };
+        let operations = serde_json::to_value(&plan.operations)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        let value = serde_json::json!({
+            "timeline_revision": plan.expected_revision.0,
+            "expected_revision": plan.expected_revision.0,
+            "clip_id": plan.clip_id.0,
+            "kind": plan.kind.effect_name(),
+            "effect_id": plan.effect_id.0,
+            // Null when the proposal changes nothing and would have had to
+            // create the node: no operation allocates that id, so publishing it
+            // would name a node that does not exist and may later be reused.
+            "target_effect_id": plan.target_effect_id().map(|effect| effect.0),
+            "created_new_node": plan.created_new_node,
+            "targets_existing_node": plan.targets_existing_node,
+            "existing_color_node_count": plan.existing_color_node_count,
+            "existing_nodes_of_kind": plan.existing_nodes_of_kind,
+            "color_node_limit_per_layer": kinewright_core::COLOR_NODE_LIMIT_PER_LAYER,
+            "no_change": plan.no_change,
+            "warnings": plan.warnings,
+            "assumptions": plan.assumptions,
+            "source_profile": plan.source_profile.id(),
+            "profile_assumption": plan.profile_assumption,
+            "evidence_only": true,
+            "applied": false,
+            "before": {
+                "color_node_count": plan.existing_color_node_count,
+                "nodes_of_kind": plan.existing_nodes_of_kind,
+            },
+            "after": {
+                "color_node_count": plan.existing_color_node_count
+                    + usize::from(plan.created_new_node),
+                "nodes_of_kind": plan.existing_nodes_of_kind
+                    + usize::from(plan.created_new_node),
+            },
+            "requested_parameters": plan.requested_parameters,
+            "resolved_parameters": plan.resolved_parameters,
+            "requested_curves": plan.requested_curves,
+            "resolved_curves": plan.resolved_curves,
+            "operations": operations,
+            "next": "Review these exact operations; submit them through prepare_edit_plan at the same revision if the edit is requested.",
+        });
+        Ok(success_structured(
+            format!(
+                "prepared evidence-only {} proposal for clip {} at revision {}; no operation was applied",
+                plan.kind.effect_name(),
+                plan.clip_id,
+                plan.expected_revision
+            ),
+            value,
+        ))
+    }
+
     #[allow(clippy::too_many_lines)]
     fn render_color_proof(&self, args: &RenderColorProofArgs) -> Result<CallToolResult, McpError> {
         let (actual_revision, document) = self.snapshot()?;
@@ -1732,7 +1825,7 @@ impl KinewrightMcp {
                     "content": "title",
                     "title": title_layer.title,
                     "effects": proof_effect_manifest(&title_layer.effects),
-                    "primary_nodes": proof_primary_node_manifest(&title_layer.effects),
+                    "color_nodes": proof_color_node_manifest(&title_layer.effects),
                     "transition": {
                         "alpha": title_layer.transition.alpha,
                         "fade_mix": title_layer.transition.fade_mix,
@@ -1832,7 +1925,7 @@ impl KinewrightMcp {
                 // serialized vector order and resolved primary values so the
                 // production layer can be reproduced from the manifest.
                 "effects": proof_effect_manifest(&video_layer.effects),
-                "primary_nodes": proof_primary_node_manifest(&video_layer.effects),
+                "color_nodes": proof_color_node_manifest(&video_layer.effects),
                 "transition": {
                     "alpha": video_layer.transition.alpha,
                     "fade_mix": video_layer.transition.fade_mix,
@@ -7379,7 +7472,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_color_context",
-            "Return the project working, monitoring, and delivery colour descriptions, source metadata, managed-profile status, ordered CC1 stages, per-clip primary nodes, and legacy-stage warnings at the exact timeline revision. The default status matches the executed application D65 profile assumption; use raw_only for unassumed classifier evidence. Metadata remains unchanged. Use render_color_proof for an isolated mapped BEFORE/AFTER frame.",
+            "Return the project working, monitoring, and delivery colour descriptions, source metadata, managed-profile status, ordered CC1 stages, the per-clip ordered managed colour-node stack (primary_correction, color_wheels, color_curves) with bypass and resolved values, and legacy-stage warnings at the exact timeline revision. The default status matches the executed application D65 profile assumption; use raw_only for unassumed classifier evidence. Metadata remains unchanged. Use render_color_proof for an isolated mapped BEFORE/AFTER frame.",
             schema_object::<ColorContextArgs>(),
         )
         .with_annotations(read_only()),
@@ -7390,6 +7483,24 @@ fn inspector_tools() -> Vec<Tool> {
                 primary_parameter_summary()
             ),
             schema_object::<PrimaryCorrectionPlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "plan_color_wheels",
+            format!(
+                "Validate an exact integer CC3 color_wheels (ASC CDL slope/offset/power) request against the current revision, visual clip type, and Core descriptor, then return unapplied AddEffect/SetEffectParam operations. A clip that already carries a color_wheels node is corrected in place unless append=true stacks another. This is evidence-only and never mutates the document. Controls: {}.",
+                color_wheels_parameter_summary()
+            ),
+            schema_object::<ColorWheelsPlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "plan_color_curves",
+            format!(
+                "Validate a CC3 color_curves request against the current revision, visual clip type, and Core descriptor, then return unapplied AddEffect/SetEffectParam operations. A clip that already carries a color_curves node is edited in place unless append=true stacks another, and curves omitted from the request keep their current points. This is evidence-only and never mutates the document. {}",
+                color_curves_request_summary()
+            ),
+            schema_object::<ColorCurvesPlanArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -8295,11 +8406,13 @@ fn proof_effect_manifest(effects: &[Effect]) -> Vec<serde_json::Value> {
     effect_chain_manifest(effects)
 }
 
-/// Keep the primary-only view aligned with `get_color_context` while retaining
-/// the complete ordered effect chain above. This is intentionally derived from
-/// the same frame-evaluated effects, never from the raw clip vector.
-fn proof_primary_node_manifest(effects: &[Effect]) -> Vec<serde_json::Value> {
-    primary_node_manifest(effects)
+/// Keep the ordered CC3 colour-node stack aligned with `get_color_context`
+/// while retaining the complete ordered effect chain above. This is
+/// intentionally derived from the same frame-evaluated effects, never from the
+/// raw clip vector, so bypass, activity, and resolved curve points describe the
+/// frame that was actually rendered.
+fn proof_color_node_manifest(effects: &[Effect]) -> Vec<serde_json::Value> {
+    color_node_manifest(effects)
 }
 
 /// The complete internal capability registry, for crate-level contract tests.
@@ -12641,6 +12754,139 @@ mod tests {
         assert_eq!(invoked.structured_content.unwrap()["timeline_revision"], 0);
     }
 
+    /// CC3 §8: both planners join the internal registry as read-only planner
+    /// capabilities, stay off the seven-tool served surface, and return exact
+    /// unapplied operations through the compact dispatcher.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn cc3_planners_are_read_only_internal_planner_capabilities() {
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 66);
+        let registry = KinewrightMcp::capability_tools().unwrap();
+        let served = KinewrightMcp::served_tools().unwrap();
+        let catalog = capabilities(&registry);
+        for name in ["plan_color_wheels", "plan_color_curves"] {
+            let tool = registry
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} must be an internal capability"));
+            assert_eq!(
+                tool.annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.read_only_hint),
+                Some(true),
+                "{name} is evidence-only"
+            );
+            assert!(
+                served.iter().all(|tool| tool.name != name),
+                "{name} must not enlarge the served surface"
+            );
+            let capability = catalog
+                .iter()
+                .find(|capability| capability.name == name)
+                .unwrap();
+            assert_eq!(capability.kind, CapabilityKind::Planner);
+            assert!(is_invocable_capability(name));
+        }
+
+        let (seed_core, playback, analysis) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed)) =
+            seed_core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut document = (*seed).clone();
+        document.media_pool[0].color_description = ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: ColorMatrix::Bt709,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: ColorProvenance::StreamMetadata,
+        };
+        let core = Core::spawn(document).unwrap();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let before = service.snapshot().unwrap();
+
+        let invoke = |name: &str, arguments: serde_json::Value| {
+            service
+                .call_blocking(
+                    CallToolRequestParams::new("invoke_capability").with_arguments(
+                        json!({"name": name, "arguments": arguments})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
+                )
+                .unwrap()
+        };
+
+        let wheels = invoke(
+            "plan_color_wheels",
+            json!({
+                "expected_revision": 0,
+                "clip_id": 1,
+                "parameters": {"gain_red_thousandths": 1_200}
+            }),
+        );
+        assert_eq!(wheels.is_error, Some(false));
+        let wheels = wheels.structured_content.unwrap();
+        assert_eq!(wheels["applied"], false);
+        assert_eq!(wheels["evidence_only"], true);
+        assert_eq!(wheels["kind"], "color_wheels");
+        assert_eq!(wheels["created_new_node"], true);
+        assert_eq!(wheels["existing_color_node_count"], 0);
+        assert_eq!(wheels["resolved_parameters"]["gain_red_thousandths"], 1_200);
+        assert_eq!(
+            wheels["resolved_parameters"]["gain_blue_thousandths"],
+            1_000
+        );
+        assert_eq!(wheels["operations"].as_array().unwrap().len(), 1);
+        assert_eq!(wheels["after"]["color_node_count"], 1);
+
+        let curves = invoke(
+            "plan_color_curves",
+            json!({
+                "expected_revision": 0,
+                "clip_id": 1,
+                "curves": {"master": [[0, 0], [5_000, 6_000], [10_000, 10_000]]}
+            }),
+        );
+        assert_eq!(curves.is_error, Some(false));
+        let curves = curves.structured_content.unwrap();
+        assert_eq!(curves["applied"], false);
+        assert_eq!(curves["kind"], "color_curves");
+        assert_eq!(
+            curves["resolved_curves"]["master"],
+            json!([[0, 0], [5_000, 6_000], [10_000, 10_000]])
+        );
+        assert_eq!(curves["requested_parameters"]["master_point_count"], 3);
+        assert_eq!(curves["requested_parameters"]["master_y1"], 6_000);
+
+        // A rejected request keeps the CC1/CC2 field/observed/allowed shape.
+        let rejected = invoke(
+            "plan_color_curves",
+            json!({
+                "expected_revision": 0,
+                "clip_id": 1,
+                "curves": {"red": [[0, 0], [5_000, 0], [5_000, 9_000]]}
+            }),
+        );
+        assert_eq!(rejected.is_error, Some(true));
+        let rejected = rejected.structured_content.unwrap();
+        assert_eq!(rejected["code"], "invalid_curve_points");
+        assert_eq!(rejected["details"]["field"], "curves.red[2].x");
+        assert_eq!(rejected["details"]["observed"], 5_000);
+        assert_eq!(rejected["applied"], false);
+
+        assert_eq!(
+            service.snapshot().unwrap(),
+            before,
+            "neither planner may touch the live document"
+        );
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)]
     fn render_color_proof_returns_mapped_before_after_evidence_without_mutating() {
@@ -12819,13 +13065,10 @@ mod tests {
             effects[0]["primary_parameters"]["contrast_pivot_basis_points"],
             5_000
         );
+        assert_eq!(active_layers[0]["color_nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(active_layers[0]["color_nodes"][0]["effect_id"], 6);
         assert_eq!(
-            active_layers[0]["primary_nodes"].as_array().unwrap().len(),
-            1
-        );
-        assert_eq!(active_layers[0]["primary_nodes"][0]["effect_id"], 6);
-        assert_eq!(
-            active_layers[0]["primary_nodes"][0]["parameters"]["exposure_milli_stops"],
+            active_layers[0]["color_nodes"][0]["parameters"]["exposure_milli_stops"],
             750
         );
         assert_eq!(effects[1]["effect_index"], 1);
@@ -13188,6 +13431,141 @@ mod tests {
     fn assert_wire_color(value: &serde_json::Value, confidence: u16, provenance: &str) {
         assert_eq!(value["confidence_basis_points"], confidence);
         assert_eq!(value["provenance"], provenance);
+    }
+
+    /// The CC3 §10.3 item 12 stack: a managed primary, a *bypassed but
+    /// non-neutral* wheels node, and a three-point curves node, in that
+    /// serialized order.
+    fn ordered_colour_node_document() -> Document {
+        let (seed_core, _, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed)) =
+            seed_core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut document = (*seed).clone();
+        document.media_pool[0].color_description = ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: ColorMatrix::Bt709,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: ColorProvenance::StreamMetadata,
+        };
+        let effects = &mut document.tracks[0].clips[0].effects;
+        effects.push(Effect {
+            id: EffectId(6),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                ParamValue::Integer(250),
+            )]),
+            keyframes: BTreeMap::new(),
+        });
+        // Bypassed but deliberately non-neutral: CC3 §5 keeps its slot, its
+        // stage index, and every stored value while it renders as the exact
+        // identity.
+        effects.push(Effect {
+            id: EffectId(7),
+            name: "color_wheels".to_owned(),
+            parameters: BTreeMap::from([
+                (
+                    "gain_red_thousandths".to_owned(),
+                    ParamValue::Integer(1_400),
+                ),
+                ("bypass".to_owned(), ParamValue::Integer(1)),
+            ]),
+            keyframes: BTreeMap::new(),
+        });
+        effects.push(Effect {
+            id: EffectId(8),
+            name: "color_curves".to_owned(),
+            parameters: BTreeMap::from([
+                ("master_point_count".to_owned(), ParamValue::Integer(3)),
+                ("master_x1".to_owned(), ParamValue::Integer(5_000)),
+                ("master_y1".to_owned(), ParamValue::Integer(6_000)),
+            ]),
+            keyframes: BTreeMap::new(),
+        });
+        document.validate().unwrap();
+        document
+    }
+
+    /// CC3 §10.3 item 12, ordered-stage half: the proof manifest's colour-node
+    /// stack is `clip.effects` order, which is the compositor's evaluation
+    /// order. `kinewright-media` exposes no stage manifest, so the agent's
+    /// `render_color_proof` surface is where the ordering is observable.
+    #[test]
+    fn render_color_proof_reports_the_ordered_colour_node_stack_in_clip_effect_order() {
+        let (_, playback, _) = fixture();
+        let document = ordered_colour_node_document();
+        let frame = RgbaImage {
+            width: 2,
+            height: 2,
+            pixels: [32, 32, 32, 255].repeat(4),
+        };
+        let media = Arc::new(NoopMedia {
+            thumbnail_frames: BTreeMap::from([(TimeCode(12), frame.clone())]),
+            candidate_thumbnail_frames: BTreeMap::from([(TimeCode(12), frame)]),
+            ..NoopMedia::default()
+        });
+        let service = KinewrightMcp::new(
+            Core::spawn(document).unwrap(),
+            playback,
+            media,
+            ConfirmationBroker::default(),
+        );
+        let result = service
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(12),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+            })
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        let value = result.structured_content.unwrap();
+        let nodes = value["active_rendered_layers"][0]["color_nodes"]
+            .as_array()
+            .expect("the proof manifest carries an ordered colour-node stack")
+            .clone();
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|node| (
+                    node["stage_index"].as_u64(),
+                    node["kind"].as_str(),
+                    node["effect_id"].as_u64()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some(0), Some("primary_correction"), Some(6)),
+                (Some(1), Some("color_wheels"), Some(7)),
+                (Some(2), Some("color_curves"), Some(8)),
+            ],
+            "the manifest order must equal clip.effects order",
+        );
+
+        assert_eq!(nodes[1]["bypass"], 1);
+        assert_eq!(nodes[1]["active"], false);
+        assert_eq!(nodes[1]["inactive_reason"], "bypassed");
+        assert_eq!(
+            nodes[1]["parameters"]["gain_red_thousandths"], 1_400,
+            "a bypassed node keeps every stored value",
+        );
+
+        assert_eq!(nodes[2]["active"], true);
+        assert_eq!(
+            nodes[2]["curves"]["master"]["points"],
+            json!([[0, 0], [5_000, 6_000], [10_000, 10_000]]),
+            "the omitted third point resolves to its (10000, 10000) neutral",
+        );
+        assert_eq!(nodes[2]["curves"]["master"]["truncated"], false);
+        assert_eq!(nodes[2]["curves"]["red"]["structural_identity"], true);
     }
 
     #[test]

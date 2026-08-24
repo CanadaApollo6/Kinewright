@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -7,11 +7,12 @@ use thiserror::Error;
 use crate::{
     AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, COLOR_CONFIDENCE_MAX_BASIS_POINTS,
     CaptionPreset, Clip, ClipContent, ClipId, ColorContext, ColorDescription, ColorProvenance,
-    Document, Effect, EffectId, FreezeFrame, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId,
-    MediaAsset, MediaBin, MediaSourceFingerprint, ParamValue, RelinkCandidate, StringOut,
-    StringOutId, SyncGroup, SyncGroupId, ThreePointMode, TimeCode, TimeMappingError, Title,
-    TitleParameterKind, TitlePosition, Track, TrackId, TrackKind, Transition, is_audio_effect,
-    map_source_range_to_project, title_parameter_descriptor,
+    Document, Effect, EffectId, FreezeFrame, KeyframeInterpolation, LinkId,
+    MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin, MediaSourceFingerprint,
+    ParamValue, RelinkCandidate, StringOut, StringOutId, SyncGroup, SyncGroupId, ThreePointMode,
+    TimeCode, TimeMappingError, Title, TitleParameterKind, TitlePosition, Track, TrackId,
+    TrackKind, Transition, is_audio_effect, map_source_range_to_project,
+    title_parameter_descriptor,
 };
 
 // The project colour context is intentionally kept inline in the operation so
@@ -651,6 +652,30 @@ pub enum OpError {
         min: i64,
         max: i64,
         actual: i64,
+    },
+    #[error(
+        "effect {effect:?} curve {curve:?} point {index} has x {x}, which is not greater than the previous point's x {previous_x}; x must be strictly increasing over the active prefix"
+    )]
+    InvalidCurvePoints {
+        effect: String,
+        curve: String,
+        index: usize,
+        previous_x: i64,
+        x: i64,
+    },
+    #[error("effect {effect:?} parameter {name:?} accepts only hold keyframes")]
+    NonHoldKeyframeParameter { effect: String, name: String },
+    #[error(
+        "effect {effect:?} curve {curve:?} cannot keyframe point coordinates while its point_count has more than one keyframe"
+    )]
+    CurvePointCountAnimatedWithPoints { effect: String, curve: String },
+    #[error(
+        "clip {clip} would carry {actual} managed colour nodes, exceeding the limit of {limit}"
+    )]
+    TooManyColorNodes {
+        clip: ClipId,
+        limit: usize,
+        actual: usize,
     },
     #[error("effect {effect:?} parameter {name:?} has an invalid automation curve: {reason}")]
     InvalidEffectAutomation {
@@ -2314,6 +2339,7 @@ fn add_effect(doc: &mut Document, clip_id: ClipId, effect: Effect) -> Result<(),
             effect: effect.name,
         });
     }
+    validate_color_curve_points(&effect)?;
     let (track_index, clip_index) = find_clip(doc, clip_id)?;
     let clip_duration = doc.clip_duration(&doc.tracks[track_index].clips[clip_index])?;
     validate_effect_automation(clip_id, clip_duration, &effect)?;
@@ -2323,6 +2349,20 @@ fn add_effect(doc: &mut Document, clip_id: ClipId, effect: Effect) -> Result<(),
             clip: clip_id,
             effect: effect.id,
         });
+    }
+    // CC3 §3.1: a layer carries at most sixteen managed colour nodes. A
+    // bypassed node keeps its slot, so the count is of stored nodes rather
+    // than of active ones, and the seventeenth is a typed error instead of a
+    // silent truncation.
+    if crate::is_managed_color_node(&effect.name) {
+        let existing = crate::managed_color_node_count(&clip.effects);
+        if existing >= crate::COLOR_NODE_LIMIT_PER_LAYER {
+            return Err(OpError::TooManyColorNodes {
+                clip: clip_id,
+                limit: crate::COLOR_NODE_LIMIT_PER_LAYER,
+                actual: existing + 1,
+            });
+        }
     }
     clip.effects.push(effect);
     Ok(())
@@ -2360,6 +2400,15 @@ fn set_effect_param(
             effect: effect_id,
         })?;
     validate_effect_parameter(&effect.name, name, &value)?;
+    // CC3 §2.3: strict `x` ordering is checked against the parameter map the
+    // change would produce, so a rejected edit leaves the document untouched.
+    if crate::classify_color_node(effect) == Some(crate::ColorNodeKind::Curves) {
+        let mut prospective = effect.clone();
+        prospective
+            .parameters
+            .insert(name.to_owned(), value.clone());
+        validate_color_curve_points(&prospective)?;
+    }
     effect.parameters.insert(name.to_owned(), value);
     Ok(())
 }
@@ -2396,6 +2445,15 @@ fn set_effect_keyframes(
         name,
         &curve,
     )?;
+    // CC3 §6: the two legal curve keyframing policies are checked against the
+    // automation map the change would produce, so either side of the pair -
+    // an animated `point_count` or an animated coordinate - is rejected
+    // atomically whichever one arrives second.
+    if crate::classify_color_node(effect) == Some(crate::ColorNodeKind::Curves) {
+        let mut prospective = effect.keyframes.clone();
+        prospective.insert(name.to_owned(), curve.clone());
+        validate_curve_keyframe_policy(&effect.name, &prospective)?;
+    }
     effect.keyframes.insert(name.to_owned(), curve);
     Ok(())
 }
@@ -2751,6 +2809,7 @@ fn validate_effect_automation(
             curve,
         )?;
     }
+    validate_curve_keyframe_policy(&effect.name, &effect.keyframes)?;
     Ok(())
 }
 
@@ -2771,6 +2830,20 @@ fn validate_curve(
             name: name.to_owned(),
             reason: error.to_string(),
         })?;
+    // CC3 §6 policy 1: `{curve}_point_count` switches the whole curve
+    // discontinuously, so only `Hold` keyframes are legal. Any other
+    // interpolation would resolve intermediate point counts that no author
+    // ever authored.
+    if is_curve_point_count_parameter(effect_name, name) {
+        for keyframe in &curve.keyframes {
+            if keyframe.interpolation != KeyframeInterpolation::Hold {
+                return Err(OpError::NonHoldKeyframeParameter {
+                    effect: effect_name.to_owned(),
+                    name: name.to_owned(),
+                });
+            }
+        }
+    }
     for keyframe in &curve.keyframes {
         if keyframe.at >= clip_duration {
             return Err(OpError::EffectKeyframeOutsideClip {
@@ -2787,6 +2860,68 @@ fn validate_curve(
             &ParamValue::Integer(keyframe.value),
         )?;
         debug_assert!((descriptor.min..=descriptor.max).contains(&keyframe.value));
+    }
+    Ok(())
+}
+
+/// Whether `name` is the `{curve}_point_count` control of a `color_curves`
+/// node.
+fn is_curve_point_count_parameter(effect_name: &str, name: &str) -> bool {
+    crate::ColorNodeKind::from_effect_name(effect_name) == Some(crate::ColorNodeKind::Curves)
+        && crate::ColorCurveChannel::ALL
+            .into_iter()
+            .any(|curve| curve.point_count_parameter() == name)
+}
+
+/// Reject a `color_curves` node whose stored static points are not strictly
+/// increasing in `x` over a curve's active prefix (CC3 §2.3).
+///
+/// Points at index `>= point_count` are ignored, so their colliding
+/// `(10000, 10000)` neutrals stay legal.
+fn validate_color_curve_points(effect: &Effect) -> Result<(), OpError> {
+    if let Some(violation) = crate::color_curve_order_violation(effect) {
+        return Err(OpError::InvalidCurvePoints {
+            effect: effect.name.clone(),
+            curve: violation.curve.name().to_owned(),
+            index: violation.index,
+            previous_x: violation.previous_x,
+            x: violation.x,
+        });
+    }
+    Ok(())
+}
+
+/// Enforce the CC3 §6 curve keyframing policies over a complete automation map.
+///
+/// Whole-curve steps keyframe `{curve}_point_count`; point-wise interpolation
+/// keyframes coordinates at a constant point count. Mixing them - a
+/// `point_count` with more than one keyframe while any coordinate of the same
+/// curve is animated - would resolve point lists nobody authored.
+fn validate_curve_keyframe_policy(
+    effect_name: &str,
+    keyframes: &BTreeMap<String, AutomationCurve>,
+) -> Result<(), OpError> {
+    if crate::ColorNodeKind::from_effect_name(effect_name) != Some(crate::ColorNodeKind::Curves) {
+        return Ok(());
+    }
+    for curve in crate::ColorCurveChannel::ALL {
+        let animated_point_count = keyframes
+            .get(curve.point_count_parameter())
+            .is_some_and(|automation| automation.keyframes.len() > 1);
+        if !animated_point_count {
+            continue;
+        }
+        let animated_coordinate = curve.parameter_names().iter().skip(1).any(|name| {
+            keyframes
+                .get(*name)
+                .is_some_and(|automation| !automation.keyframes.is_empty())
+        });
+        if animated_coordinate {
+            return Err(OpError::CurvePointCountAnimatedWithPoints {
+                effect: effect_name.to_owned(),
+                curve: curve.name().to_owned(),
+            });
+        }
     }
     Ok(())
 }
@@ -3145,7 +3280,25 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                     });
                 }
                 validate_effect(effect)?;
+                // CC3 §2.3: the strictly-increasing-`x` rule is a document
+                // invariant, not just an operation precondition. Without it a
+                // hand-edited project that `AddEffect`/`SetEffectParam` would
+                // reject loads with `Ok` and then locks its own colour node,
+                // because every later `SetEffectParam` re-validates the whole
+                // effect and fails on parameters the user never touched.
+                validate_color_curve_points(effect)?;
                 validate_effect_automation(clip.id, clip_duration, effect)?;
+            }
+            // CC3 §3.1: the sixteen-managed-node limit is likewise an
+            // invariant. `AddEffect` enforces it, so a document that exceeds it
+            // can only have arrived by hand and must not load silently.
+            let color_nodes = crate::managed_color_node_count(&clip.effects);
+            if color_nodes > crate::COLOR_NODE_LIMIT_PER_LAYER {
+                return Err(OpError::TooManyColorNodes {
+                    clip: clip.id,
+                    limit: crate::COLOR_NODE_LIMIT_PER_LAYER,
+                    actual: color_nodes,
+                });
             }
             if let Some(transition) = &clip.transition_in {
                 validate_transition(doc, clip, transition)?;

@@ -58,12 +58,12 @@ use crate::{
     timeline::TransitionRenderParams,
 };
 
-const MONITOR_CPU_GPU_MAX: u8 = 2;
-const MONITOR_CPU_GPU_P99: f64 = 1.0;
-const MONITOR_CPU_GPU_MEAN: f64 = 0.50;
-const LINEAR_CPU_GPU_MAX: f32 = 1.5e-3;
-const LINEAR_CPU_GPU_P99: f32 = 7.5e-4;
-const LINEAR_CPU_GPU_MEAN: f32 = 2.5e-4;
+pub(crate) const MONITOR_CPU_GPU_MAX: u8 = 2;
+pub(crate) const MONITOR_CPU_GPU_P99: f64 = 1.0;
+pub(crate) const MONITOR_CPU_GPU_MEAN: f64 = 0.50;
+pub(crate) const LINEAR_CPU_GPU_MAX: f32 = 1.5e-3;
+pub(crate) const LINEAR_CPU_GPU_P99: f32 = 7.5e-4;
+pub(crate) const LINEAR_CPU_GPU_MEAN: f32 = 2.5e-4;
 const DELIVERY_CODEC_MAX: u8 = 4;
 const DELIVERY_CODEC_P99: f64 = 2.0;
 const DELIVERY_CODEC_MEAN: f64 = 1.0;
@@ -76,15 +76,15 @@ const DELIVERY_CODEC_MEAN: f64 = 1.0;
 /// applies §6.2 verbatim on the in-gamut band and keeps the §6.2 maximum plus
 /// an explicit one-ULP P99/mean on the over-range band, instead of quietly
 /// widening the gate everywhere or dropping over-range coverage.
-const LINEAR_GATE_IN_GAMUT: f32 = 1.0;
-const LINEAR_GATE_DOMAIN: f32 = 2.0;
-const LINEAR_OVER_RANGE_P99: f32 = 9.765_625e-4;
-const LINEAR_OVER_RANGE_MEAN: f32 = 9.765_625e-4;
+pub(crate) const LINEAR_GATE_IN_GAMUT: f32 = 1.0;
+pub(crate) const LINEAR_GATE_DOMAIN: f32 = 2.0;
+pub(crate) const LINEAR_OVER_RANGE_P99: f32 = 9.765_625e-4;
+pub(crate) const LINEAR_OVER_RANGE_MEAN: f32 = 9.765_625e-4;
 
 /// §6.2 neutral-identity monitor gate, used by the decoded identity ramps.
-const IDENTITY_RAMP_MONITOR_MAX: u8 = 1;
-const IDENTITY_RAMP_MONITOR_P99: f64 = 1.0;
-const IDENTITY_RAMP_MONITOR_MEAN: f64 = 0.25;
+pub(crate) const IDENTITY_RAMP_MONITOR_MAX: u8 = 1;
+pub(crate) const IDENTITY_RAMP_MONITOR_P99: f64 = 1.0;
+pub(crate) const IDENTITY_RAMP_MONITOR_MEAN: f64 = 0.25;
 
 /// Linear-working gate for the decoded identity ramps.
 ///
@@ -113,7 +113,7 @@ const NO_CLAMP_RECOVERY_MAX: f32 = 1.5e-3;
 /// with the raster.  A control case whose CPU reference is identical to the
 /// neutral reference is a provable no-op and must fail loudly rather than
 /// report a flattering `linear_max_error: 0.0`.
-const MIN_CHANGED_LINEAR_BASIS_POINTS: u64 = 500;
+pub(crate) const MIN_CHANGED_LINEAR_BASIS_POINTS: u64 = 500;
 
 /// Absolute/relative tolerance used when the f32 production reference is
 /// compared against the f64 spec equations written out in this file.
@@ -136,33 +136,33 @@ struct RampSpec {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct DiffMetrics {
-    max: u8,
-    p99: f64,
-    mean: f64,
+pub(crate) struct DiffMetrics {
+    pub(crate) max: u8,
+    pub(crate) p99: f64,
+    pub(crate) mean: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct FloatDiffMetrics {
-    max: f32,
-    p99: f32,
-    mean: f32,
+pub(crate) struct FloatDiffMetrics {
+    pub(crate) max: f32,
+    pub(crate) p99: f32,
+    pub(crate) mean: f32,
 }
 
 /// The linear CPU/GPU comparison split by §6.2 magnitude band.
 #[derive(Debug, Clone, Copy, Default)]
-struct LinearParityMetrics {
+pub(crate) struct LinearParityMetrics {
     /// `|reference| <= 1.0`: the §6.2 gate applies verbatim.
-    in_gamut: FloatDiffMetrics,
-    in_gamut_samples: usize,
+    pub(crate) in_gamut: FloatDiffMetrics,
+    pub(crate) in_gamut_samples: usize,
     /// `1.0 < |reference| <= 2.0`: §6.2 maximum plus the one-ULP P99/mean.
-    over_range: FloatDiffMetrics,
-    over_range_samples: usize,
+    pub(crate) over_range: FloatDiffMetrics,
+    pub(crate) over_range_samples: usize,
     /// `|reference| > 2.0`, excluded from the linear gate per §6.2.
     ///
     /// This is a legitimate exclusion: §6.2 defines the gate only over the
     /// bounded domain, so a reference beyond it has no stated tolerance.
-    above_domain: usize,
+    pub(crate) above_domain: usize,
     /// A NaN or infinity on either side.
     ///
     /// This is NOT a legitimate exclusion. Folding it into `above_domain`
@@ -170,15 +170,15 @@ struct LinearParityMetrics {
     /// gate and still report parity, which is exactly the failure the CC1
     /// finiteness claim exists to catch. It is counted separately and asserted
     /// to be zero.
-    non_finite: usize,
+    pub(crate) non_finite: usize,
 }
 
 impl LinearParityMetrics {
-    const fn compared(&self) -> usize {
+    pub(crate) const fn compared(&self) -> usize {
         self.in_gamut_samples + self.over_range_samples
     }
 
-    fn as_json(&self) -> Value {
+    pub(crate) fn as_json(&self) -> Value {
         json!({
             "in_gamut_max_error": self.in_gamut.max,
             "in_gamut_p99_error": self.in_gamut.p99,
@@ -278,7 +278,7 @@ fn ramp_specs() -> [RampSpec; 5] {
     ]
 }
 
-fn output_hash(bytes: &[u8]) -> String {
+pub(crate) fn output_hash(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let mut result = String::with_capacity(64);
@@ -288,21 +288,35 @@ fn output_hash(bytes: &[u8]) -> String {
     result
 }
 
-fn file_hash(path: &Path) -> String {
+pub(crate) fn file_hash(path: &Path) -> String {
     let bytes = std::fs::read(path)
         .unwrap_or_else(|error| panic!("could not hash fixture file {}: {error}", path.display()));
     output_hash(&bytes)
 }
 
-fn git_revision() -> String {
-    ProcessCommand::new("git")
+pub(crate) fn git_revision() -> String {
+    let revision = ProcessCommand::new("git")
         .args(["rev-parse", "HEAD"])
         .output()
         .ok()
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .filter(|revision| !revision.is_empty())
-        .unwrap_or_else(|| "unavailable".to_owned())
+        .filter(|revision| !revision.is_empty());
+    let Some(revision) = revision else {
+        return "unavailable".to_owned();
+    };
+    // Evidence must not claim a clean revision for code that is not committed.
+    let dirty = ProcessCommand::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| !output.stdout.iter().all(u8::is_ascii_whitespace));
+    if dirty {
+        format!("{revision}-dirty")
+    } else {
+        revision
+    }
 }
 
 fn emit_evidence(
@@ -363,14 +377,14 @@ fn emit_evidence(
     write_evidence_artefact(fixture, &payload);
 }
 
-/// Persist one evidence payload under `target/cc1-evidence/`.
+/// Persist one evidence payload under `target/color-evidence/`.
 ///
 /// `emit_evidence` only reaches a human under `--nocapture`, which makes an
 /// audit depend on how the suite happened to be invoked.  Writing the same
 /// JSON to a file leaves an artefact behind for every run.  Nothing asserts on
 /// these files: a read-only or full filesystem must not fail a colour fixture,
 /// so a write failure is reported and ignored.
-fn write_evidence_artefact(fixture: &str, payload: &Value) {
+pub(crate) fn write_evidence_artefact(fixture: &str, payload: &Value) {
     let directory = evidence_directory();
     if let Err(error) = std::fs::create_dir_all(&directory) {
         eprintln!(
@@ -400,14 +414,14 @@ fn write_evidence_artefact(fixture: &str, payload: &Value) {
 
 fn evidence_directory() -> PathBuf {
     if let Some(target) = std::env::var_os("CARGO_TARGET_DIR") {
-        return PathBuf::from(target).join("cc1-evidence");
+        return PathBuf::from(target).join("color-evidence");
     }
     // `CARGO_MANIFEST_DIR` is `crates/kinewright-media`; the workspace target
     // directory is two levels up.
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/cc1-evidence")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/color-evidence")
 }
 
-fn backend_metadata(backend: &str) -> Value {
+pub(crate) fn backend_metadata(backend: &str) -> Value {
     let mut metadata = serde_json::Map::new();
     for token in backend.split(';') {
         let Some((key, value)) = token.split_once('=') else {
@@ -738,7 +752,7 @@ fn assert_neutral_pixels(rgba: &[u8], fixture: &str) {
     }
 }
 
-fn abs_code_diff_rgb(actual: &[u8], expected: &[u8]) -> DiffMetrics {
+pub(crate) fn abs_code_diff_rgb(actual: &[u8], expected: &[u8]) -> DiffMetrics {
     assert_eq!(actual.len(), expected.len());
     let mut differences = actual
         .as_chunks::<4>()
@@ -768,7 +782,7 @@ fn abs_code_diff_rgb(actual: &[u8], expected: &[u8]) -> DiffMetrics {
     DiffMetrics { max, p99, mean }
 }
 
-fn monitor_luma_and_clipping(rgba: &[u8]) -> Value {
+pub(crate) fn monitor_luma_and_clipping(rgba: &[u8]) -> Value {
     let mut lumas = Vec::with_capacity(rgba.len() / 4);
     let mut clipped_channels = 0_u64;
     for pixel in rgba.as_chunks::<4>().0 {
@@ -804,7 +818,7 @@ fn monitor_luma_and_clipping(rgba: &[u8]) -> Value {
     })
 }
 
-fn abs_float_diff(actual: &[f32], expected: &[f32]) -> FloatDiffMetrics {
+pub(crate) fn abs_float_diff(actual: &[f32], expected: &[f32]) -> FloatDiffMetrics {
     assert_eq!(actual.len(), expected.len());
     let mut differences = actual
         .iter()
@@ -830,7 +844,7 @@ fn abs_float_diff(actual: &[f32], expected: &[f32]) -> FloatDiffMetrics {
 /// Band membership is decided by the CPU reference, which is the comparison
 /// source named by §6.2, so a GPU value that has drifted out of the domain
 /// cannot exclude itself from the gate.
-fn linear_parity_metrics(actual: &[f32], expected: &[f32]) -> LinearParityMetrics {
+pub(crate) fn linear_parity_metrics(actual: &[f32], expected: &[f32]) -> LinearParityMetrics {
     assert_eq!(actual.len(), expected.len());
     let mut in_gamut = (Vec::new(), Vec::new());
     let mut over_range = (Vec::new(), Vec::new());
@@ -876,7 +890,7 @@ fn linear_parity_metrics(actual: &[f32], expected: &[f32]) -> LinearParityMetric
 }
 
 /// Apply the §6.2 linear gate, band by band.
-fn assert_linear_parity(metrics: &LinearParityMetrics, label: &str) {
+pub(crate) fn assert_linear_parity(metrics: &LinearParityMetrics, label: &str) {
     // The CC1 doc claims the managed path never emits a non-finite sample.
     // Excluding one from the gate instead of failing would let a NaN-producing
     // GPU report parity, so this is a hard failure rather than a band.
@@ -1089,7 +1103,7 @@ fn chart_neutral_spread(output: &[u8]) -> u8 {
         .unwrap_or(0)
 }
 
-fn working_frame(width: u32, height: u32, rgb: &[[f32; 3]]) -> WorkingFrame {
+pub(crate) fn working_frame(width: u32, height: u32, rgb: &[[f32; 3]]) -> WorkingFrame {
     assert_eq!(
         rgb.len(),
         usize::try_from(width * height).expect("working frame size")
@@ -1374,7 +1388,7 @@ fn assert_gpu_control_case(
 /// CC1 §5/§6.1.7 make the renderer part of the claim, so the lane travels with
 /// the evidence instead of being inferred from the test name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GpuLane {
+pub(crate) enum GpuLane {
     /// `force_fallback_adapter` succeeded: lavapipe/llvmpipe/WARP.
     SoftwareFallback,
     /// No software adapter exists and the operator opted in to the physical
@@ -1385,7 +1399,7 @@ enum GpuLane {
 }
 
 impl GpuLane {
-    const fn id(self) -> &'static str {
+    pub(crate) const fn id(self) -> &'static str {
         match self {
             Self::SoftwareFallback => "software_fallback",
             Self::HardwareOptIn => "hardware_optin",
@@ -1396,10 +1410,10 @@ impl GpuLane {
 
 /// A GPU context plus the provenance that must be reported with, and asserted
 /// against, every raster it renders.
-struct FixtureGpu {
+pub(crate) struct FixtureGpu {
     context: GpuContext,
     info: String,
-    lane: GpuLane,
+    pub(crate) lane: GpuLane,
     software_fallback: bool,
     gpu_claim: bool,
 }
@@ -1424,11 +1438,11 @@ impl FixtureGpu {
         }
     }
 
-    fn context(&self) -> GpuContext {
+    pub(crate) fn context(&self) -> GpuContext {
         self.context.clone()
     }
 
-    fn backend(&self) -> &str {
+    pub(crate) fn backend(&self) -> &str {
         backend_name(&self.info)
     }
 
@@ -1437,7 +1451,7 @@ impl FixtureGpu {
     /// true` would make the assertion unsatisfiable on a machine without
     /// lavapipe and, worse, would let a hardware run keep claiming software
     /// provenance.
-    fn assert_proof_provenance(&self, metadata: &kinewright_core::MonitorProofMetadata) {
+    pub(crate) fn assert_proof_provenance(&self, metadata: &kinewright_core::MonitorProofMetadata) {
         assert!(
             !metadata.backend.is_empty(),
             "monitor proof must name the backend that rendered it"
@@ -1470,7 +1484,7 @@ impl FixtureGpu {
 /// fail, never report a green fixture it did not run.  A machine with a real
 /// GPU but no software rasterizer can opt in to the physical adapter, and the
 /// evidence then says so.
-fn fallback_gpu() -> FixtureGpu {
+pub(crate) fn fallback_gpu() -> FixtureGpu {
     let software = match GpuContext::headless(true) {
         Ok(context) => context,
         Err(error) => return hardware_opt_in_gpu(&error.to_string()),
@@ -1513,7 +1527,7 @@ fn hardware_opt_in_gpu(software_error: &str) -> FixtureGpu {
     fixture
 }
 
-fn hardware_gpu() -> FixtureGpu {
+pub(crate) fn hardware_gpu() -> FixtureGpu {
     let context = GpuContext::headless(false).unwrap_or_else(|error| {
         panic!(
             "CC1 hardware GPU parity is required but no non-fallback adapter was available ({error}). Install/enable a supported Vulkan, DX12, Metal, or GL adapter for this platform, then rerun cargo test -p kinewright-media."
@@ -1564,7 +1578,7 @@ fn assert_manifest_description(manifest: &Value, expected: &ColorDescription, la
 
 /// Assert one declared manifest tolerance equals the `f64` code constant that
 /// the fixtures actually gate with.
-fn assert_manifest_f64(parent: &Value, key: &str, expected: f64) {
+pub(crate) fn assert_manifest_f64(parent: &Value, key: &str, expected: f64) {
     let declared = parent
         .get(key)
         .and_then(Value::as_f64)
@@ -1577,7 +1591,7 @@ fn assert_manifest_f64(parent: &Value, key: &str, expected: f64) {
 
 /// The `f32` form. The declared decimal must round to exactly the constant so
 /// the manifest cannot drift by a value smaller than a single-precision step.
-fn assert_manifest_f32(parent: &Value, key: &str, expected: f32) {
+pub(crate) fn assert_manifest_f32(parent: &Value, key: &str, expected: f32) {
     let declared = parent
         .get(key)
         .and_then(Value::as_f64)
@@ -3465,7 +3479,7 @@ fn cc1_unsupported_source_blocks_managed_proof_and_export() {
     );
 }
 
-fn simple_document(asset: MediaAsset, resolution: (u32, u32)) -> Document {
+pub(crate) fn simple_document(asset: MediaAsset, resolution: (u32, u32)) -> Document {
     let duration = if asset.duration > TimeCode::ZERO {
         asset.duration
     } else {
@@ -3515,7 +3529,10 @@ const DELIVERY_SOURCE_BAR_MONITOR_CODES: [u8; 5] = [0, 56, 130, 205, 255];
 /// Decode the proof/delivery source through the managed decoder so the
 /// production GPU raster can be compared against the independent CPU
 /// reference rather than only against another GPU raster.
-fn decode_managed_working_frame(path: &Path, description: &ColorDescription) -> WorkingFrame {
+pub(crate) fn decode_managed_working_frame(
+    path: &Path,
+    description: &ColorDescription,
+) -> WorkingFrame {
     let mut decoder = VideoDecoder::open_scaled_managed(
         path,
         Rational::new(1, 1).expect("one fps"),
@@ -3676,7 +3693,7 @@ fn cc1_full_raster_monitor_proof_has_same_render_semantics_as_monitor_preview() 
     );
 }
 
-fn generate_delivery_source(
+pub(crate) fn generate_delivery_source(
     directory: &TempDirectory,
     width: u32,
     height: u32,

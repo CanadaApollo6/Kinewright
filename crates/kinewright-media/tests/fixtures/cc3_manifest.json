@@ -1,0 +1,228 @@
+{
+  "contract": "CC3 curves and wheels",
+  "contract_token": "cc3_curves_and_wheels",
+  "manifest_version": 1,
+  "nodes": [
+    "primary_correction",
+    "color_wheels",
+    "color_curves"
+  ],
+  "working_encoding": {
+    "name": "grade709",
+    "alpha": 1.0992968,
+    "beta": 0.018053969,
+    "beta_encoded": 0.08124286,
+    "k": 0.0992968,
+    "inverse_exponent": 2.2222223,
+    "note": "grading parameterization only; encode_bt709/decode_bt709 remain the normative monitor transform"
+  },
+  "wheels_controls": [
+    { "name": "lift_master_basis_points", "min": -2000, "max": 2000, "neutral": 0 },
+    { "name": "lift_red_basis_points", "min": -2000, "max": 2000, "neutral": 0 },
+    { "name": "lift_green_basis_points", "min": -2000, "max": 2000, "neutral": 0 },
+    { "name": "lift_blue_basis_points", "min": -2000, "max": 2000, "neutral": 0 },
+    { "name": "gamma_master_thousandths", "min": 100, "max": 4000, "neutral": 1000 },
+    { "name": "gamma_red_thousandths", "min": 100, "max": 4000, "neutral": 1000 },
+    { "name": "gamma_green_thousandths", "min": 100, "max": 4000, "neutral": 1000 },
+    { "name": "gamma_blue_thousandths", "min": 100, "max": 4000, "neutral": 1000 },
+    { "name": "gain_master_thousandths", "min": 0, "max": 4000, "neutral": 1000 },
+    { "name": "gain_red_thousandths", "min": 0, "max": 4000, "neutral": 1000 },
+    { "name": "gain_green_thousandths", "min": 0, "max": 4000, "neutral": 1000 },
+    { "name": "gain_blue_thousandths", "min": 0, "max": 4000, "neutral": 1000 },
+    { "name": "bypass", "min": 0, "max": 1, "neutral": 0 }
+  ],
+  "curves": {
+    "parameters": 133,
+    "curves": [
+      "master",
+      "red",
+      "green",
+      "blue"
+    ],
+    "points_per_curve_min": 2,
+    "points_per_curve_max": 16,
+    "coordinate_min": -2000,
+    "coordinate_max": 12000,
+    "interpolation": "monotone cubic Hermite with Fritsch-Carlson tangent limiting",
+    "extrapolation": "linear from the limited end tangents"
+  },
+  "raster": {
+    "rgb_samples": 192,
+    "block_width_pixels": 8,
+    "levels": [
+      -0.5,
+      -0.25,
+      -0.1,
+      -0.02,
+      -0.005,
+      0.0,
+      0.002,
+      0.005,
+      0.018053969,
+      0.03,
+      0.06,
+      0.1,
+      0.18,
+      0.25,
+      0.35,
+      0.5,
+      0.65,
+      0.8,
+      0.9,
+      1.0,
+      1.2,
+      1.5,
+      2.5,
+      4.0
+    ],
+    "patterns": [
+      "neutral",
+      "red",
+      "green",
+      "blue",
+      "cyan",
+      "magenta",
+      "yellow",
+      "skewed"
+    ],
+    "coverage": {
+      "counting_domain": "distinct linear channel values present in the 192-sample raster",
+      "minimum_level_at_most": -0.25,
+      "maximum_level_at_least": 4.0,
+      "negative_levels_at_least": 5,
+      "levels_above_one_at_least": 6,
+      "levels_in_closed_upper_mid_at_least": 8,
+      "levels_in_half_open_upper_mid_at_least": 7
+    }
+  },
+  "tolerances": {
+    "monitor_cpu_gpu_max_code": 2,
+    "monitor_cpu_gpu_p99_code": 1,
+    "monitor_cpu_gpu_mean_code": 0.5,
+    "linear_cpu_gpu_max": 0.0015,
+    "linear_cpu_gpu_p99": 0.00075,
+    "linear_cpu_gpu_mean": 0.00025,
+    "linear_over_range_p99": 0.0009765625,
+    "linear_over_range_mean": 0.0009765625,
+    "linear_gate_in_gamut": 1.0,
+    "linear_gate_domain": 2.0,
+    "identity_ramp_monitor_max_code": 1,
+    "identity_ramp_monitor_p99_code": 1,
+    "identity_ramp_monitor_mean_code": 0.25,
+    "anchor_tolerance": 0.00002,
+    "spec_relative_tolerance": 0.00001,
+    "spec_absolute_floor": 0.0000001,
+    "minimum_changed_linear_basis_points": 500
+  },
+  "required_evidence": [
+    "cc3_parity_raster_coverage",
+    "cc3_identity",
+    "cc3_encoding_bijection",
+    "cc3_monotonicity",
+    "cc3_boundary_expected_values",
+    "cc3_boundary_finiteness",
+    "cc3_per_channel_independence",
+    "cc3_collinear_identity",
+    "cc3_node_ordering",
+    "cc3_degenerate_automation",
+    "cc3_gpu_cpu_parity",
+    "cc3_serialization_history",
+    "cc3_typed_rejections",
+    "cc3_proof_parity"
+  ],
+  "required_fixtures": [
+    {
+      "item": 1,
+      "name": "identity",
+      "tests": [
+        "cc3_inactive_nodes_are_bit_identical_to_the_stack_without_them"
+      ]
+    },
+    {
+      "item": 2,
+      "name": "encoding bijection",
+      "tests": [
+        "cc3_grade709_is_a_bijection_and_matches_the_documented_anchors"
+      ]
+    },
+    {
+      "item": 3,
+      "name": "monotonicity",
+      "tests": [
+        "cc3_monotone_nodes_never_descend_on_the_neutral_ramps"
+      ]
+    },
+    {
+      "item": 4,
+      "name": "boundary",
+      "tests": [
+        "cc3_every_control_bound_matches_a_hand_derived_expected_value",
+        "cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_infinity"
+      ]
+    },
+    {
+      "item": 5,
+      "name": "per-channel independence",
+      "tests": [
+        "cc3_red_only_changes_leave_green_and_blue_bit_identical"
+      ]
+    },
+    {
+      "item": 6,
+      "name": "collinear identity",
+      "tests": [
+        "cc3_collinear_sixteen_point_curve_is_identity_without_the_short_circuit"
+      ]
+    },
+    {
+      "item": 7,
+      "name": "ordering",
+      "tests": [
+        "cc3_node_order_changes_the_result_and_each_order_matches_the_cpu_reference"
+      ]
+    },
+    {
+      "item": 8,
+      "name": "degenerate automation",
+      "tests": [
+        "cc3_degenerate_automation_truncates_on_cpu_and_gpu"
+      ]
+    },
+    {
+      "item": 9,
+      "name": "cpu/gpu parity",
+      "tests": [
+        "cc3_gpu_compositor_matches_the_cpu_reference_on_software_fallback",
+        "cc3_gpu_compositor_matches_the_cpu_reference_on_hardware"
+      ]
+    },
+    {
+      "item": 10,
+      "name": "serialization and history",
+      "tests": [
+        "cc3_serialization_and_history_preserve_both_nodes",
+        "cc3_illegal_edits_are_rejected_atomically_with_field_observed_and_allowed"
+      ]
+    },
+    {
+      "item": 11,
+      "name": "agent plan-not-apply",
+      "owner": "kinewright-agent",
+      "tests": [
+        "kinewright-agent: plan_color_wheels / plan_color_curves evidence-only planners are outside the media crate"
+      ]
+    },
+    {
+      "item": 12,
+      "name": "proof parity",
+      "tests": [
+        "cc3_proof_parity_renders_all_three_node_kinds_identically"
+      ]
+    }
+  ],
+  "gpu_contexts": {
+    "software": "required: lavapipe/llvmpipe adapter with exact backend+adapter provenance",
+    "software_unavailable_opt_in": "optional: set KINEWRIGHT_CC1_ALLOW_HARDWARE_GPU=1 to run the default lane on the physical adapter when no lavapipe/llvmpipe adapter exists; evidence then records software_fallback=false, gpu_claim=true, lane=hardware_optin",
+    "hardware": "required on a physical-GPU lane: run cc3_gpu_compositor_matches_the_cpu_reference_on_hardware --ignored --nocapture"
+  }
+}

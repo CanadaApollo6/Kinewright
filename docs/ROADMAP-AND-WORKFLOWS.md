@@ -182,11 +182,22 @@ The first three cycle intentions are:
    implementation contract and remaining hands-on platform smoke gate are recorded
    in `CC2-SCOPES-AND-MATCHING.md`.
 
-The next primary colour slice is **CC3 curves and wheels**; its implementation
-contract is `CC3-CURVES-AND-WHEELS.md`. Before CC3 started, a six-lane review of
-CC1 and CC2 (2026-08-24) fixed the defects recorded in `CHANGELOG.md` and
-hardened both fixture suites so that every control has an analytic expected
-value and no parity case is vacuous.
+6. **CC3 curves and wheels — implemented 2026-08-24, pending platform smoke.**
+   Two ordered managed colour nodes, `color_wheels` (ASC CDL-style slope/offset/
+   power with per-channel and master integer controls) and `color_curves`
+   (master/red/green/blue monotone cubic Hermite curves with integer points),
+   execute in `clip.effects` order inside the CC1 working pipeline through an
+   invertible `grade709` grading encoding. Both nodes are serialized as ordinary
+   integer parameters, carry a `bypass` token, keyframe under an explicit policy,
+   reset through existing operations, and are inspected, planned
+   (`plan_color_wheels`/`plan_color_curves`), and rendered on the GPU node stack
+   with an independent CPU reference and a fixture suite in `cc3_fixtures.rs`.
+   The contract is `CC3-CURVES-AND-WHEELS.md`.
+
+Before CC3 started, a six-lane review of CC1 and CC2 (2026-08-24) fixed the
+defects recorded in `CHANGELOG.md` and hardened both fixture suites so that
+every control has an analytic expected value and no parity case is vacuous.
+The next primary colour slice is **CC4 look management**.
 
 Within that cadence, three workstreams remain active:
 
@@ -359,7 +370,8 @@ constructors, compositor inputs, `ExportSettings`, and FFmpeg stream/container
 metadata. Later stages cannot treat those surfaces as implicit or start before the
 required earlier exit gate passes.
 
-**Current status (2026-08-24): CC0, M41, CC1, M42, and CC2 are complete.** CC0's exit evidence
+**Current status (2026-08-24): CC0, M41, CC1, M42, CC2, and CC3 are complete
+apart from the CC3 hands-on platform smoke gate.** CC0's exit evidence
 includes legacy project migration, known/partial/unknown and 10-bit probe fixtures,
 visible human and agent inspection, an undoable source override, delivery rejection
 outside the current contract, and an encoded file decoded again to verify its
@@ -372,8 +384,10 @@ evidence. M42 adds independent Source/Program monitoring, explicit video/audio
 patch destinations, atomic compound edits, and mandatory live source revalidation.
 CC2 adds deterministic full-raster-aware scopes, ROI and temporal evidence, an
 asynchronous human reference workflow, and revision-gated two-shot matching
-proposals that expose exact operations without hidden changes. CC3 curves and
-wheels is the next primary colour slice.
+proposals that expose exact operations without hidden changes. CC3 adds the
+ordered wheels and curves nodes, the `grade709` grading encoding, the widened
+GPU node-stack ABI, the wheel and curve-editor widgets, and evidence-only
+wheel/curve planners. CC4 look management is the next primary colour slice.
 
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |

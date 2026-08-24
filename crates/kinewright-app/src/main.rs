@@ -3,6 +3,8 @@ mod captions;
 mod chat_ui;
 mod color_scopes_ui;
 mod color_ui;
+mod color_wheel_widget;
+mod curve_editor_widget;
 mod edit_diff;
 mod error_ui;
 mod export_ui;
