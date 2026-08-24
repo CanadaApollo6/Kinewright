@@ -8,8 +8,10 @@ use std::{
 };
 
 use kinewright_core::{
-    AssetId, Document, ExportCancellation, ExportSettings, MediaAsset, MediaKind, Operation,
-    Rational, TimeCode, Track, TrackId, TrackKind, map_source_range_to_project,
+    AssetId, ColorBitDepth, ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange,
+    ColorTransfer, ColorWhitePoint, Document, ExportCancellation, ExportSettings, MediaAsset,
+    MediaKind, Operation, Rational, TimeCode, Track, TrackId, TrackKind,
+    map_source_range_to_project,
 };
 
 use crate::{
@@ -389,6 +391,149 @@ fn generate_vfr(output: &Path) {
     );
 }
 
+fn generate_color_video(output: &Path, filter: Option<&str>, pixel_format: &str) {
+    let source = "testsrc2=size=64x64:rate=1:duration=1";
+    let mut arguments = vec!["-f", "lavfi", "-i", source];
+    if let Some(filter) = filter {
+        arguments.extend(["-vf", filter]);
+    }
+    arguments.extend([
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        pixel_format,
+        "-an",
+    ]);
+    run_ffmpeg(&arguments, output);
+}
+
+#[test]
+fn probe_preserves_tagged_and_untagged_source_color_metadata() {
+    initialize_ffmpeg().unwrap();
+    let directory = MatrixDirectory::new("m8-color-probe");
+    let tagged = directory.path("tagged-rec709.mp4");
+    generate_color_video(
+        &tagged,
+        Some("setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709"),
+        "yuv420p",
+    );
+    let tagged_asset = probe_path(&tagged, AssetId(1)).unwrap();
+    assert_eq!(
+        tagged_asset.color_description.primaries,
+        ColorPrimaries::Bt709
+    );
+    assert_eq!(
+        tagged_asset.color_description.transfer,
+        ColorTransfer::Bt709
+    );
+    assert_eq!(tagged_asset.color_description.matrix, ColorMatrix::Bt709);
+    assert_eq!(tagged_asset.color_description.range, ColorRange::Limited);
+    assert_eq!(
+        tagged_asset.color_description.white_point,
+        ColorWhitePoint::Unknown
+    );
+    assert_eq!(
+        tagged_asset.color_description.bit_depth,
+        ColorBitDepth::Eight
+    );
+    assert_eq!(
+        tagged_asset.color_description.provenance,
+        ColorProvenance::StreamMetadata
+    );
+    assert_eq!(
+        tagged_asset.color_description.confidence_basis_points,
+        10_000
+    );
+
+    let partial = directory.path("partial-rec709.mp4");
+    generate_color_video(&partial, Some("setparams=color_primaries=bt709"), "yuv420p");
+    let partial_asset = probe_path(&partial, AssetId(2)).unwrap();
+    assert_eq!(
+        partial_asset.color_description.primaries,
+        ColorPrimaries::Bt709
+    );
+    assert_eq!(
+        partial_asset.color_description.transfer,
+        ColorTransfer::Unknown
+    );
+    assert_eq!(partial_asset.color_description.matrix, ColorMatrix::Unknown);
+    // FFmpeg's setparams filter preserves the format's limited-range default
+    // alongside the sole explicit primaries tag, so this fixture has two of
+    // four stream colorimetry fields plus inferred component depth.
+    assert_eq!(partial_asset.color_description.range, ColorRange::Limited);
+    assert_eq!(
+        partial_asset.color_description.bit_depth,
+        ColorBitDepth::Eight
+    );
+    assert_eq!(
+        partial_asset.color_description.provenance,
+        ColorProvenance::StreamMetadata
+    );
+    assert_eq!(
+        partial_asset.color_description.confidence_basis_points,
+        6_000
+    );
+
+    let untagged = directory.path("untagged.mp4");
+    generate_color_video(&untagged, None, "yuv420p");
+    let untagged_asset = probe_path(&untagged, AssetId(3)).unwrap();
+    assert_eq!(
+        untagged_asset.color_description.primaries,
+        ColorPrimaries::Unknown
+    );
+    assert_eq!(
+        untagged_asset.color_description.transfer,
+        ColorTransfer::Unknown
+    );
+    assert_eq!(
+        untagged_asset.color_description.matrix,
+        ColorMatrix::Unknown
+    );
+    assert_eq!(untagged_asset.color_description.range, ColorRange::Unknown);
+    assert_eq!(
+        untagged_asset.color_description.white_point,
+        ColorWhitePoint::Unknown
+    );
+    assert_eq!(
+        untagged_asset.color_description.bit_depth,
+        ColorBitDepth::Eight
+    );
+    assert_eq!(
+        untagged_asset.color_description.provenance,
+        ColorProvenance::Inferred
+    );
+    assert_eq!(
+        untagged_asset.color_description.confidence_basis_points,
+        2_000
+    );
+}
+
+#[test]
+fn probe_preserves_ten_bit_bt2020_source_metadata() {
+    initialize_ffmpeg().unwrap();
+    let directory = MatrixDirectory::new("m8-color-depth");
+    let path = directory.path("tagged-bt2020-pq-10bit.mp4");
+    generate_color_video(
+        &path,
+        Some(
+            "setparams=range=limited:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc",
+        ),
+        "yuv420p10le",
+    );
+    let asset = probe_path(&path, AssetId(1)).unwrap();
+    assert_eq!(asset.color_description.primaries, ColorPrimaries::Bt2020);
+    assert_eq!(asset.color_description.transfer, ColorTransfer::Smpte2084);
+    assert_eq!(asset.color_description.matrix, ColorMatrix::Bt2020Ncl);
+    assert_eq!(asset.color_description.range, ColorRange::Limited);
+    assert_eq!(asset.color_description.bit_depth, ColorBitDepth::Ten);
+    assert_eq!(
+        asset.color_description.provenance,
+        ColorProvenance::StreamMetadata
+    );
+}
+
 fn generate_rotated(output: &Path, directory: &MatrixDirectory) {
     let encoded = directory.path("rotation-encoded.mp4");
     run_ffmpeg(
@@ -669,6 +814,7 @@ fn validate_mixed_export(directory: &MatrixDirectory, assets: &[MediaAsset]) -> 
     let settings = ExportSettings {
         fps: document.fps,
         resolution: document.resolution,
+        delivery_color: kinewright_core::ColorContext::sdr_rec709().delivery,
         video_codec: "libx264".to_owned(),
         audio_codec: "aac".to_owned(),
         video_bitrate: 750_000,

@@ -13,6 +13,7 @@ use kinewright_core::{
 
 use crate::{
     app::KinewrightApp,
+    color_ui::color_pipeline_summary,
     icons::Icon,
     theme::{self, color, size, space},
 };
@@ -144,6 +145,7 @@ impl KinewrightApp {
         let settings = ExportSettings {
             fps,
             resolution: (self.export_dialog.width, self.export_dialog.height),
+            delivery_color: document.color_context.delivery.clone(),
             video_codec: "libx264".to_owned(),
             audio_codec: "aac".to_owned(),
             video_bitrate: 8_000_000,
@@ -266,6 +268,7 @@ impl KinewrightApp {
         let mut cancel = false;
         let caption_cues = self.timeline_caption_cues();
         let mut caption_format = None;
+        let project_color_pipeline = color_pipeline_summary(&self.focused().document.color_context);
         egui::Window::new("Export")
             .open(&mut open)
             .resizable(false)
@@ -275,6 +278,14 @@ impl KinewrightApp {
                     egui::RichText::new("H.264 video · AAC audio · MP4 container")
                         .color(color::TEXT_SECONDARY),
                 );
+                ui.add_space(space::TWO);
+                ui.label(theme::caps_label("COLOR PIPELINE", color::TEXT_MUTED));
+                for stage in &project_color_pipeline {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(stage).color(color::TEXT_SECONDARY))
+                            .wrap(),
+                    );
+                }
                 ui.add_space(space::TWO);
                 let before_aspect = self.export_dialog.delivery_aspect;
                 ui.horizontal(|ui| {

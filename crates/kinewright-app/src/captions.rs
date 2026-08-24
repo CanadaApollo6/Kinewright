@@ -127,6 +127,7 @@ mod tests {
                 },
             ],
             fps: Rational::new(30, 1).unwrap(),
+            color_context: kinewright_core::ColorContext::default(),
             ..Document::default()
         }
     }

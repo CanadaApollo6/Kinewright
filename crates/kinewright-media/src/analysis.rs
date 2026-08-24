@@ -444,6 +444,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Audio,
             resolution: None,
+            color_description: kinewright_core::ColorDescription::default(),
         }
     }
 

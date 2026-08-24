@@ -152,8 +152,10 @@ silently become a second unbounded project.
 
 The first three cycle intentions are:
 
-1. **CC0 colour contract** as the primary slice; write the offline/relink and
-   generated-proxy contract as the next non-colour brief.
+1. **CC0 colour contract — completed 2026-08-24.** The implementation now carries
+   explicit source/working/monitoring/delivery metadata through probe, project,
+   human and agent inspection, conformance, and tagged SDR Rec.709 export. The
+   offline/relink and generated-proxy contract remains the next non-colour brief.
 2. **Offline/relink and proxy/cache visibility** as the primary slice; begin only
    bounded CC1 groundwork after CC0's migration and metadata gates pass.
 3. **CC1 managed SDR primary correction** as the primary slice; select the next
@@ -204,9 +206,14 @@ The present implementation is a useful base, not yet a managed colour pipeline:
   histograms, means, clipping counts, and a 64-column luma waveform.
 - Masks and tracking exist, but the current compositor applies the mask to final
   layer alpha. That is **not** yet an effect-scoped colour secondary.
-- `MediaAsset` does not yet preserve an explicit source colour description. Decode
-  converts into 8-bit RGBA, the compositor target is `Rgba8Unorm`, and export is an
-  8-bit H.264/YUV420P path without a complete project colour-management contract.
+- CC0 now preserves explicit source, working, monitoring, and delivery colour
+  descriptions with provenance and confidence. Probe keeps unknown values honest;
+  editors and agents can inspect them and apply an undoable metadata override.
+  Current export accepts only the declared 8-bit SDR Rec.709 contract and writes
+  explicit H.264/YUV420P colour tags.
+- Decode still converts into 8-bit RGBA and the compositor target remains
+  `Rgba8Unorm`. CC0 records and validates the contract but does not perform an input
+  colour transform; the defined high-precision managed transform path is CC1.
 - Effect parameters are flattened into fixed compositor inputs rather than a true
   ordered colour-node stack; multiple creative LUT stages are therefore not a
   supported grading model.
@@ -307,6 +314,13 @@ CC0 explicitly covers probe/import, serialized project migration and fixture
 constructors, compositor inputs, `ExportSettings`, and FFmpeg stream/container
 metadata. Later stages cannot treat those surfaces as implicit or start before the
 required earlier exit gate passes.
+
+**Current status (2026-08-24): CC0 is complete.** Its exit evidence includes legacy
+project migration, known/partial/unknown and 10-bit probe fixtures, visible human and
+agent inspection, an undoable source override, delivery rejection outside the current
+contract, and an encoded file decoded again to verify its representable Rec.709 tags.
+The next primary slice is the offline/relink and proxy/cache workflow; CC1 groundwork
+may now proceed only as the bounded secondary lane defined above.
 
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |

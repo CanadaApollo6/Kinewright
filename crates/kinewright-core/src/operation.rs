@@ -5,18 +5,25 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, CaptionPreset, Clip, ClipContent,
-    ClipId, Document, Effect, EffectId, FreezeFrame, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker,
-    MarkerId, MediaAsset, MediaBin, ParamValue, StringOut, StringOutId, SyncGroup, SyncGroupId,
-    ThreePointMode, TimeCode, TimeMappingError, Title, TitleParameterKind, TitlePosition, Track,
-    TrackId, TrackKind, Transition, is_audio_effect, map_source_range_to_project,
-    title_parameter_descriptor,
+    AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, COLOR_CONFIDENCE_MAX_BASIS_POINTS,
+    CaptionPreset, Clip, ClipContent, ClipId, ColorDescription, ColorProvenance, Document, Effect,
+    EffectId, FreezeFrame, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset,
+    MediaBin, ParamValue, StringOut, StringOutId, SyncGroup, SyncGroupId, ThreePointMode, TimeCode,
+    TimeMappingError, Title, TitleParameterKind, TitlePosition, Track, TrackId, TrackKind,
+    Transition, is_audio_effect, map_source_range_to_project, title_parameter_descriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Operation {
     AddAsset {
         asset: MediaAsset,
+    },
+    /// Replace one asset's interpreted source colour metadata with an explicit
+    /// user override. Probe/container metadata enters through `AddAsset`, not
+    /// through this mutation path.
+    SetAssetColorDescription {
+        asset: AssetId,
+        color_description: ColorDescription,
     },
     UpsertBin {
         bin: MediaBin,
@@ -458,6 +465,15 @@ pub enum OpError {
     InvalidAssetRate(AssetId),
     #[error("asset {0} has a non-positive duration")]
     InvalidAssetDuration(AssetId),
+    #[error("color confidence is {actual}, outside the inclusive range 0..=10000 basis points")]
+    ColorConfidenceOutOfRange { actual: u16 },
+    #[error("asset {asset} color override must have positive confidence")]
+    ZeroConfidenceColorOverride { asset: AssetId },
+    #[error("asset {asset} color override requires user_override provenance, got {actual:?}")]
+    InvalidColorOverrideProvenance {
+        asset: AssetId,
+        actual: ColorProvenance,
+    },
     #[error("document resolution must be non-zero")]
     InvalidResolution,
     #[error("document duration {actual:?} does not match calculated duration {expected:?}")]
@@ -626,6 +642,10 @@ pub enum BatchError {
 fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpError> {
     match operation {
         Operation::AddAsset { asset } => add_asset(doc, asset.clone()),
+        Operation::SetAssetColorDescription {
+            asset,
+            color_description,
+        } => set_asset_color_description(doc, *asset, color_description.clone()),
         Operation::UpsertBin { bin } => {
             upsert_bin(doc, bin.clone());
             Ok(())
@@ -810,6 +830,30 @@ fn add_asset(doc: &mut Document, asset: MediaAsset) -> Result<(), OpError> {
     }
     validate_asset(&asset)?;
     doc.media_pool.push(asset);
+    Ok(())
+}
+
+fn set_asset_color_description(
+    doc: &mut Document,
+    asset_id: AssetId,
+    color_description: ColorDescription,
+) -> Result<(), OpError> {
+    let index = doc
+        .media_pool
+        .iter()
+        .position(|asset| asset.id == asset_id)
+        .ok_or(OpError::MissingAsset(asset_id))?;
+    validate_color_description(&color_description)?;
+    if color_description.confidence_basis_points == 0 {
+        return Err(OpError::ZeroConfidenceColorOverride { asset: asset_id });
+    }
+    if color_description.provenance != ColorProvenance::UserOverride {
+        return Err(OpError::InvalidColorOverrideProvenance {
+            asset: asset_id,
+            actual: color_description.provenance,
+        });
+    }
+    doc.media_pool[index].color_description = color_description;
     Ok(())
 }
 
@@ -2246,6 +2290,16 @@ fn validate_asset(asset: &MediaAsset) -> Result<(), OpError> {
     {
         return Err(OpError::InvalidResolution);
     }
+    validate_color_description(&asset.color_description)?;
+    Ok(())
+}
+
+fn validate_color_description(color_description: &ColorDescription) -> Result<(), OpError> {
+    if color_description.confidence_basis_points > COLOR_CONFIDENCE_MAX_BASIS_POINTS {
+        return Err(OpError::ColorConfidenceOutOfRange {
+            actual: color_description.confidence_basis_points,
+        });
+    }
     Ok(())
 }
 
@@ -2615,6 +2669,13 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
     }
     if doc.resolution.0 == 0 || doc.resolution.1 == 0 {
         return Err(OpError::InvalidResolution);
+    }
+    for color_description in [
+        &doc.color_context.working,
+        &doc.color_context.monitoring,
+        &doc.color_context.delivery,
+    ] {
+        validate_color_description(color_description)?;
     }
 
     let mut asset_ids = HashSet::new();

@@ -531,6 +531,7 @@ fn fixture_document() -> Document {
         fps: Rational::new(30, 1).unwrap(),
         kind: MediaKind::Video,
         resolution: Some((320, 180)),
+        color_description: kinewright_core::ColorDescription::default(),
     };
     Document {
         catalog: kinewright_core::MediaCatalog::default(),
@@ -575,5 +576,6 @@ fn fixture_document() -> Document {
         fps: Rational::new(30, 1).unwrap(),
         resolution: (320, 180),
         duration: TimeCode(150),
+        color_context: kinewright_core::ColorContext::default(),
     }
 }

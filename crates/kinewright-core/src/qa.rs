@@ -2,7 +2,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CaptionPreset, ClipContent, ClipId, Document, Effect, MediaKind, ParamValue, TimeCode,
+    AssetId, CaptionPreset, ClipContent, ClipId, ColorBitDepth, ColorMatrix, ColorPrimaries,
+    ColorProvenance, ColorRange, ColorTransfer, Document, Effect, MediaKind, ParamValue, TimeCode,
     TitlePixelBounds, TrackId, title_layout,
 };
 
@@ -19,6 +20,11 @@ pub struct QaIssue {
     pub severity: QaSeverity,
     pub code: String,
     pub message: String,
+    /// Source asset associated with an issue that is not specific to one
+    /// timeline clip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub asset: Option<AssetId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub track: Option<TrackId>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,6 +70,45 @@ pub fn qa_document(document: &Document) -> QaReport {
         ));
     }
     for asset in &document.media_pool {
+        let mut source_color_concerns = Vec::new();
+        if matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo) {
+            if matches!(asset.color_description.primaries, ColorPrimaries::Unknown) {
+                source_color_concerns.push("primaries are unknown");
+            }
+            if matches!(asset.color_description.transfer, ColorTransfer::Unknown) {
+                source_color_concerns.push("transfer is unknown");
+            }
+            if matches!(asset.color_description.matrix, ColorMatrix::Unknown) {
+                source_color_concerns.push("matrix is unknown");
+            }
+            if matches!(asset.color_description.range, ColorRange::Unknown) {
+                source_color_concerns.push("range is unknown");
+            }
+            if matches!(asset.color_description.bit_depth, ColorBitDepth::Unknown) {
+                source_color_concerns.push("bit depth is unknown");
+            }
+            match asset.color_description.provenance {
+                ColorProvenance::Unknown => source_color_concerns.push("provenance is unknown"),
+                ColorProvenance::Inferred => source_color_concerns.push("provenance is inferred"),
+                _ => {}
+            }
+        }
+        if !source_color_concerns.is_empty() {
+            issues.push(QaIssue {
+                severity: QaSeverity::Warning,
+                code: "source_color_metadata_uncertain".to_owned(),
+                message: format!(
+                    "Asset {} ({:?}) needs source colour review: {}.",
+                    asset.id,
+                    asset.name,
+                    source_color_concerns.join(", ")
+                ),
+                asset: Some(asset.id),
+                track: None,
+                clip: None,
+                range: None,
+            });
+        }
         if !asset.path.exists() {
             issues.push(issue(
                 QaSeverity::Error,
@@ -359,6 +404,7 @@ fn issue(
         severity,
         code: code.to_owned(),
         message: message.into(),
+        asset: None,
         track,
         clip,
         range,
@@ -384,6 +430,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::AudioVideo,
             resolution: Some((1920, 1080)),
+            color_description: crate::ColorDescription::default(),
         };
         let document = Document {
             tracks: vec![Track {
@@ -440,6 +487,108 @@ mod tests {
             assert!(report.issues.iter().any(|issue| issue.code == code));
         }
         assert!(!report.export_ready());
+    }
+
+    #[test]
+    fn source_color_warning_is_typed_and_non_blocking() {
+        let asset = MediaAsset {
+            id: crate::AssetId(7),
+            path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+            name: "unknown-source".to_owned(),
+            duration: TimeCode(1),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Video,
+            resolution: Some((1920, 1080)),
+            color_description: crate::ColorDescription::unknown(),
+        };
+        let document = Document {
+            media_pool: vec![asset],
+            duration: TimeCode(1),
+            ..Document::default()
+        };
+
+        let report = qa_document(&document);
+        let warning = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "source_color_metadata_uncertain")
+            .expect("unknown video source colour should be visible to readiness checks");
+
+        assert_eq!(warning.severity, QaSeverity::Warning);
+        assert_eq!(warning.asset, Some(crate::AssetId(7)));
+        assert!(warning.message.contains("primaries are unknown"));
+        assert!(warning.message.contains("provenance is unknown"));
+        assert!(report.export_ready());
+    }
+
+    #[test]
+    fn unknown_white_point_alone_does_not_warn_about_source_color() {
+        let asset = MediaAsset {
+            id: crate::AssetId(8),
+            path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+            name: "probe-complete".to_owned(),
+            duration: TimeCode(1),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::AudioVideo,
+            resolution: Some((1920, 1080)),
+            color_description: crate::ColorDescription {
+                primaries: ColorPrimaries::Bt709,
+                transfer: ColorTransfer::Bt709,
+                matrix: ColorMatrix::Bt709,
+                range: ColorRange::Limited,
+                white_point: crate::ColorWhitePoint::Unknown,
+                bit_depth: ColorBitDepth::Eight,
+                confidence_basis_points: 10_000,
+                provenance: ColorProvenance::StreamMetadata,
+            },
+        };
+        let document = Document {
+            media_pool: vec![asset],
+            duration: TimeCode(1),
+            ..Document::default()
+        };
+
+        let report = qa_document(&document);
+
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "source_color_metadata_uncertain")
+        );
+        assert!(report.export_ready());
+    }
+
+    #[test]
+    fn inferred_source_color_provenance_warns_even_when_fields_are_known() {
+        let mut color_description = crate::ColorContext::sdr_rec709().delivery;
+        color_description.provenance = ColorProvenance::Inferred;
+        let asset = MediaAsset {
+            id: crate::AssetId(9),
+            path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+            name: "inferred-source".to_owned(),
+            duration: TimeCode(1),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Video,
+            resolution: Some((1920, 1080)),
+            color_description,
+        };
+        let document = Document {
+            media_pool: vec![asset],
+            duration: TimeCode(1),
+            ..Document::default()
+        };
+
+        let report = qa_document(&document);
+        let warning = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "source_color_metadata_uncertain")
+            .expect("inferred provenance should be visible to readiness checks");
+
+        assert_eq!(warning.asset, Some(crate::AssetId(9)));
+        assert!(warning.message.contains("provenance is inferred"));
+        assert!(report.export_ready());
     }
 
     #[test]

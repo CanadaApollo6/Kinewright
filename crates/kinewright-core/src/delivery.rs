@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ClipContent, Document, Effect, EffectId, ExportCancellation, ExportSettings, OpError,
-    ParamValue, QaIssue, QaSeverity, qa_document,
+    ClipContent, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
+    ColorRange, ColorTransfer, ColorWhitePoint, Document, Effect, EffectId, ExportCancellation,
+    ExportSettings, OpError, ParamValue, QaIssue, QaSeverity, qa_document,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -95,6 +96,7 @@ impl DeliveryProfile {
         ExportSettings {
             fps: document.fps,
             resolution: self.resolution(document.resolution),
+            delivery_color: document.color_context.delivery.clone(),
             video_codec: "libx264".to_owned(),
             audio_codec: "aac".to_owned(),
             video_bitrate,
@@ -109,6 +111,7 @@ pub struct DeliveryConformanceReport {
     pub profile: DeliveryProfile,
     pub container: String,
     pub resolution: (u32, u32),
+    pub delivery_color: ColorDescription,
     pub video_codec: String,
     pub audio_codec: String,
     pub video_bitrate: u64,
@@ -255,21 +258,50 @@ pub fn delivery_conformance(
                 "Delivery raster {}x{} must be positive and even for H.264.",
                 settings.resolution.0, settings.resolution.1
             ),
+            asset: None,
             track: None,
             clip: None,
             range: None,
         });
     }
+    if !delivery_color_supported(&settings.delivery_color) {
+        issues.push(QaIssue {
+            severity: QaSeverity::Error,
+            code: "unsupported_delivery_color".to_owned(),
+            message: "Current libx264/YUV420P export requires explicit 8-bit SDR Rec.709 delivery colour metadata (BT.709 primaries, transfer, and matrix; limited range; D65; nonzero confidence; application-default or user-override provenance).".to_owned(),
+            asset: None,
+            track: None,
+            clip: None,
+            range: None,
+        });
+    }
+    let delivery_color = settings.delivery_color.clone();
     Ok(DeliveryConformanceReport {
         profile,
         container: profile.container_extension().to_owned(),
         resolution: settings.resolution,
+        delivery_color,
         video_codec: settings.video_codec,
         audio_codec: settings.audio_codec,
         video_bitrate: settings.video_bitrate,
         audio_bitrate: settings.audio_bitrate,
         issues,
     })
+}
+
+fn delivery_color_supported(color: &ColorDescription) -> bool {
+    color.confidence_is_valid()
+        && color.confidence_basis_points > 0
+        && matches!(
+            &color.provenance,
+            ColorProvenance::ApplicationDefault | ColorProvenance::UserOverride
+        )
+        && matches!(&color.primaries, ColorPrimaries::Bt709)
+        && matches!(&color.transfer, ColorTransfer::Bt709)
+        && matches!(&color.matrix, ColorMatrix::Bt709)
+        && matches!(&color.range, ColorRange::Limited)
+        && matches!(&color.white_point, ColorWhitePoint::D65)
+        && matches!(&color.bit_depth, ColorBitDepth::Eight)
 }
 
 /// Materialize a non-destructive delivery document from a master cut.
@@ -358,7 +390,8 @@ pub fn document_for_delivery_variant(
 #[cfg(test)]
 mod tests {
     use crate::{
-        AssetId, Clip, MediaAsset, MediaKind, Rational, TimeCode, Track, TrackId, TrackKind,
+        AssetId, Clip, ColorContext, ColorTransfer, MediaAsset, MediaKind, Rational, TimeCode,
+        Track, TrackId, TrackKind,
     };
 
     use super::*;
@@ -372,6 +405,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Video,
             resolution: Some((1920, 1080)),
+            color_description: crate::ColorDescription::default(),
         };
         Document {
             tracks: vec![Track {
@@ -588,6 +622,7 @@ mod tests {
             assert_eq!(report.profile, profile);
             assert_eq!(report.container, "mp4");
             assert_eq!(report.resolution, settings.resolution);
+            assert_eq!(report.delivery_color, settings.delivery_color);
             assert_eq!(report.video_codec, "libx264");
             assert_eq!(report.audio_codec, "aac");
             assert!(report.export_ready());
@@ -620,5 +655,113 @@ mod tests {
         assert_eq!(settings.resolution, (1920, 1080));
         assert_eq!(settings.video_bitrate, 12_000_000);
         assert_eq!(settings.audio_bitrate, 384_000);
+    }
+
+    #[test]
+    fn every_delivery_profile_uses_the_document_delivery_color() {
+        let document = fixture();
+        assert_eq!(
+            document.color_context.delivery,
+            ColorContext::sdr_rec709().delivery
+        );
+        for profile in DeliveryProfile::ALL {
+            let settings = profile.export_settings(&document, ExportCancellation::default());
+
+            assert_eq!(settings.delivery_color, document.color_context.delivery);
+        }
+    }
+
+    #[test]
+    fn custom_delivery_context_propagates_and_is_rejected_when_unsupported() {
+        let mut document = fixture();
+        document.media_pool[0].path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let mut custom_delivery = ColorContext::sdr_rec709().delivery;
+        custom_delivery.transfer = ColorTransfer::Smpte2084;
+        document.color_context.delivery = custom_delivery.clone();
+
+        let settings =
+            DeliveryProfile::SourceMaster.export_settings(&document, ExportCancellation::default());
+        assert_eq!(settings.delivery_color, custom_delivery);
+
+        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
+            .expect("custom delivery context should still produce a report");
+        assert_eq!(report.delivery_color, custom_delivery);
+        assert!(!report.export_ready());
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "unsupported_delivery_color")
+        );
+    }
+
+    #[test]
+    fn delivery_color_allows_only_application_default_or_user_override_provenance() {
+        let mut document = fixture();
+        document.media_pool[0].path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        document.color_context.delivery.provenance = ColorProvenance::UserOverride;
+        let user_override =
+            delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50).unwrap();
+        assert!(user_override.export_ready());
+
+        for provenance in [
+            ColorProvenance::Unknown,
+            ColorProvenance::ContainerMetadata,
+            ColorProvenance::StreamMetadata,
+            ColorProvenance::SidecarMetadata,
+            ColorProvenance::Inferred,
+            ColorProvenance::Other("future_project_source".to_owned()),
+        ] {
+            document.color_context.delivery.provenance = provenance.clone();
+            let report =
+                delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50).unwrap();
+
+            assert!(
+                !report.export_ready(),
+                "unexpected supported delivery provenance: {provenance:?}"
+            );
+            assert!(
+                report
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == "unsupported_delivery_color")
+            );
+        }
+    }
+
+    #[test]
+    fn uncertain_source_color_is_a_non_blocking_conformance_warning_with_asset_id() {
+        let mut document = fixture();
+        document.media_pool[0].path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+
+        let report =
+            delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50).unwrap();
+        let warning = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "source_color_metadata_uncertain")
+            .expect("source colour warning should flow into conformance");
+
+        assert_eq!(warning.severity, QaSeverity::Warning);
+        assert_eq!(warning.asset, Some(AssetId(1)));
+        assert!(report.export_ready());
+    }
+
+    #[test]
+    fn delivery_conformance_report_serializes_typed_delivery_color() {
+        let mut document = fixture();
+        document.media_pool[0].path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
+            .expect("fixture should produce a conformance report");
+        let serialized = serde_json::to_value(&report).expect("report should serialize");
+
+        assert_eq!(
+            serialized["delivery_color"],
+            serde_json::to_value(&report.delivery_color).expect("colour should serialize")
+        );
     }
 }

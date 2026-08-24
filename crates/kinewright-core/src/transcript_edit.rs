@@ -200,6 +200,7 @@ mod tests {
                 fps,
                 kind: MediaKind::Audio,
                 resolution: None,
+                color_description: crate::ColorDescription::default(),
             };
             clips.push(Clip {
                 id: ClipId(*id),
@@ -221,6 +222,7 @@ mod tests {
         Document {
             catalog: crate::MediaCatalog::default(),
             audio_mix: crate::AudioMix::default(),
+            color_context: crate::ColorContext::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Audio,

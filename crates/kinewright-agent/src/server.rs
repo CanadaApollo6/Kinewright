@@ -625,6 +625,7 @@ impl KinewrightMcp {
                     render_timeline_state(&document)
                 )))
             }
+            "get_color_context" => self.color_context(),
             "get_clip_info" => {
                 let args: ClipInfoArgs = decode_args("get_clip_info", arguments)?;
                 let document = self.document()?;
@@ -1246,6 +1247,42 @@ impl KinewrightMcp {
         Ok(success_text(json))
     }
 
+    fn color_context(&self) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let assets = document
+            .media_pool
+            .iter()
+            .map(|asset| {
+                serde_json::json!({
+                    "id": asset.id.0,
+                    "name": asset.name,
+                    "color_description": asset.color_description,
+                })
+            })
+            .collect::<Vec<_>>();
+        let value = serde_json::json!({
+            "timeline_revision": revision.0,
+            "color_context": {
+                "working": document.color_context.working,
+                "monitoring": document.color_context.monitoring,
+                "delivery": document.color_context.delivery,
+            },
+            "assets": assets,
+        });
+        Ok(success_structured(
+            format!(
+                "timeline_revision={} assets={} working={} monitoring={} delivery={}\n{}",
+                revision,
+                value["assets"].as_array().map_or(0, Vec::len),
+                value["color_context"]["working"],
+                value["color_context"]["monitoring"],
+                value["color_context"]["delivery"],
+                value,
+            ),
+            value,
+        ))
+    }
+
     fn delivery_variants() -> CallToolResult {
         let variants = DeliveryAspect::ALL.map(|aspect| {
             let (width, height) = aspect.resolution();
@@ -1282,6 +1319,7 @@ impl KinewrightMcp {
                     "numerator": settings.fps.numerator(),
                     "denominator": settings.fps.denominator(),
                 },
+                "delivery_color": settings.delivery_color,
             })
         });
         let structured = serde_json::json!({
@@ -1312,6 +1350,7 @@ impl KinewrightMcp {
         let structured = serde_json::json!({
             "timeline_revision": revision,
             "export_ready": report.export_ready(),
+            "delivery_color": report.delivery_color,
             "report": report,
         });
         Ok(success_structured(
@@ -1358,6 +1397,16 @@ impl KinewrightMcp {
             .iter()
             .filter(|issue| issue.severity == kinewright_core::QaSeverity::Error)
             .count();
+        let qa_warnings = qa
+            .issues
+            .iter()
+            .filter(|issue| issue.severity == kinewright_core::QaSeverity::Warning)
+            .collect::<Vec<_>>();
+        let conformance_warnings = conformance
+            .issues
+            .iter()
+            .filter(|issue| issue.severity == kinewright_core::QaSeverity::Warning)
+            .collect::<Vec<_>>();
         let ready = pending_silence_assets.is_empty()
             && cuttable.is_empty()
             && qa_errors == 0
@@ -1389,14 +1438,18 @@ impl KinewrightMcp {
             "qa": {
                 "export_ready": qa.export_ready(),
                 "error_count": qa_errors,
-                "warning_count": qa.count(kinewright_core::QaSeverity::Warning),
+                "warning_count": qa_warnings.len(),
+                "warning_issues": qa_warnings,
                 "blocking_issues": qa.issues.iter().filter(|issue| issue.severity == kinewright_core::QaSeverity::Error).collect::<Vec<_>>(),
             },
             "delivery": {
                 "profile": args.profile,
+                "delivery_color": conformance.delivery_color,
                 "export_ready": conformance.export_ready(),
                 "resolution": conformance.resolution,
                 "error_count": conformance_errors,
+                "warning_count": conformance_warnings.len(),
+                "warning_issues": conformance_warnings,
                 "blocking_issues": conformance.issues.iter().filter(|issue| issue.severity == kinewright_core::QaSeverity::Error).collect::<Vec<_>>(),
             },
             "storyboard": storyboard.structured_content,
@@ -3111,6 +3164,7 @@ impl KinewrightMcp {
                     "denominator": asset.fps.denominator(),
                 },
                 "resolution": asset.resolution,
+                "color_description": asset.color_description,
             },
             "source_monitor": {
                 "source_in": source_in.0,
@@ -5882,6 +5936,12 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "get_color_context",
+            "Return the project working, monitoring, and delivery colour descriptions plus every asset's source colour description and the exact timeline revision. This is metadata inspection only; unknown source metadata remains explicit and is never inferred as Rec.709.",
+            schema_object::<EmptyArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "search_capabilities",
             "Search only unnamed editing, perception, proof, or delivery needs. Skip exact names in the user request; batch independent terms.",
             schema_object::<CapabilitySearchArgs>(),
@@ -8148,10 +8208,12 @@ fn render_plan_outcomes(
 mod tests {
     use super::*;
     use kinewright_core::{
-        AssetBeats, AssetId, AssetSceneChanges, AssetTranscript, BeatMarker, Clip, FrameTexture,
-        Marker, MarkerId, MediaAsset, MediaError, MediaEvent, MediaKind, ParamValue, Rational,
-        RgbaImage, SceneChange, SceneStatus, SilenceSpan, SilenceStatus, TimelineSceneChange,
-        TimelineSilenceSpan, Title, Track, TrackId, TrackKind, TranscriptWord, VisualAssetResult,
+        AssetBeats, AssetId, AssetSceneChanges, AssetTranscript, BeatMarker, Clip, ColorBitDepth,
+        ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer,
+        ColorWhitePoint, FrameTexture, Marker, MarkerId, MediaAsset, MediaError, MediaEvent,
+        MediaKind, ParamValue, Rational, RgbaImage, SceneChange, SceneStatus, SilenceSpan,
+        SilenceStatus, TimelineSceneChange, TimelineSilenceSpan, Title, Track, TrackId, TrackKind,
+        TranscriptWord, VisualAssetResult,
     };
     use serde_json::json;
     use std::{
@@ -8342,6 +8404,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Video,
             resolution: Some((320, 180)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let document = Document {
             catalog: kinewright_core::MediaCatalog::default(),
@@ -8370,6 +8433,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             resolution: (320, 180),
             duration: TimeCode(60),
+            color_context: kinewright_core::ColorContext::default(),
         };
         let media = Arc::new(NoopMedia::default());
         (Core::spawn(document).unwrap(), media.clone(), media)
@@ -8401,6 +8465,7 @@ mod tests {
             fps,
             kind: MediaKind::Video,
             resolution: Some((1_920, 1_080)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let music = MediaAsset {
             id: AssetId(9),
@@ -8410,6 +8475,7 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((1_920, 1_080)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let document = Document {
             tracks: vec![
@@ -8462,6 +8528,7 @@ mod tests {
             fps,
             kind: MediaKind::Video,
             resolution: Some((1_920, 1_080)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let music = MediaAsset {
             id: AssetId(9),
@@ -8471,6 +8538,7 @@ mod tests {
             fps,
             kind: MediaKind::Audio,
             resolution: None,
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let media_clip = |id, asset, track_start| Clip {
             id: ClipId(id),
@@ -8525,6 +8593,7 @@ mod tests {
             fps: source_fps,
             kind: MediaKind::Audio,
             resolution: None,
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let document = Document {
             tracks: vec![Track {
@@ -8537,6 +8606,7 @@ mod tests {
             fps: Rational::new(25, 1).unwrap(),
             resolution: (1_920, 1_080),
             duration: TimeCode::ZERO,
+            color_context: kinewright_core::ColorContext::default(),
             ..Document::default()
         };
         let analysis = Arc::new(NoopMedia {
@@ -8895,6 +8965,21 @@ mod tests {
         let readiness = readiness.structured_content.unwrap();
         assert_eq!(readiness["silence"]["checked"], false);
         assert_eq!(readiness["silence"]["pending_asset_ids"], json!([]));
+        let qa_color_warning = readiness["qa"]["warning_issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|issue| issue["code"] == "source_color_metadata_uncertain")
+            .expect("readiness should expose source colour review by asset");
+        assert_eq!(qa_color_warning["asset"], 1);
+        assert_eq!(qa_color_warning["severity"], "warning");
+        let delivery_color_warning = readiness["delivery"]["warning_issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|issue| issue["code"] == "source_color_metadata_uncertain")
+            .expect("delivery readiness should retain source colour review");
+        assert_eq!(delivery_color_warning["asset"], 1);
     }
 
     #[test]
@@ -9884,6 +9969,7 @@ mod tests {
             "plan_music_fit",
             "plan_speaker_multicam",
             "track_reframe_subject",
+            "get_color_context",
             "get_delivery_profiles",
             "get_delivery_conformance",
             "queue_export",
@@ -9901,6 +9987,224 @@ mod tests {
             .collect::<Vec<_>>();
         served.sort_unstable();
         assert_eq!(registered, served);
+
+        let (core, playback, analysis) = fixture();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let profiles = service.delivery_profiles().unwrap();
+        let profiles = profiles.structured_content.unwrap();
+        let source_master = profiles["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|profile| profile["id"] == "source_master")
+            .unwrap();
+        assert_eq!(source_master["delivery_color"]["primaries"], "bt709");
+        assert_eq!(source_master["delivery_color"]["matrix"], "bt709");
+        assert_eq!(source_master["delivery_color"]["range"], "limited");
+
+        let conformance = service
+            .delivery_conformance(&DeliveryConformanceArgs {
+                profile: DeliveryProfile::SourceMaster,
+                focus_x_percent: 50,
+                focus_y_percent: 50,
+            })
+            .unwrap();
+        let conformance = conformance.structured_content.unwrap();
+        assert_eq!(
+            conformance["delivery_color"],
+            source_master["delivery_color"]
+        );
+        assert_eq!(
+            conformance["report"]["delivery_color"],
+            source_master["delivery_color"]
+        );
+    }
+
+    #[test]
+    fn color_context_is_a_read_only_internal_capability_with_revisioned_source_data() {
+        let registry = KinewrightMcp::capability_tools().unwrap();
+        assert!(registry.iter().any(|tool| tool.name == "get_color_context"));
+        let served = KinewrightMcp::served_tools().unwrap();
+        assert!(served.iter().all(|tool| tool.name != "get_color_context"));
+
+        let (core, playback, analysis) = fixture();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let before = service.snapshot().unwrap();
+        let result = service
+            .call_blocking(CallToolRequestParams::new("get_color_context"))
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        let value = result.structured_content.unwrap();
+        assert_eq!(value["timeline_revision"], 0);
+        assert_eq!(value["color_context"]["working"]["primaries"], "bt709");
+        assert_eq!(value["color_context"]["working"]["matrix"], "rgb");
+        assert_eq!(
+            value["color_context"]["working"]["confidence_basis_points"],
+            10_000
+        );
+        assert_eq!(
+            value["color_context"]["working"]["provenance"],
+            "application_default"
+        );
+        assert_eq!(value["color_context"]["monitoring"]["range"], "full");
+        assert_eq!(value["color_context"]["delivery"]["range"], "limited");
+        assert_eq!(value["assets"].as_array().unwrap().len(), 1);
+        assert_eq!(value["assets"][0]["id"], 1);
+        assert_eq!(
+            value["assets"][0]["color_description"]["primaries"],
+            "unknown"
+        );
+        assert_eq!(
+            value["assets"][0]["color_description"]["confidence_basis_points"],
+            0
+        );
+        assert_eq!(
+            value["assets"][0]["color_description"]["provenance"],
+            "unknown"
+        );
+        assert_eq!(service.snapshot().unwrap(), before);
+
+        let invoked = service
+            .call_blocking(
+                CallToolRequestParams::new("invoke_capability").with_arguments(
+                    json!({"name": "get_color_context", "arguments": {}})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(invoked.is_error, Some(false));
+        assert_eq!(invoked.structured_content.unwrap()["timeline_revision"], 0);
+    }
+
+    fn probed_color_description() -> ColorDescription {
+        ColorDescription {
+            primaries: ColorPrimaries::Bt2020,
+            transfer: ColorTransfer::AribStdB67,
+            matrix: ColorMatrix::Bt2020Ncl,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Ten,
+            confidence_basis_points: 8_765,
+            provenance: ColorProvenance::StreamMetadata,
+        }
+    }
+
+    fn user_color_override() -> ColorDescription {
+        ColorDescription {
+            primaries: ColorPrimaries::DisplayP3,
+            transfer: ColorTransfer::Gamma22,
+            matrix: ColorMatrix::Rgb,
+            range: ColorRange::Full,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Twelve,
+            confidence_basis_points: 9_321,
+            provenance: ColorProvenance::UserOverride,
+        }
+    }
+
+    fn color_override_request(
+        expected_revision: u64,
+        description: &ColorDescription,
+    ) -> CallToolRequestParams {
+        CallToolRequestParams::new("set_asset_color_description").with_arguments(
+            json!({
+                "expected_revision": expected_revision,
+                "asset": 1,
+                "color_description": description,
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+    }
+
+    fn source_color(service: &KinewrightMcp) -> serde_json::Value {
+        service
+            .source_info(&SourceInfoArgs {
+                asset_id: AssetId(1),
+                source_in: None,
+                source_out: None,
+            })
+            .unwrap()
+            .structured_content
+            .unwrap()["asset"]["color_description"]
+            .clone()
+    }
+
+    fn assert_wire_color(value: &serde_json::Value, confidence: u16, provenance: &str) {
+        assert_eq!(value["confidence_basis_points"], confidence);
+        assert_eq!(value["provenance"], provenance);
+    }
+
+    #[test]
+    fn generated_color_override_is_revision_gated_and_undo_restores_probed_metadata() {
+        let (seed_core, playback, analysis) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed_document)) =
+            seed_core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let probed = probed_color_description();
+        let mut document = (*seed_document).clone();
+        document.media_pool[0].color_description = probed.clone();
+        let core = Core::spawn(document).unwrap();
+        let service = KinewrightMcp::new(
+            core.clone(),
+            playback,
+            analysis,
+            ConfirmationBroker::default(),
+        );
+
+        let override_description = user_color_override();
+        let applied = service
+            .call_blocking(color_override_request(0, &override_description))
+            .unwrap();
+        assert_eq!(applied.is_error, Some(false));
+        let (revision, applied_document) = service.snapshot().unwrap();
+        assert_eq!(revision, TimelineRevision(1));
+        assert_eq!(
+            applied_document
+                .asset(AssetId(1))
+                .unwrap()
+                .color_description,
+            override_description
+        );
+
+        assert_wire_color(&source_color(&service), 9_321, "user_override");
+        let context = service.color_context().unwrap().structured_content.unwrap();
+        assert_wire_color(
+            &context["assets"][0]["color_description"],
+            9_321,
+            "user_override",
+        );
+
+        let mut stale_description = override_description.clone();
+        stale_description.confidence_basis_points = 9_999;
+        let stale = service
+            .call_blocking(color_override_request(0, &stale_description))
+            .unwrap();
+        assert_eq!(stale.is_error, Some(true));
+        assert!(
+            stale.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("revision conflict")
+        );
+        assert_eq!(service.snapshot().unwrap().0, TimelineRevision(1));
+
+        let Event::DocumentChanged {
+            doc,
+            revision: TimelineRevision(2),
+            ..
+        } = core.request(Command::Undo).unwrap()
+        else {
+            panic!("undo should restore the probed colour description");
+        };
+        assert_eq!(doc.asset(AssetId(1)).unwrap().color_description, probed);
+        assert_wire_color(&source_color(&service), 8_765, "stream_metadata");
     }
 
     #[test]
@@ -9966,6 +10270,15 @@ mod tests {
         assert_eq!(source.is_error, Some(false));
         let source = source.structured_content.unwrap();
         assert_eq!(source["source_monitor"]["duration"], 20);
+        assert_eq!(source["asset"]["color_description"]["primaries"], "unknown");
+        assert_eq!(
+            source["asset"]["color_description"]["confidence_basis_points"],
+            0
+        );
+        assert_eq!(
+            source["asset"]["color_description"]["provenance"],
+            "unknown"
+        );
         assert_eq!(source["words"][0]["speaker"], "Partner");
 
         let search = service
@@ -10210,6 +10523,8 @@ mod tests {
         let registry_metrics = ToolSurfaceMetrics::measure(&registry);
         let served_metrics = ToolSurfaceMetrics::measure(&served);
         println!("registry={registry_metrics:?} served={served_metrics:?}");
+        assert_eq!(registry_metrics.tool_count, 99);
+        assert_eq!(served_metrics.tool_count, 7);
         assert!(served_metrics.tool_count < registry_metrics.tool_count / 4);
         assert!(served_metrics.serialized_bytes < registry_metrics.serialized_bytes / 4);
 
@@ -10497,6 +10812,7 @@ mod tests {
                 fps: Rational::new(30, 1).unwrap(),
                 kind: MediaKind::Audio,
                 resolution: None,
+                color_description: kinewright_core::ColorDescription::default(),
             },
         }))
         .unwrap();
@@ -11068,6 +11384,7 @@ mod tests {
                 fps: Rational::new(30, 1).unwrap(),
                 kind: MediaKind::Audio,
                 resolution: None,
+                color_description: kinewright_core::ColorDescription::default(),
             },
         }))
         .unwrap();
@@ -11364,6 +11681,7 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((320, 180)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let transcript = AssetTranscript {
             asset: asset.id,
@@ -11436,6 +11754,7 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((320, 180)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let transcript = AssetTranscript {
             asset: asset.id,
@@ -11490,6 +11809,7 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((320, 180)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let transcript = AssetTranscript {
             asset: asset.id,
@@ -11548,6 +11868,7 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((320, 180)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let transcript = AssetTranscript {
             asset: asset.id,

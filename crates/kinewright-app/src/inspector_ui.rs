@@ -961,6 +961,7 @@ mod tests {
                 sync_lock: true,
                 clips: vec![freeze],
             }],
+            color_context: kinewright_core::ColorContext::default(),
             ..Document::default()
         };
         assert_eq!(
@@ -988,6 +989,7 @@ mod tests {
                     fps: Rational::new(30, 1).expect("valid fps"),
                     kind: MediaKind::Video,
                     resolution: Some((1920, 1080)),
+                    color_description: kinewright_core::ColorDescription::default(),
                 },
                 MediaAsset {
                     id: AssetId(2),
@@ -997,6 +999,7 @@ mod tests {
                     fps: Rational::new(30, 1).expect("valid fps"),
                     kind: MediaKind::Audio,
                     resolution: None,
+                    color_description: kinewright_core::ColorDescription::default(),
                 },
             ],
             tracks: vec![
@@ -1013,6 +1016,7 @@ mod tests {
                     clips: vec![media_clip(ClipId(11), AssetId(2), link)],
                 },
             ],
+            color_context: kinewright_core::ColorContext::default(),
             ..Document::default()
         };
 

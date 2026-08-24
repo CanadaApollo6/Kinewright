@@ -7,6 +7,10 @@ use kinewright_core::{
 
 use crate::{
     app::KinewrightApp,
+    color_ui::{
+        ASSUME_SDR_REC709_TOOLTIP, SourceColorDisplay, assume_sdr_rec709_operation,
+        source_color_display,
+    },
     icons::{self, Icon},
     theme::{self, color, radius, size, space, type_size},
     timeline_ui::format_timecode,
@@ -239,6 +243,9 @@ impl KinewrightApp {
                                         .font(theme::semibold(type_size::BODY)),
                                 );
                                 ui.colored_label(color::TEXT_MUTED, asset_metadata(&asset));
+                                if let Some(display) = source_color_display(&asset) {
+                                    source_color_label(ui, display);
+                                }
                                 if let Some(bin) = self
                                     .focused()
                                     .document
@@ -316,6 +323,16 @@ impl KinewrightApp {
                 ui.label(egui::RichText::new("SOURCE").font(theme::semibold(type_size::CAPTION)));
                 ui.colored_label(color::TEXT_MUTED, &asset.name);
             });
+            if let Some(display) = source_color_display(&asset) {
+                source_color_label(ui, display);
+                if ui
+                    .button("Assume SDR Rec.709 metadata")
+                    .on_hover_text(ASSUME_SDR_REC709_TOOLTIP)
+                    .clicked()
+                {
+                    self.send_operation(assume_sdr_rec709_operation(&asset));
+                }
+            }
             let mut source_in = self.focused().source_in.0;
             let mut source_out = self.focused().source_out.0;
             ui.horizontal(|ui| {
@@ -466,6 +483,15 @@ fn asset_metadata(asset: &kinewright_core::MediaAsset) -> String {
     )
 }
 
+fn source_color_label(ui: &mut egui::Ui, display: SourceColorDisplay) {
+    let text_color = if display.warning {
+        color::STATUS_WARNING
+    } else {
+        color::TEXT_MUTED
+    };
+    ui.add(egui::Label::new(egui::RichText::new(display.summary).color(text_color)).wrap());
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -485,10 +511,12 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((1_920, 1_080)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let document = Document {
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
+            color_context: kinewright_core::ColorContext::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,

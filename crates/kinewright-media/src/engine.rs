@@ -420,6 +420,7 @@ impl Analysis for FfmpegMediaEngine {
         let settings = ExportSettings {
             fps: document.fps,
             resolution: document.resolution,
+            delivery_color: kinewright_core::ColorContext::sdr_rec709().delivery,
             video_codec: "libx264".to_owned(),
             audio_codec: "aac".to_owned(),
             video_bitrate: 1,

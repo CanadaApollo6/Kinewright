@@ -3,7 +3,10 @@ use std::{collections::BTreeMap, path::PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{AutomationCurve, OpError, Rational, TimeCode, Title, map_source_range_to_project};
+use crate::{
+    AutomationCurve, ColorContext, ColorDescription, OpError, Rational, TimeCode, Title,
+    map_source_range_to_project,
+};
 
 macro_rules! id_type {
     ($name:ident) => {
@@ -83,6 +86,14 @@ pub struct MediaAsset {
     pub fps: Rational,
     pub kind: MediaKind,
     pub resolution: Option<(u32, u32)>,
+    /// Source colour metadata from probing or an explicit user override.
+    ///
+    /// Missing in pre-CC0 project files and therefore defaults to an explicit
+    /// unknown description. Unknown must not be treated as Rec.709 by
+    /// consumers without an explicit decision.
+    #[serde(default)]
+    #[schemars(default)]
+    pub color_description: ColorDescription,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -414,6 +425,12 @@ pub struct Document {
     #[serde(default, skip_serializing_if = "AudioMix::is_empty")]
     #[schemars(default)]
     pub audio_mix: AudioMix,
+    /// Distinct project working, monitoring, and delivery colour descriptions.
+    /// Missing in pre-CC0 files and defaulted to the current SDR Rec.709
+    /// application context.
+    #[serde(default)]
+    #[schemars(default)]
+    pub color_context: ColorContext,
     pub fps: Rational,
     pub resolution: (u32, u32),
     pub duration: TimeCode,
@@ -427,6 +444,7 @@ impl Default for Document {
             markers: Vec::new(),
             catalog: MediaCatalog::default(),
             audio_mix: AudioMix::default(),
+            color_context: ColorContext::default(),
             fps: Rational::default(),
             resolution: (1_920, 1_080),
             duration: TimeCode::ZERO,

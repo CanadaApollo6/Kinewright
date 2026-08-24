@@ -6,10 +6,11 @@ use std::{
 };
 
 use kinewright_core::{
-    Analysis, AssetId, Clip, ClipContent, ClipId, Document, Effect, EffectId, Export,
-    ExportCancellation, ExportSettings, FreezeFrame, MediaAsset, MediaError, MediaEvent, MediaKind,
-    ParamValue, Playback, PlaybackState, Rational, TimeCode, Title, Track, TrackId, TrackKind,
-    Transition,
+    Analysis, AssetId, Clip, ClipContent, ClipId, ColorBitDepth, ColorDescription, ColorMatrix,
+    ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Document, Effect,
+    EffectId, Export, ExportCancellation, ExportSettings, FreezeFrame, MediaAsset, MediaError,
+    MediaEvent, MediaKind, ParamValue, Playback, PlaybackState, Rational, TimeCode, Title, Track,
+    TrackId, TrackKind, Transition,
 };
 use kinewright_media::FfmpegMediaEngine;
 
@@ -140,6 +141,7 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
     let document = Document {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
+        color_context: kinewright_core::ColorContext::default(),
         tracks: vec![
             Track {
                 id: TrackId(1),
@@ -236,6 +238,7 @@ fn two_track_effect_export_matches_preview_after_h264_redecode() {
             ExportSettings {
                 fps: document.fps,
                 resolution: document.resolution,
+                delivery_color: kinewright_core::ColorContext::sdr_rec709().delivery,
                 video_codec: "libx264".to_owned(),
                 audio_codec: "aac".to_owned(),
                 video_bitrate: 500_000,
@@ -255,6 +258,20 @@ fn two_track_effect_export_matches_preview_after_h264_redecode() {
     assert_eq!(exported_asset.kind, MediaKind::AudioVideo);
     assert_eq!(exported_asset.resolution, Some((64, 64)));
     assert_eq!(exported_asset.duration, TimeCode(10));
+    assert_eq!(
+        exported_asset.color_description,
+        ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: ColorMatrix::Bt709,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::Unknown,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: ColorProvenance::StreamMetadata,
+        },
+        "the encoded stream must re-probe with every representable Rec.709 stream tag; H.264 has no separate white-point tag"
+    );
     let mixed_audio = decode_stereo_audio(&output.0);
     assert!(
         tone_amplitude(&mixed_audio, 48_000, 440.0) > 0.02,
@@ -300,6 +317,7 @@ fn two_track_effect_export_matches_preview_after_h264_redecode() {
             ExportSettings {
                 fps: fade_document.fps,
                 resolution: fade_document.resolution,
+                delivery_color: kinewright_core::ColorContext::sdr_rec709().delivery,
                 video_codec: "libx264".to_owned(),
                 audio_codec: "aac".to_owned(),
                 video_bitrate: 500_000,
@@ -326,6 +344,7 @@ fn title_export_pixels_match_preview_after_h264_redecode() {
     let document = Document {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
+        color_context: kinewright_core::ColorContext::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -386,6 +405,7 @@ fn title_export_pixels_match_preview_after_h264_redecode() {
             ExportSettings {
                 fps: document.fps,
                 resolution: document.resolution,
+                delivery_color: kinewright_core::ColorContext::sdr_rec709().delivery,
                 video_codec: "libx264".to_owned(),
                 audio_codec: "aac".to_owned(),
                 video_bitrate: 1_000_000,
@@ -414,6 +434,7 @@ fn freeze_export_pixels_match_preview_after_h264_redecode() {
     let document = Document {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
+        color_context: kinewright_core::ColorContext::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -465,6 +486,7 @@ fn freeze_export_pixels_match_preview_after_h264_redecode() {
             ExportSettings {
                 fps: document.fps,
                 resolution: document.resolution,
+                delivery_color: kinewright_core::ColorContext::sdr_rec709().delivery,
                 video_codec: "libx264".to_owned(),
                 audio_codec: "aac".to_owned(),
                 video_bitrate: 1_000_000,
@@ -558,6 +580,7 @@ fn cancelled_export_writes_no_output() {
         ExportSettings {
             fps: document.fps,
             resolution: document.resolution,
+            delivery_color: kinewright_core::ColorContext::sdr_rec709().delivery,
             video_codec: "libx264".to_owned(),
             audio_codec: "aac".to_owned(),
             video_bitrate: 500_000,
@@ -684,6 +707,7 @@ fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
     let document = Document {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
+        color_context: kinewright_core::ColorContext::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -818,6 +842,7 @@ fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
     let document = Document {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
+        color_context: kinewright_core::ColorContext::default(),
         tracks: vec![
             Track {
                 id: TrackId(1),
@@ -899,6 +924,7 @@ fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
     let document = Document {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
+        color_context: kinewright_core::ColorContext::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -964,6 +990,7 @@ fn full_timeline(asset: MediaAsset) -> Document {
     let document = Document {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
+        color_context: kinewright_core::ColorContext::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,

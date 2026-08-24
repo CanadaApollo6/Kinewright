@@ -997,6 +997,7 @@ mod tests {
                 fps: Rational::new(30, 1).unwrap(),
                 kind: MediaKind::AudioVideo,
                 resolution: Some((1_920, 1_080)),
+                color_description: kinewright_core::ColorDescription::default(),
             }],
             markers: vec![Marker {
                 id: MarkerId(3),
@@ -1007,6 +1008,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             resolution: (1_920, 1_080),
             duration: TimeCode(180),
+            color_context: kinewright_core::ColorContext::default(),
         }
     }
 

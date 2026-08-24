@@ -465,6 +465,7 @@ mod tests {
         Document {
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
+            color_context: kinewright_core::ColorContext::default(),
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,
@@ -509,6 +510,7 @@ mod tests {
                     fps: Rational::new(30, 1).unwrap(),
                     kind: MediaKind::AudioVideo,
                     resolution: Some((320, 180)),
+                    color_description: kinewright_core::ColorDescription::default(),
                 },
                 MediaAsset {
                     id: AssetId(2),
@@ -518,6 +520,7 @@ mod tests {
                     fps: Rational::new(30, 1).unwrap(),
                     kind: MediaKind::AudioVideo,
                     resolution: Some((320, 180)),
+                    color_description: kinewright_core::ColorDescription::default(),
                 },
             ],
             markers: Vec::new(),
@@ -847,6 +850,7 @@ mod tests {
                 fps: Rational::new(30, 1).unwrap(),
                 kind: MediaKind::Audio,
                 resolution: None,
+                color_description: kinewright_core::ColorDescription::default(),
             },
             MediaAsset {
                 id: AssetId(4),
@@ -856,6 +860,7 @@ mod tests {
                 fps: Rational::new(30, 1).unwrap(),
                 kind: MediaKind::Video,
                 resolution: Some((320, 180)),
+                color_description: kinewright_core::ColorDescription::default(),
             },
         ]);
         document.tracks.extend([

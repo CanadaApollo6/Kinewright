@@ -6,14 +6,16 @@ use std::{
 };
 
 use kinewright_core::{
-    AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, Clip, ClipContent, ClipId, Command,
-    Core, Document, Effect, EffectId, Event, FreezeFrame, Keyframe, KeyframeInterpolation, LinkId,
-    Marker, MarkerId, MediaAsset, MediaBin, MediaKind, OpError, Operation, ParamValue, Rational,
-    SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember,
-    TRANSITION_DESCRIPTORS, ThreePointMode, TimeCode, Title, TitlePosition, Track, TrackId,
-    TrackKind, Transition, transition_descriptor,
+    AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, Clip, ClipContent, ClipId,
+    ColorBitDepth, ColorContext, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
+    ColorRange, ColorTransfer, ColorWhitePoint, Command, Core, Document, Effect, EffectId, Event,
+    FreezeFrame, Keyframe, KeyframeInterpolation, LinkId, Marker, MarkerId, MediaAsset, MediaBin,
+    MediaKind, OpError, Operation, ParamValue, Rational, SourceSelect, StringOut, StringOutId,
+    SyncGroup, SyncGroupId, SyncGroupMember, TRANSITION_DESCRIPTORS, ThreePointMode, TimeCode,
+    Title, TitlePosition, Track, TrackId, TrackKind, Transition, transition_descriptor,
 };
 use proptest::prelude::*;
+use schemars::schema_for;
 
 fn asset(id: u64, fps: Rational, duration: i64) -> MediaAsset {
     MediaAsset {
@@ -24,6 +26,20 @@ fn asset(id: u64, fps: Rational, duration: i64) -> MediaAsset {
         fps,
         kind: MediaKind::Video,
         resolution: Some((1_920, 1_080)),
+        color_description: ColorDescription::default(),
+    }
+}
+
+fn user_color_override() -> ColorDescription {
+    ColorDescription {
+        primaries: ColorPrimaries::Bt709,
+        transfer: ColorTransfer::Bt709,
+        matrix: ColorMatrix::Bt709,
+        range: ColorRange::Limited,
+        white_point: ColorWhitePoint::D65,
+        bit_depth: ColorBitDepth::Ten,
+        confidence_basis_points: 9_000,
+        provenance: ColorProvenance::UserOverride,
     }
 }
 
@@ -31,6 +47,7 @@ fn empty_timeline(fps: Rational) -> Document {
     Document {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
+        color_context: ColorContext::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -125,6 +142,10 @@ fn document_and_every_operation_variant_round_trip_through_json() {
     let operations = vec![
         Operation::AddAsset {
             asset: asset(2, Rational::new(24_000, 1_001).unwrap(), 240),
+        },
+        Operation::SetAssetColorDescription {
+            asset: AssetId(1),
+            color_description: user_color_override(),
         },
         Operation::UpsertBin {
             bin: MediaBin {
@@ -417,6 +438,283 @@ fn pre_m15_project_json_defaults_additive_fields_without_changing_legacy_shape()
 }
 
 #[test]
+fn media_asset_colour_description_defaults_to_explicit_unknown() {
+    let asset_json = serde_json::json!({
+        "id": 7,
+        "path": "legacy.mp4",
+        "name": "legacy",
+        "duration": 120,
+        "fps": { "numerator": 30, "denominator": 1 },
+        "kind": "Video",
+        "resolution": [1920, 1080]
+    });
+
+    let asset: MediaAsset = serde_json::from_value(asset_json).unwrap();
+    assert_eq!(asset.color_description, ColorDescription::unknown());
+    assert!(asset.color_description.is_unknown());
+    let saved = serde_json::to_value(&asset).unwrap();
+    assert_eq!(
+        saved["color_description"],
+        serde_json::to_value(ColorDescription::unknown()).unwrap()
+    );
+}
+
+#[test]
+fn source_colour_description_round_trips_known_and_future_values() {
+    let description = ColorDescription {
+        primaries: ColorPrimaries::Bt709,
+        transfer: ColorTransfer::Bt1886,
+        matrix: ColorMatrix::Bt709,
+        range: ColorRange::Limited,
+        white_point: ColorWhitePoint::D65,
+        bit_depth: ColorBitDepth::Ten,
+        confidence_basis_points: 9_500,
+        provenance: ColorProvenance::StreamMetadata,
+    };
+    let mut asset = asset(7, Rational::new(30, 1).unwrap(), 120);
+    asset.color_description = description.clone();
+
+    let encoded = serde_json::to_string(&asset).unwrap();
+    assert!(encoded.contains("\"primaries\":\"bt709\""));
+    assert!(encoded.contains("\"bit_depth\":10"));
+    assert!(encoded.contains("\"confidence_basis_points\":9500"));
+    assert_eq!(serde_json::from_str::<MediaAsset>(&encoded).unwrap(), asset);
+
+    let mut future_json = serde_json::to_value(&asset).unwrap();
+    future_json["color_description"]["primaries"] = serde_json::json!("future_wide_gamut");
+    future_json["color_description"]["transfer"] = serde_json::json!("future_transfer");
+    let future_asset: MediaAsset = serde_json::from_value(future_json).unwrap();
+    assert_eq!(
+        future_asset.color_description.primaries,
+        ColorPrimaries::Other("future_wide_gamut".to_owned())
+    );
+    assert_eq!(
+        future_asset.color_description.transfer,
+        ColorTransfer::Other("future_transfer".to_owned())
+    );
+}
+
+#[test]
+fn pre_cc0_project_json_loads_with_unknown_source_colour_metadata() {
+    let document: Document =
+        serde_json::from_str(include_str!("fixtures/pre_m13_project.json")).unwrap();
+    assert_eq!(document.media_pool.len(), 1);
+    assert!(document.media_pool[0].color_description.is_unknown());
+    assert_eq!(document.color_context, ColorContext::default());
+    document.validate().unwrap();
+
+    let saved = serde_json::to_value(&document).unwrap();
+    assert_eq!(
+        saved["media_pool"][0]["color_description"],
+        serde_json::to_value(ColorDescription::unknown()).unwrap()
+    );
+    assert_eq!(
+        saved["color_context"],
+        serde_json::to_value(ColorContext::default()).unwrap()
+    );
+    for stage in ["working", "monitoring", "delivery"] {
+        assert!(saved["color_context"][stage].is_object());
+    }
+    let reopened: Document = serde_json::from_value(saved).unwrap();
+    assert_eq!(reopened, document);
+}
+
+#[test]
+fn document_defaults_to_distinct_sdr_rec709_colour_contexts() {
+    let context = ColorContext::default();
+    assert_eq!(context, ColorContext::sdr_rec709());
+    assert_eq!(context.working.primaries, ColorPrimaries::Bt709);
+    assert_eq!(context.working.transfer, ColorTransfer::Bt709);
+    assert_eq!(context.working.matrix, ColorMatrix::Rgb);
+    assert_eq!(context.working.range, ColorRange::Full);
+    assert_eq!(context.working.white_point, ColorWhitePoint::D65);
+    assert_eq!(context.working.bit_depth, ColorBitDepth::Eight);
+    assert_eq!(context.monitoring.matrix, ColorMatrix::Rgb);
+    assert_eq!(context.monitoring.range, ColorRange::Full);
+    assert_eq!(context.delivery.matrix, ColorMatrix::Bt709);
+    assert_eq!(context.delivery.range, ColorRange::Limited);
+    assert_ne!(context.working, context.delivery);
+    assert_eq!(
+        context.delivery.provenance,
+        ColorProvenance::ApplicationDefault
+    );
+
+    let saved = serde_json::to_value(Document::default()).unwrap();
+    assert_eq!(
+        saved["color_context"],
+        serde_json::to_value(ColorContext::default()).unwrap()
+    );
+}
+
+#[test]
+fn non_default_colour_context_round_trips_through_document_json() {
+    let mut document = Document::default();
+    document.color_context.delivery.transfer = ColorTransfer::Smpte2084;
+    document.color_context.delivery.range = ColorRange::Full;
+
+    let encoded = serde_json::to_string(&document).unwrap();
+    assert!(encoded.contains("\"color_context\""));
+    assert!(encoded.contains("\"transfer\":\"smpte2084\""));
+    assert_eq!(
+        serde_json::from_str::<Document>(&encoded).unwrap(),
+        document
+    );
+}
+
+#[test]
+fn colour_wire_schemas_match_forward_compatible_serialization() {
+    let tag_schema = serde_json::to_value(schema_for!(ColorPrimaries)).unwrap();
+    assert_eq!(tag_schema["type"], serde_json::json!("string"));
+
+    let bit_depth_schema = serde_json::to_value(schema_for!(ColorBitDepth)).unwrap();
+    let one_of = bit_depth_schema["oneOf"].as_array().unwrap();
+    assert_eq!(one_of.len(), 2);
+    assert_eq!(one_of[0]["type"], serde_json::json!("integer"));
+    assert_eq!(one_of[1]["type"], serde_json::json!("string"));
+
+    let description_schema = serde_json::to_value(schema_for!(ColorDescription)).unwrap();
+    assert_eq!(
+        description_schema["properties"]["confidence_basis_points"]["maximum"],
+        serde_json::json!(10_000)
+    );
+
+    let operation_schema = serde_json::to_string(&schema_for!(Operation)).unwrap();
+    assert!(operation_schema.contains("SetAssetColorDescription"));
+}
+
+#[test]
+fn asset_colour_override_is_typed_atomic_and_undoable_data() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    Operation::AddAsset {
+        asset: asset(1, fps, 120),
+    }
+    .apply(&mut document)
+    .unwrap();
+
+    let color_description = user_color_override();
+    let operation = Operation::SetAssetColorDescription {
+        asset: AssetId(1),
+        color_description: color_description.clone(),
+    };
+    operation.apply(&mut document).unwrap();
+    assert_eq!(
+        document.asset(AssetId(1)).unwrap().color_description,
+        color_description
+    );
+
+    let encoded = serde_json::to_string(&operation).unwrap();
+    assert!(encoded.contains("SetAssetColorDescription"));
+    assert_eq!(
+        serde_json::from_str::<Operation>(&encoded).unwrap(),
+        operation
+    );
+}
+
+#[test]
+fn asset_colour_override_rejects_missing_invalid_and_forged_metadata_atomically() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    Operation::AddAsset {
+        asset: asset(1, fps, 120),
+    }
+    .apply(&mut document)
+    .unwrap();
+    let before = document.clone();
+
+    let error = Operation::SetAssetColorDescription {
+        asset: AssetId(999),
+        color_description: user_color_override(),
+    }
+    .apply(&mut document)
+    .unwrap_err();
+    assert_eq!(error, OpError::MissingAsset(AssetId(999)));
+    assert_eq!(document, before);
+
+    let mut excessive = user_color_override();
+    excessive.confidence_basis_points = 10_001;
+    let error = Operation::SetAssetColorDescription {
+        asset: AssetId(1),
+        color_description: excessive,
+    }
+    .apply(&mut document)
+    .unwrap_err();
+    assert_eq!(error, OpError::ColorConfidenceOutOfRange { actual: 10_001 });
+    assert_eq!(document, before);
+
+    let mut zero = user_color_override();
+    zero.confidence_basis_points = 0;
+    let error = Operation::SetAssetColorDescription {
+        asset: AssetId(1),
+        color_description: zero,
+    }
+    .apply(&mut document)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::ZeroConfidenceColorOverride { asset: AssetId(1) }
+    );
+    assert_eq!(document, before);
+
+    let mut forged = user_color_override();
+    forged.provenance = ColorProvenance::StreamMetadata;
+    let error = Operation::SetAssetColorDescription {
+        asset: AssetId(1),
+        color_description: forged,
+    }
+    .apply(&mut document)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::InvalidColorOverrideProvenance {
+            asset: AssetId(1),
+            actual: ColorProvenance::StreamMetadata,
+        }
+    );
+    assert_eq!(document, before);
+}
+
+#[test]
+fn document_and_add_asset_validate_every_colour_confidence() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut invalid_asset = asset(1, fps, 120);
+    invalid_asset.color_description = user_color_override();
+    invalid_asset.color_description.confidence_basis_points = 10_001;
+
+    let mut direct = empty_timeline(fps);
+    direct.media_pool.push(invalid_asset.clone());
+    assert_eq!(
+        direct.validate(),
+        Err(OpError::ColorConfidenceOutOfRange { actual: 10_001 })
+    );
+
+    let mut through_operation = empty_timeline(fps);
+    let before = through_operation.clone();
+    assert_eq!(
+        Operation::AddAsset {
+            asset: invalid_asset,
+        }
+        .apply(&mut through_operation),
+        Err(OpError::ColorConfidenceOutOfRange { actual: 10_001 })
+    );
+    assert_eq!(through_operation, before);
+
+    for stage in 0..3 {
+        let mut document = Document::default();
+        let description = match stage {
+            0 => &mut document.color_context.working,
+            1 => &mut document.color_context.monitoring,
+            _ => &mut document.color_context.delivery,
+        };
+        description.confidence_basis_points = 10_001;
+        assert_eq!(
+            document.validate(),
+            Err(OpError::ColorConfidenceOutOfRange { actual: 10_001 })
+        );
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn title_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
     let fps = Rational::new(30, 1).unwrap();
@@ -546,6 +844,7 @@ fn add_freeze_frame_validates_track_asset_frame_and_duration() {
             fps,
             kind: MediaKind::Audio,
             resolution: None,
+            color_description: ColorDescription::default(),
         },
     ]);
     document.validate().unwrap();
@@ -2241,6 +2540,7 @@ fn unsorted_input_document_is_rejected() {
         }],
         media_pool: vec![media],
         markers: Vec::new(),
+        color_context: ColorContext::default(),
         fps,
         resolution: (1_920, 1_080),
         duration: TimeCode(30),

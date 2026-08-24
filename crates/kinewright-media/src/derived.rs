@@ -1825,6 +1825,7 @@ mod tests {
             fps: Rational::new(24, 1).unwrap(),
             kind: MediaKind::AudioVideo,
             resolution: Some((160, 90)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let duration = map_source_range_to_project(
             TimeCode(10)..TimeCode(40),
@@ -1835,6 +1836,7 @@ mod tests {
         Document {
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
+            color_context: kinewright_core::ColorContext::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,

@@ -6,6 +6,10 @@ use crate::{Command, Operation};
 ///
 /// This type is intentionally pure data. Persistence belongs to the app layer;
 /// core only identifies the exact history command that produced an event.
+/// The enum is short-lived at the journal boundary, and preserving its direct
+/// serialized operation shape is more useful than adding allocation solely to
+/// equalize in-memory variant sizes.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JournalCommand {
     Do(Operation),

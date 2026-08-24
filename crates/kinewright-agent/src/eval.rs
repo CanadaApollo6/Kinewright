@@ -6676,6 +6676,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Video,
             resolution: Some((320, 180)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         Document {
             catalog: kinewright_core::MediaCatalog::default(),
@@ -6704,6 +6705,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             resolution: (320, 180),
             duration: TimeCode(60),
+            color_context: kinewright_core::ColorContext::default(),
         }
     }
 
@@ -6779,6 +6781,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Audio,
             resolution: None,
+            color_description: kinewright_core::ColorDescription::default(),
         };
         final_document.media_pool.push(audio_asset);
         final_document.tracks.push(Track {
@@ -7266,6 +7269,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Audio,
             resolution: None,
+            color_description: kinewright_core::ColorDescription::default(),
         };
         exact_document.media_pool.push(audio_asset);
         exact_document.tracks.push(Track {
@@ -7375,6 +7379,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Video,
             resolution: Some((320, 180)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let closing_asset = MediaAsset {
             id: AssetId(3),
@@ -7384,6 +7389,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Video,
             resolution: Some((320, 180)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         final_document
             .media_pool
@@ -7973,6 +7979,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Video,
             resolution: Some((320, 180)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         final_document.media_pool.push(second_asset);
         let mut second_clip = final_document.tracks[0].clips[0].clone();
@@ -8662,6 +8669,7 @@ mod tests {
             profile: DeliveryProfile::VerticalShort,
             container: "mp4".to_owned(),
             resolution: (1_080, 1_920),
+            delivery_color: document.color_context.delivery.clone(),
             video_codec: "h264".to_owned(),
             audio_codec: "aac".to_owned(),
             video_bitrate: 1,

@@ -8,7 +8,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 53] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 54] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -16,6 +16,7 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 53] = [
     "prepare_edit_plan",
     "commit_edit_plan",
     "discard_edit_plan",
+    "get_color_context",
     "get_clip_info",
     "get_source_info",
     "get_source_storyboard",
@@ -168,6 +169,7 @@ pub fn capability_tool_names() -> Result<Vec<String>, SchemaError> {
 pub fn operation_tool_name(operation: &Operation) -> &'static str {
     match operation {
         Operation::AddAsset { .. } => "add_asset",
+        Operation::SetAssetColorDescription { .. } => "set_asset_color_description",
         Operation::UpsertBin { .. } => "upsert_bin",
         Operation::RemoveBin { .. } => "remove_bin",
         Operation::SetAssetBin { .. } => "set_asset_bin",
@@ -303,6 +305,9 @@ fn operation_tool(
             .expect("writing transition documentation to a String cannot fail");
     }
     match variant.as_str() {
+        "SetAssetColorDescription" => description.push_str(
+            " Source colour overrides must provide the complete typed colour description, nonzero confidence, and user_override provenance. The operation is revision-gated and undoable.",
+        ),
         "RippleDeleteClip" | "RippleInsertGap" => description.push_str(
             " Ripple shifts the edited track and every other sync-locked track. Unlocked tracks remain fixed. Project markers at or after the ripple point always shift regardless of track sync locks. The delete ripple point is the removed clip's pre-edit end; insert uses its explicit at frame. Only clips starting at or after that point shift, and a straddling clip remains unchanged.",
         ),
@@ -443,6 +448,7 @@ mod tests {
             names,
             [
                 "add_asset",
+                "set_asset_color_description",
                 "upsert_bin",
                 "remove_bin",
                 "set_asset_bin",
@@ -522,6 +528,50 @@ mod tests {
     }
 
     #[test]
+    fn asset_color_override_schema_is_typed_and_revision_gated() {
+        let tools = operation_tools().unwrap();
+        let override_tool = tools
+            .iter()
+            .find(|definition| definition.tool.name == "set_asset_color_description")
+            .unwrap();
+        let schema = &override_tool.tool.input_schema;
+
+        assert_eq!(schema["required"], serde_json::json!(["expected_revision"]));
+        assert_eq!(
+            schema["allOf"][0]["properties"]["color_description"]["$ref"],
+            "#/$defs/ColorDescription"
+        );
+        let description = &schema["$defs"]["ColorDescription"];
+        for field in [
+            "primaries",
+            "transfer",
+            "matrix",
+            "range",
+            "white_point",
+            "bit_depth",
+            "confidence_basis_points",
+            "provenance",
+        ] {
+            assert!(
+                description["properties"].get(field).is_some(),
+                "color description schema omitted {field}"
+            );
+        }
+        assert_eq!(
+            description["properties"]["confidence_basis_points"]["maximum"],
+            10_000
+        );
+        assert!(
+            override_tool
+                .tool
+                .description
+                .as_deref()
+                .unwrap()
+                .contains("user_override provenance")
+        );
+    }
+
+    #[test]
     fn add_transition_schema_documents_every_registered_transition() {
         let tools = operation_tools().unwrap();
         let add_transition = tools
@@ -560,6 +610,13 @@ mod tests {
 
     #[test]
     fn operation_exhaustiveness_guard_requires_new_variants_to_be_acknowledged() {
+        assert_eq!(
+            operation_tool_name(&Operation::SetAssetColorDescription {
+                asset: AssetId(1),
+                color_description: kinewright_core::ColorDescription::default(),
+            }),
+            "set_asset_color_description"
+        );
         assert_eq!(
             operation_tool_name(&Operation::SetTrackSyncLock {
                 track: TrackId(1),

@@ -45,6 +45,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut document = Document {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
+        color_context: kinewright_core::ColorContext::default(),
         tracks: vec![
             Track {
                 id: TrackId(1),
@@ -146,6 +147,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ExportSettings {
             fps: document.fps,
             resolution: document.resolution,
+            delivery_color: kinewright_core::ColorContext::sdr_rec709().delivery,
             video_codec: "libx264".to_owned(),
             audio_codec: "aac".to_owned(),
             video_bitrate: 2_000_000,

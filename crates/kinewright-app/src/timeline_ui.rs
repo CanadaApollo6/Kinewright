@@ -2113,6 +2113,7 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((1_920, 1_080)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let clip = |id, track_start| Clip {
             id: ClipId(id),
@@ -2131,6 +2132,7 @@ mod tests {
         Document {
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
+            color_context: kinewright_core::ColorContext::default(),
             tracks: vec![
                 Track {
                     id: TrackId(1),
@@ -2391,6 +2393,7 @@ mod tests {
         let fps = Rational::new(30, 1).unwrap();
         let mut document = Document {
             fps,
+            color_context: kinewright_core::ColorContext::default(),
             ..Document::default()
         };
         document.media_pool.push(MediaAsset {
@@ -2401,6 +2404,7 @@ mod tests {
             fps,
             kind: MediaKind::Video,
             resolution: Some((1_920, 1_080)),
+            color_description: kinewright_core::ColorDescription::default(),
         });
         document.tracks.push(Track {
             id: TrackId(1),

@@ -4,6 +4,7 @@ mod actor;
 mod agent;
 mod automation;
 mod captions;
+mod color;
 mod creator;
 mod delivery;
 mod editorial;
@@ -29,6 +30,10 @@ pub use captions::{
     CaptionCue, CaptionMotion, CaptionPlanError, animated_caption_operations,
     animated_caption_operations_at, authored_caption_cues, caption_cues, caption_title_operations,
     dedup_timeline_words, srt, vtt,
+};
+pub use color::{
+    COLOR_CONFIDENCE_MAX_BASIS_POINTS, ColorBitDepth, ColorContext, ColorDescription, ColorMatrix,
+    ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint,
 };
 pub use creator::{
     BeatMontageAnchorRepair, BeatMontageCadenceContract, BeatMontageCadenceSummary,

@@ -209,6 +209,7 @@ pub fn single_clip_document(asset: MediaAsset) -> Document {
     Document {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
+        color_context: kinewright_core::ColorContext::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,

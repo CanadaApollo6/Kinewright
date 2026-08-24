@@ -1553,6 +1553,7 @@ mod tests {
         let settings = ExportSettings {
             fps,
             resolution: (64, 64),
+            delivery_color: kinewright_core::ColorContext::sdr_rec709().delivery,
             video_codec: "libx264".to_owned(),
             audio_codec: "aac".to_owned(),
             video_bitrate: 1_000_000,
@@ -1663,6 +1664,7 @@ mod tests {
         let document = Document {
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
+            color_context: kinewright_core::ColorContext::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -1690,6 +1692,7 @@ mod tests {
                 fps,
                 kind: MediaKind::Video,
                 resolution: Some((64, 64)),
+                color_description: kinewright_core::ColorDescription::default(),
             }],
             markers: Vec::new(),
             fps,
@@ -1747,6 +1750,7 @@ mod tests {
                     ducking_sidechain_tracks: vec![TrackId(1)],
                 }],
             },
+            color_context: kinewright_core::ColorContext::default(),
             tracks: vec![
                 Track {
                     id: TrackId(1),
@@ -1809,6 +1813,7 @@ mod tests {
             fps,
             kind: MediaKind::Audio,
             resolution: None,
+            color_description: kinewright_core::ColorDescription::default(),
         }
     }
 

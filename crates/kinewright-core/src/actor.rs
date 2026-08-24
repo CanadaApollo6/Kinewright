@@ -395,8 +395,10 @@ fn broadcast(subscribers: &mut Vec<Sender<Event>>, event: &Event) {
 mod tests {
     use super::*;
     use crate::{
-        AssetId, Clip, ClipContent, ClipId, Effect, EffectId, MediaAsset, MediaKind, ParamValue,
-        Rational, TimeCode, Track, TrackId, TrackKind, Transition,
+        AssetId, Clip, ClipContent, ClipId, ColorBitDepth, ColorDescription, ColorMatrix,
+        ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Effect,
+        EffectId, MediaAsset, MediaKind, ParamValue, Rational, TimeCode, Track, TrackId, TrackKind,
+        Transition,
     };
     use proptest::prelude::*;
     use std::{collections::BTreeMap, path::PathBuf, time::Duration};
@@ -410,7 +412,83 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Video,
             resolution: Some((1_920, 1_080)),
+            color_description: crate::ColorDescription::default(),
         }
+    }
+
+    fn user_color_override() -> ColorDescription {
+        ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: ColorMatrix::Bt709,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Ten,
+            confidence_basis_points: 9_000,
+            provenance: ColorProvenance::UserOverride,
+        }
+    }
+
+    #[test]
+    fn color_override_events_journal_and_history_preserve_the_exact_operation() {
+        let core = Core::spawn(Document::default()).unwrap();
+        core.request(Command::Do(Operation::AddAsset { asset: asset(1) }))
+            .unwrap();
+        let operation = Operation::SetAssetColorDescription {
+            asset: AssetId(1),
+            color_description: user_color_override(),
+        };
+
+        let Event::DocumentChanged {
+            doc,
+            revision: TimelineRevision(2),
+            last_op: Some(last_op),
+            journal_command: Some(JournalCommand::Do(journaled)),
+        } = core.request(Command::Do(operation.clone())).unwrap()
+        else {
+            panic!("expected accepted color override");
+        };
+        assert_eq!(last_op, operation);
+        assert_eq!(journaled, operation);
+        assert_eq!(
+            doc.asset(AssetId(1)).unwrap().color_description,
+            user_color_override()
+        );
+        let journal_json = serde_json::to_value(JournalCommand::Do(operation.clone())).unwrap();
+        assert_eq!(
+            journal_json["Do"]["SetAssetColorDescription"]["asset"],
+            serde_json::json!(1)
+        );
+
+        let Event::DocumentChanged {
+            doc,
+            revision: TimelineRevision(3),
+            journal_command: Some(JournalCommand::Undo),
+            ..
+        } = core.request(Command::Undo).unwrap()
+        else {
+            panic!("expected color override undo");
+        };
+        assert!(
+            doc.asset(AssetId(1))
+                .unwrap()
+                .color_description
+                .is_unknown()
+        );
+
+        let Event::DocumentChanged {
+            doc,
+            revision: TimelineRevision(4),
+            journal_command: Some(JournalCommand::Redo),
+            ..
+        } = core.request(Command::Redo).unwrap()
+        else {
+            panic!("expected color override redo");
+        };
+        assert_eq!(
+            doc.asset(AssetId(1)).unwrap().color_description,
+            user_color_override()
+        );
     }
 
     #[test]
@@ -736,6 +814,7 @@ mod tests {
         Document {
             catalog: crate::MediaCatalog::default(),
             audio_mix: crate::AudioMix::default(),
+            color_context: crate::ColorContext::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -750,6 +829,7 @@ mod tests {
                 fps: Rational::new(30, 1).unwrap(),
                 kind: MediaKind::Video,
                 resolution: Some((1_920, 1_080)),
+                color_description: crate::ColorDescription::default(),
             }],
             markers: Vec::new(),
             fps: Rational::new(30, 1).unwrap(),

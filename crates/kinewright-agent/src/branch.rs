@@ -216,6 +216,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::AudioVideo,
             resolution: Some((1920, 1080)),
+            color_description: kinewright_core::ColorDescription::default(),
         }
     }
 

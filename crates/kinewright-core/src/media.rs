@@ -9,7 +9,7 @@ use std::{
 use crossbeam_channel::{Receiver, Sender};
 use thiserror::Error;
 
-use crate::{AssetId, ClipId, Document, MediaAsset, Rational, TimeCode, TrackId};
+use crate::{AssetId, ClipId, ColorDescription, Document, MediaAsset, Rational, TimeCode, TrackId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameTexture {
@@ -84,6 +84,11 @@ pub enum VisualAssetResult {
 pub struct ExportSettings {
     pub fps: Rational,
     pub resolution: (u32, u32),
+    /// Colour metadata declared for the encoded delivery.
+    ///
+    /// This is an output-tag contract only. The current export path does not
+    /// perform a colour transform; managed pixel transforms belong to CC1.
+    pub delivery_color: ColorDescription,
     pub video_codec: String,
     pub audio_codec: String,
     pub video_bitrate: u64,

@@ -116,6 +116,7 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((1_920, 1_080)),
+            color_description: kinewright_core::ColorDescription::default(),
         };
         let clips = [(1, 0, 0..100), (2, 100, 100..200), (3, 200, 200..300)]
             .into_iter()
@@ -137,6 +138,7 @@ mod tests {
         Document {
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
+            color_context: kinewright_core::ColorContext::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,

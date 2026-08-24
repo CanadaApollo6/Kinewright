@@ -1134,6 +1134,9 @@ pub(crate) fn review_preroll_frames(fps: kinewright_core::Rational) -> i64 {
 pub(crate) fn operation_status(operation: &Operation) -> String {
     match operation {
         Operation::AddAsset { asset } => format!("Imported {}", asset.name),
+        Operation::SetAssetColorDescription { asset, .. } => {
+            format!("Updated source color metadata for asset {asset}")
+        }
         Operation::UpsertBin { bin } => format!("Saved bin {}", bin.name),
         Operation::RemoveBin { bin } => format!("Removed bin {bin}"),
         Operation::SetAssetBin { asset, bin } => bin.map_or_else(
@@ -1249,6 +1252,7 @@ fn default_project_document() -> Document {
             sync_lock: true,
             clips: Vec::new(),
         }],
+        color_context: kinewright_core::ColorContext::default(),
         ..Document::default()
     }
 }

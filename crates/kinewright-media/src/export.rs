@@ -6,8 +6,9 @@ use std::{
 
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
-    Document, ExportProgress, ExportSettings, FrameRounding, MediaError, ProgressSink, TimeCode,
-    TrackId, map_frames_with_rounding,
+    ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange,
+    ColorTransfer, ColorWhitePoint, Document, ExportProgress, ExportSettings, FrameRounding,
+    MediaError, ProgressSink, TimeCode, TrackId, map_frames_with_rounding,
 };
 
 use crate::{
@@ -103,9 +104,22 @@ fn export_to_temporary(
     if global_header {
         video_encoder.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
     }
+    // The current exporter is an explicit Rec.709 SDR metadata path. The
+    // validation above rejects other delivery descriptions before any output
+    // is created; this assignment therefore cannot silently mislabel another
+    // target. Pixel transforms remain a CC1 concern.
+    video_encoder.set_colorspace(ffmpeg::color::Space::BT709);
+    video_encoder.set_color_range(ffmpeg::color::Range::MPEG);
     let mut video_options = ffmpeg::Dictionary::new();
     if settings.video_codec == "libx264" {
         video_options.set("preset", "medium");
+        // FFmpeg's generic codec-context colour fields do not reliably carry
+        // primaries and transfer through libx264's SPS. These x264 options
+        // are required for the tags to survive a post-export re-probe.
+        video_options.set(
+            "x264-params",
+            "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+        );
     }
     let mut video_encoder = video_encoder
         .open_as_with(video_codec, video_options)
@@ -193,6 +207,7 @@ fn export_to_temporary(
             settings.resolution.0,
             settings.resolution.1,
         );
+        stamp_rgba_color(&mut rgba);
         copy_rgba_to_frame(&composed.rgba, &mut rgba)?;
         let mut yuv = ffmpeg::frame::Video::new(
             ffmpeg::format::Pixel::YUV420P,
@@ -200,6 +215,7 @@ fn export_to_temporary(
             settings.resolution.1,
         );
         scaler.run(&rgba, &mut yuv).map_err(backend)?;
+        stamp_yuv420p_color(&mut yuv);
         yuv.set_pts(Some(i64::try_from(output_frame).unwrap_or(i64::MAX)));
         video_encoder.send_frame(&yuv).map_err(backend)?;
         drain_packets(
@@ -264,6 +280,25 @@ fn copy_rgba_to_frame(rgba: &[u8], frame: &mut ffmpeg::frame::Video) -> Result<(
             .copy_from_slice(&rgba[source_start..source_start + row_bytes]);
     }
     Ok(())
+}
+
+/// Stamp the full-range RGB intermediate produced by the compositor. RGB has
+/// identity matrix coefficients and full-range samples; its primaries and
+/// transfer still describe the explicit Rec.709 SDR working/display contract.
+fn stamp_rgba_color(frame: &mut ffmpeg::frame::Video) {
+    frame.set_color_space(ffmpeg::color::Space::RGB);
+    frame.set_color_range(ffmpeg::color::Range::JPEG);
+    frame.set_color_primaries(ffmpeg::color::Primaries::BT709);
+    frame.set_color_transfer_characteristic(ffmpeg::color::TransferCharacteristic::BT709);
+}
+
+/// Stamp the limited-range YUV420P delivery frame with the exact metadata
+/// emitted by the current H.264 path.
+fn stamp_yuv420p_color(frame: &mut ffmpeg::frame::Video) {
+    frame.set_color_space(ffmpeg::color::Space::BT709);
+    frame.set_color_range(ffmpeg::color::Range::MPEG);
+    frame.set_color_primaries(ffmpeg::color::Primaries::BT709);
+    frame.set_color_transfer_characteristic(ffmpeg::color::TransferCharacteristic::BT709);
 }
 
 fn drain_packets(
@@ -435,6 +470,7 @@ fn validate_settings(
     out: &Path,
     settings: &ExportSettings,
 ) -> Result<(), MediaError> {
+    validate_delivery_color(settings)?;
     if document.duration <= TimeCode::ZERO {
         return Err(MediaError::Backend(
             "cannot export an empty timeline".to_owned(),
@@ -465,6 +501,41 @@ fn validate_settings(
     {
         return Err(MediaError::Backend(
             "export directory does not exist".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// The current encoder/scaler path supports one explicit delivery contract:
+/// 8-bit SDR Rec.709 in limited-range YUV420P. Keep this gate in front of
+/// encoder setup so an unknown or future colour description cannot be
+/// mislabeled with today's tags.
+fn validate_delivery_color(settings: &ExportSettings) -> Result<(), MediaError> {
+    if settings.video_codec != "libx264" {
+        return Err(MediaError::Backend(
+            "explicit delivery colour tagging currently requires the libx264 H.264 encoder"
+                .to_owned(),
+        ));
+    }
+    validate_delivery_description(&settings.delivery_color)
+}
+
+fn validate_delivery_description(color: &ColorDescription) -> Result<(), MediaError> {
+    if !color.confidence_is_valid()
+        || color.confidence_basis_points == 0
+        || !matches!(
+            &color.provenance,
+            ColorProvenance::ApplicationDefault | ColorProvenance::UserOverride
+        )
+        || !matches!(&color.primaries, ColorPrimaries::Bt709)
+        || !matches!(&color.transfer, ColorTransfer::Bt709)
+        || !matches!(&color.matrix, ColorMatrix::Bt709)
+        || !matches!(&color.range, ColorRange::Limited)
+        || !matches!(&color.white_point, ColorWhitePoint::D65)
+        || !matches!(&color.bit_depth, ColorBitDepth::Eight)
+    {
+        return Err(MediaError::Backend(
+            "unsupported delivery colour: the current H.264/YUV420P path requires explicit 8-bit SDR Rec.709 (BT.709 primaries, transfer, and matrix; limited range; D65; nonzero confidence; application_default or user_override provenance)".to_owned(),
         ));
     }
     Ok(())
@@ -511,4 +582,121 @@ fn replace_output(temporary: &Path, out: &Path) -> Result<(), MediaError> {
         return Err(backend(error));
     }
     fs::remove_file(backup).map_err(backend)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kinewright_core::{ColorContext, DeliveryProfile, ExportCancellation};
+
+    #[test]
+    fn accepts_the_current_sdr_rec709_delivery_contract() {
+        let color = ColorContext::sdr_rec709().delivery;
+        assert!(validate_delivery_description(&color).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_delivery_metadata() {
+        let error = validate_delivery_description(&ColorDescription::default())
+            .expect_err("unknown delivery metadata must not be tagged as Rec.709");
+        assert!(error.to_string().contains("unsupported delivery colour"));
+    }
+
+    #[test]
+    fn rejects_zero_confidence_delivery_metadata() {
+        let mut color = ColorContext::sdr_rec709().delivery;
+        color.confidence_basis_points = 0;
+        let error = validate_delivery_description(&color)
+            .expect_err("zero-confidence delivery metadata must not be tagged as Rec.709");
+        assert!(error.to_string().contains("nonzero confidence"));
+    }
+
+    #[test]
+    fn accepts_only_supported_project_delivery_provenance() {
+        for provenance in [
+            ColorProvenance::ApplicationDefault,
+            ColorProvenance::UserOverride,
+        ] {
+            let mut color = ColorContext::sdr_rec709().delivery;
+            color.provenance = provenance;
+            assert!(
+                validate_delivery_description(&color).is_ok(),
+                "current project delivery provenance should be accepted: {:?}",
+                color.provenance
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_or_non_project_delivery_provenance() {
+        for provenance in [
+            ColorProvenance::Unknown,
+            ColorProvenance::Other("future_provenance".to_owned()),
+            ColorProvenance::StreamMetadata,
+            ColorProvenance::ContainerMetadata,
+            ColorProvenance::SidecarMetadata,
+            ColorProvenance::Inferred,
+        ] {
+            let mut color = ColorContext::sdr_rec709().delivery;
+            color.provenance = provenance;
+            let error = validate_delivery_description(&color)
+                .expect_err("unsupported provenance must not be tagged as Rec.709");
+            assert!(
+                error
+                    .to_string()
+                    .contains("application_default or user_override provenance"),
+                "unexpected delivery provenance error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_rec709_delivery_metadata() {
+        let mut color = ColorContext::sdr_rec709().delivery;
+        color.primaries = ColorPrimaries::Bt2020;
+        let error = validate_delivery_description(&color)
+            .expect_err("non-Rec.709 delivery metadata is not supported yet");
+        assert!(
+            error
+                .to_string()
+                .contains("requires explicit 8-bit SDR Rec.709")
+        );
+    }
+
+    #[test]
+    fn rejects_non_libx264_for_explicit_color_tagging() {
+        let mut settings = DeliveryProfile::SourceMaster
+            .export_settings(&Document::default(), ExportCancellation::default());
+        settings.video_codec = "h264_nvenc".to_owned();
+        let error = validate_delivery_color(&settings)
+            .expect_err("unmapped H.264 encoders must not claim tagged output");
+        assert!(
+            error
+                .to_string()
+                .contains("requires the libx264 H.264 encoder")
+        );
+    }
+
+    #[test]
+    fn stamps_rgb_and_yuv_frames_with_their_explicit_ranges() {
+        let mut rgba = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGBA, 2, 2);
+        stamp_rgba_color(&mut rgba);
+        assert_eq!(rgba.color_space(), ffmpeg::color::Space::RGB);
+        assert_eq!(rgba.color_range(), ffmpeg::color::Range::JPEG);
+        assert_eq!(rgba.color_primaries(), ffmpeg::color::Primaries::BT709);
+        assert_eq!(
+            rgba.color_transfer_characteristic(),
+            ffmpeg::color::TransferCharacteristic::BT709
+        );
+
+        let mut yuv = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, 2, 2);
+        stamp_yuv420p_color(&mut yuv);
+        assert_eq!(yuv.color_space(), ffmpeg::color::Space::BT709);
+        assert_eq!(yuv.color_range(), ffmpeg::color::Range::MPEG);
+        assert_eq!(yuv.color_primaries(), ffmpeg::color::Primaries::BT709);
+        assert_eq!(
+            yuv.color_transfer_characteristic(),
+            ffmpeg::color::TransferCharacteristic::BT709
+        );
+    }
 }

@@ -2,12 +2,15 @@ use std::{path::Path, sync::Arc};
 
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
-    AssetId, FrameTexture, MediaAsset, MediaError, MediaKind, Rational, RgbaImage, TimeCode,
+    AssetId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
+    ColorRange, ColorTransfer, ColorWhitePoint, FrameTexture, MediaAsset, MediaError, MediaKind,
+    Rational, RgbaImage, TimeCode,
 };
 
 use crate::cache::FrameCache;
 
 const AV_TIME_BASE: i64 = 1_000_000;
+const COLOR_COVERAGE_PER_FIELD_BASIS_POINTS: u16 = 2_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VideoRotation {
@@ -57,7 +60,7 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
         }
     };
 
-    let (fps, resolution, duration) = if let Some(stream) = video {
+    let (fps, resolution, duration, color_description) = if let Some(stream) = video {
         let timing =
             analyze_video_packets(path, stream.index(), normalized_start(stream.start_time()))?;
         let rate = select_video_rate(path, &stream, &timing)?;
@@ -73,6 +76,7 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
             .decoder()
             .video()
             .map_err(|error| media_error(path, "could not open the video decoder", error))?;
+        let color_description = color_description_from_decoder(&decoder);
         let stream_duration = timestamp_to_grid_ceil(stream.duration(), stream.time_base(), rate);
         let packet_duration = timing.duration.map_or(0, |duration| {
             timestamp_to_grid_ceil(duration, stream.time_base(), rate)
@@ -85,13 +89,14 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
             container_duration
         });
         let resolution = rotation.display_dimensions(decoder.width(), decoder.height());
-        (rate, Some(resolution), duration)
+        (rate, Some(resolution), duration, color_description)
     } else {
         let rate = Rational::default();
         (
             rate,
             None,
             TimeCode(duration_us_to_frames(input.duration(), rate)),
+            ColorDescription::unknown(),
         )
     };
 
@@ -114,7 +119,322 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
         fps,
         kind,
         resolution,
+        color_description,
     })
+}
+
+fn color_description_from_decoder(decoder: &ffmpeg::codec::decoder::Video) -> ColorDescription {
+    let primaries = map_color_primaries(decoder.color_primaries());
+    let transfer = map_color_transfer(decoder.color_transfer_characteristic());
+    let matrix = map_color_matrix(decoder.color_space());
+    let range = map_color_range(decoder.color_range());
+    let bit_depth = bit_depth_from_pixel(decoder.format());
+    let (provenance, confidence_basis_points) =
+        color_metadata_coverage(&primaries, &transfer, &matrix, &range, &bit_depth);
+
+    ColorDescription {
+        primaries,
+        transfer,
+        matrix,
+        range,
+        // FFmpeg exposes primaries, transfer, matrix, and range here, but not
+        // a white point. Keep this unknown rather than mixing an inferred
+        // value into a description whose provenance is stream metadata.
+        white_point: ColorWhitePoint::Unknown,
+        bit_depth,
+        confidence_basis_points,
+        provenance,
+    }
+}
+
+/// Score how completely the probe described the source rather than claiming
+/// that a declared value is intrinsically correct. Each of the four `FFmpeg`
+/// stream colorimetry fields covers one fifth of the description, and a safely
+/// inferred component depth covers the final fifth.
+fn color_metadata_coverage(
+    primaries: &ColorPrimaries,
+    transfer: &ColorTransfer,
+    matrix: &ColorMatrix,
+    range: &ColorRange,
+    bit_depth: &ColorBitDepth,
+) -> (ColorProvenance, u16) {
+    let known_stream_fields = [
+        !matches!(primaries, ColorPrimaries::Unknown),
+        !matches!(transfer, ColorTransfer::Unknown),
+        !matches!(matrix, ColorMatrix::Unknown),
+        !matches!(range, ColorRange::Unknown),
+    ]
+    .into_iter()
+    .filter(|known| *known)
+    .count();
+    let bit_depth_known = !matches!(bit_depth, ColorBitDepth::Unknown);
+    let known_fields = known_stream_fields + usize::from(bit_depth_known);
+    let confidence_basis_points = u16::try_from(known_fields)
+        .unwrap_or(5)
+        .saturating_mul(COLOR_COVERAGE_PER_FIELD_BASIS_POINTS)
+        .min(kinewright_core::COLOR_CONFIDENCE_MAX_BASIS_POINTS);
+    let provenance = if known_stream_fields > 0 {
+        ColorProvenance::StreamMetadata
+    } else if bit_depth_known {
+        ColorProvenance::Inferred
+    } else {
+        ColorProvenance::Unknown
+    };
+    (provenance, confidence_basis_points)
+}
+
+fn map_color_primaries(value: ffmpeg::color::Primaries) -> ColorPrimaries {
+    use ffmpeg::color::Primaries;
+
+    match value {
+        Primaries::Reserved0 | Primaries::Unspecified | Primaries::Reserved => {
+            ColorPrimaries::Unknown
+        }
+        Primaries::BT709 => ColorPrimaries::Bt709,
+        Primaries::BT2020 => ColorPrimaries::Bt2020,
+        Primaries::BT470M => ColorPrimaries::Bt470M,
+        Primaries::BT470BG => ColorPrimaries::Bt470Bg,
+        Primaries::SMPTE170M => ColorPrimaries::Smpte170M,
+        Primaries::SMPTE240M => ColorPrimaries::Smpte240M,
+        Primaries::SMPTE431 => ColorPrimaries::DciP3,
+        Primaries::SMPTE432 => ColorPrimaries::DisplayP3,
+        Primaries::Film => ColorPrimaries::Film,
+        Primaries::SMPTE428 => ColorPrimaries::Other("smpte428".to_owned()),
+        Primaries::EBU3213 => ColorPrimaries::Other("ebu3213".to_owned()),
+    }
+}
+
+fn map_color_transfer(value: ffmpeg::color::TransferCharacteristic) -> ColorTransfer {
+    use ffmpeg::color::TransferCharacteristic;
+
+    match value {
+        TransferCharacteristic::Reserved0
+        | TransferCharacteristic::Unspecified
+        | TransferCharacteristic::Reserved => ColorTransfer::Unknown,
+        TransferCharacteristic::BT709 => ColorTransfer::Bt709,
+        TransferCharacteristic::GAMMA22 => ColorTransfer::Gamma22,
+        TransferCharacteristic::GAMMA28 => ColorTransfer::Gamma28,
+        TransferCharacteristic::SMPTE170M => ColorTransfer::Smpte170M,
+        TransferCharacteristic::Linear => ColorTransfer::Linear,
+        TransferCharacteristic::Log => ColorTransfer::Log,
+        TransferCharacteristic::IEC61966_2_1 => ColorTransfer::Srgb,
+        TransferCharacteristic::SMPTE2084 => ColorTransfer::Smpte2084,
+        TransferCharacteristic::ARIB_STD_B67 => ColorTransfer::AribStdB67,
+        TransferCharacteristic::SMPTE240M => ColorTransfer::Other("smpte240m".to_owned()),
+        TransferCharacteristic::LogSqrt => ColorTransfer::Other("log_sqrt".to_owned()),
+        TransferCharacteristic::IEC61966_2_4 => ColorTransfer::Other("iec61966_2_4".to_owned()),
+        TransferCharacteristic::BT1361_ECG => ColorTransfer::Other("bt1361_ecg".to_owned()),
+        TransferCharacteristic::BT2020_10 => ColorTransfer::Other("bt2020_10".to_owned()),
+        TransferCharacteristic::BT2020_12 => ColorTransfer::Other("bt2020_12".to_owned()),
+        TransferCharacteristic::SMPTE428 => ColorTransfer::Other("smpte428".to_owned()),
+    }
+}
+
+fn map_color_matrix(value: ffmpeg::color::Space) -> ColorMatrix {
+    use ffmpeg::color::Space;
+
+    match value {
+        Space::Unspecified | Space::Reserved => ColorMatrix::Unknown,
+        Space::RGB => ColorMatrix::Rgb,
+        Space::BT709 => ColorMatrix::Bt709,
+        Space::BT470BG => ColorMatrix::Other("bt470bg".to_owned()),
+        Space::BT2020NCL => ColorMatrix::Bt2020Ncl,
+        Space::BT2020CL => ColorMatrix::Bt2020Cl,
+        Space::SMPTE170M => ColorMatrix::Smpte170M,
+        Space::SMPTE240M => ColorMatrix::Smpte240M,
+        Space::YCGCO => ColorMatrix::Ycgco,
+        Space::ChromaDerivedNCL => ColorMatrix::ChromaDerivedNcl,
+        Space::ChromaDerivedCL => ColorMatrix::ChromaDerivedCl,
+        Space::ICTCP => ColorMatrix::Ictcp,
+        Space::FCC => ColorMatrix::Other("fcc".to_owned()),
+        Space::SMPTE2085 => ColorMatrix::Other("smpte2085".to_owned()),
+        Space::IPT_C2 => ColorMatrix::Other("ipt_c2".to_owned()),
+        Space::YCGCO_RE => ColorMatrix::Other("ycgco_re".to_owned()),
+        Space::YCGCO_RO => ColorMatrix::Other("ycgco_ro".to_owned()),
+    }
+}
+
+fn map_color_range(value: ffmpeg::color::Range) -> ColorRange {
+    match value {
+        ffmpeg::color::Range::Unspecified => ColorRange::Unknown,
+        ffmpeg::color::Range::MPEG => ColorRange::Limited,
+        ffmpeg::color::Range::JPEG => ColorRange::Full,
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn bit_depth_from_pixel(pixel: ffmpeg::format::Pixel) -> ColorBitDepth {
+    let Some(name) = pixel
+        .descriptor()
+        .map(ffmpeg::format::pixel::Descriptor::name)
+    else {
+        return ColorBitDepth::Unknown;
+    };
+
+    if matches!(
+        name,
+        "yuv420p"
+            | "yuv422p"
+            | "yuv444p"
+            | "yuv440p"
+            | "yuv411p"
+            | "yuv410p"
+            | "yuvj420p"
+            | "yuvj422p"
+            | "yuvj444p"
+            | "yuvj440p"
+            | "yuyv422"
+            | "uyvy422"
+            | "nv12"
+            | "nv21"
+            | "nv16"
+            | "gbrp"
+            | "gbrap"
+            | "yuva420p"
+            | "yuva422p"
+            | "yuva444p"
+            | "rgba"
+            | "bgra"
+            | "argb"
+            | "abgr"
+            | "rgb24"
+            | "bgr24"
+            | "gray8"
+            | "ya8"
+    ) {
+        return ColorBitDepth::Eight;
+    }
+
+    if matches!(
+        name,
+        "yuv420p9be"
+            | "yuv420p9le"
+            | "yuv422p9be"
+            | "yuv422p9le"
+            | "yuv444p9be"
+            | "yuv444p9le"
+            | "gbrp9be"
+            | "gbrp9le"
+            | "yuva420p9be"
+            | "yuva420p9le"
+            | "yuva422p9be"
+            | "yuva422p9le"
+            | "yuva444p9be"
+            | "yuva444p9le"
+    ) {
+        return ColorBitDepth::Integer(9);
+    }
+
+    if matches!(
+        name,
+        "yuv420p10be"
+            | "yuv420p10le"
+            | "yuv422p10be"
+            | "yuv422p10le"
+            | "yuv444p10be"
+            | "yuv444p10le"
+            | "gbrp10be"
+            | "gbrp10le"
+            | "yuva420p10be"
+            | "yuva420p10le"
+            | "yuva422p10be"
+            | "yuva422p10le"
+            | "yuva444p10be"
+            | "yuva444p10le"
+            | "yuv440p10be"
+            | "yuv440p10le"
+            | "gbrap10be"
+            | "gbrap10le"
+            | "p010be"
+            | "p010le"
+    ) {
+        return ColorBitDepth::Ten;
+    }
+
+    if matches!(
+        name,
+        "yuv420p12be"
+            | "yuv420p12le"
+            | "yuv422p12be"
+            | "yuv422p12le"
+            | "yuv440p12be"
+            | "yuv440p12le"
+            | "yuv444p12be"
+            | "yuv444p12le"
+            | "gbrp12be"
+            | "gbrp12le"
+            | "gbrap12be"
+            | "gbrap12le"
+            | "yuva422p12be"
+            | "yuva422p12le"
+            | "yuva444p12be"
+            | "yuva444p12le"
+            | "p012be"
+            | "p012le"
+    ) {
+        return ColorBitDepth::Twelve;
+    }
+
+    if matches!(
+        name,
+        "yuv420p14be"
+            | "yuv420p14le"
+            | "yuv422p14be"
+            | "yuv422p14le"
+            | "yuv444p14be"
+            | "yuv444p14le"
+            | "gbrp14be"
+            | "gbrp14le"
+            | "gbrap14be"
+            | "gbrap14le"
+    ) {
+        return ColorBitDepth::Integer(14);
+    }
+
+    if matches!(
+        name,
+        "yuv420p16be"
+            | "yuv420p16le"
+            | "yuv422p16be"
+            | "yuv422p16le"
+            | "yuv444p16be"
+            | "yuv444p16le"
+            | "gbrp16be"
+            | "gbrp16le"
+            | "gbrap16be"
+            | "gbrap16le"
+            | "yuva420p16be"
+            | "yuva420p16le"
+            | "yuva422p16be"
+            | "yuva422p16le"
+            | "yuva444p16be"
+            | "yuva444p16le"
+            | "p016be"
+            | "p016le"
+            | "gray16be"
+            | "gray16le"
+            | "rgb48be"
+            | "rgb48le"
+            | "rgba64be"
+            | "rgba64le"
+    ) {
+        return ColorBitDepth::Sixteen;
+    }
+
+    if matches!(
+        name,
+        "gbrpf16be" | "gbrpf16le" | "gbrapf16be" | "gbrapf16le"
+    ) {
+        return ColorBitDepth::Float16;
+    }
+    if matches!(
+        name,
+        "gbrpf32be" | "gbrpf32le" | "gbrapf32be" | "gbrapf32le"
+    ) {
+        return ColorBitDepth::Float32;
+    }
+
+    ColorBitDepth::Unknown
 }
 
 fn valid_rate(rate: ffmpeg::Rational) -> Option<Rational> {
@@ -791,4 +1111,221 @@ fn normalized_start(start: i64) -> i64 {
 
 pub(crate) fn backend(error: impl std::fmt::Display) -> MediaError {
     MediaError::Backend(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ffmpeg_color_enums_map_known_and_unspecified_values() {
+        assert_eq!(
+            map_color_primaries(ffmpeg::color::Primaries::BT709),
+            ColorPrimaries::Bt709
+        );
+        assert_eq!(
+            map_color_primaries(ffmpeg::color::Primaries::SMPTE431),
+            ColorPrimaries::DciP3
+        );
+        assert_eq!(
+            map_color_primaries(ffmpeg::color::Primaries::SMPTE428),
+            ColorPrimaries::Other("smpte428".to_owned())
+        );
+        assert_eq!(
+            map_color_primaries(ffmpeg::color::Primaries::EBU3213),
+            ColorPrimaries::Other("ebu3213".to_owned())
+        );
+        assert_eq!(
+            map_color_primaries(ffmpeg::color::Primaries::Unspecified),
+            ColorPrimaries::Unknown
+        );
+
+        assert_eq!(
+            map_color_transfer(ffmpeg::color::TransferCharacteristic::BT709),
+            ColorTransfer::Bt709
+        );
+        assert_eq!(
+            map_color_transfer(ffmpeg::color::TransferCharacteristic::IEC61966_2_1),
+            ColorTransfer::Srgb
+        );
+        assert_eq!(
+            map_color_transfer(ffmpeg::color::TransferCharacteristic::BT2020_10),
+            ColorTransfer::Other("bt2020_10".to_owned())
+        );
+        assert_eq!(
+            map_color_transfer(ffmpeg::color::TransferCharacteristic::SMPTE428),
+            ColorTransfer::Other("smpte428".to_owned())
+        );
+        assert_eq!(
+            map_color_transfer(ffmpeg::color::TransferCharacteristic::Unspecified),
+            ColorTransfer::Unknown
+        );
+
+        assert_eq!(
+            map_color_matrix(ffmpeg::color::Space::RGB),
+            ColorMatrix::Rgb
+        );
+        assert_eq!(
+            map_color_matrix(ffmpeg::color::Space::BT2020NCL),
+            ColorMatrix::Bt2020Ncl
+        );
+        assert_eq!(
+            map_color_matrix(ffmpeg::color::Space::FCC),
+            ColorMatrix::Other("fcc".to_owned())
+        );
+        assert_eq!(
+            map_color_matrix(ffmpeg::color::Space::BT470BG),
+            ColorMatrix::Other("bt470bg".to_owned())
+        );
+        assert_eq!(
+            map_color_matrix(ffmpeg::color::Space::IPT_C2),
+            ColorMatrix::Other("ipt_c2".to_owned())
+        );
+        assert_eq!(
+            map_color_matrix(ffmpeg::color::Space::Unspecified),
+            ColorMatrix::Unknown
+        );
+
+        assert_eq!(
+            map_color_range(ffmpeg::color::Range::MPEG),
+            ColorRange::Limited
+        );
+        assert_eq!(
+            map_color_range(ffmpeg::color::Range::JPEG),
+            ColorRange::Full
+        );
+        assert_eq!(
+            map_color_range(ffmpeg::color::Range::Unspecified),
+            ColorRange::Unknown
+        );
+    }
+
+    #[test]
+    fn common_pixel_formats_map_to_component_depth() {
+        assert_eq!(
+            bit_depth_from_pixel(ffmpeg::format::Pixel::YUV420P),
+            ColorBitDepth::Eight
+        );
+        for pixel in [
+            ffmpeg::format::Pixel::YUYV422,
+            ffmpeg::format::Pixel::UYVY422,
+            ffmpeg::format::Pixel::NV16,
+            ffmpeg::format::Pixel::YUVA420P,
+            ffmpeg::format::Pixel::GBRAP,
+            ffmpeg::format::Pixel::YUVJ440P,
+        ] {
+            assert_eq!(bit_depth_from_pixel(pixel), ColorBitDepth::Eight);
+        }
+        assert_eq!(
+            bit_depth_from_pixel(ffmpeg::format::Pixel::YUV420P9LE),
+            ColorBitDepth::Integer(9)
+        );
+        assert_eq!(
+            bit_depth_from_pixel(ffmpeg::format::Pixel::YUV420P10LE),
+            ColorBitDepth::Ten
+        );
+        assert_eq!(
+            bit_depth_from_pixel(ffmpeg::format::Pixel::P010LE),
+            ColorBitDepth::Ten
+        );
+        assert_eq!(
+            bit_depth_from_pixel(ffmpeg::format::Pixel::YUV420P12LE),
+            ColorBitDepth::Twelve
+        );
+        for pixel in [
+            ffmpeg::format::Pixel::YUV440P12LE,
+            ffmpeg::format::Pixel::YUVA422P12LE,
+            ffmpeg::format::Pixel::YUVA444P12LE,
+            ffmpeg::format::Pixel::GBRAP12LE,
+        ] {
+            assert_eq!(bit_depth_from_pixel(pixel), ColorBitDepth::Twelve);
+        }
+        for pixel in [
+            ffmpeg::format::Pixel::YUV422P14LE,
+            ffmpeg::format::Pixel::GBRAP14LE,
+        ] {
+            assert_eq!(bit_depth_from_pixel(pixel), ColorBitDepth::Integer(14));
+        }
+        assert_eq!(
+            bit_depth_from_pixel(ffmpeg::format::Pixel::RGBA64LE),
+            ColorBitDepth::Sixteen
+        );
+        assert_eq!(
+            bit_depth_from_pixel(ffmpeg::format::Pixel::GBRPF32LE),
+            ColorBitDepth::Float32
+        );
+        assert_eq!(
+            bit_depth_from_pixel(ffmpeg::format::Pixel::None),
+            ColorBitDepth::Unknown
+        );
+        assert_eq!(
+            bit_depth_from_pixel(ffmpeg::format::Pixel::RGB565LE),
+            ColorBitDepth::Unknown,
+            "packed total-pixel widths must not be mistaken for component depth"
+        );
+    }
+
+    #[test]
+    fn color_confidence_measures_partial_metadata_coverage() {
+        let unknown_primaries = ColorPrimaries::Unknown;
+        let unknown_transfer = ColorTransfer::Unknown;
+        let unknown_matrix = ColorMatrix::Unknown;
+        let unknown_range = ColorRange::Unknown;
+        let unknown_depth = ColorBitDepth::Unknown;
+        assert_eq!(
+            color_metadata_coverage(
+                &unknown_primaries,
+                &unknown_transfer,
+                &unknown_matrix,
+                &unknown_range,
+                &unknown_depth,
+            ),
+            (ColorProvenance::Unknown, 0)
+        );
+
+        let eight_bit = ColorBitDepth::Eight;
+        assert_eq!(
+            color_metadata_coverage(
+                &unknown_primaries,
+                &unknown_transfer,
+                &unknown_matrix,
+                &unknown_range,
+                &eight_bit,
+            ),
+            (ColorProvenance::Inferred, 2_000)
+        );
+
+        let bt709_primaries = ColorPrimaries::Bt709;
+        assert_eq!(
+            color_metadata_coverage(
+                &bt709_primaries,
+                &unknown_transfer,
+                &unknown_matrix,
+                &unknown_range,
+                &unknown_depth,
+            ),
+            (ColorProvenance::StreamMetadata, 2_000)
+        );
+        assert_eq!(
+            color_metadata_coverage(
+                &bt709_primaries,
+                &unknown_transfer,
+                &unknown_matrix,
+                &unknown_range,
+                &eight_bit,
+            ),
+            (ColorProvenance::StreamMetadata, 4_000)
+        );
+
+        assert_eq!(
+            color_metadata_coverage(
+                &bt709_primaries,
+                &ColorTransfer::Bt709,
+                &ColorMatrix::Bt709,
+                &ColorRange::Limited,
+                &eight_bit,
+            ),
+            (ColorProvenance::StreamMetadata, 10_000)
+        );
+    }
 }
