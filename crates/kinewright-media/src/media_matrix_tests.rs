@@ -117,12 +117,24 @@ fn generate_cfr(output: &Path, rate: &str, size: &str, duration: &str) {
         "lavfi".to_owned(),
         "-i".to_owned(),
         source,
+        "-vf".to_owned(),
+        "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709".to_owned(),
         "-c:v".to_owned(),
         "libx264".to_owned(),
         "-preset".to_owned(),
         "ultrafast".to_owned(),
         "-pix_fmt".to_owned(),
         "yuv420p".to_owned(),
+        "-color_primaries".to_owned(),
+        "bt709".to_owned(),
+        "-color_trc".to_owned(),
+        "bt709".to_owned(),
+        "-colorspace".to_owned(),
+        "bt709".to_owned(),
+        "-color_range".to_owned(),
+        "tv".to_owned(),
+        "-x264-params".to_owned(),
+        "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv".to_owned(),
         "-an".to_owned(),
     ];
     run_ffmpeg(&arguments, output);
@@ -147,12 +159,24 @@ fn generate_video_with_audio(
         "lavfi".to_owned(),
         "-i".to_owned(),
         audio,
+        "-vf".to_owned(),
+        "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709".to_owned(),
         "-c:v".to_owned(),
         codec.to_owned(),
         "-preset".to_owned(),
         "ultrafast".to_owned(),
         "-pix_fmt".to_owned(),
         "yuv420p".to_owned(),
+        "-color_primaries".to_owned(),
+        "bt709".to_owned(),
+        "-color_trc".to_owned(),
+        "bt709".to_owned(),
+        "-colorspace".to_owned(),
+        "bt709".to_owned(),
+        "-color_range".to_owned(),
+        "tv".to_owned(),
+        "-x264-params".to_owned(),
+        "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv".to_owned(),
         "-g".to_owned(),
         gop.to_owned(),
         "-keyint_min".to_owned(),
@@ -380,6 +404,16 @@ fn generate_vfr(output: &Path) {
             "ultrafast",
             "-pix_fmt",
             "yuv420p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-x264-params",
+            "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv",
             "-g",
             "60",
             "-c:a",
@@ -548,6 +582,16 @@ fn generate_rotated(output: &Path, directory: &MatrixDirectory) {
             "ultrafast",
             "-pix_fmt",
             "yuv420p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-x264-params",
+            "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv",
             "-an",
         ],
         &encoded,
@@ -571,7 +615,7 @@ fn vfr_grid_holds_the_previous_pts_frame_and_is_deterministic() {
     assert_eq!(asset.duration, TimeCode(30));
 
     let mut decoder = VideoDecoder::open(&path, asset.fps).unwrap();
-    let mut cache = FrameCache::new(4);
+    let mut cache: FrameCache<kinewright_core::FrameTexture> = FrameCache::new(4);
     decoder
         .decode_window(TimeCode(0), TimeCode(1), &mut cache)
         .unwrap();
@@ -583,7 +627,7 @@ fn vfr_grid_holds_the_previous_pts_frame_and_is_deterministic() {
     );
 
     let mut second_decoder = VideoDecoder::open(&path, asset.fps).unwrap();
-    let mut second_cache = FrameCache::new(2);
+    let mut second_cache: FrameCache<kinewright_core::FrameTexture> = FrameCache::new(2);
     second_decoder
         .decode_window(TimeCode(1), TimeCode(1), &mut second_cache)
         .unwrap();
@@ -594,7 +638,7 @@ fn vfr_grid_holds_the_previous_pts_frame_and_is_deterministic() {
     );
 
     let mut proxy_decoder = VideoDecoder::open_scaled(&path, asset.fps, Some(80)).unwrap();
-    let mut proxy_cache = FrameCache::new(4);
+    let mut proxy_cache: FrameCache<kinewright_core::FrameTexture> = FrameCache::new(4);
     proxy_decoder
         .decode_window(TimeCode(0), TimeCode(0), &mut proxy_cache)
         .unwrap();
@@ -621,7 +665,7 @@ fn display_matrix_rotation_changes_probe_and_decode_dimensions() {
 
     assert_eq!(asset.resolution, Some((54, 96)));
     let mut decoder = VideoDecoder::open(&path, asset.fps).unwrap();
-    let mut cache = FrameCache::new(2);
+    let mut cache: FrameCache<kinewright_core::FrameTexture> = FrameCache::new(2);
     decoder
         .decode_window(TimeCode::ZERO, TimeCode::ZERO, &mut cache)
         .unwrap();
@@ -655,7 +699,7 @@ fn assert_rotated_quadrants(frame: &kinewright_core::FrameTexture) {
 
 fn decode_at(path: &Path, asset: &MediaAsset, at: TimeCode) -> kinewright_core::FrameTexture {
     let mut decoder = VideoDecoder::open(path, asset.fps).unwrap();
-    let mut cache = FrameCache::new(2);
+    let mut cache: FrameCache<kinewright_core::FrameTexture> = FrameCache::new(2);
     decoder.decode_window(at, at, &mut cache).unwrap();
     assert!(
         cache.contains(at),
@@ -958,7 +1002,10 @@ fn percentile(samples: &mut [Duration], percent: usize) -> Duration {
     samples[rank.min(samples.len().saturating_sub(1))]
 }
 
-fn assert_proxy_frame(cache: &mut FrameCache, at: TimeCode) -> (u32, u32) {
+fn assert_proxy_frame(
+    cache: &mut FrameCache<kinewright_core::FrameTexture>,
+    at: TimeCode,
+) -> (u32, u32) {
     assert!(
         cache.contains(at),
         "proxy decode did not cache exact frame {at}"
@@ -982,7 +1029,7 @@ fn measure_proxy_performance(case: &MatrixCase) -> PerfResult {
     let mut cold_samples = Vec::with_capacity(PERF_SEEKS);
     let mut proxy = (0, 0);
     for at in random_positions {
-        let mut cache = FrameCache::new(2);
+        let mut cache: FrameCache<kinewright_core::FrameTexture> = FrameCache::new(2);
         let started = Instant::now();
         seek_decoder.decode_window(at, at, &mut cache).unwrap();
         cold_samples.push(started.elapsed());
@@ -991,7 +1038,7 @@ fn measure_proxy_performance(case: &MatrixCase) -> PerfResult {
 
     let mut sequential_decoder =
         VideoDecoder::open_scaled(&case.path, asset.fps, Some(PREVIEW_MAX_WIDTH)).unwrap();
-    let mut sequential_cache = FrameCache::new(4);
+    let mut sequential_cache: FrameCache<kinewright_core::FrameTexture> = FrameCache::new(4);
     let sequential_started = Instant::now();
     let mut start = TimeCode::ZERO;
     while start < asset.duration {
@@ -1022,7 +1069,7 @@ fn measure_proxy_performance(case: &MatrixCase) -> PerfResult {
     let mut scrub_samples = Vec::with_capacity(PERF_SEEKS);
     for index in 0..PERF_SEEKS {
         let at = TimeCode((1 + i64::try_from(index).unwrap().saturating_mul(scrub_step)).min(last));
-        let mut cache = FrameCache::new(2);
+        let mut cache: FrameCache<kinewright_core::FrameTexture> = FrameCache::new(2);
         let started = Instant::now();
         scrub_decoder.decode_window(at, at, &mut cache).unwrap();
         scrub_samples.push(started.elapsed());

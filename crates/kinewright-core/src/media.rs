@@ -49,6 +49,82 @@ pub struct MediaAvailabilityStatus {
     pub reason: Option<String>,
 }
 
+/// One live source-availability failure that blocks export.
+///
+/// This keeps the availability observation out of persisted project state:
+/// source status belongs to the machine that is about to render, while the
+/// imported fingerprint remains part of the project document.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct ExportMediaPreflightIssue {
+    pub asset: AssetId,
+    pub asset_name: String,
+    pub availability: MediaAvailabilityStatus,
+}
+
+/// Live source-identity result for the timeline-referenced portion of one
+/// immutable export document.
+///
+/// `OnlineUnverified` deliberately blocks export. It identifies a legacy
+/// source that has no persisted fingerprint, so a readable path alone cannot
+/// prove it is the media that was edited. Re-import or explicitly relink the
+/// source to record a verified identity before delivery. This policy applies
+/// equally to video and audio assets and is intentionally stricter than
+/// ordinary preview availability.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct ExportMediaPreflightReport {
+    /// Asset ids checked in deterministic media-pool order. Unused media-bin
+    /// entries are intentionally absent.
+    pub checked_assets: Vec<AssetId>,
+    /// Every status other than `online_verified`, retained with its typed
+    /// backend reason for UI and agent recovery surfaces.
+    pub issues: Vec<ExportMediaPreflightIssue>,
+}
+
+impl ExportMediaPreflightReport {
+    /// Return whether every timeline-referenced source was live and matched
+    /// its persisted fingerprint at preflight time.
+    #[must_use]
+    pub const fn export_ready(&self) -> bool {
+        self.issues.is_empty()
+    }
+
+    /// Produce a concise human-readable summary while preserving the full
+    /// typed report for callers that need individual recovery actions.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        if self.issues.is_empty() {
+            return format!(
+                "{} timeline-referenced source(s) are online and fingerprint-verified",
+                self.checked_assets.len()
+            );
+        }
+        let details = self
+            .issues
+            .iter()
+            .map(|issue| {
+                let reason = issue
+                    .availability
+                    .reason
+                    .as_deref()
+                    .unwrap_or("no backend reason was provided");
+                format!(
+                    "{} ({:?}): {reason}",
+                    issue.asset_name, issue.availability.kind
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "Export blocked: {} timeline-referenced source(s) need relink or recovery: {details}",
+            self.issues.len()
+        )
+    }
+}
+
 /// Fixed cache families exposed by the media runtime. The generated-proxy
 /// family is present in the contract so clients can distinguish an intentional
 /// unsupported feature from an empty cache; M41 does not generate proxies.
@@ -120,6 +196,61 @@ pub struct RgbaImage {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
+}
+
+/// The renderer implementation that produced a managed monitor proof.
+///
+/// This is intentionally a core-owned vocabulary: proof manifests must not
+/// expose a `wgpu` type or make a backend-specific claim that a test double
+/// cannot support.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitorProofRenderKind {
+    GpuPreview,
+    TestDouble,
+}
+
+/// Backend provenance attached to one full-resolution managed proof.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct MonitorProofMetadata {
+    pub render_kind: MonitorProofRenderKind,
+    /// Stable backend identifier, such as `vulkan` or `dx12`.
+    pub backend: String,
+    /// Adapter/device name reported by the active renderer.
+    pub adapter: String,
+    /// True when the renderer is known to be a software fallback.
+    pub software_fallback: bool,
+    /// True only when the renderer can honestly claim a GPU compositor path.
+    pub gpu_claim: bool,
+    /// Full-raster proof marker. Managed proof must always set this to true.
+    pub full_resolution: bool,
+}
+
+impl MonitorProofMetadata {
+    /// Metadata for deterministic analysis/test doubles. It never claims GPU
+    /// rendering and makes the non-production backend explicit.
+    #[must_use]
+    pub fn test_double() -> Self {
+        Self {
+            render_kind: MonitorProofRenderKind::TestDouble,
+            backend: "test_double".to_owned(),
+            adapter: "test_double".to_owned(),
+            software_fallback: true,
+            gpu_claim: false,
+            full_resolution: true,
+        }
+    }
+}
+
+/// One full-resolution managed monitor proof and its renderer provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorProof {
+    pub image: RgbaImage,
+    pub metadata: MonitorProofMetadata,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -533,8 +664,37 @@ pub enum MediaError {
     NotImplemented,
     #[error("export was cancelled")]
     Cancelled,
+    /// The managed renderer cannot prove that a decoder's native format is a
+    /// supported integer source surface. This remains structured so proof
+    /// callers can offer a stable recovery action instead of parsing text.
+    #[error(
+        "unsupported_decoder_format: {reason} (path={path}, format={format}, declared_bit_depth={declared_bit_depth:?}, decoder_bit_depth={decoder_bit_depth:?})"
+    )]
+    UnsupportedDecoderFormat {
+        /// The source path involved in the failed managed decode.
+        path: PathBuf,
+        /// The `FFmpeg` pixel-format name when available.
+        format: String,
+        /// The declared source integer depth, if it was valid enough to read.
+        declared_bit_depth: Option<u8>,
+        /// The decoder's native integer depth, if it was recognized.
+        decoder_bit_depth: Option<u8>,
+        /// A stable human-readable reason for recovery surfaces.
+        reason: String,
+    },
     #[error("media backend error: {0}")]
     Backend(String),
+}
+
+impl MediaError {
+    /// Return the machine-readable recovery code, when this error has one.
+    #[must_use]
+    pub const fn recovery_code(&self) -> Option<&'static str> {
+        match self {
+            Self::UnsupportedDecoderFormat { .. } => Some("unsupported_decoder_format"),
+            Self::NotImplemented | Self::Cancelled | Self::Backend(_) => None,
+        }
+    }
 }
 
 pub trait Playback: Send + Sync {
@@ -605,6 +765,24 @@ pub trait Analysis: Send + Sync {
         max_w: u32,
     ) -> Result<RgbaImage, MediaError> {
         self.thumbnail_at(t, max_w)
+    }
+    /// Render one exact project frame at the document's full resolution for
+    /// managed colour proof. This is intentionally separate from thumbnail
+    /// rendering: proxy dimensions cannot establish full-raster conformance.
+    ///
+    /// Stateful backends should use a branch-scoped renderer and must not
+    /// mutate the live playback document or reuse a stale proxy surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the backend cannot provide a managed
+    /// full-resolution proof frame.
+    fn monitor_proof_for_document(
+        &self,
+        _document: Arc<Document>,
+        _t: TimeCode,
+    ) -> Result<MonitorProof, MediaError> {
+        Err(MediaError::NotImplemented)
     }
     /// Queue derived speech recognition without blocking the caller. Repeated
     /// requests for the same asset are coalesced by the implementation.
@@ -732,6 +910,48 @@ pub trait Analysis: Send + Sync {
     /// cleared safely, or when the implementation does not own that family.
     fn clear_cache(&self, _family: MediaCacheFamily) -> Result<MediaCacheClearResult, MediaError> {
         Err(MediaError::NotImplemented)
+    }
+}
+
+/// Recheck every timeline-referenced source immediately before an export is
+/// accepted or started.
+///
+/// The observation comes from the active [`Analysis`] backend rather than the
+/// persisted document, because file availability and content identity are
+/// machine-local and can change while a project is open. Only
+/// [`MediaAvailabilityKind::OnlineVerified`] is accepted. In particular,
+/// `OnlineUnverified` legacy sources are blocked until they have been
+/// verified through import/relink, preventing a same-path replacement from
+/// silently entering delivery. Audio sources use the same rule as visual
+/// sources, while unused media-pool entries are excluded.
+#[must_use]
+pub fn export_media_preflight(
+    document: &Document,
+    analysis: &dyn Analysis,
+) -> ExportMediaPreflightReport {
+    export_media_preflight_with(document, |asset| analysis.media_availability(asset))
+}
+
+fn export_media_preflight_with(
+    document: &Document,
+    mut availability_for: impl FnMut(&MediaAsset) -> MediaAvailabilityStatus,
+) -> ExportMediaPreflightReport {
+    let mut checked_assets = Vec::new();
+    let mut issues = Vec::new();
+    for asset in document.timeline_referenced_media_assets() {
+        checked_assets.push(asset.id);
+        let availability = availability_for(asset);
+        if availability.kind != MediaAvailabilityKind::OnlineVerified {
+            issues.push(ExportMediaPreflightIssue {
+                asset: asset.id,
+                asset_name: asset.name.clone(),
+                availability,
+            });
+        }
+    }
+    ExportMediaPreflightReport {
+        checked_assets,
+        issues,
     }
 }
 
@@ -914,5 +1134,114 @@ pub trait Export: Send + Sync {
         progress: ProgressSink,
     ) -> Result<(), MediaError> {
         self.export(out, settings, progress)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Clip, ClipContent, MediaKind, Rational, Track, TrackKind};
+
+    fn asset(id: u64, kind: MediaKind) -> MediaAsset {
+        MediaAsset {
+            id: AssetId(id),
+            path: format!("fixture-{id}.mov").into(),
+            name: format!("fixture-{id}"),
+            duration: TimeCode(30),
+            fps: Rational::new(30, 1).unwrap(),
+            kind,
+            resolution: Some((1920, 1080)),
+            source_fingerprint: MediaSourceFingerprint::unknown(),
+            color_description: ColorDescription::default(),
+        }
+    }
+
+    fn media_clip(id: u64) -> Clip {
+        Clip {
+            id: ClipId(id),
+            asset: AssetId(id),
+            source_range: TimeCode::ZERO..TimeCode(30),
+            content: ClipContent::Media,
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+        }
+    }
+
+    fn document_with_video_audio_and_unused() -> Document {
+        Document {
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![media_clip(1)],
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: vec![media_clip(2)],
+                },
+            ],
+            media_pool: vec![
+                asset(1, MediaKind::Video),
+                asset(2, MediaKind::Audio),
+                asset(3, MediaKind::AudioVideo),
+            ],
+            duration: TimeCode(30),
+            ..Document::default()
+        }
+    }
+
+    fn status(kind: MediaAvailabilityKind) -> MediaAvailabilityStatus {
+        MediaAvailabilityStatus {
+            kind,
+            observed_fingerprint: None,
+            reason: Some("fixture availability".to_owned()),
+        }
+    }
+
+    #[test]
+    fn export_preflight_checks_only_timeline_video_and_audio_sources() {
+        let document = document_with_video_audio_and_unused();
+        let mut observed = Vec::new();
+        let report = export_media_preflight_with(&document, |asset| {
+            observed.push(asset.id);
+            status(MediaAvailabilityKind::OnlineVerified)
+        });
+
+        assert!(report.export_ready());
+        assert_eq!(report.checked_assets, vec![AssetId(1), AssetId(2)]);
+        assert_eq!(observed, vec![AssetId(1), AssetId(2)]);
+    }
+
+    #[test]
+    fn export_preflight_blocks_changed_and_legacy_unverified_sources() {
+        let document = document_with_video_audio_and_unused();
+        let report = export_media_preflight_with(&document, |asset| match asset.id {
+            AssetId(1) => status(MediaAvailabilityKind::Changed),
+            AssetId(2) => status(MediaAvailabilityKind::OnlineUnverified),
+            _ => unreachable!("unused assets are not observed"),
+        });
+
+        assert!(!report.export_ready());
+        assert_eq!(report.issues.len(), 2);
+        assert_eq!(report.issues[0].asset, AssetId(1));
+        assert_eq!(
+            report.issues[0].availability.kind,
+            MediaAvailabilityKind::Changed
+        );
+        assert_eq!(report.issues[1].asset, AssetId(2));
+        assert_eq!(
+            report.issues[1].availability.kind,
+            MediaAvailabilityKind::OnlineUnverified
+        );
+        assert!(report.summary().contains("relink or recovery"));
     }
 }

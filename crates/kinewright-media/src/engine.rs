@@ -14,9 +14,10 @@ use kinewright_core::{
     Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, BeatStatus, Document, Export,
     ExportCancellation, ExportSettings, FrameTexture, MediaAsset, MediaAvailabilityKind,
     MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus,
-    MediaCacheInventory, MediaError, MediaEvent, Playback, PlaybackState, ProgressSink, Rational,
-    RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange,
-    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, VisualAssetResult,
+    MediaCacheInventory, MediaError, MediaEvent, MonitorProof, Playback, PlaybackState,
+    ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat,
+    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus,
+    VisualAssetResult,
 };
 
 use crate::{
@@ -559,6 +560,34 @@ impl Analysis for FfmpegMediaEngine {
         response
             .recv()
             .map_err(|_| MediaError::Backend("media worker stopped".to_owned()))?
+    }
+
+    fn monitor_proof_for_document(
+        &self,
+        document: Arc<Document>,
+        at: TimeCode,
+    ) -> Result<MonitorProof, MediaError> {
+        // Proof rendering is deliberately isolated from the playback worker:
+        // a revision-bound before/after pair must not evict or reuse its
+        // proxy cache, alter transport state, or let one branch's asset ids
+        // collide with another branch.
+        let mut renderer = FrameRenderer::new(self.gpu.clone());
+        let resolution = document.resolution;
+        let frame = renderer.render(
+            &document,
+            at,
+            resolution,
+            RenderScale::FullResolution,
+            DecodeStrategy::Seek,
+        )?;
+        Ok(MonitorProof {
+            image: RgbaImage {
+                width: frame.width,
+                height: frame.height,
+                pixels: (*frame.rgba).clone(),
+            },
+            metadata: self.gpu.monitor_proof_metadata(),
+        })
     }
 
     fn request_waveform(&self, asset: MediaAsset, request_generation: u64) -> bool {

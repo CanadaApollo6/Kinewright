@@ -94,7 +94,7 @@ pub enum FixturePackError {
     HashAsset {
         asset: String,
         path: PathBuf,
-        source: kinewright_core::MediaError,
+        source: Box<kinewright_core::MediaError>,
     },
 }
 
@@ -376,7 +376,7 @@ fn verify_asset(asset: &FixtureAsset, path: &Path) -> Result<(), FixturePackErro
         kinewright_media::sha256_file(path).map_err(|source| FixturePackError::HashAsset {
             asset: asset.id.clone(),
             path: path.to_path_buf(),
-            source,
+            source: Box::new(source),
         })?;
     if hash != asset.sha256 {
         return Err(FixturePackError::Integrity {

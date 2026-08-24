@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -159,7 +162,7 @@ pub enum ParamValue {
     Text(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Effect {
     pub id: EffectId,
     /// A registered effect name from `EFFECT_DESCRIPTORS`.
@@ -173,7 +176,38 @@ pub struct Effect {
     pub keyframes: BTreeMap<String, AutomationCurve>,
 }
 
+#[derive(Debug, Deserialize)]
+struct EffectWire {
+    id: EffectId,
+    name: String,
+    parameters: BTreeMap<String, ParamValue>,
+    #[serde(default)]
+    keyframes: BTreeMap<String, AutomationCurve>,
+}
+
+impl<'de> Deserialize<'de> for Effect {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut wire = EffectWire::deserialize(deserializer)?;
+        canonicalize_legacy_color_grade_name(&mut wire.name);
+        Ok(Self {
+            id: wire.id,
+            name: wire.name,
+            parameters: wire.parameters,
+            keyframes: wire.keyframes,
+        })
+    }
+}
+
 impl Effect {
+    /// Rewrite legacy names whose persisted meaning now has one canonical
+    /// representation before the effect enters live project state.
+    pub(crate) fn canonicalize_legacy_name(&mut self) {
+        canonicalize_legacy_color_grade_name(&mut self.name);
+    }
+
     /// Resolve a parameter at one clip-local frame, falling back to its static value.
     #[must_use]
     pub fn integer_parameter_at(&self, name: &str, at: TimeCode) -> Option<i64> {
@@ -199,6 +233,12 @@ impl Effect {
         }
         evaluated.keyframes.clear();
         evaluated
+    }
+}
+
+fn canonicalize_legacy_color_grade_name(name: &mut String) {
+    if name == "color_grade" {
+        "primary_correction".clone_into(name);
     }
 }
 
@@ -513,6 +553,29 @@ impl Document {
         self.media_pool.iter().find(|asset| asset.id == id)
     }
 
+    /// Return the unique source assets that are actually referenced by clips
+    /// on the timeline, in media-pool order.
+    ///
+    /// Title clips intentionally do not refer to a source asset. Both normal
+    /// media clips and freeze clips do: a freeze is still decoded from its
+    /// source and must therefore participate in source availability and
+    /// export preflight checks. This distinction is central to keeping stale,
+    /// unused media-bin entries from blocking a delivery.
+    #[must_use]
+    pub fn timeline_referenced_media_assets(&self) -> Vec<&MediaAsset> {
+        let referenced_ids: BTreeSet<_> = self
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .filter(|clip| matches!(clip.content, ClipContent::Media | ClipContent::Freeze(_)))
+            .map(|clip| clip.asset)
+            .collect();
+        self.media_pool
+            .iter()
+            .filter(|asset| referenced_ids.contains(&asset.id))
+            .collect()
+    }
+
     #[must_use]
     pub fn clip(&self, id: ClipId) -> Option<&Clip> {
         self.tracks
@@ -569,5 +632,158 @@ impl Document {
         }
         self.duration = duration;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::{
+        AutomationCurve, JournalCommand, Keyframe, KeyframeInterpolation, Operation, TrackKind,
+    };
+
+    fn effect(name: &str) -> Effect {
+        Effect {
+            id: EffectId(7),
+            name: name.to_owned(),
+            parameters: BTreeMap::from([
+                ("exposure_milli_stops".to_owned(), ParamValue::Integer(750)),
+                ("tint_percent".to_owned(), ParamValue::Integer(-12)),
+                (
+                    "label".to_owned(),
+                    ParamValue::Text("preserve me".to_owned()),
+                ),
+            ]),
+            keyframes: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                AutomationCurve {
+                    keyframes: vec![Keyframe {
+                        at: TimeCode(3),
+                        value: 1_250,
+                        interpolation: KeyframeInterpolation::EaseIn,
+                    }],
+                },
+            )]),
+        }
+    }
+
+    fn document_with_effects(effects: Vec<Effect>) -> Document {
+        let mut document = Document::default();
+        document.tracks.push(Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![Clip {
+                id: ClipId(1),
+                asset: AssetId(1),
+                source_range: TimeCode::ZERO..TimeCode(10),
+                content: ClipContent::Media,
+                timeline_start: TimeCode::ZERO,
+                effects,
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
+            }],
+        });
+        document
+    }
+
+    #[test]
+    fn legacy_color_grade_wire_name_migrates_without_losing_effect_data() {
+        let original = effect("color_grade");
+        let wire = serde_json::to_value(&original).expect("effect should serialize");
+        assert_eq!(wire["name"], "color_grade");
+
+        let decoded: Effect = serde_json::from_value(wire).expect("legacy effect should decode");
+
+        assert_eq!(decoded.name, "primary_correction");
+        assert_eq!(decoded.id, original.id);
+        assert_eq!(decoded.parameters, original.parameters);
+        assert_eq!(decoded.keyframes, original.keyframes);
+        assert_eq!(
+            serde_json::to_value(decoded).expect("migrated effect should serialize")["name"],
+            "primary_correction"
+        );
+    }
+
+    #[test]
+    fn raw_in_memory_legacy_effect_keeps_its_wire_name_until_the_core_boundary() {
+        let legacy = effect("color_grade");
+        let canonical = effect("primary_correction");
+
+        assert_eq!(
+            serde_json::to_value(legacy).expect("legacy effect should serialize")["name"],
+            "color_grade"
+        );
+        assert_eq!(
+            serde_json::to_value(canonical).expect("canonical effect should serialize")["name"],
+            "primary_correction"
+        );
+    }
+
+    #[test]
+    fn legacy_effect_migration_preserves_project_vector_position() {
+        let original = document_with_effects(vec![
+            effect("brightness"),
+            effect("color_grade"),
+            effect("saturation"),
+        ]);
+        let wire = serde_json::to_value(&original).expect("document should serialize");
+        assert_eq!(
+            wire["tracks"][0]["clips"][0]["effects"][1]["name"],
+            "color_grade"
+        );
+
+        let decoded: Document = serde_json::from_value(wire).expect("document should decode");
+        let effects = &decoded.tracks[0].clips[0].effects;
+        assert_eq!(
+            effects
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["brightness", "primary_correction", "saturation"]
+        );
+        assert_eq!(
+            effects[1].parameters,
+            original.tracks[0].clips[0].effects[1].parameters
+        );
+        assert_eq!(
+            effects[1].keyframes,
+            original.tracks[0].clips[0].effects[1].keyframes
+        );
+    }
+
+    #[test]
+    fn legacy_effect_inside_journal_operation_migrates_on_decode() {
+        let command = JournalCommand::Do(Operation::AddEffect {
+            clip: ClipId(1),
+            effect: effect("color_grade"),
+        });
+        let wire = serde_json::to_value(command).expect("journal command should serialize");
+        let decoded: JournalCommand =
+            serde_json::from_value(wire).expect("legacy journal operation should decode");
+
+        let JournalCommand::Do(Operation::AddEffect { effect, .. }) = decoded else {
+            panic!("expected an AddEffect journal command");
+        };
+        assert_eq!(effect.name, "primary_correction");
+        assert_eq!(effect.id, EffectId(7));
+    }
+
+    #[test]
+    fn unknown_effect_names_round_trip_without_renaming() {
+        let mut wire =
+            serde_json::to_value(effect("future_effect")).expect("future effect should serialize");
+        wire["name"] = json!("future_effect_v2");
+
+        let decoded: Effect = serde_json::from_value(wire).expect("future effect should decode");
+        assert_eq!(decoded.name, "future_effect_v2");
+        let round_trip = serde_json::to_value(decoded).expect("future effect should serialize");
+        assert_eq!(round_trip["name"], "future_effect_v2");
     }
 }

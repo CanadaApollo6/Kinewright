@@ -1,7 +1,8 @@
 use kinewright_core::{
     COLOR_CONFIDENCE_MAX_BASIS_POINTS, ColorBitDepth, ColorContext, ColorDescription, ColorMatrix,
-    ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, MediaAsset,
-    MediaKind, Operation,
+    ColorPipelineState, ColorPrimaries, ColorProvenance, ColorRange, ColorSourceError,
+    ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, MediaAsset, MediaKind, Operation,
+    classify_source, classify_source_with_assumption,
 };
 
 pub(crate) const ASSUME_SDR_REC709_TOOLTIP: &str = "This changes metadata only; it does not apply a pixel transform. Ctrl+Z restores the prior probed description.";
@@ -10,6 +11,7 @@ pub(crate) const ASSUME_SDR_REC709_TOOLTIP: &str = "This changes metadata only; 
 pub(crate) struct SourceColorDisplay {
     pub(crate) summary: String,
     pub(crate) warning: bool,
+    pub(crate) blocking: bool,
 }
 
 #[must_use]
@@ -17,25 +19,51 @@ pub(crate) fn source_color_display(asset: &MediaAsset) -> Option<SourceColorDisp
     if asset.kind == MediaKind::Audio {
         return None;
     }
-    Some(SourceColorDisplay {
-        summary: format!(
-            "SOURCE COLOR · {}",
-            color_description_summary(&asset.color_description)
+    let base = format!(
+        "SOURCE COLOR · {}",
+        color_description_summary(&asset.color_description)
+    );
+    let (summary, warning, blocking) = match classify_source(&asset.color_description) {
+        Ok(_) => (
+            base,
+            matches!(
+                asset.color_description.provenance,
+                ColorProvenance::Unknown | ColorProvenance::Inferred
+            ),
+            false,
         ),
-        warning: source_color_is_unresolved(&asset.color_description),
+        Err(ColorSourceError::UnknownWhitePoint) => match classify_source_with_assumption(
+            &asset.color_description,
+            Some(ColorSourceProfileAssumption::D65),
+        ) {
+            Ok(_) => (
+                format!(
+                    "{base} · ASSUMPTION source_color_profile_assumption: raw white_point=unknown → D65"
+                ),
+                true,
+                false,
+            ),
+            Err(error) => blocked_source_display(&base, &error),
+        },
+        Err(error) => blocked_source_display(&base, &error),
+    };
+    Some(SourceColorDisplay {
+        summary,
+        warning,
+        blocking,
     })
 }
 
-fn source_color_is_unresolved(description: &ColorDescription) -> bool {
-    matches!(description.primaries, ColorPrimaries::Unknown)
-        || matches!(description.transfer, ColorTransfer::Unknown)
-        || matches!(description.matrix, ColorMatrix::Unknown)
-        || matches!(description.range, ColorRange::Unknown)
-        || matches!(description.bit_depth, ColorBitDepth::Unknown)
-        || matches!(
-            description.provenance,
-            ColorProvenance::Unknown | ColorProvenance::Inferred
-        )
+fn blocked_source_display(base: &str, error: &ColorSourceError) -> (String, bool, bool) {
+    (
+        format!(
+            "{base} · BLOCKED code={} {}",
+            error.code(),
+            error.actionable_message()
+        ),
+        true,
+        true,
+    )
 }
 
 #[must_use]
@@ -54,7 +82,7 @@ pub(crate) fn color_description_summary(description: &ColorDescription) -> Strin
 }
 
 #[must_use]
-pub(crate) fn color_pipeline_summary(context: &ColorContext) -> [String; 3] {
+pub(crate) fn color_pipeline_summary(context: &ColorContext) -> [String; 4] {
     [
         format!("WORKING · {}", color_description_summary(&context.working)),
         format!(
@@ -65,7 +93,24 @@ pub(crate) fn color_pipeline_summary(context: &ColorContext) -> [String; 3] {
             "DELIVERY · {}",
             color_description_summary(&context.delivery)
         ),
+        format!(
+            "PIPELINE · {}",
+            color_pipeline_state_label(&context.pipeline_state)
+        ),
     ]
+}
+
+#[must_use]
+pub(crate) fn managed_sdr_reset_needed(context: &ColorContext) -> bool {
+    !context.is_managed_sdr_compatible()
+}
+
+fn color_pipeline_state_label(state: &ColorPipelineState) -> String {
+    match state {
+        ColorPipelineState::Legacy => "LEGACY".to_owned(),
+        ColorPipelineState::ManagedSdrV1 => "MANAGED SDR V1".to_owned(),
+        ColorPipelineState::Other(value) => format!("FUTURE ({value})"),
+    }
 }
 
 #[must_use]
@@ -240,10 +285,9 @@ mod tests {
         let display =
             source_color_display(&asset(MediaKind::Video, ColorDescription::unknown())).unwrap();
         assert!(display.warning);
-        assert_eq!(
-            display.summary,
-            "SOURCE COLOR · P:unknown T:unknown M:unknown R:unknown W:unknown D:unknown · Prov:unknown C:0.00%"
-        );
+        assert!(display.blocking);
+        assert!(display.summary.contains("BLOCKED"));
+        assert!(display.summary.contains("code=unknown_source_primaries"));
     }
 
     #[test]
@@ -258,16 +302,19 @@ mod tests {
         };
         let display = source_color_display(&asset(MediaKind::Video, description)).unwrap();
         assert!(display.warning);
-        assert_eq!(
-            display.summary,
-            "SOURCE COLOR · P:BT.2020 T:unknown M:unknown R:full W:unknown D:10-bit · Prov:stream C:87.50%"
+        assert!(display.blocking);
+        assert!(display.summary.contains("P:BT.2020"));
+        assert!(
+            display
+                .summary
+                .contains("code=unsupported_source_primaries")
         );
     }
 
     #[test]
-    fn fully_tagged_stream_metadata_does_not_warn_when_only_white_point_is_unknown() {
+    fn supported_bt709_with_unknown_white_point_shows_explicit_d65_assumption() {
         let description = ColorDescription {
-            primaries: ColorPrimaries::Other("future_primaries".to_owned()),
+            primaries: ColorPrimaries::Bt709,
             transfer: ColorTransfer::Bt709,
             matrix: ColorMatrix::Bt709,
             range: ColorRange::Limited,
@@ -277,9 +324,58 @@ mod tests {
             provenance: ColorProvenance::StreamMetadata,
         };
         let display = source_color_display(&asset(MediaKind::Video, description)).unwrap();
-        assert!(!display.warning);
-        assert!(display.summary.contains("P:future_primaries"));
+        assert!(display.warning);
+        assert!(!display.blocking);
+        assert!(
+            display
+                .summary
+                .contains("ASSUMPTION source_color_profile_assumption")
+        );
         assert!(display.summary.contains("W:unknown"));
+    }
+
+    #[test]
+    fn fully_known_unsupported_source_is_blocking() {
+        let description = ColorDescription {
+            primaries: ColorPrimaries::Bt2020,
+            transfer: ColorTransfer::Smpte2084,
+            matrix: ColorMatrix::Bt2020Ncl,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Ten,
+            confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
+            provenance: ColorProvenance::StreamMetadata,
+        };
+        let display = source_color_display(&asset(MediaKind::Video, description)).unwrap();
+        assert!(display.warning);
+        assert!(display.blocking);
+        assert!(display.summary.contains("BLOCKED"));
+        assert!(
+            display
+                .summary
+                .contains("code=unsupported_source_primaries")
+        );
+    }
+
+    #[test]
+    fn unknown_white_point_does_not_hide_an_unsupported_source_combination() {
+        let description = ColorDescription {
+            primaries: ColorPrimaries::Srgb,
+            transfer: ColorTransfer::Bt709,
+            matrix: ColorMatrix::Rgb,
+            range: ColorRange::Full,
+            white_point: ColorWhitePoint::Unknown,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
+            provenance: ColorProvenance::StreamMetadata,
+        };
+        let display = source_color_display(&asset(MediaKind::Video, description)).unwrap();
+        assert!(display.blocking);
+        assert!(
+            display
+                .summary
+                .contains("code=unsupported_source_combination")
+        );
     }
 
     #[test]
@@ -354,5 +450,27 @@ mod tests {
         assert!(summaries[1].contains("M:RGB R:full"));
         assert!(summaries[2].starts_with("DELIVERY · "));
         assert!(summaries[2].contains("M:BT.709 R:limited"));
+        assert_eq!(summaries[3], "PIPELINE · MANAGED SDR V1");
+    }
+
+    #[test]
+    fn pipeline_summary_and_reset_state_distinguish_legacy_and_future_contexts() {
+        let mut legacy = ColorContext::sdr_rec709();
+        legacy.pipeline_state = ColorPipelineState::Legacy;
+        assert_eq!(color_pipeline_summary(&legacy)[3], "PIPELINE · LEGACY");
+        assert!(managed_sdr_reset_needed(&legacy));
+
+        let mut future = ColorContext::sdr_rec709();
+        future.pipeline_state = ColorPipelineState::Other("managed_sdr_v2".to_owned());
+        assert_eq!(
+            color_pipeline_summary(&future)[3],
+            "PIPELINE · FUTURE (managed_sdr_v2)"
+        );
+        assert!(managed_sdr_reset_needed(&future));
+        assert!(!managed_sdr_reset_needed(&ColorContext::sdr_rec709()));
+
+        let mut incompatible_delivery = ColorContext::sdr_rec709();
+        incompatible_delivery.delivery.transfer = ColorTransfer::Smpte2084;
+        assert!(managed_sdr_reset_needed(&incompatible_delivery));
     }
 }

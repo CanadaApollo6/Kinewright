@@ -5,9 +5,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ClipContent, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
-    ColorRange, ColorTransfer, ColorWhitePoint, Document, Effect, EffectId, ExportCancellation,
-    ExportSettings, OpError, ParamValue, QaIssue, QaSeverity, qa_document,
+    ClipContent, ColorBitDepth, ColorDescription, ColorMatrix, ColorPipelineState, ColorPrimaries,
+    ColorProvenance, ColorRange, ColorSourceError, ColorSourceProfileAssumption, ColorTransfer,
+    ColorWhitePoint, Document, Effect, EffectId, ExportCancellation, ExportSettings, MediaKind,
+    OpError, ParamValue, QaIssue, QaSeverity, TrackKind, classify_source,
+    classify_source_with_assumption, qa_document,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -246,6 +248,8 @@ pub fn delivery_conformance(
     )?;
     let settings = profile.export_settings(&delivery, ExportCancellation::default());
     let mut issues = qa_document(&delivery).issues;
+    append_managed_pipeline_issues(&delivery, &mut issues);
+    append_managed_source_issues(&delivery, &mut issues);
     if settings.resolution.0 == 0
         || settings.resolution.1 == 0
         || !settings.resolution.0.is_multiple_of(2)
@@ -287,6 +291,118 @@ pub fn delivery_conformance(
         audio_bitrate: settings.audio_bitrate,
         issues,
     })
+}
+
+fn append_managed_pipeline_issues(document: &Document, issues: &mut Vec<QaIssue>) {
+    if !matches!(
+        document.color_context.pipeline_state,
+        ColorPipelineState::ManagedSdrV1
+    ) {
+        issues.push(QaIssue {
+            severity: QaSeverity::Error,
+            code: "unsupported_color_pipeline_state".to_owned(),
+            message: format!(
+                "Managed SDR delivery requires pipeline_state=managed_sdr_v1, observed {:?}. Reset the project colour pipeline before proof or export.",
+                document.color_context.pipeline_state
+            ),
+            asset: None,
+            track: None,
+            clip: None,
+            range: None,
+        });
+    }
+
+    if !document.color_context.working_matches_managed_sdr() {
+        issues.push(QaIssue {
+            severity: QaSeverity::Error,
+            code: "unsupported_working_color_context".to_owned(),
+            message: format!(
+                "Managed SDR delivery requires the exact linear BT.709/D65 Float16 working description; observed {:?}. Reset the working colour target explicitly.",
+                document.color_context.working
+            ),
+            asset: None,
+            track: None,
+            clip: None,
+            range: None,
+        });
+    }
+    if !document.color_context.monitoring_matches_managed_sdr() {
+        issues.push(QaIssue {
+            severity: QaSeverity::Error,
+            code: "unsupported_monitoring_color_context".to_owned(),
+            message: format!(
+                "Managed SDR delivery requires the exact BT.709/D65 Float16 monitoring description; observed {:?}. Reset the monitoring colour target explicitly.",
+                document.color_context.monitoring
+            ),
+            asset: None,
+            track: None,
+            clip: None,
+            range: None,
+        });
+    }
+}
+
+fn append_managed_source_issues(document: &Document, issues: &mut Vec<QaIssue>) {
+    let referenced_visual_assets = document
+        .tracks
+        .iter()
+        .filter(|track| track.kind == TrackKind::Video)
+        .flat_map(|track| &track.clips)
+        .filter(|clip| matches!(clip.content, ClipContent::Media | ClipContent::Freeze(_)))
+        .filter_map(|clip| document.asset(clip.asset))
+        .filter(|asset| matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo));
+
+    let mut seen = std::collections::HashSet::new();
+    for asset in referenced_visual_assets {
+        if !seen.insert(asset.id) {
+            continue;
+        }
+        let error = match classify_source(&asset.color_description) {
+            Ok(_) => continue,
+            Err(ColorSourceError::UnknownWhitePoint) => {
+                match classify_source_with_assumption(
+                    &asset.color_description,
+                    Some(ColorSourceProfileAssumption::D65),
+                ) {
+                    Ok(_) => {
+                        issues.push(QaIssue {
+                            severity: QaSeverity::Warning,
+                            code: "source_color_profile_assumption".to_owned(),
+                            message: format!(
+                                "Asset {} ({}) has raw source white_point=unknown; managed SDR is using the explicit profile assumption D65. The raw metadata remains unchanged.",
+                                asset.id, asset.name
+                            ),
+                            asset: Some(asset.id),
+                            track: None,
+                            clip: None,
+                            range: None,
+                        });
+                        continue;
+                    }
+                    Err(error) => error,
+                }
+            }
+            Err(error) => error,
+        };
+        issues.push(QaIssue {
+            severity: QaSeverity::Error,
+            code: "unsupported_source_color".to_owned(),
+            message: format!(
+                "Asset {} ({}) cannot enter the managed SDR path: code={}, field={}, observed={}, allowed={}. {}",
+                asset.id,
+                asset.name,
+                error.code(),
+                error.field(),
+                error.observed(),
+                error.allowed_values(),
+                error.recovery_action(),
+            ),
+            asset: Some(asset.id),
+            track: None,
+            clip: None,
+            range: None,
+        });
+    }
 }
 
 fn delivery_color_supported(color: &ColorDescription) -> bool {
@@ -390,8 +506,8 @@ pub fn document_for_delivery_variant(
 #[cfg(test)]
 mod tests {
     use crate::{
-        AssetId, Clip, ColorContext, ColorTransfer, MediaAsset, MediaKind, Rational, TimeCode,
-        Track, TrackId, TrackKind,
+        AssetId, Clip, ColorContext, ColorPrimaries, ColorTransfer, ColorWhitePoint, MediaAsset,
+        MediaKind, Rational, TimeCode, Track, TrackId, TrackKind,
     };
 
     use super::*;
@@ -406,7 +522,7 @@ mod tests {
             kind: MediaKind::Video,
             resolution: Some((1920, 1080)),
             source_fingerprint: crate::MediaSourceFingerprint::default(),
-            color_description: crate::ColorDescription::default(),
+            color_description: ColorContext::sdr_rec709().delivery,
         };
         Document {
             tracks: vec![Track {
@@ -647,6 +763,75 @@ mod tests {
     }
 
     #[test]
+    fn unused_offline_media_pool_asset_does_not_block_delivery() {
+        let mut document = fixture();
+        document.media_pool[0].path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        document.media_pool.push(MediaAsset {
+            id: AssetId(2),
+            path: "definitely-missing-delivery-unused-fixture.mov".into(),
+            name: "unused-offline".to_owned(),
+            duration: TimeCode(30),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::AudioVideo,
+            resolution: Some((1920, 1080)),
+            source_fingerprint: crate::MediaSourceFingerprint::default(),
+            color_description: ColorContext::sdr_rec709().delivery,
+        });
+
+        let report =
+            delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50).unwrap();
+
+        assert!(report.export_ready());
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "missing_media")
+        );
+    }
+
+    #[test]
+    fn delivery_reports_post_primary_luts_without_blocking() {
+        let mut document = fixture();
+        document.media_pool[0].path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        document.tracks[0].clips[0].effects.extend([
+            Effect {
+                id: EffectId(90),
+                name: "look_lut".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::new(),
+            },
+            Effect {
+                id: EffectId(91),
+                name: "cube_lut".to_owned(),
+                parameters: BTreeMap::from([(
+                    "path".to_owned(),
+                    ParamValue::Text("compatibility.cube".to_owned()),
+                )]),
+                keyframes: BTreeMap::new(),
+            },
+        ]);
+
+        let report =
+            delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50).unwrap();
+        let warnings = report
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "legacy_lut_stage")
+            .collect::<Vec<_>>();
+
+        assert_eq!(warnings.len(), 2);
+        assert!(
+            warnings
+                .iter()
+                .all(|issue| issue.severity == QaSeverity::Warning)
+        );
+        assert!(report.export_ready());
+    }
+
+    #[test]
     fn youtube_profile_uses_recommended_high_frame_rate_bitrate() {
         let mut source = fixture();
         source.fps = Rational::new(60, 1).unwrap();
@@ -733,10 +918,174 @@ mod tests {
     }
 
     #[test]
+    fn managed_context_accepts_semantically_exact_user_overrides() {
+        let mut document = fixture();
+        document.media_pool[0].path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        document.color_context.working.provenance = ColorProvenance::UserOverride;
+        document.color_context.working.confidence_basis_points = 9_500;
+        document.color_context.monitoring.provenance = ColorProvenance::UserOverride;
+        document.color_context.monitoring.confidence_basis_points = 9_500;
+
+        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
+            .expect("user-authorized managed context should produce a report");
+
+        assert!(report.export_ready());
+        assert!(!report.issues.iter().any(|issue| {
+            matches!(
+                issue.code.as_str(),
+                "unsupported_working_color_context" | "unsupported_monitoring_color_context"
+            )
+        }));
+    }
+
+    #[test]
+    fn incompatible_pipeline_state_and_targets_block_with_actionable_codes() {
+        let mut document = fixture();
+        document.media_pool[0].path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        document.color_context.pipeline_state = ColorPipelineState::Legacy;
+        document.color_context.working.bit_depth = crate::ColorBitDepth::Eight;
+        document.color_context.monitoring.transfer = ColorTransfer::Bt1886;
+
+        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
+            .expect("incompatible colour context should still produce a report");
+
+        assert!(!report.export_ready());
+        for code in [
+            "unsupported_color_pipeline_state",
+            "unsupported_working_color_context",
+            "unsupported_monitoring_color_context",
+        ] {
+            let issue = report
+                .issues
+                .iter()
+                .find(|issue| issue.code == code)
+                .unwrap_or_else(|| panic!("expected issue code {code}"));
+            assert!(issue.message.contains("Reset"));
+        }
+    }
+
+    #[test]
+    fn referenced_unknown_source_blocks_but_unused_bin_media_remains_inspectable() {
+        let mut document = fixture();
+        document.media_pool[0].path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        document.media_pool.push(MediaAsset {
+            id: AssetId(2),
+            path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+            name: "unused-unknown".to_owned(),
+            duration: TimeCode(30),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Video,
+            resolution: Some((1920, 1080)),
+            source_fingerprint: crate::MediaSourceFingerprint::default(),
+            color_description: crate::ColorDescription::unknown(),
+        });
+        document.media_pool[0].color_description = crate::ColorDescription::unknown();
+
+        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
+            .expect("source metadata failures should be reported, not returned as errors");
+
+        assert!(!report.export_ready());
+        let blocking_assets: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "unsupported_source_color")
+            .filter_map(|issue| issue.asset)
+            .collect();
+        assert_eq!(blocking_assets, vec![AssetId(1)]);
+    }
+
+    #[test]
+    fn audio_track_reference_to_av_media_does_not_enter_visual_source_gate() {
+        let mut document = fixture();
+        document.media_pool[0].path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        document.media_pool.push(MediaAsset {
+            id: AssetId(2),
+            path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+            name: "audio-track-av".to_owned(),
+            duration: TimeCode(30),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::AudioVideo,
+            resolution: Some((1920, 1080)),
+            source_fingerprint: crate::MediaSourceFingerprint::default(),
+            color_description: crate::ColorDescription::unknown(),
+        });
+        document.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![Clip {
+                id: crate::ClipId(2),
+                asset: AssetId(2),
+                source_range: TimeCode(0)..TimeCode(30),
+                content: ClipContent::Media,
+                timeline_start: TimeCode::ZERO,
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
+            }],
+        });
+
+        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
+            .expect("audio-only A/V use should remain deliverable");
+
+        assert!(report.export_ready());
+        assert!(!report.issues.iter().any(|issue| {
+            issue.code == "unsupported_source_color" && issue.asset == Some(AssetId(2))
+        }));
+    }
+
+    #[test]
+    fn unsupported_known_source_profile_blocks_managed_delivery() {
+        let mut document = fixture();
+        document.media_pool[0].path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        document.media_pool[0].color_description = crate::ColorDescription {
+            primaries: crate::ColorPrimaries::Bt2020,
+            transfer: crate::ColorTransfer::Smpte2084,
+            matrix: crate::ColorMatrix::Bt2020Ncl,
+            range: crate::ColorRange::Limited,
+            white_point: crate::ColorWhitePoint::D65,
+            bit_depth: crate::ColorBitDepth::Ten,
+            confidence_basis_points: crate::COLOR_CONFIDENCE_MAX_BASIS_POINTS,
+            provenance: crate::ColorProvenance::StreamMetadata,
+        };
+
+        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
+            .expect("unsupported source profile should produce a report");
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "unsupported_source_color")
+            .expect("known unsupported source must be a blocking issue");
+        assert_eq!(issue.asset, Some(AssetId(1)));
+        assert!(issue.message.contains("unsupported_source_primaries"));
+        assert!(issue.message.contains("field=primaries"));
+        assert!(!report.export_ready());
+    }
+
+    #[test]
     fn uncertain_source_color_is_a_non_blocking_conformance_warning_with_asset_id() {
         let mut document = fixture();
         document.media_pool[0].path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        document.media_pool[0].color_description = crate::ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: crate::ColorMatrix::Bt709,
+            range: crate::ColorRange::Limited,
+            white_point: ColorWhitePoint::Unknown,
+            bit_depth: crate::ColorBitDepth::Eight,
+            confidence_basis_points: crate::COLOR_CONFIDENCE_MAX_BASIS_POINTS,
+            provenance: crate::ColorProvenance::Inferred,
+        };
 
         let report =
             delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50).unwrap();
@@ -749,6 +1098,12 @@ mod tests {
         assert_eq!(warning.severity, QaSeverity::Warning);
         assert_eq!(warning.asset, Some(AssetId(1)));
         assert!(report.export_ready());
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "source_color_profile_assumption")
+        );
     }
 
     #[test]

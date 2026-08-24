@@ -549,7 +549,9 @@ fn asset_metadata(asset: &kinewright_core::MediaAsset) -> String {
 }
 
 fn source_color_label(ui: &mut egui::Ui, display: SourceColorDisplay) {
-    let text_color = if display.warning {
+    let text_color = if display.blocking {
+        color::STATUS_DANGER
+    } else if display.warning {
         color::STATUS_WARNING
     } else {
         color::TEXT_MUTED

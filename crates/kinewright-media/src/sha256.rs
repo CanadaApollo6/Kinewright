@@ -256,6 +256,23 @@ fn hash_reader(file: &mut File, path: &Path) -> Result<String, MediaError> {
     Ok(encoded)
 }
 
+/// Hash an in-memory byte surface with the same SHA-256 implementation used
+/// for imported media identities.
+///
+/// Keeping this helper beside [`sha256_file`] makes proof manifests able to
+/// identify the exact RGBA pixel and encoded-PNG bytes that were returned to a
+/// caller without introducing a second hashing implementation in the agent.
+#[must_use]
+pub fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let mut encoded = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
 /// Stream a regular file through the repository's deterministic SHA-256 implementation.
 ///
 /// # Errors

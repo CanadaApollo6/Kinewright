@@ -7,13 +7,14 @@ use std::{
 
 use eframe::egui;
 use kinewright_core::{
-    CaptionCue, DeliveryAspect, DeliveryVariant, ExportCancellation, ExportProgress,
-    ExportSettings, MediaError, Rational, TimeCode, document_for_delivery_variant, srt, vtt,
+    CaptionCue, DeliveryAspect, DeliveryVariant, ExportCancellation, ExportMediaPreflightReport,
+    ExportProgress, ExportSettings, MediaError, Operation, Rational, TimeCode,
+    document_for_delivery_variant, export_media_preflight, srt, vtt,
 };
 
 use crate::{
     app::KinewrightApp,
-    color_ui::color_pipeline_summary,
+    color_ui::{color_pipeline_summary, managed_sdr_reset_needed},
     icons::Icon,
     theme::{self, color, size, space},
 };
@@ -56,6 +57,17 @@ impl CaptionFormat {
             Self::Srt => "SubRip captions",
             Self::Vtt => "WebVTT captions",
         }
+    }
+}
+
+fn run_export_after_media_preflight(
+    report: &ExportMediaPreflightReport,
+    export: impl FnOnce() -> Result<(), MediaError>,
+) -> Result<(), MediaError> {
+    if report.export_ready() {
+        export()
+    } else {
+        Err(MediaError::Backend(report.summary()))
     }
 }
 
@@ -142,6 +154,11 @@ impl KinewrightApp {
         } else {
             Arc::clone(&self.focused().document)
         };
+        let media_preflight = export_media_preflight(&document, self.analysis.as_ref());
+        if !media_preflight.export_ready() {
+            self.record_error("Export", media_preflight.summary());
+            return;
+        }
         let settings = ExportSettings {
             fps,
             resolution: (self.export_dialog.width, self.export_dialog.height),
@@ -155,13 +172,17 @@ impl KinewrightApp {
         let (progress_tx, progress_rx) = crossbeam_channel::unbounded();
         let (result_tx, result_rx) = mpsc::channel();
         let media = Arc::clone(&self.exporter);
+        let worker_analysis = Arc::clone(&self.analysis);
         let worker_document = document;
         let worker_output = output.clone();
         let spawn = thread::Builder::new()
             .name("kinewright-export".to_owned())
             .spawn(move || {
-                let result =
-                    media.export_document(worker_document, &worker_output, settings, progress_tx);
+                let media_preflight =
+                    export_media_preflight(&worker_document, worker_analysis.as_ref());
+                let result = run_export_after_media_preflight(&media_preflight, || {
+                    media.export_document(worker_document, &worker_output, settings, progress_tx)
+                });
                 let _ = result_tx.send((worker_output, result));
             });
         if let Err(error) = spawn {
@@ -266,9 +287,12 @@ impl KinewrightApp {
         let mut browse = false;
         let mut start = false;
         let mut cancel = false;
+        let mut reset_color_pipeline = false;
         let caption_cues = self.timeline_caption_cues();
         let mut caption_format = None;
         let project_color_pipeline = color_pipeline_summary(&self.focused().document.color_context);
+        let color_pipeline_reset_needed =
+            managed_sdr_reset_needed(&self.focused().document.color_context);
         egui::Window::new("Export")
             .open(&mut open)
             .resizable(false)
@@ -285,6 +309,22 @@ impl KinewrightApp {
                         egui::Label::new(egui::RichText::new(stage).color(color::TEXT_SECONDARY))
                             .wrap(),
                     );
+                }
+                if color_pipeline_reset_needed {
+                    ui.colored_label(
+                        color::STATUS_DANGER,
+                        "BLOCKED · Managed SDR export requires a compatible project colour pipeline.",
+                    );
+                    if ui
+                        .add(
+                            egui::Button::new("Reset to Managed SDR")
+                                .fill(color::ACCENT_WASH)
+                                .stroke(egui::Stroke::new(1.0, color::STATUS_DANGER)),
+                        )
+                        .clicked()
+                    {
+                        reset_color_pipeline = true;
+                    }
                 }
                 ui.add_space(space::TWO);
                 let before_aspect = self.export_dialog.delivery_aspect;
@@ -433,13 +473,17 @@ impl KinewrightApp {
                 } else {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add(
+                            .add_enabled(
+                                !color_pipeline_reset_needed,
                                 egui::Button::image_and_text(
                                     Icon::Export.image(size::ICON_MD),
                                     "Export MP4",
                                 )
                                 .fill(color::ACCENT_WASH)
                                 .stroke(egui::Stroke::new(1.0, color::ACCENT_DIM_BORDER)),
+                            )
+                            .on_disabled_hover_text(
+                                "Reset the project colour pipeline before exporting.",
                             )
                             .clicked()
                         {
@@ -452,6 +496,11 @@ impl KinewrightApp {
         if browse {
             self.choose_export_output();
         }
+        if reset_color_pipeline {
+            self.send_operation(Operation::SetColorContext {
+                color_context: kinewright_core::ColorContext::sdr_rec709(),
+            });
+        }
         if start {
             self.start_export();
         }
@@ -462,5 +511,45 @@ impl KinewrightApp {
             job.cancellation.cancel();
             "Cancelling export…".clone_into(&mut self.status);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use kinewright_core::{
+        AssetId, ExportMediaPreflightIssue, MediaAvailabilityKind, MediaAvailabilityStatus,
+    };
+
+    use super::*;
+
+    #[test]
+    fn worker_preflight_failure_reaches_the_result_and_skips_export() {
+        let export_called = Cell::new(false);
+        let blocked = ExportMediaPreflightReport {
+            checked_assets: vec![AssetId(7)],
+            issues: vec![ExportMediaPreflightIssue {
+                asset: AssetId(7),
+                asset_name: "changed-source".to_owned(),
+                availability: MediaAvailabilityStatus {
+                    kind: MediaAvailabilityKind::Changed,
+                    observed_fingerprint: None,
+                    reason: Some("source changed after the export was queued".to_owned()),
+                },
+            }],
+        };
+
+        let result = run_export_after_media_preflight(&blocked, || {
+            export_called.set(true);
+            Ok(())
+        });
+
+        assert!(!export_called.get());
+        assert!(matches!(
+            result,
+            Err(MediaError::Backend(message))
+                if message.contains("changed-source") && message.contains("Changed")
+        ));
     }
 }

@@ -3,8 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AssetId, CaptionPreset, ClipContent, ClipId, ColorBitDepth, ColorMatrix, ColorPrimaries,
-    ColorProvenance, ColorRange, ColorTransfer, Document, Effect, MediaKind, ParamValue, TimeCode,
-    TitlePixelBounds, TrackId, title_layout,
+    ColorProvenance, ColorRange, ColorTransfer, Document, Effect, EffectCompatibilityStage,
+    MediaKind, ParamValue, TimeCode, TitlePixelBounds, TrackId, effect_compatibility_stage,
+    title_layout,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -59,6 +60,11 @@ impl QaReport {
 #[allow(clippy::too_many_lines)]
 pub fn qa_document(document: &Document) -> QaReport {
     let mut issues = Vec::new();
+    let referenced_media_assets = document
+        .timeline_referenced_media_assets()
+        .into_iter()
+        .map(|asset| asset.id)
+        .collect::<std::collections::HashSet<_>>();
     if document.duration <= TimeCode::ZERO {
         issues.push(issue(
             QaSeverity::Error,
@@ -109,15 +115,16 @@ pub fn qa_document(document: &Document) -> QaReport {
                 range: None,
             });
         }
-        if !asset.path.exists() {
-            issues.push(issue(
-                QaSeverity::Error,
-                "missing_media",
-                format!("Media file is missing: {}", asset.path.display()),
-                None,
-                None,
-                None,
-            ));
+        if referenced_media_assets.contains(&asset.id) && !asset.path.exists() {
+            issues.push(QaIssue {
+                severity: QaSeverity::Error,
+                code: "missing_media".to_owned(),
+                message: format!("Media file is missing: {}", asset.path.display()),
+                asset: Some(asset.id),
+                track: None,
+                clip: None,
+                range: None,
+            });
         }
     }
 
@@ -126,6 +133,28 @@ pub fn qa_document(document: &Document) -> QaReport {
         let mut previous_end = TimeCode::ZERO;
         let mut previous_was_media = false;
         for clip in &track.clips {
+            for effect in &clip.effects {
+                if let Some(stage) = effect_compatibility_stage(&effect.name) {
+                    let message = match stage {
+                        EffectCompatibilityStage::LegacyDisplayCoded => format!(
+                            "Clip {} uses the legacy display-coded {} effect. It remains loadable through the compatibility path, but is outside the managed SDR primary conformance claim.",
+                            clip.id, effect.name
+                        ),
+                        EffectCompatibilityStage::PostPrimaryLut => format!(
+                            "Clip {} uses the post-primary {} compatibility LUT stage. It remains supported, but is outside the managed SDR primary conformance claim.",
+                            clip.id, effect.name
+                        ),
+                    };
+                    issues.push(issue(
+                        QaSeverity::Warning,
+                        stage.issue_code(),
+                        message,
+                        Some(track.id),
+                        Some(clip.id),
+                        None,
+                    ));
+                }
+            }
             has_audible_media |= matches!(clip.content, ClipContent::Media)
                 && clip.speed_percent == 100
                 && document.asset(clip.asset).is_some_and(|asset| {
@@ -491,6 +520,66 @@ mod tests {
     }
 
     #[test]
+    fn qa_missing_media_scopes_to_timeline_references_including_audio() {
+        let offline = |id, kind| MediaAsset {
+            id: crate::AssetId(id),
+            path: format!("definitely-missing-qa-scope-{id}.mov").into(),
+            name: format!("fixture-{id}"),
+            duration: TimeCode(30),
+            fps: Rational::new(30, 1).unwrap(),
+            kind,
+            resolution: Some((1920, 1080)),
+            source_fingerprint: crate::MediaSourceFingerprint::default(),
+            color_description: crate::ColorDescription::default(),
+        };
+        let media_clip = |id| Clip {
+            id: ClipId(id),
+            asset: crate::AssetId(id),
+            source_range: TimeCode::ZERO..TimeCode(30),
+            content: ClipContent::Media,
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+        };
+        let document = Document {
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![media_clip(1)],
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: vec![media_clip(2)],
+                },
+            ],
+            media_pool: vec![
+                offline(1, MediaKind::Video),
+                offline(2, MediaKind::Audio),
+                offline(3, MediaKind::AudioVideo),
+            ],
+            duration: TimeCode(30),
+            ..Document::default()
+        };
+
+        let missing_assets = qa_document(&document)
+            .issues
+            .into_iter()
+            .filter(|issue| issue.code == "missing_media")
+            .filter_map(|issue| issue.asset)
+            .collect::<Vec<_>>();
+        assert_eq!(missing_assets, vec![crate::AssetId(1), crate::AssetId(2)]);
+    }
+
+    #[test]
     fn source_color_warning_is_typed_and_non_blocking() {
         let asset = MediaAsset {
             id: crate::AssetId(7),
@@ -592,6 +681,71 @@ mod tests {
 
         assert_eq!(warning.asset, Some(crate::AssetId(9)));
         assert!(warning.message.contains("provenance is inferred"));
+        assert!(report.export_ready());
+    }
+
+    #[test]
+    fn post_primary_lut_stages_are_typed_non_blocking_warnings() {
+        let document = Document {
+            tracks: vec![Track {
+                id: TrackId(12),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![Clip {
+                    id: ClipId(34),
+                    asset: crate::AssetId::default(),
+                    source_range: TimeCode::ZERO..TimeCode(30),
+                    content: ClipContent::Title(crate::Title::default()),
+                    timeline_start: TimeCode::ZERO,
+                    effects: vec![
+                        Effect {
+                            id: crate::EffectId(1),
+                            name: "look_lut".to_owned(),
+                            parameters: std::collections::BTreeMap::new(),
+                            keyframes: std::collections::BTreeMap::new(),
+                        },
+                        Effect {
+                            id: crate::EffectId(2),
+                            name: "cube_lut".to_owned(),
+                            parameters: std::collections::BTreeMap::new(),
+                            keyframes: std::collections::BTreeMap::new(),
+                        },
+                    ],
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                }],
+            }],
+            duration: TimeCode(30),
+            ..Document::default()
+        };
+
+        let report = qa_document(&document);
+        let warnings = report
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "legacy_lut_stage")
+            .collect::<Vec<_>>();
+
+        assert_eq!(warnings.len(), 2);
+        assert!(
+            warnings
+                .iter()
+                .all(|issue| issue.severity == QaSeverity::Warning)
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|issue| issue.message.contains("look_lut"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|issue| issue.message.contains("cube_lut"))
+        );
         assert!(report.export_ready());
     }
 

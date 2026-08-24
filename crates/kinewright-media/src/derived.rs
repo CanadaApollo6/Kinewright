@@ -8,9 +8,10 @@ use std::{
 use crossbeam_channel::{Sender, unbounded};
 use kinewright_core::{
     AssetBeats, AssetSceneChanges, AssetSilences, BeatMarker, BeatStatus, Document,
-    ExportCancellation, FrameRounding, MediaAsset, MediaError, MediaKind, Rational, SceneChange,
-    SceneStatus, SilenceSpan, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange,
-    TimelineSilenceSpan, map_frames_with_rounding, map_source_range_to_project,
+    ExportCancellation, FrameRounding, FrameTexture, MediaAsset, MediaError, MediaKind, Rational,
+    SceneChange, SceneStatus, SilenceSpan, SilenceStatus, TimeCode, TimelineBeat,
+    TimelineSceneChange, TimelineSilenceSpan, map_frames_with_rounding,
+    map_source_range_to_project,
 };
 use serde::{Deserialize, Serialize};
 
@@ -848,7 +849,8 @@ fn detect_scene_changes(
 ) -> Result<Vec<SceneChange>, MediaError> {
     let proxy_width = config.proxy_width.clamp(32, 512);
     let mut decoder = VideoDecoder::open_scaled(path, fps, Some(proxy_width))?;
-    let mut cache = FrameCache::new(usize::try_from(SCENE_WINDOW_FRAMES + 1).unwrap_or(33));
+    let mut cache: FrameCache<FrameTexture> =
+        FrameCache::new(usize::try_from(SCENE_WINDOW_FRAMES + 1).unwrap_or(33));
     let mut previous_pixels: Option<Arc<Vec<u8>>> = None;
     let mut previous_difference: Option<f64> = None;
     let mut changes = Vec::new();

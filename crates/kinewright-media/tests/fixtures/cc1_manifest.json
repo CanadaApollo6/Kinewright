@@ -1,0 +1,81 @@
+{
+  "contract": "CC1 managed SDR primary correction",
+  "manifest_version": 1,
+  "profiles": [
+    "rec709_video",
+    "srgb_full"
+  ],
+  "source_depths_bits": [8, 10],
+  "working": {
+    "primaries": "bt709",
+    "transfer": "linear",
+    "matrix": "rgb",
+    "range": "full",
+    "white_point": "d65",
+    "bit_depth": "float16"
+  },
+  "monitoring": {
+    "primaries": "bt709",
+    "transfer": "bt709",
+    "matrix": "rgb",
+    "range": "full",
+    "white_point": "d65",
+    "bit_depth": "float16"
+  },
+  "delivery": {
+    "primaries": "bt709",
+    "transfer": "bt709",
+    "matrix": "bt709",
+    "range": "limited",
+    "white_point": "d65",
+    "bit_depth": 8,
+    "codec": "h264",
+    "pixel_format": "yuv420p"
+  },
+  "controls": [
+    "exposure_milli_stops",
+    "temperature_percent",
+    "tint_percent",
+    "contrast_percent",
+    "contrast_pivot_basis_points",
+    "blacks_percent",
+    "shadows_percent",
+    "highlights_percent",
+    "whites_percent",
+    "saturation_percent"
+  ],
+  "tolerances": {
+    "monitor_cpu_gpu_max_code": 2,
+    "monitor_cpu_gpu_p99_code": 1,
+    "monitor_cpu_gpu_mean_code": 0.5,
+    "linear_cpu_gpu_max": 0.0015,
+    "linear_cpu_gpu_p99": 0.00075,
+    "linear_cpu_gpu_mean": 0.00025,
+    "delivery_codec_max_code": 4,
+    "delivery_codec_p99_code": 2,
+    "delivery_codec_mean_code": 1.0
+  },
+  "required_evidence": [
+    "migration",
+    "identity_ramps",
+    "neutral_chart",
+    "primary_controls",
+    "gpu_cpu_parity",
+    "no_intermediate_clamp",
+    "unsupported_metadata",
+    "same_raster_monitor_proof",
+    "h264_yuv420p_delivery",
+    "managed_cache_memory_bound"
+  ],
+  "gpu_contexts": {
+    "software": "required: lavapipe/llvmpipe adapter with exact backend+adapter provenance",
+    "hardware": "required on a physical-GPU lane: run cc1_gpu_compositor_matches_canonical_cpu_reference_on_hardware --ignored --nocapture"
+  },
+  "identity_ramp_gate": {
+    "max_code": 1,
+    "p99_code": 1,
+    "mean_code": 0.25,
+    "alpha": "exact",
+    "native_plane_round_trip": "exact"
+  }
+}

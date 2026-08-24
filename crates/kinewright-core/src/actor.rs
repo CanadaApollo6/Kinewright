@@ -361,7 +361,8 @@ fn revision_conflict(state: &CoreState, expected: TimelineRevision) -> Option<Ev
     })
 }
 
-fn execute_operation(state: &mut CoreState, operation: Operation) -> Event {
+fn execute_operation(state: &mut CoreState, mut operation: Operation) -> Event {
+    operation.canonicalize_legacy_effect_names();
     match state.do_operation(operation.clone()) {
         Ok(doc) => Event::DocumentChanged {
             doc,
@@ -376,7 +377,10 @@ fn execute_operation(state: &mut CoreState, operation: Operation) -> Event {
     }
 }
 
-fn execute_batch(state: &mut CoreState, operations: Vec<Operation>) -> Event {
+fn execute_batch(state: &mut CoreState, mut operations: Vec<Operation>) -> Event {
+    for operation in &mut operations {
+        operation.canonicalize_legacy_effect_names();
+    }
     match state.do_batch(operations.clone()) {
         Ok(doc) => Event::DocumentChanged {
             doc,

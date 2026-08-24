@@ -4,7 +4,8 @@ use eframe::egui;
 use kinewright_core::{
     Clip, ClipContent, ClipId, EFFECT_DESCRIPTORS, Effect, EffectId, MARKER_COLOR_TOKEN_COUNT,
     Marker, MarkerId, MediaKind, Operation, ParamValue, TITLE_COLORS, TITLE_FONT_SIZES,
-    TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition, Transition, is_audio_effect,
+    TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition, Transition, effect_compatibility_stage,
+    is_audio_effect, is_legacy_display_effect,
 };
 
 use crate::{
@@ -471,6 +472,10 @@ fn effects_section(ui: &mut egui::Ui, clip: &Clip, pending: &mut Vec<Operation>)
     ui.add_space(space::TWO);
     ui.strong("Effects");
     for effect in &clip.effects {
+        if effect.name == "primary_correction" {
+            primary_correction_section(ui, clip, effect, pending);
+            continue;
+        }
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.label(&effect.name);
@@ -514,11 +519,14 @@ fn effects_section(ui: &mut egui::Ui, clip: &Clip, pending: &mut Vec<Operation>)
                     }
                 }
             }
+            if let Some(stage) = effect_compatibility_stage(&effect.name) {
+                ui.colored_label(color::STATUS_WARNING, stage.inspector_warning());
+            }
         });
     }
     ui.menu_button("+ Effect", |ui| {
         for descriptor in EFFECT_DESCRIPTORS {
-            if is_audio_effect(descriptor.name) || descriptor.name == "cube_lut" {
+            if !is_effect_insertable(descriptor.name) {
                 continue;
             }
             if clip
@@ -528,12 +536,139 @@ fn effects_section(ui: &mut egui::Ui, clip: &Clip, pending: &mut Vec<Operation>)
             {
                 continue;
             }
-            if ui.button(descriptor.name).clicked() {
+            if ui.button(effect_display_name(descriptor.name)).clicked() {
                 pending.push(add_effect_operation(clip, descriptor));
                 ui.close();
             }
         }
     });
+}
+
+fn primary_correction_section(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    effect: &Effect,
+    pending: &mut Vec<Operation>,
+) {
+    let Some(descriptor) = EFFECT_DESCRIPTORS
+        .iter()
+        .find(|descriptor| descriptor.name == "primary_correction")
+    else {
+        return;
+    };
+
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Primary correction").strong());
+            ui.colored_label(color::TEXT_MUTED, "Managed SDR");
+            if ui.small_button("Remove").clicked() {
+                pending.push(Operation::RemoveEffect {
+                    clip: clip.id,
+                    effect: effect.id,
+                });
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                color::TEXT_MUTED,
+                "Exposure · white balance · tone · saturation",
+            );
+            if ui.small_button("Reset Primary").clicked() {
+                pending.extend(primary_reset_operations(clip.id, effect, descriptor));
+            }
+        });
+
+        for parameter in descriptor.parameters {
+            let mut value = effect
+                .parameters
+                .get(parameter.name)
+                .and_then(|value| match value {
+                    ParamValue::Integer(value) => Some(*value),
+                    ParamValue::Boolean(_) | ParamValue::Text(_) => None,
+                })
+                .unwrap_or(parameter.neutral);
+            ui.horizontal(|ui| {
+                let changed = ui
+                    .add(
+                        egui::Slider::new(&mut value, parameter.min..=parameter.max)
+                            .text(primary_parameter_label(parameter.name))
+                            .integer(),
+                    )
+                    .changed();
+                ui.monospace(primary_parameter_readout(parameter.name, value));
+                if changed {
+                    pending.push(effect_param_operation(
+                        clip.id,
+                        effect.id,
+                        parameter.name,
+                        value,
+                    ));
+                }
+            });
+        }
+    });
+}
+
+fn primary_reset_operations(
+    clip: ClipId,
+    effect: &Effect,
+    descriptor: &kinewright_core::EffectDescriptor,
+) -> Vec<Operation> {
+    let mut operations = Vec::with_capacity(descriptor.parameters.len() + effect.keyframes.len());
+    for parameter in descriptor.parameters {
+        operations.push(effect_param_operation(
+            clip,
+            effect.id,
+            parameter.name,
+            parameter.neutral,
+        ));
+        if effect.keyframes.contains_key(parameter.name) {
+            operations.push(Operation::ClearEffectKeyframes {
+                clip,
+                effect: effect.id,
+                name: parameter.name.to_owned(),
+            });
+        }
+    }
+    operations
+}
+
+fn primary_parameter_label(name: &str) -> &str {
+    match name {
+        "exposure_milli_stops" => "Exposure",
+        "temperature_percent" => "Temperature",
+        "tint_percent" => "Tint",
+        "contrast_percent" => "Contrast",
+        "contrast_pivot_basis_points" => "Pivot",
+        "blacks_percent" => "Blacks",
+        "shadows_percent" => "Shadows",
+        "highlights_percent" => "Highlights",
+        "whites_percent" => "Whites",
+        "saturation_percent" => "Saturation",
+        _ => name,
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn primary_parameter_readout(name: &str, value: i64) -> String {
+    match name {
+        "exposure_milli_stops" => format!("{:+.3} stops", value as f64 / 1_000.0),
+        "contrast_pivot_basis_points" => format!("{:.4}", value as f64 / 10_000.0),
+        _ => format!("{value:+}%"),
+    }
+}
+
+fn effect_display_name(name: &str) -> &str {
+    match name {
+        "primary_correction" => "Primary correction",
+        _ => name,
+    }
+}
+
+fn is_effect_insertable(name: &str) -> bool {
+    !is_audio_effect(name)
+        && !is_legacy_display_effect(name)
+        && !matches!(name, "color_grade" | "cube_lut")
 }
 
 /// Keep internal, high-precision reframe storage out of the generic inspector
@@ -765,8 +900,9 @@ mod tests {
     use std::path::PathBuf;
 
     use kinewright_core::{
-        AssetId, Document, EffectDescriptor, EffectParameterDescriptor, EffectUniform, LinkId,
-        MediaAsset, Rational, Track, TrackId, TrackKind,
+        AssetId, AutomationCurve, Document, EffectDescriptor, EffectParameterDescriptor,
+        EffectUniform, Keyframe, KeyframeInterpolation, LinkId, MediaAsset, Rational, Track,
+        TrackId, TrackKind,
     };
 
     use super::*;
@@ -871,6 +1007,112 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn primary_correction_card_uses_contract_defaults_and_reset_batch() {
+        let descriptor = EFFECT_DESCRIPTORS
+            .iter()
+            .find(|descriptor| descriptor.name == "primary_correction")
+            .expect("CC1 descriptor");
+        let clip = Clip {
+            id: ClipId(3),
+            asset: AssetId(1),
+            source_range: TimeCode(0)..TimeCode(30),
+            content: ClipContent::Media,
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+        };
+
+        let Operation::AddEffect { effect, .. } = add_effect_operation(&clip, descriptor) else {
+            panic!("primary correction must emit AddEffect");
+        };
+        assert_eq!(effect.parameters.len(), descriptor.parameters.len());
+        assert!(effect.parameters.iter().all(|(name, value)| value
+            == &ParamValue::Integer(descriptor.parameter(name).unwrap().neutral)));
+
+        let reset_effect = Effect {
+            id: EffectId(8),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::from([(
+                "shadows_percent".to_owned(),
+                AutomationCurve {
+                    keyframes: vec![Keyframe {
+                        at: TimeCode::ZERO,
+                        value: 40,
+                        interpolation: KeyframeInterpolation::Linear,
+                    }],
+                },
+            )]),
+        };
+        let reset = primary_reset_operations(clip.id, &reset_effect, descriptor);
+        assert_eq!(reset.len(), descriptor.parameters.len() + 1);
+        let reset_values = reset
+            .iter()
+            .filter(|operation| matches!(operation, Operation::SetEffectParam { .. }));
+        for (operation, parameter) in reset_values.zip(descriptor.parameters) {
+            assert_eq!(
+                operation,
+                &Operation::SetEffectParam {
+                    clip: clip.id,
+                    effect: EffectId(8),
+                    name: parameter.name.to_owned(),
+                    value: ParamValue::Integer(parameter.neutral),
+                }
+            );
+        }
+        assert!(reset.contains(&Operation::ClearEffectKeyframes {
+            clip: clip.id,
+            effect: EffectId(8),
+            name: "shadows_percent".to_owned(),
+        }));
+    }
+
+    #[test]
+    fn primary_correction_readouts_use_human_units() {
+        assert_eq!(primary_parameter_label("exposure_milli_stops"), "Exposure");
+        assert_eq!(
+            primary_parameter_label("contrast_pivot_basis_points"),
+            "Pivot"
+        );
+        assert_eq!(primary_parameter_label("blacks_percent"), "Blacks");
+        assert_eq!(primary_parameter_label("saturation_percent"), "Saturation");
+        assert_eq!(
+            primary_parameter_readout("exposure_milli_stops", 1_250),
+            "+1.250 stops"
+        );
+        assert_eq!(
+            primary_parameter_readout("contrast_pivot_basis_points", 5_000),
+            "0.5000"
+        );
+        assert_eq!(primary_parameter_readout("whites_percent", -25), "-25%");
+    }
+
+    #[test]
+    fn legacy_display_effects_are_visible_but_not_offered_for_new_insertion() {
+        for name in ["brightness", "contrast", "saturation"] {
+            assert!(!is_effect_insertable(name));
+            assert!(is_legacy_display_effect(name));
+        }
+        assert!(is_effect_insertable("primary_correction"));
+        assert!(is_effect_insertable("look_lut"));
+        assert!(!is_effect_insertable("color_grade"));
+        assert!(!is_effect_insertable("cube_lut"));
+        for name in ["look_lut", "cube_lut"] {
+            assert_eq!(
+                effect_compatibility_stage(name)
+                    .expect("LUT compatibility stage")
+                    .issue_code(),
+                "legacy_lut_stage"
+            );
+        }
     }
 
     #[test]

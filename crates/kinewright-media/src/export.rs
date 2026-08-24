@@ -178,16 +178,7 @@ fn export_to_temporary(
         .time_base();
 
     let mut renderer = FrameRenderer::new(gpu);
-    let mut scaler = ffmpeg::software::scaling::Context::get(
-        ffmpeg::format::Pixel::RGBA,
-        settings.resolution.0,
-        settings.resolution.1,
-        ffmpeg::format::Pixel::YUV420P,
-        settings.resolution.0,
-        settings.resolution.1,
-        ffmpeg::software::scaling::Flags::BILINEAR,
-    )
-    .map_err(backend)?;
+    let mut delivery_filter = delivery_filter_graph(settings.resolution)?;
     for output_frame in 0..total_frames {
         check_cancelled(settings)?;
         let output_at = TimeCode(i64::try_from(output_frame).unwrap_or(i64::MAX));
@@ -209,12 +200,7 @@ fn export_to_temporary(
         );
         stamp_rgba_color(&mut rgba);
         copy_rgba_to_frame(&composed.rgba, &mut rgba)?;
-        let mut yuv = ffmpeg::frame::Video::new(
-            ffmpeg::format::Pixel::YUV420P,
-            settings.resolution.0,
-            settings.resolution.1,
-        );
-        scaler.run(&rgba, &mut yuv).map_err(backend)?;
+        let mut yuv = delivery_filter.run(&rgba)?;
         stamp_yuv420p_color(&mut yuv);
         yuv.set_pts(Some(i64::try_from(output_frame).unwrap_or(i64::MAX)));
         video_encoder.send_frame(&yuv).map_err(backend)?;
@@ -248,6 +234,88 @@ fn export_to_temporary(
     muxer.write_trailer().map_err(backend)?;
     send_progress(progress, total_frames, total_frames);
     Ok(())
+}
+
+struct DeliveryFilter {
+    graph: ffmpeg::filter::Graph,
+}
+
+impl DeliveryFilter {
+    fn run(&mut self, rgba: &ffmpeg::frame::Video) -> Result<ffmpeg::frame::Video, MediaError> {
+        {
+            let mut source_context = self.graph.get("source").ok_or_else(|| {
+                MediaError::Backend("delivery source filter disappeared".to_owned())
+            })?;
+            let mut source = source_context.source();
+            source.add(rgba).map_err(|error| {
+                MediaError::Backend(format!("delivery source submission failed: {error}"))
+            })?;
+        }
+        let mut output = ffmpeg::frame::Video::empty();
+        {
+            let mut sink_context = self.graph.get("sink").ok_or_else(|| {
+                MediaError::Backend("delivery sink filter disappeared".to_owned())
+            })?;
+            let mut sink = sink_context.sink();
+            sink.frame(&mut output).map_err(|error| {
+                MediaError::Backend(format!(
+                    "explicit BT.709 limited-range delivery conversion failed: {error}"
+                ))
+            })?;
+        }
+        Ok(output)
+    }
+}
+
+fn delivery_filter_graph(resolution: (u32, u32)) -> Result<DeliveryFilter, MediaError> {
+    let source_filter = ffmpeg::filter::find("buffer")
+        .ok_or_else(|| MediaError::Backend("FFmpeg buffer filter is unavailable".to_owned()))?;
+    let sink_filter = ffmpeg::filter::find("buffersink")
+        .ok_or_else(|| MediaError::Backend("FFmpeg buffersink filter is unavailable".to_owned()))?;
+    let scale_filter = ffmpeg::filter::find("scale")
+        .ok_or_else(|| MediaError::Backend("FFmpeg scale filter is unavailable".to_owned()))?;
+    let format_filter = ffmpeg::filter::find("format")
+        .ok_or_else(|| MediaError::Backend("FFmpeg format filter is unavailable".to_owned()))?;
+    let mut graph = ffmpeg::filter::Graph::new();
+    let args = format!(
+        "video_size={}x{}:pix_fmt=rgba:time_base=1/1:pixel_aspect=1/1:colorspace=gbr:range=jpeg",
+        resolution.0, resolution.1
+    );
+    let mut source_context = graph
+        .add(&source_filter, "source", &args)
+        .map_err(|error| {
+            MediaError::Backend(format!("could not configure delivery source: {error}"))
+        })?;
+    let scale_args = format!(
+        "w={}:h={}:flags=bicubic:in_range=jpeg:out_range=mpeg:out_color_matrix=bt709",
+        resolution.0, resolution.1
+    );
+    let mut scale_context = graph
+        .add(&scale_filter, "scale", &scale_args)
+        .map_err(|error| {
+            MediaError::Backend(format!(
+                "could not configure delivery scale (args={scale_args:?}): {error}"
+            ))
+        })?;
+    let mut format_context = graph
+        .add(&format_filter, "format", "pix_fmts=yuv420p")
+        .map_err(|error| {
+            MediaError::Backend(format!(
+                "could not configure delivery YUV420P format: {error}"
+            ))
+        })?;
+    let mut sink_context = graph.add(&sink_filter, "sink", "").map_err(|error| {
+        MediaError::Backend(format!("could not configure delivery sink: {error}"))
+    })?;
+    source_context.link(0, &mut scale_context, 0);
+    scale_context.link(0, &mut format_context, 0);
+    format_context.link(0, &mut sink_context, 0);
+    graph.validate().map_err(|error| {
+        MediaError::Backend(format!(
+            "could not configure explicit BT.709 limited-range delivery conversion (scale_args={scale_args:?}): {error}"
+        ))
+    })?;
+    Ok(DeliveryFilter { graph })
 }
 
 fn find_codec(name: &str, expected_id: ffmpeg::codec::Id) -> Result<ffmpeg::Codec, MediaError> {

@@ -4,12 +4,14 @@ mod analysis;
 mod audio;
 mod cache;
 mod clock;
+pub mod color_pipeline;
 mod compositor;
 mod decode;
 mod derived;
 mod derived_cache;
 mod engine;
 mod export;
+mod frame;
 mod loudness;
 mod lut;
 mod render;
@@ -24,13 +26,20 @@ pub mod test_support;
 #[cfg(test)]
 mod media_matrix_tests;
 
+#[cfg(test)]
+mod cc1_fixtures;
+
 use ffmpeg_next as ffmpeg;
 use kinewright_core::MediaError;
 
 pub use analysis::{MAX_THUMBNAIL_BYTES, MAX_THUMBNAIL_FILES, MAX_WAVEFORM_PEAKS};
 pub use cache::select_frame_for_position;
 pub use clock::{frame_to_samples, samples_to_frame};
-pub use compositor::{Compositor, CompositorLayer, GpuContext};
+pub use compositor::{
+    COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE,
+    COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, Compositor, CompositorLayer, GpuContext,
+    compositor_required_limits,
+};
 pub use derived::{
     BeatDetectionConfig, DEFAULT_BEAT_MINIMUM_INTERVAL_MILLISECONDS,
     DEFAULT_BEAT_WINDOW_MILLISECONDS, DEFAULT_MINIMUM_SILENCE_FRAMES,
@@ -45,7 +54,7 @@ pub use kinewright_core::{
     VisualRequestKind, WaveformData, WaveformPeak,
 };
 pub use loudness::measure_loudness;
-pub use sha256::{sha256_file, source_fingerprint};
+pub use sha256::{sha256_bytes, sha256_file, source_fingerprint};
 pub use timeline::{
     TimelineAudioSegment, TimelineSource, TimelineTitleLayer, TimelineVideoLayer,
     TimelineVisualLayer, TransitionRenderParams, timeline_audio_segments, timeline_source_at,

@@ -20,6 +20,16 @@ pub enum EffectUniform {
     Exposure,
     Temperature,
     Tint,
+    PrimaryExposure,
+    PrimaryTemperature,
+    PrimaryTint,
+    PrimaryContrast,
+    PrimaryPivot,
+    Blacks,
+    Shadows,
+    Highlights,
+    Whites,
+    PrimarySaturation,
     LutPreset,
     LutIntensity,
     ExternalLutIntensity,
@@ -242,6 +252,81 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
                 max: 100,
                 neutral: 0,
                 uniform: EffectUniform::Tint,
+            },
+        ],
+    },
+    EffectDescriptor {
+        name: "primary_correction",
+        parameters: &[
+            EffectParameterDescriptor {
+                name: "exposure_milli_stops",
+                min: -5_000,
+                max: 5_000,
+                neutral: 0,
+                uniform: EffectUniform::PrimaryExposure,
+            },
+            EffectParameterDescriptor {
+                name: "temperature_percent",
+                min: -100,
+                max: 100,
+                neutral: 0,
+                uniform: EffectUniform::PrimaryTemperature,
+            },
+            EffectParameterDescriptor {
+                name: "tint_percent",
+                min: -100,
+                max: 100,
+                neutral: 0,
+                uniform: EffectUniform::PrimaryTint,
+            },
+            EffectParameterDescriptor {
+                name: "contrast_percent",
+                min: -100,
+                max: 100,
+                neutral: 0,
+                uniform: EffectUniform::PrimaryContrast,
+            },
+            EffectParameterDescriptor {
+                name: "contrast_pivot_basis_points",
+                min: 0,
+                max: 10_000,
+                neutral: 5_000,
+                uniform: EffectUniform::PrimaryPivot,
+            },
+            EffectParameterDescriptor {
+                name: "blacks_percent",
+                min: -100,
+                max: 100,
+                neutral: 0,
+                uniform: EffectUniform::Blacks,
+            },
+            EffectParameterDescriptor {
+                name: "shadows_percent",
+                min: -100,
+                max: 100,
+                neutral: 0,
+                uniform: EffectUniform::Shadows,
+            },
+            EffectParameterDescriptor {
+                name: "highlights_percent",
+                min: -100,
+                max: 100,
+                neutral: 0,
+                uniform: EffectUniform::Highlights,
+            },
+            EffectParameterDescriptor {
+                name: "whites_percent",
+                min: -100,
+                max: 100,
+                neutral: 0,
+                uniform: EffectUniform::Whites,
+            },
+            EffectParameterDescriptor {
+                name: "saturation_percent",
+                min: -100,
+                max: 100,
+                neutral: 0,
+                uniform: EffectUniform::PrimarySaturation,
             },
         ],
     },
@@ -496,12 +581,76 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
     },
 ];
 
+/// Built-in effects whose historical compositor semantics operate in the
+/// display-coded compatibility path rather than the managed CC1 working
+/// space. They remain loadable for old projects, but must be surfaced as
+/// legacy colour semantics and are not offered for new insertion.
+pub const LEGACY_DISPLAY_EFFECT_NAMES: &[&str] = &["brightness", "contrast", "saturation"];
+
+/// Built-in LUT effects that execute after the managed primary correction.
+/// They remain supported compatibility stages, but are outside the CC1
+/// managed-primary conformance claim and must be reported as such.
+pub const POST_PRIMARY_LUT_EFFECT_NAMES: &[&str] = &["look_lut", "cube_lut"];
+
+/// Colour compatibility stage occupied by an effect outside the CC1 managed
+/// primary correction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectCompatibilityStage {
+    /// Historical display-coded controls retained for project compatibility.
+    LegacyDisplayCoded,
+    /// Built-in looks and imported `.cube` LUTs applied after the primary.
+    PostPrimaryLut,
+}
+
+impl EffectCompatibilityStage {
+    /// Stable QA/delivery issue code for the compatibility stage.
+    #[must_use]
+    pub const fn issue_code(self) -> &'static str {
+        match self {
+            Self::LegacyDisplayCoded => "legacy_colour_semantics",
+            Self::PostPrimaryLut => "legacy_lut_stage",
+        }
+    }
+
+    /// Human-facing inspector warning for the compatibility stage.
+    #[must_use]
+    pub const fn inspector_warning(self) -> &'static str {
+        match self {
+            Self::LegacyDisplayCoded => {
+                "Legacy display semantics · compatibility path; not managed SDR primary"
+            }
+            Self::PostPrimaryLut => {
+                "Post-primary compatibility LUT · outside managed SDR conformance"
+            }
+        }
+    }
+}
+
 #[must_use]
 pub fn is_audio_effect(name: &str) -> bool {
     matches!(
         name,
         "audio_gain" | "audio_eq" | "audio_compressor" | "audio_ducking" | "audio_limiter"
     )
+}
+
+/// Whether an effect is a legacy display-coded colour effect.
+#[must_use]
+pub fn is_legacy_display_effect(name: &str) -> bool {
+    effect_compatibility_stage(name) == Some(EffectCompatibilityStage::LegacyDisplayCoded)
+}
+
+/// Classify colour effects that remain supported outside the CC1 managed
+/// primary correction.
+#[must_use]
+pub fn effect_compatibility_stage(name: &str) -> Option<EffectCompatibilityStage> {
+    match name {
+        "brightness" | "contrast" | "saturation" => {
+            Some(EffectCompatibilityStage::LegacyDisplayCoded)
+        }
+        "look_lut" | "cube_lut" => Some(EffectCompatibilityStage::PostPrimaryLut),
+        _ => None,
+    }
 }
 
 #[must_use]

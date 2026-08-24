@@ -8,7 +8,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 58] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 60] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -17,6 +17,8 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 58] = [
     "commit_edit_plan",
     "discard_edit_plan",
     "get_color_context",
+    "plan_primary_correction",
+    "render_color_proof",
     "get_media_status",
     "get_cache_status",
     "clear_media_cache",
@@ -190,6 +192,7 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         // generated operation tool is deliberately not emitted (see above).
         Operation::RelinkAsset { .. } => "relink_asset",
         Operation::SetAssetColorDescription { .. } => "set_asset_color_description",
+        Operation::SetColorContext { .. } => "set_color_context",
         Operation::UpsertBin { .. } => "upsert_bin",
         Operation::RemoveBin { .. } => "remove_bin",
         Operation::SetAssetBin { .. } => "set_asset_bin",
@@ -330,6 +333,9 @@ fn operation_tool(
         ),
         "SetAssetColorDescription" => description.push_str(
             " Source colour overrides must provide the complete typed colour description, nonzero confidence, and user_override provenance. The operation is revision-gated and undoable.",
+        ),
+        "SetColorContext" => description.push_str(
+            " Replaces the project working, monitoring, and delivery colour context as one journaled, undoable edit. Use the current managed SDR context to reset an incompatible legacy or future target explicitly; loading a project never performs this rewrite silently.",
         ),
         "RippleDeleteClip" | "RippleInsertGap" => description.push_str(
             " Ripple shifts the edited track and every other sync-locked track. Unlocked tracks remain fixed. Project markers at or after the ripple point always shift regardless of track sync locks. The delete ripple point is the removed clip's pre-edit end; insert uses its explicit at frame. Only clips starting at or after that point shift, and a straddling clip remains unchanged.",
@@ -472,6 +478,7 @@ mod tests {
             [
                 "add_asset",
                 "set_asset_color_description",
+                "set_color_context",
                 "upsert_bin",
                 "remove_bin",
                 "set_asset_bin",

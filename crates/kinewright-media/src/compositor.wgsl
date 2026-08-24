@@ -41,12 +41,27 @@ struct LayerParams {
     external_domain_max_r: f32,
     external_domain_max_g: f32,
     external_domain_max_b: f32,
+    input_linear: f32,
+    legacy_stage_active: f32,
+    _uniform_padding: vec2<f32>,
+};
+
+struct PrimaryNode {
+    values: array<vec4<f32>, 3>,
+};
+
+struct PrimaryBuffer {
+    // Keep the host ABI explicit: the count occupies the first u32 of a
+    // 16-byte header, and the node array begins immediately at byte 16.
+    header: vec4<u32>,
+    nodes: array<PrimaryNode>,
 };
 
 @group(0) @binding(0) var layer_texture: texture_2d<f32>;
 @group(0) @binding(1) var layer_sampler: sampler;
 @group(0) @binding(2) var<uniform> params: LayerParams;
 @group(0) @binding(3) var lut_texture: texture_3d<f32>;
+@group(0) @binding(4) var<storage, read> primary_buffer: PrimaryBuffer;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -109,6 +124,78 @@ fn sample_external_lut(color: vec3<f32>) -> vec3<f32> {
     return mix(low_z, high_z, fraction.z);
 }
 
+fn decode_bt709(value: f32) -> f32 {
+    if value < 0.081 {
+        return value / 4.5;
+    }
+    return pow((value + 0.099) / 1.099, 1.0 / 0.45);
+}
+
+fn encode_bt709(value: f32) -> f32 {
+    let sign = select(1.0, -1.0, value < 0.0);
+    let magnitude = abs(value);
+    if magnitude < 0.018 {
+        return sign * 4.5 * magnitude;
+    }
+    return sign * (1.099 * pow(magnitude, 0.45) - 0.099);
+}
+
+fn smooth_weight(start: f32, end: f32, value: f32) -> f32 {
+    return smoothstep(start, end, value);
+}
+
+fn apply_primary_node(linear_rgb: vec3<f32>, node: PrimaryNode) -> vec3<f32> {
+    let first = node.values[0];
+    let second = node.values[1];
+    let third = node.values[2];
+    let temperature = first.y;
+    let tint = first.z;
+    let red_gain = 1.0 + 0.1 * temperature;
+    let green_gain = 1.0 - 0.1 * tint;
+    let blue_gain = 1.0 - 0.1 * temperature;
+    let exposure_gain = exp2(first.x);
+    var corrected = vec3<f32>(
+        linear_rgb.r * red_gain * exposure_gain,
+        linear_rgb.g * green_gain * exposure_gain,
+        linear_rgb.b * blue_gain * exposure_gain,
+    );
+    for (var channel = 0u; channel < 3u; channel++) {
+        let value = corrected[channel];
+        let bounded = clamp(value, 0.0, 1.0);
+        let black_weight = 1.0 - smooth_weight(0.0, 0.25, bounded);
+        let shadow_weight = 1.0 - smooth_weight(0.15, 0.50, bounded);
+        let highlight_weight = smooth_weight(0.50, 0.85, bounded);
+        let white_weight = smooth_weight(0.75, 1.0, bounded);
+        corrected[channel] = value
+            + 0.25 * second.y * black_weight
+            + 0.20 * second.z * shadow_weight
+            + 0.20 * second.w * highlight_weight
+            + 0.25 * third.x * white_weight;
+    }
+    let pivot = second.x;
+    let contrast_scale = 1.0 + first.w;
+    corrected = vec3<f32>(
+        pivot + (corrected.r - pivot) * contrast_scale,
+        pivot + (corrected.g - pivot) * contrast_scale,
+        pivot + (corrected.b - pivot) * contrast_scale,
+    );
+    let luminance = dot(corrected, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let saturation_scale = 1.0 + third.y;
+    return vec3<f32>(
+        luminance + (corrected.r - luminance) * saturation_scale,
+        luminance + (corrected.g - luminance) * saturation_scale,
+        luminance + (corrected.b - luminance) * saturation_scale,
+    );
+}
+
+fn apply_primary_nodes(input_rgb: vec3<f32>) -> vec3<f32> {
+    var corrected = input_rgb;
+    for (var index = 0u; index < primary_buffer.header.x; index++) {
+        corrected = apply_primary_node(corrected, primary_buffer.nodes[index]);
+    }
+    return corrected;
+}
+
 @fragment
 fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var sample_uv = input.uv;
@@ -134,35 +221,75 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
     let sampled = textureSample(layer_texture, layer_sampler, sample_uv);
-    var rgb = sampled.rgb * exp2(params.exposure);
-    rgb += vec3<f32>(params.temperature * 0.1, params.tint * 0.08, -params.temperature * 0.1);
-    rgb += vec3<f32>(params.brightness);
-    rgb = (rgb - vec3<f32>(0.5)) * params.contrast + vec3<f32>(0.5);
-    let luminance = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-    rgb = mix(vec3<f32>(luminance), rgb, params.saturation);
-    let pre_lut = rgb;
-    let preset = u32(round(params.lut_preset));
-    if preset == 1u {
-        rgb = (rgb - vec3<f32>(0.5)) * 1.08 + vec3<f32>(0.54, 0.50, 0.46);
-    } else if preset == 2u {
-        rgb = (rgb - vec3<f32>(0.5)) * 1.12 + vec3<f32>(0.46, 0.50, 0.55);
-    } else if preset == 3u {
-        let mono = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-        rgb = vec3<f32>(mono);
-    } else if preset == 4u {
-        let bleach_luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-        rgb = mix(vec3<f32>(bleach_luma), rgb, 0.35);
-        rgb = (rgb - vec3<f32>(0.5)) * 1.35 + vec3<f32>(0.5);
+    var linear_rgb = vec3<f32>(
+        decode_bt709(sampled.r),
+        decode_bt709(sampled.g),
+        decode_bt709(sampled.b),
+    );
+    if params.input_linear > 0.5 {
+        linear_rgb = sampled.rgb;
     }
-    rgb = mix(pre_lut, rgb, params.lut_intensity);
-    if params.external_lut_enabled > 0.5 {
-        let lut_rgb = sample_external_lut(rgb);
-        rgb = mix(rgb, lut_rgb, params.external_lut_intensity);
+    if primary_buffer.header.x > 0u {
+        linear_rgb = apply_primary_nodes(linear_rgb);
     }
-    rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
-    let fade_color = vec3<f32>(params.fade_white);
-    rgb = mix(rgb, fade_color, params.fade_mix);
+    var output_linear = linear_rgb;
     var alpha = clamp(sampled.a * params.opacity, 0.0, 1.0);
+    if params.legacy_stage_active > 0.5 {
+        var rgb = vec3<f32>(
+            encode_bt709(linear_rgb.r),
+            encode_bt709(linear_rgb.g),
+            encode_bt709(linear_rgb.b),
+        );
+        rgb *= exp2(params.exposure);
+        rgb += vec3<f32>(params.temperature * 0.1, params.tint * 0.08, -params.temperature * 0.1);
+        rgb += vec3<f32>(params.brightness);
+        rgb = (rgb - vec3<f32>(0.5)) * params.contrast + vec3<f32>(0.5);
+        let luminance = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        rgb = mix(vec3<f32>(luminance), rgb, params.saturation);
+        let pre_lut = rgb;
+        let preset = u32(round(params.lut_preset));
+        if preset == 1u {
+            rgb = (rgb - vec3<f32>(0.5)) * 1.08 + vec3<f32>(0.54, 0.50, 0.46);
+        } else if preset == 2u {
+            rgb = (rgb - vec3<f32>(0.5)) * 1.12 + vec3<f32>(0.46, 0.50, 0.55);
+        } else if preset == 3u {
+            let mono = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            rgb = vec3<f32>(mono);
+        } else if preset == 4u {
+            let bleach_luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            rgb = mix(vec3<f32>(bleach_luma), rgb, 0.35);
+            rgb = (rgb - vec3<f32>(0.5)) * 1.35 + vec3<f32>(0.5);
+        }
+        rgb = mix(pre_lut, rgb, params.lut_intensity);
+        if params.external_lut_enabled > 0.5 {
+            let lut_rgb = sample_external_lut(rgb);
+            rgb = mix(rgb, lut_rgb, params.external_lut_intensity);
+        }
+        // Legacy display compatibility retains its established display-space
+        // clamp. It is outside the managed primary sequence.
+        rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+        if params.key_threshold >= 0.0 {
+            let key_color = vec3<f32>(params.key_red, params.key_green, params.key_blue);
+            let distance = length(rgb - key_color) / 1.7320508;
+            let key_alpha = smoothstep(
+                max(0.0, params.key_threshold - params.key_softness),
+                min(1.0, params.key_threshold + params.key_softness + 0.00001),
+                distance,
+            );
+            alpha *= key_alpha;
+            let key_dominance = max(0.0, rgb.g - max(rgb.r, rgb.b));
+            rgb.g = max(
+                0.0,
+                rgb.g - key_dominance * params.key_spill * (1.0 - key_alpha),
+            );
+        }
+        output_linear = vec3<f32>(
+            decode_bt709(rgb.r),
+            decode_bt709(rgb.g),
+            decode_bt709(rgb.b),
+        );
+    }
+    output_linear = mix(output_linear, vec3<f32>(params.fade_white), params.fade_mix);
     if params.fade_mix > 0.0 {
         alpha = 1.0;
     }
@@ -193,20 +320,5 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
         alpha *= mask_alpha;
     }
-    if params.key_threshold >= 0.0 {
-        let key_color = vec3<f32>(params.key_red, params.key_green, params.key_blue);
-        let distance = length(sampled.rgb - key_color) / 1.7320508;
-        let key_alpha = smoothstep(
-            max(0.0, params.key_threshold - params.key_softness),
-            min(1.0, params.key_threshold + params.key_softness + 0.00001),
-            distance,
-        );
-        alpha *= key_alpha;
-        let key_dominance = max(0.0, sampled.g - max(sampled.r, sampled.b));
-        rgb.g = max(
-            0.0,
-            rgb.g - key_dominance * params.key_spill * (1.0 - key_alpha),
-        );
-    }
-    return vec4<f32>(rgb, alpha);
+    return vec4<f32>(output_linear, alpha);
 }

@@ -33,9 +33,10 @@ use kinewright_core::{
     TranscriptStatus, animated_caption_operations_at, apply_batch, authored_caption_cues,
     beat_montage_plan, beat_montage_plan_near_anchors_with_report, beat_montage_plan_with_anchors,
     beat_pacing_plan, caption_cues, dedup_timeline_words, delivery_conformance,
-    document_for_delivery_profile, document_for_delivery_variant, is_filler_word,
-    map_source_range_to_project, music_fit_plan_with_end_anchor, music_structure_analysis,
-    plan_speaker_multicam, plan_subject_reframe_basis_points_with_containment, qa_document,
+    document_for_delivery_profile, document_for_delivery_variant, effect_descriptor,
+    is_filler_word, map_source_range_to_project, music_fit_plan_with_end_anchor,
+    music_structure_analysis, plan_speaker_multicam,
+    plan_subject_reframe_basis_points_with_containment, qa_document,
     validate_beat_montage_plan_cadence,
 };
 use rmcp::{
@@ -56,6 +57,11 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
+    color_status::{
+        CC1_STAGE_NAMES, ColorContextArgs, ColorProofError, PrimaryCorrectionPlanArgs,
+        PrimaryPlanError, RenderColorProofArgs, color_context_value_with_assumptions,
+        color_context_value_with_options, legacy_stage_warnings, plan_primary_correction,
+    },
     export_queue::{ExportJobId, ExportQueue, ExportQueueError, QueueExportRequest},
     pacing::{DialoguePacingGap, dialogue_pacing_gaps},
     render::{
@@ -358,7 +364,9 @@ impl McpServer {
             .map_err(McpServerError::Listener)?;
         let endpoint = format!("http://{address}/mcp");
         let (shutdown, shutdown_rx) = oneshot::channel();
-        let export_queue = exporter.map(ExportQueue::new).transpose()?;
+        let export_queue = exporter
+            .map(|exporter| ExportQueue::new(exporter, Arc::clone(&analysis)))
+            .transpose()?;
         let tool_surface_metrics = ToolSurfaceMetrics::measure(&KinewrightMcp::served_tools()?);
         let handler = KinewrightMcp::configured(
             core,
@@ -627,7 +635,19 @@ impl KinewrightMcp {
                     render_timeline_state(&document)
                 )))
             }
-            "get_color_context" => self.color_context(),
+            "get_color_context" => {
+                let args: ColorContextArgs = decode_args("get_color_context", arguments)?;
+                self.color_context(&args)
+            }
+            "plan_primary_correction" => {
+                let args: PrimaryCorrectionPlanArgs =
+                    decode_args("plan_primary_correction", arguments)?;
+                self.primary_correction_plan(&args)
+            }
+            "render_color_proof" => {
+                let args: RenderColorProofArgs = decode_args("render_color_proof", arguments)?;
+                self.render_color_proof(&args)
+            }
             "get_media_status" => self.media_status(),
             "get_cache_status" => self.cache_status(),
             "clear_media_cache" => {
@@ -1424,28 +1444,24 @@ impl KinewrightMcp {
         Ok(success_text(json))
     }
 
-    fn color_context(&self) -> Result<CallToolResult, McpError> {
+    fn color_context(&self, args: &ColorContextArgs) -> Result<CallToolResult, McpError> {
         let (revision, document) = self.snapshot()?;
-        let assets = document
-            .media_pool
-            .iter()
-            .map(|asset| {
-                serde_json::json!({
-                    "id": asset.id.0,
-                    "name": asset.name,
-                    "color_description": asset.color_description,
-                })
-            })
-            .collect::<Vec<_>>();
-        let value = serde_json::json!({
-            "timeline_revision": revision.0,
-            "color_context": {
-                "working": document.color_context.working,
-                "monitoring": document.color_context.monitoring,
-                "delivery": document.color_context.delivery,
-            },
-            "assets": assets,
-        });
+        let value = if args.raw_only {
+            color_context_value_with_options(
+                revision,
+                &document,
+                args.profile_assumption,
+                &args.asset_ids,
+                true,
+            )
+        } else {
+            color_context_value_with_assumptions(
+                revision,
+                &document,
+                args.profile_assumption,
+                &args.asset_ids,
+            )
+        };
         Ok(success_structured(
             format!(
                 "timeline_revision={} assets={} working={} monitoring={} delivery={}\n{}",
@@ -1458,6 +1474,560 @@ impl KinewrightMcp {
             ),
             value,
         ))
+    }
+
+    fn primary_correction_plan(
+        &self,
+        args: &PrimaryCorrectionPlanArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let (actual_revision, document) = self.snapshot()?;
+        let plan = match plan_primary_correction(&document, actual_revision, args) {
+            Ok(plan) => plan,
+            Err(PrimaryPlanError::RevisionConflict { expected, actual }) => {
+                return Ok(revision_conflict_text(expected, actual));
+            }
+            Err(error) => {
+                return Ok(error_structured(
+                    format!("primary correction plan rejected: {error}"),
+                    serde_json::json!({
+                        "code": error.code(),
+                        "message": error.to_string(),
+                        "details": error.details(),
+                        "evidence_only": true,
+                        "applied": false,
+                    }),
+                ));
+            }
+        };
+        let operations = serde_json::to_value(&plan.operations)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        let value = serde_json::json!({
+            "timeline_revision": plan.expected_revision.0,
+            "clip_id": plan.clip_id.0,
+            "effect_id": plan.effect_id.0,
+            "source_profile": plan.source_profile.id(),
+            "profile_assumption": plan.profile_assumption,
+            "evidence_only": true,
+            "applied": false,
+            "before": {
+                "primary_node_count": plan.existing_primary_node_count,
+            },
+            "after": {
+                "primary_node_count": plan.existing_primary_node_count + 1,
+            },
+            "requested_parameters": plan.requested_parameters,
+            "resolved_parameters": plan.resolved_parameters,
+            "operations": operations,
+            "next": "Review these exact operations; submit them through prepare_edit_plan at the same revision if the edit is requested.",
+        });
+        Ok(success_structured(
+            format!(
+                "prepared evidence-only primary correction for clip {} at revision {}; no operation was applied",
+                plan.clip_id, plan.expected_revision
+            ),
+            value,
+        ))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn render_color_proof(&self, args: &RenderColorProofArgs) -> Result<CallToolResult, McpError> {
+        let (actual_revision, document) = self.snapshot()?;
+        let plan_args = PrimaryCorrectionPlanArgs::from(args);
+        let plan = match plan_primary_correction(&document, actual_revision, &plan_args) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Ok(color_proof_error_result(ColorProofError::from(error)));
+            }
+        };
+        if !document.color_context.is_managed_sdr_compatible() {
+            return Ok(color_proof_error_result(
+                ColorProofError::PipelineIncompatible {
+                    reason: format!(
+                        "pipeline_state={:?}, working={:?}, monitoring={:?}",
+                        document.color_context.pipeline_state,
+                        document.color_context.working,
+                        document.color_context.monitoring,
+                    ),
+                },
+            ));
+        }
+        if args.timecode < TimeCode::ZERO || args.timecode >= document.duration {
+            return Ok(color_proof_error_result(
+                ColorProofError::ProjectFrameOutOfRange {
+                    frame: args.timecode,
+                    duration: document.duration,
+                },
+            ));
+        }
+        let Some(clip) = document.clip(args.clip_id) else {
+            return Ok(color_proof_error_result(ColorProofError::Primary(
+                PrimaryPlanError::MissingClip(args.clip_id),
+            )));
+        };
+        let clip_duration = match document.clip_duration(clip) {
+            Ok(duration) => duration,
+            Err(error) => {
+                return Ok(color_proof_error_result(
+                    ColorProofError::ClipTimingInvalid {
+                        clip: args.clip_id,
+                        reason: error.to_string(),
+                    },
+                ));
+            }
+        };
+        let Some(clip_end) = clip.timeline_start.checked_add(clip_duration) else {
+            return Ok(color_proof_error_result(
+                ColorProofError::ClipTimingInvalid {
+                    clip: args.clip_id,
+                    reason: "clip end overflowed".to_owned(),
+                },
+            ));
+        };
+        if args.timecode < clip.timeline_start || args.timecode >= clip_end {
+            return Ok(color_proof_error_result(
+                ColorProofError::ClipFrameOutOfRange {
+                    clip: args.clip_id,
+                    frame: args.timecode,
+                    start: clip.timeline_start,
+                    end: clip_end,
+                },
+            ));
+        }
+        let Some(asset) = document.asset(clip.asset) else {
+            return Ok(color_proof_error_result(ColorProofError::Primary(
+                PrimaryPlanError::MissingAsset {
+                    clip: args.clip_id,
+                    asset: clip.asset,
+                },
+            )));
+        };
+        // A proof renders one exact project frame.  Availability therefore
+        // follows the compositor's active visual layers at that frame, not
+        // every clip in the document (and never audio-only tracks).  This is
+        // important for offline bins and for a later shot that is not part of
+        // the requested BEFORE/AFTER image.
+        let active_visual_layers =
+            match kinewright_media::visual_layers_at(&document, args.timecode) {
+                Ok(layers) => layers,
+                Err(error) => {
+                    return Ok(color_proof_error_result(ColorProofError::from_media_error(
+                        "visual_layer_resolution",
+                        error,
+                    )));
+                }
+            };
+        let mut active_rendered_layers = Vec::new();
+        let mut active_rendered_sources = Vec::new();
+        let mut selected_clip_is_rendered = false;
+        for layer in active_visual_layers {
+            let (track_id, clip_id, asset_id) = match &layer {
+                kinewright_media::TimelineVisualLayer::Video(layer) => (
+                    layer.source.track,
+                    layer.source.clip,
+                    Some(layer.source.asset),
+                ),
+                kinewright_media::TimelineVisualLayer::Title(layer) => {
+                    (layer.track, layer.clip, None)
+                }
+            };
+            let Some(timeline_clip) = Self::document_clip_on_track(&document, track_id, clip_id)
+            else {
+                return Ok(color_proof_error_result(ColorProofError::RenderFailed {
+                    stage: "visual_layer_resolution",
+                    message: format!(
+                        "production visual resolver returned track {track_id} clip {clip_id}, but that clip is not present in the document"
+                    ),
+                }));
+            };
+            if timeline_clip.id == args.clip_id {
+                selected_clip_is_rendered = true;
+            }
+            let Some(asset_id) = asset_id else {
+                // Titles are compositor-native overlays and do not require a
+                // source file. Record the production title layer explicitly,
+                // without inventing asset identity or availability fields.
+                let kinewright_media::TimelineVisualLayer::Title(title_layer) = &layer else {
+                    unreachable!("only title layers omit an asset id")
+                };
+                let ClipContent::Title(document_title) = &timeline_clip.content else {
+                    return Ok(color_proof_error_result(ColorProofError::RenderFailed {
+                        stage: "visual_layer_resolution",
+                        message: format!(
+                            "production visual resolver returned a title layer for track {track_id} clip {clip_id}, but the document clip is not a title"
+                        ),
+                    }));
+                };
+                if document_title != &title_layer.title {
+                    return Ok(color_proof_error_result(ColorProofError::RenderFailed {
+                        stage: "visual_layer_resolution",
+                        message: format!(
+                            "production visual resolver returned title parameters that differ from track {track_id} clip {clip_id}"
+                        ),
+                    }));
+                }
+                active_rendered_layers.push(serde_json::json!({
+                    "track_id": track_id.0,
+                    "clip_id": clip_id.0,
+                    "content": "title",
+                    "title": title_layer.title,
+                    "effects": proof_effect_manifest(&title_layer.effects),
+                    "primary_nodes": proof_primary_node_manifest(&title_layer.effects),
+                    "transition": {
+                        "alpha": title_layer.transition.alpha,
+                        "fade_mix": title_layer.transition.fade_mix,
+                        "fade_white": title_layer.transition.fade_white,
+                    },
+                    "legacy_stage_warnings": legacy_stage_warnings(timeline_clip),
+                }));
+                continue;
+            };
+            if timeline_clip.asset != asset_id {
+                return Ok(color_proof_error_result(ColorProofError::RenderFailed {
+                    stage: "visual_layer_resolution",
+                    message: format!(
+                        "production visual resolver mapped track {track_id} clip {clip_id} to asset {asset_id}, but the document clip references asset {}",
+                        timeline_clip.asset
+                    ),
+                }));
+            }
+            let Some(timeline_asset) = document.asset(asset_id) else {
+                return Ok(color_proof_error_result(ColorProofError::RenderFailed {
+                    stage: "visual_layer_resolution",
+                    message: format!(
+                        "production visual resolver returned missing asset {asset_id} for track {track_id} clip {clip_id}"
+                    ),
+                }));
+            };
+            let availability = self.analysis.media_availability(timeline_asset);
+            if !matches!(
+                availability.kind,
+                kinewright_core::MediaAvailabilityKind::OnlineVerified
+                    | kinewright_core::MediaAvailabilityKind::OnlineUnverified
+            ) {
+                return Ok(color_proof_error_result(
+                    ColorProofError::MediaUnavailable {
+                        clip: timeline_clip.id,
+                        asset: timeline_asset.id,
+                        status: availability,
+                    },
+                ));
+            }
+            let kinewright_media::TimelineVisualLayer::Video(video_layer) = &layer else {
+                unreachable!("only video layers include an asset id")
+            };
+            let content = match &timeline_clip.content {
+                ClipContent::Media => "media",
+                ClipContent::Freeze(_) => "freeze",
+                ClipContent::Title(_) => {
+                    return Ok(color_proof_error_result(ColorProofError::RenderFailed {
+                        stage: "visual_layer_resolution",
+                        message: format!(
+                            "production visual resolver returned a source-backed layer for title clip {clip_id} on track {track_id}"
+                        ),
+                    }));
+                }
+            };
+            active_rendered_layers.push(serde_json::json!({
+                "track_id": track_id.0,
+                "clip_id": clip_id.0,
+                "content": content,
+                "asset_id": timeline_asset.id.0,
+                "source_frame": video_layer.source.source_at.0,
+                "source_end": video_layer.source.source_end.0,
+                "timeline_end": video_layer.source.timeline_end.0,
+                "source": {
+                    "raw_description": timeline_asset.color_description,
+                    "provenance": timeline_asset.color_description.provenance,
+                    "confidence_basis_points": timeline_asset.color_description.confidence_basis_points,
+                },
+                "source_fingerprint": timeline_asset.source_fingerprint,
+                "availability": availability,
+                // `visual_layers_at` has already evaluated clip-local
+                // automation at this exact project frame. Preserve the
+                // serialized vector order and resolved primary values so the
+                // production layer can be reproduced from the manifest.
+                "effects": proof_effect_manifest(&video_layer.effects),
+                "primary_nodes": proof_primary_node_manifest(&video_layer.effects),
+                "transition": {
+                    "alpha": video_layer.transition.alpha,
+                    "fade_mix": video_layer.transition.fade_mix,
+                    "fade_white": video_layer.transition.fade_white,
+                },
+                "legacy_stage_warnings": legacy_stage_warnings(timeline_clip),
+            }));
+            // Retain one manifest entry per rendered clip so per-clip legacy
+            // warnings remain observable when an asset is overlaid more than
+            // once.
+            active_rendered_sources.push((track_id, timeline_clip, timeline_asset, availability));
+        }
+        if !selected_clip_is_rendered {
+            return Ok(color_proof_error_result(ColorProofError::RenderFailed {
+                stage: "selected_visual_layer",
+                message: format!(
+                    "selected clip {} is not an active rendered visual layer at project frame {}; an overlapping or higher-priority clip may obscure it",
+                    args.clip_id, args.timecode
+                ),
+            }));
+        }
+
+        let mut candidate = (*document).clone();
+        if let Err(error) = apply_batch(&mut candidate, &plan.operations) {
+            return Ok(color_proof_error_result(ColorProofError::RenderFailed {
+                stage: "candidate_document",
+                message: error.to_string(),
+            }));
+        }
+        let before = match self
+            .analysis
+            .monitor_proof_for_document(Arc::clone(&document), args.timecode)
+        {
+            Ok(proof) => proof,
+            Err(error) => {
+                return Ok(color_proof_error_result(ColorProofError::from_media_error(
+                    "before", error,
+                )));
+            }
+        };
+        let after = match self
+            .analysis
+            .monitor_proof_for_document(Arc::new(candidate), args.timecode)
+        {
+            Ok(proof) => proof,
+            Err(error) => {
+                return Ok(color_proof_error_result(ColorProofError::from_media_error(
+                    "after", error,
+                )));
+            }
+        };
+        if !before.metadata.full_resolution || !after.metadata.full_resolution {
+            return Ok(color_proof_error_result(ColorProofError::InvalidImage {
+                stage: "before_after",
+                message: "managed monitor proof did not report full_resolution=true".to_owned(),
+            }));
+        }
+        if before.metadata != after.metadata {
+            return Ok(color_proof_error_result(ColorProofError::InvalidImage {
+                stage: "before_after",
+                message: format!(
+                    "before/after renderer provenance differs: {:?} vs {:?}",
+                    before.metadata, after.metadata
+                ),
+            }));
+        }
+        if before.image.width != document.resolution.0
+            || before.image.height != document.resolution.1
+            || after.image.width != document.resolution.0
+            || after.image.height != document.resolution.1
+        {
+            return Ok(color_proof_error_result(ColorProofError::InvalidImage {
+                stage: "before_after",
+                message: format!(
+                    "full-resolution proof raster must match document resolution {}x{}; before={}x{}, after={}x{}",
+                    document.resolution.0,
+                    document.resolution.1,
+                    before.image.width,
+                    before.image.height,
+                    after.image.width,
+                    after.image.height,
+                ),
+            }));
+        }
+        let objective = match color_proof_objective(&before.image, &after.image) {
+            Ok(objective) => objective,
+            Err(message) => {
+                return Ok(color_proof_error_result(ColorProofError::InvalidImage {
+                    stage: "before_after",
+                    message,
+                }));
+            }
+        };
+        let sheet = match compose_contact_sheet(&[before.image.clone(), after.image.clone()]) {
+            Ok(sheet) => sheet,
+            Err(error) => {
+                return Ok(color_proof_error_result(ColorProofError::RenderFailed {
+                    stage: "before_after_composition",
+                    message: error.to_string(),
+                }));
+            }
+        };
+        let png = match encode_png(&sheet) {
+            Ok(png) => png,
+            Err(error) => {
+                return Ok(color_proof_error_result(ColorProofError::RenderFailed {
+                    stage: "png_encoding",
+                    message: error.to_string(),
+                }));
+            }
+        };
+        let before_png = match encode_png(&before.image) {
+            Ok(png) => png,
+            Err(error) => {
+                return Ok(color_proof_error_result(ColorProofError::RenderFailed {
+                    stage: "before_png_encoding",
+                    message: error.to_string(),
+                }));
+            }
+        };
+        let after_png = match encode_png(&after.image) {
+            Ok(png) => png,
+            Err(error) => {
+                return Ok(color_proof_error_result(ColorProofError::RenderFailed {
+                    stage: "after_png_encoding",
+                    message: error.to_string(),
+                }));
+            }
+        };
+        let hashes = serde_json::json!({
+            "before_rgba8_pixels_sha256": kinewright_media::sha256_bytes(&before.image.pixels),
+            "after_rgba8_pixels_sha256": kinewright_media::sha256_bytes(&after.image.pixels),
+            "before_png_bytes_sha256": kinewright_media::sha256_bytes(&before_png),
+            "after_png_bytes_sha256": kinewright_media::sha256_bytes(&after_png),
+            "contact_sheet_rgba8_pixels_sha256": kinewright_media::sha256_bytes(&sheet.pixels),
+            "contact_sheet_png_bytes_sha256": kinewright_media::sha256_bytes(&png),
+        });
+        let operations = serde_json::to_value(&plan.operations)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        let profile_assumption = plan.profile_assumption.map(|_| {
+            serde_json::json!({
+                "selected": "d65",
+                "source": if args.profile_assumption.is_some() {
+                    "explicit"
+                } else {
+                    "application_profile_assumption"
+                },
+            })
+        });
+        let clip_local_frame = args
+            .timecode
+            .checked_sub(clip.timeline_start)
+            .unwrap_or(TimeCode::ZERO);
+        let manifest = serde_json::json!({
+            "timeline_revision": actual_revision.0,
+            "clip_id": args.clip_id.0,
+            "asset_id": asset.id.0,
+            "active_rendered_layers": active_rendered_layers,
+            "active_rendered_sources": active_rendered_sources.iter().map(|(track_id, active_clip, active_asset, availability)| {
+                serde_json::json!({
+                    "track_id": track_id.0,
+                    "clip_id": active_clip.id.0,
+                    "content": match &active_clip.content {
+                        ClipContent::Media => "media",
+                        ClipContent::Freeze(_) => "freeze",
+                        ClipContent::Title(_) => "title",
+                    },
+                    "asset_id": active_asset.id.0,
+                    "source": {
+                        "raw_description": active_asset.color_description,
+                        "provenance": active_asset.color_description.provenance,
+                        "confidence_basis_points": active_asset.color_description.confidence_basis_points,
+                    },
+                    "source_fingerprint": active_asset.source_fingerprint,
+                    "availability": availability,
+                    "legacy_stage_warnings": legacy_stage_warnings(active_clip),
+                })
+            }).collect::<Vec<_>>(),
+            "project_frame": args.timecode.0,
+            "clip_local_frame": clip_local_frame.0,
+            "source_profile": plan.source_profile.id(),
+            "source": {
+                "raw_description": asset.color_description,
+                "provenance": asset.color_description.provenance,
+                "confidence_basis_points": asset.color_description.confidence_basis_points,
+                "profile_assumption": profile_assumption,
+            },
+            "profile_assumption": profile_assumption,
+            "render_kind": before.metadata.render_kind,
+            "renderer": "analysis.monitor_proof_for_document",
+            "backend": before.metadata.backend,
+            "adapter": before.metadata.adapter,
+            "backend_provenance": {
+                "backend": before.metadata.backend,
+                "adapter": before.metadata.adapter,
+                "software_fallback": before.metadata.software_fallback,
+            },
+            "software_fallback": before.metadata.software_fallback,
+            "gpu_claim": before.metadata.gpu_claim,
+            "full_resolution": before.metadata.full_resolution,
+            "cpu_reference": false,
+            "decoded_delivery": false,
+            "ordered_stage_names": CC1_STAGE_NAMES,
+            "legacy_stage_warnings": legacy_stage_warnings(clip),
+            "color_context": {
+                "pipeline_state": document.color_context.pipeline_state,
+                "working": document.color_context.working,
+                "monitoring": document.color_context.monitoring,
+                "delivery": document.color_context.delivery,
+            },
+            "formats": {
+                "input": {
+                    "bit_depth": asset.color_description.bit_depth,
+                    "range": asset.color_description.range,
+                    "raster": asset.resolution,
+                },
+                "working": {
+                    "bit_depth": document.color_context.working.bit_depth,
+                    "range": document.color_context.working.range,
+                },
+                "monitoring": {
+                    "bit_depth": document.color_context.monitoring.bit_depth,
+                    "range": document.color_context.monitoring.range,
+                },
+                "delivery": {
+                    "bit_depth": document.color_context.delivery.bit_depth,
+                    "range": document.color_context.delivery.range,
+                },
+                "output": {
+                    "bit_depth": "rgba8",
+                    "range": document.color_context.monitoring.range,
+                    "raster": [before.image.width, before.image.height],
+                },
+            },
+            "sampling_region": {
+                "project_frame": args.timecode.0,
+                "clip_id": args.clip_id.0,
+                "clip_local_frame": clip_local_frame.0,
+            },
+            "primary_correction": {
+                "requested_parameters": plan.requested_parameters,
+                "resolved_parameters": plan.resolved_parameters,
+            },
+            "operations": operations,
+            "evidence_only": true,
+            "applied": false,
+            "cells": [
+                {
+                    "cell": "before",
+                    "label": "BEFORE",
+                    "index": 0,
+                    "x": 0,
+                    "y": 0,
+                    "width": before.image.width,
+                    "height": before.image.height,
+                },
+                {
+                    "cell": "after",
+                    "label": "AFTER",
+                    "index": 1,
+                    "x": before.image.width.saturating_add(STORYBOARD_GUTTER),
+                    "y": 0,
+                    "width": after.image.width,
+                    "height": after.image.height,
+                },
+            ],
+            "sheet": {"width": sheet.width, "height": sheet.height},
+            "hashes": hashes,
+            "objective": objective,
+            "next": "Review the mapped BEFORE/AFTER cells and exact unapplied operations; submit through prepare_edit_plan at the same revision only if the edit is requested.",
+        });
+        let mut result = CallToolResult::success(vec![
+            ContentBlock::text(format!(
+                "CC1 colour proof clip={} asset={} project_frame={} revision={} BEFORE|AFTER",
+                args.clip_id, asset.id, args.timecode, actual_revision
+            )),
+            ContentBlock::image(BASE64.encode(png), "image/png"),
+        ]);
+        result.structured_content = Some(manifest);
+        Ok(result)
     }
 
     fn delivery_variants() -> CallToolResult {
@@ -3316,6 +3886,24 @@ impl KinewrightMcp {
                     .and_then(|asset| self.source_availability_error(asset, consumer))
             })
         })
+    }
+
+    /// Resolve a production visual-layer identity back to its exact document
+    /// clip. The media resolver owns interval, transition, freeze-frame, and
+    /// overlap semantics; this lookup only joins its stable ids to metadata
+    /// needed by the proof manifest.
+    fn document_clip_on_track(
+        document: &Document,
+        track_id: TrackId,
+        clip_id: ClipId,
+    ) -> Option<&Clip> {
+        document
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)?
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -6203,8 +6791,20 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_color_context",
-            "Return the project working, monitoring, and delivery colour descriptions plus every asset's source colour description and the exact timeline revision. This is metadata inspection only; unknown source metadata remains explicit and is never inferred as Rec.709.",
-            schema_object::<EmptyArgs>(),
+            "Return the project working, monitoring, and delivery colour descriptions, source metadata, managed-profile status, ordered CC1 stages, per-clip primary nodes, and legacy-stage warnings at the exact timeline revision. The default status matches the executed application D65 profile assumption; use raw_only for unassumed classifier evidence. Metadata remains unchanged. Use render_color_proof for an isolated mapped BEFORE/AFTER frame.",
+            schema_object::<ColorContextArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "plan_primary_correction",
+            "Validate an exact integer CC1 primary-correction request against the current revision, visual clip type, and Core descriptor, then return unapplied AddEffect/SetEffectParam operations. This is evidence-only and never mutates the document.",
+            schema_object::<PrimaryCorrectionPlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "render_color_proof",
+            "Render an isolated managed-compositor CC1 BEFORE/AFTER proof at one exact project frame. The revision-bound integer primary correction is evidence-only: the live document is never mutated, and the response includes the mapped PNG cells, exact unapplied operations, resolved parameters, source/profile metadata, and objective deltas.",
+            schema_object::<RenderColorProofArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -7070,6 +7670,79 @@ fn error_structured(text: impl Into<String>, value: serde_json::Value) -> CallTo
     result
 }
 
+/// Serialize the exact effect chain consumed by the production visual
+/// resolver for one proof frame.
+///
+/// `visual_layers_at` evaluates clip-local automation before handing effects
+/// to the compositor, so the returned parameters are the values actually
+/// rendered at that frame. The vector order is intentionally retained; two
+/// primary nodes with the same values are not interchangeable because the
+/// managed pipeline applies them serially.
+fn proof_effect_manifest(effects: &[Effect]) -> Vec<serde_json::Value> {
+    effects
+        .iter()
+        .enumerate()
+        .map(|(effect_index, effect)| {
+            let primary_parameters = if effect.name == "primary_correction" {
+                effect_descriptor("primary_correction")
+                    .map(|descriptor| {
+                        descriptor
+                            .parameters
+                            .iter()
+                            .map(|parameter| {
+                                (
+                                    parameter.name,
+                                    effect
+                                        .parameters
+                                        .get(parameter.name)
+                                        .cloned()
+                                        .unwrap_or(ParamValue::Integer(parameter.neutral)),
+                                )
+                            })
+                            .collect::<BTreeMap<_, _>>()
+                    })
+                    .map_or_else(
+                        || serde_json::Value::Null,
+                        |parameters| serde_json::json!(parameters),
+                    )
+            } else {
+                serde_json::Value::Null
+            };
+            serde_json::json!({
+                "effect_index": effect_index,
+                "effect_id": effect.id.0,
+                "name": effect.name,
+                "parameters": effect.parameters,
+                "primary_parameters": primary_parameters,
+                // The production resolver has already evaluated keyframes;
+                // retaining the empty map makes that fact explicit and keeps
+                // this shape compatible with the colour-status primary-node
+                // evidence surface.
+                "keyframes": effect.keyframes,
+            })
+        })
+        .collect()
+}
+
+/// Keep the primary-only view aligned with `get_color_context` while retaining
+/// the complete ordered effect chain above. This is intentionally derived from
+/// the same frame-evaluated effects, never from the raw clip vector.
+fn proof_primary_node_manifest(effects: &[Effect]) -> Vec<serde_json::Value> {
+    proof_effect_manifest(effects)
+        .into_iter()
+        .filter(|effect| !effect["primary_parameters"].is_null())
+        .map(|effect| {
+            serde_json::json!({
+                "effect_id": effect["effect_id"],
+                "effect_index": effect["effect_index"],
+                "name": effect["name"],
+                "parameters": effect["primary_parameters"],
+                "keyframes": effect["keyframes"],
+            })
+        })
+        .collect()
+}
+
 fn paths_resolve_equal(left: &Path, right: &Path) -> bool {
     let resolved = |path: &Path| {
         if let Ok(canonical) = path.canonicalize() {
@@ -7108,6 +7781,113 @@ fn encode_png(image: &kinewright_core::RgbaImage) -> Result<Vec<u8>, McpError> {
         )
         .map_err(|error| McpError::internal_error(error.to_string(), None))?;
     Ok(png)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn color_proof_error_result(error: ColorProofError) -> CallToolResult {
+    error_structured(
+        format!("CC1 colour proof rejected: {error}"),
+        serde_json::json!({
+            "code": error.code(),
+            "message": error.to_string(),
+            "details": error.details(),
+            "evidence_only": true,
+            "applied": false,
+        }),
+    )
+}
+
+fn color_proof_objective(
+    before: &kinewright_core::RgbaImage,
+    after: &kinewright_core::RgbaImage,
+) -> Result<serde_json::Value, String> {
+    let expected_len = usize::try_from(before.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(before.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "before raster dimensions overflowed".to_owned())?;
+    if before.width != after.width || before.height != after.height {
+        return Err(format!(
+            "before raster is {}x{}, after raster is {}x{}",
+            before.width, before.height, after.width, after.height
+        ));
+    }
+    if before.pixels.len() != expected_len || after.pixels.len() != expected_len {
+        return Err(format!(
+            "RGBA8 raster length does not match {}x{} dimensions",
+            before.width, before.height
+        ));
+    }
+    let mut deltas = Vec::with_capacity(expected_len / 4 * 3);
+    let mut before_clipped = 0_u128;
+    let mut after_clipped = 0_u128;
+    let mut channel_count = 0_u128;
+    let mut delta_sum = 0_u128;
+    for (before_pixel, after_pixel) in before
+        .pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(after.pixels.as_chunks::<4>().0.iter())
+    {
+        for channel in 0..3 {
+            let before_channel = before_pixel[channel];
+            let after_channel = after_pixel[channel];
+            if before_channel == 0 || before_channel == u8::MAX {
+                before_clipped = before_clipped.saturating_add(1);
+            }
+            if after_channel == 0 || after_channel == u8::MAX {
+                after_clipped = after_clipped.saturating_add(1);
+            }
+            let delta = before_channel.abs_diff(after_channel);
+            deltas.push(delta);
+            delta_sum = delta_sum.saturating_add(u128::from(delta));
+            channel_count = channel_count.saturating_add(1);
+        }
+    }
+    if deltas.is_empty() {
+        return Err("RGBA8 raster contains no RGB channels".to_owned());
+    }
+    deltas.sort_unstable();
+    let p99_index = deltas
+        .len()
+        .saturating_mul(99)
+        .div_ceil(100)
+        .saturating_sub(1);
+    let denominator = channel_count.saturating_mul(u128::from(u8::MAX));
+    let mean_basis_points = delta_sum
+        .saturating_mul(10_000)
+        .saturating_add(denominator / 2)
+        / denominator;
+    let clipping_basis_points = |count: u128| {
+        let rounded = count
+            .saturating_mul(10_000)
+            .saturating_add(channel_count / 2)
+            / channel_count;
+        u16::try_from(rounded).unwrap_or(u16::MAX).min(10_000)
+    };
+    let mean_milli_code_values = delta_sum
+        .saturating_mul(1_000)
+        .saturating_add(channel_count / 2)
+        / channel_count;
+    Ok(serde_json::json!({
+        "max_channel_delta_code_values": deltas.last().copied().unwrap_or_default(),
+        "p99_channel_delta_code_values": deltas[p99_index],
+        "mean_channel_delta_milli_code_values": u32::try_from(mean_milli_code_values)
+            .unwrap_or(u32::MAX),
+        "mean_normalized_delta_basis_points": u16::try_from(mean_basis_points)
+            .unwrap_or(u16::MAX)
+            .min(10_000),
+        "clipping_basis_points": {
+            "before": clipping_basis_points(before_clipped),
+            "after": clipping_basis_points(after_clipped),
+            "definition": "RGB channels equal to final RGBA8 code 0 or 255",
+        },
+    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8514,9 +9294,10 @@ mod tests {
         ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer,
         ColorWhitePoint, FrameTexture, Marker, MarkerId, MediaAsset, MediaAvailabilityKind,
         MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily, MediaCacheInventory,
-        MediaError, MediaEvent, MediaKind, MediaSourceFingerprint, ParamValue, Rational, RgbaImage,
-        SceneChange, SceneStatus, SilenceSpan, SilenceStatus, TimelineSceneChange,
-        TimelineSilenceSpan, Title, Track, TrackId, TrackKind, TranscriptWord, VisualAssetResult,
+        MediaError, MediaEvent, MediaKind, MediaSourceFingerprint, MonitorProof,
+        MonitorProofMetadata, ParamValue, Rational, RgbaImage, SceneChange, SceneStatus,
+        SilenceSpan, SilenceStatus, TimelineSceneChange, TimelineSilenceSpan, Title, Track,
+        TrackId, TrackKind, TranscriptWord, VisualAssetResult,
     };
     use serde_json::json;
     use std::{
@@ -8540,6 +9321,10 @@ mod tests {
         beat_requests: Mutex<Vec<AssetId>>,
         scene_requests: Mutex<Vec<AssetId>>,
         thumbnail_frames: BTreeMap<TimeCode, RgbaImage>,
+        candidate_thumbnail_frames: BTreeMap<TimeCode, RgbaImage>,
+        candidate_effect_id: Option<EffectId>,
+        render_error: Option<String>,
+        proof_error: Option<MediaError>,
     }
 
     impl Playback for NoopMedia {
@@ -8706,10 +9491,26 @@ mod tests {
 
         fn thumbnail_for_document(
             &self,
-            _document: Arc<Document>,
+            document: Arc<Document>,
             t: TimeCode,
             _max_w: u32,
         ) -> Result<RgbaImage, MediaError> {
+            if let Some(error) = &self.render_error {
+                return Err(MediaError::Backend(error.clone()));
+            }
+            let candidate = document
+                .tracks
+                .iter()
+                .flat_map(|track| track.clips.iter())
+                .any(|clip| {
+                    clip.effects.iter().any(|effect| {
+                        effect.name == "primary_correction"
+                            && self.candidate_effect_id.is_none_or(|id| effect.id == id)
+                    })
+                });
+            if candidate && let Some(image) = self.candidate_thumbnail_frames.get(&t) {
+                return Ok(image.clone());
+            }
             if let Some(image) = self.thumbnail_frames.get(&t) {
                 return Ok(image.clone());
             }
@@ -8717,6 +9518,49 @@ mod tests {
                 width: 2,
                 height: 2,
                 pixels: vec![0; 16],
+            })
+        }
+
+        fn monitor_proof_for_document(
+            &self,
+            document: Arc<Document>,
+            t: TimeCode,
+        ) -> Result<MonitorProof, MediaError> {
+            if let Some(error) = &self.proof_error {
+                return Err(error.clone());
+            }
+            let image = self.thumbnail_for_document(Arc::clone(&document), t, u32::MAX)?;
+            let (width, height) = document.resolution;
+            if width == 0 || height == 0 {
+                return Err(MediaError::Backend(
+                    "test proof document has an empty raster".to_owned(),
+                ));
+            }
+            let proof_image = if image.width == width && image.height == height {
+                image
+            } else {
+                let Some(source) =
+                    image::RgbaImage::from_raw(image.width, image.height, image.pixels)
+                else {
+                    return Err(MediaError::Backend(
+                        "test proof image has invalid RGBA dimensions".to_owned(),
+                    ));
+                };
+                let resized = image::imageops::resize(
+                    &source,
+                    width,
+                    height,
+                    image::imageops::FilterType::Nearest,
+                );
+                RgbaImage {
+                    width,
+                    height,
+                    pixels: resized.into_raw(),
+                }
+            };
+            Ok(MonitorProof {
+                image: proof_image,
+                metadata: MonitorProofMetadata::test_double(),
             })
         }
 
@@ -10459,6 +11303,198 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
+    fn cc1_color_proof_preflight_is_scoped_to_active_visual_layers() {
+        let (seed_core, playback, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed)) =
+            seed_core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let managed_source = ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: ColorMatrix::Bt709,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: ColorProvenance::StreamMetadata,
+        };
+        let mut document = (*seed).clone();
+        document.media_pool[0].color_description = managed_source.clone();
+
+        let mut later_video = document.media_pool[0].clone();
+        later_video.id = AssetId(2);
+        later_video.name = "later-offline-video".to_owned();
+        later_video.path = PathBuf::from("later-offline.mp4");
+        let mut offline_audio = later_video.clone();
+        offline_audio.id = AssetId(3);
+        offline_audio.name = "offline-audio".to_owned();
+        offline_audio.path = PathBuf::from("offline-audio.wav");
+        offline_audio.kind = MediaKind::Audio;
+        let mut offline_overlay = later_video.clone();
+        offline_overlay.id = AssetId(4);
+        offline_overlay.name = "active-offline-overlay".to_owned();
+        offline_overlay.path = PathBuf::from("active-offline-overlay.mp4");
+        document
+            .media_pool
+            .extend([later_video, offline_audio, offline_overlay]);
+
+        let mut later_clip = document.tracks[0].clips[0].clone();
+        later_clip.id = ClipId(2);
+        later_clip.asset = AssetId(2);
+        later_clip.timeline_start = TimeCode(60);
+        later_clip.source_range = TimeCode::ZERO..TimeCode(30);
+        document.tracks[0].clips.push(later_clip);
+
+        let mut audio_clip = document.tracks[0].clips[0].clone();
+        audio_clip.id = ClipId(3);
+        audio_clip.asset = AssetId(3);
+        audio_clip.source_range = TimeCode::ZERO..TimeCode(60);
+        document.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![audio_clip],
+        });
+        document.duration = TimeCode(90);
+        document.validate().unwrap();
+
+        let proof_args = || RenderColorProofArgs {
+            expected_revision: TimelineRevision(0),
+            clip_id: ClipId(1),
+            timecode: TimeCode(12),
+            profile_assumption: None,
+            parameters: BTreeMap::new(),
+        };
+        let offline = |reason: &str| MediaAvailabilityStatus {
+            kind: MediaAvailabilityKind::OfflineMissing,
+            observed_fingerprint: None,
+            reason: Some(reason.to_owned()),
+        };
+        let media_for = |availability_by_asset| {
+            Arc::new(NoopMedia {
+                availability_by_asset,
+                thumbnail_frames: BTreeMap::from([(
+                    TimeCode(12),
+                    RgbaImage {
+                        width: 2,
+                        height: 2,
+                        pixels: [32, 32, 32, 255].repeat(4),
+                    },
+                )]),
+                candidate_thumbnail_frames: BTreeMap::from([(
+                    TimeCode(12),
+                    RgbaImage {
+                        width: 2,
+                        height: 2,
+                        pixels: [96, 64, 32, 255].repeat(4),
+                    },
+                )]),
+                ..NoopMedia::default()
+            })
+        };
+
+        // A later offline video and an offline audio track are irrelevant to
+        // the exact frame being proven.
+        let media = media_for(BTreeMap::from([
+            (AssetId(2), offline("later video is offline")),
+            (AssetId(3), offline("audio is offline")),
+        ]));
+        let service = KinewrightMcp::new(
+            Core::spawn(document.clone()).unwrap(),
+            playback.clone(),
+            media.clone(),
+            ConfirmationBroker::default(),
+        );
+        let result = service.render_color_proof(&proof_args()).unwrap();
+        assert_eq!(result.is_error, Some(false));
+        let manifest = result.structured_content.unwrap();
+        assert_eq!(
+            manifest["active_rendered_sources"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(manifest["active_rendered_sources"][0]["asset_id"], 1);
+
+        // An offline source on a second video track is an active overlay and
+        // must block even though the selected clip itself is online.
+        let mut overlay_document = document.clone();
+        let mut overlay_clip = overlay_document.tracks[0].clips[0].clone();
+        overlay_clip.id = ClipId(4);
+        overlay_clip.asset = AssetId(4);
+        overlay_document.tracks.push(Track {
+            id: TrackId(3),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![overlay_clip],
+        });
+        overlay_document.validate().unwrap();
+        let media = media_for(BTreeMap::from([(
+            AssetId(4),
+            offline("active overlay is offline"),
+        )]));
+        let service = KinewrightMcp::new(
+            Core::spawn(overlay_document.clone()).unwrap(),
+            playback.clone(),
+            media.clone(),
+            ConfirmationBroker::default(),
+        );
+        let result = service.render_color_proof(&proof_args()).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "media_offline");
+        assert_eq!(structured["details"]["clip_id"], 4);
+        assert_eq!(structured["details"]["asset_id"], 4);
+
+        // Freeze frames are source-backed visual layers too; their held frame
+        // still requires the referenced asset to be available.
+        let mut freeze_document = overlay_document;
+        freeze_document.tracks[2].clips[0].content =
+            kinewright_core::ClipContent::Freeze(kinewright_core::FreezeFrame {
+                source_frame: TimeCode(3),
+            });
+        freeze_document.validate().unwrap();
+        let media = media_for(BTreeMap::from([(
+            AssetId(4),
+            offline("active freeze source is offline"),
+        )]));
+        let service = KinewrightMcp::new(
+            Core::spawn(freeze_document).unwrap(),
+            playback.clone(),
+            media,
+            ConfirmationBroker::default(),
+        );
+        let result = service.render_color_proof(&proof_args()).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "media_offline");
+        assert_eq!(structured["details"]["clip_id"], 4);
+
+        // The selected source remains an explicit hard failure when it is the
+        // active source that is offline.
+        let media = media_for(BTreeMap::from([(
+            AssetId(1),
+            offline("selected source is offline"),
+        )]));
+        let service = KinewrightMcp::new(
+            Core::spawn(document).unwrap(),
+            playback,
+            media,
+            ConfirmationBroker::default(),
+        );
+        let result = service.render_color_proof(&proof_args()).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "media_offline");
+        assert_eq!(structured["details"]["clip_id"], 1);
+        assert_eq!(structured["details"]["asset_id"], 1);
+    }
+
+    #[test]
     fn m41_cache_status_and_scoped_clear_are_typed_and_proxy_failure_is_explicit() {
         let (core, playback, _) = fixture();
         let media = Arc::new(NoopMedia {
@@ -10697,6 +11733,7 @@ mod tests {
             "plan_speaker_multicam",
             "track_reframe_subject",
             "get_color_context",
+            "render_color_proof",
             "get_delivery_profiles",
             "get_delivery_conformance",
             "queue_export",
@@ -10751,6 +11788,11 @@ mod tests {
     fn color_context_is_a_read_only_internal_capability_with_revisioned_source_data() {
         let registry = KinewrightMcp::capability_tools().unwrap();
         assert!(registry.iter().any(|tool| tool.name == "get_color_context"));
+        assert!(
+            registry
+                .iter()
+                .any(|tool| tool.name == "plan_primary_correction")
+        );
         let served = KinewrightMcp::served_tools().unwrap();
         assert!(served.iter().all(|tool| tool.name != "get_color_context"));
 
@@ -10778,17 +11820,22 @@ mod tests {
         assert_eq!(value["assets"].as_array().unwrap().len(), 1);
         assert_eq!(value["assets"][0]["id"], 1);
         assert_eq!(
-            value["assets"][0]["color_description"]["primaries"],
+            value["assets"][0]["source"]["raw_description"]["primaries"],
             "unknown"
         );
         assert_eq!(
-            value["assets"][0]["color_description"]["confidence_basis_points"],
+            value["assets"][0]["source"]["raw_description"]["confidence_basis_points"],
             0
         );
         assert_eq!(
-            value["assets"][0]["color_description"]["provenance"],
+            value["assets"][0]["source"]["raw_description"]["provenance"],
             "unknown"
         );
+        assert_eq!(
+            value["assets"][0]["source"]["status"]["status"],
+            "needs_color_override"
+        );
+        assert_eq!(value["assets"][0]["managed_blocking"], true);
         assert_eq!(service.snapshot().unwrap(), before);
 
         let invoked = service
@@ -10803,6 +11850,464 @@ mod tests {
             .unwrap();
         assert_eq!(invoked.is_error, Some(false));
         assert_eq!(invoked.structured_content.unwrap()["timeline_revision"], 0);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn render_color_proof_returns_mapped_before_after_evidence_without_mutating() {
+        let (seed_core, playback, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed)) =
+            seed_core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut document = (*seed).clone();
+        document.media_pool[0].color_description = ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: ColorMatrix::Bt709,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: ColorProvenance::StreamMetadata,
+        };
+        document.tracks[0].clips[0].effects.push(Effect {
+            id: EffectId(6),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                ParamValue::Integer(100),
+            )]),
+            keyframes: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                AutomationCurve {
+                    keyframes: vec![
+                        Keyframe {
+                            at: TimeCode::ZERO,
+                            value: 100,
+                            interpolation: KeyframeInterpolation::Hold,
+                        },
+                        Keyframe {
+                            at: TimeCode(12),
+                            value: 750,
+                            interpolation: KeyframeInterpolation::Hold,
+                        },
+                    ],
+                },
+            )]),
+        });
+        document.tracks[0].clips[0].effects.push(Effect {
+            id: EffectId(7),
+            name: "look_lut".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        });
+        document.tracks[0].clips[0].effects.push(Effect {
+            id: EffectId(8),
+            name: "cube_lut".to_owned(),
+            parameters: BTreeMap::from([(
+                "path".to_owned(),
+                ParamValue::Text("fixture.cube".to_owned()),
+            )]),
+            keyframes: BTreeMap::new(),
+        });
+        document.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![Clip {
+                id: ClipId(2),
+                asset: AssetId::default(),
+                source_range: TimeCode::ZERO..TimeCode(60),
+                content: ClipContent::Title(Title {
+                    text: "CC1 proof overlay".to_owned(),
+                    font_size_token: 2,
+                    color_token: 1,
+                    position: TitlePosition::Top,
+                    background_scrim: false,
+                    fade_in_frames: TimeCode(3),
+                    fade_out_frames: TimeCode(4),
+                    caption_preset: None,
+                }),
+                timeline_start: TimeCode::ZERO,
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
+            }],
+        });
+        document.validate().unwrap();
+        let proof_document = document.clone();
+        let core = Core::spawn(document).unwrap();
+        let before = RgbaImage {
+            width: 2,
+            height: 2,
+            pixels: [32, 32, 32, 255].repeat(4),
+        };
+        let after = RgbaImage {
+            width: 2,
+            height: 2,
+            pixels: [255, 64, 32, 255].repeat(4),
+        };
+        let media = Arc::new(NoopMedia {
+            thumbnail_frames: BTreeMap::from([(TimeCode(12), before.clone())]),
+            candidate_thumbnail_frames: BTreeMap::from([(TimeCode(12), after.clone())]),
+            candidate_effect_id: Some(EffectId(9)),
+            ..NoopMedia::default()
+        });
+        let service =
+            KinewrightMcp::new(core, playback, media.clone(), ConfirmationBroker::default());
+        let before_snapshot = service.snapshot().unwrap();
+        let result = service
+            .call_blocking(
+                CallToolRequestParams::new("render_color_proof").with_arguments(
+                    json!({
+                        "expected_revision": 0,
+                        "clip_id": 1,
+                        "timecode": 12,
+                        "parameters": {"exposure_milli_stops": 1_000},
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(result.content.len(), 2);
+        let value = result.structured_content.unwrap();
+        assert_eq!(value["timeline_revision"], 0);
+        assert_eq!(value["clip_id"], 1);
+        assert_eq!(value["asset_id"], 1);
+        assert_eq!(value["project_frame"], 12);
+        assert_eq!(value["render_kind"], "test_double");
+        assert_eq!(value["renderer"], "analysis.monitor_proof_for_document");
+        assert_eq!(value["backend"], "test_double");
+        assert_eq!(value["adapter"], "test_double");
+        assert_eq!(value["software_fallback"], true);
+        assert_eq!(value["gpu_claim"], false);
+        assert_eq!(value["full_resolution"], true);
+        assert_eq!(
+            value["legacy_stage_warnings"][0]["code"],
+            "legacy_lut_stage"
+        );
+        assert_eq!(value["legacy_stage_warnings"][0]["effect_id"], 7);
+        assert_eq!(
+            value["legacy_stage_warnings"][1]["code"],
+            "legacy_lut_stage"
+        );
+        assert_eq!(value["legacy_stage_warnings"][1]["effect_id"], 8);
+        assert_eq!(value["cpu_reference"], false);
+        assert_eq!(value["decoded_delivery"], false);
+        assert_eq!(value["source_profile"], "rec709_video");
+        assert_eq!(value["source"]["provenance"], "stream_metadata");
+        let active_layers = value["active_rendered_layers"].as_array().unwrap();
+        assert_eq!(active_layers.len(), 2);
+        assert_eq!(active_layers[0]["track_id"], 1);
+        assert_eq!(active_layers[0]["clip_id"], 1);
+        assert_eq!(active_layers[0]["content"], "media");
+        assert_eq!(active_layers[0]["asset_id"], 1);
+        assert_eq!(active_layers[0]["source"]["provenance"], "stream_metadata");
+        let effects = active_layers[0]["effects"].as_array().unwrap();
+        assert_eq!(effects.len(), 3);
+        assert_eq!(effects[0]["effect_index"], 0);
+        assert_eq!(effects[0]["effect_id"], 6);
+        assert_eq!(effects[0]["name"], "primary_correction");
+        assert_eq!(effects[0]["parameters"]["exposure_milli_stops"], 750);
+        assert_eq!(effects[0]["keyframes"], json!({}));
+        assert_eq!(
+            effects[0]["primary_parameters"]["exposure_milli_stops"],
+            750
+        );
+        assert_eq!(
+            effects[0]["primary_parameters"]["contrast_pivot_basis_points"],
+            5_000
+        );
+        assert_eq!(
+            active_layers[0]["primary_nodes"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(active_layers[0]["primary_nodes"][0]["effect_id"], 6);
+        assert_eq!(
+            active_layers[0]["primary_nodes"][0]["parameters"]["exposure_milli_stops"],
+            750
+        );
+        assert_eq!(effects[1]["effect_index"], 1);
+        assert_eq!(effects[1]["effect_id"], 7);
+        assert_eq!(effects[1]["name"], "look_lut");
+        assert_eq!(effects[2]["effect_index"], 2);
+        assert_eq!(effects[2]["effect_id"], 8);
+        assert_eq!(effects[2]["name"], "cube_lut");
+        assert_eq!(
+            active_layers[0]["availability"]["kind"],
+            "online_unverified"
+        );
+        assert_eq!(active_layers[1]["track_id"], 2);
+        assert_eq!(active_layers[1]["clip_id"], 2);
+        assert_eq!(active_layers[1]["content"], "title");
+        assert_eq!(active_layers[1]["title"]["text"], "CC1 proof overlay");
+        assert_eq!(active_layers[1]["title"]["font_size_token"], 2);
+        assert_eq!(active_layers[1]["title"]["color_token"], 1);
+        assert_eq!(active_layers[1]["title"]["position"], "top");
+        assert!(active_layers[1].get("asset_id").is_none());
+        assert!(active_layers[1].get("source").is_none());
+        assert!(active_layers[1].get("source_fingerprint").is_none());
+        assert!(active_layers[1].get("availability").is_none());
+        assert_eq!(
+            value["active_rendered_sources"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(value["active_rendered_sources"][0]["track_id"], 1);
+        assert_eq!(value["active_rendered_sources"][0]["clip_id"], 1);
+        assert_eq!(value["active_rendered_sources"][0]["asset_id"], 1);
+        assert_eq!(
+            value["active_rendered_sources"][0]["source"]["provenance"],
+            "stream_metadata"
+        );
+        assert_eq!(
+            value["active_rendered_sources"][0]["availability"]["kind"],
+            "online_unverified"
+        );
+        assert_eq!(
+            value["active_rendered_sources"][0]["legacy_stage_warnings"],
+            value["legacy_stage_warnings"]
+        );
+        assert_eq!(value["formats"]["input"]["bit_depth"], 8);
+        assert_eq!(value["formats"]["output"]["bit_depth"], "rgba8");
+        let resized_pixels = |image: &RgbaImage| {
+            image::imageops::resize(
+                &image::RgbaImage::from_raw(image.width, image.height, image.pixels.clone())
+                    .unwrap(),
+                320,
+                180,
+                image::imageops::FilterType::Nearest,
+            )
+            .into_raw()
+        };
+        assert_eq!(
+            value["hashes"]["before_rgba8_pixels_sha256"],
+            kinewright_media::sha256_bytes(&resized_pixels(&before))
+        );
+        assert_eq!(
+            value["hashes"]["after_rgba8_pixels_sha256"],
+            kinewright_media::sha256_bytes(&resized_pixels(&after))
+        );
+        for label in [
+            "before_rgba8_pixels_sha256",
+            "after_rgba8_pixels_sha256",
+            "before_png_bytes_sha256",
+            "after_png_bytes_sha256",
+            "contact_sheet_rgba8_pixels_sha256",
+            "contact_sheet_png_bytes_sha256",
+        ] {
+            assert_eq!(
+                value["hashes"][label].as_str().unwrap().len(),
+                64,
+                "{label}"
+            );
+        }
+        assert_eq!(
+            value["primary_correction"]["resolved_parameters"]
+                .as_object()
+                .unwrap()
+                .len(),
+            10
+        );
+        assert_eq!(value["operations"].as_array().unwrap().len(), 2);
+        assert_eq!(value["cells"][0]["cell"], "before");
+        assert_eq!(value["cells"][1]["cell"], "after");
+        assert_eq!(value["objective"]["max_channel_delta_code_values"], 223);
+        assert_eq!(
+            value["objective"]["mean_channel_delta_milli_code_values"],
+            85_000
+        );
+        assert!(
+            value["objective"]["clipping_basis_points"]["after"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(value["evidence_only"], true);
+        assert_eq!(value["applied"], false);
+        assert_eq!(service.snapshot().unwrap(), before_snapshot);
+
+        // Freeze clips use the same source-backed production layer shape as
+        // media clips. Keep an online freeze overlay in this focused manifest
+        // check so its exact effect/primary fields cannot regress separately.
+        let mut freeze_document = proof_document.clone();
+        freeze_document.tracks[1].clips[0].asset = AssetId(1);
+        freeze_document.tracks[1].clips[0].content =
+            ClipContent::Freeze(kinewright_core::FreezeFrame {
+                source_frame: TimeCode(3),
+            });
+        freeze_document.validate().unwrap();
+        let freeze_service = KinewrightMcp::new(
+            Core::spawn(freeze_document).unwrap(),
+            Arc::new(NoopMedia::default()),
+            Arc::new(NoopMedia {
+                thumbnail_frames: BTreeMap::from([(TimeCode(12), before.clone())]),
+                candidate_thumbnail_frames: BTreeMap::from([(TimeCode(12), after.clone())]),
+                candidate_effect_id: Some(EffectId(9)),
+                ..NoopMedia::default()
+            }),
+            ConfirmationBroker::default(),
+        );
+        let freeze_result = freeze_service
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(12),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+            })
+            .unwrap();
+        assert_eq!(freeze_result.is_error, Some(false));
+        let freeze_manifest = freeze_result.structured_content.unwrap();
+        let freeze_layers = freeze_manifest["active_rendered_layers"]
+            .as_array()
+            .unwrap();
+        assert_eq!(freeze_layers[1]["content"], "freeze");
+        assert_eq!(freeze_layers[1]["source_frame"], 3);
+        assert!(freeze_layers[1]["effects"].is_array());
+
+        let stale = service
+            .call_blocking(
+                CallToolRequestParams::new("render_color_proof").with_arguments(
+                    json!({
+                        "expected_revision": 1,
+                        "clip_id": 1,
+                        "timecode": 12,
+                        "parameters": {},
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(stale.is_error, Some(true));
+        assert_eq!(
+            stale.structured_content.unwrap()["code"],
+            "revision_conflict"
+        );
+
+        for (kind, code) in [
+            (MediaAvailabilityKind::OfflineMissing, "media_offline"),
+            (MediaAvailabilityKind::Changed, "media_changed"),
+        ] {
+            let media = Arc::new(NoopMedia {
+                availability_by_asset: BTreeMap::from([(
+                    AssetId(1),
+                    MediaAvailabilityStatus {
+                        kind,
+                        observed_fingerprint: None,
+                        reason: Some("test proof availability".to_owned()),
+                    },
+                )]),
+                ..NoopMedia::default()
+            });
+            let unavailable = KinewrightMcp::new(
+                Core::spawn(proof_document.clone()).unwrap(),
+                Arc::new(NoopMedia::default()),
+                media,
+                ConfirmationBroker::default(),
+            );
+            let result = unavailable
+                .render_color_proof(&RenderColorProofArgs {
+                    expected_revision: TimelineRevision(0),
+                    clip_id: ClipId(1),
+                    timecode: TimeCode(12),
+                    profile_assumption: None,
+                    parameters: BTreeMap::new(),
+                })
+                .unwrap();
+            assert_eq!(result.is_error, Some(true));
+            assert_eq!(result.structured_content.unwrap()["code"], code);
+        }
+
+        let mut incompatible_document = proof_document.clone();
+        incompatible_document.color_context.pipeline_state =
+            kinewright_core::ColorPipelineState::Legacy;
+        let incompatible = KinewrightMcp::new(
+            Core::spawn(incompatible_document).unwrap(),
+            Arc::new(NoopMedia::default()),
+            Arc::new(NoopMedia::default()),
+            ConfirmationBroker::default(),
+        );
+        let result = incompatible
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(12),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+            })
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content.unwrap()["code"],
+            "unsupported_color_pipeline"
+        );
+
+        let failed_media = Arc::new(NoopMedia {
+            render_error: Some("test compositor failure".to_owned()),
+            ..NoopMedia::default()
+        });
+        let failed = KinewrightMcp::new(
+            Core::spawn(proof_document.clone()).unwrap(),
+            Arc::new(NoopMedia::default()),
+            failed_media,
+            ConfirmationBroker::default(),
+        );
+        let result = failed
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(12),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+            })
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content.unwrap()["code"],
+            "color_proof_render_failed"
+        );
+
+        let unsupported_media = Arc::new(NoopMedia {
+            proof_error: Some(MediaError::UnsupportedDecoderFormat {
+                path: PathBuf::from("fixture.mp4"),
+                format: "yuv444p10le".to_owned(),
+                declared_bit_depth: Some(8),
+                decoder_bit_depth: Some(10),
+                reason: "managed source depth mismatch".to_owned(),
+            }),
+            ..NoopMedia::default()
+        });
+        let unsupported = KinewrightMcp::new(
+            Core::spawn(proof_document).unwrap(),
+            Arc::new(NoopMedia::default()),
+            unsupported_media,
+            ConfirmationBroker::default(),
+        );
+        let result = unsupported
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(12),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+            })
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "unsupported_decoder_format");
+        assert_eq!(structured["details"]["format"], "yuv444p10le");
+        assert_eq!(structured["details"]["decoder_bit_depth"], 10);
     }
 
     fn probed_color_description() -> ColorDescription {
@@ -10900,9 +12405,13 @@ mod tests {
         );
 
         assert_wire_color(&source_color(&service), 9_321, "user_override");
-        let context = service.color_context().unwrap().structured_content.unwrap();
+        let context = service
+            .color_context(&ColorContextArgs::default())
+            .unwrap()
+            .structured_content
+            .unwrap();
         assert_wire_color(
-            &context["assets"][0]["color_description"],
+            &context["assets"][0]["source"]["raw_description"],
             9_321,
             "user_override",
         );
@@ -11250,7 +12759,10 @@ mod tests {
         let registry_metrics = ToolSurfaceMetrics::measure(&registry);
         let served_metrics = ToolSurfaceMetrics::measure(&served);
         println!("registry={registry_metrics:?} served={served_metrics:?}");
-        assert_eq!(registry_metrics.tool_count, 103);
+        assert_eq!(
+            registry_metrics.tool_count,
+            operation_tools().unwrap().len() + crate::schema::INSPECTOR_TOOL_NAMES.len()
+        );
         assert_eq!(served_metrics.tool_count, 7);
         assert!(served_metrics.tool_count < registry_metrics.tool_count / 4);
         assert!(served_metrics.serialized_bytes < registry_metrics.serialized_bytes / 4);

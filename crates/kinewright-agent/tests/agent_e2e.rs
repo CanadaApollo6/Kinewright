@@ -9,7 +9,8 @@ use kinewright_agent::{
 };
 use kinewright_core::{
     AgentDriver, AgentEvent, AssetId, Clip, ClipId, Command, Core, Document, Event, MediaAsset,
-    MediaKind, Query, QueryResult, Rational, SessionConfig, TimeCode, Track, TrackId, TrackKind,
+    MediaKind, Operation, Query, QueryResult, Rational, SessionConfig, TimeCode, Track, TrackId,
+    TrackKind,
 };
 use kinewright_media::FfmpegMediaEngine;
 
@@ -395,7 +396,11 @@ fn codex_builds_m33_visual_automation_and_an_audio_bus_on_an_isolated_branch() {
     let comparison = branch.compare().unwrap();
     assert_eq!(comparison.operations.len(), 3);
     let clip_effect = &comparison.document.clip(ClipId(1)).unwrap().effects[0];
-    assert_eq!(clip_effect.name, "color_grade");
+    assert_eq!(clip_effect.name, "primary_correction");
+    assert!(matches!(
+        &comparison.operations[0],
+        Operation::AddEffect { effect, .. } if effect.name == "primary_correction"
+    ));
     assert_eq!(
         clip_effect
             .keyframes

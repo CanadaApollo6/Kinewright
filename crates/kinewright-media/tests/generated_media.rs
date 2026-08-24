@@ -69,6 +69,16 @@ impl TestClip {
                 "libx264",
                 "-pix_fmt",
                 "yuv420p",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-colorspace",
+                "bt709",
+                "-color_range",
+                "tv",
+                "-x264-params",
+                "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv",
                 "-g",
                 "60",
                 "-c:a",
@@ -185,6 +195,16 @@ fn generate_solid(name: &str, color: &str, frequency: &str) -> TemporaryFile {
             "libx264",
             "-pix_fmt",
             "yuv420p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-x264-params",
+            "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv",
             "-c:a",
             "aac",
             "-shortest",
@@ -290,7 +310,7 @@ fn two_track_effect_export_matches_preview_after_h264_redecode() {
     engine.request_frame(TimeCode(4));
     let preview_blended = receive_frame(&frames, TimeCode(4));
     assert_frame_center_close(&preview_start, [255, 0, 0], 5);
-    assert_frame_center_close(&preview_blended, [128, 0, 128], 8);
+    assert_frame_center_close(&preview_blended, [180, 0, 180], 8);
 
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -373,7 +393,7 @@ fn two_track_effect_export_matches_preview_after_h264_redecode() {
     engine.request_frame(TimeCode(2));
     let fade_preview_middle = receive_frame(&frames, TimeCode(2));
     assert_frame_center_close(&fade_preview_start, [255, 255, 255], 5);
-    assert_frame_center_close(&fade_preview_middle, [128, 128, 255], 8);
+    assert_frame_center_close(&fade_preview_middle, [180, 180, 255], 8);
 
     let fade_output = TemporaryFile(std::env::temp_dir().join(format!(
         "kinewright-fade-export-{}-{nonce}.mp4",
@@ -756,12 +776,13 @@ fn frame_requests_decode_exact_requested_frames_without_an_audio_device() {
     let asset = engine.probe(&clip.0).unwrap();
     let document = full_timeline(asset);
     let frames = engine.frames();
+    let events = engine.events();
     engine.set_document(std::sync::Arc::new(document));
 
     engine.request_frame(TimeCode(0));
-    let first = receive_frame(&frames, TimeCode(0));
+    let first = receive_frame_checked(&frames, &events, TimeCode(0));
     engine.request_frame(TimeCode(30));
-    let second = receive_frame(&frames, TimeCode(30));
+    let second = receive_frame_checked(&frames, &events, TimeCode(30));
 
     assert_eq!((first.width, first.height), (320, 180));
     assert_eq!(first.rgba.len(), 320 * 180 * 4);
@@ -1166,6 +1187,40 @@ fn receive_frame(
         let (at, frame) = frames
             .recv_timeout(remaining)
             .unwrap_or_else(|error| panic!("no frame {requested} arrived: {error}"));
+        if at == requested {
+            return frame;
+        }
+    }
+}
+
+fn receive_frame_checked(
+    frames: &crossbeam_channel::Receiver<(TimeCode, kinewright_core::FrameTexture)>,
+    events: &crossbeam_channel::Receiver<MediaEvent>,
+    requested: TimeCode,
+) -> kinewright_core::FrameTexture {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(MediaEvent::Error(error)) = events.try_iter().find_map(|event| match event {
+            MediaEvent::Error(error) => Some(MediaEvent::Error(error)),
+            _ => None,
+        }) {
+            panic!("render failed before frame {requested}: {error}");
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let (at, frame) = match frames.recv_timeout(remaining) {
+            Ok(value) => value,
+            Err(error) => {
+                if let Some(MediaEvent::Error(media_error)) =
+                    events.try_iter().find_map(|event| match event {
+                        MediaEvent::Error(media_error) => Some(MediaEvent::Error(media_error)),
+                        _ => None,
+                    })
+                {
+                    panic!("render failed before frame {requested}: {media_error}");
+                }
+                panic!("no frame {requested} arrived: {error}");
+            }
+        };
         if at == requested {
             return frame;
         }

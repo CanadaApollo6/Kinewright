@@ -12,8 +12,9 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender};
 use kinewright_core::{
-    DeliveryConformanceReport, DeliveryProfile, Document, Export, ExportCancellation,
-    ExportProgress, MediaError, delivery_conformance, document_for_delivery_profile,
+    Analysis, DeliveryConformanceReport, DeliveryProfile, Document, Export, ExportCancellation,
+    ExportMediaPreflightReport, ExportProgress, MediaError, delivery_conformance,
+    document_for_delivery_profile, export_media_preflight,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -114,6 +115,8 @@ pub enum ExportQueueError {
     InvalidDelivery(String),
     #[error("delivery conformance rejected the export")]
     Conformance(Box<DeliveryConformanceReport>),
+    #[error("live source identity preflight rejected the export")]
+    MediaPreflight(Box<ExportMediaPreflightReport>),
     #[error("the export job id space is exhausted")]
     IdExhausted,
     #[error("export queue capacity must be greater than zero")]
@@ -135,6 +138,7 @@ pub struct ExportQueue {
 
 struct QueueState {
     exporter: Arc<dyn Export>,
+    analysis: Arc<dyn Analysis>,
     jobs: Mutex<BTreeMap<ExportJobId, StoredJob>>,
     next_id: AtomicU64,
 }
@@ -160,8 +164,11 @@ impl ExportQueue {
     /// # Errors
     ///
     /// Returns an error if the worker thread cannot be started.
-    pub fn new(exporter: Arc<dyn Export>) -> Result<Self, ExportQueueError> {
-        Self::with_capacity(exporter, DEFAULT_EXPORT_QUEUE_CAPACITY)
+    pub fn new(
+        exporter: Arc<dyn Export>,
+        analysis: Arc<dyn Analysis>,
+    ) -> Result<Self, ExportQueueError> {
+        Self::with_capacity(exporter, analysis, DEFAULT_EXPORT_QUEUE_CAPACITY)
     }
 
     /// Start a serial export queue with an explicit maximum pending count.
@@ -172,6 +179,7 @@ impl ExportQueue {
     /// started.
     pub fn with_capacity(
         exporter: Arc<dyn Export>,
+        analysis: Arc<dyn Analysis>,
         capacity: usize,
     ) -> Result<Self, ExportQueueError> {
         if capacity == 0 {
@@ -180,6 +188,7 @@ impl ExportQueue {
         let (work_tx, work_rx) = crossbeam_channel::bounded(capacity);
         let state = Arc::new(QueueState {
             exporter,
+            analysis,
             jobs: Mutex::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
         });
@@ -244,6 +253,11 @@ impl ExportQueue {
             document_for_delivery_profile(document, profile, focus_x_percent, focus_y_percent)
                 .map_err(|error| ExportQueueError::InvalidDelivery(error.to_string()))?,
         );
+        let media_preflight =
+            export_media_preflight(&delivery_document, self.state.analysis.as_ref());
+        if !media_preflight.export_ready() {
+            return Err(ExportQueueError::MediaPreflight(Box::new(media_preflight)));
+        }
         let output_key = output_path_key(&output_path);
         let cancellation = ExportCancellation::default();
         let (id, record) = {
@@ -348,6 +362,11 @@ fn worker_loop(state: &Arc<QueueState>, work_rx: &Receiver<WorkItem>) {
 fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
     if work.cancellation.is_cancelled() || !mark_running(state, work.id) {
         mark_cancelled(state, work.id);
+        return;
+    }
+    let media_preflight = export_media_preflight(&work.document, state.analysis.as_ref());
+    if !media_preflight.export_ready() {
+        mark_failed(state, work.id, media_preflight.summary());
         return;
     }
     if let Err(error) = validate_worker_output(&work.output_path, work.overwrite) {
@@ -580,10 +599,142 @@ mod tests {
     };
 
     use kinewright_core::{
-        AssetId, Clip, ClipContent, MediaError, TimeCode, Title, Track, TrackId, TrackKind,
+        Analysis, AssetId, Clip, ClipContent, ColorContext, MediaAsset, MediaAvailabilityKind,
+        MediaAvailabilityStatus, MediaError, MediaKind, MediaSourceFingerprint, Rational,
+        RgbaImage, SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
+        TimelineTranscriptWord, Title, Track, TrackId, TrackKind, TranscriptStatus,
+        VisualAssetResult,
     };
 
     use super::*;
+
+    #[derive(Default)]
+    struct AvailabilityAnalysis {
+        statuses: Mutex<BTreeMap<AssetId, MediaAvailabilityStatus>>,
+    }
+
+    impl AvailabilityAnalysis {
+        fn with_statuses(
+            statuses: impl IntoIterator<Item = (AssetId, MediaAvailabilityKind)>,
+        ) -> Self {
+            Self {
+                statuses: Mutex::new(
+                    statuses
+                        .into_iter()
+                        .map(|(asset, kind)| (asset, Self::status(kind)))
+                        .collect(),
+                ),
+            }
+        }
+
+        fn status(kind: MediaAvailabilityKind) -> MediaAvailabilityStatus {
+            MediaAvailabilityStatus {
+                kind,
+                observed_fingerprint: None,
+                reason: Some("test availability".to_owned()),
+            }
+        }
+
+        fn set_status(&self, asset: AssetId, kind: MediaAvailabilityKind) {
+            self.statuses
+                .lock()
+                .unwrap()
+                .insert(asset, Self::status(kind));
+        }
+    }
+
+    impl Analysis for AvailabilityAnalysis {
+        fn probe(&self, _path: &Path) -> Result<MediaAsset, MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+
+        fn media_availability(&self, asset: &MediaAsset) -> MediaAvailabilityStatus {
+            self.statuses
+                .lock()
+                .unwrap()
+                .get(&asset.id)
+                .cloned()
+                .unwrap_or(MediaAvailabilityStatus {
+                    kind: MediaAvailabilityKind::OnlineUnverified,
+                    observed_fingerprint: None,
+                    reason: Some("test status was not explicitly seeded".to_owned()),
+                })
+        }
+
+        fn thumbnail_at(&self, _t: TimeCode, _max_w: u32) -> Result<RgbaImage, MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+
+        fn request_transcription(&self, _asset: MediaAsset) {}
+
+        fn transcript_status(&self, _asset: &MediaAsset) -> TranscriptStatus {
+            TranscriptStatus::NotRequested
+        }
+
+        fn timeline_transcript(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+        ) -> Result<Vec<TimelineTranscriptWord>, MediaError> {
+            Ok(Vec::new())
+        }
+
+        fn request_silence_detection(&self, _asset: MediaAsset) {}
+
+        fn silence_status(&self, _asset: &MediaAsset) -> SilenceStatus {
+            SilenceStatus::NotRequested
+        }
+
+        fn timeline_silences(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+            _minimum_source_frames: TimeCode,
+        ) -> Result<Vec<TimelineSilenceSpan>, MediaError> {
+            Ok(Vec::new())
+        }
+
+        fn request_scene_detection(&self, _asset: MediaAsset) {}
+
+        fn scene_status(&self, _asset: &MediaAsset) -> kinewright_core::SceneStatus {
+            kinewright_core::SceneStatus::NotRequested
+        }
+
+        fn timeline_scene_changes(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+            _minimum_confidence_basis_points: u16,
+        ) -> Result<Vec<TimelineSceneChange>, MediaError> {
+            Ok(Vec::new())
+        }
+
+        fn request_waveform(&self, _asset: MediaAsset, _request_generation: u64) -> bool {
+            false
+        }
+
+        fn request_thumbnail(
+            &self,
+            _asset: MediaAsset,
+            _source_at: TimeCode,
+            _max_width: u32,
+            _request_generation: u64,
+        ) -> bool {
+            false
+        }
+
+        fn visual_asset_results(&self) -> Receiver<VisualAssetResult> {
+            crossbeam_channel::never()
+        }
+    }
+
+    fn fail_closed_analysis() -> Arc<dyn Analysis> {
+        Arc::new(AvailabilityAnalysis::default())
+    }
+
+    fn queue(exporter: Arc<dyn Export>) -> ExportQueue {
+        ExportQueue::new(exporter, fail_closed_analysis()).unwrap()
+    }
 
     struct RecordingExporter {
         calls: Mutex<Vec<(i64, PathBuf)>>,
@@ -734,7 +885,7 @@ mod tests {
     #[test]
     fn queue_uses_immutable_snapshots_and_executes_serially() {
         let exporter = Arc::new(RecordingExporter::new(Duration::from_millis(30)));
-        let queue = ExportQueue::new(exporter.clone()).unwrap();
+        let queue = queue(exporter.clone());
         let directory = test_directory("serial");
         let mut first_document = renderable_document(10);
         let first = queue
@@ -778,7 +929,7 @@ mod tests {
             started_tx,
             release_rx,
         });
-        let queue = ExportQueue::new(exporter.clone()).unwrap();
+        let queue = queue(exporter.clone());
         let directory = test_directory("cancel");
         let first = queue
             .enqueue(
@@ -815,11 +966,10 @@ mod tests {
     fn running_cancellation_reaches_the_backend_token() {
         let (started_tx, started_rx) = crossbeam_channel::bounded(1);
         let (finished_tx, finished_rx) = crossbeam_channel::bounded(1);
-        let queue = ExportQueue::new(Arc::new(CancellableExporter {
+        let queue = queue(Arc::new(CancellableExporter {
             started_tx,
             finished_tx,
-        }))
-        .unwrap();
+        }));
         let directory = test_directory("running-cancel");
         let job = queue
             .enqueue(
@@ -848,7 +998,7 @@ mod tests {
         let exporter = Arc::new(SequencedExporter {
             call: AtomicUsize::new(0),
         });
-        let queue = ExportQueue::new(exporter).unwrap();
+        let queue = queue(exporter);
         let directory = test_directory("recovery");
         let jobs = ["panic.mp4", "failure.mp4", "success.mp4"].map(|name| {
             queue
@@ -873,7 +1023,7 @@ mod tests {
     #[test]
     fn conformance_and_output_guards_reject_unsafe_requests() {
         let exporter = Arc::new(RecordingExporter::new(Duration::ZERO));
-        let queue = ExportQueue::new(exporter).unwrap();
+        let queue = queue(exporter);
         let directory = test_directory("guards");
         let wrong_container = queue.enqueue(
             &renderable_document(10),
@@ -911,6 +1061,138 @@ mod tests {
     }
 
     #[test]
+    fn queue_blocks_a_changed_same_path_source_before_allocating_a_job() {
+        let analysis = Arc::new(AvailabilityAnalysis::with_statuses([
+            (AssetId(1), MediaAvailabilityKind::Changed),
+            (AssetId(2), MediaAvailabilityKind::OnlineVerified),
+        ]));
+        let queue =
+            ExportQueue::new(Arc::new(RecordingExporter::new(Duration::ZERO)), analysis).unwrap();
+        let directory = test_directory("changed-source");
+
+        let result = queue.enqueue(
+            &media_document_with_video_audio_and_unused(),
+            request(directory.join("changed.mp4"), false),
+        );
+
+        assert!(matches!(
+            result,
+            Err(ExportQueueError::MediaPreflight(report))
+                if report.issues.len() == 1
+                    && report.issues[0].asset == AssetId(1)
+                    && report.issues[0].availability.kind == MediaAvailabilityKind::Changed
+        ));
+        assert!(queue.list().is_empty());
+        cleanup_directory(&directory);
+    }
+
+    #[test]
+    fn queue_blocks_legacy_online_unverified_sources_until_relinked() {
+        let analysis = Arc::new(AvailabilityAnalysis::with_statuses([
+            (AssetId(1), MediaAvailabilityKind::OnlineUnverified),
+            (AssetId(2), MediaAvailabilityKind::OnlineVerified),
+        ]));
+        let queue =
+            ExportQueue::new(Arc::new(RecordingExporter::new(Duration::ZERO)), analysis).unwrap();
+        let directory = test_directory("legacy-unverified");
+
+        let result = queue.enqueue(
+            &media_document_with_video_audio_and_unused(),
+            request(directory.join("legacy.mp4"), false),
+        );
+
+        assert!(matches!(
+            result,
+            Err(ExportQueueError::MediaPreflight(report))
+                if report.issues.len() == 1
+                    && report.issues[0].availability.kind == MediaAvailabilityKind::OnlineUnverified
+        ));
+        cleanup_directory(&directory);
+    }
+
+    #[test]
+    fn queue_ignores_unused_offline_media_but_blocks_referenced_video_and_audio() {
+        let exporter = Arc::new(RecordingExporter::new(Duration::ZERO));
+        let unused_only = Arc::new(AvailabilityAnalysis::with_statuses([
+            (AssetId(1), MediaAvailabilityKind::OnlineVerified),
+            (AssetId(2), MediaAvailabilityKind::OnlineVerified),
+            (AssetId(3), MediaAvailabilityKind::OfflineMissing),
+        ]));
+        let queue = ExportQueue::new(exporter.clone(), unused_only).unwrap();
+        let directory = test_directory("referenced-scope");
+        let accepted = queue
+            .enqueue(
+                &media_document_with_video_audio_and_unused(),
+                request(directory.join("unused-offline.mp4"), false),
+            )
+            .unwrap();
+        assert_eq!(
+            wait_for_terminal(&queue, accepted.id).state,
+            ExportJobState::Completed
+        );
+
+        let blocking = Arc::new(AvailabilityAnalysis::with_statuses([
+            (AssetId(1), MediaAvailabilityKind::OfflineMissing),
+            (AssetId(2), MediaAvailabilityKind::Unreadable),
+        ]));
+        let queue =
+            ExportQueue::new(Arc::new(RecordingExporter::new(Duration::ZERO)), blocking).unwrap();
+        let result = queue.enqueue(
+            &media_document_with_video_audio_and_unused(),
+            request(directory.join("referenced-offline.mp4"), false),
+        );
+        assert!(matches!(
+            result,
+            Err(ExportQueueError::MediaPreflight(report))
+                if report.issues.iter().map(|issue| issue.asset).collect::<Vec<_>>()
+                    == vec![AssetId(1), AssetId(2)]
+        ));
+        cleanup_directory(&directory);
+    }
+
+    #[test]
+    fn worker_rechecks_source_identity_when_a_queued_export_reaches_the_front() {
+        let (started_tx, started_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let exporter = Arc::new(BlockingExporter {
+            calls: AtomicUsize::new(0),
+            started_tx,
+            release_rx,
+        });
+        let analysis = Arc::new(AvailabilityAnalysis::with_statuses([
+            (AssetId(1), MediaAvailabilityKind::OnlineVerified),
+            (AssetId(2), MediaAvailabilityKind::OnlineVerified),
+        ]));
+        let queue = ExportQueue::new(exporter.clone(), analysis.clone()).unwrap();
+        let directory = test_directory("source-race");
+        let first = queue
+            .enqueue(
+                &renderable_document(30),
+                request(directory.join("first.mp4"), false),
+            )
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let second = queue
+            .enqueue(
+                &media_document_with_video_audio_and_unused(),
+                request(directory.join("second.mp4"), false),
+            )
+            .unwrap();
+        analysis.set_status(AssetId(1), MediaAvailabilityKind::Changed);
+        release_tx.send(()).unwrap();
+
+        assert_eq!(
+            wait_for_terminal(&queue, first.id).state,
+            ExportJobState::Completed
+        );
+        let second = wait_for_terminal(&queue, second.id);
+        assert_eq!(second.state, ExportJobState::Failed);
+        assert!(second.error.unwrap().contains("Changed"));
+        assert_eq!(exporter.calls.load(Ordering::SeqCst), 1);
+        cleanup_directory(&directory);
+    }
+
+    #[test]
     fn active_jobs_reserve_their_normalized_output_path() {
         let (started_tx, started_rx) = crossbeam_channel::bounded(1);
         let (release_tx, release_rx) = crossbeam_channel::bounded(1);
@@ -919,7 +1201,7 @@ mod tests {
             started_tx,
             release_rx,
         });
-        let queue = ExportQueue::new(exporter).unwrap();
+        let queue = queue(exporter);
         let directory = test_directory("reserve");
         let output = directory.join("same.mp4");
         let first = queue
@@ -945,7 +1227,7 @@ mod tests {
             started_tx,
             release_rx,
         });
-        let queue = ExportQueue::new(exporter.clone()).unwrap();
+        let queue = queue(exporter.clone());
         let directory = test_directory("race");
         let first = queue
             .enqueue(
@@ -984,7 +1266,7 @@ mod tests {
             started_tx,
             release_rx,
         });
-        let queue = ExportQueue::with_capacity(exporter, 1).unwrap();
+        let queue = ExportQueue::with_capacity(exporter, fail_closed_analysis(), 1).unwrap();
         let directory = test_directory("bounded");
         let first = queue
             .enqueue(
@@ -1054,6 +1336,63 @@ mod tests {
                 }],
             }],
             duration: TimeCode(duration),
+            ..Document::default()
+        }
+    }
+
+    fn media_asset(id: u64, kind: MediaKind) -> MediaAsset {
+        MediaAsset {
+            id: AssetId(id),
+            path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+            name: format!("source-{id}"),
+            duration: TimeCode(30),
+            fps: Rational::new(30, 1).unwrap(),
+            kind,
+            resolution: Some((1920, 1080)),
+            source_fingerprint: MediaSourceFingerprint::unknown(),
+            color_description: ColorContext::sdr_rec709().delivery,
+        }
+    }
+
+    fn media_clip(id: u64) -> Clip {
+        Clip {
+            id: kinewright_core::ClipId(id),
+            asset: AssetId(id),
+            source_range: TimeCode::ZERO..TimeCode(30),
+            content: ClipContent::Media,
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+        }
+    }
+
+    fn media_document_with_video_audio_and_unused() -> Document {
+        Document {
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![media_clip(1)],
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: vec![media_clip(2)],
+                },
+            ],
+            media_pool: vec![
+                media_asset(1, MediaKind::Video),
+                media_asset(2, MediaKind::Audio),
+                media_asset(3, MediaKind::AudioVideo),
+            ],
+            duration: TimeCode(30),
             ..Document::default()
         }
     }

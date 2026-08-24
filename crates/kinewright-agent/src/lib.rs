@@ -2,6 +2,7 @@
 
 mod acp;
 mod branch;
+mod color_status;
 mod cursor;
 mod drivers;
 pub mod eval;

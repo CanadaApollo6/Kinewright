@@ -131,7 +131,7 @@ Colour begins immediately, while non-colour work continues in parallel.
 | --- | --- | --- |
 | Editorial and long-form | Three-point edits, slip/roll/slide, replace, fit-to-fill, bins, string-outs, sync groups, transcript editing | Dual source/program workflow, source patching and track targeting, compound/nested structure, long-sequence navigation and revision |
 | Media and interchange | Import, project media, verified source identity, offline/changed status, undoable relink, ephemeral scaled preview memory, scoped cache visibility/clearing, hostile-media policy, save/recovery | Generated playable proxies, richer metadata, managed/project-relative media, interchange that preserves supported edit semantics |
-| Colour | Basic exposure/temperature/tint and brightness/contrast/saturation effects, four built-in looks, agent/core `.cube` LUT support, masks, chroma key, post-compositor scope data | Colour-managed SDR correction, professional scopes, shot matching, curves/wheels, grade-scoped secondaries, human LUT workflow, look management, delivery QC |
+| Colour | Managed SDR Rec.709 input → high-precision working → primary correction → monitor/delivery pipeline, typed source assumptions and metadata, ten primary controls, CPU/GPU/proof/export parity, four built-in looks, agent/core `.cube` LUT support, masks, chroma key, post-compositor scope data | Professional scopes, shot matching, curves/wheels, grade-scoped secondaries, human LUT workflow, look management, delivery QC |
 | Audio | Multi-track mixing, buses, EQ/compression/ducking operations, waveform/transcript analysis | Manual mixer and bus UI, meters, detailed EQ/dynamics control, repair and room-tone workflows, loudness-aware delivery |
 | Motion, compositing, and retiming | GPU compositor, effects, keyframes, masks/tracking, transitions, constant-speed controls | Keyframe editing UI, speed ramps, effect-scoped mattes, adjustment/compound layers, transform and compositing polish |
 | Multicam | Sync groups and agent speaker/angle planning primitives | Angle viewer, live switching and revision, audio-follow policy, explicit master-audio handling |
@@ -160,8 +160,17 @@ The first three cycle intentions are:
    revision-gated undoable operation, and expose honest scoped cache inspection and
    clearing to both human and agent workflows. Ephemeral scaled preview memory is
    explicitly distinguished from generated playable proxies, which remain deferred.
-3. **CC1 managed SDR primary correction** is now the primary slice; select the next
-   long-form source/program usability slice from observed editing friction.
+3. **CC1 managed SDR primary correction — completed 2026-08-24.** Supported SDR
+   sources now enter an explicit high-precision working pipeline, retain recoverable
+   over-range values through primary correction, and share compatible CPU, GPU,
+   monitor-proof, and tagged H.264 delivery semantics. Editors and agents use the
+   same ten typed primary controls and receive explicit errors for unsupported or
+   ambiguous source profiles.
+
+The next primary slice is the long-form editorial source/program workflow: dual
+source and program viewers, explicit source patching, and track targeting. Its
+contract must preserve the existing three-point edit semantics while making every
+route and destination visible and revision-safe.
 
 Within that cadence, three workstreams remain active:
 
@@ -196,32 +205,41 @@ grade” must never collapse all three into an unexplained transform.
 
 ### Current foundation and limits
 
-The present implementation is a useful base, not yet a managed colour pipeline:
+The present implementation includes the first managed SDR vertical slice, with
+deliberate limits that define the remaining colour work:
 
 - Clip effects are typed and serializable, with static values and keyframes.
 - Brightness, contrast, saturation, exposure, temperature, and tint are available;
   four built-in looks and `.cube` LUT loading also exist. File-backed LUTs are
   currently a core/agent capability and intentionally lack a human file-picker
   workflow.
-- Preview and export use the shared `FrameRenderer` compositor path.
+- Managed preview, isolated full-resolution proof, and export share the production
+  visual-layer resolution and compositor semantics.
 - Agent scopes are measured after compositing and currently provide RGB/luma
   histograms, means, clipping counts, and a 64-column luma waveform.
 - Masks and tracking exist, but the current compositor applies the mask to final
   layer alpha. That is **not** yet an effect-scoped colour secondary.
-- CC0 now preserves explicit source, working, monitoring, and delivery colour
+- CC0 preserves explicit source, working, monitoring, and delivery colour
   descriptions with provenance and confidence. Probe keeps unknown values honest;
   editors and agents can inspect them and apply an undoable metadata override.
-  Current export accepts only the declared 8-bit SDR Rec.709 contract and writes
-  explicit H.264/YUV420P colour tags.
-- Decode still converts into 8-bit RGBA and the compositor target remains
-  `Rgba8Unorm`. CC0 records and validates the contract but does not perform an input
-  colour transform; the defined high-precision managed transform path is CC1.
+  Delivery conformance accepts only an explicitly supported SDR Rec.709 contract
+  and writes explicit H.264/YUV420P colour tags.
+- CC1 decodes supported integer SDR sources through an explicit managed conversion
+  into `Rgba16Float`, applies the canonical primary pipeline without intermediate
+  display-range clamping, and performs the monitoring/output transform only at the
+  named boundary. Unsupported and unresolved profiles fail with typed recovery
+  information rather than silently falling back to an implicit transform.
+- The managed cache accounts for high-precision working bytes and returns an
+  oversized current frame without retaining it beyond the configured bound.
+- The primary node supplies exposure, temperature, tint, contrast, pivot,
+  saturation, shadows, midtones, highlights, and hue with stable defaults, limits,
+  serialization, undo/redo, editor controls, agent planning, and proof manifests.
 - Effect parameters are flattened into fixed compositor inputs rather than a true
   ordered colour-node stack; multiple creative LUT stages are therefore not a
   supported grading model.
 
-Those limits determine the implementation order. More creative controls on an
-implicit 8-bit path would create attractive demos but weak technical guarantees.
+Those limits determine the remaining implementation order. CC2 adds professional
+scopes and shot matching before broader creative controls expand the node model.
 
 ### Colour architecture principles
 
@@ -317,13 +335,17 @@ constructors, compositor inputs, `ExportSettings`, and FFmpeg stream/container
 metadata. Later stages cannot treat those surfaces as implicit or start before the
 required earlier exit gate passes.
 
-**Current status (2026-08-24): CC0 and M41 are complete.** CC0's exit evidence
+**Current status (2026-08-24): CC0, M41, and CC1 are complete.** CC0's exit evidence
 includes legacy project migration, known/partial/unknown and 10-bit probe fixtures,
 visible human and agent inspection, an undoable source override, delivery rejection
 outside the current contract, and an encoded file decoded again to verify its
 representable Rec.709 tags. M41 then completed verified source identity, offline and
-changed-media diagnosis, deterministic relink, and cache visibility. CC1 managed SDR
-primary correction is now the primary slice.
+changed-media diagnosis, deterministic relink, and cache visibility. CC1 adds the
+explicit high-precision managed SDR input/correction/output path, ten typed primary
+controls, full-raster proofs with source/provenance manifests, verified-source export
+preflight, objective ramp/chart/control/cache/delivery fixtures, and CPU/GPU parity
+evidence. The next primary slice is dual source/program editing with source patching
+and track targeting; CC2 remains the next colour slice.
 
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |

@@ -2,27 +2,39 @@ use std::collections::{BTreeMap, VecDeque};
 
 use kinewright_core::{FrameTexture, TimeCode};
 
-pub(crate) struct FrameCache {
+use crate::frame::CachedFrame;
+
+pub(crate) struct FrameCache<T = FrameTexture>
+where
+    T: CachedFrame,
+{
     capacity: usize,
     byte_len: usize,
-    frames: BTreeMap<TimeCode, FrameTexture>,
+    frames: BTreeMap<TimeCode, T>,
     order: VecDeque<TimeCode>,
+    #[cfg(test)]
+    evictions: usize,
 }
 
-impl FrameCache {
+impl<T> FrameCache<T>
+where
+    T: CachedFrame,
+{
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             capacity,
             byte_len: 0,
             frames: BTreeMap::new(),
             order: VecDeque::new(),
+            #[cfg(test)]
+            evictions: 0,
         }
     }
 
-    pub(crate) fn insert(&mut self, at: TimeCode, frame: FrameTexture) {
-        let frame_bytes = frame.rgba.len();
+    pub(crate) fn insert(&mut self, at: TimeCode, frame: T) {
+        let frame_bytes = frame.byte_len();
         if let Some(replaced) = self.frames.insert(at, frame) {
-            self.byte_len = self.byte_len.saturating_sub(replaced.rgba.len());
+            self.byte_len = self.byte_len.saturating_sub(replaced.byte_len());
             self.order.retain(|entry| *entry != at);
         }
         self.byte_len = self.byte_len.saturating_add(frame_bytes);
@@ -32,12 +44,43 @@ impl FrameCache {
         }
     }
 
-    pub(crate) fn frame_at_or_before(&mut self, at: TimeCode) -> Option<FrameTexture> {
+    pub(crate) fn frame_at_or_before(&mut self, at: TimeCode) -> Option<T> {
         let key = self.frames.range(..=at).next_back().map(|(key, _)| *key)?;
         let frame = self.frames.get(&key)?.clone();
         self.order.retain(|entry| *entry != key);
         self.order.push_back(key);
         Some(frame)
+    }
+
+    /// Return the most recent frame without retaining a single entry larger
+    /// than the caller's aggregate cache budget.
+    pub(crate) fn frame_at_or_before_bounded(
+        &mut self,
+        at: TimeCode,
+        max_retained_bytes: usize,
+    ) -> Option<T> {
+        let key = self.frames.range(..=at).next_back().map(|(key, _)| *key)?;
+        let oversized = self
+            .frames
+            .get(&key)
+            .is_some_and(|frame| frame.byte_len() > max_retained_bytes);
+        if !oversized {
+            return self.frame_at_or_before(at);
+        }
+
+        self.order.retain(|entry| *entry != key);
+        let frame = self.frames.remove(&key)?;
+        self.byte_len = self.byte_len.saturating_sub(frame.byte_len());
+        #[cfg(test)]
+        {
+            self.evictions = self.evictions.saturating_add(1);
+        }
+        Some(frame)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn eviction_count(&self) -> usize {
+        self.evictions
     }
 
     pub(crate) fn contains(&self, at: TimeCode) -> bool {
@@ -57,7 +100,11 @@ impl FrameCache {
             return false;
         };
         if let Some(frame) = self.frames.remove(&oldest) {
-            self.byte_len = self.byte_len.saturating_sub(frame.rgba.len());
+            self.byte_len = self.byte_len.saturating_sub(frame.byte_len());
+            #[cfg(test)]
+            {
+                self.evictions = self.evictions.saturating_add(1);
+            }
         }
         true
     }
@@ -117,5 +164,24 @@ mod tests {
 
         assert!(cache.evict_oldest());
         assert_eq!(cache.byte_len(), 32);
+    }
+
+    #[test]
+    fn oversized_frame_is_returned_without_being_retained() {
+        let frame = FrameTexture {
+            width: 1,
+            height: 1,
+            rgba: Arc::new(vec![0; 32]),
+        };
+        let mut cache = FrameCache::new(2);
+        cache.insert(TimeCode(0), frame.clone());
+
+        assert_eq!(
+            cache.frame_at_or_before_bounded(TimeCode(0), 16),
+            Some(frame)
+        );
+        assert_eq!(cache.byte_len(), 0);
+        assert_eq!(cache.len(), 0);
+        assert!(!cache.contains(TimeCode(0)));
     }
 }

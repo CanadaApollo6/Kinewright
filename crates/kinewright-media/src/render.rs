@@ -4,7 +4,9 @@ use std::{
 };
 
 use kinewright_core::{
-    AssetId, ClipId, Document, FrameTexture, MediaError, Rational, TimeCode, Title,
+    AssetId, ClipId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
+    ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Document,
+    FrameTexture, MediaError, MediaSourceFingerprint, Rational, TimeCode, Title,
 };
 
 use crate::{
@@ -13,6 +15,7 @@ use crate::{
     compositor::{Compositor, CompositorLayer, GpuContext},
     decode::VideoDecoder,
     derived_cache::CacheStats,
+    frame::WorkingFrame,
     visual_layers_at,
 };
 
@@ -51,15 +54,94 @@ impl RenderScale {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct VideoSourceKey {
     asset: AssetId,
+    /// The path is part of the decoder identity even when two paths currently
+    /// point at the same bytes. A relink is a runtime input and must not
+    /// silently inherit the old decoder's state.
+    path: std::path::PathBuf,
+    /// Keep the imported content identity in the key so a changed/relinked
+    /// source cannot reuse frames retained for the same asset id.
+    fingerprint: SourceFingerprintKey,
+    /// Managed conversion is configured from the raw description. Include all
+    /// fields, including confidence/provenance, so a same-id colour override
+    /// always opens a decoder with the new interpretation.
+    description: ColorDescriptionKey,
+    assumption: Option<ColorSourceProfileAssumption>,
+    fps: Rational,
     max_width: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SourceFingerprintKey {
+    content_sha256: Option<String>,
+    byte_len: Option<u64>,
+}
+
+impl From<&MediaSourceFingerprint> for SourceFingerprintKey {
+    fn from(fingerprint: &MediaSourceFingerprint) -> Self {
+        Self {
+            content_sha256: fingerprint.content_sha256.clone(),
+            byte_len: fingerprint.byte_len,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ColorDescriptionKey {
+    primaries: ColorPrimaries,
+    transfer: ColorTransfer,
+    matrix: ColorMatrix,
+    range: ColorRange,
+    white_point: ColorWhitePoint,
+    bit_depth: ColorBitDepth,
+    confidence_basis_points: u16,
+    provenance: ColorProvenance,
+}
+
+impl From<&ColorDescription> for ColorDescriptionKey {
+    fn from(description: &ColorDescription) -> Self {
+        Self {
+            primaries: description.primaries.clone(),
+            transfer: description.transfer.clone(),
+            matrix: description.matrix.clone(),
+            range: description.range.clone(),
+            white_point: description.white_point.clone(),
+            bit_depth: description.bit_depth.clone(),
+            confidence_basis_points: description.confidence_basis_points,
+            provenance: description.provenance.clone(),
+        }
+    }
+}
+
+impl VideoSourceKey {
+    fn new(
+        asset: AssetId,
+        path: &Path,
+        fingerprint: &MediaSourceFingerprint,
+        fps: Rational,
+        description: &ColorDescription,
+        assumption: Option<ColorSourceProfileAssumption>,
+        max_width: Option<u32>,
+    ) -> Self {
+        Self {
+            asset,
+            path: path.to_path_buf(),
+            fingerprint: fingerprint.into(),
+            description: description.into(),
+            assumption,
+            fps,
+            max_width,
+        }
+    }
+}
+
+type TitleCacheKey = (ClipId, (u32, u32), Title);
+
 struct VideoSource {
     decoder: VideoDecoder,
-    cache: FrameCache,
+    cache: FrameCache<WorkingFrame>,
 }
 
 /// The single frame-rendering path used by both playback preview and export.
@@ -70,7 +152,9 @@ pub(crate) struct FrameRenderer {
     source_order: VecDeque<VideoSourceKey>,
     compositor: Compositor,
     title_rasterizer: crate::title::TitleRasterizer,
-    title_cache: HashMap<(ClipId, (u32, u32), Title), FrameTexture>,
+    title_cache: HashMap<TitleCacheKey, WorkingFrame>,
+    title_order: VecDeque<TitleCacheKey>,
+    cache_budget: usize,
 }
 
 impl FrameRenderer {
@@ -81,6 +165,8 @@ impl FrameRenderer {
             compositor: Compositor::new(gpu),
             title_rasterizer: crate::title::TitleRasterizer::new(),
             title_cache: HashMap::new(),
+            title_order: VecDeque::new(),
+            cache_budget: FRAME_CACHE_BYTE_BUDGET,
         }
     }
 
@@ -89,6 +175,7 @@ impl FrameRenderer {
         self.video_sources.clear();
         self.source_order.clear();
         self.title_cache.clear();
+        self.title_order.clear();
         stats
     }
 
@@ -98,21 +185,32 @@ impl FrameRenderer {
             .values()
             .map(|source| source.cache.len())
             .sum::<usize>();
-        let frame_bytes = self
-            .video_sources
-            .values()
-            .map(|source| source.cache.byte_len())
-            .fold(0_usize, usize::saturating_add);
-        let title_bytes = self
-            .title_cache
-            .values()
-            .map(|frame| frame.rgba.len())
-            .fold(0_usize, usize::saturating_add);
+        let frame_bytes = self.cache_bytes();
+        let title_bytes = self.title_cache_bytes();
         CacheStats {
             file_count: u64::try_from(frame_count.saturating_add(self.title_cache.len()))
                 .unwrap_or(u64::MAX),
             bytes: u64::try_from(frame_bytes.saturating_add(title_bytes)).unwrap_or(u64::MAX),
         }
+    }
+
+    /// Return the configured aggregate working-cache budget for objective
+    /// media evidence. This remains crate-visible and test-only so production
+    /// callers cannot make cache policy part of the public API.
+    #[cfg(test)]
+    pub(crate) const fn cache_budget_bytes(&self) -> usize {
+        self.cache_budget
+    }
+
+    /// Return the number of real working-frame evictions observed by the
+    /// managed renderer. This is a test-only diagnostic for the bounded-cache
+    /// evidence fixture; production cache policy remains unchanged.
+    #[cfg(test)]
+    pub(crate) fn cache_eviction_count(&self) -> usize {
+        self.video_sources
+            .values()
+            .map(|source| source.cache.eviction_count())
+            .sum()
     }
 
     pub(crate) fn render(
@@ -123,6 +221,7 @@ impl FrameRenderer {
         scale: RenderScale,
         strategy: DecodeStrategy,
     ) -> Result<FrameTexture, MediaError> {
+        validate_managed_context(document)?;
         let layer_specs = visual_layers_at(document, project_at)?;
         let mut decoded_layers = Vec::with_capacity(layer_specs.len());
         for layer in layer_specs {
@@ -143,16 +242,21 @@ impl FrameRenderer {
                         layer.source.source_end,
                         scale,
                         strategy,
+                        &asset.source_fingerprint,
+                        &asset.color_description,
                     )?;
                     decoded_layers.push((frame, layer.effects, layer.transition));
                 }
                 TimelineVisualLayer::Title(layer) => {
                     let key = (layer.clip, resolution, layer.title.clone());
-                    let frame = if let Some(frame) = self.title_cache.get(&key) {
-                        frame.clone()
+                    let frame = if let Some(frame) = self.title_cache.get(&key).cloned() {
+                        self.touch_title(key);
+                        frame
                     } else {
-                        let frame = self.title_rasterizer.rasterize(&layer.title, resolution)?;
-                        self.title_cache.insert(key, frame.clone());
+                        let display_frame =
+                            self.title_rasterizer.rasterize(&layer.title, resolution)?;
+                        let frame = WorkingFrame::from_display_frame(&display_frame)?;
+                        self.cache_title_frame(key, frame.clone());
                         frame
                     };
                     decoded_layers.push((frame, layer.effects, layer.transition));
@@ -181,16 +285,32 @@ impl FrameRenderer {
         source_end: TimeCode,
         scale: RenderScale,
         strategy: DecodeStrategy,
-    ) -> Result<FrameTexture, MediaError> {
-        let key = VideoSourceKey {
+        fingerprint: &MediaSourceFingerprint,
+        description: &ColorDescription,
+    ) -> Result<WorkingFrame, MediaError> {
+        let assumption = d65_assumption(description);
+        let key = VideoSourceKey::new(
             asset,
-            max_width: scale.max_width(),
-        };
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.video_sources.entry(key) {
-            let decoder = key.max_width.map_or_else(
-                || VideoDecoder::open(path, fps),
-                |max_width| VideoDecoder::open_scaled(path, fps, Some(max_width)),
-            )?;
+            path,
+            fingerprint,
+            fps,
+            description,
+            assumption,
+            scale.max_width(),
+        );
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            self.video_sources.entry(key.clone())
+        {
+            let decoder = VideoDecoder::open_scaled_managed(
+                path,
+                fps,
+                key.max_width,
+                description,
+                assumption,
+            )
+            .map_err(|error| {
+                contextual_managed_decode_error(asset, path, description, assumption, error)
+            })?;
             entry.insert(VideoSource {
                 decoder,
                 cache: FrameCache::new(FRAME_CACHE_CAPACITY),
@@ -204,7 +324,7 @@ impl FrameRenderer {
         if cache_miss {
             let frame_bytes = source_resolution
                 .map(|resolution| bounded_resolution(resolution, key.max_width))
-                .map_or(0, rgba_bytes);
+                .map_or(0, working_bytes);
             let prefetch = match strategy {
                 // Scrub requests are coalesced and should return the selected
                 // frame without decoding work the next mouse move may discard.
@@ -242,7 +362,11 @@ impl FrameRenderer {
         let frame = self
             .video_sources
             .get_mut(&key)
-            .and_then(|source| source.cache.frame_at_or_before(source_at))
+            .and_then(|source| {
+                source
+                    .cache
+                    .frame_at_or_before_bounded(source_at, self.cache_budget)
+            })
             .ok_or_else(|| {
                 MediaError::Backend(format!(
                     "no video frame decoded for asset {asset} at {source_at}"
@@ -254,8 +378,13 @@ impl FrameRenderer {
     }
 
     fn touch_source(&mut self, key: VideoSourceKey) {
-        self.source_order.retain(|entry| *entry != key);
+        self.source_order.retain(|entry| entry != &key);
         self.source_order.push_back(key);
+    }
+
+    fn touch_title(&mut self, key: TitleCacheKey) {
+        self.title_order.retain(|entry| *entry != key);
+        self.title_order.push_back(key);
     }
 
     fn cache_bytes(&self) -> usize {
@@ -265,22 +394,111 @@ impl FrameRenderer {
             .fold(0, usize::saturating_add)
     }
 
+    fn title_cache_bytes(&self) -> usize {
+        self.title_cache
+            .values()
+            .map(WorkingFrame::byte_len)
+            .fold(0, usize::saturating_add)
+    }
+
+    fn total_cache_bytes(&self) -> usize {
+        self.cache_bytes().saturating_add(self.title_cache_bytes())
+    }
+
+    fn cache_title_frame(&mut self, key: TitleCacheKey, frame: WorkingFrame) -> bool {
+        let incoming = frame.byte_len();
+        if incoming > self.cache_budget {
+            // A single title larger than the aggregate budget is still
+            // rendered for the current request, but is never retained.
+            return false;
+        }
+        if self.title_cache.remove(&key).is_some() {
+            self.title_order.retain(|entry| *entry != key);
+        }
+        self.reserve_cache_bytes(incoming);
+        if self.total_cache_bytes().saturating_add(incoming) > self.cache_budget {
+            return false;
+        }
+        self.title_cache.insert(key.clone(), frame);
+        self.touch_title(key);
+        true
+    }
+
     fn reserve_cache_bytes(&mut self, incoming: usize) {
-        while self.cache_bytes().saturating_add(incoming) > FRAME_CACHE_BYTE_BUDGET {
-            let Some(key) = self.source_order.pop_front() else {
-                break;
-            };
-            let Some(source) = self.video_sources.get_mut(&key) else {
-                continue;
-            };
-            if !source.cache.evict_oldest() {
+        while self.total_cache_bytes().saturating_add(incoming) > self.cache_budget {
+            if self.evict_oldest_video_frame() || self.evict_oldest_title_frame() {
                 continue;
             }
-            if source.cache.byte_len() > 0 {
-                self.source_order.push_back(key);
-            }
+            break;
         }
     }
+
+    fn evict_oldest_video_frame(&mut self) -> bool {
+        let Some(key) = self.source_order.pop_front() else {
+            return false;
+        };
+        let Some(source) = self.video_sources.get_mut(&key) else {
+            return true;
+        };
+        let _ = source.cache.evict_oldest();
+        if source.cache.byte_len() > 0 {
+            self.source_order.push_back(key);
+        }
+        true
+    }
+
+    fn evict_oldest_title_frame(&mut self) -> bool {
+        let Some(key) = self.title_order.pop_front() else {
+            return false;
+        };
+        self.title_cache.remove(&key);
+        true
+    }
+}
+
+fn contextual_managed_decode_error(
+    asset: AssetId,
+    path: &Path,
+    description: &ColorDescription,
+    assumption: Option<ColorSourceProfileAssumption>,
+    error: MediaError,
+) -> MediaError {
+    match error {
+        MediaError::UnsupportedDecoderFormat {
+            path: error_path,
+            format,
+            declared_bit_depth,
+            decoder_bit_depth,
+            reason,
+        } => MediaError::UnsupportedDecoderFormat {
+            path: error_path,
+            format,
+            declared_bit_depth,
+            decoder_bit_depth,
+            reason: format!(
+                "managed decode for asset {asset} ({}; description={description:?}, assumption={assumption:?}) failed: {reason}",
+                path.display()
+            ),
+        },
+        error => MediaError::Backend(format!(
+            "managed decode for asset {asset} ({}; description={description:?}, assumption={assumption:?}) failed: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn validate_managed_context(document: &Document) -> Result<(), MediaError> {
+    if document.color_context.is_managed_sdr_compatible() {
+        return Ok(());
+    }
+
+    Err(MediaError::Backend(format!(
+        "managed renderer cannot execute this project colour context: pipeline_state={:?}, working={:?}, monitoring={:?}, delivery={:?}; reset the project to Managed SDR v1 or choose an explicit compatible user override",
+        document.color_context.pipeline_state,
+        document.color_context.working,
+        document.color_context.monitoring,
+        document.color_context.delivery,
+    )))
 }
 
 fn bounded_resolution(source: (u32, u32), max_width: Option<u32>) -> (u32, u32) {
@@ -302,6 +520,19 @@ fn rgba_bytes(resolution: (u32, u32)) -> usize {
         .saturating_mul(4)
 }
 
+fn working_bytes(resolution: (u32, u32)) -> usize {
+    rgba_bytes(resolution).saturating_mul(2)
+}
+
+fn d65_assumption(description: &ColorDescription) -> Option<ColorSourceProfileAssumption> {
+    (matches!(description.primaries, ColorPrimaries::Bt709)
+        && matches!(
+            description.white_point,
+            kinewright_core::ColorWhitePoint::Unknown
+        ))
+    .then_some(ColorSourceProfileAssumption::D65)
+}
+
 fn prefetch_frames(frame_bytes: usize) -> i64 {
     if frame_bytes == 0 {
         return 0;
@@ -314,7 +545,105 @@ fn prefetch_frames(frame_bytes: usize) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use half::f16;
+    use kinewright_core::{Analysis, ColorPipelineState, ColorTransfer};
+
     use super::*;
+    use crate::{
+        decode::probe_path,
+        initialize_ffmpeg,
+        test_support::{GeneratedMedia, single_clip_document},
+    };
+
+    fn test_renderer() -> Option<FrameRenderer> {
+        let gpu = GpuContext::headless(true)
+            .or_else(|_| GpuContext::headless(false))
+            .ok()?;
+        Some(FrameRenderer::new(gpu))
+    }
+
+    fn working_frame_with_bytes(bytes: usize) -> WorkingFrame {
+        assert_eq!(bytes % std::mem::size_of::<f16>(), 0);
+        WorkingFrame {
+            width: 1,
+            height: 1,
+            pixels: Arc::new(vec![f16::from_f32(0.0); bytes / std::mem::size_of::<f16>()]),
+        }
+    }
+
+    fn title_key(id: u64) -> TitleCacheKey {
+        (ClipId(id), (1, 1), Title::default())
+    }
+
+    #[test]
+    fn title_bytes_are_reserved_before_video_cache_growth() {
+        let Some(mut renderer) = test_renderer() else {
+            eprintln!("skipped: no usable wgpu adapter in this environment");
+            return;
+        };
+        renderer.cache_budget = 100;
+        assert!(renderer.cache_title_frame(title_key(1), working_frame_with_bytes(80)));
+        assert_eq!(renderer.cache_stats().bytes, 80);
+
+        // This is the reservation made before a video decode window.  The
+        // title must be evicted rather than allowing aggregate residency to
+        // exceed the bound reported by cache_stats().
+        renderer.reserve_cache_bytes(30);
+        assert!(renderer.title_cache.is_empty());
+        assert!(renderer.total_cache_bytes().saturating_add(30) <= renderer.cache_budget);
+    }
+
+    #[test]
+    fn oversized_title_is_rendered_without_being_cached() {
+        let Some(mut renderer) = test_renderer() else {
+            eprintln!("skipped: no usable wgpu adapter in this environment");
+            return;
+        };
+        renderer.cache_budget = 100;
+        assert!(!renderer.cache_title_frame(title_key(1), working_frame_with_bytes(120)));
+        assert!(renderer.title_cache.is_empty());
+        assert_eq!(renderer.cache_stats().bytes, 0);
+    }
+
+    #[test]
+    fn managed_renderer_rejects_legacy_and_future_contexts() {
+        let mut legacy = Document::default();
+        legacy.color_context.pipeline_state = ColorPipelineState::Legacy;
+        let error = validate_managed_context(&legacy).expect_err("legacy must be rejected");
+        assert!(error.to_string().contains("pipeline_state=Legacy"));
+
+        let mut future = Document::default();
+        future.color_context.pipeline_state = ColorPipelineState::Other("managed_sdr_v2".into());
+        let error = validate_managed_context(&future).expect_err("future state must be rejected");
+        assert!(error.to_string().contains("managed_sdr_v2"));
+    }
+
+    #[test]
+    fn managed_renderer_rejects_incompatible_working_or_monitoring_targets() {
+        let mut working = Document::default();
+        working.color_context.working.transfer = ColorTransfer::Bt709;
+        let error = validate_managed_context(&working).expect_err("working target must match");
+        assert!(error.to_string().contains("working="));
+
+        let mut monitoring = Document::default();
+        monitoring.color_context.monitoring.transfer = ColorTransfer::Srgb;
+        let error =
+            validate_managed_context(&monitoring).expect_err("monitoring target must match");
+        assert!(error.to_string().contains("monitoring="));
+    }
+
+    #[test]
+    fn managed_renderer_accepts_exact_user_override_targets() {
+        let mut document = Document::default();
+        document.color_context.working.provenance = kinewright_core::ColorProvenance::UserOverride;
+        document.color_context.monitoring.provenance =
+            kinewright_core::ColorProvenance::UserOverride;
+        document.color_context.delivery.provenance = kinewright_core::ColorProvenance::UserOverride;
+        assert!(document.color_context.is_managed_sdr_compatible());
+        validate_managed_context(&document).expect("exact user overrides remain executable");
+    }
 
     #[test]
     fn preview_resolution_preserves_aspect_and_never_upscales() {
@@ -335,15 +664,202 @@ mod tests {
     #[test]
     fn proxy_width_is_part_of_decoder_and_cache_identity() {
         let asset = AssetId(7);
+        let path = Path::new("fixture.mkv");
+        let fingerprint = MediaSourceFingerprint::unknown();
+        let description = ColorDescription::unknown();
         assert_ne!(
-            VideoSourceKey {
+            VideoSourceKey::new(
                 asset,
-                max_width: Some(1280),
+                path,
+                &fingerprint,
+                Rational::new(30, 1).unwrap(),
+                &description,
+                None,
+                Some(1280),
+            ),
+            VideoSourceKey::new(
+                asset,
+                path,
+                &fingerprint,
+                Rational::new(30, 1).unwrap(),
+                &description,
+                None,
+                Some(640),
+            )
+        );
+    }
+
+    #[test]
+    fn source_identity_changes_for_same_asset_id_when_runtime_inputs_change() {
+        let asset = AssetId(7);
+        let path = Path::new("fixture.mkv");
+        let fingerprint = MediaSourceFingerprint {
+            content_sha256: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            ),
+            byte_len: Some(123),
+        };
+        let description = ColorDescription::unknown();
+        let baseline = VideoSourceKey::new(
+            asset,
+            path,
+            &fingerprint,
+            Rational::new(30, 1).unwrap(),
+            &description,
+            None,
+            Some(640),
+        );
+
+        let changed_path = VideoSourceKey::new(
+            asset,
+            Path::new("relinked.mkv"),
+            &fingerprint,
+            Rational::new(30, 1).unwrap(),
+            &description,
+            None,
+            Some(640),
+        );
+        assert_ne!(baseline, changed_path, "relinks need a fresh decoder");
+
+        let changed_fingerprint = VideoSourceKey::new(
+            asset,
+            path,
+            &MediaSourceFingerprint {
+                content_sha256: Some(
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+                ),
+                byte_len: Some(456),
             },
-            VideoSourceKey {
-                asset,
-                max_width: Some(640),
-            }
+            Rational::new(30, 1).unwrap(),
+            &description,
+            None,
+            Some(640),
+        );
+        assert_ne!(
+            baseline, changed_fingerprint,
+            "a verified content change needs a fresh decoder"
+        );
+
+        let changed_description = ColorDescription {
+            transfer: kinewright_core::ColorTransfer::Srgb,
+            ..description.clone()
+        };
+        let changed_color = VideoSourceKey::new(
+            asset,
+            path,
+            &fingerprint,
+            Rational::new(30, 1).unwrap(),
+            &changed_description,
+            None,
+            Some(640),
+        );
+        assert_ne!(
+            baseline, changed_color,
+            "a same-id colour override needs a fresh managed decoder"
+        );
+
+        let mut decoder_cache = HashMap::new();
+        decoder_cache.insert(baseline, "old");
+        decoder_cache.insert(changed_path, "relinked");
+        decoder_cache.insert(changed_fingerprint, "changed content");
+        decoder_cache.insert(changed_color, "changed colour");
+        assert_eq!(
+            decoder_cache.len(),
+            4,
+            "each candidate document must resolve a distinct source cache entry"
+        );
+    }
+
+    fn generated_solid_source(label: &str, color: &str) -> GeneratedMedia {
+        let filter = format!("color=c={color}:size=16x16:rate=1:duration=1");
+        GeneratedMedia::ffmpeg(
+            label,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                &filter,
+                "-frames:v",
+                "1",
+                "-c:v",
+                "ffv1",
+                "-pix_fmt",
+                "yuv444p",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-colorspace",
+                "bt709",
+                "-color_range",
+                "tv",
+            ],
+            "mkv",
+        )
+    }
+
+    fn mean_channel(pixels: &[u8], channel: usize) -> f32 {
+        let count = u16::try_from(pixels.len() / 4).expect("test image fits in u16");
+        pixels
+            .chunks_exact(4)
+            .map(|pixel| f32::from(pixel[channel]))
+            .sum::<f32>()
+            / f32::from(count)
+    }
+
+    #[test]
+    fn thumbnail_for_document_reopens_same_id_after_relink() {
+        initialize_ffmpeg().expect("FFmpeg should initialize for relink identity fixture");
+        let Some(gpu) = GpuContext::headless(true)
+            .or_else(|_| GpuContext::headless(false))
+            .ok()
+        else {
+            eprintln!("skipped: no usable wgpu adapter in this environment");
+            return;
+        };
+        let red = generated_solid_source("source-identity-red", "red");
+        let blue = generated_solid_source("source-identity-blue", "blue");
+        let mut red_asset = probe_path(red.path(), AssetId(11)).expect("red source should probe");
+        let mut blue_asset =
+            probe_path(blue.path(), AssetId(11)).expect("blue source should probe");
+        let description = ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: kinewright_core::ColorMatrix::Bt709,
+            range: kinewright_core::ColorRange::Limited,
+            white_point: kinewright_core::ColorWhitePoint::D65,
+            bit_depth: kinewright_core::ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: kinewright_core::ColorProvenance::UserOverride,
+        };
+        red_asset.color_description = description.clone();
+        blue_asset.color_description = description;
+        let red_document = Arc::new(single_clip_document(red_asset));
+        let blue_document = Arc::new(single_clip_document(blue_asset));
+        let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu)
+            .expect("media engine should start for relink identity fixture");
+
+        let red_thumbnail = engine
+            .thumbnail_for_document(Arc::clone(&red_document), TimeCode::ZERO, 16)
+            .expect("red thumbnail should render");
+        let blue_thumbnail = engine
+            .thumbnail_for_document(Arc::clone(&blue_document), TimeCode::ZERO, 16)
+            .expect("blue thumbnail should render");
+        assert_eq!(
+            (red_thumbnail.width, red_thumbnail.height),
+            (blue_thumbnail.width, blue_thumbnail.height)
+        );
+        assert_ne!(
+            red_thumbnail.pixels, blue_thumbnail.pixels,
+            "thumbnail_for_document must not reuse a same-id decoder after relink"
+        );
+        assert!(
+            mean_channel(&red_thumbnail.pixels, 0) > mean_channel(&red_thumbnail.pixels, 2),
+            "red relink candidate should render red content"
+        );
+        assert!(
+            mean_channel(&blue_thumbnail.pixels, 2) > mean_channel(&blue_thumbnail.pixels, 0),
+            "blue relink candidate should render blue content"
         );
     }
 

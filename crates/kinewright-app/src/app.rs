@@ -12,7 +12,7 @@ use kinewright_core::{
     MediaAsset, MediaError, MediaEvent, Operation, Playback, PlaybackState, TimeCode, Track,
     TrackId, TrackKind,
 };
-use kinewright_media::{FfmpegMediaEngine, GpuContext};
+use kinewright_media::{FfmpegMediaEngine, GpuContext, compositor_required_limits};
 
 use crate::{
     error_ui::ErrorLog,
@@ -1223,6 +1223,7 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
         Operation::SetAssetColorDescription { asset, .. } => {
             format!("Updated source color metadata for asset {asset}")
         }
+        Operation::SetColorContext { .. } => "Updated project color pipeline context".to_owned(),
         Operation::UpsertBin { bin } => format!("Saved bin {}", bin.name),
         Operation::RemoveBin { bin } => format!("Removed bin {bin}"),
         Operation::SetAssetBin { asset, bin } => bin.map_or_else(
@@ -1361,6 +1362,24 @@ fn window_icon() -> Option<egui::IconData> {
     })
 }
 
+fn native_wgpu_configuration() -> eframe::WgpuConfiguration {
+    let mut configuration = eframe::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut configuration.wgpu_setup {
+        // Kinewright's native render contract is Vulkan on Linux, DX12 on
+        // Windows, and Metal on macOS. eframe otherwise also considers GL and
+        // requests WebGL2-compatible device limits there, which expose no
+        // fragment-stage storage buffers and cannot run the ordered primary
+        // correction shader.
+        setup.instance_descriptor.backends = eframe::wgpu::Backends::PRIMARY;
+        setup.device_descriptor = Arc::new(|_| eframe::wgpu::DeviceDescriptor {
+            label: Some("Kinewright shared native device"),
+            required_limits: compositor_required_limits(eframe::wgpu::Limits::default()),
+            ..Default::default()
+        });
+    }
+    configuration
+}
+
 pub(crate) fn run() -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([size::WINDOW_WIDTH, size::WINDOW_HEIGHT])
@@ -1373,6 +1392,7 @@ pub(crate) fn run() -> eframe::Result {
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             viewport,
+            wgpu_options: native_wgpu_configuration(),
             ..Default::default()
         },
         Box::new(move |creation_context| {
@@ -1382,7 +1402,11 @@ pub(crate) fn run() -> eframe::Result {
                 .wgpu_render_state
                 .as_ref()
                 .expect("the Kinewright app requires eframe's wgpu renderer");
-            let gpu = GpuContext::new(render_state.device.clone(), render_state.queue.clone());
+            let gpu = GpuContext::new_with_adapter_info(
+                render_state.device.clone(),
+                render_state.queue.clone(),
+                render_state.adapter.get_info(),
+            );
             let media = Arc::new(
                 FfmpegMediaEngine::new_with_gpu(gpu).expect("FFmpeg media engine must initialize"),
             );
@@ -1391,4 +1415,25 @@ pub(crate) fn run() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn native_renderer_excludes_the_unsupported_gl_backend() {
+        let configuration = super::native_wgpu_configuration();
+        let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = configuration.wgpu_setup else {
+            panic!("native app must create its configured wgpu instance");
+        };
+        assert_eq!(
+            setup.instance_descriptor.backends,
+            eframe::wgpu::Backends::PRIMARY
+        );
+        assert!(
+            !setup
+                .instance_descriptor
+                .backends
+                .contains(eframe::wgpu::Backends::GL)
+        );
+    }
 }

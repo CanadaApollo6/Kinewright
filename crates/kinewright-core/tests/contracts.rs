@@ -7,13 +7,14 @@ use std::{
 
 use kinewright_core::{
     AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, Clip, ClipContent, ClipId,
-    ColorBitDepth, ColorContext, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
-    ColorRange, ColorTransfer, ColorWhitePoint, Command, Core, Document, Effect, EffectId, Event,
-    FreezeFrame, JournalCommand, Keyframe, KeyframeInterpolation, LinkId, Marker, MarkerId,
-    MediaAsset, MediaBin, MediaKind, MediaSourceFingerprint, OpError, Operation, ParamValue,
-    Rational, RelinkCandidate, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId,
-    SyncGroupMember, TRANSITION_DESCRIPTORS, ThreePointMode, TimeCode, Title, TitlePosition, Track,
-    TrackId, TrackKind, Transition, transition_descriptor,
+    ColorBitDepth, ColorContext, ColorDescription, ColorMatrix, ColorPipelineState, ColorPrimaries,
+    ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Command, Core, Document, Effect,
+    EffectId, EffectUniform, Event, FreezeFrame, JournalCommand, Keyframe, KeyframeInterpolation,
+    LinkId, Marker, MarkerId, MediaAsset, MediaBin, MediaKind, MediaSourceFingerprint, OpError,
+    Operation, ParamValue, Rational, RelinkCandidate, SourceSelect, StringOut, StringOutId,
+    SyncGroup, SyncGroupId, SyncGroupMember, TRANSITION_DESCRIPTORS, ThreePointMode, TimeCode,
+    Title, TitlePosition, Track, TrackId, TrackKind, Transition, effect_compatibility_stage,
+    effect_descriptor, is_legacy_display_effect, transition_descriptor,
 };
 use proptest::prelude::*;
 use schemars::schema_for;
@@ -178,6 +179,9 @@ fn document_and_every_operation_variant_round_trip_through_json() {
         Operation::SetAssetColorDescription {
             asset: AssetId(1),
             color_description: user_color_override(),
+        },
+        Operation::SetColorContext {
+            color_context: ColorContext::sdr_rec709(),
         },
         Operation::UpsertBin {
             bin: MediaBin {
@@ -840,12 +844,15 @@ fn relink_operation_journals_replays_and_undoes_redoes_without_filesystem_access
 fn document_defaults_to_distinct_sdr_rec709_colour_contexts() {
     let context = ColorContext::default();
     assert_eq!(context, ColorContext::sdr_rec709());
+    assert_eq!(context.pipeline_state, ColorPipelineState::ManagedSdrV1);
     assert_eq!(context.working.primaries, ColorPrimaries::Bt709);
-    assert_eq!(context.working.transfer, ColorTransfer::Bt709);
+    assert_eq!(context.working.transfer, ColorTransfer::Linear);
     assert_eq!(context.working.matrix, ColorMatrix::Rgb);
     assert_eq!(context.working.range, ColorRange::Full);
     assert_eq!(context.working.white_point, ColorWhitePoint::D65);
-    assert_eq!(context.working.bit_depth, ColorBitDepth::Eight);
+    assert_eq!(context.working.bit_depth, ColorBitDepth::Float16);
+    assert_eq!(context.monitoring.transfer, ColorTransfer::Bt709);
+    assert_eq!(context.monitoring.bit_depth, ColorBitDepth::Float16);
     assert_eq!(context.monitoring.matrix, ColorMatrix::Rgb);
     assert_eq!(context.monitoring.range, ColorRange::Full);
     assert_eq!(context.delivery.matrix, ColorMatrix::Bt709);
@@ -897,6 +904,7 @@ fn colour_wire_schemas_match_forward_compatible_serialization() {
 
     let operation_schema = serde_json::to_string(&schema_for!(Operation)).unwrap();
     assert!(operation_schema.contains("SetAssetColorDescription"));
+    assert!(operation_schema.contains("SetColorContext"));
 }
 
 #[test]
@@ -926,6 +934,66 @@ fn asset_colour_override_is_typed_atomic_and_undoable_data() {
         serde_json::from_str::<Operation>(&encoded).unwrap(),
         operation
     );
+}
+
+#[test]
+fn project_colour_context_reset_is_typed_journaled_undoable_and_redoable() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut initial = empty_timeline(fps);
+    initial.color_context.pipeline_state = ColorPipelineState::Legacy;
+    initial.color_context.working.bit_depth = ColorBitDepth::Eight;
+    initial.color_context.monitoring.transfer = ColorTransfer::Bt1886;
+    initial.validate().unwrap();
+    let target = ColorContext::sdr_rec709();
+    let operation = Operation::SetColorContext {
+        color_context: target.clone(),
+    };
+    let core = Core::spawn(initial.clone()).unwrap();
+
+    let Event::DocumentChanged {
+        doc: changed,
+        journal_command: Some(JournalCommand::Do(actual)),
+        ..
+    } = core.request(Command::Do(operation.clone())).unwrap()
+    else {
+        panic!("colour context reset should be journaled");
+    };
+    assert_eq!(actual, operation);
+    assert_eq!(changed.color_context, target);
+
+    let Event::DocumentChanged { doc: undone, .. } = core.request(Command::Undo).unwrap() else {
+        panic!("colour context reset should be undoable");
+    };
+    assert_eq!(&undone.color_context, &initial.color_context);
+
+    let Event::DocumentChanged { doc: redone, .. } = core.request(Command::Redo).unwrap() else {
+        panic!("colour context reset should be redoable");
+    };
+    assert_eq!(&redone.color_context, &target);
+
+    let encoded = serde_json::to_string(&operation).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Operation>(&encoded).unwrap(),
+        operation
+    );
+}
+
+#[test]
+fn project_colour_context_operation_rejects_invalid_confidence_atomically() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    let before = document.clone();
+    let mut invalid = ColorContext::sdr_rec709();
+    invalid.monitoring.confidence_basis_points = 10_001;
+
+    let error = Operation::SetColorContext {
+        color_context: invalid,
+    }
+    .apply(&mut document)
+    .unwrap_err();
+
+    assert_eq!(error, OpError::ColorConfidenceOutOfRange { actual: 10_001 });
+    assert_eq!(document, before);
 }
 
 #[test]
@@ -2017,6 +2085,444 @@ fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
         .apply(&mut doc),
         Err(OpError::UnknownEffect("blur".to_owned()))
     );
+}
+
+#[test]
+fn primary_correction_descriptor_matches_cc1_contract() {
+    let descriptor = effect_descriptor("primary_correction").expect("CC1 descriptor");
+    let expected = [
+        ("exposure_milli_stops", -5_000, 5_000, 0),
+        ("temperature_percent", -100, 100, 0),
+        ("tint_percent", -100, 100, 0),
+        ("contrast_percent", -100, 100, 0),
+        ("contrast_pivot_basis_points", 0, 10_000, 5_000),
+        ("blacks_percent", -100, 100, 0),
+        ("shadows_percent", -100, 100, 0),
+        ("highlights_percent", -100, 100, 0),
+        ("whites_percent", -100, 100, 0),
+        ("saturation_percent", -100, 100, 0),
+    ];
+
+    assert_eq!(descriptor.parameters.len(), expected.len());
+    for (parameter, (name, min, max, neutral)) in descriptor.parameters.iter().zip(expected) {
+        assert_eq!(
+            (
+                parameter.name,
+                parameter.min,
+                parameter.max,
+                parameter.neutral
+            ),
+            (name, min, max, neutral)
+        );
+    }
+    assert_eq!(
+        descriptor
+            .parameter("exposure_milli_stops")
+            .unwrap()
+            .uniform,
+        EffectUniform::PrimaryExposure
+    );
+    assert_eq!(
+        descriptor.parameter("temperature_percent").unwrap().uniform,
+        EffectUniform::PrimaryTemperature
+    );
+    assert_eq!(
+        descriptor.parameter("tint_percent").unwrap().uniform,
+        EffectUniform::PrimaryTint
+    );
+    assert_eq!(
+        descriptor.parameter("contrast_percent").unwrap().uniform,
+        EffectUniform::PrimaryContrast
+    );
+    assert_eq!(
+        descriptor
+            .parameter("contrast_pivot_basis_points")
+            .unwrap()
+            .uniform,
+        EffectUniform::PrimaryPivot
+    );
+    assert_eq!(
+        descriptor.parameter("blacks_percent").unwrap().uniform,
+        EffectUniform::Blacks
+    );
+    assert_eq!(
+        descriptor.parameter("shadows_percent").unwrap().uniform,
+        EffectUniform::Shadows
+    );
+    assert_eq!(
+        descriptor.parameter("highlights_percent").unwrap().uniform,
+        EffectUniform::Highlights
+    );
+    assert_eq!(
+        descriptor.parameter("whites_percent").unwrap().uniform,
+        EffectUniform::Whites
+    );
+    assert_eq!(
+        descriptor.parameter("saturation_percent").unwrap().uniform,
+        EffectUniform::PrimarySaturation
+    );
+    assert_eq!(
+        effect_descriptor("color_grade")
+            .unwrap()
+            .parameter("exposure_milli_stops")
+            .unwrap()
+            .uniform,
+        EffectUniform::Exposure
+    );
+    assert_eq!(
+        effect_descriptor("color_grade")
+            .unwrap()
+            .parameter("temperature_percent")
+            .unwrap()
+            .uniform,
+        EffectUniform::Temperature
+    );
+    assert_eq!(
+        effect_descriptor("color_grade")
+            .unwrap()
+            .parameter("tint_percent")
+            .unwrap()
+            .uniform,
+        EffectUniform::Tint
+    );
+}
+
+#[test]
+fn legacy_display_effects_are_explicitly_classified_for_compatibility() {
+    for name in ["brightness", "contrast", "saturation"] {
+        assert!(is_legacy_display_effect(name));
+    }
+    for name in ["primary_correction", "color_grade", "transform"] {
+        assert!(!is_legacy_display_effect(name));
+    }
+    for name in ["look_lut", "cube_lut"] {
+        let stage = effect_compatibility_stage(name).expect("LUT stage must be reported");
+        assert_eq!(stage.issue_code(), "legacy_lut_stage");
+        assert!(stage.inspector_warning().contains("Post-primary"));
+    }
+    assert!(effect_compatibility_stage("primary_correction").is_none());
+}
+
+#[test]
+fn legacy_color_grade_add_is_canonical_before_history_journal_and_save() {
+    let initial = document_with_one_clip();
+    let submitted = Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            id: EffectId(7),
+            name: "color_grade".to_owned(),
+            parameters: BTreeMap::from([
+                (
+                    "exposure_milli_stops".to_owned(),
+                    ParamValue::Integer(-1_000),
+                ),
+                ("temperature_percent".to_owned(), ParamValue::Integer(12)),
+                ("tint_percent".to_owned(), ParamValue::Integer(-8)),
+            ]),
+            keyframes: BTreeMap::new(),
+        },
+    };
+    let mut directly_applied = initial.clone();
+    submitted.apply(&mut directly_applied).unwrap();
+    assert_eq!(
+        directly_applied.clip(ClipId(1)).unwrap().effects[0].name,
+        "primary_correction"
+    );
+    let core = Core::spawn(initial.clone()).unwrap();
+
+    let Event::DocumentChanged {
+        doc: canonical,
+        last_op: Some(last_op),
+        journal_command: Some(JournalCommand::Do(journaled)),
+        ..
+    } = core.request(Command::Do(submitted.clone())).unwrap()
+    else {
+        panic!("legacy AddEffect should be accepted through the canonical boundary");
+    };
+    assert!(matches!(
+        &submitted,
+        Operation::AddEffect { effect, .. } if effect.name == "color_grade"
+    ));
+    for operation in [&last_op, &journaled] {
+        assert!(matches!(
+            operation,
+            Operation::AddEffect { effect, .. } if effect.name == "primary_correction"
+        ));
+    }
+    assert_eq!(
+        canonical.clip(ClipId(1)).unwrap().effects[0].name,
+        "primary_correction"
+    );
+
+    let saved = serde_json::to_string(&*canonical).unwrap();
+    assert!(saved.contains("\"name\":\"primary_correction\""));
+    assert!(!saved.contains("\"name\":\"color_grade\""));
+    let reopened: Document = serde_json::from_str(&saved).unwrap();
+    assert_eq!(reopened, *canonical);
+
+    let journal_json = serde_json::to_string(&JournalCommand::Do(journaled.clone())).unwrap();
+    assert!(journal_json.contains("\"name\":\"primary_correction\""));
+    assert!(!journal_json.contains("\"name\":\"color_grade\""));
+    let replayed_command: JournalCommand = serde_json::from_str(&journal_json).unwrap();
+    let replay_core = Core::spawn(initial.clone()).unwrap();
+    let Event::DocumentChanged {
+        doc: replayed,
+        journal_command: Some(JournalCommand::Do(replayed_operation)),
+        ..
+    } = replay_core.request(replayed_command.into()).unwrap()
+    else {
+        panic!("canonical journal command should replay");
+    };
+    assert_eq!(replayed, canonical);
+    assert_eq!(replayed_operation, journaled);
+
+    let Event::DocumentChanged { doc: undone, .. } = core.request(Command::Undo).unwrap() else {
+        panic!("legacy AddEffect should undo");
+    };
+    assert_eq!(&*undone, &initial);
+    let Event::DocumentChanged { doc: redone, .. } = core.request(Command::Redo).unwrap() else {
+        panic!("legacy AddEffect should redo");
+    };
+    assert_eq!(redone, canonical);
+}
+
+#[test]
+fn legacy_color_grade_in_batch_is_canonical_before_plan_history() {
+    let initial = document_with_one_clip();
+    let operations = vec![
+        Operation::AddEffect {
+            clip: ClipId(1),
+            effect: Effect {
+                id: EffectId(7),
+                name: "color_grade".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::new(),
+            },
+        },
+        Operation::SetEffectParam {
+            clip: ClipId(1),
+            effect: EffectId(7),
+            name: "exposure_milli_stops".to_owned(),
+            value: ParamValue::Integer(500),
+        },
+    ];
+    let core = Core::spawn(initial).unwrap();
+
+    let Event::DocumentChanged {
+        doc,
+        journal_command: Some(JournalCommand::DoBatch(journaled)),
+        ..
+    } = core.request(Command::DoBatch(operations)).unwrap()
+    else {
+        panic!("legacy edit plan should apply atomically");
+    };
+
+    assert!(matches!(
+        &journaled[0],
+        Operation::AddEffect { effect, .. } if effect.name == "primary_correction"
+    ));
+    let effect = &doc.clip(ClipId(1)).unwrap().effects[0];
+    assert_eq!(effect.name, "primary_correction");
+    assert_eq!(
+        effect.parameters["exposure_milli_stops"],
+        ParamValue::Integer(500)
+    );
+    let Event::QueryResult(kinewright_core::QueryResult::AppliedOperations(applied)) = core
+        .request(Command::Query(kinewright_core::Query::AppliedOperations))
+        .unwrap()
+    else {
+        panic!("expected canonical applied-operation history");
+    };
+    assert_eq!(&*applied, journaled.as_slice());
+}
+
+#[test]
+fn legacy_serialized_color_grade_journal_replays_to_canonical_state() {
+    let initial = document_with_one_clip();
+    let legacy = JournalCommand::Do(Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            id: EffectId(7),
+            name: "color_grade".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        },
+    });
+    let legacy_json = serde_json::to_string(&legacy).unwrap();
+    assert!(legacy_json.contains("\"name\":\"color_grade\""));
+    let replay: JournalCommand = serde_json::from_str(&legacy_json).unwrap();
+    let core = Core::spawn(initial).unwrap();
+
+    let Event::DocumentChanged {
+        doc,
+        journal_command: Some(JournalCommand::Do(journaled)),
+        ..
+    } = core.request(replay.into()).unwrap()
+    else {
+        panic!("legacy serialized journal should replay");
+    };
+
+    assert_eq!(
+        doc.clip(ClipId(1)).unwrap().effects[0].name,
+        "primary_correction"
+    );
+    assert!(matches!(
+        journaled,
+        Operation::AddEffect { effect, .. } if effect.name == "primary_correction"
+    ));
+}
+
+#[test]
+fn primary_correction_operations_validate_bounds_and_keyframes() {
+    let descriptor = effect_descriptor("primary_correction").expect("CC1 descriptor");
+    let mut doc = document_with_one_clip();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            id: EffectId(7),
+            name: "primary_correction".to_owned(),
+            parameters: descriptor
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    (
+                        parameter.name.to_owned(),
+                        ParamValue::Integer(parameter.neutral),
+                    )
+                })
+                .collect(),
+            keyframes: BTreeMap::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    for parameter in descriptor.parameters {
+        for value in [parameter.min, parameter.max] {
+            Operation::SetEffectParam {
+                clip: ClipId(1),
+                effect: EffectId(7),
+                name: parameter.name.to_owned(),
+                value: ParamValue::Integer(value),
+            }
+            .apply(&mut doc)
+            .unwrap();
+        }
+
+        let before = doc.clone();
+        assert!(
+            Operation::SetEffectParam {
+                clip: ClipId(1),
+                effect: EffectId(7),
+                name: parameter.name.to_owned(),
+                value: ParamValue::Integer(parameter.min - 1),
+            }
+            .apply(&mut doc)
+            .is_err()
+        );
+        assert_eq!(doc, before);
+    }
+
+    let curve = AutomationCurve {
+        keyframes: vec![
+            Keyframe {
+                at: TimeCode::ZERO,
+                value: -100,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            Keyframe {
+                at: TimeCode(20),
+                value: 100,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ],
+    };
+    Operation::SetEffectKeyframes {
+        clip: ClipId(1),
+        effect: EffectId(7),
+        name: "shadows_percent".to_owned(),
+        curve: curve.clone(),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let effect = &doc.clip(ClipId(1)).unwrap().effects[0];
+    assert_eq!(effect.keyframes.get("shadows_percent"), Some(&curve));
+    assert_eq!(
+        effect.integer_parameter_at("shadows_percent", TimeCode(10)),
+        Some(0)
+    );
+
+    let before = doc.clone();
+    assert!(
+        Operation::SetEffectKeyframes {
+            clip: ClipId(1),
+            effect: EffectId(7),
+            name: "contrast_pivot_basis_points".to_owned(),
+            curve: AutomationCurve {
+                keyframes: vec![Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 10_001,
+                    interpolation: KeyframeInterpolation::Linear,
+                }],
+            },
+        }
+        .apply(&mut doc)
+        .is_err()
+    );
+    assert_eq!(doc, before);
+}
+
+#[test]
+fn primary_correction_batch_is_undoable_and_redoable() {
+    let initial = document_with_one_clip();
+    let core = Core::spawn(initial.clone()).unwrap();
+    let add = Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            id: EffectId(7),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        },
+    };
+    let Event::DocumentChanged { doc: added, .. } = core.request(Command::Do(add)).unwrap() else {
+        panic!("primary correction should be added");
+    };
+    let edits = vec![
+        Operation::SetEffectParam {
+            clip: ClipId(1),
+            effect: EffectId(7),
+            name: "exposure_milli_stops".to_owned(),
+            value: ParamValue::Integer(1_000),
+        },
+        Operation::SetEffectParam {
+            clip: ClipId(1),
+            effect: EffectId(7),
+            name: "contrast_pivot_basis_points".to_owned(),
+            value: ParamValue::Integer(4_500),
+        },
+        Operation::SetEffectParam {
+            clip: ClipId(1),
+            effect: EffectId(7),
+            name: "whites_percent".to_owned(),
+            value: ParamValue::Integer(25),
+        },
+    ];
+    let Event::DocumentChanged { doc: changed, .. } =
+        core.request(Command::DoBatch(edits)).unwrap()
+    else {
+        panic!("primary correction batch should be accepted");
+    };
+
+    let Event::DocumentChanged { doc: undone, .. } = core.request(Command::Undo).unwrap() else {
+        panic!("primary correction batch should be undoable");
+    };
+    assert_eq!(&*undone, &*added);
+    let Event::DocumentChanged { doc: redone, .. } = core.request(Command::Redo).unwrap() else {
+        panic!("primary correction batch should be redoable");
+    };
+    assert_eq!(&*redone, &*changed);
+    assert_ne!(&*redone, &initial);
 }
 
 #[test]

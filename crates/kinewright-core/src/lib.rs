@@ -33,7 +33,9 @@ pub use captions::{
 };
 pub use color::{
     COLOR_CONFIDENCE_MAX_BASIS_POINTS, ColorBitDepth, ColorContext, ColorDescription, ColorMatrix,
-    ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint,
+    ColorPipelineState, ColorPrimaries, ColorProvenance, ColorRange, ColorSourceError,
+    ColorSourceProfile, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint,
+    classify_source, classify_source_with_assumption,
 };
 pub use creator::{
     BeatMontageAnchorRepair, BeatMontageCadenceContract, BeatMontageCadenceSummary,
@@ -56,20 +58,22 @@ pub use delivery::{
 };
 pub use editorial::ThreePointMode;
 pub use effect::{
-    EFFECT_DESCRIPTORS, EffectDescriptor, EffectParameterDescriptor, EffectUniform,
-    effect_descriptor, is_audio_effect,
+    EFFECT_DESCRIPTORS, EffectCompatibilityStage, EffectDescriptor, EffectParameterDescriptor,
+    EffectUniform, LEGACY_DISPLAY_EFFECT_NAMES, POST_PRIMARY_LUT_EFFECT_NAMES,
+    effect_compatibility_stage, effect_descriptor, is_audio_effect, is_legacy_display_effect,
 };
 pub use journal::JournalCommand;
 pub use media::{
     Analysis, AnalysisJobStatus, AnalysisKind, AnalysisPhase, AssetBeats, AssetSceneChanges,
     AssetSilences, AssetTranscript, AudioLoudness, BeatMarker, BeatStatus, Export,
-    ExportCancellation, ExportProgress, ExportSettings, FrameTexture, MediaAvailabilityKind,
-    MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus,
-    MediaCacheInventory, MediaError, MediaEvent, Playback, PlaybackState, ProgressSink, RgbaImage,
-    SceneChange, SceneStatus, SilenceSpan, SilenceStatus, ThumbnailFrame, ThumbnailKey,
-    TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TranscriptStatus, TranscriptWord, VisualAssetResult, VisualRequestKind, WaveformData,
-    WaveformPeak,
+    ExportCancellation, ExportMediaPreflightIssue, ExportMediaPreflightReport, ExportProgress,
+    ExportSettings, FrameTexture, MediaAvailabilityKind, MediaAvailabilityStatus,
+    MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory,
+    MediaError, MediaEvent, MonitorProof, MonitorProofMetadata, MonitorProofRenderKind, Playback,
+    PlaybackState, ProgressSink, RgbaImage, SceneChange, SceneStatus, SilenceSpan, SilenceStatus,
+    ThumbnailFrame, ThumbnailKey, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan,
+    TimelineTranscriptWord, TranscriptStatus, TranscriptWord, VisualAssetResult, VisualRequestKind,
+    WaveformData, WaveformPeak, export_media_preflight,
 };
 pub use model::{
     AssetId, AudioBus, AudioBusId, AudioMix, BinId, Clip, ClipContent, ClipId, Document, Effect,

@@ -14,6 +14,7 @@ ab_glyph.workspace = true
 cpal.workspace = true
 crossbeam-channel.workspace = true
 ffmpeg-next.workspace = true
+half.workspace = true
 kinewright-core = { path = "../kinewright-core" }
 pollster.workspace = true
 reqwest.workspace = true
@@ -28,4 +29,3 @@ serde_json.workspace = true
 
 [lints]
 workspace = true
-

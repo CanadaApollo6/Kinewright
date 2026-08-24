@@ -6,14 +6,19 @@ use thiserror::Error;
 
 use crate::{
     AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, COLOR_CONFIDENCE_MAX_BASIS_POINTS,
-    CaptionPreset, Clip, ClipContent, ClipId, ColorDescription, ColorProvenance, Document, Effect,
-    EffectId, FreezeFrame, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset,
-    MediaBin, MediaSourceFingerprint, ParamValue, RelinkCandidate, StringOut, StringOutId,
-    SyncGroup, SyncGroupId, ThreePointMode, TimeCode, TimeMappingError, Title, TitleParameterKind,
-    TitlePosition, Track, TrackId, TrackKind, Transition, is_audio_effect,
+    CaptionPreset, Clip, ClipContent, ClipId, ColorContext, ColorDescription, ColorProvenance,
+    Document, Effect, EffectId, FreezeFrame, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId,
+    MediaAsset, MediaBin, MediaSourceFingerprint, ParamValue, RelinkCandidate, StringOut,
+    StringOutId, SyncGroup, SyncGroupId, ThreePointMode, TimeCode, TimeMappingError, Title,
+    TitleParameterKind, TitlePosition, Track, TrackId, TrackKind, Transition, is_audio_effect,
     map_source_range_to_project, title_parameter_descriptor,
 };
 
+// The project colour context is intentionally kept inline in the operation so
+// the generated schema exposes the complete atomic reset payload directly.
+// Its size is larger than most timeline edits, but boxing it would make the
+// public operation shape less inspectable and needlessly complicate serde.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Operation {
     AddAsset {
@@ -37,6 +42,13 @@ pub enum Operation {
     SetAssetColorDescription {
         asset: AssetId,
         color_description: ColorDescription,
+    },
+    /// Replace the project working, monitoring, and delivery colour context.
+    /// This is an ordinary atomic project edit so explicit resets remain
+    /// journaled, revision-gated, and undoable rather than being hidden load
+    /// side effects.
+    SetColorContext {
+        color_context: ColorContext,
     },
     UpsertBin {
         bin: MediaBin,
@@ -280,6 +292,13 @@ impl Operation {
     /// Returns an operation error without mutating `doc` when validation fails.
     pub fn apply(&self, doc: &mut Document) -> Result<(), OpError> {
         <Self as ApplyOp>::apply(self, doc)
+    }
+
+    /// Canonicalize compatibility aliases before history or journal capture.
+    pub(crate) fn canonicalize_legacy_effect_names(&mut self) {
+        if let Self::AddEffect { effect, .. } = self {
+            effect.canonicalize_legacy_name();
+        }
     }
 }
 
@@ -693,6 +712,9 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
             asset,
             color_description,
         } => set_asset_color_description(doc, *asset, color_description.clone()),
+        Operation::SetColorContext { color_context } => {
+            set_color_context(doc, color_context.clone())
+        }
         Operation::UpsertBin { bin } => {
             upsert_bin(doc, bin.clone());
             Ok(())
@@ -786,7 +808,11 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
         Operation::AddMarker { marker } => add_marker(doc, marker.clone()),
         Operation::RemoveMarker { marker } => remove_marker(doc, *marker),
         Operation::MoveMarker { marker, to } => move_marker(doc, *marker, *to),
-        Operation::AddEffect { clip, effect } => add_effect(doc, *clip, effect.clone()),
+        Operation::AddEffect { clip, effect } => {
+            let mut effect = effect.clone();
+            effect.canonicalize_legacy_name();
+            add_effect(doc, *clip, effect)
+        }
         Operation::RemoveEffect { clip, effect } => remove_effect(doc, *clip, *effect),
         Operation::SetEffectParam {
             clip,
@@ -973,6 +999,18 @@ fn set_asset_color_description(
         });
     }
     doc.media_pool[index].color_description = color_description;
+    Ok(())
+}
+
+fn set_color_context(doc: &mut Document, color_context: ColorContext) -> Result<(), OpError> {
+    for description in [
+        &color_context.working,
+        &color_context.monitoring,
+        &color_context.delivery,
+    ] {
+        validate_color_description(description)?;
+    }
+    doc.color_context = color_context;
     Ok(())
 }
 

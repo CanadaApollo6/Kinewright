@@ -24,7 +24,8 @@ cpal = "=0.18.1"
 crossbeam-channel = "=0.5.16"
 eframe = "=0.35.0"
 egui_extras = { version = "=0.35.0", default-features = false, features = ["svg"] }
-ffmpeg-next = { version = "=8.0.0", default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"] }
+half = "=2.7.1"
+ffmpeg-next = { version = "=8.0.0", default-features = false, features = ["codec", "filter", "format", "software-resampling", "software-scaling"] }
 image = { version = "=0.25.9", default-features = false, features = ["png"] }
 proptest = "=1.11.0"
 pollster = "=0.4.0"

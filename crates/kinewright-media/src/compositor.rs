@@ -7,31 +7,106 @@ use std::{
     time::SystemTime,
 };
 
+use half::f16;
 use kinewright_core::{
-    Effect, EffectParameterDescriptor, EffectUniform, FrameTexture, MediaError, ParamValue,
-    effect_descriptor,
+    Effect, EffectParameterDescriptor, EffectUniform, FrameTexture, MediaError,
+    MonitorProofMetadata, MonitorProofRenderKind, ParamValue, effect_descriptor,
 };
 
 use crate::{
+    color_pipeline::{PrimaryCorrection, encode_monitor_rgba8},
+    frame::WorkingFrame,
     lut::{CubeLut, parse_cube_lut},
     timeline::TransitionRenderParams,
 };
 
-const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const UNIFORM_FLOATS: usize = 44;
+const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const UNIFORM_FLOATS: usize = 48;
 const UNIFORM_SIZE: u64 = UNIFORM_FLOATS as u64 * 4;
 const UNIFORM_BYTES: usize = UNIFORM_FLOATS * 4;
+const PRIMARY_HEADER_BYTES: usize = 16;
+const PRIMARY_NODE_BYTES: usize = 48;
+
+/// The compositor's primary-correction ABI uses one read-only storage buffer
+/// in the fragment stage.  Keep this requirement next to the bind-group
+/// layout so native device setup cannot accidentally negotiate it away.
+pub const COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE: u32 = 1;
+
+/// The smallest primary buffer contains its 16-byte header and one 48-byte
+/// neutral node.  A device must be able to bind at least that much storage.
+pub const COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE: u64 =
+    (PRIMARY_HEADER_BYTES + PRIMARY_NODE_BYTES) as u64;
+
+/// Add the minimum limits required by the production compositor to a device
+/// request. This deliberately preserves stronger caller requirements while
+/// making the shader ABI explicit for both headless and windowed devices.
+#[must_use]
+pub fn compositor_required_limits(mut limits: wgpu::Limits) -> wgpu::Limits {
+    limits.max_storage_buffers_per_shader_stage = limits
+        .max_storage_buffers_per_shader_stage
+        .max(COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE);
+    limits.max_storage_buffer_binding_size = limits
+        .max_storage_buffer_binding_size
+        .max(COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE);
+    limits
+}
 
 #[derive(Clone)]
 pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    provenance: GpuProvenance,
+}
+
+#[derive(Clone)]
+struct GpuProvenance {
+    backend: String,
+    adapter: String,
+    software_fallback: bool,
+    gpu_claim: bool,
 }
 
 impl GpuContext {
     #[must_use]
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
-        Self { device, queue }
+        Self {
+            device,
+            queue,
+            provenance: GpuProvenance {
+                backend: "unknown".to_owned(),
+                adapter: "unknown".to_owned(),
+                software_fallback: false,
+                // A context built without adapter metadata cannot make a GPU
+                // claim in a proof manifest.
+                gpu_claim: false,
+            },
+        }
+    }
+
+    /// Build a context from an already-created adapter/device pair.
+    ///
+    /// The native app shares eframe's wgpu device with the media renderer.
+    /// Keeping the adapter info alongside that device is important because a
+    /// monitor proof must identify the backend that actually rendered it.
+    /// Callers that do not have adapter metadata should use [`Self::new`],
+    /// which deliberately makes no GPU claim.
+    #[must_use]
+    pub fn new_with_adapter_info(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        info: wgpu::AdapterInfo,
+    ) -> Self {
+        let software_fallback = info.device_type == wgpu::DeviceType::Cpu;
+        Self {
+            device,
+            queue,
+            provenance: GpuProvenance {
+                backend: info.backend.to_string(),
+                adapter: info.name,
+                software_fallback,
+                gpu_claim: !software_fallback,
+            },
+        }
     }
 
     /// Acquire a headless adapter and device for rendering.
@@ -50,22 +125,87 @@ impl GpuContext {
         .map_err(|error| {
             MediaError::Backend(format!("could not acquire a wgpu adapter: {error}"))
         })?;
+        let info = adapter.get_info();
         let descriptor = wgpu::DeviceDescriptor {
             label: Some("Kinewright compositor device"),
+            required_limits: compositor_required_limits(wgpu::Limits::default()),
             ..Default::default()
         };
         let (device, queue) =
             pollster::block_on(adapter.request_device(&descriptor)).map_err(|error| {
                 MediaError::Backend(format!("could not create a wgpu device: {error}"))
             })?;
-        Ok(Self { device, queue })
+        let mut context = Self::new_with_adapter_info(device, queue, info);
+        if force_fallback_adapter {
+            context.provenance.software_fallback = true;
+            context.provenance.gpu_claim = false;
+        }
+        Ok(context)
+    }
+
+    pub(crate) fn monitor_proof_metadata(&self) -> MonitorProofMetadata {
+        MonitorProofMetadata {
+            render_kind: MonitorProofRenderKind::GpuPreview,
+            backend: self.provenance.backend.clone(),
+            adapter: self.provenance.adapter.clone(),
+            software_fallback: self.provenance.software_fallback,
+            gpu_claim: self.provenance.gpu_claim,
+            full_resolution: true,
+        }
     }
 }
 
-pub struct CompositorLayer<'a> {
-    pub frame: &'a FrameTexture,
+pub struct CompositorLayer<'a, F = FrameTexture> {
+    pub frame: &'a F,
     pub effects: &'a [Effect],
     pub transition: TransitionRenderParams,
+}
+
+#[doc(hidden)]
+pub trait CompositorInput {
+    const FORMAT: wgpu::TextureFormat;
+    const BYTES_PER_PIXEL: u32;
+    const LINEAR: bool;
+
+    fn width(&self) -> u32;
+    fn height(&self) -> u32;
+    fn upload_bytes(&self) -> Vec<u8>;
+}
+
+impl CompositorInput for FrameTexture {
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+    const BYTES_PER_PIXEL: u32 = 4;
+    const LINEAR: bool = false;
+
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
+    }
+
+    fn upload_bytes(&self) -> Vec<u8> {
+        (*self.rgba).clone()
+    }
+}
+
+impl CompositorInput for WorkingFrame {
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+    const BYTES_PER_PIXEL: u32 = 8;
+    const LINEAR: bool = true;
+
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
+    }
+
+    fn upload_bytes(&self) -> Vec<u8> {
+        self.upload_bytes()
+    }
 }
 
 pub struct Compositor {
@@ -80,6 +220,7 @@ struct LayerResources {
     _texture: wgpu::Texture,
     _lut_texture: wgpu::Texture,
     _uniform: wgpu::Buffer,
+    _primary: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
 
@@ -133,6 +274,8 @@ struct LayerParams {
     external_domain_max_r: f32,
     external_domain_max_g: f32,
     external_domain_max_b: f32,
+    input_linear: f32,
+    legacy_stage_active: f32,
 }
 
 impl Default for LayerParams {
@@ -180,6 +323,8 @@ impl Default for LayerParams {
             external_domain_max_r: 1.0,
             external_domain_max_g: 1.0,
             external_domain_max_b: 1.0,
+            input_linear: 0.0,
+            legacy_stage_active: 0.0,
         }
     }
 }
@@ -225,6 +370,16 @@ impl Compositor {
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D3,
                         multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
@@ -299,10 +454,10 @@ impl Compositor {
     /// # Errors
     ///
     /// Returns a media error for invalid dimensions or a GPU mapping failure.
-    pub fn render(
+    pub fn render<F: CompositorInput>(
         &self,
         resolution: (u32, u32),
-        layers: &[CompositorLayer<'_>],
+        layers: &[CompositorLayer<'_, F>],
     ) -> Result<FrameTexture, MediaError> {
         let (width, height) = resolution;
         if width == 0 || height == 0 {
@@ -362,12 +517,16 @@ impl Compositor {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn layer_resources(&self, layer: &CompositorLayer<'_>) -> Result<LayerResources, MediaError> {
-        let expected_len = usize::try_from(layer.frame.width)
+    fn layer_resources<F: CompositorInput>(
+        &self,
+        layer: &CompositorLayer<'_, F>,
+    ) -> Result<LayerResources, MediaError> {
+        let expected_len = usize::try_from(layer.frame.width())
             .unwrap_or_default()
-            .saturating_mul(usize::try_from(layer.frame.height).unwrap_or_default())
-            .saturating_mul(4);
-        if layer.frame.rgba.len() != expected_len || expected_len == 0 {
+            .saturating_mul(usize::try_from(layer.frame.height()).unwrap_or_default())
+            .saturating_mul(usize::try_from(F::BYTES_PER_PIXEL).unwrap_or_default());
+        let upload_bytes = layer.frame.upload_bytes();
+        if upload_bytes.len() != expected_len || expected_len == 0 {
             return Err(MediaError::Backend(
                 "invalid compositor input frame".to_owned(),
             ));
@@ -375,14 +534,14 @@ impl Compositor {
         let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Kinewright compositor source"),
             size: wgpu::Extent3d {
-                width: layer.frame.width,
-                height: layer.frame.height,
+                width: layer.frame.width(),
+                height: layer.frame.height(),
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: OUTPUT_FORMAT,
+            format: F::FORMAT,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -393,15 +552,15 @@ impl Compositor {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            layer.frame.rgba.as_slice(),
+            &upload_bytes,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(layer.frame.width.saturating_mul(4)),
-                rows_per_image: Some(layer.frame.height),
+                bytes_per_row: Some(layer.frame.width().saturating_mul(F::BYTES_PER_PIXEL)),
+                rows_per_image: Some(layer.frame.height()),
             },
             wgpu::Extent3d {
-                width: layer.frame.width,
-                height: layer.frame.height,
+                width: layer.frame.width(),
+                height: layer.frame.height(),
                 depth_or_array_layers: 1,
             },
         );
@@ -452,6 +611,20 @@ impl Compositor {
         params.external_domain_max_r = cube_lut.domain_max[0];
         params.external_domain_max_g = cube_lut.domain_max[1];
         params.external_domain_max_b = cube_lut.domain_max[2];
+        params.input_linear = f32::from(F::LINEAR);
+        params.legacy_stage_active = if legacy_stage_active(layer.effects) {
+            1.0
+        } else {
+            0.0
+        };
+        let primary_bytes = primary_buffer_bytes(layer.effects)?;
+        let primary = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Kinewright primary correction nodes"),
+            size: u64::try_from(primary_bytes.len()).unwrap_or(u64::MAX),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.gpu.queue.write_buffer(&primary, 0, &primary_bytes);
         let uniform = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Kinewright compositor layer parameters"),
             size: UNIFORM_SIZE,
@@ -484,12 +657,17 @@ impl Compositor {
                         binding: 3,
                         resource: wgpu::BindingResource::TextureView(&lut_view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: primary.as_entire_binding(),
+                    },
                 ],
             });
         Ok(LayerResources {
             _texture: texture,
             _lut_texture: lut_texture,
             _uniform: uniform,
+            _primary: primary,
             bind_group,
         })
     }
@@ -569,7 +747,7 @@ impl Compositor {
         output: &wgpu::Texture,
         mut encoder: wgpu::CommandEncoder,
     ) -> Result<FrameTexture, MediaError> {
-        let row_bytes = width.saturating_mul(4);
+        let row_bytes = width.saturating_mul(8);
         let padded_row_bytes = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let buffer_size = u64::from(padded_row_bytes).saturating_mul(u64::from(height));
@@ -616,14 +794,23 @@ impl Compositor {
             .map_err(|error| MediaError::Backend(format!("wgpu readback map failed: {error}")))?;
         let mapped = slice.get_mapped_range();
         let mut rgba = Vec::with_capacity(
-            usize::try_from(row_bytes)
+            usize::try_from(width)
                 .unwrap_or_default()
-                .saturating_mul(usize::try_from(height).unwrap_or_default()),
+                .saturating_mul(usize::try_from(height).unwrap_or_default())
+                .saturating_mul(4),
         );
         for row in 0..usize::try_from(height).unwrap_or_default() {
             let start = row.saturating_mul(usize::try_from(padded_row_bytes).unwrap_or_default());
             let end = start.saturating_add(usize::try_from(row_bytes).unwrap_or_default());
-            rgba.extend_from_slice(&mapped[start..end]);
+            for pixel in mapped[start..end].chunks_exact(8) {
+                let linear = [
+                    f16::from_le_bytes([pixel[0], pixel[1]]).to_f32(),
+                    f16::from_le_bytes([pixel[2], pixel[3]]).to_f32(),
+                    f16::from_le_bytes([pixel[4], pixel[5]]).to_f32(),
+                    f16::from_le_bytes([pixel[6], pixel[7]]).to_f32(),
+                ];
+                rgba.extend_from_slice(&encode_monitor_rgba8(linear));
+            }
         }
         drop(mapped);
         buffer.unmap();
@@ -632,6 +819,151 @@ impl Compositor {
             height,
             rgba: Arc::new(rgba),
         })
+    }
+
+    /// Render and read back the production working surface for CC1 evidence.
+    ///
+    /// This is deliberately test-only: the public compositor contract ends at
+    /// the monitor `FrameTexture`, while the fixture gate needs to compare the
+    /// actual `Rgba16Float` render target against the canonical CPU reference.
+    #[cfg(test)]
+    pub(crate) fn render_working(
+        &self,
+        resolution: (u32, u32),
+        layers: &[CompositorLayer<'_, WorkingFrame>],
+    ) -> Result<Vec<f32>, MediaError> {
+        let (width, height) = resolution;
+        if width == 0 || height == 0 {
+            return Err(MediaError::Backend(
+                "compositor output resolution must be non-zero".to_owned(),
+            ));
+        }
+        let output = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Kinewright compositor working evidence output"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: OUTPUT_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let resources = layers
+            .iter()
+            .map(|layer| self.layer_resources(layer))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Kinewright compositor working evidence commands"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Kinewright compositor working evidence pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &output_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            for resource in &resources {
+                pass.set_bind_group(0, &resource.bind_group, &[]);
+                pass.draw(0..4, 0..1);
+            }
+        }
+        self.readback_working(width, height, &output, encoder)
+    }
+
+    #[cfg(test)]
+    fn readback_working(
+        &self,
+        width: u32,
+        height: u32,
+        output: &wgpu::Texture,
+        mut encoder: wgpu::CommandEncoder,
+    ) -> Result<Vec<f32>, MediaError> {
+        let row_bytes = width.saturating_mul(8);
+        let padded_row_bytes = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer_size = u64::from(padded_row_bytes).saturating_mul(u64::from(height));
+        let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Kinewright compositor working evidence readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: output,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row_bytes),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.gpu.queue.submit([encoder.finish()]);
+        let slice = buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        self.gpu
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| MediaError::Backend(format!("wgpu readback poll failed: {error}")))?;
+        receiver
+            .recv()
+            .map_err(|_| MediaError::Backend("wgpu readback callback stopped".to_owned()))?
+            .map_err(|error| MediaError::Backend(format!("wgpu readback map failed: {error}")))?;
+        let mapped = slice.get_mapped_range();
+        let mut values = Vec::with_capacity(
+            usize::try_from(width)
+                .unwrap_or_default()
+                .saturating_mul(usize::try_from(height).unwrap_or_default())
+                .saturating_mul(4),
+        );
+        for row in 0..usize::try_from(height).unwrap_or_default() {
+            let start = row.saturating_mul(usize::try_from(padded_row_bytes).unwrap_or_default());
+            let end = start.saturating_add(usize::try_from(row_bytes).unwrap_or_default());
+            for pixel in mapped[start..end].chunks_exact(8) {
+                values.extend([
+                    f16::from_le_bytes([pixel[0], pixel[1]]).to_f32(),
+                    f16::from_le_bytes([pixel[2], pixel[3]]).to_f32(),
+                    f16::from_le_bytes([pixel[4], pixel[5]]).to_f32(),
+                    f16::from_le_bytes([pixel[6], pixel[7]]).to_f32(),
+                ]);
+            }
+        }
+        drop(mapped);
+        buffer.unmap();
+        Ok(values)
     }
 }
 
@@ -680,6 +1012,10 @@ impl LayerParams {
             self.external_domain_max_r,
             self.external_domain_max_g,
             self.external_domain_max_b,
+            self.input_linear,
+            self.legacy_stage_active,
+            0.0,
+            0.0,
         ];
         let mut bytes = [0_u8; UNIFORM_BYTES];
         for (index, value) in values.into_iter().enumerate() {
@@ -690,6 +1026,75 @@ impl LayerParams {
     }
 }
 
+/// Serialize primary nodes into a storage buffer without collapsing adjacent
+/// nodes. The order in the document's effect vector is the execution order in
+/// the shader. A single neutral node keeps the storage binding valid when no
+/// primary effect is present.
+#[allow(clippy::cast_precision_loss)]
+fn primary_buffer_bytes(effects: &[Effect]) -> Result<Vec<u8>, MediaError> {
+    let mut corrections = Vec::new();
+    for effect in effects
+        .iter()
+        .filter(|effect| effect.name == "primary_correction")
+    {
+        corrections.push(PrimaryCorrection::from_effect(effect).map_err(|error| {
+            MediaError::Backend(format!("managed primary correction failed: {error}"))
+        })?);
+    }
+    let count = u32::try_from(corrections.len()).map_err(|_| {
+        MediaError::Backend("too many primary correction nodes for one compositor layer".to_owned())
+    })?;
+    // `PrimaryBuffer` is a storage struct with a 16-byte `vec4<u32>` header
+    // followed by tightly packed `PrimaryNode` values.  Each node contains
+    // three `vec4<f32>` values, so its WGSL array stride is 48 bytes.
+    let node_count = corrections.len().max(1);
+    let mut bytes = vec![
+        0_u8;
+        PRIMARY_HEADER_BYTES
+            .saturating_add(node_count.saturating_mul(PRIMARY_NODE_BYTES))
+    ];
+    bytes[0..4].copy_from_slice(&count.to_le_bytes());
+    for (node_index, correction) in corrections.iter().enumerate() {
+        let values = [
+            correction.exposure_milli_stops as f32 / 1_000.0,
+            correction.temperature_percent as f32 / 100.0,
+            correction.tint_percent as f32 / 100.0,
+            correction.contrast_percent as f32 / 100.0,
+            correction.contrast_pivot_basis_points as f32 / 10_000.0,
+            correction.blacks_percent as f32 / 100.0,
+            correction.shadows_percent as f32 / 100.0,
+            correction.highlights_percent as f32 / 100.0,
+            correction.whites_percent as f32 / 100.0,
+            correction.saturation_percent as f32 / 100.0,
+            0.0,
+            0.0,
+        ];
+        let offset =
+            PRIMARY_HEADER_BYTES.saturating_add(node_index.saturating_mul(PRIMARY_NODE_BYTES));
+        for (index, value) in values.into_iter().enumerate() {
+            let start = offset.saturating_add(index.saturating_mul(4));
+            bytes[start..start + 4].copy_from_slice(&value.to_ne_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
+fn legacy_stage_active(effects: &[Effect]) -> bool {
+    effects.iter().any(|effect| {
+        matches!(
+            effect.name.as_str(),
+            "color_grade"
+                | "brightness"
+                | "contrast"
+                | "saturation"
+                | "look_lut"
+                | "cube_lut"
+                | "chroma_key"
+        )
+    })
+}
+
+#[allow(clippy::too_many_lines)]
 fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerParams {
     let mut params = LayerParams {
         opacity: transition.alpha.clamp(0.0, 1.0),
@@ -731,6 +1136,33 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                 EffectUniform::Exposure => params.exposure += value / 1_000.0,
                 EffectUniform::Temperature => params.temperature += value / 100.0,
                 EffectUniform::Tint => params.tint += value / 100.0,
+                // CC1 primary nodes are serialized separately and executed
+                // in order by the shader's storage-buffer loop. They must
+                // never be flattened into the legacy display controls.
+                EffectUniform::PrimaryExposure
+                | EffectUniform::PrimaryTemperature
+                | EffectUniform::PrimaryTint
+                | EffectUniform::PrimaryContrast
+                | EffectUniform::PrimaryPivot
+                | EffectUniform::Blacks
+                | EffectUniform::Shadows
+                | EffectUniform::Highlights
+                | EffectUniform::Whites
+                | EffectUniform::PrimarySaturation
+                | EffectUniform::AudioGain
+                | EffectUniform::EqLowGain
+                | EffectUniform::EqMidGain
+                | EffectUniform::EqHighGain
+                | EffectUniform::CompressorThreshold
+                | EffectUniform::CompressorRatio
+                | EffectUniform::CompressorAttack
+                | EffectUniform::CompressorRelease
+                | EffectUniform::CompressorMakeup
+                | EffectUniform::LimiterCeiling
+                | EffectUniform::DuckThreshold
+                | EffectUniform::DuckReduction
+                | EffectUniform::DuckAttack
+                | EffectUniform::DuckRelease => {}
                 EffectUniform::LutPreset => params.lut_preset = value,
                 EffectUniform::LutIntensity => params.lut_intensity = value / 100.0,
                 EffectUniform::ExternalLutIntensity => {
@@ -749,20 +1181,6 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                 EffectUniform::KeyThreshold => params.key_threshold = value / 100.0,
                 EffectUniform::KeySoftness => params.key_softness = value / 200.0,
                 EffectUniform::KeySpill => params.key_spill = value / 100.0,
-                EffectUniform::AudioGain
-                | EffectUniform::EqLowGain
-                | EffectUniform::EqMidGain
-                | EffectUniform::EqHighGain
-                | EffectUniform::CompressorThreshold
-                | EffectUniform::CompressorRatio
-                | EffectUniform::CompressorAttack
-                | EffectUniform::CompressorRelease
-                | EffectUniform::CompressorMakeup
-                | EffectUniform::LimiterCeiling
-                | EffectUniform::DuckThreshold
-                | EffectUniform::DuckReduction
-                | EffectUniform::DuckAttack
-                | EffectUniform::DuckRelease => {}
             }
         }
     }
@@ -825,6 +1243,34 @@ mod tests {
         Some(Compositor::new(gpu))
     }
 
+    #[test]
+    fn compositor_limit_contract_requires_its_fragment_storage_buffer() {
+        let limits = compositor_required_limits(wgpu::Limits::downlevel_webgl2_defaults());
+        assert_eq!(
+            limits.max_storage_buffers_per_shader_stage,
+            COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE
+        );
+        assert_eq!(
+            limits.max_storage_buffer_binding_size,
+            COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE
+        );
+    }
+
+    #[test]
+    fn headless_context_preserves_adapter_provenance() {
+        let Some(gpu) = GpuContext::headless(true)
+            .or_else(|_| GpuContext::headless(false))
+            .ok()
+        else {
+            eprintln!("skipped: no usable wgpu adapter in this environment");
+            return;
+        };
+        let metadata = gpu.monitor_proof_metadata();
+        assert_ne!(metadata.backend, "unknown");
+        assert_ne!(metadata.adapter, "unknown");
+        assert!(!metadata.gpu_claim || !metadata.software_fallback);
+    }
+
     fn assert_pixel_close(actual: &[u8], expected: [u8; 4], tolerance: u8) {
         for (channel, expected) in actual.iter().zip(expected) {
             assert!(
@@ -853,6 +1299,11 @@ mod tests {
                 .collect(),
             keyframes: BTreeMap::new(),
         }
+    }
+
+    fn primary_f32(bytes: &[u8], offset: usize) -> f32 {
+        let end = offset.saturating_add(std::mem::size_of::<f32>());
+        f32::from_ne_bytes(bytes[offset..end].try_into().expect("f32-aligned bytes"))
     }
 
     fn crop(id: u64, left: i64, right: i64, top: i64, bottom: i64) -> Effect {
@@ -888,6 +1339,87 @@ mod tests {
     fn pixel(frame: &FrameTexture, x: u32, y: u32) -> &[u8] {
         let index = usize::try_from((y * frame.width + x) * 4).unwrap();
         &frame.rgba[index..index + 4]
+    }
+
+    #[test]
+    fn primary_buffer_matches_wgsl_header_and_tight_node_stride() {
+        let first = effect_with(
+            1,
+            "primary_correction",
+            &[
+                ("exposure_milli_stops", 1_000),
+                ("temperature_percent", 25),
+                ("tint_percent", -10),
+                ("contrast_percent", -20),
+                ("contrast_pivot_basis_points", 4_200),
+                ("blacks_percent", 30),
+                ("shadows_percent", -40),
+                ("highlights_percent", 50),
+                ("whites_percent", -60),
+                ("saturation_percent", 70),
+            ],
+        );
+        let second = effect_with(
+            2,
+            "primary_correction",
+            &[
+                ("exposure_milli_stops", -1_000),
+                ("saturation_percent", -70),
+            ],
+        );
+        let bytes = primary_buffer_bytes(&[first, second]).expect("valid primary nodes");
+
+        assert_eq!(bytes.len(), PRIMARY_HEADER_BYTES + 2 * PRIMARY_NODE_BYTES);
+        assert_eq!(u32::from_ne_bytes(bytes[0..4].try_into().unwrap()), 2);
+        assert!(bytes[4..PRIMARY_HEADER_BYTES].iter().all(|byte| *byte == 0));
+
+        let first_values = [
+            1.0, 0.25, -0.1, -0.2, 0.42, 0.3, -0.4, 0.5, -0.6, 0.7, 0.0, 0.0,
+        ];
+        let second_values = [-1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, -0.7, 0.0, 0.0];
+        for (index, expected) in first_values.into_iter().enumerate() {
+            assert!(
+                (primary_f32(&bytes, PRIMARY_HEADER_BYTES + index * 4) - expected).abs() < 1e-6
+            );
+        }
+        for (index, expected) in second_values.into_iter().enumerate() {
+            assert!(
+                (primary_f32(
+                    &bytes,
+                    PRIMARY_HEADER_BYTES + PRIMARY_NODE_BYTES + index * 4
+                ) - expected)
+                    .abs()
+                    < 1e-6
+            );
+        }
+    }
+
+    #[test]
+    fn primary_correction_nodes_execute_in_order_on_gpu() {
+        let Some(compositor) = fallback() else {
+            eprintln!("skipped: no usable wgpu adapter in this environment");
+            return;
+        };
+        let input = solid(4, 4, [64, 128, 192, 255]);
+        let effects = [
+            effect_with(1, "primary_correction", &[("exposure_milli_stops", 1_000)]),
+            effect_with(2, "primary_correction", &[("exposure_milli_stops", -1_000)]),
+        ];
+        let output = compositor
+            .render(
+                (4, 4),
+                &[CompositorLayer {
+                    frame: &input,
+                    effects: &effects,
+                    transition: TransitionRenderParams::default(),
+                }],
+            )
+            .expect("primary nodes should render");
+
+        // The second exposure reverses the first.  A wrong 64-byte host
+        // stride makes the shader read padding and half of the second node,
+        // so this catches both the header and array-stride ABI errors.
+        assert_pixel_close(&output.rgba[0..4], [64, 128, 192, 255], 3);
     }
 
     #[test]
@@ -958,7 +1490,9 @@ mod tests {
                 }],
             )
             .unwrap();
-        assert_pixel_close(&output.rgba[0..4], [128, 0, 0, 255], 2);
+        // Alpha compositing is linear-light; BT.709 monitor encoding maps
+        // 50% red to approximately code value 180.
+        assert_pixel_close(&output.rgba[0..4], [180, 0, 0, 255], 3);
 
         let transform = effect(4, "transform", "scale_percent", 50);
         let output = compositor
@@ -1152,7 +1686,7 @@ mod tests {
             .unwrap();
 
         assert_pixel_close(pixel(&output, 4, 0), [0, 255, 0, 255], 2);
-        assert_pixel_close(pixel(&output, 4, 4), [0, 0, 128, 255], 2);
+        assert_pixel_close(pixel(&output, 4, 4), [0, 0, 180, 255], 3);
     }
 
     #[test]
@@ -1373,11 +1907,11 @@ mod tests {
                 ],
             )
             .unwrap();
-        assert_pixel_close(&output.rgba[0..4], [128, 0, 128, 255], 2);
+        assert_pixel_close(&output.rgba[0..4], [180, 0, 180, 255], 3);
 
         for (name, fade_white, expected) in [
-            ("fade_from_black", 0.0, [0, 0, 128, 255]),
-            ("fade_from_white", 1.0, [128, 128, 255, 255]),
+            ("fade_from_black", 0.0, [0, 0, 180, 255]),
+            ("fade_from_white", 1.0, [180, 180, 255, 255]),
         ] {
             let output = compositor
                 .render(
