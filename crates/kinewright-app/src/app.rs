@@ -18,6 +18,7 @@ use crate::{
     error_ui::ErrorLog,
     export_ui::{ExportDialog, ExportJob},
     icons::Icon,
+    media_workflow::media_asset_requires_refresh,
     project::{ProjectSession, index_after_close, project_name, session_index_by_id},
     theme::{self, color, size, space},
     timeline_ui::is_internal_marker,
@@ -77,6 +78,19 @@ pub(crate) struct KinewrightApp {
     pub(crate) cursor_tier: Option<String>,
     pub(crate) probe_tx: mpsc::Sender<(u64, PathBuf, Result<MediaAsset, MediaError>)>,
     pub(crate) probe_rx: mpsc::Receiver<(u64, PathBuf, Result<MediaAsset, MediaError>)>,
+    pub(crate) relink_probe_tx: mpsc::Sender<crate::media_workflow::RelinkProbeResponse>,
+    pub(crate) relink_probe_rx: mpsc::Receiver<crate::media_workflow::RelinkProbeResponse>,
+    pub(crate) relink_probe_pending: usize,
+    pub(crate) media_status_tx: mpsc::Sender<crate::media_workflow::MediaStatusResponse>,
+    pub(crate) media_status_rx: mpsc::Receiver<crate::media_workflow::MediaStatusResponse>,
+    pub(crate) cache_clear_tx: mpsc::Sender<crate::media_workflow::CacheClearResponse>,
+    pub(crate) cache_clear_rx: mpsc::Receiver<crate::media_workflow::CacheClearResponse>,
+    pub(crate) media_statuses: crate::media_workflow::MediaStatusStore,
+    pub(crate) pending_legacy_relink: Option<crate::media_workflow::PendingLegacyRelink>,
+    pub(crate) media_cache_dialog_open: bool,
+    pub(crate) media_cache_inventory: Option<kinewright_core::MediaCacheInventory>,
+    pub(crate) media_cache_clear_pending: Option<kinewright_core::MediaCacheFamily>,
+    pub(crate) media_cache_clear_result: Option<kinewright_core::MediaCacheClearResult>,
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) playing: bool,
     pub(crate) meter_levels: [f32; 2],
@@ -133,6 +147,9 @@ impl KinewrightApp {
         let media_events = media.events();
         let visual_cache = crate::visual_cache::VisualCache::new(media.visual_asset_results());
         let (probe_tx, probe_rx) = mpsc::channel();
+        let (relink_probe_tx, relink_probe_rx) = mpsc::channel();
+        let (media_status_tx, media_status_rx) = mpsc::channel();
+        let (cache_clear_tx, cache_clear_rx) = mpsc::channel();
         let playback: Arc<dyn Playback> = media.clone();
         let analysis: Arc<dyn Analysis> = media.clone();
         let exporter: Arc<dyn Export> = media;
@@ -201,6 +218,19 @@ impl KinewrightApp {
             cursor_tier: None,
             probe_tx,
             probe_rx,
+            relink_probe_tx,
+            relink_probe_rx,
+            relink_probe_pending: 0,
+            media_status_tx,
+            media_status_rx,
+            cache_clear_tx,
+            cache_clear_rx,
+            media_statuses: crate::media_workflow::MediaStatusStore::default(),
+            pending_legacy_relink: None,
+            media_cache_dialog_open: false,
+            media_cache_inventory: None,
+            media_cache_clear_pending: None,
+            media_cache_clear_result: None,
             texture: None,
             playing: false,
             meter_levels: [0.0; 2],
@@ -280,6 +310,7 @@ impl KinewrightApp {
                 }
             }
         }
+        app.queue_media_status_checks_for_project(0);
         app
     }
 
@@ -441,6 +472,7 @@ impl KinewrightApp {
         let assets = session.document.media_pool.clone();
         self.projects.push(session);
         self.focus_project(self.projects.len() - 1);
+        self.queue_media_status_checks_for_project(self.focused_project);
         for asset in assets {
             self.request_asset_analysis(asset);
         }
@@ -507,6 +539,14 @@ impl KinewrightApp {
                 .move_pending_to(&mut remaining[0].recovery);
         }
         self.projects.remove(index);
+        self.media_statuses.remove_session(id);
+        if self
+            .pending_legacy_relink
+            .as_ref()
+            .is_some_and(|pending| pending.session_id == id)
+        {
+            self.pending_legacy_relink = None;
+        }
         self.focus_project_with_rebind(next_focus, closing_focused);
         self.status = format!("Closed {name}");
     }
@@ -663,6 +703,7 @@ impl KinewrightApp {
         self.poll_agent(ctx);
         self.poll_export(ctx);
         self.poll_recording(ctx);
+        self.poll_media_workflow(ctx);
         for (asset, error) in self.visual_cache.poll(ctx) {
             self.error_log.push(
                 "Media",
@@ -670,6 +711,12 @@ impl KinewrightApp {
             );
         }
         if self.visual_cache.has_pending() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        if self.media_statuses.has_pending()
+            || self.relink_probe_pending > 0
+            || self.media_cache_clear_pending.is_some()
+        {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
         while let Ok((session_id, path, result)) = self.probe_rx.try_recv() {
@@ -716,17 +763,44 @@ impl KinewrightApp {
                     last_op,
                     journal_command,
                 } => {
-                    let new_assets = doc
+                    let previous_document = Arc::clone(&self.projects[project_index].document);
+                    let media_changed_assets = doc
                         .media_pool
                         .iter()
                         .filter(|asset| {
-                            self.projects[project_index]
-                                .document
-                                .asset(asset.id)
-                                .is_none()
+                            media_asset_requires_refresh(
+                                previous_document.asset(asset.id),
+                                asset,
+                                last_op.as_ref(),
+                            )
                         })
                         .cloned()
                         .collect::<Vec<_>>();
+                    let previous_paths = media_changed_assets
+                        .iter()
+                        .filter_map(|asset| {
+                            previous_document
+                                .asset(asset.id)
+                                .map(|previous| previous.path.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    let session_id = self.projects[project_index].id;
+                    for asset in &media_changed_assets {
+                        self.media_statuses.invalidate(session_id, asset.id);
+                    }
+                    for path in previous_paths {
+                        self.visual_cache.invalidate_path(&path);
+                    }
+                    for asset in &media_changed_assets {
+                        if self
+                            .media_statuses
+                            .path_has_changed_observation(&asset.path)
+                        {
+                            self.visual_cache.invalidate_path(&asset.path);
+                        } else {
+                            self.visual_cache.invalidate_and_unblock_path(&asset.path);
+                        }
+                    }
                     self.projects[project_index].document = Arc::clone(&doc);
                     self.projects[project_index].revision = revision;
                     self.projects[project_index].transcript_selection = None;
@@ -760,6 +834,9 @@ impl KinewrightApp {
                     }
                     if project_index == self.focused_project {
                         self.playing = false;
+                        if !media_changed_assets.is_empty() {
+                            self.texture = None;
+                        }
                         let position = self.projects[project_index].position;
                         self.playback.set_document(Arc::clone(&doc));
                         self.playback.seek(position);
@@ -784,9 +861,10 @@ impl KinewrightApp {
                             self.add_asset_to_timeline_for(project_index, asset_id);
                         }
                     }
-                    for asset in new_assets {
+                    for asset in media_changed_assets {
                         self.request_asset_analysis(asset);
                     }
+                    self.queue_media_status_checks_for_project(project_index);
                     if project_index == self.focused_project {
                         if let Some(operation) = last_op {
                             self.status = operation_status(&operation);
@@ -936,6 +1014,7 @@ impl eframe::App for KinewrightApp {
                     let assets = session.document.media_pool.clone();
                     self.projects.push(session);
                     self.focus_project(self.projects.len() - 1);
+                    self.queue_media_status_checks_for_project(self.focused_project);
                     for asset in assets {
                         self.request_asset_analysis(asset);
                     }
@@ -949,6 +1028,8 @@ impl eframe::App for KinewrightApp {
         self.show_export_dialog(ui.ctx());
         self.show_record_dialog(ui.ctx());
         self.show_settings_dialog(ui.ctx());
+        self.show_media_cache_dialog(ui.ctx());
+        self.show_legacy_relink_confirmation(ui.ctx());
         self.show_help(ui.ctx());
         self.show_error_log(ui.ctx());
         self.show_unsaved_confirmation(ui.ctx());
@@ -1134,6 +1215,11 @@ pub(crate) fn review_preroll_frames(fps: kinewright_core::Rational) -> i64 {
 pub(crate) fn operation_status(operation: &Operation) -> String {
     match operation {
         Operation::AddAsset { asset } => format!("Imported {}", asset.name),
+        Operation::RelinkAsset {
+            asset, candidate, ..
+        } => {
+            format!("Relinked asset {asset} to {}", candidate.path.display())
+        }
         Operation::SetAssetColorDescription { asset, .. } => {
             format!("Updated source color metadata for asset {asset}")
         }

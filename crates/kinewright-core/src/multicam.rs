@@ -1246,6 +1246,7 @@ mod tests {
             fps: fps(),
             kind,
             resolution: Some((1_920, 1_080)),
+            source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: crate::ColorDescription::default(),
         }
     }

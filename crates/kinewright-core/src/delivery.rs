@@ -405,6 +405,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Video,
             resolution: Some((1920, 1080)),
+            source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: crate::ColorDescription::default(),
         };
         Document {

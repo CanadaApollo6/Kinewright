@@ -130,7 +130,7 @@ Colour begins immediately, while non-colour work continues in parallel.
 | Track | Existing base | Next workflow goals |
 | --- | --- | --- |
 | Editorial and long-form | Three-point edits, slip/roll/slide, replace, fit-to-fill, bins, string-outs, sync groups, transcript editing | Dual source/program workflow, source patching and track targeting, compound/nested structure, long-sequence navigation and revision |
-| Media and interchange | Import, project media, in-memory preview proxy decode/cache, hostile-media policy, save/recovery | Offline/relink workflow, explicit generated-proxy/cache management, richer metadata, interchange that preserves supported edit semantics |
+| Media and interchange | Import, project media, verified source identity, offline/changed status, undoable relink, ephemeral scaled preview memory, scoped cache visibility/clearing, hostile-media policy, save/recovery | Generated playable proxies, richer metadata, managed/project-relative media, interchange that preserves supported edit semantics |
 | Colour | Basic exposure/temperature/tint and brightness/contrast/saturation effects, four built-in looks, agent/core `.cube` LUT support, masks, chroma key, post-compositor scope data | Colour-managed SDR correction, professional scopes, shot matching, curves/wheels, grade-scoped secondaries, human LUT workflow, look management, delivery QC |
 | Audio | Multi-track mixing, buses, EQ/compression/ducking operations, waveform/transcript analysis | Manual mixer and bus UI, meters, detailed EQ/dynamics control, repair and room-tone workflows, loudness-aware delivery |
 | Motion, compositing, and retiming | GPU compositor, effects, keyframes, masks/tracking, transitions, constant-speed controls | Keyframe editing UI, speed ramps, effect-scoped mattes, adjustment/compound layers, transform and compositing polish |
@@ -154,11 +154,13 @@ The first three cycle intentions are:
 
 1. **CC0 colour contract — completed 2026-08-24.** The implementation now carries
    explicit source/working/monitoring/delivery metadata through probe, project,
-   human and agent inspection, conformance, and tagged SDR Rec.709 export. The
-   offline/relink and generated-proxy contract remains the next non-colour brief.
-2. **Offline/relink and proxy/cache visibility** as the primary slice; begin only
-   bounded CC1 groundwork after CC0's migration and metadata gates pass.
-3. **CC1 managed SDR primary correction** as the primary slice; select the next
+   human and agent inspection, conformance, and tagged SDR Rec.709 export.
+2. **M41 offline/relink and cache visibility — completed 2026-08-24.** Projects
+   persist a verified source identity, report live availability, relink through one
+   revision-gated undoable operation, and expose honest scoped cache inspection and
+   clearing to both human and agent workflows. Ephemeral scaled preview memory is
+   explicitly distinguished from generated playable proxies, which remain deferred.
+3. **CC1 managed SDR primary correction** is now the primary slice; select the next
    long-form source/program usability slice from observed editing friction.
 
 Within that cadence, three workstreams remain active:
@@ -315,12 +317,13 @@ constructors, compositor inputs, `ExportSettings`, and FFmpeg stream/container
 metadata. Later stages cannot treat those surfaces as implicit or start before the
 required earlier exit gate passes.
 
-**Current status (2026-08-24): CC0 is complete.** Its exit evidence includes legacy
-project migration, known/partial/unknown and 10-bit probe fixtures, visible human and
-agent inspection, an undoable source override, delivery rejection outside the current
-contract, and an encoded file decoded again to verify its representable Rec.709 tags.
-The next primary slice is the offline/relink and proxy/cache workflow; CC1 groundwork
-may now proceed only as the bounded secondary lane defined above.
+**Current status (2026-08-24): CC0 and M41 are complete.** CC0's exit evidence
+includes legacy project migration, known/partial/unknown and 10-bit probe fixtures,
+visible human and agent inspection, an undoable source override, delivery rejection
+outside the current contract, and an encoded file decoded again to verify its
+representable Rec.709 tags. M41 then completed verified source identity, offline and
+changed-media diagnosis, deterministic relink, and cache visibility. CC1 managed SDR
+primary correction is now the primary slice.
 
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |
@@ -427,5 +430,7 @@ ownership boundary, and definition of done stable.
   existing colour, audio, automation, and retiming primitives.
 - [M40 generalization gauntlet](M40-GENERALIZATION-GAUNTLET.md) — current
   real-footage evaluation programme.
+- [M41 offline/relink and cache visibility](M41-OFFLINE-RELINK-CACHE-VISIBILITY.md)
+  — verified source identity, deterministic relink, and owned-cache contract.
 - [Media policy](MEDIA-POLICY.md) — hostile-media behaviour and invariants.
 - [Building Kinewright](BUILDING.md) — Windows, Linux, FFmpeg, and toolchain setup.

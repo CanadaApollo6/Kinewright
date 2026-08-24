@@ -12,6 +12,7 @@ use crate::{
     cache::FrameCache,
     compositor::{Compositor, CompositorLayer, GpuContext},
     decode::VideoDecoder,
+    derived_cache::CacheStats,
     visual_layers_at,
 };
 
@@ -41,7 +42,7 @@ impl RenderScale {
     fn max_width(self) -> Option<u32> {
         match self {
             Self::FullResolution => None,
-            Self::Proxy { max_width } => Some(max_width.max(1)),
+            Self::Proxy { max_width } => Some(max_width.clamp(1, PREVIEW_MAX_WIDTH)),
         }
     }
 
@@ -83,10 +84,35 @@ impl FrameRenderer {
         }
     }
 
-    pub(crate) fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) -> CacheStats {
+        let stats = self.cache_stats();
         self.video_sources.clear();
         self.source_order.clear();
         self.title_cache.clear();
+        stats
+    }
+
+    pub(crate) fn cache_stats(&self) -> CacheStats {
+        let frame_count = self
+            .video_sources
+            .values()
+            .map(|source| source.cache.len())
+            .sum::<usize>();
+        let frame_bytes = self
+            .video_sources
+            .values()
+            .map(|source| source.cache.byte_len())
+            .fold(0_usize, usize::saturating_add);
+        let title_bytes = self
+            .title_cache
+            .values()
+            .map(|frame| frame.rgba.len())
+            .fold(0_usize, usize::saturating_add);
+        CacheStats {
+            file_count: u64::try_from(frame_count.saturating_add(self.title_cache.len()))
+                .unwrap_or(u64::MAX),
+            bytes: u64::try_from(frame_bytes.saturating_add(title_bytes)).unwrap_or(u64::MAX),
+        }
     }
 
     pub(crate) fn render(
@@ -298,6 +324,12 @@ mod tests {
         assert_eq!(proxy.output_resolution((3840, 2160)), (1280, 720));
         assert_eq!(proxy.output_resolution((640, 360)), (640, 360));
         assert_eq!(proxy.output_resolution((2160, 3840)), (1280, 2275));
+    }
+
+    #[test]
+    fn proxy_resolution_is_capped_at_the_memory_proxy_width() {
+        let proxy = RenderScale::Proxy { max_width: 8_192 };
+        assert_eq!(proxy.output_resolution((3_840, 2_160)), (1_280, 720));
     }
 
     #[test]

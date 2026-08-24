@@ -40,10 +40,12 @@ pub use derived::{
 };
 pub use engine::FfmpegMediaEngine;
 pub use kinewright_core::{
-    ThumbnailFrame, ThumbnailKey, VisualAssetResult, VisualRequestKind, WaveformData, WaveformPeak,
+    MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily,
+    MediaCacheFamilyStatus, MediaCacheInventory, ThumbnailFrame, ThumbnailKey, VisualAssetResult,
+    VisualRequestKind, WaveformData, WaveformPeak,
 };
 pub use loudness::measure_loudness;
-pub use sha256::sha256_file;
+pub use sha256::{sha256_file, source_fingerprint};
 pub use timeline::{
     TimelineAudioSegment, TimelineSource, TimelineTitleLayer, TimelineVideoLayer,
     TimelineVisualLayer, TransitionRenderParams, timeline_audio_segments, timeline_source_at,

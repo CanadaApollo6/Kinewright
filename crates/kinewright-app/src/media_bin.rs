@@ -12,6 +12,7 @@ use crate::{
         source_color_display,
     },
     icons::{self, Icon},
+    media_workflow::{paint_source_status, source_display_state},
     theme::{self, color, radius, size, space, type_size},
     timeline_ui::format_timecode,
 };
@@ -153,6 +154,20 @@ impl KinewrightApp {
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("Refresh")
+                    .on_hover_text("Recheck media files and source fingerprints")
+                    .clicked()
+                {
+                    self.refresh_media_statuses_for_focused_project();
+                }
+                if ui
+                    .small_button("Cache")
+                    .on_hover_text("Inspect preview and derived-media caches")
+                    .clicked()
+                {
+                    self.open_media_cache_dialog();
+                }
                 let button =
                     egui::Button::image_and_text(Icon::Import.image(size::ICON_MD), "Import")
                         .image_tint_follows_text_color(true)
@@ -177,11 +192,19 @@ impl KinewrightApp {
             return;
         }
         let assets = self.focused().document.media_pool.clone();
+        let assets = assets
+            .into_iter()
+            .map(|asset| {
+                let status = self.media_status_for_asset(&asset);
+                (asset, status)
+            })
+            .collect::<Vec<_>>();
         let media = Arc::clone(&self.analysis);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for asset in assets {
+                for (asset, status) in assets {
+                    let source_state = source_display_state(status.as_ref());
                     let selected = self.focused_mut().selected_asset == Some(asset.id);
                     let response = theme::card_frame(selected).show(ui, |ui| {
                         let width = ui.available_width().max(120.0);
@@ -191,6 +214,7 @@ impl KinewrightApp {
                         ui.painter()
                             .rect_filled(thumbnail_rect, radius::SM, color::MEDIA_SHADOW);
                         if ui.clip_rect().intersects(thumbnail_rect)
+                            && !source_state.blocks_preview()
                             && matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo)
                         {
                             if let Some(texture) = self.visual_cache.thumbnail(
@@ -218,6 +242,20 @@ impl KinewrightApp {
                                 ),
                             );
                         }
+                        if source_state.blocks_preview() {
+                            ui.painter().rect_filled(
+                                thumbnail_rect,
+                                radius::SM,
+                                egui::Color32::from_black_alpha(150),
+                            );
+                            ui.painter().text(
+                                thumbnail_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                source_state.label(),
+                                theme::semibold(type_size::CAPTION),
+                                color::STATUS_DANGER,
+                            );
+                        }
                         let duration = format_timecode(asset.duration, asset.fps);
                         let duration_size = egui::vec2(76.0, 18.0);
                         let badge = egui::Rect::from_min_size(
@@ -243,6 +281,13 @@ impl KinewrightApp {
                                         .font(theme::semibold(type_size::BODY)),
                                 );
                                 ui.colored_label(color::TEXT_MUTED, asset_metadata(&asset));
+                                paint_source_status(ui, source_state);
+                                if source_state.blocks_preview() {
+                                    ui.colored_label(
+                                        color::STATUS_DANGER,
+                                        source_state.description(),
+                                    );
+                                }
                                 if let Some(display) = source_color_display(&asset) {
                                     source_color_label(ui, display);
                                 }
@@ -323,6 +368,26 @@ impl KinewrightApp {
                 ui.label(egui::RichText::new("SOURCE").font(theme::semibold(type_size::CAPTION)));
                 ui.colored_label(color::TEXT_MUTED, &asset.name);
             });
+            let status = self.media_status_for_asset(&asset);
+            let source_state = source_display_state(status.as_ref());
+            ui.horizontal(|ui| {
+                paint_source_status(ui, source_state);
+                if ui
+                    .button("Relink…")
+                    .on_hover_text("Choose a replacement and verify its source fingerprint")
+                    .clicked()
+                {
+                    self.choose_relink_for_asset(asset.id);
+                }
+            });
+            ui.colored_label(
+                if source_state.blocks_preview() {
+                    color::STATUS_DANGER
+                } else {
+                    color::TEXT_MUTED
+                },
+                source_state.description(),
+            );
             if let Some(display) = source_color_display(&asset) {
                 source_color_label(ui, display);
                 if ui
@@ -511,6 +576,7 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((1_920, 1_080)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let document = Document {

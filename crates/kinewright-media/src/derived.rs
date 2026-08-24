@@ -19,7 +19,8 @@ use crate::{
     cache::FrameCache,
     decode::VideoDecoder,
     derived_cache::{
-        CancellationRegistry, ContentHashes, JsonCache, StatusReporter, cache_root, spawn_worker,
+        CacheStats, CancellationRegistry, ContentHashes, JsonCache, StatusReporter, cache_root,
+        clear_cache_root, inventory_cache_root, spawn_worker,
     },
 };
 
@@ -95,6 +96,7 @@ pub(crate) struct DerivedAnalysisService {
     scene_cancellations: CancellationRegistry,
     beat_cancellations: CancellationRegistry,
     config: DerivedAnalysisConfig,
+    root: PathBuf,
 }
 
 impl DerivedAnalysisService {
@@ -106,8 +108,9 @@ impl DerivedAnalysisService {
         let silence_cancellations = CancellationRegistry::default();
         let scene_cancellations = CancellationRegistry::default();
         let beat_cancellations = CancellationRegistry::default();
+        let root = cache_root(data_dir, "derived-analysis", CACHE_VERSION);
         let mut worker = DerivedAnalysisWorker::new(
-            cache_root(data_dir, "derived-analysis", CACHE_VERSION),
+            root.clone(),
             silence_states.clone(),
             scene_states.clone(),
             beat_states.clone(),
@@ -130,6 +133,7 @@ impl DerivedAnalysisService {
             scene_cancellations,
             beat_cancellations,
             config,
+            root,
         })
     }
 
@@ -260,6 +264,14 @@ impl DerivedAnalysisService {
         self.beat_states.get_or(path, BeatStatus::NotRequested)
     }
 
+    pub(crate) fn cache_stats(&self) -> Result<CacheStats, MediaError> {
+        inventory_cache_root(&self.root)
+    }
+
+    pub(crate) fn clear_cache(&self) -> Result<CacheStats, MediaError> {
+        clear_cache_root(&self.root)
+    }
+
     pub(crate) fn cancel(&self, path: &Path, kind: kinewright_core::AnalysisKind) -> bool {
         match kind {
             kinewright_core::AnalysisKind::Transcript => false,
@@ -368,7 +380,7 @@ impl DerivedAnalysisWorker {
             silence_cancellations,
             scene_cancellations,
             beat_cancellations,
-            hashes: ContentHashes::default(),
+            hashes: ContentHashes,
         }
     }
 
@@ -1825,6 +1837,7 @@ mod tests {
             fps: Rational::new(24, 1).unwrap(),
             kind: MediaKind::AudioVideo,
             resolution: Some((160, 90)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let duration = map_source_range_to_project(

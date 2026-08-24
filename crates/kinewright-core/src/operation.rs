@@ -8,15 +8,28 @@ use crate::{
     AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, COLOR_CONFIDENCE_MAX_BASIS_POINTS,
     CaptionPreset, Clip, ClipContent, ClipId, ColorDescription, ColorProvenance, Document, Effect,
     EffectId, FreezeFrame, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset,
-    MediaBin, ParamValue, StringOut, StringOutId, SyncGroup, SyncGroupId, ThreePointMode, TimeCode,
-    TimeMappingError, Title, TitleParameterKind, TitlePosition, Track, TrackId, TrackKind,
-    Transition, is_audio_effect, map_source_range_to_project, title_parameter_descriptor,
+    MediaBin, MediaSourceFingerprint, ParamValue, RelinkCandidate, StringOut, StringOutId,
+    SyncGroup, SyncGroupId, ThreePointMode, TimeCode, TimeMappingError, Title, TitleParameterKind,
+    TitlePosition, Track, TrackId, TrackKind, Transition, is_audio_effect,
+    map_source_range_to_project, title_parameter_descriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Operation {
     AddAsset {
         asset: MediaAsset,
+    },
+    /// Relink one asset to a probed, content-identified path without changing
+    /// the asset's stable id, name, colour metadata, or any timeline reference.
+    /// The media layer owns filesystem access; Core validates only the supplied
+    /// candidate data and the persisted source contract.
+    RelinkAsset {
+        asset: AssetId,
+        candidate: RelinkCandidate,
+        /// Legacy assets may have no persisted source fingerprint. Re-linking
+        /// those assets requires an explicit user decision because matching
+        /// technical metadata does not prove byte identity.
+        allow_unverified_source: bool,
     },
     /// Replace one asset's interpreted source colour metadata with an explicit
     /// user override. Probe/container metadata enters through `AddAsset`, not
@@ -465,6 +478,35 @@ pub enum OpError {
     InvalidAssetRate(AssetId),
     #[error("asset {0} has a non-positive duration")]
     InvalidAssetDuration(AssetId),
+    #[error(
+        "asset {asset} source fingerprint must include both SHA-256 and byte length, or neither"
+    )]
+    SourceFingerprintIncomplete { asset: AssetId },
+    #[error(
+        "asset {asset} source fingerprint SHA-256 must be exactly 64 lowercase hexadecimal characters"
+    )]
+    InvalidSourceFingerprintHash { asset: AssetId },
+    #[error("asset {asset} source fingerprint byte length must be positive")]
+    InvalidSourceFingerprintByteLength { asset: AssetId },
+    #[error("relink candidate path for asset {asset} must be non-empty")]
+    EmptyRelinkCandidatePath { asset: AssetId },
+    #[error("relink candidate for asset {asset} must have a verified source fingerprint")]
+    UnverifiedRelinkCandidate { asset: AssetId },
+    #[error(
+        "relink candidate for asset {asset} has incompatible {field}: expected {expected}, got {actual}"
+    )]
+    RelinkMetadataMismatch {
+        asset: AssetId,
+        field: &'static str,
+        expected: String,
+        actual: String,
+    },
+    #[error("relink candidate for asset {asset} does not match its persisted source fingerprint")]
+    RelinkFingerprintMismatch { asset: AssetId },
+    #[error(
+        "asset {asset} has no persisted source fingerprint; relink requires explicit allow_unverified_source"
+    )]
+    RelinkRequiresExplicitUnverifiedSource { asset: AssetId },
     #[error("color confidence is {actual}, outside the inclusive range 0..=10000 basis points")]
     ColorConfidenceOutOfRange { actual: u16 },
     #[error("asset {asset} color override must have positive confidence")]
@@ -642,6 +684,11 @@ pub enum BatchError {
 fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpError> {
     match operation {
         Operation::AddAsset { asset } => add_asset(doc, asset.clone()),
+        Operation::RelinkAsset {
+            asset,
+            candidate,
+            allow_unverified_source,
+        } => relink_asset(doc, *asset, candidate, *allow_unverified_source),
         Operation::SetAssetColorDescription {
             asset,
             color_description,
@@ -830,6 +877,78 @@ fn add_asset(doc: &mut Document, asset: MediaAsset) -> Result<(), OpError> {
     }
     validate_asset(&asset)?;
     doc.media_pool.push(asset);
+    Ok(())
+}
+
+fn relink_asset(
+    doc: &mut Document,
+    asset_id: AssetId,
+    candidate: &RelinkCandidate,
+    allow_unverified_source: bool,
+) -> Result<(), OpError> {
+    let index = doc
+        .media_pool
+        .iter()
+        .position(|asset| asset.id == asset_id)
+        .ok_or(OpError::MissingAsset(asset_id))?;
+    if candidate.path.as_os_str().is_empty() {
+        return Err(OpError::EmptyRelinkCandidatePath { asset: asset_id });
+    }
+    validate_source_fingerprint(asset_id, &candidate.fingerprint)?;
+    if !candidate.fingerprint.is_verified() {
+        return Err(OpError::UnverifiedRelinkCandidate { asset: asset_id });
+    }
+
+    let current = &doc.media_pool[index];
+    if current.kind != candidate.kind {
+        return Err(OpError::RelinkMetadataMismatch {
+            asset: asset_id,
+            field: "kind",
+            expected: format!("{:?}", current.kind),
+            actual: format!("{:?}", candidate.kind),
+        });
+    }
+    if current.fps != candidate.fps {
+        return Err(OpError::RelinkMetadataMismatch {
+            asset: asset_id,
+            field: "fps",
+            expected: format!("{}/{}", current.fps.numerator(), current.fps.denominator()),
+            actual: format!(
+                "{}/{}",
+                candidate.fps.numerator(),
+                candidate.fps.denominator()
+            ),
+        });
+    }
+    if current.duration != candidate.duration {
+        return Err(OpError::RelinkMetadataMismatch {
+            asset: asset_id,
+            field: "duration",
+            expected: current.duration.to_string(),
+            actual: candidate.duration.to_string(),
+        });
+    }
+    if current.resolution != candidate.resolution {
+        return Err(OpError::RelinkMetadataMismatch {
+            asset: asset_id,
+            field: "resolution",
+            expected: format!("{:?}", current.resolution),
+            actual: format!("{:?}", candidate.resolution),
+        });
+    }
+
+    if current.source_fingerprint.is_verified() {
+        if current.source_fingerprint != candidate.fingerprint {
+            return Err(OpError::RelinkFingerprintMismatch { asset: asset_id });
+        }
+    } else if !allow_unverified_source {
+        return Err(OpError::RelinkRequiresExplicitUnverifiedSource { asset: asset_id });
+    }
+
+    doc.media_pool[index].path.clone_from(&candidate.path);
+    doc.media_pool[index]
+        .source_fingerprint
+        .clone_from(&candidate.fingerprint);
     Ok(())
 }
 
@@ -2290,8 +2409,32 @@ fn validate_asset(asset: &MediaAsset) -> Result<(), OpError> {
     {
         return Err(OpError::InvalidResolution);
     }
+    validate_source_fingerprint(asset.id, &asset.source_fingerprint)?;
     validate_color_description(&asset.color_description)?;
     Ok(())
+}
+
+fn validate_source_fingerprint(
+    asset: AssetId,
+    fingerprint: &MediaSourceFingerprint,
+) -> Result<(), OpError> {
+    match (&fingerprint.content_sha256, fingerprint.byte_len) {
+        (None, None) => Ok(()),
+        (Some(_), None) | (None, Some(_)) => Err(OpError::SourceFingerprintIncomplete { asset }),
+        (Some(hash), Some(byte_len)) => {
+            if hash.len() != 64
+                || !hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(OpError::InvalidSourceFingerprintHash { asset });
+            }
+            if byte_len == 0 {
+                return Err(OpError::InvalidSourceFingerprintByteLength { asset });
+            }
+            Ok(())
+        }
+    }
 }
 
 fn validate_color_description(color_description: &ColorDescription) -> Result<(), OpError> {

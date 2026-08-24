@@ -15,8 +15,9 @@ use crate::{
     audio::decode_audio_peaks,
     decode::thumbnail,
     derived_cache::{
-        ContentHashes, JsonCache, TempFileStyle, atomic_write, cache_path, cache_root,
-        create_cache_dir, read_cache, spawn_worker, trim_cache,
+        CacheStats, ContentHashes, JsonCache, TempFileStyle, atomic_write, cache_path, cache_root,
+        clear_cache_root, create_cache_dir, inventory_cache_root, read_cache, spawn_worker,
+        trim_cache,
     },
 };
 
@@ -35,6 +36,7 @@ pub(crate) struct VisualAssetService {
     jobs: Sender<Job>,
     results: Receiver<VisualAssetResult>,
     in_flight: Arc<Mutex<HashSet<JobKey>>>,
+    root: PathBuf,
 }
 
 impl VisualAssetService {
@@ -43,11 +45,8 @@ impl VisualAssetService {
         let (results_tx, results) = bounded(RESULT_CAPACITY);
         let in_flight = Arc::new(Mutex::new(HashSet::new()));
         let worker_in_flight = Arc::clone(&in_flight);
-        let mut worker = VisualAssetWorker::new(
-            cache_root(data_dir, "visual-assets", CACHE_VERSION),
-            results_tx,
-            worker_in_flight,
-        );
+        let root = cache_root(data_dir, "visual-assets", CACHE_VERSION);
+        let mut worker = VisualAssetWorker::new(root.clone(), results_tx, worker_in_flight);
         spawn_worker(
             "kinewright-visual-assets",
             "visual asset",
@@ -58,14 +57,18 @@ impl VisualAssetService {
             jobs,
             results,
             in_flight,
+            root,
         })
     }
 
-    pub(crate) fn request_waveform(&self, asset: MediaAsset) -> bool {
+    pub(crate) fn request_waveform(&self, asset: MediaAsset, request_generation: u64) -> bool {
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
             return false;
         }
-        self.request(Job::Waveform(asset))
+        self.request(Job::Waveform {
+            asset,
+            request_generation,
+        })
     }
 
     pub(crate) fn request_thumbnail(
@@ -73,6 +76,7 @@ impl VisualAssetService {
         asset: MediaAsset,
         source_at: TimeCode,
         max_width: u32,
+        request_generation: u64,
     ) -> bool {
         if !matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo) {
             return false;
@@ -86,11 +90,20 @@ impl VisualAssetService {
             asset,
             source_at,
             max_width: max_width.clamp(1, 512),
+            request_generation,
         })
     }
 
     pub(crate) fn results(&self) -> Receiver<VisualAssetResult> {
         self.results.clone()
+    }
+
+    pub(crate) fn cache_stats(&self) -> Result<CacheStats, MediaError> {
+        inventory_cache_root(&self.root)
+    }
+
+    pub(crate) fn clear_cache(&self) -> Result<CacheStats, MediaError> {
+        clear_cache_root(&self.root)
     }
 
     fn request(&self, job: Job) -> bool {
@@ -114,25 +127,34 @@ impl VisualAssetService {
 }
 
 enum Job {
-    Waveform(MediaAsset),
+    Waveform {
+        asset: MediaAsset,
+        request_generation: u64,
+    },
     Thumbnail {
         asset: MediaAsset,
         source_at: TimeCode,
         max_width: u32,
+        request_generation: u64,
     },
 }
 
 impl Job {
     fn key(&self) -> JobKey {
         match self {
-            Self::Waveform(asset) => JobKey::Waveform {
+            Self::Waveform {
+                asset,
+                request_generation,
+            } => JobKey::Waveform {
                 asset: asset.id,
                 path: asset.path.clone(),
+                request_generation: *request_generation,
             },
             Self::Thumbnail {
                 asset,
                 source_at,
                 max_width,
+                request_generation,
             } => JobKey::Thumbnail {
                 key: ThumbnailKey {
                     asset: asset.id,
@@ -140,6 +162,7 @@ impl Job {
                     max_width: *max_width,
                 },
                 path: asset.path.clone(),
+                request_generation: *request_generation,
             },
         }
     }
@@ -150,8 +173,16 @@ impl Job {
 /// id-only key would hand one project's pixels to another's request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum JobKey {
-    Waveform { asset: AssetId, path: PathBuf },
-    Thumbnail { key: ThumbnailKey, path: PathBuf },
+    Waveform {
+        asset: AssetId,
+        path: PathBuf,
+        request_generation: u64,
+    },
+    Thumbnail {
+        key: ThumbnailKey,
+        path: PathBuf,
+        request_generation: u64,
+    },
 }
 
 struct VisualAssetWorker {
@@ -171,7 +202,7 @@ impl VisualAssetWorker {
             root,
             results,
             in_flight,
-            hashes: ContentHashes::default(),
+            hashes: ContentHashes,
         }
     }
 
@@ -186,28 +217,33 @@ impl VisualAssetWorker {
 
     fn process(&mut self, job: Job) -> VisualAssetResult {
         match job {
-            Job::Waveform(asset) => {
-                self.waveform(&asset)
-                    .unwrap_or_else(|error| VisualAssetResult::Failed {
-                        asset: asset.id,
-                        path: asset.path.clone(),
-                        request: VisualRequestKind::Waveform,
-                        message: error.to_string(),
-                    })
-            }
+            Job::Waveform {
+                asset,
+                request_generation,
+            } => self
+                .waveform(&asset, request_generation)
+                .unwrap_or_else(|error| VisualAssetResult::Failed {
+                    asset: asset.id,
+                    request_generation,
+                    path: asset.path.clone(),
+                    request: VisualRequestKind::Waveform,
+                    message: error.to_string(),
+                }),
             Job::Thumbnail {
                 asset,
                 source_at,
                 max_width,
+                request_generation,
             } => {
                 let key = ThumbnailKey {
                     asset: asset.id,
                     source_at,
                     max_width,
                 };
-                self.thumbnail(&asset, key)
+                self.thumbnail(&asset, key, request_generation)
                     .unwrap_or_else(|error| VisualAssetResult::Failed {
                         asset: asset.id,
+                        request_generation,
                         path: asset.path.clone(),
                         request: VisualRequestKind::Thumbnail(key),
                         message: error.to_string(),
@@ -216,12 +252,17 @@ impl VisualAssetWorker {
         }
     }
 
-    fn waveform(&mut self, asset: &MediaAsset) -> Result<VisualAssetResult, MediaError> {
+    fn waveform(
+        &mut self,
+        asset: &MediaAsset,
+        request_generation: u64,
+    ) -> Result<VisualAssetResult, MediaError> {
         let hash = self.content_hash(&asset.path)?;
         let store = WaveformStore::new(self.root.join("waveforms"));
         if let Some(mut cached) = store.load(&hash, asset.fps, asset.duration)? {
             cached.asset = asset.id;
             cached.path.clone_from(&asset.path);
+            cached.request_generation = request_generation;
             return Ok(VisualAssetResult::Waveform(Arc::new(cached)));
         }
         let peaks = decode_audio_peaks(
@@ -236,6 +277,7 @@ impl VisualAssetWorker {
         .collect();
         let waveform = WaveformData {
             asset: asset.id,
+            request_generation,
             path: asset.path.clone(),
             content_sha256: hash,
             source_fps: asset.fps,
@@ -250,6 +292,7 @@ impl VisualAssetWorker {
         &mut self,
         asset: &MediaAsset,
         key: ThumbnailKey,
+        request_generation: u64,
     ) -> Result<VisualAssetResult, MediaError> {
         let hash = self.content_hash(&asset.path)?;
         let store = ThumbnailStore::new(self.root.join("thumbnails"));
@@ -262,6 +305,7 @@ impl VisualAssetWorker {
         };
         Ok(VisualAssetResult::Thumbnail(ThumbnailFrame {
             key,
+            request_generation,
             path: asset.path.clone(),
             image: Arc::new(image),
         }))
@@ -418,6 +462,7 @@ mod tests {
     fn waveform(hash: &str) -> WaveformData {
         WaveformData {
             asset: AssetId(1),
+            request_generation: 0,
             path: PathBuf::from("visual-1.wav"),
             content_sha256: hash.to_owned(),
             source_fps: Rational::new(30, 1).unwrap(),
@@ -444,6 +489,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Audio,
             resolution: None,
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
         }
     }
@@ -457,14 +503,22 @@ mod tests {
             jobs,
             results,
             in_flight: Arc::clone(&in_flight),
+            root: PathBuf::from("visual-assets/v1"),
         };
 
-        assert!(service.request(Job::Waveform(asset(1))));
-        assert!(!service.request(Job::Waveform(asset(2))));
+        assert!(service.request(Job::Waveform {
+            asset: asset(1),
+            request_generation: 1,
+        }));
+        assert!(!service.request(Job::Waveform {
+            asset: asset(2),
+            request_generation: 1,
+        }));
         assert_eq!(in_flight.lock().unwrap().len(), 1);
         assert!(in_flight.lock().unwrap().contains(&JobKey::Waveform {
             asset: AssetId(1),
             path: asset(1).path,
+            request_generation: 1,
         }));
     }
 
@@ -474,7 +528,18 @@ mod tests {
         // treat different files as different work.
         let mut second = asset(1);
         second.path = PathBuf::from("other-project.wav");
-        assert_ne!(Job::Waveform(asset(1)).key(), Job::Waveform(second).key());
+        assert_ne!(
+            Job::Waveform {
+                asset: asset(1),
+                request_generation: 1,
+            }
+            .key(),
+            Job::Waveform {
+                asset: second,
+                request_generation: 1,
+            }
+            .key()
+        );
     }
 
     #[test]

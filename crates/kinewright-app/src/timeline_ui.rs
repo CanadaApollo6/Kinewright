@@ -2113,6 +2113,7 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((1_920, 1_080)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let clip = |id, track_start| Clip {
@@ -2404,6 +2405,7 @@ mod tests {
             fps,
             kind: MediaKind::Video,
             resolution: Some((1_920, 1_080)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
         });
         document.tracks.push(Track {

@@ -430,6 +430,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::AudioVideo,
             resolution: Some((1920, 1080)),
+            source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: crate::ColorDescription::default(),
         };
         let document = Document {
@@ -499,6 +500,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Video,
             resolution: Some((1920, 1080)),
+            source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: crate::ColorDescription::unknown(),
         };
         let document = Document {
@@ -531,6 +533,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::AudioVideo,
             resolution: Some((1920, 1080)),
+            source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: crate::ColorDescription {
                 primaries: ColorPrimaries::Bt709,
                 transfer: ColorTransfer::Bt709,
@@ -571,6 +574,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Video,
             resolution: Some((1920, 1080)),
+            source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description,
         };
         let document = Document {

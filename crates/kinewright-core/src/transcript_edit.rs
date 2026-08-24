@@ -200,6 +200,7 @@ mod tests {
                 fps,
                 kind: MediaKind::Audio,
                 resolution: None,
+                source_fingerprint: crate::MediaSourceFingerprint::default(),
                 color_description: crate::ColorDescription::default(),
             };
             clips.push(Clip {

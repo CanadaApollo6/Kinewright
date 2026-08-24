@@ -41,6 +41,7 @@ pub(crate) struct TranscriptService {
     jobs: Sender<TranscriptJob>,
     states: StatusReporter<TranscriptStatus>,
     cancellations: CancellationRegistry,
+    root: PathBuf,
 }
 
 struct TranscriptJob {
@@ -54,6 +55,7 @@ impl TranscriptService {
         let (jobs, jobs_rx) = unbounded();
         let states = StatusReporter::new();
         let cancellations = CancellationRegistry::default();
+        let root = cache_root(&data_dir, "transcripts", CACHE_VERSION);
         let mut worker = TranscriptWorker::new(data_dir, states.clone(), cancellations.clone());
         spawn_worker("kinewright-transcript", "transcript", jobs_rx, move |job| {
             worker.handle(&job)
@@ -62,6 +64,7 @@ impl TranscriptService {
             jobs,
             states,
             cancellations,
+            root,
         })
     }
 
@@ -120,6 +123,18 @@ impl TranscriptService {
 
     pub(crate) fn register(&self, path: &Path, transcript: AssetTranscript) {
         self.update(path, TranscriptStatus::Ready(Arc::new(transcript)));
+    }
+
+    pub(crate) fn cache_stats(&self) -> Result<crate::derived_cache::CacheStats, MediaError> {
+        crate::derived_cache::inventory_cache_root(&self.root)
+    }
+
+    pub(crate) fn cache_root(&self) -> &Path {
+        &self.root
+    }
+
+    pub(crate) fn clear_cache(&self) -> Result<crate::derived_cache::CacheStats, MediaError> {
+        crate::derived_cache::clear_cache_root(&self.root)
     }
 
     pub(crate) fn timeline_words(
@@ -974,6 +989,7 @@ mod tests {
             fps: source_fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((320, 180)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let clip_duration = map_source_range_to_project(

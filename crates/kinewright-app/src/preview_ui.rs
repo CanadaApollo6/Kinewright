@@ -9,7 +9,7 @@ use crate::{
 impl KinewrightApp {
     // Project pixel dimensions are intentionally projected into egui's f32 coordinate space.
     #[allow(clippy::cast_precision_loss)]
-    pub(crate) fn preview(&self, ui: &mut egui::Ui) {
+    pub(crate) fn preview(&mut self, ui: &mut egui::Ui) {
         // The monitor owns its dock (M24): its height follows the dock width
         // at the project aspect, capped so the transport and inspector below
         // always keep room.
@@ -32,7 +32,11 @@ impl KinewrightApp {
             "PROGRAM",
             color::TEXT_MUTED,
         );
-        if let Some(texture) = &self.texture {
+        let playhead_state = self.playhead_media_state();
+        let blocked = playhead_state
+            .as_ref()
+            .is_some_and(|(state, _)| state.blocks_preview());
+        if !blocked && let Some(texture) = &self.texture {
             let source = texture.size_vec2();
             let inset = rect.shrink2(egui::vec2(space::FOUR, space::FOUR));
             let scale = (inset.width() / source.x).min(inset.height() / source.y);
@@ -71,9 +75,17 @@ impl KinewrightApp {
             painter.text(
                 screen_rect.center() + egui::vec2(0.0, 16.0),
                 egui::Align2::CENTER_CENTER,
-                "No timeline frame",
+                if let Some((state, _)) = playhead_state {
+                    state.label()
+                } else {
+                    "No timeline frame"
+                },
                 egui::FontId::new(type_size::CAPTION, egui::FontFamily::Proportional),
-                color::TEXT_MUTED,
+                if blocked {
+                    color::STATUS_DANGER
+                } else {
+                    color::TEXT_MUTED
+                },
             );
         }
     }

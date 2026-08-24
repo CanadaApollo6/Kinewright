@@ -8,11 +8,12 @@ use std::{
 use kinewright_core::{
     Analysis, AssetId, Clip, ClipContent, ClipId, ColorBitDepth, ColorDescription, ColorMatrix,
     ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Document, Effect,
-    EffectId, Export, ExportCancellation, ExportSettings, FreezeFrame, MediaAsset, MediaError,
-    MediaEvent, MediaKind, ParamValue, Playback, PlaybackState, Rational, TimeCode, Title, Track,
+    EffectId, Export, ExportCancellation, ExportSettings, FreezeFrame, MediaAsset,
+    MediaAvailabilityKind, MediaCacheFamily, MediaError, MediaEvent, MediaKind, Operation,
+    ParamValue, Playback, PlaybackState, Rational, RelinkCandidate, TimeCode, Title, Track,
     TrackId, TrackKind, Transition,
 };
-use kinewright_media::FfmpegMediaEngine;
+use kinewright_media::{FfmpegMediaEngine, source_fingerprint};
 
 #[path = "../src/test_support.rs"]
 pub mod test_support;
@@ -29,6 +30,10 @@ impl Drop for TemporaryFile {
 }
 
 impl TestClip {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
     fn generate() -> Self {
         let ffmpeg = ffmpeg_executable();
         assert!(
@@ -82,6 +87,70 @@ impl Drop for TestClip {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+#[test]
+fn probe_records_the_source_sha256_and_byte_length() {
+    let clip = TestClip::generate();
+    let engine = FfmpegMediaEngine::new().unwrap();
+    let asset = engine.probe(clip.path()).unwrap();
+    let expected = source_fingerprint(clip.path()).unwrap();
+    assert_eq!(asset.source_fingerprint, expected);
+    assert_eq!(
+        asset.source_fingerprint.byte_len,
+        Some(std::fs::metadata(clip.path()).unwrap().len())
+    );
+}
+
+#[test]
+fn cache_inventory_is_honest_and_scoped_clear_is_idempotent() {
+    let directory = test_support::TempDirectory::new("cache-inventory");
+    let visual_root = directory.path("visual-assets/v1");
+    std::fs::create_dir_all(&visual_root).unwrap();
+    std::fs::write(visual_root.join("fixture.rgba"), b"visual-cache").unwrap();
+    let source = directory.path("source.mp4");
+    std::fs::write(&source, b"source-media").unwrap();
+
+    let engine = FfmpegMediaEngine::new_with_data_dir(directory.root().to_path_buf()).unwrap();
+    let inventory = engine.cache_inventory();
+    assert_eq!(inventory.families.len(), 5);
+    let visual = inventory
+        .families
+        .iter()
+        .find(|family| family.family == MediaCacheFamily::VisualAssets)
+        .unwrap();
+    assert!(visual.supported);
+    assert_eq!(visual.file_count, 1);
+    assert_eq!(visual.bytes, 12);
+    let transcript_root = directory.root().join("transcripts/v2");
+    let transcripts = inventory
+        .families
+        .iter()
+        .find(|family| family.family == MediaCacheFamily::Transcripts)
+        .unwrap();
+    assert_eq!(transcripts.root.as_deref(), Some(transcript_root.as_path()));
+    let proxy = inventory
+        .families
+        .iter()
+        .find(|family| family.family == MediaCacheFamily::GeneratedProxy)
+        .unwrap();
+    assert!(!proxy.supported);
+    assert_eq!(proxy.file_count, 0);
+    assert!(proxy.note.as_deref().unwrap().contains("not supported"));
+
+    let cleared = engine.clear_cache(MediaCacheFamily::VisualAssets).unwrap();
+    assert_eq!(cleared.removed_file_count, 1);
+    assert_eq!(cleared.removed_bytes, 12);
+    assert!(cleared.may_repopulate);
+    assert_eq!(std::fs::read(&source).unwrap(), b"source-media");
+    let cleared_again = engine.clear_cache(MediaCacheFamily::VisualAssets).unwrap();
+    assert_eq!(cleared_again.removed_file_count, 0);
+    assert_eq!(cleared_again.removed_bytes, 0);
+    let unsupported = engine
+        .clear_cache(MediaCacheFamily::GeneratedProxy)
+        .unwrap();
+    assert!(!unsupported.supported);
+    assert_eq!(unsupported.removed_file_count, 0);
 }
 
 fn generate_solid(name: &str, color: &str, frequency: &str) -> TemporaryFile {
@@ -697,6 +766,73 @@ fn frame_requests_decode_exact_requested_frames_without_an_audio_device() {
     assert_eq!((first.width, first.height), (320, 180));
     assert_eq!(first.rgba.len(), 320 * 180 * 4);
     assert_ne!(first.rgba, second.rgba);
+}
+
+#[test]
+fn relinked_moved_source_round_trip_renders_identical_frame() {
+    let clip = TestClip::generate();
+    let engine = FfmpegMediaEngine::new().unwrap();
+    let original_asset = engine.probe(clip.path()).unwrap();
+    let document = full_timeline(original_asset.clone());
+    let frames = engine.frames();
+    engine.set_document(std::sync::Arc::new(document.clone()));
+    engine.request_frame(TimeCode(30));
+    let before_move = receive_frame(&frames, TimeCode(30));
+
+    // Exercise the persisted project boundary before the source path changes.
+    let encoded = serde_json::to_vec(&document).unwrap();
+    let mut relinked_document: Document = serde_json::from_slice(&encoded).unwrap();
+    // Flush the worker's decoder before renaming. This also keeps the test
+    // valid on Windows, where an open FFmpeg handle can prevent a rename.
+    engine.set_document(std::sync::Arc::new(Document::default()));
+    engine.request_frame(TimeCode::ZERO);
+    let _ = receive_frame(&frames, TimeCode::ZERO);
+    let moved = TemporaryFile(std::env::temp_dir().join(format!(
+        "kinewright-relinked-{}-{}.mp4",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )));
+    std::fs::rename(clip.path(), &moved.0).unwrap();
+
+    assert_eq!(
+        engine.media_availability(&original_asset).kind,
+        MediaAvailabilityKind::OfflineMissing
+    );
+
+    let replacement = engine.probe(&moved.0).unwrap();
+    let candidate = RelinkCandidate {
+        path: moved.0.clone(),
+        fingerprint: replacement.source_fingerprint,
+        kind: replacement.kind,
+        fps: replacement.fps,
+        duration: replacement.duration,
+        resolution: replacement.resolution,
+    };
+    Operation::RelinkAsset {
+        asset: original_asset.id,
+        candidate,
+        allow_unverified_source: false,
+    }
+    .apply(&mut relinked_document)
+    .unwrap();
+    let relinked_asset = relinked_document.asset(original_asset.id).unwrap();
+    assert_eq!(relinked_asset.path, moved.0);
+    assert_eq!(
+        relinked_asset.source_fingerprint,
+        original_asset.source_fingerprint
+    );
+
+    engine.set_document(std::sync::Arc::new(relinked_document));
+    engine.request_frame(TimeCode(30));
+    let after_relink = receive_frame(&frames, TimeCode(30));
+    assert_eq!(
+        (before_move.width, before_move.height),
+        (after_relink.width, after_relink.height)
+    );
+    assert_eq!(before_move.rgba.as_ref(), after_relink.rgba.as_ref());
 }
 
 #[test]

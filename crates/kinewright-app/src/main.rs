@@ -9,6 +9,7 @@ mod icons;
 mod inspector_ui;
 mod keys;
 mod media_bin;
+mod media_workflow;
 mod preview_ui;
 mod project;
 mod recording;

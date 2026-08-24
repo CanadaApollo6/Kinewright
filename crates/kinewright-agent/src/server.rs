@@ -23,8 +23,9 @@ use kinewright_core::{
     CaptionCue, CaptionMotion, CaptionPreset, Clip, ClipContent, ClipId, Command, Core,
     DeliveryAspect, DeliveryProfile, DeliveryVariant, Document, Effect, EffectId, Event, Export,
     ExportCancellation, Keyframe, KeyframeInterpolation, MUSIC_STRUCTURE_DEFAULT_METER_BEATS,
-    MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId, MediaAsset, MediaKind, Operation,
-    ParamValue, Playback, Query, QueryResult, ReframeFocusBounds, SceneStatus, SilenceStatus,
+    MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId, MediaAsset, MediaAvailabilityKind,
+    MediaCacheFamily, MediaCacheInventory, MediaKind, Operation, ParamValue, Playback, Query,
+    QueryResult, ReframeFocusBounds, RelinkCandidate, SceneStatus, SilenceStatus,
     SpeakerAngleAssignment, SpeakerMulticamSettings, SubjectCenterBasisPointSample,
     SubjectFocusBasisPointConstraint, SubjectReframeSettings, SyncGroupId, ThreePointMode,
     TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange,
@@ -70,6 +71,7 @@ use crate::{
 };
 
 const THUMBNAIL_MAX_WIDTH: u32 = 512;
+const MEDIA_PREVIEW_MAX_WIDTH: u32 = 1_280;
 const STORYBOARD_DEFAULT_FRAMES: u8 = 9;
 const STORYBOARD_MAX_FRAMES: u8 = 16;
 const STORYBOARD_DEFAULT_CELL_WIDTH: u32 = 320;
@@ -626,6 +628,12 @@ impl KinewrightMcp {
                 )))
             }
             "get_color_context" => self.color_context(),
+            "get_media_status" => self.media_status(),
+            "get_cache_status" => self.cache_status(),
+            "clear_media_cache" => {
+                let args: ClearMediaCacheArgs = decode_args("clear_media_cache", arguments)?;
+                self.clear_media_cache(args.family)
+            }
             "get_clip_info" => {
                 let args: ClipInfoArgs = decode_args("get_clip_info", arguments)?;
                 let document = self.document()?;
@@ -813,6 +821,13 @@ impl KinewrightMcp {
                 let args: ImportMediaArgs = decode_args("import_media", arguments)?;
                 Ok(self.import_media(args.expected_revision, &args.path))
             }
+            "relink_media" => {
+                let args: RelinkMediaArgs = decode_args("relink_media", arguments)?;
+                self.relink_media(&args)
+            }
+            "relink_asset" => Ok(error_text(
+                "relink_asset is not exposed as a generated operation; use relink_media so the replacement is probed and hashed first",
+            )),
             tool_name => {
                 let revisioned = decode_operation(tool_name, arguments)
                     .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
@@ -894,6 +909,160 @@ impl KinewrightMcp {
         }
     }
 
+    fn media_status(&self) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let assets = document
+            .media_pool
+            .iter()
+            .map(|asset| {
+                serde_json::json!({
+                    "asset_id": asset.id.0,
+                    "path": asset.path,
+                    "persisted_fingerprint": asset.source_fingerprint,
+                    "availability": self.analysis.media_availability(asset),
+                    "analysis_jobs": self.analysis.analysis_jobs(asset),
+                })
+            })
+            .collect::<Vec<_>>();
+        let value = serde_json::json!({
+            "timeline_revision": revision.0,
+            "preview": {
+                "mode": "in_memory",
+                "max_width": MEDIA_PREVIEW_MAX_WIDTH,
+                "persistent": false,
+                "generated_proxy_supported": false,
+            },
+            "assets": assets,
+        });
+        Ok(success_structured(
+            format!(
+                "media status at timeline revision {}: {} asset(s), preview mode=in_memory max_width={} persistent=false generated_proxy_supported=false",
+                revision,
+                value["assets"].as_array().map_or(0, Vec::len),
+                MEDIA_PREVIEW_MAX_WIDTH,
+            ),
+            value,
+        ))
+    }
+
+    fn cache_status(&self) -> Result<CallToolResult, McpError> {
+        let inventory: MediaCacheInventory = self.analysis.cache_inventory();
+        let value = serde_json::to_value(&inventory)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        Ok(success_structured(
+            format!("media cache status: {} family(s)", inventory.families.len()),
+            value,
+        ))
+    }
+
+    fn clear_media_cache(&self, family: MediaCacheFamily) -> Result<CallToolResult, McpError> {
+        match self.analysis.clear_cache(family) {
+            Ok(result) if !result.supported => {
+                let generated_proxy = family == MediaCacheFamily::GeneratedProxy;
+                let code = if generated_proxy {
+                    "unsupported_generated_proxy"
+                } else {
+                    "unsupported_cache_family"
+                };
+                Ok(error_structured(
+                    format!("cannot clear {family:?} media cache: {code}"),
+                    serde_json::json!({
+                        "family": family,
+                        "supported": false,
+                        "code": code,
+                        "message": result.note,
+                    }),
+                ))
+            }
+            Ok(result) => {
+                let value = serde_json::to_value(&result)
+                    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+                Ok(success_structured(
+                    format!(
+                        "cleared {:?} media cache: {} file(s), {} byte(s)",
+                        family, result.removed_file_count, result.removed_bytes
+                    ),
+                    value,
+                ))
+            }
+            Err(error) if error == kinewright_core::MediaError::NotImplemented => {
+                let generated_proxy = family == MediaCacheFamily::GeneratedProxy;
+                let code = if generated_proxy {
+                    "unsupported_generated_proxy"
+                } else {
+                    "unsupported_cache_family"
+                };
+                Ok(error_structured(
+                    format!("cannot clear {family:?} media cache: {code}"),
+                    serde_json::json!({
+                        "family": family,
+                        "supported": false,
+                        "code": code,
+                        "message": error.to_string(),
+                    }),
+                ))
+            }
+            Err(error) => Ok(error_structured(
+                format!("could not clear {family:?} media cache: {error}"),
+                serde_json::json!({
+                    "family": family,
+                    "supported": true,
+                    "code": "cache_clear_failed",
+                    "message": error.to_string(),
+                }),
+            )),
+        }
+    }
+
+    fn relink_media(&self, args: &RelinkMediaArgs) -> Result<CallToolResult, McpError> {
+        let (actual_revision, document) = self.snapshot()?;
+        if args.expected_revision != actual_revision {
+            return Ok(revision_conflict_text(
+                args.expected_revision,
+                actual_revision,
+            ));
+        }
+        let Some(current) = document.asset(args.asset_id) else {
+            return Ok(error_text(format!(
+                "asset {} does not exist",
+                args.asset_id
+            )));
+        };
+
+        // Probe and hash the replacement before constructing the Core
+        // operation. Core remains filesystem-free and receives only this
+        // typed candidate; all mismatches therefore remain atomic Core
+        // rejections after this read-only preflight.
+        let probed = match self.analysis.probe(&args.path) {
+            Ok(asset) => asset,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let candidate = RelinkCandidate {
+            path: args.path.clone(),
+            fingerprint: probed.source_fingerprint,
+            kind: probed.kind,
+            fps: probed.fps,
+            duration: probed.duration,
+            resolution: probed.resolution,
+        };
+        let operation = Operation::RelinkAsset {
+            asset: args.asset_id,
+            candidate,
+            allow_unverified_source: args.allow_unverified_source,
+        };
+        let result = self.apply_operation("relink_media", args.expected_revision, operation);
+        if result.is_error != Some(true) {
+            // Refresh content-addressed analysis for the replacement path.
+            // The operation itself remains the one Core history entry.
+            if let Ok((_, updated)) = self.snapshot()
+                && let Some(updated_asset) = updated.asset(current.id)
+            {
+                self.request_asset_analysis(updated_asset.clone());
+            }
+        }
+        Ok(result)
+    }
+
     fn apply_operation(
         &self,
         tool_name: &str,
@@ -953,6 +1122,14 @@ impl KinewrightMcp {
         let (actual_revision, before) = self.snapshot()?;
         if expected_revision != actual_revision {
             return Ok(revision_conflict_text(expected_revision, actual_revision));
+        }
+        if operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::RelinkAsset { .. }))
+        {
+            return Ok(error_text(
+                "RelinkAsset cannot be submitted through apply_edit_plan; use relink_media so the replacement is probed and hashed first",
+            ));
         }
         if let Some(description) = plan_confirmation_description(&before, operations)
             && let Err(reason) = self.confirmations.confirm("apply_edit_plan", description)
@@ -1678,6 +1855,9 @@ impl KinewrightMcp {
 
     fn frame_at(&self, timecode: TimeCode) -> Result<CallToolResult, McpError> {
         let document = self.document()?;
+        if let Some(error) = self.document_availability_error(&document, "frame proof") {
+            return Ok(error);
+        }
         if timecode < TimeCode::ZERO || timecode >= document.duration {
             return Ok(error_text(format!(
                 "frame {} is outside project range 0..{}",
@@ -1704,6 +1884,9 @@ impl KinewrightMcp {
 
     fn video_scopes(&self, args: &VideoScopesArgs) -> Result<CallToolResult, McpError> {
         let document = self.document()?;
+        if let Some(error) = self.document_availability_error(&document, "video scopes") {
+            return Ok(error);
+        }
         if args.timecode < TimeCode::ZERO || args.timecode >= document.duration {
             return Ok(error_text(format!(
                 "frame {} is outside project range 0..{}",
@@ -2327,6 +2510,9 @@ impl KinewrightMcp {
     #[allow(clippy::too_many_lines)]
     fn cut_neighborhoods(&self, args: &CutNeighborhoodsArgs) -> Result<CallToolResult, McpError> {
         let (revision, document) = self.snapshot()?;
+        if let Some(error) = self.document_availability_error(&document, "cut proof") {
+            return Ok(error);
+        }
         let Some(track) = document
             .tracks
             .iter()
@@ -2549,6 +2735,9 @@ impl KinewrightMcp {
                 asset.id
             )));
         }
+        if let Some(error) = self.source_availability_error(&asset, "source storyboard") {
+            return Ok(error);
+        }
 
         let source_in = args
             .range
@@ -2682,6 +2871,9 @@ impl KinewrightMcp {
                 "asset {} is not a video asset",
                 asset.id
             )));
+        }
+        if let Some(error) = self.source_availability_error(&asset, "source shot board") {
+            return Ok(error);
         }
 
         let source_in = args
@@ -3021,6 +3213,9 @@ impl KinewrightMcp {
         label: &str,
         variant: Option<serde_json::Value>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(error) = self.document_availability_error(document, label) {
+            return Ok(error);
+        }
         let range = validated_timeline_range(document, args.range, label)?;
         let frame_count = args.frame_count.unwrap_or(STORYBOARD_DEFAULT_FRAMES);
         if !(1..=STORYBOARD_MAX_FRAMES).contains(&frame_count) {
@@ -3072,6 +3267,55 @@ impl KinewrightMcp {
         ]);
         result.structured_content = Some(manifest);
         Ok(result)
+    }
+
+    fn source_availability_error(
+        &self,
+        asset: &MediaAsset,
+        consumer: &str,
+    ) -> Option<CallToolResult> {
+        let availability = self.analysis.media_availability(asset);
+        if matches!(
+            availability.kind,
+            MediaAvailabilityKind::OnlineVerified | MediaAvailabilityKind::OnlineUnverified
+        ) {
+            return None;
+        }
+        Some(error_structured(
+            format!(
+                "{consumer} cannot read asset {} at {}: {:?}",
+                asset.id,
+                asset.path.display(),
+                availability.kind
+            ),
+            serde_json::json!({
+                "asset_id": asset.id.0,
+                "path": asset.path,
+                "availability": availability,
+                "consumer": consumer,
+            }),
+        ))
+    }
+
+    fn document_availability_error(
+        &self,
+        document: &Document,
+        consumer: &str,
+    ) -> Option<CallToolResult> {
+        // An offline item sitting unused in the media pool must not block a
+        // timeline proof. Only source-backed clips can contribute decoded
+        // pixels; titles are project-native and need no source file.
+        let mut inspected = BTreeSet::new();
+        document.tracks.iter().find_map(|track| {
+            track.clips.iter().find_map(|clip| {
+                if matches!(clip.content, ClipContent::Title(_)) || !inspected.insert(clip.asset) {
+                    return None;
+                }
+                document
+                    .asset(clip.asset)
+                    .and_then(|asset| self.source_availability_error(asset, consumer))
+            })
+        })
     }
 
     #[allow(clippy::too_many_lines)]
@@ -3152,6 +3396,7 @@ impl KinewrightMcp {
                 .collect::<Vec<_>>(),
             _ => Vec::new(),
         };
+        let availability = self.analysis.media_availability(asset);
         let value = serde_json::json!({
             "asset": {
                 "id": asset.id.0,
@@ -3165,6 +3410,8 @@ impl KinewrightMcp {
                 },
                 "resolution": asset.resolution,
                 "color_description": asset.color_description,
+                "persisted_fingerprint": asset.source_fingerprint,
+                "availability": availability,
             },
             "source_monitor": {
                 "source_in": source_in.0,
@@ -5333,6 +5580,25 @@ struct ImportMediaArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct RelinkMediaArgs {
+    /// Exact revision returned by `get_media_status` or `get_timeline_state`.
+    expected_revision: TimelineRevision,
+    /// Stable asset id whose path should be replaced.
+    asset_id: AssetId,
+    /// Replacement path on the user's machine. The media layer probes and hashes it before Core sees it.
+    path: PathBuf,
+    /// Required for legacy assets whose persisted source fingerprint is unknown.
+    #[serde(default)]
+    allow_unverified_source: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ClearMediaCacheArgs {
+    /// One owned cache family. Generated proxies are represented but unsupported in M41.
+    family: MediaCacheFamily,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct SourceInfoArgs {
     /// Stable asset id shown by `get_timeline_state` or `search_media`.
     asset_id: AssetId,
@@ -5941,6 +6207,42 @@ fn inspector_tools() -> Vec<Tool> {
             schema_object::<EmptyArgs>(),
         )
         .with_annotations(read_only()),
+        Tool::new(
+            "get_media_status",
+            "Return the exact timeline revision, every asset path and persisted fingerprint, current filesystem availability, derived-analysis lifecycle, and the honest in-memory preview contract. Availability is dynamic and is never persisted into the project.",
+            schema_object::<EmptyArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_cache_status",
+            "Return typed inventory for every owned media-cache family, including disk roots, file counts, bytes, repopulation notes, and the explicitly unsupported generated-proxy family.",
+            schema_object::<EmptyArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "clear_media_cache",
+            "Clear exactly one owned media-cache family as a non-Core side effect. This never deletes project state or source media; unsupported generated proxies return a typed unsupported result.",
+            schema_object::<ClearMediaCacheArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(true)
+                .open_world(false),
+        ),
+        Tool::new(
+            "relink_media",
+            "Probe and hash one replacement path, require exact kind/frame-rate/duration/resolution compatibility, then apply one undoable RelinkAsset operation at the expected revision. Known fingerprints must match exactly; legacy unknown fingerprints require explicit allow_unverified_source.",
+            schema_object::<RelinkMediaArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(true),
+        ),
         Tool::new(
             "search_capabilities",
             "Search only unnamed editing, perception, proof, or delivery needs. Skip exact names in the user request; batch independent terms.",
@@ -8210,10 +8512,11 @@ mod tests {
     use kinewright_core::{
         AssetBeats, AssetId, AssetSceneChanges, AssetTranscript, BeatMarker, Clip, ColorBitDepth,
         ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer,
-        ColorWhitePoint, FrameTexture, Marker, MarkerId, MediaAsset, MediaError, MediaEvent,
-        MediaKind, ParamValue, Rational, RgbaImage, SceneChange, SceneStatus, SilenceSpan,
-        SilenceStatus, TimelineSceneChange, TimelineSilenceSpan, Title, Track, TrackId, TrackKind,
-        TranscriptWord, VisualAssetResult,
+        ColorWhitePoint, FrameTexture, Marker, MarkerId, MediaAsset, MediaAvailabilityKind,
+        MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily, MediaCacheInventory,
+        MediaError, MediaEvent, MediaKind, MediaSourceFingerprint, ParamValue, Rational, RgbaImage,
+        SceneChange, SceneStatus, SilenceSpan, SilenceStatus, TimelineSceneChange,
+        TimelineSilenceSpan, Title, Track, TrackId, TrackKind, TranscriptWord, VisualAssetResult,
     };
     use serde_json::json;
     use std::{
@@ -8224,6 +8527,11 @@ mod tests {
 
     #[derive(Default)]
     struct NoopMedia {
+        probe_asset: Option<MediaAsset>,
+        probe_paths: Mutex<Vec<PathBuf>>,
+        cache_inventory: Option<MediaCacheInventory>,
+        clear_cache_result: Option<MediaCacheClearResult>,
+        availability_by_asset: BTreeMap<AssetId, MediaAvailabilityStatus>,
         transcript: Option<Arc<AssetTranscript>>,
         beat_statuses: BTreeMap<AssetId, BeatStatus>,
         scene_statuses: BTreeMap<AssetId, SceneStatus>,
@@ -8263,8 +8571,43 @@ mod tests {
     }
 
     impl Analysis for NoopMedia {
-        fn probe(&self, _path: &Path) -> Result<MediaAsset, MediaError> {
-            Err(MediaError::NotImplemented)
+        fn probe(&self, path: &Path) -> Result<MediaAsset, MediaError> {
+            self.probe_paths.lock().unwrap().push(path.to_path_buf());
+            self.probe_asset
+                .clone()
+                .map_or(Err(MediaError::NotImplemented), |mut asset| {
+                    asset.path = path.to_path_buf();
+                    Ok(asset)
+                })
+        }
+
+        fn media_availability(&self, asset: &MediaAsset) -> MediaAvailabilityStatus {
+            self.availability_by_asset
+                .get(&asset.id)
+                .cloned()
+                .unwrap_or_else(|| MediaAvailabilityStatus {
+                    kind: MediaAvailabilityKind::OnlineUnverified,
+                    observed_fingerprint: None,
+                    reason: Some("test backend does not inspect filesystem state".to_owned()),
+                })
+        }
+
+        fn cache_inventory(&self) -> MediaCacheInventory {
+            self.cache_inventory.clone().unwrap_or(MediaCacheInventory {
+                families: Vec::new(),
+            })
+        }
+
+        fn clear_cache(
+            &self,
+            family: MediaCacheFamily,
+        ) -> Result<MediaCacheClearResult, MediaError> {
+            if family == MediaCacheFamily::GeneratedProxy {
+                return Err(MediaError::NotImplemented);
+            }
+            self.clear_cache_result
+                .clone()
+                .ok_or(MediaError::NotImplemented)
         }
 
         fn request_transcription(&self, _asset: MediaAsset) {}
@@ -8377,7 +8720,7 @@ mod tests {
             })
         }
 
-        fn request_waveform(&self, _asset: MediaAsset) -> bool {
+        fn request_waveform(&self, _asset: MediaAsset, _request_generation: u64) -> bool {
             false
         }
 
@@ -8386,6 +8729,7 @@ mod tests {
             _asset: MediaAsset,
             _source_at: TimeCode,
             _max_width: u32,
+            _request_generation: u64,
         ) -> bool {
             false
         }
@@ -8404,6 +8748,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Video,
             resolution: Some((320, 180)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let document = Document {
@@ -8439,6 +8784,82 @@ mod tests {
         (Core::spawn(document).unwrap(), media.clone(), media)
     }
 
+    fn fingerprint(byte_len: u64, nibble: char) -> MediaSourceFingerprint {
+        MediaSourceFingerprint {
+            content_sha256: Some(std::iter::repeat_n(nibble, 64).collect()),
+            byte_len: Some(byte_len),
+        }
+    }
+
+    fn relink_probe_asset(source_fingerprint: MediaSourceFingerprint) -> MediaAsset {
+        MediaAsset {
+            id: AssetId(99),
+            path: PathBuf::from("probe-placeholder.mp4"),
+            name: "replacement".to_owned(),
+            duration: TimeCode(60),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Video,
+            resolution: Some((320, 180)),
+            source_fingerprint,
+            color_description: kinewright_core::ColorDescription::default(),
+        }
+    }
+
+    fn relink_service(
+        current_fingerprint: MediaSourceFingerprint,
+        candidate_fingerprint: MediaSourceFingerprint,
+    ) -> (KinewrightMcp, Core, Arc<NoopMedia>) {
+        relink_service_with_probe(
+            current_fingerprint,
+            relink_probe_asset(candidate_fingerprint),
+        )
+    }
+
+    fn relink_service_with_probe(
+        current_fingerprint: MediaSourceFingerprint,
+        probe_asset: MediaAsset,
+    ) -> (KinewrightMcp, Core, Arc<NoopMedia>) {
+        let (seed_core, playback, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed_document)) =
+            seed_core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut document = (*seed_document).clone();
+        document.media_pool[0].source_fingerprint = current_fingerprint;
+        let core = Core::spawn(document).unwrap();
+        let media = Arc::new(NoopMedia {
+            probe_asset: Some(probe_asset),
+            ..NoopMedia::default()
+        });
+        let service = KinewrightMcp::new(
+            core.clone(),
+            playback,
+            media.clone(),
+            ConfirmationBroker::default(),
+        );
+        (service, core, media)
+    }
+
+    fn relink_request(
+        expected_revision: u64,
+        asset_id: u64,
+        path: &str,
+        allow_unverified_source: bool,
+    ) -> CallToolRequestParams {
+        CallToolRequestParams::new("relink_media").with_arguments(
+            json!({
+                "expected_revision": expected_revision,
+                "asset_id": asset_id,
+                "path": path,
+                "allow_unverified_source": allow_unverified_source,
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+    }
+
     fn montage_analysis(status: BeatStatus) -> Arc<NoopMedia> {
         Arc::new(NoopMedia {
             beat_statuses: BTreeMap::from([(AssetId(9), status)]),
@@ -8465,6 +8886,7 @@ mod tests {
             fps,
             kind: MediaKind::Video,
             resolution: Some((1_920, 1_080)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let music = MediaAsset {
@@ -8475,6 +8897,7 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((1_920, 1_080)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let document = Document {
@@ -8528,6 +8951,7 @@ mod tests {
             fps,
             kind: MediaKind::Video,
             resolution: Some((1_920, 1_080)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let music = MediaAsset {
@@ -8538,6 +8962,7 @@ mod tests {
             fps,
             kind: MediaKind::Audio,
             resolution: None,
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let media_clip = |id, asset, track_start| Clip {
@@ -8593,6 +9018,7 @@ mod tests {
             fps: source_fps,
             kind: MediaKind::Audio,
             resolution: None,
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let document = Document {
@@ -9958,6 +10384,307 @@ mod tests {
     }
 
     #[test]
+    fn m41_media_status_reports_dynamic_availability_jobs_and_preview_limits() {
+        let (core, playback, analysis) = fixture();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let result = service
+            .call_blocking(CallToolRequestParams::new("get_media_status"))
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        let value = result.structured_content.unwrap();
+        assert_eq!(value["timeline_revision"], 0);
+        assert_eq!(value["preview"]["mode"], "in_memory");
+        assert_eq!(value["preview"]["max_width"], 1_280);
+        assert_eq!(value["preview"]["persistent"], false);
+        assert_eq!(value["preview"]["generated_proxy_supported"], false);
+        assert_eq!(value["assets"].as_array().unwrap().len(), 1);
+        assert_eq!(value["assets"][0]["path"], "fixture.mp4");
+        assert_eq!(
+            value["assets"][0]["availability"]["kind"],
+            "online_unverified"
+        );
+        assert_eq!(
+            value["assets"][0]["analysis_jobs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn m41_timeline_proofs_ignore_offline_media_pool_assets_until_referenced() {
+        let (seed_core, _, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed)) =
+            seed_core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut document = (*seed).clone();
+        let mut unused = document.media_pool[0].clone();
+        unused.id = AssetId(2);
+        unused.path = PathBuf::from("unused-offline.mp4");
+        document.media_pool.push(unused);
+        document.validate().unwrap();
+
+        let offline = MediaAvailabilityStatus {
+            kind: MediaAvailabilityKind::OfflineMissing,
+            observed_fingerprint: None,
+            reason: Some("test source is offline".to_owned()),
+        };
+        let media = Arc::new(NoopMedia {
+            availability_by_asset: BTreeMap::from([(AssetId(2), offline)]),
+            ..NoopMedia::default()
+        });
+        let service = KinewrightMcp::new(
+            Core::spawn(document.clone()).unwrap(),
+            media.clone(),
+            media,
+            ConfirmationBroker::default(),
+        );
+        assert!(
+            service
+                .document_availability_error(&document, "frame proof")
+                .is_none(),
+            "an unused offline bin item must not block a timeline proof"
+        );
+
+        document.tracks[0].clips[0].asset = AssetId(2);
+        assert!(
+            service
+                .document_availability_error(&document, "frame proof")
+                .is_some(),
+            "a referenced offline source must block the proof explicitly"
+        );
+    }
+
+    #[test]
+    fn m41_cache_status_and_scoped_clear_are_typed_and_proxy_failure_is_explicit() {
+        let (core, playback, _) = fixture();
+        let media = Arc::new(NoopMedia {
+            cache_inventory: Some(MediaCacheInventory {
+                families: vec![kinewright_core::MediaCacheFamilyStatus {
+                    family: MediaCacheFamily::VisualAssets,
+                    supported: true,
+                    root: Some(PathBuf::from("visual-assets/v1")),
+                    file_count: 3,
+                    bytes: 120,
+                    may_repopulate: true,
+                    note: Some("test inventory".to_owned()),
+                }],
+            }),
+            clear_cache_result: Some(MediaCacheClearResult {
+                family: MediaCacheFamily::VisualAssets,
+                supported: true,
+                removed_file_count: 3,
+                removed_bytes: 120,
+                may_repopulate: true,
+                note: Some("test clear".to_owned()),
+            }),
+            ..NoopMedia::default()
+        });
+        let service = KinewrightMcp::new(core, playback, media, ConfirmationBroker::default());
+
+        let status = service
+            .call_blocking(CallToolRequestParams::new("get_cache_status"))
+            .unwrap();
+        assert_eq!(status.is_error, Some(false));
+        assert_eq!(
+            status.structured_content.unwrap()["families"][0]["file_count"],
+            3
+        );
+
+        let clear = service
+            .call_blocking(
+                CallToolRequestParams::new("clear_media_cache").with_arguments(
+                    json!({"family": "visual_assets"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(clear.is_error, Some(false));
+        assert_eq!(clear.structured_content.unwrap()["removed_bytes"], 120);
+
+        let unsupported = service
+            .call_blocking(
+                CallToolRequestParams::new("clear_media_cache").with_arguments(
+                    json!({"family": "generated_proxy"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(unsupported.is_error, Some(true));
+        let value = unsupported.structured_content.unwrap();
+        assert_eq!(value["family"], "generated_proxy");
+        assert_eq!(value["code"], "unsupported_generated_proxy");
+        assert_eq!(value["supported"], false);
+    }
+
+    #[test]
+    fn m41_relink_probes_applies_one_undoable_operation_and_rejects_known_mismatch() {
+        let known = fingerprint(8, 'a');
+        let (service, core, media) = relink_service(known.clone(), known.clone());
+        let applied = service
+            .call_blocking(relink_request(0, 1, "moved/replacement.mp4", false))
+            .unwrap();
+        assert_eq!(applied.is_error, Some(false));
+        assert_eq!(
+            media.probe_paths.lock().unwrap().as_slice(),
+            [PathBuf::from("moved/replacement.mp4")]
+        );
+        let (revision, document) = service.snapshot().unwrap();
+        assert_eq!(revision, TimelineRevision(1));
+        assert_eq!(
+            document.asset(AssetId(1)).unwrap().path,
+            PathBuf::from("moved/replacement.mp4")
+        );
+
+        let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
+            panic!("relink should be undoable");
+        };
+        assert_eq!(
+            doc.asset(AssetId(1)).unwrap().path,
+            PathBuf::from("fixture.mp4")
+        );
+
+        let (service, _, _) = relink_service(known, fingerprint(8, 'b'));
+        let mismatch = service
+            .call_blocking(relink_request(0, 1, "wrong-content.mp4", false))
+            .unwrap();
+        assert_eq!(mismatch.is_error, Some(true));
+        assert!(
+            mismatch.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("fingerprint")
+        );
+        assert_eq!(service.snapshot().unwrap().0, TimelineRevision(0));
+        assert_eq!(
+            service
+                .snapshot()
+                .unwrap()
+                .1
+                .asset(AssetId(1))
+                .unwrap()
+                .path,
+            PathBuf::from("fixture.mp4")
+        );
+
+        let mut metadata_mismatch = relink_probe_asset(fingerprint(8, 'a'));
+        metadata_mismatch.duration = TimeCode(59);
+        let (service, _, _) = relink_service_with_probe(fingerprint(8, 'a'), metadata_mismatch);
+        let mismatch = service
+            .call_blocking(relink_request(0, 1, "wrong-duration.mp4", false))
+            .unwrap();
+        assert_eq!(mismatch.is_error, Some(true));
+        assert!(
+            mismatch.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("duration")
+        );
+        assert_eq!(service.snapshot().unwrap().0, TimelineRevision(0));
+    }
+
+    #[test]
+    fn m41_relink_requires_legacy_opt_in_and_stale_revision_preflights_before_probe() {
+        let candidate_fingerprint = fingerprint(8, 'a');
+        let (service, _, media) = relink_service(
+            MediaSourceFingerprint::unknown(),
+            candidate_fingerprint.clone(),
+        );
+        let refused = service
+            .call_blocking(relink_request(0, 1, "legacy-replacement.mp4", false))
+            .unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        assert!(
+            refused.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("allow_unverified_source")
+        );
+        assert_eq!(service.snapshot().unwrap().0, TimelineRevision(0));
+
+        let accepted = service
+            .call_blocking(relink_request(0, 1, "legacy-replacement.mp4", true))
+            .unwrap();
+        assert_eq!(accepted.is_error, Some(false));
+        assert!(
+            service
+                .snapshot()
+                .unwrap()
+                .1
+                .asset(AssetId(1))
+                .unwrap()
+                .source_fingerprint
+                .is_verified()
+        );
+
+        let before_probe_count = media.probe_paths.lock().unwrap().len();
+        let stale = service
+            .call_blocking(relink_request(0, 1, "stale.mp4", true))
+            .unwrap();
+        assert_eq!(stale.is_error, Some(true));
+        assert!(
+            stale.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("revision conflict")
+        );
+        assert_eq!(media.probe_paths.lock().unwrap().len(), before_probe_count);
+    }
+
+    #[test]
+    fn m41_relink_is_not_available_through_generated_operation_or_edit_plan() {
+        let registry = KinewrightMcp::capability_tools().unwrap();
+        assert!(registry.iter().any(|tool| tool.name == "relink_media"));
+        assert!(registry.iter().all(|tool| tool.name != "relink_asset"));
+        let (core, playback, analysis) = fixture();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let result = service
+            .call_blocking(
+                CallToolRequestParams::new("apply_edit_plan").with_arguments(
+                    json!({
+                        "expected_revision": 0,
+                        "operations": [{
+                            "op": "relink_asset",
+                            "asset": 1,
+                            "candidate": {
+                                "path": "bypass.mp4",
+                                "fingerprint": {},
+                                "kind": "Video",
+                                "fps": {"numerator": 30, "denominator": 1},
+                                "duration": 60,
+                                "resolution": [320, 180]
+                            },
+                            "allow_unverified_source": true
+                        }]
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("relink_media")
+        );
+    }
+
+    #[test]
     fn m34_agent_tools_expose_creator_plans_tracking_and_delivery_jobs() {
         let tools = KinewrightMcp::tools().unwrap();
         let names = tools
@@ -10523,7 +11250,7 @@ mod tests {
         let registry_metrics = ToolSurfaceMetrics::measure(&registry);
         let served_metrics = ToolSurfaceMetrics::measure(&served);
         println!("registry={registry_metrics:?} served={served_metrics:?}");
-        assert_eq!(registry_metrics.tool_count, 99);
+        assert_eq!(registry_metrics.tool_count, 103);
         assert_eq!(served_metrics.tool_count, 7);
         assert!(served_metrics.tool_count < registry_metrics.tool_count / 4);
         assert!(served_metrics.serialized_bytes < registry_metrics.serialized_bytes / 4);
@@ -10812,6 +11539,7 @@ mod tests {
                 fps: Rational::new(30, 1).unwrap(),
                 kind: MediaKind::Audio,
                 resolution: None,
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
                 color_description: kinewright_core::ColorDescription::default(),
             },
         }))
@@ -11384,6 +12112,7 @@ mod tests {
                 fps: Rational::new(30, 1).unwrap(),
                 kind: MediaKind::Audio,
                 resolution: None,
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
                 color_description: kinewright_core::ColorDescription::default(),
             },
         }))
@@ -11681,6 +12410,7 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((320, 180)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let transcript = AssetTranscript {
@@ -11754,6 +12484,7 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((320, 180)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let transcript = AssetTranscript {
@@ -11809,6 +12540,7 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((320, 180)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let transcript = AssetTranscript {
@@ -11868,6 +12600,7 @@ mod tests {
             fps,
             kind: MediaKind::AudioVideo,
             resolution: Some((320, 180)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let transcript = AssetTranscript {

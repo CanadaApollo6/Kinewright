@@ -1,4 +1,5 @@
 use std::{
+    fs,
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock, RwLock,
@@ -11,10 +12,11 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use kinewright_core::{
     Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, BeatStatus, Document, Export,
-    ExportCancellation, ExportSettings, FrameTexture, MediaAsset, MediaError, MediaEvent, Playback,
-    PlaybackState, ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode,
-    TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TranscriptStatus, VisualAssetResult,
+    ExportCancellation, ExportSettings, FrameTexture, MediaAsset, MediaAvailabilityKind,
+    MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus,
+    MediaCacheInventory, MediaError, MediaEvent, Playback, PlaybackState, ProgressSink, Rational,
+    RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, VisualAssetResult,
 };
 
 use crate::{
@@ -24,8 +26,10 @@ use crate::{
     compositor::GpuContext,
     decode::probe_path,
     derived::{DerivedAnalysisConfig, DerivedAnalysisService},
+    derived_cache::CacheStats,
     loudness::measure_loudness,
     render::{DecodeStrategy, FrameRenderer, PREVIEW_MAX_WIDTH, RenderScale},
+    sha256::source_fingerprint,
     transcript::{TranscriptService, default_data_dir},
 };
 
@@ -90,6 +94,12 @@ enum Control {
         max_width: u32,
         reply: Sender<Result<RgbaImage, MediaError>>,
     },
+    PreviewCacheStats {
+        reply: Sender<CacheStats>,
+    },
+    ClearPreviewCache {
+        reply: Sender<CacheStats>,
+    },
 }
 
 pub struct FfmpegMediaEngine {
@@ -100,6 +110,7 @@ pub struct FfmpegMediaEngine {
     clock: Arc<SharedClock>,
     meter: Arc<MeterState>,
     next_asset_id: AtomicU64,
+    data_dir: PathBuf,
     gpu: GpuContext,
     export_document: Arc<RwLock<Arc<Document>>>,
     transcripts: TranscriptService,
@@ -166,6 +177,7 @@ impl FfmpegMediaEngine {
         analysis_config: DerivedAnalysisConfig,
     ) -> Result<Self, MediaError> {
         crate::initialize_ffmpeg()?;
+        let data_dir_for_self = data_dir.clone();
         let (control_tx, control_rx) = unbounded();
         let (frames_tx, frames_rx) = bounded(2);
         let (events_tx, events_rx) = bounded(16);
@@ -210,6 +222,7 @@ impl FfmpegMediaEngine {
             clock,
             meter,
             next_asset_id: AtomicU64::new(1),
+            data_dir: data_dir_for_self,
             gpu,
             export_document: Arc::new(RwLock::new(Arc::new(Document::default()))),
             transcripts: TranscriptService::new(data_dir)?,
@@ -271,6 +284,58 @@ impl FfmpegMediaEngine {
         }
         self.transcripts.register(&asset.path, transcript);
         Ok(())
+    }
+
+    fn preview_cache_command(&self, clear: bool) -> Result<CacheStats, MediaError> {
+        let (reply, response) = bounded(1);
+        let control = if clear {
+            Control::ClearPreviewCache { reply }
+        } else {
+            Control::PreviewCacheStats { reply }
+        };
+        self.control_tx
+            .send(control)
+            .map_err(|_| MediaError::Backend("media worker stopped".to_owned()))?;
+        response
+            .recv()
+            .map_err(|_| MediaError::Backend("media worker stopped".to_owned()))
+    }
+
+    fn cache_root(&self, family: &str) -> PathBuf {
+        self.data_dir.join(family).join("v1")
+    }
+
+    fn cache_family_status(
+        family: MediaCacheFamily,
+        root: Option<PathBuf>,
+        supported: bool,
+        may_repopulate: bool,
+        stats: Result<CacheStats, MediaError>,
+        note: Option<String>,
+    ) -> MediaCacheFamilyStatus {
+        match stats {
+            Ok(stats) => MediaCacheFamilyStatus {
+                family,
+                supported,
+                root,
+                file_count: stats.file_count,
+                bytes: stats.bytes,
+                may_repopulate,
+                note,
+            },
+            Err(error) => MediaCacheFamilyStatus {
+                family,
+                supported,
+                root,
+                file_count: 0,
+                bytes: 0,
+                may_repopulate,
+                note: Some(format!(
+                    "cache inventory unavailable: {error}{}",
+                    note.map_or_else(String::new, |note| format!("; {note}"))
+                )),
+            },
+        }
     }
 }
 
@@ -345,6 +410,10 @@ impl Analysis for FfmpegMediaEngine {
     fn probe(&self, path: &Path) -> Result<MediaAsset, MediaError> {
         let id = AssetId(self.next_asset_id.fetch_add(1, Ordering::Relaxed));
         probe_path(path, id)
+    }
+
+    fn media_availability(&self, asset: &MediaAsset) -> MediaAvailabilityStatus {
+        media_availability(asset)
     }
 
     fn request_transcription(&self, asset: MediaAsset) {
@@ -492,17 +561,189 @@ impl Analysis for FfmpegMediaEngine {
             .map_err(|_| MediaError::Backend("media worker stopped".to_owned()))?
     }
 
-    fn request_waveform(&self, asset: MediaAsset) -> bool {
-        self.visual_assets.request_waveform(asset)
+    fn request_waveform(&self, asset: MediaAsset, request_generation: u64) -> bool {
+        self.visual_assets
+            .request_waveform(asset, request_generation)
     }
 
-    fn request_thumbnail(&self, asset: MediaAsset, source_at: TimeCode, max_width: u32) -> bool {
+    fn request_thumbnail(
+        &self,
+        asset: MediaAsset,
+        source_at: TimeCode,
+        max_width: u32,
+        request_generation: u64,
+    ) -> bool {
         self.visual_assets
-            .request_thumbnail(asset, source_at, max_width)
+            .request_thumbnail(asset, source_at, max_width, request_generation)
     }
 
     fn visual_asset_results(&self) -> Receiver<VisualAssetResult> {
         self.visual_assets.results()
+    }
+
+    fn cache_inventory(&self) -> MediaCacheInventory {
+        let preview_note = Some(
+            "preview_memory is an ephemeral in-memory decode cache; it is not a disk proxy"
+                .to_owned(),
+        );
+        let visual_root = self.cache_root("visual-assets");
+        let derived_root = self.cache_root("derived-analysis");
+        let proxy_root = self.cache_root("generated-proxy");
+        MediaCacheInventory {
+            families: vec![
+                Self::cache_family_status(
+                    MediaCacheFamily::PreviewMemory,
+                    None,
+                    true,
+                    true,
+                    self.preview_cache_command(false),
+                    preview_note,
+                ),
+                Self::cache_family_status(
+                    MediaCacheFamily::VisualAssets,
+                    Some(visual_root),
+                    true,
+                    true,
+                    self.visual_assets.cache_stats(),
+                    Some("background visual workers may repopulate this family".to_owned()),
+                ),
+                Self::cache_family_status(
+                    MediaCacheFamily::DerivedAnalysis,
+                    Some(derived_root),
+                    true,
+                    true,
+                    self.derived_analysis.cache_stats(),
+                    Some("background analysis workers may repopulate this family".to_owned()),
+                ),
+                Self::cache_family_status(
+                    MediaCacheFamily::Transcripts,
+                    Some(self.transcripts.cache_root().to_path_buf()),
+                    true,
+                    true,
+                    self.transcripts.cache_stats(),
+                    Some("background transcription workers may repopulate this family".to_owned()),
+                ),
+                Self::cache_family_status(
+                    MediaCacheFamily::GeneratedProxy,
+                    Some(proxy_root),
+                    false,
+                    false,
+                    crate::derived_cache::inventory_cache_root(&self.cache_root("generated-proxy")),
+                    Some("generated disk proxies are not supported in M41".to_owned()),
+                ),
+            ],
+        }
+    }
+
+    fn clear_cache(&self, family: MediaCacheFamily) -> Result<MediaCacheClearResult, MediaError> {
+        let (supported, may_repopulate, stats, note) = match family {
+            MediaCacheFamily::PreviewMemory => (
+                true,
+                true,
+                self.preview_cache_command(true)?,
+                Some(
+                    "preview playback or scrubbing can repopulate this in-memory cache".to_owned(),
+                ),
+            ),
+            MediaCacheFamily::VisualAssets => (
+                true,
+                true,
+                self.visual_assets.clear_cache()?,
+                Some("queued visual work may repopulate this family".to_owned()),
+            ),
+            MediaCacheFamily::DerivedAnalysis => (
+                true,
+                true,
+                self.derived_analysis.clear_cache()?,
+                Some("queued analysis work may repopulate this family".to_owned()),
+            ),
+            MediaCacheFamily::Transcripts => (
+                true,
+                true,
+                self.transcripts.clear_cache()?,
+                Some("queued transcription work may repopulate this family".to_owned()),
+            ),
+            MediaCacheFamily::GeneratedProxy => (
+                false,
+                false,
+                CacheStats::default(),
+                Some("generated disk proxies are not supported in M41".to_owned()),
+            ),
+        };
+        Ok(MediaCacheClearResult {
+            family,
+            supported,
+            removed_file_count: stats.file_count,
+            removed_bytes: stats.bytes,
+            may_repopulate,
+            note,
+        })
+    }
+}
+
+fn media_availability(asset: &MediaAsset) -> MediaAvailabilityStatus {
+    let metadata = match fs::metadata(&asset.path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return MediaAvailabilityStatus {
+                kind: MediaAvailabilityKind::OfflineMissing,
+                observed_fingerprint: None,
+                reason: Some(format!("media path is missing: {}", asset.path.display())),
+            };
+        }
+        Err(error) => {
+            return MediaAvailabilityStatus {
+                kind: MediaAvailabilityKind::Unreadable,
+                observed_fingerprint: None,
+                reason: Some(format!(
+                    "could not inspect media path {}: {error}",
+                    asset.path.display()
+                )),
+            };
+        }
+    };
+    if !metadata.is_file() {
+        return MediaAvailabilityStatus {
+            kind: MediaAvailabilityKind::OfflineMissing,
+            observed_fingerprint: None,
+            reason: Some(format!(
+                "media path is missing or not a regular file: {}",
+                asset.path.display()
+            )),
+        };
+    }
+    let observed_fingerprint = match source_fingerprint(&asset.path) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            return MediaAvailabilityStatus {
+                kind: MediaAvailabilityKind::Unreadable,
+                observed_fingerprint: None,
+                reason: Some(error.to_string()),
+            };
+        }
+    };
+    if !asset.source_fingerprint.is_verified() {
+        return MediaAvailabilityStatus {
+            kind: MediaAvailabilityKind::OnlineUnverified,
+            observed_fingerprint: Some(observed_fingerprint),
+            reason: Some("source identity is not persisted for this asset".to_owned()),
+        };
+    }
+    if asset.source_fingerprint == observed_fingerprint {
+        MediaAvailabilityStatus {
+            kind: MediaAvailabilityKind::OnlineVerified,
+            observed_fingerprint: Some(observed_fingerprint),
+            reason: None,
+        }
+    } else {
+        MediaAvailabilityStatus {
+            kind: MediaAvailabilityKind::Changed,
+            observed_fingerprint: Some(observed_fingerprint),
+            reason: Some(
+                "the file at this path no longer matches the imported source fingerprint"
+                    .to_owned(),
+            ),
+        }
     }
 }
 
@@ -623,6 +864,12 @@ impl Worker {
                         pixels: (*frame.rgba).clone(),
                     });
                 let _ = reply.send(result);
+            }
+            Control::PreviewCacheStats { reply } => {
+                let _ = reply.send(self.renderer.cache_stats());
+            }
+            Control::ClearPreviewCache { reply } => {
+                let _ = reply.send(self.renderer.clear());
             }
         }
     }
@@ -783,5 +1030,69 @@ fn send_latest<T: Send>(sender: &Sender<T>, drop_receiver: &Receiver<T>, value: 
             let _ = drop_receiver.try_recv();
             let _ = sender.try_send(value);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use kinewright_core::{MediaKind, MediaSourceFingerprint};
+
+    use super::*;
+    use crate::{sha256::source_fingerprint, test_support::TempDirectory};
+
+    fn asset(path: PathBuf, fingerprint: MediaSourceFingerprint) -> MediaAsset {
+        MediaAsset {
+            id: AssetId(1),
+            path,
+            name: "fixture".to_owned(),
+            duration: TimeCode(30),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Video,
+            resolution: Some((320, 180)),
+            source_fingerprint: fingerprint,
+            color_description: kinewright_core::ColorDescription::default(),
+        }
+    }
+
+    #[test]
+    fn availability_distinguishes_verified_unverified_changed_missing_and_non_regular() {
+        let directory = TempDirectory::new("availability");
+        let path = directory.path("source.bin");
+        fs::write(&path, b"original").unwrap();
+        let fingerprint = source_fingerprint(&path).unwrap();
+
+        assert_eq!(
+            media_availability(&asset(path.clone(), fingerprint.clone())).kind,
+            MediaAvailabilityKind::OnlineVerified
+        );
+        assert_eq!(
+            media_availability(&asset(path.clone(), MediaSourceFingerprint::unknown())).kind,
+            MediaAvailabilityKind::OnlineUnverified
+        );
+
+        fs::write(&path, b"changed source").unwrap();
+        let changed = media_availability(&asset(path.clone(), fingerprint));
+        assert_eq!(changed.kind, MediaAvailabilityKind::Changed);
+        assert!(changed.observed_fingerprint.is_some());
+
+        let missing = asset(
+            directory.path("missing.bin"),
+            MediaSourceFingerprint::unknown(),
+        );
+        assert_eq!(
+            media_availability(&missing).kind,
+            MediaAvailabilityKind::OfflineMissing
+        );
+
+        let directory_asset = asset(
+            directory.root().to_path_buf(),
+            MediaSourceFingerprint::unknown(),
+        );
+        assert_eq!(
+            media_availability(&directory_asset).kind,
+            MediaAvailabilityKind::OfflineMissing
+        );
     }
 }

@@ -9,10 +9,11 @@ use kinewright_core::{
     AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, Clip, ClipContent, ClipId,
     ColorBitDepth, ColorContext, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
     ColorRange, ColorTransfer, ColorWhitePoint, Command, Core, Document, Effect, EffectId, Event,
-    FreezeFrame, Keyframe, KeyframeInterpolation, LinkId, Marker, MarkerId, MediaAsset, MediaBin,
-    MediaKind, OpError, Operation, ParamValue, Rational, SourceSelect, StringOut, StringOutId,
-    SyncGroup, SyncGroupId, SyncGroupMember, TRANSITION_DESCRIPTORS, ThreePointMode, TimeCode,
-    Title, TitlePosition, Track, TrackId, TrackKind, Transition, transition_descriptor,
+    FreezeFrame, JournalCommand, Keyframe, KeyframeInterpolation, LinkId, Marker, MarkerId,
+    MediaAsset, MediaBin, MediaKind, MediaSourceFingerprint, OpError, Operation, ParamValue,
+    Rational, RelinkCandidate, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId,
+    SyncGroupMember, TRANSITION_DESCRIPTORS, ThreePointMode, TimeCode, Title, TitlePosition, Track,
+    TrackId, TrackKind, Transition, transition_descriptor,
 };
 use proptest::prelude::*;
 use schemars::schema_for;
@@ -26,7 +27,26 @@ fn asset(id: u64, fps: Rational, duration: i64) -> MediaAsset {
         fps,
         kind: MediaKind::Video,
         resolution: Some((1_920, 1_080)),
+        source_fingerprint: MediaSourceFingerprint::default(),
         color_description: ColorDescription::default(),
+    }
+}
+
+fn source_fingerprint(byte_len: u64) -> MediaSourceFingerprint {
+    MediaSourceFingerprint {
+        content_sha256: Some("0123456789abcdef".repeat(4)),
+        byte_len: Some(byte_len),
+    }
+}
+
+fn relink_candidate(asset: &MediaAsset, path: &str) -> RelinkCandidate {
+    RelinkCandidate {
+        path: PathBuf::from(path),
+        fingerprint: asset.source_fingerprint.clone(),
+        kind: asset.kind,
+        fps: asset.fps,
+        duration: asset.duration,
+        resolution: asset.resolution,
     }
 }
 
@@ -142,6 +162,18 @@ fn document_and_every_operation_variant_round_trip_through_json() {
     let operations = vec![
         Operation::AddAsset {
             asset: asset(2, Rational::new(24_000, 1_001).unwrap(), 240),
+        },
+        Operation::RelinkAsset {
+            asset: AssetId(1),
+            candidate: RelinkCandidate {
+                path: PathBuf::from("moved-asset-1.mp4"),
+                fingerprint: source_fingerprint(2_048),
+                kind: MediaKind::Video,
+                fps: Rational::new(30, 1).unwrap(),
+                duration: TimeCode(120),
+                resolution: Some((1_920, 1_080)),
+            },
+            allow_unverified_source: false,
         },
         Operation::SetAssetColorDescription {
             asset: AssetId(1),
@@ -520,6 +552,291 @@ fn pre_cc0_project_json_loads_with_unknown_source_colour_metadata() {
 }
 
 #[test]
+fn source_fingerprint_defaults_round_trips_and_is_exposed_in_schemas() {
+    let legacy = serde_json::json!({
+        "id": 7,
+        "path": "legacy.mp4",
+        "name": "legacy",
+        "duration": 120,
+        "fps": { "numerator": 30, "denominator": 1 },
+        "kind": "Video",
+        "resolution": [1920, 1080]
+    });
+    let legacy_asset: MediaAsset = serde_json::from_value(legacy).unwrap();
+    assert!(legacy_asset.source_fingerprint.is_unknown());
+    assert!(
+        !serde_json::to_string(&legacy_asset)
+            .unwrap()
+            .contains("source_fingerprint")
+    );
+
+    let mut known = asset(7, Rational::new(30, 1).unwrap(), 120);
+    known.source_fingerprint = source_fingerprint(1_024);
+    let encoded = serde_json::to_string(&known).unwrap();
+    assert!(encoded.contains("\"content_sha256\":\"0123456789abcdef"));
+    assert_eq!(serde_json::from_str::<MediaAsset>(&encoded).unwrap(), known);
+
+    let fingerprint_schema = serde_json::to_value(schema_for!(MediaSourceFingerprint)).unwrap();
+    assert!(fingerprint_schema["properties"]["content_sha256"].is_object());
+    assert!(fingerprint_schema["properties"]["byte_len"].is_object());
+    let candidate_schema = serde_json::to_value(schema_for!(RelinkCandidate)).unwrap();
+    assert!(candidate_schema["properties"]["fingerprint"].is_object());
+    let operation_schema = serde_json::to_string(&schema_for!(Operation)).unwrap();
+    assert!(operation_schema.contains("RelinkAsset"));
+    assert!(operation_schema.contains("allow_unverified_source"));
+}
+
+#[test]
+fn source_fingerprint_validation_requires_a_verified_pair() {
+    let cases = [
+        (
+            MediaSourceFingerprint {
+                content_sha256: Some("a".repeat(64)),
+                byte_len: None,
+            },
+            OpError::SourceFingerprintIncomplete { asset: AssetId(1) },
+        ),
+        (
+            MediaSourceFingerprint {
+                content_sha256: None,
+                byte_len: Some(10),
+            },
+            OpError::SourceFingerprintIncomplete { asset: AssetId(1) },
+        ),
+        (
+            MediaSourceFingerprint {
+                content_sha256: Some("A".repeat(64)),
+                byte_len: Some(10),
+            },
+            OpError::InvalidSourceFingerprintHash { asset: AssetId(1) },
+        ),
+        (
+            MediaSourceFingerprint {
+                content_sha256: Some("a".repeat(63)),
+                byte_len: Some(10),
+            },
+            OpError::InvalidSourceFingerprintHash { asset: AssetId(1) },
+        ),
+        (
+            MediaSourceFingerprint {
+                content_sha256: Some("g".repeat(64)),
+                byte_len: Some(10),
+            },
+            OpError::InvalidSourceFingerprintHash { asset: AssetId(1) },
+        ),
+        (
+            MediaSourceFingerprint {
+                content_sha256: Some("a".repeat(64)),
+                byte_len: Some(0),
+            },
+            OpError::InvalidSourceFingerprintByteLength { asset: AssetId(1) },
+        ),
+    ];
+
+    for (fingerprint, expected) in cases {
+        let mut document = empty_timeline(Rational::new(30, 1).unwrap());
+        let mut candidate = asset(1, Rational::new(30, 1).unwrap(), 120);
+        candidate.source_fingerprint = fingerprint;
+        document.media_pool.push(candidate.clone());
+        assert_eq!(document.validate(), Err(expected.clone()));
+
+        let mut through_operation = empty_timeline(Rational::new(30, 1).unwrap());
+        assert_eq!(
+            Operation::AddAsset { asset: candidate }.apply(&mut through_operation),
+            Err(expected)
+        );
+        assert!(through_operation.media_pool.is_empty());
+    }
+}
+
+#[test]
+fn relink_asset_requires_verified_compatible_source_and_preserves_references() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut original = asset(1, fps, 120);
+    original.source_fingerprint = source_fingerprint(2_048);
+    let mut document = empty_timeline(fps);
+    Operation::AddAsset { asset: original }
+        .apply(&mut document)
+        .unwrap();
+    Operation::AddClip {
+        track: TrackId(1),
+        asset: AssetId(1),
+        at: TimeCode(0),
+        source: TimeCode(5)..TimeCode(25),
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::SetAssetColorDescription {
+        asset: AssetId(1),
+        color_description: user_color_override(),
+    }
+    .apply(&mut document)
+    .unwrap();
+    let before = document.clone();
+    let current = document.asset(AssetId(1)).unwrap().clone();
+    let operation = Operation::RelinkAsset {
+        asset: AssetId(1),
+        candidate: relink_candidate(&current, "/moved/asset-1.mp4"),
+        allow_unverified_source: false,
+    };
+
+    operation.apply(&mut document).unwrap();
+    let relinked = document.asset(AssetId(1)).unwrap().clone();
+    assert_eq!(relinked.id, before.asset(AssetId(1)).unwrap().id);
+    assert_eq!(relinked.name, before.asset(AssetId(1)).unwrap().name);
+    assert_eq!(
+        relinked.color_description,
+        before.asset(AssetId(1)).unwrap().color_description
+    );
+    assert_eq!(relinked.path, PathBuf::from("/moved/asset-1.mp4"));
+    assert_eq!(relinked.source_fingerprint, current.source_fingerprint);
+    assert_eq!(document.tracks, before.tracks);
+
+    let mut mismatch = relink_candidate(&relinked, "/wrong/asset-1.mp4");
+    mismatch.duration = TimeCode(121);
+    let unchanged = document.clone();
+    assert_eq!(
+        (Operation::RelinkAsset {
+            asset: AssetId(1),
+            candidate: mismatch,
+            allow_unverified_source: false,
+        })
+        .apply(&mut document),
+        Err(OpError::RelinkMetadataMismatch {
+            asset: AssetId(1),
+            field: "duration",
+            expected: "120".to_owned(),
+            actual: "121".to_owned(),
+        })
+    );
+    assert_eq!(document, unchanged);
+
+    let mut hash_mismatch = relink_candidate(&relinked, "/wrong/hash.mp4");
+    hash_mismatch.fingerprint.content_sha256 = Some("f".repeat(64));
+    assert_eq!(
+        (Operation::RelinkAsset {
+            asset: AssetId(1),
+            candidate: hash_mismatch,
+            allow_unverified_source: false,
+        })
+        .apply(&mut document),
+        Err(OpError::RelinkFingerprintMismatch { asset: AssetId(1) })
+    );
+    assert_eq!(document, unchanged);
+
+    let mut missing = relink_candidate(&relinked, "/wrong/missing.mp4");
+    missing.fingerprint = MediaSourceFingerprint::default();
+    assert_eq!(
+        (Operation::RelinkAsset {
+            asset: AssetId(1),
+            candidate: missing,
+            allow_unverified_source: true,
+        })
+        .apply(&mut document),
+        Err(OpError::UnverifiedRelinkCandidate { asset: AssetId(1) })
+    );
+    assert_eq!(document, unchanged);
+}
+
+#[test]
+fn relink_unknown_legacy_source_requires_explicit_confirmation() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    Operation::AddAsset {
+        asset: asset(1, fps, 120),
+    }
+    .apply(&mut document)
+    .unwrap();
+    let current = document.asset(AssetId(1)).unwrap().clone();
+    let candidate = relink_candidate(
+        &MediaAsset {
+            source_fingerprint: source_fingerprint(2_048),
+            ..current.clone()
+        },
+        "/moved/legacy.mp4",
+    );
+    assert_eq!(
+        (Operation::RelinkAsset {
+            asset: AssetId(1),
+            candidate: candidate.clone(),
+            allow_unverified_source: false,
+        })
+        .apply(&mut document),
+        Err(OpError::RelinkRequiresExplicitUnverifiedSource { asset: AssetId(1) })
+    );
+    assert_eq!(document.asset(AssetId(1)).unwrap().path, current.path);
+
+    Operation::RelinkAsset {
+        asset: AssetId(1),
+        candidate,
+        allow_unverified_source: true,
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(
+        document.asset(AssetId(1)).unwrap().path,
+        PathBuf::from("/moved/legacy.mp4")
+    );
+    assert!(
+        document
+            .asset(AssetId(1))
+            .unwrap()
+            .source_fingerprint
+            .is_verified()
+    );
+}
+
+#[test]
+fn relink_operation_journals_replays_and_undoes_redoes_without_filesystem_access() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut initial = Document::default();
+    let mut original = asset(1, fps, 120);
+    original.source_fingerprint = source_fingerprint(2_048);
+    initial.media_pool.push(original);
+    initial.validate().unwrap();
+
+    let current = initial.asset(AssetId(1)).unwrap().clone();
+    let operation = Operation::RelinkAsset {
+        asset: AssetId(1),
+        candidate: relink_candidate(&current, "/never/needs/to/exist.mp4"),
+        allow_unverified_source: false,
+    };
+    let core = Core::spawn(initial.clone()).unwrap();
+    let Event::DocumentChanged {
+        doc: relinked,
+        journal_command: Some(JournalCommand::Do(actual)),
+        ..
+    } = core.request(Command::Do(operation.clone())).unwrap()
+    else {
+        panic!("relink should be accepted and journaled");
+    };
+    assert_eq!(actual, operation);
+
+    let encoded = serde_json::to_string(&JournalCommand::Do(operation.clone())).unwrap();
+    let parsed: JournalCommand = serde_json::from_str(&encoded).unwrap();
+    let replay_core = Core::spawn(initial.clone()).unwrap();
+    let Event::DocumentChanged {
+        doc: replayed,
+        journal_command: Some(replayed_command),
+        ..
+    } = replay_core.request(parsed.into()).unwrap()
+    else {
+        panic!("journaled relink should replay while paths are offline");
+    };
+    assert_eq!(replayed, relinked);
+    assert_eq!(replayed_command, JournalCommand::Do(operation.clone()));
+
+    let Event::DocumentChanged { doc: undone, .. } = core.request(Command::Undo).unwrap() else {
+        panic!("relink should undo");
+    };
+    assert_eq!(&*undone, &initial);
+    let Event::DocumentChanged { doc: redone, .. } = core.request(Command::Redo).unwrap() else {
+        panic!("relink should redo");
+    };
+    assert_eq!(&*redone, &*relinked);
+}
+
+#[test]
 fn document_defaults_to_distinct_sdr_rec709_colour_contexts() {
     let context = ColorContext::default();
     assert_eq!(context, ColorContext::sdr_rec709());
@@ -844,6 +1161,7 @@ fn add_freeze_frame_validates_track_asset_frame_and_duration() {
             fps,
             kind: MediaKind::Audio,
             resolution: None,
+            source_fingerprint: MediaSourceFingerprint::default(),
             color_description: ColorDescription::default(),
         },
     ]);

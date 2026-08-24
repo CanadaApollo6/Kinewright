@@ -8,7 +8,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 54] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 58] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -17,6 +17,10 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 54] = [
     "commit_edit_plan",
     "discard_edit_plan",
     "get_color_context",
+    "get_media_status",
+    "get_cache_status",
+    "clear_media_cache",
+    "relink_media",
     "get_clip_info",
     "get_source_info",
     "get_source_storyboard",
@@ -111,6 +115,19 @@ pub fn operation_tools() -> Result<Vec<OperationToolDefinition>, SchemaError> {
 
     variants
         .iter()
+        // Relinking is intentionally omitted from generated mutator tools.
+        // A raw Operation::RelinkAsset cannot prove that the replacement path
+        // was probed and hashed by the filesystem-owning media layer. The
+        // explicit `relink_media` capability performs that preflight before
+        // entering Core; keeping the enum variant in the core schema preserves
+        // journal/serde compatibility without exposing an unsafe shortcut.
+        .filter(|variant_schema| {
+            variant_schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .and_then(|properties| properties.keys().next())
+                .is_none_or(|variant| variant != "RelinkAsset")
+        })
         .map(|variant_schema| operation_tool(variant_schema, definitions.as_ref()))
         .collect()
 }
@@ -169,6 +186,9 @@ pub fn capability_tool_names() -> Result<Vec<String>, SchemaError> {
 pub fn operation_tool_name(operation: &Operation) -> &'static str {
     match operation {
         Operation::AddAsset { .. } => "add_asset",
+        // This name remains stable for journal/plan diagnostics, but the
+        // generated operation tool is deliberately not emitted (see above).
+        Operation::RelinkAsset { .. } => "relink_asset",
         Operation::SetAssetColorDescription { .. } => "set_asset_color_description",
         Operation::UpsertBin { .. } => "upsert_bin",
         Operation::RemoveBin { .. } => "remove_bin",
@@ -305,6 +325,9 @@ fn operation_tool(
             .expect("writing transition documentation to a String cannot fail");
     }
     match variant.as_str() {
+        "RelinkAsset" => description.push_str(
+            " This operation is intentionally not exposed as a generated tool; use relink_media so the media layer probes and hashes the replacement before Core applies it.",
+        ),
         "SetAssetColorDescription" => description.push_str(
             " Source colour overrides must provide the complete typed colour description, nonzero confidence, and user_override provenance. The operation is revision-gated and undoable.",
         ),
@@ -633,6 +656,32 @@ mod tests {
             "ripple_insert_gap"
         );
         let _ = (AssetId(1), ClipId(4));
+    }
+
+    #[test]
+    fn relink_is_explicitly_omitted_from_generated_mutators() {
+        let tools = operation_tools().unwrap();
+        assert!(
+            tools
+                .iter()
+                .all(|definition| definition.tool.name != "relink_asset")
+        );
+        assert!(INSPECTOR_TOOL_NAMES.contains(&"relink_media"));
+        assert_eq!(
+            operation_tool_name(&Operation::RelinkAsset {
+                asset: AssetId(1),
+                candidate: kinewright_core::RelinkCandidate {
+                    path: std::path::PathBuf::from("replacement.mp4"),
+                    fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+                    kind: kinewright_core::MediaKind::Video,
+                    fps: kinewright_core::Rational::new(30, 1).unwrap(),
+                    duration: TimeCode(30),
+                    resolution: Some((320, 180)),
+                },
+                allow_unverified_source: true,
+            }),
+            "relink_asset"
+        );
     }
 
     #[test]

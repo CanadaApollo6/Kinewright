@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex, RwLock},
     thread,
     time::SystemTime,
@@ -125,20 +126,125 @@ impl CancellationRegistry {
     }
 }
 
+/// Content hashes are deliberately recomputed for every request. File size
+/// and modification time are useful diagnostics but are not a source identity:
+/// a same-size replacement can preserve both values on some filesystems.
 #[derive(Default)]
-pub(crate) struct ContentHashes {
-    hashes: HashMap<PathBuf, String>,
-}
+pub(crate) struct ContentHashes;
 
 impl ContentHashes {
+    #[allow(clippy::unused_self)]
     pub(crate) fn get(&mut self, path: &Path) -> Result<String, MediaError> {
-        if let Some(hash) = self.hashes.get(path) {
-            return Ok(hash.clone());
-        }
-        let hash = sha256_file(path)?;
-        self.hashes.insert(path.to_path_buf(), hash.clone());
-        Ok(hash)
+        sha256_file(path)
     }
+}
+
+/// Counts regular files below one cache family without following symlinks.
+/// Cache roots are application-owned, so a symlink is ignored rather than
+/// traversed or deleted outside that root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct CacheStats {
+    pub(crate) file_count: u64,
+    pub(crate) bytes: u64,
+}
+
+pub(crate) fn inventory_cache_root(root: &Path) -> Result<CacheStats, MediaError> {
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CacheStats::default());
+        }
+        Err(error) => return Err(cache_error("inspect cache", &error)),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(MediaError::Backend(format!(
+            "refusing to inspect cache root symlink {}",
+            root.display()
+        )));
+    }
+    if !metadata.is_dir() {
+        return Err(MediaError::Backend(format!(
+            "cache root is not a directory: {}",
+            root.display()
+        )));
+    }
+    inventory_cache_dir(root)
+}
+
+fn inventory_cache_dir(root: &Path) -> Result<CacheStats, MediaError> {
+    let mut stats = CacheStats::default();
+    for entry in fs::read_dir(root).map_err(|error| cache_error("scan cache", &error))? {
+        let entry = entry.map_err(|error| cache_error("read cache entry", &error))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| cache_error("inspect cache entry", &error))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            let child = inventory_cache_dir(&entry.path())?;
+            stats.file_count = stats.file_count.saturating_add(child.file_count);
+            stats.bytes = stats.bytes.saturating_add(child.bytes);
+        } else if file_type.is_file() {
+            let bytes = entry
+                .metadata()
+                .map_err(|error| cache_error("inspect cache file", &error))?
+                .len();
+            stats.file_count = stats.file_count.saturating_add(1);
+            stats.bytes = stats.bytes.saturating_add(bytes);
+        }
+    }
+    Ok(stats)
+}
+
+/// Remove only regular files below the supplied application-owned cache root.
+/// Symlinks are deliberately left untouched and never followed. Empty cache
+/// subdirectories are removed, while the family root itself is retained so a
+/// subsequent worker can recreate files without changing its ownership shape.
+pub(crate) fn clear_cache_root(root: &Path) -> Result<CacheStats, MediaError> {
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CacheStats::default());
+        }
+        Err(error) => return Err(cache_error("inspect cache", &error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(MediaError::Backend(format!(
+            "refusing to clear non-directory cache root {}",
+            root.display()
+        )));
+    }
+    clear_cache_dir(root)
+}
+
+fn clear_cache_dir(root: &Path) -> Result<CacheStats, MediaError> {
+    let mut stats = CacheStats::default();
+    for entry in fs::read_dir(root).map_err(|error| cache_error("scan cache", &error))? {
+        let entry = entry.map_err(|error| cache_error("read cache entry", &error))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| cache_error("inspect cache entry", &error))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            let child = clear_cache_dir(&path)?;
+            stats.file_count = stats.file_count.saturating_add(child.file_count);
+            stats.bytes = stats.bytes.saturating_add(child.bytes);
+            let _ = fs::remove_dir(&path);
+        } else if file_type.is_file() {
+            let bytes = entry
+                .metadata()
+                .map_err(|error| cache_error("inspect cache file", &error))?
+                .len();
+            fs::remove_file(&path).map_err(|error| cache_error("clear cache file", &error))?;
+            stats.file_count = stats.file_count.saturating_add(1);
+            stats.bytes = stats.bytes.saturating_add(bytes);
+        }
+    }
+    Ok(stats)
 }
 
 #[derive(Clone, Copy)]
@@ -251,12 +357,20 @@ pub(crate) fn atomic_write(
     label: &str,
     style: TempFileStyle,
 ) -> Result<(), MediaError> {
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let extension = match style {
         TempFileStyle::AppendToExtension => path.extension().map_or_else(
-            || format!("tmp-{}", std::process::id()),
-            |extension| format!("{}.tmp-{}", extension.to_string_lossy(), std::process::id()),
+            || format!("tmp-{}-{sequence}", std::process::id()),
+            |extension| {
+                format!(
+                    "{}.tmp-{}-{sequence}",
+                    extension.to_string_lossy(),
+                    std::process::id()
+                )
+            },
         ),
-        TempFileStyle::ReplaceExtension => format!("tmp-{}", std::process::id()),
+        TempFileStyle::ReplaceExtension => format!("tmp-{}-{sequence}", std::process::id()),
     };
     let temporary = path.with_extension(extension);
     fs::write(&temporary, bytes).map_err(|error| cache_error(&format!("write {label}"), &error))?;
@@ -306,4 +420,92 @@ pub(crate) fn trim_cache(
 
 fn cache_error(action: &str, error: &std::io::Error) -> MediaError {
     MediaError::Backend(format!("could not {action} cache: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+    use crate::sha256::sha256_file;
+    use crate::test_support::TempDirectory;
+
+    #[test]
+    fn content_hash_cache_invalidates_when_file_size_changes() {
+        let directory = TempDirectory::new("content-hash-stale");
+        let path = directory.path("source.bin");
+        fs::write(&path, b"first").unwrap();
+        let mut hashes = ContentHashes;
+        let first = hashes.get(&path).unwrap();
+        assert_eq!(first, sha256_file(&path).unwrap());
+
+        fs::write(&path, b"replacement-with-a-different-size").unwrap();
+        let second = hashes.get(&path).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(second, sha256_file(&path).unwrap());
+    }
+
+    #[test]
+    fn content_hashes_do_not_trust_same_size_same_mtime_replacement() {
+        let directory = TempDirectory::new("content-hash-same-size");
+        let path = directory.path("source.bin");
+        fs::write(&path, b"first").unwrap();
+        let original_modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let mut hashes = ContentHashes;
+        let first = hashes.get(&path).unwrap();
+
+        // Keep both metadata fields identical so a size+mtime memoization scheme
+        // would incorrectly return `first`.
+        fs::write(&path, b"other").unwrap();
+        fs::File::open(&path)
+            .unwrap()
+            .set_modified(original_modified)
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            original_modified
+        );
+
+        let second = hashes.get(&path).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(second, sha256_file(&path).unwrap());
+    }
+
+    #[test]
+    fn cache_inventory_and_clear_are_scoped_and_idempotent() {
+        let directory = TempDirectory::new("cache-scope");
+        let root = directory.path("visual-assets/v1");
+        fs::create_dir_all(root.join("thumbnails")).unwrap();
+        fs::write(root.join("waveform.json"), b"1234").unwrap();
+        fs::write(root.join("thumbnails/frame.rgba"), b"567890").unwrap();
+        let outside = directory.path("source.mp4");
+        fs::write(&outside, b"source").unwrap();
+
+        assert_eq!(
+            inventory_cache_root(&root).unwrap(),
+            CacheStats {
+                file_count: 2,
+                bytes: 10,
+            }
+        );
+        assert_eq!(
+            clear_cache_root(&root).unwrap(),
+            CacheStats {
+                file_count: 2,
+                bytes: 10,
+            }
+        );
+        assert_eq!(inventory_cache_root(&root).unwrap(), CacheStats::default());
+        assert_eq!(clear_cache_root(&root).unwrap(), CacheStats::default());
+        assert_eq!(fs::read(&outside).unwrap(), b"source");
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn missing_cache_root_is_an_empty_inventory_and_clear() {
+        let directory = TempDirectory::new("cache-missing");
+        let root = directory.path("does-not-exist/v1");
+        assert_eq!(inventory_cache_root(&root).unwrap(), CacheStats::default());
+        assert_eq!(clear_cache_root(&root).unwrap(), CacheStats::default());
+    }
 }

@@ -997,6 +997,7 @@ mod tests {
                 fps: Rational::new(30, 1).unwrap(),
                 kind: MediaKind::AudioVideo,
                 resolution: Some((1_920, 1_080)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
                 color_description: kinewright_core::ColorDescription::default(),
             }],
             markers: vec![Marker {

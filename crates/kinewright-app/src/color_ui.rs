@@ -218,6 +218,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind,
             resolution: (kind != MediaKind::Audio).then_some((1_920, 1_080)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description,
         }
     }

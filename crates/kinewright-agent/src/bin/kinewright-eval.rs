@@ -3965,6 +3965,7 @@ mod tests {
             fps: Rational::new(25, 1).unwrap(),
             kind: kinewright_core::MediaKind::Video,
             resolution: Some((1_920, 1_080)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
         };
         let exclusions = [SourceRangeExclusion {

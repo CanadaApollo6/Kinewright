@@ -75,6 +75,44 @@ impl MediaKind {
     }
 }
 
+/// A content identity captured for one source file.
+///
+/// A fingerprint is either completely unknown (both fields are `None`) or a
+/// verified pair containing the canonical lowercase SHA-256 and the source
+/// byte length.  Validation lives at the operation/document boundary so this
+/// pure model remains usable while a media worker is still hashing a file.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MediaSourceFingerprint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub content_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub byte_len: Option<u64>,
+}
+
+impl MediaSourceFingerprint {
+    #[must_use]
+    pub const fn unknown() -> Self {
+        Self {
+            content_sha256: None,
+            byte_len: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_unknown(&self) -> bool {
+        self.content_sha256.is_none() && self.byte_len.is_none()
+    }
+
+    /// Return whether both identity components are present. Callers that need
+    /// to trust the values must still validate their hash spelling and length.
+    #[must_use]
+    pub const fn is_verified(&self) -> bool {
+        self.content_sha256.is_some() && self.byte_len.is_some()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MediaAsset {
     pub id: AssetId,
@@ -86,6 +124,11 @@ pub struct MediaAsset {
     pub fps: Rational,
     pub kind: MediaKind,
     pub resolution: Option<(u32, u32)>,
+    /// Content identity from a completed source hash. Missing in pre-M41
+    /// project files and therefore defaults to an explicit unknown identity.
+    #[serde(default, skip_serializing_if = "MediaSourceFingerprint::is_unknown")]
+    #[schemars(default)]
+    pub source_fingerprint: MediaSourceFingerprint,
     /// Source colour metadata from probing or an explicit user override.
     ///
     /// Missing in pre-CC0 project files and therefore defaults to an explicit
@@ -94,6 +137,18 @@ pub struct MediaAsset {
     #[serde(default)]
     #[schemars(default)]
     pub color_description: ColorDescription,
+}
+
+/// Probed replacement metadata supplied to the filesystem-owning media layer
+/// before a relink enters the pure Core operation path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RelinkCandidate {
+    pub path: PathBuf,
+    pub fingerprint: MediaSourceFingerprint,
+    pub kind: MediaKind,
+    pub fps: Rational,
+    pub duration: TimeCode,
+    pub resolution: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

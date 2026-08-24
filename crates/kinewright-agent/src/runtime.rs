@@ -275,6 +275,14 @@ impl PreparedPlanStore {
                 actual: actual_revision,
             });
         }
+        if operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::RelinkAsset { .. }))
+        {
+            return Err(PreparePlanError::UnsupportedOperation(
+                "RelinkAsset is only available through relink_media, which probes and hashes the replacement path before applying it".to_owned(),
+            ));
+        }
         let mut candidate = document.clone();
         apply_batch(&mut candidate, &operations).map_err(PreparePlanError::InvalidPlan)?;
         let id = PreparedPlanId(self.next_id);
@@ -403,6 +411,8 @@ pub(crate) enum PreparePlanError {
     },
     #[error("operation {op_number} could not be decoded: {error}")]
     InvalidOperation { op_number: usize, error: String },
+    #[error("edit plan contains an unsupported operation: {0}")]
+    UnsupportedOperation(String),
     #[error("edit plan is invalid: {0}")]
     InvalidPlan(BatchError),
 }
@@ -492,6 +502,33 @@ mod tests {
                 vec![json!({"op": "delete_clip", "clip": 1})],
             ),
             Err(PreparePlanError::InvalidPlan(_))
+        ));
+    }
+
+    #[test]
+    fn prepared_plan_store_rejects_relink_without_media_preflight() {
+        let document = Document::default();
+        let operation = Operation::RelinkAsset {
+            asset: kinewright_core::AssetId(1),
+            candidate: kinewright_core::RelinkCandidate {
+                path: std::path::PathBuf::from("replacement.mp4"),
+                fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+                kind: kinewright_core::MediaKind::Video,
+                fps: kinewright_core::Rational::new(30, 1).unwrap(),
+                duration: kinewright_core::TimeCode(30),
+                resolution: Some((320, 180)),
+            },
+            allow_unverified_source: true,
+        };
+        let mut store = PreparedPlanStore::default();
+        assert!(matches!(
+            store.prepare_operations(
+                TimelineRevision::default(),
+                TimelineRevision::default(),
+                &document,
+                vec![operation],
+            ),
+            Err(PreparePlanError::UnsupportedOperation(_))
         ));
     }
 

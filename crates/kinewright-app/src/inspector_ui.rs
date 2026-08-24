@@ -9,6 +9,7 @@ use kinewright_core::{
 
 use crate::{
     app::KinewrightApp,
+    media_workflow::{paint_source_status, source_display_state},
     theme::{self, color, space, type_size},
     timeline_ui::{is_internal_marker, linked_members, linked_transition_operations},
 };
@@ -73,6 +74,26 @@ impl KinewrightApp {
         ui.colored_label(color::TEXT_MUTED, format!("{:?}", asset.kind));
         ui.add_space(space::ONE);
         data_row(ui, "Path", &asset.path.display().to_string());
+        let status = self.media_status_for_asset(&asset);
+        let source_state = source_display_state(status.as_ref());
+        ui.horizontal(|ui| {
+            paint_source_status(ui, source_state);
+            if ui
+                .button("Relink…")
+                .on_hover_text("Choose a replacement and verify its source fingerprint")
+                .clicked()
+            {
+                self.choose_relink_for_asset(asset.id);
+            }
+        });
+        ui.colored_label(
+            if source_state.blocks_preview() {
+                color::STATUS_DANGER
+            } else {
+                color::TEXT_MUTED
+            },
+            source_state.description(),
+        );
         data_row(ui, "Source", &range_readout(&clip.source_range, asset.fps));
         let timeline_end = self
             .focused()
@@ -989,6 +1010,7 @@ mod tests {
                     fps: Rational::new(30, 1).expect("valid fps"),
                     kind: MediaKind::Video,
                     resolution: Some((1920, 1080)),
+                    source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                     color_description: kinewright_core::ColorDescription::default(),
                 },
                 MediaAsset {
@@ -999,6 +1021,7 @@ mod tests {
                     fps: Rational::new(30, 1).expect("valid fps"),
                     kind: MediaKind::Audio,
                     resolution: None,
+                    source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                     color_description: kinewright_core::ColorDescription::default(),
                 },
             ],

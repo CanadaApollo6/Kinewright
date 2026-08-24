@@ -531,6 +531,7 @@ fn fixture_document() -> Document {
         fps: Rational::new(30, 1).unwrap(),
         kind: MediaKind::Video,
         resolution: Some((320, 180)),
+        source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
         color_description: kinewright_core::ColorDescription::default(),
     };
     Document {

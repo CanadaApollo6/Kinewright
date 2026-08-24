@@ -510,6 +510,7 @@ mod tests {
                     fps: Rational::new(30, 1).unwrap(),
                     kind: MediaKind::AudioVideo,
                     resolution: Some((320, 180)),
+                    source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                     color_description: kinewright_core::ColorDescription::default(),
                 },
                 MediaAsset {
@@ -520,6 +521,7 @@ mod tests {
                     fps: Rational::new(30, 1).unwrap(),
                     kind: MediaKind::AudioVideo,
                     resolution: Some((320, 180)),
+                    source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                     color_description: kinewright_core::ColorDescription::default(),
                 },
             ],
@@ -850,6 +852,7 @@ mod tests {
                 fps: Rational::new(30, 1).unwrap(),
                 kind: MediaKind::Audio,
                 resolution: None,
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                 color_description: kinewright_core::ColorDescription::default(),
             },
             MediaAsset {
@@ -860,6 +863,7 @@ mod tests {
                 fps: Rational::new(30, 1).unwrap(),
                 kind: MediaKind::Video,
                 resolution: Some((320, 180)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                 color_description: kinewright_core::ColorDescription::default(),
             },
         ]);

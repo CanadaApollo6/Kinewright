@@ -54,10 +54,11 @@ compositing, and export all consume those same rotated RGBA frames.
 Reflected matrices and non-right-angle rotations are rejected with an explicit
 error instead of being rendered incorrectly.
 
-## Preview proxies and decode strategy
+## Preview memory and decode strategy
 
-Interactive preview uses an in-memory decode proxy capped at 1280 display
-pixels wide. Height is calculated from the source display aspect ratio, and
+Interactive preview uses ephemeral in-memory scaled decode capped at 1280
+display pixels wide. It does not generate a playable proxy media file. Height
+is calculated from the source display aspect ratio, and
 sources narrower than 1280 pixels are never enlarged. A 3840x2160 source is
 therefore decoded and composited as 1280x720. This is the same bilinear
 swscale conversion used by thumbnails, but `thumbnail_at` continues to honor
@@ -76,13 +77,13 @@ frames. Title fade alpha multiplies the existing transition/opacity alpha before
 the compositor blends layers bottom to top.
 
 Rasterization is deterministic for a title, token set, and output resolution.
-Preview proxies rasterize at preview resolution; full-resolution export
+Preview frames rasterize at preview resolution; full-resolution export
 rasterizes again at export resolution from the same embedded font bytes and
 declarative title data.
 
-Decoder/cache identity includes the asset ID and proxy-width limit. A future
+Decoder/cache identity includes the asset ID and preview-width limit. A future
 preview resize or zoom that selects another width therefore opens a matching
-scaler and cannot reuse pixels from a differently sized proxy. `FrameTexture`
+scaler and cannot reuse pixels from a differently sized preview. `FrameTexture`
 dimensions are authoritative throughout the compositor and UI; the preview
 panel scales each delivered texture to fit its available rectangle.
 

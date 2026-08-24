@@ -48,6 +48,10 @@ impl FrameCache {
         self.byte_len
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.frames.len()
+    }
+
     pub(crate) fn evict_oldest(&mut self) -> bool {
         let Some(oldest) = self.order.pop_front() else {
             return false;

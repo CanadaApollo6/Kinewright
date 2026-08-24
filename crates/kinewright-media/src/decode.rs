@@ -7,7 +7,7 @@ use kinewright_core::{
     Rational, RgbaImage, TimeCode,
 };
 
-use crate::cache::FrameCache;
+use crate::{cache::FrameCache, sha256::source_fingerprint};
 
 const AV_TIME_BASE: i64 = 1_000_000;
 const COLOR_COVERAGE_PER_FIELD_BASIS_POINTS: u16 = 2_000;
@@ -37,6 +37,7 @@ impl VideoRotation {
 }
 
 pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaError> {
+    let source_fingerprint = source_fingerprint(path)?;
     let input = media_input(path)?;
     let video = input.streams().best(ffmpeg::media::Type::Video);
     let audio = input.streams().best(ffmpeg::media::Type::Audio);
@@ -119,6 +120,7 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
         fps,
         kind,
         resolution,
+        source_fingerprint,
         color_description,
     })
 }

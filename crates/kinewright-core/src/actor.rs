@@ -77,6 +77,7 @@ pub enum QueryResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     DocumentChanged {
         doc: Arc<Document>,
@@ -412,6 +413,7 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             kind: MediaKind::Video,
             resolution: Some((1_920, 1_080)),
+            source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: crate::ColorDescription::default(),
         }
     }
@@ -829,6 +831,7 @@ mod tests {
                 fps: Rational::new(30, 1).unwrap(),
                 kind: MediaKind::Video,
                 resolution: Some((1_920, 1_080)),
+                source_fingerprint: crate::MediaSourceFingerprint::default(),
                 color_description: crate::ColorDescription::default(),
             }],
             markers: Vec::new(),

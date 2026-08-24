@@ -63,17 +63,20 @@ pub use journal::JournalCommand;
 pub use media::{
     Analysis, AnalysisJobStatus, AnalysisKind, AnalysisPhase, AssetBeats, AssetSceneChanges,
     AssetSilences, AssetTranscript, AudioLoudness, BeatMarker, BeatStatus, Export,
-    ExportCancellation, ExportProgress, ExportSettings, FrameTexture, MediaError, MediaEvent,
-    Playback, PlaybackState, ProgressSink, RgbaImage, SceneChange, SceneStatus, SilenceSpan,
-    SilenceStatus, ThumbnailFrame, ThumbnailKey, TimelineBeat, TimelineSceneChange,
-    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, TranscriptWord,
-    VisualAssetResult, VisualRequestKind, WaveformData, WaveformPeak,
+    ExportCancellation, ExportProgress, ExportSettings, FrameTexture, MediaAvailabilityKind,
+    MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus,
+    MediaCacheInventory, MediaError, MediaEvent, Playback, PlaybackState, ProgressSink, RgbaImage,
+    SceneChange, SceneStatus, SilenceSpan, SilenceStatus, ThumbnailFrame, ThumbnailKey,
+    TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TranscriptStatus, TranscriptWord, VisualAssetResult, VisualRequestKind, WaveformData,
+    WaveformPeak,
 };
 pub use model::{
     AssetId, AudioBus, AudioBusId, AudioMix, BinId, Clip, ClipContent, ClipId, Document, Effect,
     EffectId, FreezeFrame, LinkId, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset,
-    MediaBin, MediaCatalog, MediaKind, ParamValue, SourceSelect, StringOut, StringOutId, SyncGroup,
-    SyncGroupId, SyncGroupMember, Track, TrackId, TrackKind, Transition, clip_effective_fps,
+    MediaBin, MediaCatalog, MediaKind, MediaSourceFingerprint, ParamValue, RelinkCandidate,
+    SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember, Track, TrackId,
+    TrackKind, Transition, clip_effective_fps,
 };
 pub use multicam::{
     ReframeFocusBounds, SpeakerAngleAssignment, SpeakerMulticamCut, SpeakerMulticamError,

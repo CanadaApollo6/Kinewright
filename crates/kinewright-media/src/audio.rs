@@ -1692,6 +1692,7 @@ mod tests {
                 fps,
                 kind: MediaKind::Video,
                 resolution: Some((64, 64)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                 color_description: kinewright_core::ColorDescription::default(),
             }],
             markers: Vec::new(),
@@ -1813,6 +1814,7 @@ mod tests {
             fps,
             kind: MediaKind::Audio,
             resolution: None,
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
         }
     }

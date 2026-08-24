@@ -1,5 +1,5 @@
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -9,7 +9,104 @@ use std::{
 use crossbeam_channel::{Receiver, Sender};
 use thiserror::Error;
 
-use crate::{AssetId, ClipId, ColorDescription, Document, MediaAsset, Rational, TimeCode, TrackId};
+use crate::{
+    AssetId, ClipId, ColorDescription, Document, MediaAsset, MediaSourceFingerprint, Rational,
+    TimeCode, TrackId,
+};
+
+/// The runtime truth about whether an imported source can currently be read.
+///
+/// This is deliberately not persisted in [`MediaAsset`]: availability depends
+/// on the current machine and can change while a project is open. A verified
+/// source has the same SHA-256 and byte length as its persisted fingerprint;
+/// an unverified source is readable but belongs to a legacy asset without a
+/// fingerprint. `Changed` means the path is readable but no longer matches the
+/// source identity. `Unreadable` preserves the backend reason for failures that
+/// are more specific than a missing path.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaAvailabilityKind {
+    OnlineVerified,
+    OnlineUnverified,
+    OfflineMissing,
+    Changed,
+    Unreadable,
+}
+
+/// A typed, machine-readable media availability observation.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct MediaAvailabilityStatus {
+    pub kind: MediaAvailabilityKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub observed_fingerprint: Option<MediaSourceFingerprint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub reason: Option<String>,
+}
+
+/// Fixed cache families exposed by the media runtime. The generated-proxy
+/// family is present in the contract so clients can distinguish an intentional
+/// unsupported feature from an empty cache; M41 does not generate proxies.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaCacheFamily {
+    PreviewMemory,
+    VisualAssets,
+    DerivedAnalysis,
+    Transcripts,
+    GeneratedProxy,
+}
+
+/// Inventory for one owned or explicitly unsupported cache family.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct MediaCacheFamilyStatus {
+    pub family: MediaCacheFamily,
+    pub supported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub root: Option<PathBuf>,
+    pub file_count: u64,
+    pub bytes: u64,
+    /// The family can be repopulated by an active worker or normal preview
+    /// activity after a clear. This avoids promising permanence to callers.
+    pub may_repopulate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub note: Option<String>,
+}
+
+/// Snapshot of the fixed media-cache families.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct MediaCacheInventory {
+    pub families: Vec<MediaCacheFamilyStatus>,
+}
+
+/// Result of a scoped cache clear. Clearing is idempotent: absent roots and
+/// already-removed files report zero removed files and bytes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct MediaCacheClearResult {
+    pub family: MediaCacheFamily,
+    pub supported: bool,
+    pub removed_file_count: u64,
+    pub removed_bytes: u64,
+    pub may_repopulate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub note: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameTexture {
@@ -34,6 +131,11 @@ pub struct WaveformPeak {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WaveformData {
     pub asset: AssetId,
+    /// Monotonic request generation supplied by the caller. This is runtime
+    /// delivery metadata only and is deliberately excluded from the
+    /// content-addressed disk cache serialization.
+    #[serde(skip, default)]
+    pub request_generation: u64,
     /// The requesting asset's media path. Asset ids are per-document, so
     /// with several projects open the path is the identity consumers key
     /// by. Not persisted: the disk cache is content-addressed, and the
@@ -56,6 +158,9 @@ pub struct ThumbnailKey {
 #[derive(Debug, Clone)]
 pub struct ThumbnailFrame {
     pub key: ThumbnailKey,
+    /// Monotonic request generation supplied by the caller. This is runtime
+    /// delivery metadata only and is not part of the thumbnail cache key.
+    pub request_generation: u64,
     /// See [`WaveformData::path`]: the content identity behind the id.
     pub path: std::path::PathBuf,
     pub image: Arc<RgbaImage>,
@@ -73,6 +178,9 @@ pub enum VisualAssetResult {
     Thumbnail(ThumbnailFrame),
     Failed {
         asset: AssetId,
+        /// Monotonic request generation supplied by the caller. This remains
+        /// available when a worker cannot produce a waveform or thumbnail.
+        request_generation: u64,
         /// See [`WaveformData::path`]: the content identity behind the id.
         path: std::path::PathBuf,
         request: VisualRequestKind,
@@ -452,6 +560,28 @@ pub trait Analysis: Send + Sync {
     ///
     /// Returns a media error when the file cannot be probed.
     fn probe(&self, path: &Path) -> Result<MediaAsset, MediaError>;
+    /// Inspect whether the source path is currently available and, when the
+    /// file can be read, compare its fingerprint with the imported identity.
+    /// Stateful media backends should override this to return verified,
+    /// changed, and unreadable observations rather than the conservative
+    /// default.
+    fn media_availability(&self, asset: &MediaAsset) -> MediaAvailabilityStatus {
+        if !asset.path.is_file() {
+            return MediaAvailabilityStatus {
+                kind: MediaAvailabilityKind::OfflineMissing,
+                observed_fingerprint: None,
+                reason: Some(format!(
+                    "media path is missing or not a regular file: {}",
+                    asset.path.display()
+                )),
+            };
+        }
+        MediaAvailabilityStatus {
+            kind: MediaAvailabilityKind::OnlineUnverified,
+            observed_fingerprint: None,
+            reason: Some("source identity is not available for verification".to_owned()),
+        }
+    }
     /// Decode a thumbnail at an exact project frame.
     ///
     /// # Errors
@@ -575,11 +705,34 @@ pub trait Analysis: Send + Sync {
         false
     }
     /// Queue a content-addressed waveform extraction without blocking the caller.
-    fn request_waveform(&self, asset: MediaAsset) -> bool;
+    fn request_waveform(&self, asset: MediaAsset, request_generation: u64) -> bool;
     /// Queue one source-frame thumbnail without blocking the caller.
-    fn request_thumbnail(&self, asset: MediaAsset, source_at: TimeCode, max_width: u32) -> bool;
+    fn request_thumbnail(
+        &self,
+        asset: MediaAsset,
+        source_at: TimeCode,
+        max_width: u32,
+        request_generation: u64,
+    ) -> bool;
     /// Bounded stream of ready waveform and thumbnail data.
     fn visual_asset_results(&self) -> Receiver<VisualAssetResult>;
+    /// Return inventory for the fixed media-cache families. The default is an
+    /// empty inventory for stateless test backends.
+    fn cache_inventory(&self) -> MediaCacheInventory {
+        MediaCacheInventory {
+            families: Vec::new(),
+        }
+    }
+    /// Clear one owned cache family. Implementations must not interpret this
+    /// as permission to delete project files, source media, or model weights.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the cache family cannot be inspected or
+    /// cleared safely, or when the implementation does not own that family.
+    fn clear_cache(&self, _family: MediaCacheFamily) -> Result<MediaCacheClearResult, MediaError> {
+        Err(MediaError::NotImplemented)
+    }
 }
 
 fn analysis_job_statuses<A: Analysis + ?Sized>(
