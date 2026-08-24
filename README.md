@@ -95,7 +95,7 @@ Kinewright runs a local MCP (Model Context Protocol) server inside the app and s
 
 Claude Code and Codex sessions run with their built-in shell/file/web tools disabled or sandboxed away. Cursor receives only the per-project Kinewright MCP endpoint and starts in an empty scratch directory, but its ACP server may still expose Cursor-owned tools; the settings panel states this weaker boundary explicitly. Destructive Kinewright operations pause for your approval in the chat panel. Costs are surfaced when the harness reports them, and turns are capped per session.
 
-Details: [agent harnesses](docs/agent-harnesses.md) · [M36 agent runtime efficiency](docs/M36-AGENT-RUNTIME-EFFICIENCY.md) · [M37 human-acceptable first cut](docs/M37-HUMAN-ACCEPTABLE-FIRST-CUT.md) · [model-first editor](docs/MODEL-FIRST-EDITOR.md) · [current product position](docs/PRODUCT-POSITION-M35-2026-08.md) · [transcription](docs/TRANSCRIPTION.md)
+Details: [roadmap and development workflows](docs/ROADMAP-AND-WORKFLOWS.md) · [agent harnesses](docs/agent-harnesses.md) · [M36 agent runtime efficiency](docs/M36-AGENT-RUNTIME-EFFICIENCY.md) · [M37 human-acceptable first cut](docs/M37-HUMAN-ACCEPTABLE-FIRST-CUT.md) · [model-first editor](docs/MODEL-FIRST-EDITOR.md) · [current product position](docs/PRODUCT-POSITION-M35-2026-08.md) · [transcription](docs/TRANSCRIPTION.md)
 
 M38: [editorial truth, independent output scoring, and caption correction](docs/M38-EDITORIAL-TRUTH.md). M39: [normalized filler bridges and independently scored dialogue pacing](docs/M39-DIALOGUE-PACING.md). M40: [licensed real-footage generalization across interview, event/multicam, and montage tasks](docs/M40-GENERALIZATION-GAUNTLET.md).
 
