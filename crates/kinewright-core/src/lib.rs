@@ -15,6 +15,7 @@ mod model;
 mod multicam;
 mod operation;
 mod qa;
+mod scopes;
 mod time;
 mod title;
 mod transcript_edit;
@@ -92,6 +93,18 @@ pub use multicam::{
 };
 pub use operation::{ApplyOp, BatchError, OpError, Operation, apply_batch};
 pub use qa::{QaIssue, QaReport, QaSeverity, qa_document};
+pub use scopes::{
+    ChannelStatistics, ChannelStatisticsDelta, ClippingBasisPoints, ClippingDelta, LumaWaveform,
+    NormalizedRoi, NormalizedRoiError, ParadeChannel, PixelRoi, RgbParade, RgbParadeDelta,
+    SCOPE_BASIS_POINTS, SCOPE_HIGH_CLIP_CODE, SCOPE_LOW_CLIP_CODE, SCOPE_MAX_HISTOGRAM_BINS,
+    SCOPE_MAX_TEMPORAL_FRAMES, SCOPE_MAX_VECTORSCOPE_SIZE, SCOPE_MAX_WAVEFORM_COLUMNS,
+    SCOPE_MAX_WAVEFORM_ROWS, SCOPE_MEAN_SCALE, SCOPE_SAMPLE_SCALE, ScopeClipping,
+    ScopeClippingDelta, ScopeComparison, ScopeComparisonError, ScopeError, ScopeEvidence,
+    ScopeFrame, ScopeFrameInput, ScopeGridDelta, ScopeHistogramDelta, ScopeHistograms,
+    ScopeMeasurementMetadata, ScopePipelineStage, ScopeRasterResolution, ScopeRequest,
+    ScopeResolution, ScopeStage, ScopeStatistics, ScopeStatisticsDelta, SignedDelta,
+    VectorscopeDensity, compare_scope_evidence, compare_scopes, measure_scope, measure_scopes,
+};
 pub use time::{
     FrameRounding, Rational, TimeCode, TimeMappingError, map_frames, map_frames_with_rounding,
     map_source_range_to_project, speed_scaled_fps,

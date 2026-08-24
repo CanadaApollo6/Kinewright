@@ -131,7 +131,7 @@ Colour begins immediately, while non-colour work continues in parallel.
 | --- | --- | --- |
 | Editorial and long-form | Three-point edits, slip/roll/slide, replace, fit-to-fill, bins, string-outs, sync groups, transcript editing | Dual source/program workflow, source patching and track targeting, compound/nested structure, long-sequence navigation and revision |
 | Media and interchange | Import, project media, verified source identity, offline/changed status, undoable relink, ephemeral scaled preview memory, scoped cache visibility/clearing, hostile-media policy, save/recovery | Generated playable proxies, richer metadata, managed/project-relative media, interchange that preserves supported edit semantics |
-| Colour | Managed SDR Rec.709 input → high-precision working → primary correction → monitor/delivery pipeline, typed source assumptions and metadata, ten primary controls, CPU/GPU/proof/export parity, four built-in looks, agent/core `.cube` LUT support, masks, chroma key, post-compositor scope data | Professional scopes, shot matching, curves/wheels, grade-scoped secondaries, human LUT workflow, look management, delivery QC |
+| Colour | Managed SDR Rec.709 input → high-precision working → primary correction → monitor/delivery pipeline, typed source assumptions and metadata, ten primary controls, CPU/GPU/proof/export parity, four built-in looks, agent/core `.cube` LUT support, masks, chroma key, professional post-composite scopes, ROI/temporal evidence, and reference-shot matching proposals | Curves/wheels, grade-scoped secondaries, human LUT workflow, look management, delivery QC |
 | Audio | Multi-track mixing, buses, EQ/compression/ducking operations, waveform/transcript analysis | Manual mixer and bus UI, meters, detailed EQ/dynamics control, repair and room-tone workflows, loudness-aware delivery |
 | Motion, compositing, and retiming | GPU compositor, effects, keyframes, masks/tracking, transitions, constant-speed controls | Keyframe editing UI, speed ramps, effect-scoped mattes, adjustment/compound layers, transform and compositing polish |
 | Multicam | Sync groups and agent speaker/angle planning primitives | Angle viewer, live switching and revision, audio-follow policy, explicit master-audio handling |
@@ -146,9 +146,9 @@ video editor will not reach practical parity by optimizing montage taste alone.
 Planning runs in target three-to-four-week cycles. The exit gate, not the calendar,
 decides whether a slice is complete. Each cycle names one primary capability slice
 and owner in its implementation brief, one bounded reliability improvement, and one
-focused eval update. Colour and non-colour slices alternate as the primary until
-CC2 is complete; dependency work may continue in the secondary lane but cannot
-silently become a second unbounded project.
+focused eval update. With CC2 complete, colour and non-colour slices continue to
+alternate as the primary; dependency work may continue in the secondary lane but
+cannot silently become a second unbounded project.
 
 The first three cycle intentions are:
 
@@ -174,8 +174,15 @@ The first three cycle intentions are:
    unless the referenced source has just been verified. The objective contract and
    deferrals are recorded in `M42-SOURCE-PROGRAM-PATCHING.md`.
 
-The next primary slice is **CC2 scopes and matching**. Work begins only after the
-M42 integration commit and platform CI gate are closed.
+5. **CC2 scopes and matching — completed 2026-08-24.** The shared deterministic
+   engine now supplies bounded waveform, RGB parade, vectorscope, histogram,
+   clipping, ROI, temporal, and signed comparison evidence. The editor captures a
+   full-raster reference asynchronously, while agent tools inspect shots and return
+   exact revision-gated primary-correction operations without applying them. The
+   implementation contract and remaining hands-on platform smoke gate are recorded
+   in `CC2-SCOPES-AND-MATCHING.md`.
+
+The next primary colour slice is **CC3 curves and wheels**.
 
 Within that cadence, three workstreams remain active:
 
@@ -220,8 +227,11 @@ deliberate limits that define the remaining colour work:
   workflow.
 - Managed preview, isolated full-resolution proof, and export share the production
   visual-layer resolution and compositor semantics.
-- Agent scopes are measured after compositing and currently provide RGB/luma
-  histograms, means, clipping counts, and a 64-column luma waveform.
+- CC2 scopes are measured at the named managed post-composite monitoring stage and
+  provide bounded full-raster or explicitly labelled proxy histograms, statistics,
+  clipping, waveform, RGB parade, vectorscope, geometric ROI, temporal sampling,
+  and signed reference comparison. The same typed engine feeds the non-blocking
+  editor panel and the read-only agent analysis/matching tools.
 - Masks and tracking exist, but the current compositor applies the mask to final
   layer alpha. That is **not** yet an effect-scoped colour secondary.
 - CC0 preserves explicit source, working, monitoring, and delivery colour
@@ -243,8 +253,8 @@ deliberate limits that define the remaining colour work:
   ordered colour-node stack; multiple creative LUT stages are therefore not a
   supported grading model.
 
-Those limits determine the remaining implementation order. CC2 adds professional
-scopes and shot matching before broader creative controls expand the node model.
+Those limits determine the remaining implementation order. With CC2 scopes and
+shot matching complete, CC3 expands the correction model with curves and wheels.
 
 ### Colour architecture principles
 
@@ -340,7 +350,7 @@ constructors, compositor inputs, `ExportSettings`, and FFmpeg stream/container
 metadata. Later stages cannot treat those surfaces as implicit or start before the
 required earlier exit gate passes.
 
-**Current status (2026-08-24): CC0, M41, CC1, and M42 are complete.** CC0's exit evidence
+**Current status (2026-08-24): CC0, M41, CC1, M42, and CC2 are complete.** CC0's exit evidence
 includes legacy project migration, known/partial/unknown and 10-bit probe fixtures,
 visible human and agent inspection, an undoable source override, delivery rejection
 outside the current contract, and an encoded file decoded again to verify its
@@ -351,7 +361,10 @@ controls, full-raster proofs with source/provenance manifests, verified-source e
 preflight, objective ramp/chart/control/cache/delivery fixtures, and CPU/GPU parity
 evidence. M42 adds independent Source/Program monitoring, explicit video/audio
 patch destinations, atomic compound edits, and mandatory live source revalidation.
-CC2 scopes and matching is the next primary slice.
+CC2 adds deterministic full-raster-aware scopes, ROI and temporal evidence, an
+asynchronous human reference workflow, and revision-gated two-shot matching
+proposals that expose exact operations without hidden changes. CC3 curves and
+wheels is the next primary colour slice.
 
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |

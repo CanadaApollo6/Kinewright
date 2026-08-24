@@ -57,6 +57,10 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
+    color_scopes::{
+        AnalyzeColorShotArgs, PlanShotMatchArgs, ScopeError, VideoScopesV2Args, analyze_color_shot,
+        plan_shot_match, video_scopes_v2,
+    },
     color_status::{
         CC1_STAGE_NAMES, ColorContextArgs, ColorProofError, PrimaryCorrectionPlanArgs,
         PrimaryPlanError, RenderColorProofArgs, color_context_value_with_assumptions,
@@ -717,6 +721,18 @@ impl KinewrightMcp {
             "get_video_scopes" => {
                 let args: VideoScopesArgs = decode_args("get_video_scopes", arguments)?;
                 self.video_scopes(&args)
+            }
+            "get_video_scopes_v2" => {
+                let args: VideoScopesV2Args = decode_args("get_video_scopes_v2", arguments)?;
+                self.video_scopes_v2(&args)
+            }
+            "analyze_color_shot" => {
+                let args: AnalyzeColorShotArgs = decode_args("analyze_color_shot", arguments)?;
+                self.analyze_color_shot(&args)
+            }
+            "plan_shot_match" => {
+                let args: PlanShotMatchArgs = decode_args("plan_shot_match", arguments)?;
+                self.plan_shot_match(&args)
             }
             "track_mask_region" => {
                 let args: TrackMaskArgs = decode_args("track_mask_region", arguments)?;
@@ -2511,6 +2527,47 @@ impl KinewrightMcp {
             ),
             scopes,
         ))
+    }
+
+    fn video_scopes_v2(&self, args: &VideoScopesV2Args) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        match video_scopes_v2(&document, revision, self.analysis.as_ref(), args) {
+            Ok(value) => Ok(success_structured(
+                format!(
+                    "CC2 scopes at timeline revision {revision}: {} sample(s), stage={}",
+                    value["temporal"]["sample_count"], value["stage"]
+                ),
+                value,
+            )),
+            Err(error) => Ok(color_scope_error_result("get_video_scopes_v2", &error)),
+        }
+    }
+
+    fn analyze_color_shot(&self, args: &AnalyzeColorShotArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        match analyze_color_shot(&document, revision, self.analysis.as_ref(), args) {
+            Ok(value) => Ok(success_structured(
+                format!(
+                    "evidence-only CC2 color analysis for clip {} at timeline revision {}; no operation was applied",
+                    args.clip_id, revision
+                ),
+                value,
+            )),
+            Err(error) => Ok(color_scope_error_result("analyze_color_shot", &error)),
+        }
+    }
+
+    fn plan_shot_match(&self, args: &PlanShotMatchArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        match plan_shot_match(&document, revision, self.analysis.as_ref(), args) {
+            Ok(value) => Ok(success_structured(
+                format!(
+                    "evidence-only CC2 shot match at timeline revision {revision}; no operation was applied",
+                ),
+                value,
+            )),
+            Err(error) => Ok(color_scope_error_result("plan_shot_match", &error)),
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -7623,6 +7680,24 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "get_video_scopes_v2",
+            "Measure bounded CC2 waveform, RGB parade, vectorscope, histogram, clipping, and gamut evidence at an explicit named monitoring stage. Full-resolution managed monitor proofs are the default; proxy sampling requires an explicit opt-in and is labeled in provenance. Requests support a half-open range with a positive step or explicit project frames plus a normalized geometric ROI, and fail closed on unsupported stages, unavailable media, invalid bounds, stale revisions, or excessive samples.",
+            schema_object::<VideoScopesV2Args>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "analyze_color_shot",
+            "Return evidence-only CC2 diagnosis for one explicit visual shot: bounded full-resolution-aware scopes, ROI/temporal provenance, signed measurements, confidence, and assumptions. This call never mutates the timeline.",
+            schema_object::<AnalyzeColorShotArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "plan_shot_match",
+            "Compare one explicit reference shot with one or more candidate shots and return signed deltas, retained reference evidence, confidence/assumptions, and exact revision-gated primary_correction operations for each candidate. The proposal is evidence-only; review the visible operations and submit the desired subset through prepare_edit_plan.",
+            schema_object::<PlanShotMatchArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "track_mask_region",
             "Track an existing bounded mask region through one media clip using deterministic sequential template matching on isolated compositor frames. Returns confidence observations plus revision-gated SetEffectKeyframes operations for the mask center; it never silently mutates the timeline. Set mask width and height to 75 percent or less before tracking.",
             schema_object::<TrackMaskArgs>(),
@@ -8230,6 +8305,19 @@ fn encode_png(image: &kinewright_core::RgbaImage) -> Result<Vec<u8>, McpError> {
 fn color_proof_error_result(error: ColorProofError) -> CallToolResult {
     error_structured(
         format!("CC1 colour proof rejected: {error}"),
+        serde_json::json!({
+            "code": error.code(),
+            "message": error.to_string(),
+            "details": error.details(),
+            "evidence_only": true,
+            "applied": false,
+        }),
+    )
+}
+
+fn color_scope_error_result(tool: &str, error: &ScopeError) -> CallToolResult {
+    error_structured(
+        format!("{tool} rejected: {error}"),
         serde_json::json!({
             "code": error.code(),
             "message": error.to_string(),

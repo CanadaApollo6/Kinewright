@@ -97,6 +97,7 @@ pub(crate) struct KinewrightApp {
     pub(crate) media_cache_clear_pending: Option<kinewright_core::MediaCacheFamily>,
     pub(crate) media_cache_clear_result: Option<kinewright_core::MediaCacheClearResult>,
     pub(crate) texture: Option<egui::TextureHandle>,
+    pub(crate) color_scopes: crate::color_scopes_ui::ColorScopesState,
     pub(crate) playing: bool,
     pub(crate) meter_levels: [f32; 2],
     pub(crate) resume_after_scrub: bool,
@@ -238,6 +239,7 @@ impl KinewrightApp {
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
+            color_scopes: crate::color_scopes_ui::ColorScopesState::default(),
             playing: false,
             meter_levels: [0.0; 2],
             resume_after_scrub: false,
@@ -1216,6 +1218,8 @@ impl KinewrightApp {
             )
             .show(ui, |ui| {
                 self.preview(ui);
+                ui.separator();
+                self.color_scopes_panel(ui);
                 ui.separator();
                 self.transport(ui);
                 ui.add_space(space::ONE);
