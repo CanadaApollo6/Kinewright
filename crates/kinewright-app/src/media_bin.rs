@@ -1,9 +1,7 @@
 use std::{sync::Arc, thread};
 
 use eframe::egui;
-use kinewright_core::{
-    AssetId, ClipId, MediaKind, Operation, ThreePointMode, TimeCode, Track, TrackId, TrackKind,
-};
+use kinewright_core::{AssetId, ClipId, MediaKind, Operation, TimeCode, Track, TrackId, TrackKind};
 
 use crate::{
     app::KinewrightApp,
@@ -78,7 +76,7 @@ impl KinewrightApp {
             if self.add_audio_video_asset_to_timeline(project_index, &asset) {
                 self.projects[project_index].position = clip_start;
             }
-            self.projects[project_index].selected_asset = Some(asset_id);
+            self.projects[project_index].cue_source_asset(asset_id);
             return;
         }
         let Some(track_id) = self.projects[project_index]
@@ -108,7 +106,7 @@ impl KinewrightApp {
             self.record_error("Operations", "Core actor stopped while adding media");
         }
         self.projects[project_index].position = clip_start;
-        self.projects[project_index].selected_asset = Some(asset_id);
+        self.projects[project_index].cue_source_asset(asset_id);
     }
 
     fn add_audio_video_asset_to_timeline(
@@ -335,17 +333,7 @@ impl KinewrightApp {
     }
 
     fn select_source_asset(&mut self, asset_id: AssetId) {
-        let duration = self
-            .focused()
-            .document
-            .asset(asset_id)
-            .map_or(TimeCode::ZERO, |asset| asset.duration);
-        let session = self.focused_mut();
-        if session.selected_asset != Some(asset_id) {
-            session.source_in = TimeCode::ZERO;
-            session.source_out = duration;
-        }
-        session.selected_asset = Some(asset_id);
+        self.focused_mut().cue_source_asset(asset_id);
     }
 
     fn source_monitor_controls(&mut self, ui: &mut egui::Ui) {
@@ -355,14 +343,6 @@ impl KinewrightApp {
         let Some(asset) = self.focused().document.asset(asset_id).cloned() else {
             return;
         };
-        if self.focused().source_out <= self.focused().source_in
-            || self.focused().source_out > asset.duration
-        {
-            let session = self.focused_mut();
-            session.source_in = TimeCode::ZERO;
-            session.source_out = asset.duration;
-        }
-
         theme::card_frame(true).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("SOURCE").font(theme::semibold(type_size::CAPTION)));
@@ -398,54 +378,24 @@ impl KinewrightApp {
                     self.send_operation(assume_sdr_rec709_operation(&asset));
                 }
             }
-            let mut source_in = self.focused().source_in.0;
-            let mut source_out = self.focused().source_out.0;
-            ui.horizontal(|ui| {
-                ui.label("In");
-                ui.add(
-                    egui::DragValue::new(&mut source_in)
-                        .range(0..=asset.duration.0.saturating_sub(1)),
-                );
-                ui.label("Out");
-                ui.add(egui::DragValue::new(&mut source_out).range(1..=asset.duration.0));
-            });
-            source_in = source_in.clamp(0, asset.duration.0.saturating_sub(1));
-            source_out = source_out.clamp(source_in.saturating_add(1), asset.duration.0);
-            self.focused_mut().source_in = TimeCode(source_in);
-            self.focused_mut().source_out = TimeCode(source_out);
-
-            ui.horizontal(|ui| {
-                for (label, mode) in [
-                    ("Insert at playhead", ThreePointMode::Insert),
-                    ("Overwrite", ThreePointMode::Overwrite),
-                ] {
-                    if ui.button(label).clicked() {
-                        let track = self
-                            .focused()
-                            .document
-                            .tracks
-                            .iter()
-                            .find(|track| asset.kind.supports(track.kind))
-                            .map(|track| track.id);
-                        if let Some(track) = track {
-                            self.send_operation(Operation::ThreePointEdit {
-                                track,
-                                asset: asset.id,
-                                source_in: Some(TimeCode(source_in)),
-                                source_out: Some(TimeCode(source_out)),
-                                timeline_in: Some(self.focused().position),
-                                timeline_out: None,
-                                mode,
-                            });
-                        } else {
-                            self.record_error(
-                                "Source monitor",
-                                format!("No compatible track exists for {}", asset.name),
-                            );
-                        }
-                    }
-                }
-            });
+            let session = self.focused();
+            let video_route = session
+                .source_video_target
+                .map_or_else(|| "off".to_owned(), |track| format!("V → {track}"));
+            let audio_route = session
+                .source_audio_target
+                .map_or_else(|| "off".to_owned(), |track| format!("A → {track}"));
+            ui.colored_label(
+                color::TEXT_MUTED,
+                format!(
+                    "Source viewer · frame {} · In {} · Out {} · {video_route} · {audio_route}",
+                    session.source_position, session.source_in, session.source_out
+                ),
+            );
+            ui.colored_label(
+                color::TEXT_MUTED,
+                "Insert and overwrite are available in the Source viewer.",
+            );
         });
         ui.add_space(space::ONE);
     }

@@ -86,6 +86,11 @@ pub(crate) struct KinewrightApp {
     pub(crate) cache_clear_tx: mpsc::Sender<crate::media_workflow::CacheClearResponse>,
     pub(crate) cache_clear_rx: mpsc::Receiver<crate::media_workflow::CacheClearResponse>,
     pub(crate) media_statuses: crate::media_workflow::MediaStatusStore,
+    /// A human Insert/Overwrite request that is waiting for its mandatory,
+    /// current source availability verification. It is intentionally global
+    /// to the app so a Source selection change cannot reveal pixels or enable
+    /// another edit before the original request resolves fail-closed.
+    pub(crate) pending_source_edit: Option<crate::media_workflow::PendingSourceEdit>,
     pub(crate) pending_legacy_relink: Option<crate::media_workflow::PendingLegacyRelink>,
     pub(crate) media_cache_dialog_open: bool,
     pub(crate) media_cache_inventory: Option<kinewright_core::MediaCacheInventory>,
@@ -226,6 +231,7 @@ impl KinewrightApp {
             cache_clear_tx,
             cache_clear_rx,
             media_statuses: crate::media_workflow::MediaStatusStore::default(),
+            pending_source_edit: None,
             pending_legacy_relink: None,
             media_cache_dialog_open: false,
             media_cache_inventory: None,
@@ -541,6 +547,13 @@ impl KinewrightApp {
         self.projects.remove(index);
         self.media_statuses.remove_session(id);
         if self
+            .pending_source_edit
+            .as_ref()
+            .is_some_and(|pending| pending.session_id == id)
+        {
+            self.pending_source_edit = None;
+        }
+        if self
             .pending_legacy_relink
             .as_ref()
             .is_some_and(|pending| pending.session_id == id)
@@ -785,8 +798,22 @@ impl KinewrightApp {
                         })
                         .collect::<Vec<_>>();
                     let session_id = self.projects[project_index].id;
+                    let invalidated_pending_source_edit =
+                        self.pending_source_edit.as_ref().is_some_and(|pending| {
+                            pending.session_id == session_id
+                                && media_changed_assets
+                                    .iter()
+                                    .any(|asset| asset.id == pending.asset_id)
+                        });
                     for asset in &media_changed_assets {
                         self.media_statuses.invalidate(session_id, asset.id);
+                    }
+                    if invalidated_pending_source_edit {
+                        self.pending_source_edit = None;
+                        self.record_error(
+                            "Source monitor",
+                            "Source file changed while Source was being verified; no edit was applied",
+                        );
                     }
                     for path in previous_paths {
                         self.visual_cache.invalidate_path(&path);
@@ -822,6 +849,7 @@ impl KinewrightApp {
                     {
                         self.projects[project_index].selected_asset = None;
                     }
+                    self.projects[project_index].reconcile_source_state();
                     if doc.duration <= TimeCode::ZERO {
                         self.projects[project_index].position = TimeCode::ZERO;
                     } else {
@@ -843,7 +871,7 @@ impl KinewrightApp {
                         self.playback.request_frame(position);
                     }
                     if let Some(Operation::AddAsset { asset }) = &last_op {
-                        self.projects[project_index].selected_asset = Some(asset.id);
+                        self.projects[project_index].cue_source_asset(asset.id);
                         // A user import is one gesture: the probed asset goes
                         // straight onto the timeline, and the playhead moves
                         // to the new footage so the monitor answers "it
@@ -1265,6 +1293,17 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
         Operation::ThreePointEdit { mode, asset, .. } => {
             format!("Applied {mode:?} three-point edit from asset {asset}")
         }
+        Operation::PatchedThreePointEdit {
+            mode,
+            asset,
+            video_track,
+            audio_track,
+            ..
+        } => format!(
+            "Applied {mode:?} source patch from asset {asset} (video {}, audio {})",
+            video_track.map_or_else(|| "off".to_owned(), |track| track.to_string()),
+            audio_track.map_or_else(|| "off".to_owned(), |track| track.to_string()),
+        ),
         Operation::SlipClip { clip, .. } => format!("Slipped clip {clip}"),
         Operation::RollEdit {
             left_clip,

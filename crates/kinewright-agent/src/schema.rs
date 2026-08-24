@@ -8,7 +8,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 60] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 61] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -25,6 +25,7 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 60] = [
     "relink_media",
     "get_clip_info",
     "get_source_info",
+    "plan_source_program_edit",
     "get_source_storyboard",
     "get_source_shot_board",
     "get_cut_neighborhoods",
@@ -211,6 +212,7 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::TrimClip { .. } => "trim_clip",
         Operation::MoveClip { .. } => "move_clip",
         Operation::ThreePointEdit { .. } => "three_point_edit",
+        Operation::PatchedThreePointEdit { .. } => "patched_three_point_edit",
         Operation::SlipClip { .. } => "slip_clip",
         Operation::RollEdit { .. } => "roll_edit",
         Operation::SlideClip { .. } => "slide_clip",
@@ -497,6 +499,7 @@ mod tests {
                 "trim_clip",
                 "move_clip",
                 "three_point_edit",
+                "patched_three_point_edit",
                 "slip_clip",
                 "roll_edit",
                 "slide_clip",

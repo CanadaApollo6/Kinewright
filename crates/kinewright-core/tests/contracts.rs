@@ -127,6 +127,25 @@ fn document_with_three_clips() -> Document {
     doc
 }
 
+fn audio_video_document() -> Document {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut doc = empty_timeline(fps);
+    Operation::AddTrack {
+        track: Track {
+            id: TrackId(2),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: Vec::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let mut av = asset(1, fps, 300);
+    av.kind = MediaKind::AudioVideo;
+    Operation::AddAsset { asset: av }.apply(&mut doc).unwrap();
+    doc
+}
+
 fn document_with_butt_joined_clips() -> Document {
     let fps = Rational::new(30, 1).unwrap();
     let mut doc = empty_timeline(fps);
@@ -295,6 +314,16 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             timeline_in: Some(TimeCode(60)),
             timeline_out: None,
             mode: ThreePointMode::Insert,
+        },
+        Operation::PatchedThreePointEdit {
+            asset: AssetId(1),
+            source_in: Some(TimeCode(10)),
+            source_out: Some(TimeCode(40)),
+            timeline_in: Some(TimeCode(60)),
+            timeline_out: None,
+            mode: ThreePointMode::Overwrite,
+            video_track: Some(TrackId(1)),
+            audio_track: None,
         },
         Operation::SlipClip {
             clip: ClipId(1),
@@ -3602,6 +3631,500 @@ fn three_point_insert_splits_every_sync_locked_straddler_before_ripple() {
     assert_eq!(doc.tracks[0].clips[2].timeline_start, TimeCode(60));
     assert_eq!(doc.tracks[1].clips[1].timeline_start, TimeCode(60));
     assert_eq!(doc.duration, TimeCode(110));
+}
+
+#[test]
+fn patched_three_point_matches_legacy_resolution_for_every_three_mark_combination() {
+    let fps = Rational::new(30, 1).unwrap();
+    let mut base = empty_timeline(fps);
+    Operation::AddAsset {
+        asset: asset(1, fps, 300),
+    }
+    .apply(&mut base)
+    .unwrap();
+
+    for (source_in, source_out, timeline_in, timeline_out) in [
+        (
+            Some(TimeCode(10)),
+            Some(TimeCode(40)),
+            Some(TimeCode(100)),
+            None,
+        ),
+        (
+            Some(TimeCode(10)),
+            Some(TimeCode(40)),
+            None,
+            Some(TimeCode(130)),
+        ),
+        (
+            Some(TimeCode(10)),
+            None,
+            Some(TimeCode(100)),
+            Some(TimeCode(130)),
+        ),
+        (
+            None,
+            Some(TimeCode(40)),
+            Some(TimeCode(100)),
+            Some(TimeCode(130)),
+        ),
+    ] {
+        let mut legacy = base.clone();
+        Operation::ThreePointEdit {
+            track: TrackId(1),
+            asset: AssetId(1),
+            source_in,
+            source_out,
+            timeline_in,
+            timeline_out,
+            mode: ThreePointMode::Overwrite,
+        }
+        .apply(&mut legacy)
+        .unwrap();
+
+        let mut patched = base.clone();
+        Operation::PatchedThreePointEdit {
+            asset: AssetId(1),
+            source_in,
+            source_out,
+            timeline_in,
+            timeline_out,
+            mode: ThreePointMode::Overwrite,
+            video_track: Some(TrackId(1)),
+            audio_track: None,
+        }
+        .apply(&mut patched)
+        .unwrap();
+
+        let resolved = patched.clip(ClipId(1)).unwrap();
+        assert_eq!(resolved.source_range, TimeCode(10)..TimeCode(40));
+        assert_eq!(resolved.timeline_start, TimeCode(100));
+        assert_eq!(patched, legacy);
+    }
+}
+
+#[test]
+fn patched_three_point_rejects_empty_missing_duplicate_and_wrong_routes_atomically() {
+    let mut doc = audio_video_document();
+    let operation = |video_track, audio_track| Operation::PatchedThreePointEdit {
+        asset: AssetId(1),
+        source_in: Some(TimeCode(0)),
+        source_out: Some(TimeCode(30)),
+        timeline_in: Some(TimeCode(0)),
+        timeline_out: None,
+        mode: ThreePointMode::Overwrite,
+        video_track,
+        audio_track,
+    };
+
+    let before = doc.clone();
+    assert!(matches!(
+        operation(None, None).apply(&mut doc),
+        Err(OpError::EmptySourcePatch)
+    ));
+    assert_eq!(doc, before);
+
+    let before = doc.clone();
+    assert!(matches!(
+        operation(Some(TrackId(99)), None).apply(&mut doc),
+        Err(OpError::MissingTrack(TrackId(99)))
+    ));
+    assert_eq!(doc, before);
+
+    let before = doc.clone();
+    assert!(matches!(
+        operation(Some(TrackId(1)), Some(TrackId(1))).apply(&mut doc),
+        Err(OpError::DuplicateSourcePatchTrack(TrackId(1)))
+    ));
+    assert_eq!(doc, before);
+
+    let before = doc.clone();
+    assert!(matches!(
+        operation(Some(TrackId(2)), None).apply(&mut doc),
+        Err(OpError::InvalidSourcePatchRouteKind {
+            component: "video",
+            expected: TrackKind::Video,
+            actual: TrackKind::Audio,
+            track_id: TrackId(2),
+        })
+    ));
+    assert_eq!(doc, before);
+
+    let mut video_only_asset = asset(2, Rational::new(30, 1).unwrap(), 300);
+    video_only_asset.kind = MediaKind::Video;
+    Operation::AddAsset {
+        asset: video_only_asset,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let before_video_asset = doc.clone();
+    assert!(matches!(
+        Operation::PatchedThreePointEdit {
+            asset: AssetId(2),
+            source_in: Some(TimeCode(0)),
+            source_out: Some(TimeCode(30)),
+            timeline_in: Some(TimeCode(0)),
+            timeline_out: None,
+            mode: ThreePointMode::Overwrite,
+            video_track: None,
+            audio_track: Some(TrackId(2)),
+        }
+        .apply(&mut doc),
+        Err(OpError::IncompatibleTrack {
+            asset: AssetId(2),
+            track: "audio",
+            track_id: TrackId(2),
+        })
+    ));
+    assert_eq!(doc, before_video_asset);
+}
+
+#[test]
+fn patched_three_point_invalid_route_rejection_preserves_serialized_document_bytes() {
+    let mut doc = audio_video_document();
+    for track in [TrackId(1), TrackId(2)] {
+        Operation::AddClip {
+            track,
+            asset: AssetId(1),
+            at: TimeCode(20),
+            source: TimeCode(40)..TimeCode(100),
+        }
+        .apply(&mut doc)
+        .unwrap();
+    }
+    let before = serde_json::to_vec(&doc).unwrap();
+
+    assert!(matches!(
+        Operation::PatchedThreePointEdit {
+            asset: AssetId(1),
+            source_in: Some(TimeCode(100)),
+            source_out: Some(TimeCode(130)),
+            timeline_in: Some(TimeCode(30)),
+            timeline_out: None,
+            mode: ThreePointMode::Overwrite,
+            video_track: Some(TrackId(2)),
+            audio_track: None,
+        }
+        .apply(&mut doc),
+        Err(OpError::InvalidSourcePatchRouteKind {
+            component: "video",
+            expected: TrackKind::Video,
+            actual: TrackKind::Audio,
+            track_id: TrackId(2),
+        })
+    ));
+    assert_eq!(serde_json::to_vec(&doc).unwrap(), before);
+}
+
+#[test]
+fn patched_three_point_overwrite_routes_dual_av_once_and_only_clears_targets() {
+    let mut doc = audio_video_document();
+    Operation::AddTrack {
+        track: Track {
+            id: TrackId(3),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: Vec::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    for track in [TrackId(1), TrackId(2), TrackId(3)] {
+        Operation::AddClip {
+            track,
+            asset: AssetId(1),
+            at: TimeCode::ZERO,
+            source: TimeCode::ZERO..TimeCode(90),
+        }
+        .apply(&mut doc)
+        .unwrap();
+    }
+    let untouched_track = doc
+        .tracks
+        .iter()
+        .find(|track| track.id == TrackId(3))
+        .unwrap()
+        .clone();
+
+    Operation::PatchedThreePointEdit {
+        asset: AssetId(1),
+        source_in: Some(TimeCode(90)),
+        source_out: Some(TimeCode(120)),
+        timeline_in: Some(TimeCode(30)),
+        timeline_out: None,
+        mode: ThreePointMode::Overwrite,
+        video_track: Some(TrackId(1)),
+        audio_track: Some(TrackId(2)),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    let video = doc
+        .tracks
+        .iter()
+        .find(|track| track.id == TrackId(1))
+        .unwrap();
+    let audio = doc
+        .tracks
+        .iter()
+        .find(|track| track.id == TrackId(2))
+        .unwrap();
+    let video_replacement = video
+        .clips
+        .iter()
+        .find(|clip| clip.source_range == (TimeCode(90)..TimeCode(120)))
+        .unwrap();
+    let audio_replacement = audio
+        .clips
+        .iter()
+        .find(|clip| clip.source_range == (TimeCode(90)..TimeCode(120)))
+        .unwrap();
+    assert_eq!(video_replacement.timeline_start, TimeCode(30));
+    assert_eq!(audio_replacement.timeline_start, TimeCode(30));
+    assert_eq!(video_replacement.link, audio_replacement.link);
+    assert!(video_replacement.link.is_some());
+    assert!(
+        video
+            .clips
+            .iter()
+            .any(|clip| clip.timeline_start == TimeCode::ZERO)
+    );
+    assert!(
+        audio
+            .clips
+            .iter()
+            .any(|clip| clip.timeline_start == TimeCode::ZERO)
+    );
+    let untouched_after = doc
+        .tracks
+        .iter()
+        .find(|track| track.id == TrackId(3))
+        .unwrap();
+    assert!(untouched_after.sync_lock);
+    assert_eq!(untouched_after.clips, untouched_track.clips);
+    assert_eq!(doc.duration, TimeCode(90));
+    assert_eq!(video.clips.len(), 3);
+    assert_eq!(audio.clips.len(), 3);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn patched_three_point_insert_ripples_selected_and_sync_locked_tracks_once() {
+    let mut doc = audio_video_document();
+    Operation::AddTrack {
+        track: Track {
+            id: TrackId(3),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: Vec::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::AddTrack {
+        track: Track {
+            id: TrackId(4),
+            kind: TrackKind::Video,
+            sync_lock: false,
+            clips: Vec::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    for track in [TrackId(1), TrackId(2), TrackId(3)] {
+        Operation::AddClip {
+            track,
+            asset: AssetId(1),
+            at: TimeCode::ZERO,
+            source: TimeCode::ZERO..TimeCode(100),
+        }
+        .apply(&mut doc)
+        .unwrap();
+    }
+    Operation::AddClip {
+        track: TrackId(4),
+        asset: AssetId(1),
+        at: TimeCode(100),
+        source: TimeCode::ZERO..TimeCode(100),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    Operation::PatchedThreePointEdit {
+        asset: AssetId(1),
+        source_in: Some(TimeCode(200)),
+        source_out: Some(TimeCode(210)),
+        timeline_in: Some(TimeCode(50)),
+        timeline_out: None,
+        mode: ThreePointMode::Insert,
+        video_track: Some(TrackId(1)),
+        audio_track: Some(TrackId(2)),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    for track_id in [TrackId(1), TrackId(2)] {
+        let track = doc
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .unwrap();
+        let inserted = track
+            .clips
+            .iter()
+            .find(|clip| clip.source_range == (TimeCode(200)..TimeCode(210)))
+            .unwrap();
+        assert_eq!(inserted.timeline_start, TimeCode(50));
+        assert_eq!(
+            track
+                .clips
+                .iter()
+                .find(|clip| clip.source_range.start == TimeCode(50))
+                .unwrap()
+                .timeline_start,
+            TimeCode(60)
+        );
+    }
+    let locked_only = doc
+        .tracks
+        .iter()
+        .find(|track| track.id == TrackId(3))
+        .unwrap();
+    assert!(
+        locked_only
+            .clips
+            .iter()
+            .all(|clip| clip.source_range != (TimeCode(200)..TimeCode(210)))
+    );
+    assert_eq!(
+        locked_only
+            .clips
+            .iter()
+            .find(|clip| clip.source_range.start == TimeCode(50))
+            .unwrap()
+            .timeline_start,
+        TimeCode(60)
+    );
+    let unlocked = doc
+        .tracks
+        .iter()
+        .find(|track| track.id == TrackId(4))
+        .unwrap();
+    assert_eq!(unlocked.clips[0].timeline_start, TimeCode(100));
+    let video_insert = doc
+        .tracks
+        .iter()
+        .find(|track| track.id == TrackId(1))
+        .unwrap()
+        .clips
+        .iter()
+        .find(|clip| clip.source_range == (TimeCode(200)..TimeCode(210)))
+        .unwrap();
+    let audio_insert = doc
+        .tracks
+        .iter()
+        .find(|track| track.id == TrackId(2))
+        .unwrap()
+        .clips
+        .iter()
+        .find(|clip| clip.source_range == (TimeCode(200)..TimeCode(210)))
+        .unwrap();
+    assert_eq!(video_insert.link, audio_insert.link);
+    assert_eq!(doc.duration, TimeCode(200));
+}
+
+#[test]
+fn patched_three_point_single_routes_edit_only_selected_component() {
+    let mut doc = audio_video_document();
+    Operation::PatchedThreePointEdit {
+        asset: AssetId(1),
+        source_in: Some(TimeCode(0)),
+        source_out: Some(TimeCode(30)),
+        timeline_in: Some(TimeCode(0)),
+        timeline_out: None,
+        mode: ThreePointMode::Overwrite,
+        video_track: Some(TrackId(1)),
+        audio_track: None,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(doc.tracks[0].clips.len(), 1);
+    assert!(doc.tracks[1].clips.is_empty());
+
+    let mut audio_only = audio_video_document();
+    Operation::PatchedThreePointEdit {
+        asset: AssetId(1),
+        source_in: Some(TimeCode(30)),
+        source_out: Some(TimeCode(60)),
+        timeline_in: Some(TimeCode(0)),
+        timeline_out: None,
+        mode: ThreePointMode::Overwrite,
+        video_track: None,
+        audio_track: Some(TrackId(2)),
+    }
+    .apply(&mut audio_only)
+    .unwrap();
+    assert!(audio_only.tracks[0].clips.is_empty());
+    assert_eq!(audio_only.tracks[1].clips.len(), 1);
+}
+
+#[test]
+fn patched_three_point_journals_as_one_undoable_revision_and_replays() {
+    let initial = audio_video_document();
+    let operation = Operation::PatchedThreePointEdit {
+        asset: AssetId(1),
+        source_in: Some(TimeCode(0)),
+        source_out: Some(TimeCode(30)),
+        timeline_in: Some(TimeCode(0)),
+        timeline_out: None,
+        mode: ThreePointMode::Overwrite,
+        video_track: Some(TrackId(1)),
+        audio_track: Some(TrackId(2)),
+    };
+    let core = Core::spawn(initial.clone()).unwrap();
+    let Event::DocumentChanged {
+        doc: changed,
+        revision,
+        journal_command: Some(JournalCommand::Do(journaled)),
+        ..
+    } = core.request(Command::Do(operation.clone())).unwrap()
+    else {
+        panic!("patched three-point edit should be accepted and journaled");
+    };
+    assert_eq!(revision.0, 1);
+    assert_eq!(journaled, operation);
+    assert_eq!(changed.tracks[0].clips.len(), 1);
+    assert_eq!(changed.tracks[1].clips.len(), 1);
+
+    let encoded = serde_json::to_string(&JournalCommand::Do(operation.clone())).unwrap();
+    let parsed: JournalCommand = serde_json::from_str(&encoded).unwrap();
+    let replay_core = Core::spawn(initial.clone()).unwrap();
+    let Event::DocumentChanged { doc: replayed, .. } = replay_core.request(parsed.into()).unwrap()
+    else {
+        panic!("patched three-point journal should replay");
+    };
+    assert_eq!(replayed, changed);
+
+    let Event::DocumentChanged {
+        doc: undone,
+        revision,
+        ..
+    } = core.request(Command::Undo).unwrap()
+    else {
+        panic!("patched three-point edit should undo as one entry");
+    };
+    assert_eq!(&*undone, &initial);
+    assert_eq!(revision.0, 2);
+    let Event::DocumentChanged {
+        doc: redone,
+        revision,
+        ..
+    } = core.request(Command::Redo).unwrap()
+    else {
+        panic!("patched three-point edit should redo as one entry");
+    };
+    assert_eq!(&*redone, &*changed);
+    assert_eq!(revision.0, 3);
 }
 
 #[test]

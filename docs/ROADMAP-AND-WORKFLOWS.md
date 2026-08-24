@@ -167,10 +167,15 @@ The first three cycle intentions are:
    same ten typed primary controls and receive explicit errors for unsupported or
    ambiguous source profiles.
 
-The next primary slice is the long-form editorial source/program workflow: dual
-source and program viewers, explicit source patching, and track targeting. Its
-contract must preserve the existing three-point edit semantics while making every
-route and destination visible and revision-safe.
+4. **M42 source/program patching and track targeting — completed 2026-08-24.**
+   Source and Program are independently addressable, every video/audio route is
+   visible, and one revision-safe compound operation performs single- or dual-route
+   Insert and Overwrite without double-rippling. Human and agent edits fail closed
+   unless the referenced source has just been verified. The objective contract and
+   deferrals are recorded in `M42-SOURCE-PROGRAM-PATCHING.md`.
+
+The next primary slice is **CC2 scopes and matching**. Work begins only after the
+M42 integration commit and platform CI gate are closed.
 
 Within that cadence, three workstreams remain active:
 
@@ -335,7 +340,7 @@ constructors, compositor inputs, `ExportSettings`, and FFmpeg stream/container
 metadata. Later stages cannot treat those surfaces as implicit or start before the
 required earlier exit gate passes.
 
-**Current status (2026-08-24): CC0, M41, and CC1 are complete.** CC0's exit evidence
+**Current status (2026-08-24): CC0, M41, CC1, and M42 are complete.** CC0's exit evidence
 includes legacy project migration, known/partial/unknown and 10-bit probe fixtures,
 visible human and agent inspection, an undoable source override, delivery rejection
 outside the current contract, and an encoded file decoded again to verify its
@@ -344,8 +349,9 @@ changed-media diagnosis, deterministic relink, and cache visibility. CC1 adds th
 explicit high-precision managed SDR input/correction/output path, ten typed primary
 controls, full-raster proofs with source/provenance manifests, verified-source export
 preflight, objective ramp/chart/control/cache/delivery fixtures, and CPU/GPU parity
-evidence. The next primary slice is dual source/program editing with source patching
-and track targeting; CC2 remains the next colour slice.
+evidence. M42 adds independent Source/Program monitoring, explicit video/audio
+patch destinations, atomic compound edits, and mandatory live source revalidation.
+CC2 scopes and matching is the next primary slice.
 
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |
@@ -454,5 +460,8 @@ ownership boundary, and definition of done stable.
   real-footage evaluation programme.
 - [M41 offline/relink and cache visibility](M41-OFFLINE-RELINK-CACHE-VISIBILITY.md)
   — verified source identity, deterministic relink, and owned-cache contract.
+- [M42 source/program patching and track targeting](M42-SOURCE-PROGRAM-PATCHING.md)
+  — independent Source/Program workflow, explicit routes, and verified compound
+  edits.
 - [Media policy](MEDIA-POLICY.md) — hostile-media behaviour and invariants.
 - [Building Kinewright](BUILDING.md) — Windows, Linux, FFmpeg, and toolchain setup.

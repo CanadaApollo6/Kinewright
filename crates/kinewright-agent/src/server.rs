@@ -71,7 +71,8 @@ use crate::{
     },
     runtime::{
         CapabilityDescriptor, CapabilityKind, PreparedEditPlan, PreparedPlanId, PreparedPlanStore,
-        ToolSurfaceMetrics, capabilities, is_invocable_capability, search_capabilities,
+        ToolSurfaceMetrics, capabilities, decode_plan_operations, is_invocable_capability,
+        search_capabilities,
     },
     schema::{SchemaError, decode_operation, operation_tool_name, operation_tools, schema_object},
 };
@@ -564,16 +565,21 @@ impl KinewrightMcp {
             "prepare_edit_plan" => {
                 let args: PrepareEditPlanArgs = decode_args("prepare_edit_plan", arguments)?;
                 let (actual_revision, document) = self.snapshot()?;
-                let plan = self
-                    .prepared_plans
-                    .lock()
-                    .map_err(|_| McpError::internal_error("prepared plan store stopped", None))?
-                    .prepare(
-                        args.expected_revision,
-                        actual_revision,
-                        &document,
-                        args.operations,
-                    );
+                let plan: Result<PreparedEditPlan, String> = if args.expected_revision
+                    == actual_revision
+                {
+                    match decode_plan_operations(args.operations) {
+                        Ok(operations) => {
+                            self.prepare_operations(args.expected_revision, &document, operations)
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                } else {
+                    Err(format!(
+                        "timeline revision conflict: expected {}, actual {}",
+                        args.expected_revision, actual_revision
+                    ))
+                };
                 Ok(match plan {
                     Ok(plan) => success_structured(
                         format!(
@@ -585,13 +591,13 @@ impl KinewrightMcp {
                             "preview": plan.preview,
                         }),
                     ),
-                    Err(error) => error_text(error.to_string()),
+                    Err(error) => error_text(error),
                 })
             }
             "commit_edit_plan" => {
                 let args: CommitEditPlanArgs = decode_args("commit_edit_plan", arguments)?;
                 let plan = {
-                    let mut plans = self.prepared_plans.lock().map_err(|_| {
+                    let plans = self.prepared_plans.lock().map_err(|_| {
                         McpError::internal_error("prepared plan store stopped", None)
                     })?;
                     let Some(plan) = plans.get(args.plan_id) else {
@@ -606,11 +612,28 @@ impl KinewrightMcp {
                             args.plan_id, plan.expected_revision, args.expected_revision
                         )));
                     }
-                    plans
-                        .take(args.plan_id)
-                        .expect("prepared plan was just read")
+                    plan
                 };
-                self.apply_edit_plan(args.expected_revision, &plan.operations)
+                let (commit_revision, commit_document) = self.snapshot()?;
+                if args.expected_revision != commit_revision {
+                    return Ok(revision_conflict_text(
+                        args.expected_revision,
+                        commit_revision,
+                    ));
+                }
+                if let Err(error) = self
+                    .ensure_verified_source_assets(&commit_document, &plan.referenced_source_assets)
+                {
+                    return Ok(error_text(error));
+                }
+                let result = self.apply_edit_plan(args.expected_revision, &plan.operations)?;
+                if result.is_error != Some(true) {
+                    self.prepared_plans
+                        .lock()
+                        .map_err(|_| McpError::internal_error("prepared plan store stopped", None))?
+                        .take(args.plan_id);
+                }
+                Ok(result)
             }
             "discard_edit_plan" => {
                 let args: DiscardEditPlanArgs = decode_args("discard_edit_plan", arguments)?;
@@ -661,6 +684,11 @@ impl KinewrightMcp {
                     Ok(rendered) => success_text(rendered),
                     Err(error) => error_text(error),
                 })
+            }
+            "plan_source_program_edit" => {
+                let args: SourceProgramEditArgs =
+                    decode_args("plan_source_program_edit", arguments)?;
+                self.source_program_edit_plan(&args)
             }
             "get_source_info" => {
                 let args: SourceInfoArgs = decode_args("get_source_info", arguments)?;
@@ -1142,6 +1170,9 @@ impl KinewrightMcp {
         let (actual_revision, before) = self.snapshot()?;
         if expected_revision != actual_revision {
             return Ok(revision_conflict_text(expected_revision, actual_revision));
+        }
+        if let Err(error) = self.ensure_verified_patched_sources(&before, operations) {
+            return Ok(error_text(error));
         }
         if operations
             .iter()
@@ -3292,7 +3323,7 @@ impl KinewrightMcp {
 
     #[allow(clippy::too_many_lines)]
     fn source_storyboard(&self, args: &SourceStoryboardArgs) -> Result<CallToolResult, McpError> {
-        let document = self.document()?;
+        let (revision, document) = self.snapshot()?;
         let Some(asset) = document.asset(args.asset_id).cloned() else {
             return Ok(error_text(format!(
                 "asset {} does not exist",
@@ -3402,6 +3433,7 @@ impl KinewrightMcp {
             })
             .collect::<Vec<_>>();
         let manifest = serde_json::json!({
+            "timeline_revision": revision.0,
             "asset_id": asset.id.0,
             "source_range": source_range_value,
             "cells": cells,
@@ -3422,6 +3454,306 @@ impl KinewrightMcp {
         Ok(result)
     }
 
+    /// Prepare one explicit source/program patch against one observed
+    /// timeline revision. Core owns the compound operation's exact
+    /// three-point derivation, route validation, insert/overwrite semantics,
+    /// and linked A/V construction; this boundary only adds typed agent
+    /// routing, revision gating, and inspectable evidence around it.
+    #[allow(clippy::too_many_lines)]
+    fn source_program_edit_plan(
+        &self,
+        args: &SourceProgramEditArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        if args.expected_revision != revision {
+            return Ok(revision_conflict_text(args.expected_revision, revision));
+        }
+
+        let Some(asset) = document.asset(args.asset).cloned() else {
+            return Ok(error_structured(
+                format!("asset {} does not exist", args.asset),
+                serde_json::json!({
+                    "code": "missing_asset",
+                    "asset_id": args.asset.0,
+                    "timeline_revision": revision.0,
+                }),
+            ));
+        };
+        if let Some(error) = self.source_availability_error(&asset, "source program edit") {
+            return Ok(error);
+        }
+        if args.video_track.is_none() && args.audio_track.is_none() {
+            return Ok(error_structured(
+                "source program edit requires at least one explicit destination",
+                serde_json::json!({
+                    "code": "empty_source_patch",
+                    "asset_id": asset.id.0,
+                    "timeline_revision": revision.0,
+                    "video_track": serde_json::Value::Null,
+                    "audio_track": serde_json::Value::Null,
+                }),
+            ));
+        }
+        if let (Some(video_track), Some(audio_track)) = (args.video_track, args.audio_track)
+            && video_track == audio_track
+        {
+            let track = video_track;
+            return Ok(error_structured(
+                format!("source program edit targets track {track} more than once"),
+                serde_json::json!({
+                    "code": "duplicate_source_patch_track",
+                    "track_id": track.0,
+                    "timeline_revision": revision.0,
+                }),
+            ));
+        }
+
+        for (component, requested, expected_kind) in [
+            ("video", args.video_track, TrackKind::Video),
+            ("audio", args.audio_track, TrackKind::Audio),
+        ] {
+            let Some(track_id) = requested else {
+                continue;
+            };
+            if !asset.kind.supports(expected_kind) {
+                return Ok(error_structured(
+                    format!(
+                        "asset {} has no {component} component for destination track {track_id}",
+                        asset.id
+                    ),
+                    serde_json::json!({
+                        "code": "invalid_source_patch_route_kind",
+                        "component": component,
+                        "asset_kind": asset.kind,
+                        "expected_track_kind": expected_kind,
+                        "track_id": track_id.0,
+                        "timeline_revision": revision.0,
+                    }),
+                ));
+            }
+            let Some(track) = document.tracks.iter().find(|track| track.id == track_id) else {
+                return Ok(error_structured(
+                    format!("destination track {track_id} does not exist"),
+                    serde_json::json!({
+                        "code": "missing_source_patch_track",
+                        "component": component,
+                        "track_id": track_id.0,
+                        "timeline_revision": revision.0,
+                    }),
+                ));
+            };
+            if track.kind != expected_kind {
+                return Ok(error_structured(
+                    format!(
+                        "{component} source route requires a {expected_kind:?} track, got {:?} track {track_id}",
+                        track.kind
+                    ),
+                    serde_json::json!({
+                        "code": "invalid_source_patch_route_kind",
+                        "component": component,
+                        "expected_track_kind": expected_kind,
+                        "actual_track_kind": track.kind,
+                        "track_id": track_id.0,
+                        "timeline_revision": revision.0,
+                    }),
+                ));
+            }
+        }
+
+        let operation = Operation::PatchedThreePointEdit {
+            asset: asset.id,
+            source_in: args.source_in,
+            source_out: args.source_out,
+            timeline_in: args.timeline_in,
+            timeline_out: args.timeline_out,
+            mode: args.mode,
+            video_track: args.video_track,
+            audio_track: args.audio_track,
+        };
+        // Resolve the derived range on an isolated, clip-free copy. This is
+        // deliberately separate from the actual preview: overwrite may
+        // remove the highest existing clip id and Core is allowed to reuse
+        // that id for the replacement. Matching by source/timeline semantics
+        // therefore remains correct where an id-only before/after diff would
+        // lose the new clip.
+        let mut range_document = document.as_ref().clone();
+        for track in &mut range_document.tracks {
+            track.clips.clear();
+        }
+        range_document.duration = TimeCode::ZERO;
+        if let Err(error) = operation.apply(&mut range_document) {
+            return Ok(error_structured(
+                format!("source program edit is invalid: {error}"),
+                serde_json::json!({
+                    "code": "invalid_source_program_edit",
+                    "asset_id": asset.id.0,
+                    "timeline_revision": revision.0,
+                    "mode": args.mode,
+                    "video_track": args.video_track.map(|track| track.0),
+                    "audio_track": args.audio_track.map(|track| track.0),
+                    "error": error.to_string(),
+                }),
+            ));
+        }
+        let expected_clip = args
+            .video_track
+            .or(args.audio_track)
+            .and_then(|track_id| {
+                range_document
+                    .tracks
+                    .iter()
+                    .find(|track| track.id == track_id)
+                    .and_then(|track| track.clips.iter().find(|clip| clip.asset == asset.id))
+            })
+            .ok_or_else(|| {
+                McpError::internal_error(
+                    "patched source program range resolution produced no route clip",
+                    None,
+                )
+            })?;
+        let expected_source = expected_clip.source_range.clone();
+        let expected_timeline_start = expected_clip.timeline_start;
+        let mut projected = document.as_ref().clone();
+        if let Err(error) = operation.apply(&mut projected) {
+            return Ok(error_structured(
+                format!("source program edit is invalid: {error}"),
+                serde_json::json!({
+                    "code": "invalid_source_program_edit",
+                    "asset_id": asset.id.0,
+                    "timeline_revision": revision.0,
+                    "mode": args.mode,
+                    "video_track": args.video_track.map(|track| track.0),
+                    "audio_track": args.audio_track.map(|track| track.0),
+                    "error": error.to_string(),
+                }),
+            ));
+        }
+
+        let mut routed_clips = BTreeMap::new();
+        for (component, requested) in [("video", args.video_track), ("audio", args.audio_track)] {
+            let Some(track_id) = requested else {
+                continue;
+            };
+            let Some(clip) = projected
+                .tracks
+                .iter()
+                .find(|track| track.id == track_id)
+                .and_then(|track| {
+                    track.clips.iter().find(|clip| {
+                        clip.asset == asset.id
+                            && clip.source_range == expected_source
+                            && clip.timeline_start == expected_timeline_start
+                    })
+                })
+            else {
+                return Err(McpError::internal_error(
+                    format!(
+                        "patched source program operation did not produce its {component} route"
+                    ),
+                    None,
+                ));
+            };
+            routed_clips.insert(component, clip.clone());
+        }
+
+        let first_clip = routed_clips
+            .values()
+            .next()
+            .expect("at least one route was validated");
+        let duration = projected
+            .clip_duration(first_clip)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        let timeline_out = first_clip
+            .timeline_start
+            .checked_add(duration)
+            .ok_or_else(|| McpError::internal_error("timeline range overflowed", None))?;
+        for clip in routed_clips.values() {
+            if clip.source_range != first_clip.source_range
+                || clip.timeline_start != first_clip.timeline_start
+            {
+                return Err(McpError::internal_error(
+                    "patched source program routes are not aligned",
+                    None,
+                ));
+            }
+        }
+        let linked = routed_clips.len() > 1
+            && routed_clips
+                .values()
+                .map(|clip| clip.link)
+                .collect::<BTreeSet<_>>()
+                .len()
+                == 1
+            && routed_clips.values().all(|clip| clip.link.is_some());
+        if routed_clips.len() > 1 && !linked {
+            return Err(McpError::internal_error(
+                "patched source program routes are not linked",
+                None,
+            ));
+        }
+
+        let plan = match self.prepare_operations(revision, &document, vec![operation]) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Ok(error_structured(
+                    format!("source program edit could not be prepared: {error}"),
+                    serde_json::json!({
+                        "code": "invalid_source_program_edit",
+                        "asset_id": asset.id.0,
+                        "timeline_revision": revision.0,
+                        "error": error,
+                    }),
+                ));
+            }
+        };
+
+        let routed = routed_clips
+            .iter()
+            .map(|(component, clip)| {
+                (
+                    (*component).to_owned(),
+                    serde_json::json!({
+                        "track_id": if *component == "video" { args.video_track } else { args.audio_track },
+                        "clip_id": clip.id.0,
+                        "link_id": clip.link.map(|link| link.0),
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let structured = serde_json::json!({
+            "timeline_revision": revision.0,
+            "asset_id": asset.id.0,
+            "mode": args.mode,
+            "source_range": {
+                "start": first_clip.source_range.start.0,
+                "end": first_clip.source_range.end.0,
+            },
+            "timeline_range": {
+                "start": first_clip.timeline_start.0,
+                "end": timeline_out.0,
+            },
+            "destinations": routed,
+            "linked": linked,
+            "prepared_edit_plan": {
+                "plan_id": plan.id,
+                "expected_revision": revision,
+                "preview": plan.preview,
+            },
+        });
+        Ok(success_structured(
+            format!(
+                "prepared source program {} edit for asset {} as plan {}; inspect the preview, then commit it at timeline revision {revision}",
+                match args.mode {
+                    ThreePointMode::Insert => "insert",
+                    ThreePointMode::Overwrite => "overwrite",
+                },
+                asset.id,
+                plan.id,
+            ),
+            structured,
+        ))
+    }
+
     /// Return source-monitor candidates derived from cached scene boundaries.
     ///
     /// This deliberately builds an isolated, throwaway document for thumbnail
@@ -3429,7 +3761,7 @@ impl KinewrightMcp {
     /// playback document is changed.
     #[allow(clippy::too_many_lines)]
     fn source_shot_board(&self, args: &SourceShotBoardArgs) -> Result<CallToolResult, McpError> {
-        let document = self.document()?;
+        let (revision, document) = self.snapshot()?;
         let Some(asset) = document.asset(args.asset_id).cloned() else {
             return Ok(error_text(format!(
                 "asset {} does not exist",
@@ -3517,6 +3849,7 @@ impl KinewrightMcp {
                     _ => unreachable!(),
                 };
                 let manifest = serde_json::json!({
+                    "timeline_revision": revision.0,
                     "asset_id": asset.id.0,
                     "source_range": {"start": source_in.0, "end": source_out.0},
                     "status": "pending",
@@ -3700,6 +4033,7 @@ impl KinewrightMcp {
         let sheet = compose_contact_sheet(&images)?;
         let png = encode_png(&sheet)?;
         let manifest = serde_json::json!({
+            "timeline_revision": revision.0,
             "asset_id": asset.id.0,
             "source_range": {"start": source_in.0, "end": source_out.0},
             "status": "ready",
@@ -3867,6 +4201,47 @@ impl KinewrightMcp {
         ))
     }
 
+    fn ensure_verified_patched_sources(
+        &self,
+        document: &Document,
+        operations: &[Operation],
+    ) -> Result<(), String> {
+        let asset_ids = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                Operation::PatchedThreePointEdit { asset, .. } => Some(*asset),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        self.ensure_verified_source_assets(document, &asset_ids)
+    }
+
+    fn ensure_verified_source_assets(
+        &self,
+        document: &Document,
+        asset_ids: &BTreeSet<AssetId>,
+    ) -> Result<(), String> {
+        for asset_id in asset_ids {
+            let Some(asset) = document.asset(*asset_id) else {
+                return Err(format!(
+                    "patched_three_point_edit references missing asset {asset_id}"
+                ));
+            };
+            let availability = self.analysis.media_availability(asset);
+            if availability.kind != MediaAvailabilityKind::OnlineVerified {
+                return Err(format!(
+                    "patched_three_point_edit requires asset {asset_id} to be online_verified at preparation and commit; current availability is {:?} ({})",
+                    availability.kind,
+                    availability
+                        .reason
+                        .as_deref()
+                        .unwrap_or("no backend reason supplied")
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn document_availability_error(
         &self,
         document: &Document,
@@ -3908,7 +4283,7 @@ impl KinewrightMcp {
 
     #[allow(clippy::too_many_lines)]
     fn source_info(&self, args: &SourceInfoArgs) -> Result<CallToolResult, McpError> {
-        let document = self.document()?;
+        let (revision, document) = self.snapshot()?;
         let Some(asset) = document.asset(args.asset_id) else {
             return Ok(error_text(format!(
                 "asset {} does not exist",
@@ -3985,7 +4360,38 @@ impl KinewrightMcp {
             _ => Vec::new(),
         };
         let availability = self.analysis.media_availability(asset);
+        let destinations = serde_json::json!({
+            "video": document
+                .tracks
+                .iter()
+                .filter(|track| {
+                    track.kind == TrackKind::Video && asset.kind.supports(TrackKind::Video)
+                })
+                .map(|track| {
+                    serde_json::json!({
+                        "track_id": track.id.0,
+                        "kind": track.kind,
+                        "sync_lock": track.sync_lock,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "audio": document
+                .tracks
+                .iter()
+                .filter(|track| {
+                    track.kind == TrackKind::Audio && asset.kind.supports(TrackKind::Audio)
+                })
+                .map(|track| {
+                    serde_json::json!({
+                        "track_id": track.id.0,
+                        "kind": track.kind,
+                        "sync_lock": track.sync_lock,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        });
         let value = serde_json::json!({
+            "timeline_revision": revision.0,
             "asset": {
                 "id": asset.id.0,
                 "name": asset.name,
@@ -4008,6 +4414,7 @@ impl KinewrightMcp {
                 "in_marked": args.source_in.is_some(),
                 "out_marked": args.source_out.is_some(),
             },
+            "destinations": destinations,
             "speakers": speakers,
             "words": words,
             "scene_changes": scenes,
@@ -4859,6 +5266,7 @@ impl KinewrightMcp {
         document: &Document,
         operations: Vec<Operation>,
     ) -> Result<PreparedEditPlan, String> {
+        self.ensure_verified_patched_sources(document, &operations)?;
         self.prepared_plans
             .lock()
             .map_err(|_| "prepared plan store stopped".to_owned())?
@@ -5756,7 +6164,7 @@ impl ServerHandler for KinewrightMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("kinewright", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Inspect with get_timeline_state. Open names already in the user request with one batched get_capability call; search only unnamed needs or after a miss. Load only needed schemas. Invoke capabilities through invoke_capability. When a planner returns prepared_edit_plan, inspect its preview and commit that plan id directly. Use prepare_edit_plan only for model-authored operations. Reinspect after revision conflicts. Frames are exact project integers.",
+                "Inspect with get_timeline_state. Open names already in the user request with one batched get_capability call; search only unnamed needs or after a miss. Load only needed schemas. Invoke capabilities through invoke_capability. For source/program patching, use plan_source_program_edit with explicit video_track and audio_track destinations; never reconstruct a dual V/A patch as two three_point_edit operations because that can double-ripple the timeline. When a planner returns prepared_edit_plan, inspect its preview and commit that plan id directly. Use prepare_edit_plan only for model-authored operations. Reinspect after revision conflicts. Frames are exact project integers.",
             )
     }
 
@@ -6196,6 +6604,35 @@ struct SourceInfoArgs {
     /// Optional source-monitor out mark in exact asset frames.
     #[serde(default)]
     source_out: Option<TimeCode>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SourceProgramEditArgs {
+    /// Exact revision returned by `get_timeline_state` before planning.
+    expected_revision: TimelineRevision,
+    /// Stable source asset id shown by `get_timeline_state`, `search_media`, or `get_source_info`.
+    #[serde(alias = "asset_id")]
+    asset: AssetId,
+    /// Optional source-monitor In mark in exact asset frames.
+    #[serde(default)]
+    source_in: Option<TimeCode>,
+    /// Optional source-monitor Out mark in exact asset frames.
+    #[serde(default)]
+    source_out: Option<TimeCode>,
+    /// Optional record/timeline In mark in exact project frames.
+    #[serde(default)]
+    timeline_in: Option<TimeCode>,
+    /// Optional record/timeline Out mark in exact project frames.
+    #[serde(default)]
+    timeline_out: Option<TimeCode>,
+    /// Insert opens time at the record point; overwrite replaces only selected destinations.
+    mode: ThreePointMode,
+    /// Explicit destination for the source video's component. Omit to disable video patching.
+    #[serde(default)]
+    video_track: Option<TrackId>,
+    /// Explicit destination for the source audio component. Omit to disable audio patching.
+    #[serde(default)]
+    audio_track: Option<TrackId>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -7139,19 +7576,25 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_source_info",
-            "Inspect one asset as source media with optional exact source-frame in/out marks. Returns technical metadata plus cached transcript words, speaker labels, scene boundaries, beats, and analysis lifecycle for that range.",
+            "Inspect one asset as source media with optional exact source-frame in/out marks. Returns the evidence snapshot's timeline_revision, typed compatible video/audio destinations with track ids and sync-lock state, technical metadata, cached transcript words, speaker labels, scene boundaries, beats, and analysis lifecycle for that range.",
             schema_object::<SourceInfoArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
+            "plan_source_program_edit",
+            "Prepare one revision-safe compound source/program edit from exactly three of source_in, source_out, timeline_in, and timeline_out. Destinations are explicit optional video_track and audio_track ids; Core derives the missing boundary once, inserts or overwrites atomically, and links a dual-route A/V pair. Returns resolved ranges, destinations, and an opaque prepared_edit_plan without changing the live timeline.",
+            schema_object::<SourceProgramEditArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "get_source_storyboard",
-            "Render a bounded PNG contact sheet directly from one video asset's source frames. The manifest maps every cell to its exact source frame, asset id, and requested half-open source range without changing the timeline.",
+            "Render a bounded PNG contact sheet directly from one video asset's source frames. The manifest includes the evidence snapshot's timeline_revision and maps every cell to its exact source frame, asset id, and requested half-open source range without changing the timeline.",
             schema_object::<SourceStoryboardArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
             "get_source_shot_board",
-            "Return scene-derived source-shot candidates for one video asset and render start/middle/end evidence cells for each. By default candidates are sampled across the complete requested source range so one bounded call exposes the whole asset; use candidate_selection=page only for consecutive pagination. An optional inclusive minimum_duration_frames filters short candidates while preserving original candidate ids and indexes. minimum_confidence_basis_points controls scene-boundary sensitivity (0..=10000, default 1000); raise it for motion-heavy footage when weak differences over-segment a continuous shot. The manifest reports selection strategy, selected positions, requested, filtered, returned, and total counts. Candidate ids, exact half-open source ranges, and scene-boundary confidence provenance are stable; this inspector never changes the timeline.",
+            "Return scene-derived source-shot candidates for one video asset and render start/middle/end evidence cells for each. The manifest includes the evidence snapshot's timeline_revision. By default candidates are sampled across the complete requested source range so one bounded call exposes the whole asset; use candidate_selection=page only for consecutive pagination. An optional inclusive minimum_duration_frames filters short candidates while preserving original candidate ids and indexes. minimum_confidence_basis_points controls scene-boundary sensitivity (0..=10000, default 1000); raise it for motion-heavy footage when weak differences over-segment a continuous shot. The manifest reports selection strategy, selected positions, requested, filtered, returned, and total counts. Candidate ids, exact half-open source ranges, and scene-boundary confidence provenance are stable; this inspector never changes the timeline.",
             schema_object::<SourceShotBoardArgs>(),
         )
         .with_annotations(read_only()),
@@ -9313,6 +9756,7 @@ mod tests {
         cache_inventory: Option<MediaCacheInventory>,
         clear_cache_result: Option<MediaCacheClearResult>,
         availability_by_asset: BTreeMap<AssetId, MediaAvailabilityStatus>,
+        availability_override: Option<Arc<Mutex<BTreeMap<AssetId, MediaAvailabilityStatus>>>>,
         transcript: Option<Arc<AssetTranscript>>,
         beat_statuses: BTreeMap<AssetId, BeatStatus>,
         scene_statuses: BTreeMap<AssetId, SceneStatus>,
@@ -9367,6 +9811,13 @@ mod tests {
         }
 
         fn media_availability(&self, asset: &MediaAsset) -> MediaAvailabilityStatus {
+            if let Some(status) = self
+                .availability_override
+                .as_ref()
+                .and_then(|statuses| statuses.lock().unwrap().get(&asset.id).cloned())
+            {
+                return status;
+            }
             self.availability_by_asset
                 .get(&asset.id)
                 .cloned()
@@ -9626,6 +10077,98 @@ mod tests {
         };
         let media = Arc::new(NoopMedia::default());
         (Core::spawn(document).unwrap(), media.clone(), media)
+    }
+
+    fn verified_source_analysis() -> Arc<dyn Analysis> {
+        Arc::new(NoopMedia {
+            availability_by_asset: BTreeMap::from([(
+                AssetId(1),
+                MediaAvailabilityStatus {
+                    kind: MediaAvailabilityKind::OnlineVerified,
+                    observed_fingerprint: None,
+                    reason: Some("verified source fixture".to_owned()),
+                },
+            )]),
+            ..NoopMedia::default()
+        })
+    }
+
+    fn source_program_service_with_second_video_track() -> KinewrightMcp {
+        let (seed_core, playback, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed_document)) =
+            seed_core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut document = (*seed_document).clone();
+        document.tracks.push(Track {
+            id: TrackId(9),
+            kind: TrackKind::Video,
+            sync_lock: false,
+            // Keep a lower id after the overwrite so Core's post-clear id
+            // allocator reuses the removed highest id (99). An id-only
+            // before/after diff would mistake the valid replacement for the
+            // old clip and fail to report the routed result.
+            clips: vec![
+                Clip {
+                    id: ClipId(99),
+                    asset: AssetId(1),
+                    source_range: TimeCode::ZERO..TimeCode(20),
+                    content: kinewright_core::ClipContent::Media,
+                    timeline_start: TimeCode(10),
+                    effects: Vec::new(),
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                },
+                Clip {
+                    id: ClipId(98),
+                    asset: AssetId(1),
+                    source_range: TimeCode(20)..TimeCode(30),
+                    content: kinewright_core::ClipContent::Media,
+                    timeline_start: TimeCode(40),
+                    effects: Vec::new(),
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                },
+            ],
+        });
+        KinewrightMcp::new(
+            Core::spawn(document).unwrap(),
+            playback,
+            verified_source_analysis(),
+            ConfirmationBroker::default(),
+        )
+    }
+
+    fn source_program_av_service() -> KinewrightMcp {
+        let (seed_core, playback, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed_document)) =
+            seed_core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut document = (*seed_document).clone();
+        document.media_pool[0].kind = MediaKind::AudioVideo;
+        document.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: Vec::new(),
+        });
+        KinewrightMcp::new(
+            Core::spawn(document).unwrap(),
+            playback,
+            verified_source_analysis(),
+            ConfirmationBroker::default(),
+        )
     }
 
     fn fingerprint(byte_len: u64, nibble: char) -> MediaSourceFingerprint {
@@ -12467,12 +13010,14 @@ mod tests {
             .collect::<Vec<_>>();
         for name in [
             "three_point_edit",
+            "patched_three_point_edit",
             "slip_clip",
             "roll_edit",
             "slide_clip",
             "replace_clip",
             "fit_to_fill",
             "get_source_info",
+            "plan_source_program_edit",
             "search_media",
         ] {
             assert!(names.iter().any(|candidate| candidate == name));
@@ -12505,6 +13050,14 @@ mod tests {
             .unwrap();
         assert_eq!(source.is_error, Some(false));
         let source = source.structured_content.unwrap();
+        assert_eq!(source["timeline_revision"], 0);
+        assert_eq!(source["destinations"]["video"][0]["track_id"], 1);
+        assert!(
+            source["destinations"]["audio"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(source["source_monitor"]["duration"], 20);
         assert_eq!(source["asset"]["color_description"]["primaries"], "unknown");
         assert_eq!(
@@ -12535,6 +13088,393 @@ mod tests {
         let search = search.structured_content.unwrap();
         assert_eq!(search["total_matches"], 1);
         assert_eq!(search["hits"][0]["word_matches"][0]["source_start"], 12);
+    }
+
+    #[test]
+    fn source_program_planner_honors_an_explicit_second_video_track_and_commits_revision_safely() {
+        let service = source_program_service_with_second_video_track();
+        let result = service
+            .source_program_edit_plan(&SourceProgramEditArgs {
+                expected_revision: TimelineRevision(0),
+                asset: AssetId(1),
+                source_in: Some(TimeCode(20)),
+                source_out: Some(TimeCode(40)),
+                timeline_in: Some(TimeCode(10)),
+                timeline_out: None,
+                mode: ThreePointMode::Overwrite,
+                video_track: Some(TrackId(9)),
+                audio_track: None,
+            })
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["timeline_revision"], 0);
+        assert_eq!(structured["destinations"]["video"]["track_id"], 9);
+        assert_eq!(structured["source_range"], json!({"start": 20, "end": 40}));
+        assert_eq!(
+            structured["timeline_range"],
+            json!({"start": 10, "end": 30})
+        );
+        assert_eq!(structured["linked"], false);
+        let plan_id = structured["prepared_edit_plan"]["plan_id"]
+            .as_u64()
+            .expect("prepared plan id");
+        assert_eq!(
+            service
+                .snapshot()
+                .unwrap()
+                .1
+                .tracks
+                .iter()
+                .find(|track| track.id == TrackId(9))
+                .unwrap()
+                .clips[0]
+                .id,
+            ClipId(99)
+        );
+
+        let committed = service
+            .call_blocking(
+                CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                    json!({
+                        "plan_id": plan_id,
+                        "expected_revision": 0,
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(committed.is_error, Some(false));
+        let (revision, document) = service.snapshot().unwrap();
+        assert_eq!(revision, TimelineRevision(1));
+        let target = document
+            .tracks
+            .iter()
+            .find(|track| track.id == TrackId(9))
+            .unwrap();
+        assert_eq!(target.clips.len(), 2);
+        let replacement = target
+            .clips
+            .iter()
+            .find(|clip| clip.timeline_start == TimeCode(10))
+            .expect("overwrite replacement");
+        assert_eq!(replacement.source_range, TimeCode(20)..TimeCode(40));
+        assert_eq!(replacement.id, ClipId(99));
+        assert!(target.clips.iter().any(|clip| clip.id == ClipId(98)));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn source_program_planner_prepares_dual_linked_ranges_and_rejects_bad_routes_before_storage() {
+        let service = source_program_av_service();
+        let empty = service
+            .source_program_edit_plan(&SourceProgramEditArgs {
+                expected_revision: TimelineRevision(0),
+                asset: AssetId(1),
+                source_in: Some(TimeCode(0)),
+                source_out: Some(TimeCode(10)),
+                timeline_in: Some(TimeCode(20)),
+                timeline_out: None,
+                mode: ThreePointMode::Insert,
+                video_track: None,
+                audio_track: None,
+            })
+            .unwrap();
+        assert_eq!(empty.is_error, Some(true));
+        assert_eq!(
+            empty.structured_content.unwrap()["code"],
+            "empty_source_patch"
+        );
+
+        let wrong_kind = service
+            .source_program_edit_plan(&SourceProgramEditArgs {
+                expected_revision: TimelineRevision(0),
+                asset: AssetId(1),
+                source_in: Some(TimeCode(0)),
+                source_out: Some(TimeCode(10)),
+                timeline_in: Some(TimeCode(20)),
+                timeline_out: None,
+                mode: ThreePointMode::Insert,
+                video_track: Some(TrackId(2)),
+                audio_track: None,
+            })
+            .unwrap();
+        assert_eq!(wrong_kind.is_error, Some(true));
+        assert_eq!(
+            wrong_kind.structured_content.unwrap()["code"],
+            "invalid_source_patch_route_kind"
+        );
+
+        let stale = service
+            .source_program_edit_plan(&SourceProgramEditArgs {
+                expected_revision: TimelineRevision(1),
+                asset: AssetId(1),
+                source_in: Some(TimeCode(0)),
+                source_out: Some(TimeCode(10)),
+                timeline_in: Some(TimeCode(20)),
+                timeline_out: None,
+                mode: ThreePointMode::Insert,
+                video_track: Some(TrackId(1)),
+                audio_track: Some(TrackId(2)),
+            })
+            .unwrap();
+        assert_eq!(stale.is_error, Some(true));
+        assert!(
+            stale.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("revision conflict")
+        );
+
+        let planned = service
+            .source_program_edit_plan(&SourceProgramEditArgs {
+                expected_revision: TimelineRevision(0),
+                asset: AssetId(1),
+                source_in: Some(TimeCode(0)),
+                source_out: Some(TimeCode(10)),
+                timeline_in: Some(TimeCode(20)),
+                timeline_out: None,
+                mode: ThreePointMode::Insert,
+                video_track: Some(TrackId(1)),
+                audio_track: Some(TrackId(2)),
+            })
+            .unwrap();
+        assert_eq!(planned.is_error, Some(false), "{planned:?}");
+        let structured = planned.structured_content.unwrap();
+        assert_eq!(structured["timeline_revision"], 0);
+        assert_eq!(structured["source_range"], json!({"start": 0, "end": 10}));
+        assert_eq!(
+            structured["timeline_range"],
+            json!({"start": 20, "end": 30})
+        );
+        assert_eq!(structured["destinations"]["video"]["track_id"], 1);
+        assert_eq!(structured["destinations"]["audio"]["track_id"], 2);
+        assert_eq!(structured["linked"], true);
+        assert_eq!(
+            structured["destinations"]["video"]["link_id"],
+            structured["destinations"]["audio"]["link_id"]
+        );
+        assert_eq!(structured["prepared_edit_plan"]["expected_revision"], 0);
+        let plan_id = structured["prepared_edit_plan"]["plan_id"]
+            .as_u64()
+            .expect("prepared plan id");
+
+        let committed = service
+            .call_blocking(
+                CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                    json!({
+                        "plan_id": plan_id,
+                        "expected_revision": 0,
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(committed.is_error, Some(false));
+        let (revision, document) = service.snapshot().unwrap();
+        assert_eq!(revision, TimelineRevision(1));
+        let routed = document
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .filter(|clip| {
+                clip.asset == AssetId(1) && clip.source_range == (TimeCode(0)..TimeCode(10))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(routed.len(), 2);
+        assert_eq!(routed[0].timeline_start, TimeCode(20));
+        assert_eq!(routed[1].timeline_start, TimeCode(20));
+        assert_eq!(routed[0].link, routed[1].link);
+
+        let source = service
+            .source_info(&SourceInfoArgs {
+                asset_id: AssetId(1),
+                source_in: None,
+                source_out: None,
+            })
+            .unwrap();
+        assert_eq!(source.structured_content.unwrap()["timeline_revision"], 1);
+    }
+
+    fn raw_patched_operation() -> serde_json::Value {
+        json!({
+            "op": "patched_three_point_edit",
+            "asset": 1,
+            "source_in": 0,
+            "source_out": 10,
+            "timeline_in": 20,
+            "timeline_out": null,
+            "mode": "insert",
+            "video_track": 1,
+            "audio_track": null,
+        })
+    }
+
+    fn mutable_source_service() -> (
+        KinewrightMcp,
+        Arc<Mutex<BTreeMap<AssetId, MediaAvailabilityStatus>>>,
+    ) {
+        let (core, playback, _) = fixture();
+        let statuses = Arc::new(Mutex::new(BTreeMap::from([(
+            AssetId(1),
+            MediaAvailabilityStatus {
+                kind: MediaAvailabilityKind::OnlineVerified,
+                observed_fingerprint: None,
+                reason: Some("verified source fixture".to_owned()),
+            },
+        )])));
+        let analysis = Arc::new(NoopMedia {
+            availability_override: Some(Arc::clone(&statuses)),
+            ..NoopMedia::default()
+        });
+        (
+            KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default()),
+            statuses,
+        )
+    }
+
+    #[test]
+    fn raw_prepare_rejects_patched_source_without_verified_media() {
+        let (core, playback, analysis) = fixture();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let (before_revision, before_document) = service.snapshot().unwrap();
+        let result = service
+            .call_blocking(
+                CallToolRequestParams::new("prepare_edit_plan").with_arguments(
+                    json!({
+                        "expected_revision": before_revision,
+                        "operations": [raw_patched_operation()],
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("online_verified")
+        );
+        let (after_revision, after_document) = service.snapshot().unwrap();
+        assert_eq!(after_revision, before_revision);
+        assert_eq!(after_document, before_document);
+    }
+
+    #[test]
+    fn prepared_patched_source_rechecks_media_at_commit_without_mutation() {
+        let (service, statuses) = mutable_source_service();
+        let (before_revision, before_document) = service.snapshot().unwrap();
+        let prepared = service
+            .call_blocking(
+                CallToolRequestParams::new("prepare_edit_plan").with_arguments(
+                    json!({
+                        "expected_revision": before_revision,
+                        "operations": [raw_patched_operation()],
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(prepared.is_error, Some(false));
+        let plan_id = prepared.structured_content.unwrap()["plan_id"]
+            .as_u64()
+            .expect("prepared patch plan id");
+
+        statuses.lock().unwrap().insert(
+            AssetId(1),
+            MediaAvailabilityStatus {
+                kind: MediaAvailabilityKind::Changed,
+                observed_fingerprint: None,
+                reason: Some("source changed after planning".to_owned()),
+            },
+        );
+        let committed = service
+            .call_blocking(
+                CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                    json!({
+                        "plan_id": plan_id,
+                        "expected_revision": before_revision,
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(committed.is_error, Some(true));
+        assert!(
+            committed.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("online_verified")
+        );
+        let (after_revision, after_document) = service.snapshot().unwrap();
+        assert_eq!(after_revision, before_revision);
+        assert_eq!(after_document, before_document);
+        assert!(
+            service
+                .prepared_plans
+                .lock()
+                .unwrap()
+                .get(PreparedPlanId(plan_id))
+                .is_some(),
+            "failed commit should leave the opaque plan available for reinspection"
+        );
+    }
+
+    #[test]
+    fn verified_patched_source_prepares_and_commits_atomically() {
+        let (service, _statuses) = mutable_source_service();
+        let prepared = service
+            .call_blocking(
+                CallToolRequestParams::new("prepare_edit_plan").with_arguments(
+                    json!({
+                        "expected_revision": 0,
+                        "operations": [raw_patched_operation()],
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(prepared.is_error, Some(false));
+        let plan_id = prepared.structured_content.unwrap()["plan_id"]
+            .as_u64()
+            .expect("prepared patch plan id");
+        let committed = service
+            .call_blocking(
+                CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                    json!({
+                        "plan_id": plan_id,
+                        "expected_revision": 0,
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(committed.is_error, Some(false));
+        let (revision, document) = service.snapshot().unwrap();
+        assert_eq!(revision, TimelineRevision(1));
+        assert!(document.tracks[0].clips.iter().any(|clip| {
+            clip.asset == AssetId(1)
+                && clip.source_range == (TimeCode(0)..TimeCode(10))
+                && clip.timeline_start == TimeCode(20)
+        }));
     }
 
     fn delete_request() -> CallToolRequestParams {
@@ -13020,6 +13960,7 @@ mod tests {
                 .any(|block| block.as_image().is_some())
         );
         let manifest = result.structured_content.unwrap();
+        assert_eq!(manifest["timeline_revision"], 0);
         assert_eq!(manifest["asset_id"], 1);
         assert_eq!(manifest["source_range"], json!({"start": 10, "end": 50}));
         assert_eq!(manifest["sheet"], json!({"width": 20, "height": 2}));
@@ -13380,6 +14321,7 @@ mod tests {
                 .any(|block| block.as_image().is_some())
         );
         let manifest = result.structured_content.unwrap();
+        assert_eq!(manifest["timeline_revision"], 0);
         assert_eq!(manifest["status"], "ready");
         assert_eq!(
             manifest["scene_confidence_threshold_basis_points"],

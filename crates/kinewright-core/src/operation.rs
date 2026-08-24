@@ -127,6 +127,23 @@ pub enum Operation {
         timeline_out: Option<TimeCode>,
         mode: ThreePointMode,
     },
+    /// Perform one source-monitor edit with explicit video and/or audio
+    /// source-patch destinations. The missing fourth three-point boundary is
+    /// derived once and the resulting source/timeline span is applied to every
+    /// selected route. Unlike [`ThreePointEdit`], this operation can create a
+    /// linked A/V pair while preserving one atomic insert ripple.
+    PatchedThreePointEdit {
+        asset: AssetId,
+        source_in: Option<TimeCode>,
+        source_out: Option<TimeCode>,
+        timeline_in: Option<TimeCode>,
+        timeline_out: Option<TimeCode>,
+        mode: ThreePointMode,
+        /// Explicit destination for the asset's video component, when routed.
+        video_track: Option<TrackId>,
+        /// Explicit destination for the asset's audio component, when routed.
+        audio_track: Option<TrackId>,
+    },
     /// Change the media under a fixed timeline slot while preserving duration.
     SlipClip {
         clip: ClipId,
@@ -475,6 +492,19 @@ pub enum OpError {
     UnrepresentableEditBoundary { clip: ClipId, at: TimeCode },
     #[error("exactly three of source_in, source_out, timeline_in, and timeline_out must be marked")]
     InvalidThreePointSelection,
+    #[error("patched three-point edit must target at least one route")]
+    EmptySourcePatch,
+    #[error("patched three-point edit targets track {0} more than once")]
+    DuplicateSourcePatchTrack(TrackId),
+    #[error(
+        "patched three-point {component} route requires a {expected:?} track, got {actual:?} track {track_id}"
+    )]
+    InvalidSourcePatchRouteKind {
+        component: &'static str,
+        expected: TrackKind,
+        actual: TrackKind,
+        track_id: TrackId,
+    },
     #[error("three-point edit produced an invalid source range {start}..{end}")]
     InvalidThreePointSource { start: TimeCode, end: TimeCode },
     #[error("three-point edit produced an invalid timeline range {start}..{end}")]
@@ -775,6 +805,26 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
             *timeline_in,
             *timeline_out,
             *mode,
+        ),
+        Operation::PatchedThreePointEdit {
+            asset,
+            source_in,
+            source_out,
+            timeline_in,
+            timeline_out,
+            mode,
+            video_track,
+            audio_track,
+        } => patched_three_point_edit(
+            doc,
+            *asset,
+            *source_in,
+            *source_out,
+            *timeline_in,
+            *timeline_out,
+            *mode,
+            *video_track,
+            *audio_track,
         ),
         Operation::SlipClip {
             clip,
@@ -1441,13 +1491,7 @@ fn three_point_edit(
     timeline_out: Option<TimeCode>,
     mode: ThreePointMode,
 ) -> Result<(), OpError> {
-    let marks = [source_in, source_out, timeline_in, timeline_out]
-        .into_iter()
-        .flatten()
-        .count();
-    if marks != 3 {
-        return Err(OpError::InvalidThreePointSelection);
-    }
+    validate_three_point_selection(source_in, source_out, timeline_in, timeline_out)?;
     let asset = doc
         .asset(asset_id)
         .ok_or(OpError::MissingAsset(asset_id))?
@@ -1459,10 +1503,72 @@ fn three_point_edit(
         .ok_or(OpError::MissingTrack(track_id))?;
     validate_track_compatibility(&asset, track)?;
 
+    let (source, timeline) = derive_three_point_ranges(
+        doc,
+        &asset,
+        source_in,
+        source_out,
+        timeline_in,
+        timeline_out,
+    )?;
+    let duration = timeline_duration(&timeline)?;
+
+    match mode {
+        ThreePointMode::Insert => {
+            let straddling = doc
+                .tracks
+                .iter()
+                .filter(|track| track.id == track_id || track.sync_lock)
+                .filter_map(|track| {
+                    track.clips.iter().find_map(|clip| {
+                        let end = doc.clip_end(clip).ok()?;
+                        (clip.timeline_start < timeline.start && timeline.start < end)
+                            .then_some(clip.id)
+                    })
+                })
+                .collect::<Vec<_>>();
+            for clip in straddling {
+                split_clip(doc, clip, timeline.start)?;
+            }
+            ripple_insert_gap(doc, track_id, timeline.start, duration)?;
+        }
+        ThreePointMode::Overwrite => {
+            clear_track_range(doc, track_id, timeline.clone())?;
+        }
+    }
+    add_clip(doc, track_id, asset_id, timeline.start, source)
+}
+
+fn validate_three_point_selection(
+    source_in: Option<TimeCode>,
+    source_out: Option<TimeCode>,
+    timeline_in: Option<TimeCode>,
+    timeline_out: Option<TimeCode>,
+) -> Result<(), OpError> {
+    let marks = [source_in, source_out, timeline_in, timeline_out]
+        .into_iter()
+        .flatten()
+        .count();
+    if marks == 3 {
+        Ok(())
+    } else {
+        Err(OpError::InvalidThreePointSelection)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn derive_three_point_ranges(
+    doc: &Document,
+    asset: &MediaAsset,
+    source_in: Option<TimeCode>,
+    source_out: Option<TimeCode>,
+    timeline_in: Option<TimeCode>,
+    timeline_out: Option<TimeCode>,
+) -> Result<(std::ops::Range<TimeCode>, std::ops::Range<TimeCode>), OpError> {
     let (source, timeline) = match (source_in, source_out, timeline_in, timeline_out) {
         (Some(source_in), Some(source_out), Some(timeline_in), None) => {
             let source = source_in..source_out;
-            validate_source_range(&asset, &source)?;
+            validate_source_range(asset, &source)?;
             let duration = map_source_range_to_project(source.clone(), asset.fps, doc.fps)?;
             let timeline_out = timeline_in
                 .checked_add(duration)
@@ -1471,7 +1577,7 @@ fn three_point_edit(
         }
         (Some(source_in), Some(source_out), None, Some(timeline_out)) => {
             let source = source_in..source_out;
-            validate_source_range(&asset, &source)?;
+            validate_source_range(asset, &source)?;
             let duration = map_source_range_to_project(source.clone(), asset.fps, doc.fps)?;
             let timeline_in = timeline_out
                 .checked_sub(duration)
@@ -1516,12 +1622,9 @@ fn three_point_edit(
         }
         _ => return Err(OpError::InvalidThreePointSelection),
     };
-    validate_source_range(&asset, &source)?;
+    validate_source_range(asset, &source)?;
     validate_timeline_range(timeline.start, timeline.end)?;
-    let duration = timeline
-        .end
-        .checked_sub(timeline.start)
-        .ok_or(OpError::TimeOverflow)?;
+    let duration = timeline_duration(&timeline)?;
     let mapped = map_source_range_to_project(source.clone(), asset.fps, doc.fps)?;
     if mapped != duration {
         return Err(OpError::InvalidThreePointSource {
@@ -1529,13 +1632,51 @@ fn three_point_edit(
             end: source.end,
         });
     }
+    Ok((source, timeline))
+}
+
+fn timeline_duration(range: &std::ops::Range<TimeCode>) -> Result<TimeCode, OpError> {
+    range
+        .end
+        .checked_sub(range.start)
+        .ok_or(OpError::TimeOverflow)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn patched_three_point_edit(
+    doc: &mut Document,
+    asset_id: AssetId,
+    source_in: Option<TimeCode>,
+    source_out: Option<TimeCode>,
+    timeline_in: Option<TimeCode>,
+    timeline_out: Option<TimeCode>,
+    mode: ThreePointMode,
+    video_track: Option<TrackId>,
+    audio_track: Option<TrackId>,
+) -> Result<(), OpError> {
+    validate_three_point_selection(source_in, source_out, timeline_in, timeline_out)?;
+    let asset = doc
+        .asset(asset_id)
+        .ok_or(OpError::MissingAsset(asset_id))?
+        .clone();
+    let target_tracks = validate_source_patch_routes(doc, &asset, video_track, audio_track)?;
+    let (source, timeline) = derive_three_point_ranges(
+        doc,
+        &asset,
+        source_in,
+        source_out,
+        timeline_in,
+        timeline_out,
+    )?;
+    let duration = timeline_duration(&timeline)?;
 
     match mode {
         ThreePointMode::Insert => {
+            let target_set = target_tracks.iter().copied().collect::<HashSet<_>>();
             let straddling = doc
                 .tracks
                 .iter()
-                .filter(|track| track.id == track_id || track.sync_lock)
+                .filter(|track| target_set.contains(&track.id) || track.sync_lock)
                 .filter_map(|track| {
                     track.clips.iter().find_map(|clip| {
                         let end = doc.clip_end(clip).ok()?;
@@ -1547,13 +1688,66 @@ fn three_point_edit(
             for clip in straddling {
                 split_clip(doc, clip, timeline.start)?;
             }
-            ripple_insert_gap(doc, track_id, timeline.start, duration)?;
+            ripple_insert_gap_for_tracks(doc, &target_tracks, timeline.start, duration)?;
         }
         ThreePointMode::Overwrite => {
-            clear_track_range(doc, track_id, timeline.clone())?;
+            for track_id in &target_tracks {
+                clear_track_range(doc, *track_id, timeline.clone())?;
+            }
         }
     }
-    add_clip(doc, track_id, asset_id, timeline.start, source)
+
+    let mut clip_ids = Vec::with_capacity(target_tracks.len());
+    for track_id in target_tracks {
+        let clip_id = next_clip_id(doc)?;
+        add_clip(doc, track_id, asset_id, timeline.start, source.clone())?;
+        clip_ids.push(clip_id);
+    }
+    if clip_ids.len() == 2 {
+        link_clips(doc, &clip_ids)?;
+    }
+    Ok(())
+}
+
+fn validate_source_patch_routes(
+    doc: &Document,
+    asset: &MediaAsset,
+    video_track: Option<TrackId>,
+    audio_track: Option<TrackId>,
+) -> Result<Vec<TrackId>, OpError> {
+    let mut routes = Vec::with_capacity(2);
+    let mut seen = HashSet::new();
+    for (component, expected, track_id) in [
+        ("video", TrackKind::Video, video_track),
+        ("audio", TrackKind::Audio, audio_track),
+    ]
+    .into_iter()
+    .filter_map(|(component, expected, track_id)| {
+        track_id.map(|track_id| (component, expected, track_id))
+    }) {
+        if !seen.insert(track_id) {
+            return Err(OpError::DuplicateSourcePatchTrack(track_id));
+        }
+        let track = doc
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .ok_or(OpError::MissingTrack(track_id))?;
+        if track.kind != expected {
+            return Err(OpError::InvalidSourcePatchRouteKind {
+                component,
+                expected,
+                actual: track.kind,
+                track_id,
+            });
+        }
+        validate_track_compatibility(asset, track)?;
+        routes.push(track_id);
+    }
+    if routes.is_empty() {
+        return Err(OpError::EmptySourcePatch);
+    }
+    Ok(routes)
 }
 
 fn validate_timeline_range(start: TimeCode, end: TimeCode) -> Result<(), OpError> {
@@ -1919,17 +2113,29 @@ fn ripple_insert_gap(
     at: TimeCode,
     duration: TimeCode,
 ) -> Result<(), OpError> {
+    ripple_insert_gap_for_tracks(doc, &[track_id], at, duration)
+}
+
+fn ripple_insert_gap_for_tracks(
+    doc: &mut Document,
+    target_track_ids: &[TrackId],
+    at: TimeCode,
+    duration: TimeCode,
+) -> Result<(), OpError> {
     if at < TimeCode::ZERO {
         return Err(OpError::NegativeTimelinePosition(at));
     }
     if duration <= TimeCode::ZERO {
         return Err(OpError::InvalidRippleDuration(duration));
     }
-    if !doc.tracks.iter().any(|track| track.id == track_id) {
-        return Err(OpError::MissingTrack(track_id));
+    let target_tracks = target_track_ids.iter().copied().collect::<HashSet<_>>();
+    for track_id in &target_tracks {
+        if !doc.tracks.iter().any(|track| track.id == *track_id) {
+            return Err(OpError::MissingTrack(*track_id));
+        }
     }
     for track in &mut doc.tracks {
-        if track.id != track_id && !track.sync_lock {
+        if !target_tracks.contains(&track.id) && !track.sync_lock {
             continue;
         }
         for clip in track

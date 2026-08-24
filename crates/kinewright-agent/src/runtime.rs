@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use kinewright_core::{BatchError, Document, Operation, TimelineRevision, apply_batch};
+use kinewright_core::{AssetId, BatchError, Document, Operation, TimelineRevision, apply_batch};
 use rmcp::model::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -208,6 +208,10 @@ pub struct PreparedEditPlan {
     pub expected_revision: TimelineRevision,
     pub operations: Vec<Operation>,
     pub preview: EditPlanPreview,
+    /// Source assets referenced by operations whose correctness depends on a
+    /// live verified media observation. This is runtime-only plan metadata;
+    /// source availability must never be persisted in the project document.
+    pub(crate) referenced_source_assets: BTreeSet<AssetId>,
 }
 
 #[derive(Debug)]
@@ -232,34 +236,6 @@ impl PreparedPlanStore {
             order: VecDeque::new(),
             plans: HashMap::new(),
         }
-    }
-
-    pub(crate) fn prepare(
-        &mut self,
-        expected_revision: TimelineRevision,
-        actual_revision: TimelineRevision,
-        document: &Document,
-        values: Vec<Value>,
-    ) -> Result<PreparedEditPlan, PreparePlanError> {
-        if expected_revision != actual_revision {
-            return Err(PreparePlanError::RevisionConflict {
-                expected: expected_revision,
-                actual: actual_revision,
-            });
-        }
-        let operations = values
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| {
-                decode_plan_operation_value(value).map_err(|error| {
-                    PreparePlanError::InvalidOperation {
-                        op_number: index + 1,
-                        error,
-                    }
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        self.prepare_operations(expected_revision, actual_revision, document, operations)
     }
 
     pub(crate) fn prepare_operations(
@@ -291,6 +267,7 @@ impl PreparedPlanStore {
             id,
             expected_revision,
             preview: plan_preview(expected_revision, document, &candidate, &operations),
+            referenced_source_assets: referenced_source_assets(&operations),
             operations,
         };
         self.plans.insert(id, plan.clone());
@@ -387,6 +364,31 @@ pub(crate) fn decode_plan_operation_value(value: Value) -> Result<Operation, Str
         return serde_json::from_value(tagged).map_err(|error| error.to_string());
     }
     Err("operation must use the generated enum envelope or include an op field".to_owned())
+}
+
+pub(crate) fn decode_plan_operations(
+    values: Vec<Value>,
+) -> Result<Vec<Operation>, PreparePlanError> {
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            decode_plan_operation_value(value).map_err(|error| PreparePlanError::InvalidOperation {
+                op_number: index + 1,
+                error,
+            })
+        })
+        .collect()
+}
+
+fn referenced_source_assets(operations: &[Operation]) -> BTreeSet<AssetId> {
+    operations
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::PatchedThreePointEdit { asset, .. } => Some(*asset),
+            _ => None,
+        })
+        .collect()
 }
 
 fn snake_to_pascal(value: &str) -> String {
@@ -486,20 +488,20 @@ mod tests {
         let document = Document::default();
         let mut store = PreparedPlanStore::default();
         assert!(matches!(
-            store.prepare(
+            store.prepare_operations(
                 TimelineRevision(1),
                 TimelineRevision(2),
                 &document,
-                vec![json!({"op": "delete_clip", "clip": 1})],
+                vec![Operation::DeleteClip { clip: ClipId(1) }],
             ),
             Err(PreparePlanError::RevisionConflict { .. })
         ));
         assert!(matches!(
-            store.prepare(
+            store.prepare_operations(
                 TimelineRevision(2),
                 TimelineRevision(2),
                 &document,
-                vec![json!({"op": "delete_clip", "clip": 1})],
+                vec![Operation::DeleteClip { clip: ClipId(1) }],
             ),
             Err(PreparePlanError::InvalidPlan(_))
         ));
@@ -543,14 +545,18 @@ mod tests {
         });
         let mut store = PreparedPlanStore::default();
         let plan = store
-            .prepare(
+            .prepare_operations(
                 TimelineRevision(0),
                 TimelineRevision(0),
                 &document,
-                vec![json!({
-                    "op": "add_marker",
-                    "marker": {"id": 1, "position": 0, "label": "Review", "color_token": 0}
-                })],
+                vec![Operation::AddMarker {
+                    marker: Marker {
+                        id: MarkerId(1),
+                        position: TimeCode::ZERO,
+                        label: "Review".to_owned(),
+                        color_token: 0,
+                    },
+                }],
             )
             .unwrap();
         assert_eq!(store.take(plan.id).unwrap().id, plan.id);

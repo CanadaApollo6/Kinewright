@@ -875,10 +875,22 @@ impl KinewrightApp {
             self.resume_after_scrub = false;
         }
         let session = &mut self.projects[project_index];
+        let previous_selected_asset = session.selected_asset;
         session.position = playhead_position;
         session.selected_clip = selected_clip;
         session.selected_marker = selected_marker;
         session.selected_asset = selected_asset;
+        if previous_selected_asset != selected_asset {
+            if let Some(asset_id) = selected_asset {
+                // The local selection is assigned above so the timeline can
+                // report it immediately; clear it for cue_source_asset to
+                // establish fresh marks, cursor, and visible route defaults.
+                session.selected_asset = None;
+                session.cue_source_asset(asset_id);
+            } else {
+                session.reconcile_source_state();
+            }
+        }
         session.title_text_focus = title_text_focus;
         session.timeline_scroll_target = scroll_target;
     }

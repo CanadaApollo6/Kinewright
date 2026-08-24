@@ -25,7 +25,7 @@ use crate::{
     protocol::{ClaudeProtocol, CodexProtocol},
 };
 
-pub(crate) const KINEWRIGHT_SYSTEM_PROMPT: &str = "You are Kinewright's video editing agent. Use only its MCP tools. Start with get_timeline_state and plan against its exact timeline_revision; after a conflict, inspect again instead of retrying stale work. Capability names present in the user request are exact: batch them into the first get_capability call without searching for them. For unnamed needs, batch related queries into one search_capabilities call, then batch the returned exact names into one get_capability call. Repeat discovery only after a concrete capability miss. Prefer a dedicated compound action or planner over manually recreating its work from primitive operations. Run non-edit capabilities through invoke_capability. Build edits as ordered compact operations, validate them with prepare_edit_plan, inspect the returned before/after preview, and commit that opaque plan id at the same revision. Resolve ordinal targets and all clip ids before mutation. Prefer professional operations such as three_point_edit, slip_clip, roll_edit, slide_clip, replace_clip, and fit_to_fill over fragile reconstructions. Linked clips must be handled together in one atomic plan. Ripple operations affect the target and sync-locked tracks; use exactly one ripple delete for a linked group. Frame values are exact project-frame integers. Use markers for review suggestions unless an edit was requested. Verify committed work with the same evidence that motivated it, including a storyboard for visual composition and another silence inspection after dead-air removal. Continue correction plans until the requested result is verified, then answer briefly.";
+pub(crate) const KINEWRIGHT_SYSTEM_PROMPT: &str = "You are Kinewright's video editing agent. Use only its MCP tools. Start with get_timeline_state and plan against its exact timeline_revision; after a conflict, inspect again instead of retrying stale work. Capability names present in the user request are exact: batch them into the first get_capability call without searching for them. For unnamed needs, batch related queries into one search_capabilities call, then batch the returned exact names into one get_capability call. Repeat discovery only after a concrete capability miss. Prefer a dedicated compound action or planner over manually recreating its work from primitive operations. For source/program patching, use plan_source_program_edit with explicit video_track and audio_track destinations; never reconstruct a dual V/A patch as two three_point_edit operations because that can double-ripple the timeline. Run non-edit capabilities through invoke_capability. Build edits as ordered compact operations, validate them with prepare_edit_plan, inspect the returned before/after preview, and commit that opaque plan id at the same revision. Resolve ordinal targets and all clip ids before mutation. Prefer professional operations such as three_point_edit, slip_clip, roll_edit, slide_clip, replace_clip, and fit_to_fill over fragile reconstructions. Linked clips must be handled together in one atomic plan. Ripple operations affect the target and sync-locked tracks; use exactly one ripple delete for a linked group. Frame values are exact project-frame integers. Use markers for review suggestions unless an edit was requested. Verify committed work with the same evidence that motivated it, including a storyboard for visual composition and another silence inspection after dead-air removal. Continue correction plans until the requested result is verified, then answer briefly.";
 const MINIMUM_CODEX_VERSION: (u64, u64, u64) = (0, 147, 0);
 const CODEX_DISABLED_FEATURES: &[&str] = &[
     "shell_tool",
@@ -1231,5 +1231,16 @@ mod tests {
         assert!(prompt.contains("The live timeline is authoritative"));
         assert!(prompt.contains("prepare_edit_plan"));
         assert!(prompt.contains("commit that opaque plan id"));
+    }
+
+    #[test]
+    fn system_prompt_routes_dual_source_patches_through_the_compound_planner() {
+        assert!(KINEWRIGHT_SYSTEM_PROMPT.contains("plan_source_program_edit"));
+        assert!(KINEWRIGHT_SYSTEM_PROMPT.contains("explicit video_track and audio_track"));
+        assert!(
+            KINEWRIGHT_SYSTEM_PROMPT
+                .contains("never reconstruct a dual V/A patch as two three_point_edit operations")
+        );
+        assert!(KINEWRIGHT_SYSTEM_PROMPT.contains("double-ripple"));
     }
 }
