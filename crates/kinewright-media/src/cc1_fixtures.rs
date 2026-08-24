@@ -1429,6 +1429,11 @@ impl FixtureGpu {
             metadata.gpu_claim,
             lane.id(),
         );
+        // Two adapters can be installed at once (lavapipe next to a physical
+        // GPU). Printing the acquired adapter for every lane is what makes
+        // "this lane ran where it claims to have run" checkable from a test
+        // log instead of inferred from the test name.
+        println!("CC_GPU_LANE lane={} {info}", lane.id());
         Self {
             context,
             info,
@@ -1489,6 +1494,15 @@ pub(crate) fn fallback_gpu() -> FixtureGpu {
         Ok(context) => context,
         Err(error) => return hardware_opt_in_gpu(&error.to_string()),
     };
+    // The opt-in is a remedy for a machine with *no* software rasterizer, not
+    // a lane switch. A machine that has both adapters must keep running this
+    // lane on the software one, and must say so rather than ignore the
+    // operator's environment silently.
+    if std::env::var(HARDWARE_GPU_OPT_IN_ENV).ok().as_deref() == Some("1") {
+        println!(
+            "CC_GPU_LANE {HARDWARE_GPU_OPT_IN_ENV}=1 ignored: a software fallback adapter exists, so the default lane stays on it. Use the --ignored hardware lane for physical-adapter evidence."
+        );
+    }
     let fixture = FixtureGpu::describe(software, GpuLane::SoftwareFallback);
     #[cfg(target_os = "linux")]
     {

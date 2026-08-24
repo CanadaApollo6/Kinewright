@@ -718,6 +718,16 @@ is non-finite by design (see §4.1); it has its own boundary fixture.
    with the excluded count recorded, and remain subject to the monitor-code,
    finiteness, and monotonicity gates. Run on the software fallback by default and
    on a hardware adapter in the explicit lane. No new tolerance is invented.
+   §2.2 is deliberately not Lipschitz at `y = 0`: for `power < 1` the derivative
+   of `sgn(y)·|y|^power` is unbounded there, so an input perturbation of
+   `3.05e-5` in a channel whose graded value should be exactly zero produces
+   `0.18` in linear light (105 monitor codes) at `gamma_master_thousandths =
+   100`. The first lavapipe run (2026-08-24) found exactly that, caused by
+   bilinear sub-texel leakage rather than by the maths. The parity gate
+   therefore depends on the CC1 §6.2 pixel-exact sampling clause rather than on
+   tolerance width, and no epsilon guard is added to `sgn(y)·|y|^power`: the
+   function is evaluated as written, and it is the renderer's obligation to
+   feed it the texel the CPU reference was given.
 10. **Serialization and history.** Save/reopen, journal replay, undo, redo, and
     `AddEffect`/`SetEffectParam`/`SetEffectKeyframes`/`ClearEffectKeyframes` for
     both nodes, including a 16-point curve on all four channels, preserve values

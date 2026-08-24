@@ -284,6 +284,9 @@ pub struct Compositor {
     gpu: GpuContext,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// The sampler used when a layer is a pixel-exact 1:1 blit; see
+    /// [`Compositor::is_pixel_exact_blit`].
+    point_sampler: wgpu::Sampler,
     pipeline: wgpu::RenderPipeline,
     lut_cache: Mutex<HashMap<PathBuf, CachedCubeLut>>,
     /// Per-layer source textures are recycled across `render` calls. Playback
@@ -635,10 +638,19 @@ impl Compositor {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        // See `Compositor::is_pixel_exact_blit` for why a 1:1 layer must not
+        // go through the bilinear sampler.
+        let point_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Kinewright compositor 1:1 point sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
         Self {
             gpu,
             bind_group_layout,
             sampler,
+            point_sampler,
             pipeline,
             lut_cache: Mutex::new(HashMap::new()),
             texture_pool: Mutex::new(TexturePool::default()),
@@ -739,7 +751,7 @@ impl Compositor {
         });
         let mut resources = Vec::with_capacity(layers.len());
         for layer in layers {
-            match self.layer_resources(layer) {
+            match self.layer_resources(layer, width, height) {
                 Ok(resource) => resources.push(resource),
                 Err(error) => {
                     self.release_layer_textures(resources);
@@ -823,10 +835,55 @@ impl Compositor {
         pool.evict(&hot);
     }
 
+    /// Is this layer a pixel-exact 1:1 blit of its source raster?
+    ///
+    /// The full-screen quad maps output pixel centre `(x + 0.5, y + 0.5)` onto
+    /// source texel centre `(x + 0.5, y + 0.5)` whenever the source raster has
+    /// the output's shape and no geometric stage (`scale`, `offset`, or
+    /// `reframe`) moves it, so in exact arithmetic bilinear filtering is the
+    /// identity: every weight is 0 or 1.
+    ///
+    /// A sampler does not run in exact arithmetic. Vulkan only requires a few
+    /// fractional bits of sub-texel precision, and a conformant
+    /// implementation may reconstruct `uv * dimension - 0.5` in f32, so the
+    /// weight that should be exactly zero can land one ULP of the *texel*
+    /// coordinate away from it. Mesa lavapipe does exactly that: on the CC3
+    /// parity raster it mixed `2^-15`--`2^-14` of the neighbouring block into
+    /// 32 of 3072 pixels, while the NVIDIA adapter returned every texel
+    /// exactly. That is a rounding difference no driver is obliged to avoid,
+    /// and it is normally invisible -- but a managed colour node is allowed to
+    /// be ill-conditioned (`color_wheels` with `power < 1` has an unbounded
+    /// derivative at `y = 0`), so it can be amplified into a visible grade
+    /// difference between two machines rendering the same project.
+    ///
+    /// Point sampling is the exact realization of the identity the bilinear
+    /// path is only approximating here, so a 1:1 layer takes it and every
+    /// resampling layer keeps the bilinear sampler.
+    ///
+    /// The float comparisons are exact on purpose: a scale of `1.0 + 1e-6` is
+    /// a resample, and it must keep the bilinear sampler. An epsilon here
+    /// would point-sample a layer that is genuinely being resized.
+    #[allow(clippy::float_cmp)]
+    fn is_pixel_exact_blit<F: CompositorInput>(
+        layer: &CompositorLayer<'_, F>,
+        params: &LayerParams,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        layer.frame.width() == width
+            && layer.frame.height() == height
+            && params.scale == 1.0
+            && params.offset_x == 0.0
+            && params.offset_y == 0.0
+            && params.reframe_aspect <= 0.0
+    }
+
     #[allow(clippy::too_many_lines)]
     fn layer_resources<F: CompositorInput>(
         &self,
         layer: &CompositorLayer<'_, F>,
+        width: u32,
+        height: u32,
     ) -> Result<LayerResources, MediaError> {
         let expected_len = usize::try_from(layer.frame.width())
             .unwrap_or_default()
@@ -931,6 +988,11 @@ impl Compositor {
             mapped_at_creation: false,
         });
         self.gpu.queue.write_buffer(&uniform, 0, &params.as_bytes());
+        let sampler = if Self::is_pixel_exact_blit(layer, &params, width, height) {
+            &self.point_sampler
+        } else {
+            &self.sampler
+        };
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let lut_view = lut_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self
@@ -946,7 +1008,7 @@ impl Compositor {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        resource: wgpu::BindingResource::Sampler(sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -2194,6 +2256,87 @@ mod tests {
     fn pixel(frame: &FrameTexture, x: u32, y: u32) -> &[u8] {
         let index = usize::try_from((y * frame.width + x) * 4).unwrap();
         &frame.rgba[index..index + 4]
+    }
+
+    /// A 1:1 layer must read every source texel exactly, on every adapter.
+    ///
+    /// The full-screen quad maps output pixel centre `(x + 0.5, y + 0.5)` onto
+    /// source texel centre `(x + 0.5, y + 0.5)`, so bilinear filtering is the
+    /// identity in exact arithmetic, but not in a driver's arithmetic. Mesa
+    /// lavapipe reconstructs the sub-texel coordinate in f32 and lands one ULP
+    /// of the *texel* coordinate off zero, mixing `2^-15`--`2^-14` of the
+    /// neighbouring texel into the sample at block edges. NVIDIA does not.
+    ///
+    /// That leak is invisible through a well-conditioned node and fatal
+    /// through an ill-conditioned one: `color_wheels` with `power = 0.1` has an
+    /// unbounded derivative at `y = 0`, and it turned a `3.05e-5` leak into a
+    /// `0.18` linear difference, 105 monitor codes, on the CC3 §10.2 raster.
+    /// The raster below is deliberately the shape that exposed it: 8-pixel
+    /// blocks alternating with black across a wide frame, so a return to
+    /// bilinear 1:1 sampling fails here instead of inside a colour fixture.
+    #[test]
+    fn a_one_to_one_layer_samples_every_source_texel_exactly() {
+        let Some(context) = crate::gpu_test_support::fixture_gpu_or_skip() else {
+            return;
+        };
+        let compositor = Compositor::new(context);
+        let width = 1_536_u32;
+        let height = 2_u32;
+        let block = 8_u32;
+        // Every block is adjacent to a block that differs sharply in all three
+        // channels, so any sub-texel leak has something to leak. The zero
+        // channels are the sensitive detector: `Rgba16Float` resolves a leak
+        // of `3e-5` into an exact zero as a subnormal, not as another zero.
+        let texel = |x: u32| -> [f32; 3] {
+            if (x / block).is_multiple_of(2) {
+                [0.0, 0.0, 0.0]
+            } else {
+                [0.5, -0.25, 2.5]
+            }
+        };
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for index in 0..width * height {
+            pixels.extend(texel(index % width).map(f16::from_f32));
+            pixels.push(f16::from_f32(1.0));
+        }
+        let frame = WorkingFrame {
+            width,
+            height,
+            pixels: Arc::new(pixels),
+        };
+        let rendered = render_linear(&compositor, &frame, &[]);
+        let mismatches = rendered
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(frame.pixels.as_chunks::<4>().0.iter())
+            .enumerate()
+            .filter(|(_, (rendered, stored))| {
+                (0..3).any(|channel| {
+                    // Bit-exact on purpose: the whole point is that a 1:1
+                    // composite reproduces the source texel, and a tolerance
+                    // here would readmit the sub-texel leak this guards.
+                    rendered[channel].to_bits() != stored[channel].to_f32().to_bits()
+                })
+            })
+            .map(|(index, (rendered, stored))| {
+                let position = u32::try_from(index).unwrap_or(u32::MAX);
+                format!(
+                    "pixel {index} (x={}, y={}): stored {:?}, sampled {:?}",
+                    position % width,
+                    position / width,
+                    stored[..3].iter().map(|v| v.to_f32()).collect::<Vec<_>>(),
+                    &rendered[..3],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            mismatches.is_empty(),
+            "a 1:1 composite must sample each texel exactly; {} of {} pixels differ. First: {}",
+            mismatches.len(),
+            width * height,
+            mismatches[0],
+        );
     }
 
     #[test]

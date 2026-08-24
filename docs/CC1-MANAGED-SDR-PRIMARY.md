@@ -487,6 +487,21 @@ The fixture also records first, median, and 99th-percentile luma, clipping in
 basis points, and max/P99/mean absolute channel differences as required by the
 roadmap.
 
+The gate compares the GPU output pixel at `(x, y)` against the CPU reference
+evaluated on the source texel at `(x, y)`. That correspondence is a renderer
+obligation, not an assumption: when a layer's source raster has the output
+raster's shape and no geometric stage (scale, offset, or reframe) moves it, the
+compositor samples it with point filtering. Bilinear filtering is the identity
+for such a layer only in exact arithmetic; Vulkan requires just a few bits of
+sub-texel precision, and an implementation that reconstructs the sub-texel
+coordinate in f32 may return a filter weight one ULP of the texel coordinate
+away from zero. Mesa lavapipe does so (measured 2026-08-24: `2^-15` to `2^-14`
+of the neighbouring texel blended into 32 of 3072 pixels of the CC3 §10.2
+raster), where the NVIDIA adapter returns every texel exactly. A pixel-exact
+layer must therefore sample bit-exactly on every adapter, and the parity
+numbers above are stated on that basis. Layers that are genuinely resampled
+keep bilinear filtering and are outside this clause.
+
 For decoded H.264/YUV420P delivery, codec loss is measured separately from the
 managed-render comparison: maximum channel difference `<= 4`, P99 `<= 2`, and
 mean absolute difference `<= 1.0` against the delivery proof on the same raster.

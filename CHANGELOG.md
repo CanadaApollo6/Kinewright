@@ -9,6 +9,16 @@ All notable changes to Kinewright are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Added
+- Pixel-exact compositor sampling: a layer whose source raster matches the
+  output raster with no scale, offset, or reframe is now point-sampled instead
+  of bilinear-filtered. The first Mesa lavapipe run of the CC3 parity suite
+  showed lavapipe returning bilinear weights one f32 ULP of the texel coordinate
+  away from zero at 1:1 (legal under Vulkan's sub-texel precision rules), which
+  the non-Lipschitz `sgn(y)·|y|^0.1` wheels power turned into 105-code monitor
+  errors; the NVIDIA adapter was exact. Output on exact adapters is unchanged.
+  Fixture lanes now print their adapter, and the hardware opt-in is reported as
+  ignored when a software adapter exists. The CC1 §6.2 and CC3 §10.3.9
+  contracts record the obligation and the measurement.
 - CC3 curves and wheels: two new ordered managed colour nodes. `color_wheels`
   applies ASC CDL-style slope/offset/power per channel with master controls;
   `color_curves` applies master/red/green/blue monotone cubic Hermite curves

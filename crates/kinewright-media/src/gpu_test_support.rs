@@ -27,6 +27,19 @@ fn hardware_opt_in_requested() -> bool {
     std::env::var(HARDWARE_GPU_OPT_IN_ENV).ok().as_deref() == Some("1")
 }
 
+/// Report which adapter a GPU unit test actually acquired.
+///
+/// A machine can host lavapipe and a physical GPU at the same time, so "which
+/// device ran this" has to be printed rather than assumed from the lane name.
+fn announce(lane: &str, context: GpuContext) -> GpuContext {
+    let metadata = context.monitor_proof_metadata();
+    println!(
+        "CC_GPU_LANE lane={lane} backend={};adapter={};software_fallback={}",
+        metadata.backend, metadata.adapter, metadata.software_fallback,
+    );
+    context
+}
+
 /// Acquire an adapter for one GPU unit test.
 ///
 /// The software (lavapipe/WARP) adapter is preferred because it is
@@ -38,12 +51,12 @@ fn hardware_opt_in_requested() -> bool {
 /// Panics when no usable adapter is available and skipping was not permitted.
 pub(crate) fn fixture_gpu_or_skip() -> Option<GpuContext> {
     let software_error = match GpuContext::headless(true) {
-        Ok(context) => return Some(context),
+        Ok(context) => return Some(announce("software_fallback", context)),
         Err(error) => error.to_string(),
     };
     if hardware_opt_in_requested() {
         match GpuContext::headless(false) {
-            Ok(context) => return Some(context),
+            Ok(context) => return Some(announce("hardware_optin", context)),
             Err(error) => {
                 if may_skip() {
                     eprintln!(
