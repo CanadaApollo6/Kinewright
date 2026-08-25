@@ -1,15 +1,179 @@
+use std::sync::Arc;
+
 use eframe::egui;
-use kinewright_core::{MediaKind, ThreePointMode, TimeCode, TrackId, TrackKind};
+use kinewright_core::{
+    Clip, EffectUniform, MatteParams, MediaKind, ThreePointMode, TimeCode, TrackId, TrackKind,
+};
 
 use crate::{
     app::KinewrightApp,
     icons::Icon,
+    inspector_ui::{InspectorEdits, matte_gesture_coalesce_key, matte_window_drag_operations},
+    matte_overlay_ui::{
+        AnalysisMatteProofSource, LayerTransform, MatteDrag, MatteFrame, MatteTarget, MatteViewKey,
+        MatteViewStatus, coverage_color_image, matte_hit_test, paint_matte_overlay,
+    },
     media_workflow::{
         paint_source_status, should_display_source_texture, source_access_is_allowed,
         source_display_state, source_edit_controls_are_enabled,
     },
     theme::{self, color, radius, space, type_size},
 };
+
+/// What one painted viewer frame occupies on screen.
+///
+/// `image_rect` is the letterboxed rectangle the picture was drawn into, and
+/// is `None` when no texture was available. The matte overlay draws and
+/// hit-tests through exactly that rectangle (CC5 §6), so it has to leave the
+/// painter rather than stay a local.
+struct ViewerFrame {
+    response: egui::Response,
+    image_rect: Option<egui::Rect>,
+}
+
+/// The Program viewer's pointer contract (CC5 §6).
+///
+/// The viewer takes click-and-drag input **only** while a matte section is
+/// expanded for the selected clip; otherwise it keeps today's hover-only
+/// behaviour exactly. Pure, so the decision is provable without a window —
+/// giving the viewer input is the first interactive change to the preview
+/// (CC5 §12) and the narrowness of that change is the mitigation.
+#[must_use]
+pub(crate) fn viewer_sense(matte_expanded: bool) -> egui::Sense {
+    if matte_expanded {
+        egui::Sense::click_and_drag()
+    } else {
+        egui::Sense::hover()
+    }
+}
+
+/// Everything the overlay needs about the node whose matte section is open.
+struct MatteOverlayContext {
+    target: MatteTarget,
+    /// The keyframe-evaluated matte at the playhead: the overlay draws what the
+    /// renderer renders, not what the card's sliders show.
+    matte: MatteParams,
+    /// The output raster aspect `a = W / H` (CC5 §2.3), supplied by the
+    /// document rather than sniffed from the texture.
+    aspect: f64,
+    /// The clip's own `transform`, evaluated at the same clip-local frame as
+    /// the matte. The shader evaluates the matte at the *layer* quad's uv while
+    /// `image_rect` is the *composited* output, so without this a reframed clip
+    /// draws its outline, its handles and its drag results displaced by the
+    /// whole transform (CC5 §5.2).
+    transform: LayerTransform,
+    key: MatteViewKey,
+}
+
+impl MatteOverlayContext {
+    /// Where this node's matte lands inside a painted viewer rectangle.
+    fn frame(&self, image_rect: egui::Rect) -> MatteFrame {
+        MatteFrame::new(self.aspect, image_rect, self.transform)
+    }
+}
+
+/// One layer's resolved `transform`, at one clip-local frame.
+///
+/// Read through the descriptor's `EffectUniform`, not by effect name, so a
+/// future effect that drives the same uniform is picked up here exactly as the
+/// compositor picks it up (`compositor.rs`'s `LayerParams` accumulation); and
+/// keyframe-evaluated at `local_at`, so an animated reframe moves the overlay
+/// with the picture instead of pinning it to the static value.
+fn resolved_layer_transform(clip: &Clip, local_at: TimeCode) -> LayerTransform {
+    let mut transform = LayerTransform::IDENTITY;
+    for effect in &clip.effects {
+        let Some(descriptor) = kinewright_core::effect_descriptor(&effect.name) else {
+            continue;
+        };
+        for parameter in descriptor.parameters {
+            let value = effect
+                .integer_parameter_at(parameter.name, local_at)
+                .unwrap_or(parameter.neutral);
+            #[allow(clippy::cast_precision_loss)]
+            let value = value as f64;
+            match parameter.uniform {
+                EffectUniform::Scale => transform.scale *= value / 100.0,
+                EffectUniform::OffsetX => transform.offset_x += value / 50.0,
+                EffectUniform::OffsetY => transform.offset_y += value / 50.0,
+                _ => {}
+            }
+        }
+    }
+    transform
+}
+
+/// Which texture the Program viewer shows.
+///
+/// `blocked` is consulted **first**: a source whose verification blocks the
+/// preview must not leak through the Matte view, which renders the same media
+/// through the same decoder. Only then does a coverage render, when one is
+/// ready, stand in for the picture.
+fn viewer_picture<'a, T>(
+    blocked: bool,
+    matte: Option<&'a T>,
+    texture: Option<&'a T>,
+) -> Option<&'a T> {
+    if blocked {
+        return None;
+    }
+    matte.or(texture)
+}
+
+/// The overlay context for one expanded matte section, as a pure function of
+/// the document and the playhead (CC5 §6).
+///
+/// `None` — and therefore no overlay and no pointer capture — whenever the
+/// report names a clip that is not selected, a clip or effect that is gone, or
+/// a playhead that is **not over the clip**: outside `[timeline_start,
+/// timeline_start + duration)` the renderer is showing some other clip's
+/// picture, so an overlay there would draw one node's windows on top of another
+/// node's frame and a drag would edit a matte the user cannot see. A matte with
+/// no window still yields a context: the qualifier, the mix, and the Matte view
+/// are all editable without one.
+fn matte_overlay_context_for(
+    document: &kinewright_core::Document,
+    selected_clip: Option<kinewright_core::ClipId>,
+    position: TimeCode,
+    target: MatteTarget,
+    session_id: u64,
+    revision: u64,
+) -> Option<MatteOverlayContext> {
+    if selected_clip != Some(target.clip) {
+        return None;
+    }
+    let clip = document.clip(target.clip)?;
+    let effect = clip
+        .effects
+        .iter()
+        .find(|effect| effect.id == target.effect)?;
+    // Effect keyframes are clip-local (CC3 §3), so the overlay evaluates at the
+    // playhead's local frame and draws the geometry the renderer used.
+    //
+    // `TimeCode` is a signed frame count, so `checked_sub` only fails on
+    // overflow — a playhead *before* the clip yields a negative local frame
+    // rather than `None`, which is why the range is tested explicitly. The old
+    // `unwrap_or(TimeCode::ZERO)` fallback therefore never fired at all: it
+    // evaluated a negative frame instead.
+    let local_at = position.checked_sub(clip.timeline_start)?;
+    let duration = document.clip_duration(clip).ok()?;
+    if local_at < TimeCode::ZERO || local_at >= duration {
+        return None;
+    }
+    let matte = MatteParams::from_effect(&effect.evaluated_at(local_at));
+    let (width, height) = document.resolution;
+    Some(MatteOverlayContext {
+        target,
+        matte,
+        aspect: f64::from(width.max(1)) / f64::from(height.max(1)),
+        transform: resolved_layer_transform(clip, local_at),
+        key: MatteViewKey {
+            session_id,
+            revision,
+            frame: position,
+            target,
+        },
+    })
+}
 
 impl KinewrightApp {
     /// The monitor dock deliberately keeps Source and Program side by side.
@@ -104,6 +268,7 @@ impl KinewrightApp {
             } else {
                 color::TEXT_MUTED
             },
+            egui::Sense::hover(),
         );
         self.source_controls(ui, &asset, source_state, revalidation_pending);
     }
@@ -114,12 +279,22 @@ impl KinewrightApp {
         let blocked = playhead_state
             .as_ref()
             .is_some_and(|(state, _)| state.blocks_preview());
+        self.matte_overlay.poll();
+        let overlay = self.matte_overlay_context();
+        // `blocked` reaches the *request*, not just the picture: the coverage
+        // worker decodes the same media through its own renderer, so asking for
+        // one while the source is blocked would decode what the block exists to
+        // withhold (CC5 §4.1).
+        let matte_texture = overlay
+            .as_ref()
+            .and_then(|context| self.matte_view_texture(ui.ctx(), blocked, context));
         let texture = self.texture.clone();
-        Self::paint_viewer_frame(
+        let picture = viewer_picture(blocked, matte_texture.as_ref(), texture.as_ref());
+        let frame = Self::paint_viewer_frame(
             ui,
             egui::vec2(available_width, frame_height),
             "PROGRAM",
-            if blocked { None } else { texture.as_ref() },
+            picture,
             if let Some((state, _)) = playhead_state {
                 state.label()
             } else {
@@ -130,7 +305,218 @@ impl KinewrightApp {
             } else {
                 color::TEXT_MUTED
             },
+            viewer_sense(overlay.is_some()),
         );
+        if let Some(context) = overlay {
+            if let Some(image_rect) = frame.image_rect {
+                paint_matte_overlay(
+                    &ui.painter_at(frame.response.rect),
+                    context.frame(image_rect),
+                    &context.matte,
+                    &self.matte_overlay,
+                );
+                self.handle_matte_pointer(&frame.response, image_rect, &context);
+            }
+            self.matte_viewer_controls(ui, &context);
+        }
+    }
+
+    /// The node whose matte section the inspector reported as expanded, with
+    /// everything the overlay needs to draw and edit it (CC5 §6).
+    ///
+    /// `None` — and therefore no overlay and no pointer capture — whenever the
+    /// report names a clip that is not selected, or a clip or effect that is
+    /// gone. A matte with no window still yields a context: the qualifier, the
+    /// mix, and the Matte view are all editable without one.
+    fn matte_overlay_context(&self) -> Option<MatteOverlayContext> {
+        let target = self.matte_overlay.expanded()?;
+        let session = self.focused();
+        matte_overlay_context_for(
+            &session.document,
+            session.selected_clip,
+            session.position,
+            target,
+            session.id,
+            session.revision.0,
+        )
+    }
+
+    /// Turn one frame of viewer pointer interaction into coalesced edits.
+    ///
+    /// One gesture is one undo entry: every frame of a drag goes out under the
+    /// CC5 §6 coalesce key for what was grabbed, and a move — which writes two
+    /// parameters — uses the multi-operation live push.
+    fn handle_matte_pointer(
+        &mut self,
+        response: &egui::Response,
+        image_rect: egui::Rect,
+        context: &MatteOverlayContext,
+    ) {
+        let mut edits = InspectorEdits::default();
+        if response.drag_started()
+            && let Some(pointer) = response.interact_pointer_pos()
+            && let Some((window, hit)) = self.matte_hit(pointer, image_rect, context)
+        {
+            edits.begin_gesture();
+            self.matte_overlay.begin_drag(MatteDrag {
+                target: context.target,
+                window,
+                hit,
+                start: context.matte.windows[window],
+                start_pointer: pointer,
+            });
+        }
+        if response.clicked()
+            && let Some(pointer) = response.interact_pointer_pos()
+            && let Some((window, _)) = self.matte_hit(pointer, image_rect, context)
+        {
+            self.matte_overlay
+                .select_window(window, context.matte.window_count);
+        }
+        if let Some(drag) = self.matte_overlay.drag()
+            && drag.target == context.target
+            && (response.dragged() || response.drag_stopped())
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let next =
+                crate::matte_overlay_ui::drag_to_params(&drag, pointer, context.frame(image_rect));
+            // A frame that asks for the values the document already holds is
+            // not an edit: the press frame, and any frame the pointer has not
+            // moved far enough to change a basis point, write nothing.
+            if next != context.matte.windows[drag.window] {
+                let operations = matte_window_drag_operations(
+                    context.target.clip,
+                    context.target.effect,
+                    drag.window,
+                    drag.hit,
+                    &next,
+                );
+                edits.extend_live(
+                    operations,
+                    matte_gesture_coalesce_key(
+                        drag.hit,
+                        context.target.clip,
+                        context.target.effect,
+                        drag.window,
+                    ),
+                );
+            }
+        }
+        if response.drag_stopped() {
+            self.matte_overlay.end_drag();
+        }
+        self.submit_inspector_edits(edits);
+    }
+
+    /// The window a pointer grabbed, testing the selected window first so a
+    /// window drawn under another stays reachable.
+    ///
+    /// Only the selected window offers handles and a rotation arm, because only
+    /// the selected window draws them: an unselected window is select-then-edit
+    /// (CC5 §6). The selection is read clamped to the count the document holds
+    /// this frame, so it is exactly the one the overlay painted.
+    fn matte_hit(
+        &self,
+        pointer: egui::Pos2,
+        image_rect: egui::Rect,
+        context: &MatteOverlayContext,
+    ) -> Option<(usize, crate::matte_overlay_ui::MatteHit)> {
+        matte_hit_test(
+            pointer,
+            &context.matte,
+            context.frame(image_rect),
+            self.matte_overlay
+                .selected_window(context.matte.window_count),
+        )
+    }
+
+    /// The Matte view toggle, the window selector, and the coverage status.
+    fn matte_viewer_controls(&mut self, ui: &mut egui::Ui, context: &MatteOverlayContext) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("MATTE").font(theme::semibold(type_size::CAPTION)));
+            let mut view = self.matte_overlay.matte_view();
+            if ui
+                .checkbox(&mut view, "Matte view")
+                .on_hover_text(
+                    "Show this node's coverage instead of the picture: white is fully \
+                     affected, black is untouched (CC5 §4.1).",
+                )
+                .changed()
+            {
+                self.matte_overlay.set_matte_view(view);
+            }
+            let selected = self
+                .matte_overlay
+                .selected_window(context.matte.window_count);
+            for index in 0..context.matte.window_count {
+                if ui
+                    .selectable_label(selected == Some(index), format!("W{index}"))
+                    .clicked()
+                {
+                    self.matte_overlay
+                        .select_window(index, context.matte.window_count);
+                }
+            }
+            if context.matte.window_count == 0 {
+                ui.colored_label(color::TEXT_MUTED, "No windows to draw");
+            }
+            match self.matte_overlay.view_status(context.key) {
+                MatteViewStatus::Off => {}
+                MatteViewStatus::Pending => {
+                    ui.colored_label(color::STATUS_WARNING, "Rendering coverage…");
+                }
+                MatteViewStatus::Ready => {
+                    ui.colored_label(color::STATUS_SUCCESS, "Coverage");
+                }
+                MatteViewStatus::Unavailable(message) => {
+                    ui.colored_label(
+                        color::STATUS_DANGER,
+                        format!("Matte view unavailable: {message}"),
+                    );
+                }
+            }
+        });
+        ui.colored_label(
+            color::TEXT_MUTED,
+            "Windows are stored in the layer's own frame and drawn through this clip's \
+             resolved transform, so a reframed clip's outline sits on its reframed \
+             picture and a drag writes layer coordinates (CC5 §3.3, §5.2).",
+        );
+    }
+
+    /// Fetch, cache, and upload the coverage image behind the Matte view.
+    ///
+    /// The render happens on a worker thread through [`MatteProofSource`], with
+    /// the scope panel's single-flight policy: at most one `FrameRenderer` and
+    /// its cache budget exist at a time, and the newest request wins.
+    ///
+    /// [`MatteProofSource`]: crate::matte_overlay_ui::MatteProofSource
+    fn matte_view_texture(
+        &mut self,
+        ctx: &egui::Context,
+        blocked: bool,
+        context: &MatteOverlayContext,
+    ) -> Option<egui::TextureHandle> {
+        if !self.matte_overlay.matte_view() {
+            return None;
+        }
+        let key = context.key;
+        // Two `Arc` clones a frame, and the state decides whether a worker is
+        // wanted: the "is this frame blocked?" rule lives in one place rather
+        // than being restated by every caller.
+        let source = Arc::new(AnalysisMatteProofSource(Arc::clone(&self.analysis)));
+        let document = Arc::clone(&self.focused().document);
+        self.matte_overlay
+            .request_view_if_needed(blocked, source, document, key);
+        if let Some(texture) = self.matte_overlay.texture_for(key) {
+            return Some(texture.clone());
+        }
+        let image = coverage_color_image(self.matte_overlay.coverage_for(key)?);
+        // Point sampling: a coverage code is evidence, and a bilinear filter
+        // would invent partial coverage that no pixel has.
+        let texture = ctx.load_texture("matte-coverage", image, egui::TextureOptions::NEAREST);
+        self.matte_overlay.set_texture(key, texture.clone());
+        Some(texture)
     }
 
     fn paint_empty_viewer(
@@ -140,7 +526,15 @@ impl KinewrightApp {
         message: &str,
         message_color: egui::Color32,
     ) {
-        Self::paint_viewer_frame(ui, size, label, None, message, message_color);
+        Self::paint_viewer_frame(
+            ui,
+            size,
+            label,
+            None,
+            message,
+            message_color,
+            egui::Sense::hover(),
+        );
     }
 
     fn paint_viewer_frame(
@@ -150,8 +544,9 @@ impl KinewrightApp {
         texture: Option<&egui::TextureHandle>,
         message: &str,
         message_color: egui::Color32,
-    ) {
-        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        sense: egui::Sense,
+    ) -> ViewerFrame {
+        let (rect, response) = ui.allocate_exact_size(size, sense);
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, radius::SM, color::LETTERBOX);
         theme::paint_inset_well(&painter, rect, radius::px(radius::SM));
@@ -174,7 +569,10 @@ impl KinewrightApp {
                     egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
-                return;
+                return ViewerFrame {
+                    response,
+                    image_rect: Some(image_rect),
+                };
             }
         }
         let inset = rect.shrink2(egui::vec2(space::FOUR, space::FOUR));
@@ -201,6 +599,10 @@ impl KinewrightApp {
             egui::FontId::new(type_size::CAPTION, egui::FontFamily::Proportional),
             message_color,
         );
+        ViewerFrame {
+            response,
+            image_rect: None,
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -548,5 +950,210 @@ mod tests {
             Some(TrackId(99)),
             Some(TrackId(2))
         ));
+    }
+
+    /// CC5 §6: the viewer takes pointer input only while a matte section is
+    /// expanded. The decision is a pure function so it is provable without a
+    /// window, and so the "otherwise unchanged" half is a test rather than a
+    /// promise.
+    #[test]
+    fn the_viewer_takes_pointer_input_only_for_an_expanded_matte_section() {
+        let idle = viewer_sense(false);
+        assert!(!idle.senses_click(), "an idle viewer is not clickable");
+        assert!(!idle.senses_drag(), "an idle viewer is not draggable");
+        assert_eq!(idle, egui::Sense::hover(), "today's behaviour, exactly");
+
+        let editing = viewer_sense(true);
+        assert!(editing.senses_click());
+        assert!(editing.senses_drag());
+        assert_eq!(editing, egui::Sense::click_and_drag());
+    }
+
+    // -----------------------------------------------------------------------
+    // CC5 §6 overlay context
+    // -----------------------------------------------------------------------
+
+    const CLIP: kinewright_core::ClipId = kinewright_core::ClipId(10);
+    const EFFECT: kinewright_core::EffectId = kinewright_core::EffectId(1);
+
+    /// A one-clip 1920 × 1080 document whose clip starts at `timeline_start`,
+    /// runs 30 frames, and carries a `color_wheels` node plus whatever
+    /// `transform` percentages are asked for.
+    fn matte_document(timeline_start: TimeCode, transform: &[(&str, i64)]) -> Document {
+        use std::collections::BTreeMap;
+
+        use kinewright_core::{
+            AssetId, ClipContent, Effect, EffectId, MediaAsset, ParamValue, Rational,
+        };
+
+        let mut effects = vec![Effect {
+            id: EFFECT,
+            name: "color_wheels".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        }];
+        if !transform.is_empty() {
+            effects.push(Effect {
+                id: EffectId(2),
+                name: "transform".to_owned(),
+                parameters: transform
+                    .iter()
+                    .map(|(name, value)| ((*name).to_owned(), ParamValue::Integer(*value)))
+                    .collect(),
+                keyframes: BTreeMap::new(),
+            });
+        }
+        let mut document = document();
+        document.resolution = (1920, 1080);
+        document.media_pool = vec![MediaAsset {
+            id: AssetId(1),
+            path: std::path::PathBuf::from("picture.mov"),
+            name: "Picture".to_owned(),
+            duration: TimeCode(120),
+            fps: Rational::new(30, 1).expect("valid fps"),
+            kind: MediaKind::Video,
+            resolution: Some((1920, 1080)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+            color_description: kinewright_core::ColorDescription::default(),
+        }];
+        document.tracks[0].clips = vec![kinewright_core::Clip {
+            id: CLIP,
+            asset: AssetId(1),
+            source_range: TimeCode(0)..TimeCode(30),
+            content: ClipContent::Media,
+            timeline_start,
+            effects,
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+        }];
+        document.duration = TimeCode(timeline_start.0 + 30);
+        document.validate().expect("the fixture is a legal project");
+        document
+    }
+
+    fn context_at(document: &Document, position: TimeCode) -> Option<MatteOverlayContext> {
+        matte_overlay_context_for(
+            document,
+            Some(CLIP),
+            position,
+            MatteTarget::new(CLIP, EFFECT),
+            1,
+            0,
+        )
+    }
+
+    /// CC5 §6: the overlay belongs to the clip under the playhead. With the
+    /// playhead off the clip the renderer is showing somebody else's picture,
+    /// and `checked_sub`'s old `unwrap_or(ZERO)` fallback drew this node's
+    /// windows over it — and let a drag edit a matte nobody could see.
+    #[test]
+    fn no_overlay_when_the_playhead_is_off_the_selected_clip() {
+        // The clip occupies timeline frames 20..50.
+        let document = matte_document(TimeCode(20), &[]);
+
+        assert!(
+            context_at(&document, TimeCode(19)).is_none(),
+            "one frame before the clip is not on the clip"
+        );
+        assert!(
+            context_at(&document, TimeCode(20)).is_some(),
+            "the first frame of the clip is"
+        );
+        assert!(
+            context_at(&document, TimeCode(49)).is_some(),
+            "and so is the last"
+        );
+        assert!(
+            context_at(&document, TimeCode(50)).is_none(),
+            "the end is exclusive: frame 50 belongs to whatever follows"
+        );
+        assert!(
+            context_at(&document, TimeCode(500)).is_none(),
+            "and a playhead far past the clip is not a clip-local frame 0"
+        );
+
+        // A clip that is not the selected one never yields a context either.
+        assert!(
+            matte_overlay_context_for(
+                &document,
+                Some(kinewright_core::ClipId(99)),
+                TimeCode(25),
+                MatteTarget::new(CLIP, EFFECT),
+                1,
+                0,
+            )
+            .is_none()
+        );
+    }
+
+    /// CC5 §5.2: the overlay resolves the clip's own `transform` at the same
+    /// clip-local frame as the matte, in the compositor's units — `scale` a
+    /// product of `scale_percent / 100`, the offsets sums of `percent / 50`.
+    #[test]
+    fn the_overlay_context_resolves_the_layer_transform() {
+        let plain = matte_document(TimeCode::ZERO, &[]);
+        assert_eq!(
+            context_at(&plain, TimeCode(3))
+                .expect("a context")
+                .transform,
+            LayerTransform::IDENTITY,
+            "an unreframed clip is the identity, so CC4 projects are unchanged"
+        );
+
+        let reframed = matte_document(
+            TimeCode(20),
+            &[("scale_percent", 50), ("x_percent", 25), ("y_percent", -10)],
+        );
+        let context = context_at(&reframed, TimeCode(25)).expect("a context");
+        assert!(
+            (context.transform.scale - 0.5).abs() < 1e-12
+                && (context.transform.offset_x - 0.5).abs() < 1e-12
+                && (context.transform.offset_y + 0.2).abs() < 1e-12,
+            "resolved transform: {:?}",
+            context.transform
+        );
+
+        // And it reaches the geometry: the window centre is drawn where the
+        // reframed picture puts it, not where the raster centre is.
+        let image_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(64.0, 36.0));
+        let centre = crate::matte_overlay_ui::window_centre_point(
+            &context.matte.windows[0],
+            context.frame(image_rect),
+        );
+        assert!(
+            (centre.x - 48.0).abs() < 1e-3 && (centre.y - 14.4).abs() < 1e-3,
+            "reframed centre: {centre:?}"
+        );
+    }
+
+    /// CC5 §4.1 and the source-verification contract: a blocked source shows no
+    /// picture at all. The Matte view renders the same media through the same
+    /// decoder, so it must not become the way that picture reaches the screen.
+    #[test]
+    fn a_blocked_source_shows_no_picture_not_even_a_matte_view() {
+        let matte = 1_u8;
+        let texture = 2_u8;
+
+        assert_eq!(
+            viewer_picture(false, Some(&matte), Some(&texture)),
+            Some(&matte),
+            "an available coverage stands in for the picture"
+        );
+        assert_eq!(
+            viewer_picture(false, None, Some(&texture)),
+            Some(&texture),
+            "and the picture is shown when there is no coverage"
+        );
+        assert_eq!(
+            viewer_picture(true, Some(&matte), Some(&texture)),
+            None,
+            "a blocked source is blocked, coverage or not"
+        );
+        assert_eq!(viewer_picture(true, None, Some(&texture)), None);
+        assert_eq!(viewer_picture::<u8>(false, None, None), None);
     }
 }

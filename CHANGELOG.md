@@ -9,6 +9,38 @@ All notable changes to Kinewright are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Added
+- CC5 secondaries: node-owned mattes on `primary_correction`, `color_wheels`,
+  `color_curves`, and `creative_look` (never on `technical_lut`), expressed as
+  47 generated integer parameters per node — up to four rectangular or
+  elliptical windows with aspect-corrected rotation, symmetric feather, and
+  per-window invert combined by union or intersection, plus an HSL qualifier
+  (hue centre/width/softness with a wraparound-safe achromatic rule,
+  saturation and luma bands with softness) evaluated on the node input in
+  `grade709`. A node applies `out = x + (node(x) − x)·m`, with `m == 0` an
+  exact per-pixel identity so nothing outside a matte changes by a single
+  bit, and alpha is never modified; the layer `mask` effect is unchanged.
+  Tokens and counts are Hold-only keyframes; windows, mix, and qualifier
+  scalars animate freely; a `matte_band_inverted_by_automation` QA warning
+  covers crossed bands. The GPU node stack gains a 64-word matte block per
+  node in the payload region (`GRADE_ABI_VERSION` 3, 32 KiB binding) and a
+  matte-debug selector that renders coverage without a transfer; the CPU
+  reference evaluates the same contract at pixel centres with an aspect
+  argument. New `Analysis::matte_proof_for_document` and
+  `matte_coverage_statistics`; matte-scoped scopes feed the unchanged CC2
+  engine through `matte_scoped_frame` (`A = 255` where `m > 0`) with a
+  `matte_region` recorded on the evidence; comparisons require the same
+  clip/effect/threshold and report the covered-pixel delta. The
+  agent gains `inspect_grade_matte`, `track_matte_window` (the existing SAD
+  tracker with the M40 median filter and step limit, coordinate conversion
+  through the layer transform, a prepared plan that never commits, and a
+  stated tracking boundary), `plan_secondary_correction`, and matte variants
+  of `render_color_proof`; the inspector gains a matte section, keyframe
+  badges, a preview overlay with drag editing of windows (converted through
+  the clip's layer transform), and a matte view.
+  Exit evidence: affected-pixel containment (exactly zero outside pixels
+  changed on CPU and GPU), hand-derived window/feather/qualifier anchors, a
+  generated moving-box clip for the tracked-shot proof, and the CC1 gates.
+  See `docs/CC5-SECONDARIES.md`.
 - CC4 look management: LUT looks become project-owned, content-hashed assets.
   `Document.lut_assets` records id/sha256/title/size/domain/provenance; bytes
   live in a project-relative `<stem>.kinewright-assets/luts/<sha256>.cube`

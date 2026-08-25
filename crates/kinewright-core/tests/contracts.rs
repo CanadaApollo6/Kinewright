@@ -2375,7 +2375,12 @@ fn primary_correction_descriptor_matches_cc1_contract() {
         ("saturation_percent", -100, 100, 0),
     ];
 
-    assert_eq!(descriptor.parameters.len(), expected.len());
+    // CC5 §2.2 appends 47 matte parameters after the CC1 controls; they are
+    // pinned in `cc5_core.rs`.
+    assert_eq!(
+        descriptor.parameters.len(),
+        expected.len() + kinewright_core::MATTE_PARAMETER_COUNT
+    );
     for (parameter, (name, min, max, neutral)) in descriptor.parameters.iter().zip(expected) {
         assert_eq!(
             (

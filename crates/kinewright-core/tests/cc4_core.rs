@@ -233,7 +233,12 @@ fn creative_look_descriptor_matches_the_contract_table() {
         ("input_encoding_token", 0, 2, 0),
         ("bypass", 0, 1, 0),
     ];
-    assert_eq!(descriptor.parameters.len(), expected.len());
+    // CC5 §2.1 gives `creative_look` a matte and `technical_lut` none, so only
+    // this table grows; the 47 matte parameters are pinned in `cc5_core.rs`.
+    assert_eq!(
+        descriptor.parameters.len(),
+        expected.len() + kinewright_core::MATTE_PARAMETER_COUNT
+    );
     for (parameter, (name, min, max, neutral)) in descriptor.parameters.iter().zip(expected) {
         assert_eq!(parameter.name, name);
         assert_eq!(

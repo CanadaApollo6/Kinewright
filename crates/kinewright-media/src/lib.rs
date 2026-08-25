@@ -38,6 +38,9 @@ mod cc3_fixtures;
 mod cc4_fixtures;
 
 #[cfg(test)]
+mod cc5_fixtures;
+
+#[cfg(test)]
 mod gpu_test_support;
 
 use ffmpeg_next as ffmpeg;
@@ -54,7 +57,8 @@ pub use compositor::{
     COMPOSITOR_LEGACY_LUT_SLOT, COMPOSITOR_LUT_ATLAS_SLOTS, COMPOSITOR_LUT_SLOTS_PER_LAYER,
     COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE,
     COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D,
-    Compositor, CompositorLayer, DeliveryFrame, GpuContext, compositor_required_limits,
+    Compositor, CompositorLayer, DeliveryFrame, GpuContext, MatteRenderTarget,
+    compositor_required_limits,
 };
 pub use derived::{
     BeatDetectionConfig, DEFAULT_BEAT_MINIMUM_INTERVAL_MILLISECONDS,

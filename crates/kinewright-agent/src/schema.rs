@@ -3,14 +3,17 @@ use std::{borrow::Cow, fmt::Write, sync::Arc};
 use kinewright_core::{
     COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN, COLOR_CURVE_MAX_POINTS,
     COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS, ColorCurveChannel, EFFECT_DESCRIPTORS,
-    EffectParameterDescriptor, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER, Operation,
-    TITLE_PARAMETER_DESCRIPTORS, TRANSITION_DESCRIPTORS, TimelineRevision, is_lut_color_node,
+    EffectParameterDescriptor, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER,
+    MATTE_HUE_WIDTH_DISABLE_CENTIDEGREES, MATTE_MIX_BASIS_POINTS_MAX, MATTE_PARAMETER_COUNT,
+    MATTE_WINDOW_LIMIT, Operation, TITLE_PARAMETER_DESCRIPTORS, TRANSITION_DESCRIPTORS,
+    TimelineRevision, is_lut_color_node, is_matte_capable_color_node, is_matte_parameter,
+    matte_parameters, matte_window_parameters,
 };
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 71] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 74] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -28,6 +31,12 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 71] = [
     "import_lut_asset",
     "convert_legacy_look",
     "render_color_proof",
+    // CC5 §7: the three matte surfaces. `inspect_grade_matte` needs a
+    // `CAPABILITY_KIND_OVERRIDES` entry because `inspect_` matches no
+    // name-prefix inference rule.
+    "inspect_grade_matte",
+    "track_matte_window",
+    "plan_secondary_correction",
     "get_media_status",
     "get_cache_status",
     "clear_media_cache",
@@ -490,7 +499,14 @@ fn effect_documentation() -> String {
             // the tool that lists them instead.
             documentation.push_str(&lut_node_pattern_documentation(effect.parameters));
         } else {
-            for (parameter_index, parameter) in effect.parameters.iter().enumerate() {
+            // CC5 §2.2/M36: the 47 matte parameters are emitted once as a
+            // shared legend below, never enumerated per kind.
+            for (parameter_index, parameter) in effect
+                .parameters
+                .iter()
+                .filter(|parameter| !is_matte_parameter(parameter.name))
+                .enumerate()
+            {
                 if parameter_index != 0 {
                     documentation.push_str(", ");
                 }
@@ -501,6 +517,11 @@ fn effect_documentation() -> String {
                 )
                 .expect("writing effect documentation to a String cannot fail");
             }
+        }
+        // CC5 §2.2, normative: one shared legend per matte-capable kind.
+        if is_matte_capable_color_node(effect.name) {
+            documentation.push_str("; ");
+            documentation.push_str(&matte_pattern_documentation());
         }
         documentation.push(')');
         // Legacy compatibility stages remain loadable but are outside the CC1
@@ -554,6 +575,68 @@ fn lut_node_pattern_documentation(parameters: &[EffectParameterDescriptor]) -> S
         }
     }
     documentation
+}
+
+/// The 47 CC5 matte parameters in one compact legend (CC5 §2.2, M36).
+///
+/// **Normative:** this must never enumerate the 32 `matte_window{j}_*`
+/// parameters. Four matte-capable descriptors × 47 entries is several
+/// kilobytes on every `AddEffect`/`SetEffectParam` tool description — the same
+/// M36 runtime-efficiency argument that gave `color_curves` its pattern form.
+///
+/// Every bound is read from the Core descriptors so the legend cannot drift
+/// from the values Core actually validates.
+fn matte_pattern_documentation() -> String {
+    let control = |name: &str| {
+        matte_parameters()
+            .iter()
+            .find(|parameter| parameter.name == name)
+            .map_or_else(
+                || "?".to_owned(),
+                |parameter| format!("{}..={}", parameter.min, parameter.max),
+            )
+    };
+    // Window 0's descriptors carry the bounds every window shares; the table is
+    // generated from one macro, so reading window 0 reads all four.
+    let window = |suffix: &str| {
+        matte_window_parameters(0)
+            .and_then(|table| {
+                table
+                    .iter()
+                    .find(|parameter| parameter.name.ends_with(suffix))
+                    .map(|parameter| format!("{}..={}", parameter.min, parameter.max))
+            })
+            .unwrap_or_else(|| "?".to_owned())
+    };
+    let last_window = MATTE_WINDOW_LIMIT.saturating_sub(1);
+    format!(
+        "matte_* is the CC5 secondary, {MATTE_PARAMETER_COUNT} parameters summarised once: \
+matte_enabled/matte_qualifier_enabled/matte_invert/matte_combine_token={token}, neutral 0, combine 0 union 1 intersection; \
+matte_window_count={count}, neutral 0; \
+matte_mix_basis_points={mix}, neutral {MATTE_MIX_BASIS_POINTS_MAX}; \
+matte_hue_center_centidegrees={hue_center}, neutral 0; \
+matte_hue_width_centidegrees and matte_hue_softness_centidegrees={hue_width}, width neutral {MATTE_HUE_WIDTH_DISABLE_CENTIDEGREES} disables the hue leg; \
+matte_saturation_ and matte_luma_ each with low/high/softness_basis_points={band}, neutral 0/{MATTE_MIX_BASIS_POINTS_MAX}/0; \
+matte_window{{j}}_* for j=0..={last_window}: shape_token={shape}, 1 rect 2 ellipse, neutral 1; \
+center_x/center_y_basis_points={centre}, neutral 5000; \
+half_width/half_height_basis_points={half}, neutral 2500; \
+rotation_centidegrees={rotation}, neutral 0; \
+feather_basis_points={feather}, neutral 0; \
+invert={token}, neutral 0. \
+Prefer plan_secondary_correction, which accepts windows[] and qualifier{{}} and expands them; \
+see inspect_grade_matte for measured coverage",
+        token = control("matte_enabled"),
+        count = control("matte_window_count"),
+        mix = control("matte_mix_basis_points"),
+        hue_center = control("matte_hue_center_centidegrees"),
+        hue_width = control("matte_hue_width_centidegrees"),
+        band = control("matte_saturation_low_basis_points"),
+        shape = window("_shape_token"),
+        centre = window("_center_x_basis_points"),
+        half = window("_half_width_basis_points"),
+        rotation = window("_rotation_centidegrees"),
+        feather = window("_feather_basis_points"),
+    )
 }
 
 /// A compact pattern description of the 133 `color_curves` parameters.
@@ -897,7 +980,17 @@ mod tests {
             .iter()
             .find(|effect| effect.name == "color_curves")
             .expect("Core must register color_curves");
-        assert_eq!(descriptor.parameters.len(), 133);
+        // CC5 §2.2 appended the 47 matte parameters to every matte-capable
+        // descriptor, so `color_curves` now owns 133 CC3 curve controls plus
+        // 47: two generated families, both summarised rather than listed.
+        assert_eq!(
+            descriptor.parameters.len(),
+            kinewright_core::COLOR_CURVES_DESCRIPTOR_PARAMETER_COUNT
+        );
+        assert_eq!(
+            kinewright_core::COLOR_CURVES_DESCRIPTOR_PARAMETER_COUNT,
+            133 + MATTE_PARAMETER_COUNT
+        );
         let enumerated = descriptor
             .parameters
             .iter()
@@ -910,14 +1003,27 @@ mod tests {
             })
             .sum::<usize>();
         assert!(
-            enumerated > 4_096,
+            enumerated > 7_168,
             "enumerating the descriptor would cost {enumerated} bytes"
         );
 
         let curves = entry("color_curves");
+        // `color_curves` is the one kind carrying *two* generated families: the
+        // 133 CC3 curve parameters and the 47 CC5 matte parameters. Each is
+        // summarised by its own pattern, and the budget is stated per family so
+        // a future family cannot be smuggled in under one loose total.
+        let curve_pattern = color_curves_pattern_documentation();
+        let matte_legend = matte_pattern_documentation();
+        for (family, summary) in [("curves", &curve_pattern), ("matte", &matte_legend)] {
+            assert!(
+                summary.len() < 1_024,
+                "the {family} summary must stay under 1 KB, was {} bytes: {summary}",
+                summary.len()
+            );
+        }
         assert!(
-            curves.len() < 1_024,
-            "the color_curves entry must stay under 1 KB, was {} bytes: {curves}",
+            curves.len() < curve_pattern.len() + matte_legend.len() + 128,
+            "the color_curves entry is its two pattern summaries and nothing else, was {} bytes: {curves}",
             curves.len()
         );
         // The compact form still states every bound an author needs, and
@@ -939,6 +1045,91 @@ mod tests {
         assert!(wheels.contains("lift_master_basis_points=-2000..=2000, neutral 0"));
         assert!(wheels.contains("gain_blue_thousandths=0..=4000, neutral 1000"));
         assert!(wheels.contains("bypass=0..=1, neutral 0"));
+    }
+
+    /// CC5 §2.2, normative: `schema.rs` must not enumerate the 32
+    /// `matte_window{j}_*` parameters per kind. It emits one shared legend,
+    /// the same special case `color_curves` already receives.
+    #[test]
+    fn matte_documentation_is_one_compact_legend_not_47_entries_per_kind() {
+        let legend = matte_pattern_documentation();
+        // The per-kind cost of the legend, which four descriptors each pay.
+        assert!(
+            legend.len() < 1_024,
+            "the matte legend must stay under 1 KB per kind, was {} bytes: {legend}",
+            legend.len()
+        );
+        let enumerated = matte_parameters()
+            .iter()
+            .map(|parameter| {
+                format!(
+                    "{}={}..={}, neutral {}, ",
+                    parameter.name, parameter.min, parameter.max, parameter.neutral
+                )
+                .len()
+            })
+            .sum::<usize>();
+        assert!(
+            enumerated > legend.len(),
+            "enumerating the matte would cost {enumerated} bytes against the {} byte legend",
+            legend.len()
+        );
+
+        // Every bound is read from the Core descriptors, so the legend cannot
+        // drift from the values Core actually validates.
+        assert!(legend.contains("matte_window{j}_*"));
+        assert!(legend.contains("j=0..=3"));
+        assert!(legend.contains("shape_token=1..=2"));
+        assert!(legend.contains("center_x/center_y_basis_points=-10000..=20000"));
+        assert!(legend.contains("half_width/half_height_basis_points=1..=10000"));
+        assert!(legend.contains("rotation_centidegrees=-18000..=18000"));
+        assert!(legend.contains("feather_basis_points=0..=10000"));
+        assert!(legend.contains("plan_secondary_correction"));
+        assert!(legend.contains("inspect_grade_matte"));
+        // The 32 generated window names are never spelled out.
+        for name in matte_parameters().iter().map(|parameter| parameter.name) {
+            if name.starts_with("matte_window0")
+                || name.starts_with("matte_window1")
+                || name.starts_with("matte_window2")
+                || name.starts_with("matte_window3")
+            {
+                assert!(
+                    !legend.contains(name),
+                    "the generated window parameter {name} must not be enumerated"
+                );
+            }
+        }
+
+        // Exactly the four matte-capable kinds carry it, and `technical_lut`
+        // does not: a partially applied source normalization is not a
+        // meaningful state (CC5 §2.1).
+        let documentation = effect_documentation();
+        let carriers = EFFECT_DESCRIPTORS
+            .iter()
+            .filter(|effect| is_matte_capable_color_node(effect.name))
+            .map(|effect| effect.name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            carriers,
+            vec![
+                "primary_correction",
+                "color_wheels",
+                "color_curves",
+                "creative_look"
+            ]
+        );
+        assert_eq!(
+            documentation.matches(legend.as_str()).count(),
+            carriers.len()
+        );
+        let technical = documentation
+            .find("technical_lut(")
+            .expect("technical_lut must be documented");
+        let close = technical
+            + documentation[technical..]
+                .find(')')
+                .expect("every entry closes its parameter list");
+        assert!(!documentation[technical..close].contains("matte_"));
     }
 
     #[test]

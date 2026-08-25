@@ -155,6 +155,11 @@ const CAPABILITY_KIND_OVERRIDES: &[(&str, CapabilityKind)] = &[
     ("render_color_proof", CapabilityKind::Inspector),
     // CC4 §8: `list_look_assets` is read-only LUT-asset evidence.
     ("list_look_assets", CapabilityKind::Inspector),
+    // CC5 §7: `inspect_` matches no inference rule, and name-prefix inference
+    // is a convenience, not a contract. `track_matte_window` and
+    // `plan_secondary_correction` are already inferred correctly by the
+    // `track_` and `plan_` prefixes and need no entry.
+    ("inspect_grade_matte", CapabilityKind::Inspector),
 ];
 
 fn capability_kind(name: &str, operation_names: &BTreeSet<String>) -> CapabilityKind {

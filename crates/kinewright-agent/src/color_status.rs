@@ -3,27 +3,41 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
+    sync::Arc,
 };
 
 use kinewright_core::{
     AssetId, COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN, COLOR_CURVE_MAX_POINTS,
     COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS, COLOR_NODE_BYPASS_PARAMETER,
     COLOR_NODE_LIMIT_PER_LAYER, Clip, ClipContent, ClipId, ColorCurveChannel, ColorDescription,
-    ColorNodeKind, ColorSourceError, ColorSourceProfile, ColorSourceProfileAssumption, ColorStage,
-    ColorWheelChannel, ColorWheelControl, ColorWheelsParams, ColorWhitePoint, CurvePoints,
-    Document, Effect, EffectCompatibilityStage, EffectId, LUT_ASSET_ID_PARAMETER,
-    LUT_INPUT_ENCODING_PARAMETER, LUT_MIX_BASIS_POINTS_MAX, LUT_MIX_PARAMETER,
-    LUT_NODE_LIMIT_PER_LAYER, LutAsset, LutAssetId, LutAssetSource, LutAvailabilityKind,
-    LutAvailabilityStatus, LutNodeParams, MANAGED_COLOR_NODE_NAMES, MediaAvailabilityStatus,
-    MediaError, MediaKind, Operation, ParamValue, ResolvedCurves, TimeCode, TimelineRevision,
-    TrackKind, apply_batch, classify_color_node, classify_source_with_assumption,
-    effect_compatibility_stage, effect_descriptor, lut_node_count, lut_node_may_be_active,
-    managed_color_node_count,
+    ColorNodeInactiveReason, ColorNodeKind, ColorSourceError, ColorSourceProfile,
+    ColorSourceProfileAssumption, ColorStage, ColorWheelChannel, ColorWheelControl,
+    ColorWheelsParams, ColorWhitePoint, CurvePoints, Document, Effect, EffectCompatibilityStage,
+    EffectId, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER, LUT_MIX_BASIS_POINTS_MAX,
+    LUT_MIX_PARAMETER, LUT_NODE_LIMIT_PER_LAYER, LutAsset, LutAssetId, LutAssetSource,
+    LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams, MANAGED_COLOR_NODE_NAMES,
+    MATTE_MIX_BASIS_POINTS_MAX, MATTE_WINDOW_LIMIT, MatteParams, MatteWindowParams,
+    MediaAvailabilityStatus, MediaError, MediaKind, Operation, ParamValue, ResolvedCurves,
+    TimeCode, TimelineRevision, TrackKind, apply_batch, classify_color_node,
+    classify_source_with_assumption, effect_compatibility_stage, effect_descriptor, lut_node_count,
+    lut_node_may_be_active, managed_color_node_count,
 };
 use serde_json::{Value, json};
 use thiserror::Error;
 
 const PRIMARY_CORRECTION_EFFECT_NAME: &str = "primary_correction";
+
+/// The four managed colour node kinds that may carry a matte (CC5 §2.1).
+///
+/// `technical_lut` is deliberately absent: a technical input transform
+/// normalizes the *whole* source, so a partially applied one is not a
+/// meaningful state.
+pub(crate) const MATTE_CAPABLE_NODE_NAMES: [&str; 4] = [
+    "primary_correction",
+    "color_wheels",
+    "color_curves",
+    "creative_look",
+];
 
 /// Every `ColorSourceProfileAssumption` variant a caller may request. The
 /// enum is deliberately bounded; adding a variant must add an entry here.
@@ -116,6 +130,32 @@ impl LookComparison {
     }
 }
 
+/// Which matte-scoped variant `render_color_proof` renders (CC5 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MatteComparison {
+    /// The CC5 §4.1 coverage image itself, `R = G = B = round(255·m)`.
+    Coverage,
+    /// The document exactly as stored: the correction applies inside the
+    /// matte and nowhere else.
+    InsideOnly,
+    /// A scratch copy with `matte_invert` toggled, so the correction applies
+    /// outside the matte and nowhere else.
+    OutsideOnly,
+}
+
+impl MatteComparison {
+    /// The stable manifest token.
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Coverage => "coverage",
+            Self::InsideOnly => "inside_only",
+            Self::OutsideOnly => "outside_only",
+        }
+    }
+}
+
 /// Arguments for an isolated, read-only before/after CC1 proof.
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct RenderColorProofArgs {
@@ -141,6 +181,12 @@ pub(crate) struct RenderColorProofArgs {
     /// `effect_id`; defaults to `after`.
     #[serde(default)]
     pub look_comparison: Option<LookComparison>,
+    /// CC5 §7: render the node's matte instead of, or partitioned by, its
+    /// colour. Valid only alongside `effect_id` on a matte-carrying node, and
+    /// mutually exclusive with `look_comparison`, which selects a different
+    /// AFTER cell for the same question.
+    #[serde(default)]
+    pub matte_comparison: Option<MatteComparison>,
 }
 
 impl From<&RenderColorProofArgs> for PrimaryCorrectionPlanArgs {
@@ -438,6 +484,22 @@ pub(crate) enum ColorProofError {
         absent_raster: (u32, u32),
         bypass_raster: (u32, u32),
     },
+    // ---- CC5 §7 ----
+    #[error("matte_comparison requires effect_id, which names the matte-carrying node")]
+    MatteComparisonRequiresEffectId,
+    #[error(
+        "matte_comparison and look_comparison both select the AFTER cell; send exactly one of them"
+    )]
+    MatteComparisonConflictsWithLookComparison,
+    #[error("matte_comparison needs a matte-capable node, and {kind} node {effect} is not one")]
+    MatteComparisonUnsupportedKind {
+        effect: EffectId,
+        kind: &'static str,
+    },
+    #[error("matte_comparison needs a node that carries a matte, and node {effect} carries none")]
+    MatteComparisonNoMatte { effect: EffectId },
+    #[error("could not render the CC5 matte proof for node {effect}: {message}")]
+    MatteProofUnavailable { effect: EffectId, message: String },
     #[error(transparent)]
     Primary(#[from] PrimaryPlanError),
 }
@@ -461,6 +523,13 @@ impl ColorProofError {
             Self::UnsupportedDecoderFormat { .. } => "unsupported_decoder_format",
             Self::InvalidImage { .. } => "color_proof_invalid_image",
             Self::MissingLutAsset { .. } => "missing_lut_asset",
+            Self::MatteComparisonRequiresEffectId => "matte_comparison_requires_effect_id",
+            Self::MatteComparisonConflictsWithLookComparison => {
+                "matte_comparison_conflicts_with_look_comparison"
+            }
+            Self::MatteComparisonUnsupportedKind { .. } => "matte_unsupported_node_kind",
+            Self::MatteComparisonNoMatte { .. } => "matte_proof_no_matte",
+            Self::MatteProofUnavailable { .. } => MATTE_PROOF_UNAVAILABLE,
             Self::UnsupportedActiveLayerSource { .. } => "active_layer_needs_color_override",
             Self::LookProofParametersConflict { .. } => "look_proof_parameters_conflict",
             Self::LookComparisonRequiresEffectId => "look_comparison_requires_effect_id",
@@ -559,6 +628,40 @@ impl ColorProofError {
                 "observed": "a non-empty parameters object alongside effect_id",
                 "allowed": "exactly one of parameters (propose a primary) or effect_id (proof the stored node)",
                 "recovery_action": "Drop parameters to proof the stored node, or drop effect_id to proof a proposed primary correction.",
+                "effect_id": effect.0,
+            }),
+            Self::MatteComparisonRequiresEffectId => json!({
+                "field": "matte_comparison",
+                "observed": "matte_comparison without effect_id",
+                "allowed": "matte_comparison only alongside effect_id",
+                "recovery_action": "Send effect_id naming the matte-carrying node, or drop matte_comparison.",
+            }),
+            Self::MatteComparisonConflictsWithLookComparison => json!({
+                "field": "matte_comparison",
+                "observed": "matte_comparison and look_comparison together",
+                "allowed": "exactly one of matte_comparison or look_comparison",
+                "recovery_action": "Both select what the AFTER cell renders, so send one: look_comparison for before/after/bypass, matte_comparison for coverage/inside_only/outside_only.",
+            }),
+            Self::MatteComparisonUnsupportedKind { effect, kind } => json!({
+                "field": "matte_comparison",
+                "observed": {"effect_id": effect.0, "kind": kind},
+                "allowed": MATTE_CAPABLE_NODE_NAMES,
+                "recovery_action": "A technical input transform normalizes the whole source, so it carries no matte (CC5 §2.1). Proof a primary_correction, color_wheels, color_curves, or creative_look node.",
+                "effect_id": effect.0,
+            }),
+            Self::MatteComparisonNoMatte { effect } => json!({
+                "field": "matte_comparison",
+                "observed": {"effect_id": effect.0, "has_matte": false},
+                "allowed": "a node whose resolved matte is active (CC5 §2.6)",
+                // CC5 §4.1: a matte proof never returns a blank frame.
+                "recovery_action": "Add a matte with plan_secondary_correction first; a node with no matte has no coverage to partition, and this proof never returns a blank frame.",
+                "effect_id": effect.0,
+            }),
+            Self::MatteProofUnavailable { effect, message } => json!({
+                "field": "matte_comparison",
+                "observed": {"effect_id": effect.0, "message": message},
+                "allowed": "a matte-carrying node this build's renderer can proof",
+                "recovery_action": "Retry once this build's renderer supports matte proofs; no coverage image is invented here.",
                 "effect_id": effect.0,
             }),
             Self::LookComparisonRequiresEffectId => json!({
@@ -750,6 +853,9 @@ impl PrimaryPlanError {
             Self::UnknownParameter { name } => json!({
                 "parameter": name,
                 "allowed_parameters": primary_parameter_documentation(),
+                // CC5 §2.2: the 47 matte parameters are legal on this node but
+                // are described by one legend, never enumerated.
+                "matte_parameters": matte_parameter_legend(),
             }),
             Self::ParameterOutOfRange {
                 name,
@@ -764,15 +870,158 @@ impl PrimaryPlanError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CC5 §2.2 — the compact matte legend
+// ---------------------------------------------------------------------------
+
+/// The 47 CC5 matte parameters, summarised in one legend (CC5 §2.2, M36).
+///
+/// Normative: no agent surface may enumerate the 32 `matte_window{j}_*`
+/// parameters per kind. Four matte-capable descriptors × 47 parameters is
+/// several kilobytes on every `AddEffect`/`SetEffectParam` description and on
+/// every planner rejection, for a control surface an agent should reach
+/// through `plan_secondary_correction` anyway.
+///
+/// Every bound is read from the Core descriptors, so the legend cannot drift
+/// from the values Core actually validates.
+#[must_use]
+pub(crate) fn matte_parameter_legend() -> String {
+    let bound = |name: &str| {
+        kinewright_core::matte_parameters()
+            .iter()
+            .find(|parameter| parameter.name == name)
+            .map_or_else(
+                || "?".to_owned(),
+                |parameter| format!("{}..={}", parameter.min, parameter.max),
+            )
+    };
+    let window = |suffix: &str| {
+        kinewright_core::matte_window_parameters(0)
+            .and_then(|table| {
+                table
+                    .iter()
+                    .find(|parameter| parameter.name.ends_with(suffix))
+                    .map(|parameter| format!("{}..={}", parameter.min, parameter.max))
+            })
+            .unwrap_or_else(|| "?".to_owned())
+    };
+    format!(
+        "matte_* CC5 secondary, {count} parameters: \
+matte_enabled/matte_qualifier_enabled/matte_invert/matte_combine_token={token}, neutral 0, combine 0 union 1 intersection; \
+matte_window_count={count_range}, neutral 0; \
+matte_mix_basis_points={mix}, neutral {mix_neutral}; \
+matte_hue_center_centidegrees={hue_center}, neutral 0; \
+matte_hue_width_centidegrees and matte_hue_softness_centidegrees={hue_width}, width neutral {hue_disable} disables the hue leg; \
+matte_saturation_ and matte_luma_ each with low/high/softness_basis_points={band}, neutral 0/{band_high}/0; \
+matte_window{{j}}_* for j={window_min}..={window_max}: shape_token={shape}, 1 rect 2 ellipse, neutral 1; \
+center_x/center_y_basis_points={centre}, neutral 5000; \
+half_width/half_height_basis_points={half}, neutral 2500; \
+rotation_centidegrees={rotation}, neutral 0; \
+feather_basis_points={feather}, neutral 0; \
+invert={token}, neutral 0. \
+Prefer plan_secondary_correction, which accepts windows[] and qualifier{{}} and expands them; \
+inspect_grade_matte reports measured coverage",
+        count = kinewright_core::MATTE_PARAMETER_COUNT,
+        token = bound("matte_enabled"),
+        count_range = bound("matte_window_count"),
+        mix = bound("matte_mix_basis_points"),
+        mix_neutral = kinewright_core::MATTE_MIX_BASIS_POINTS_MAX,
+        hue_center = bound("matte_hue_center_centidegrees"),
+        hue_width = bound("matte_hue_width_centidegrees"),
+        hue_disable = kinewright_core::MATTE_HUE_WIDTH_DISABLE_CENTIDEGREES,
+        band = bound("matte_saturation_low_basis_points"),
+        band_high = kinewright_core::MATTE_MIX_BASIS_POINTS_MAX,
+        window_min = 0,
+        window_max = kinewright_core::MATTE_WINDOW_LIMIT.saturating_sub(1),
+        shape = window("_shape_token"),
+        centre = window("_center_x_basis_points"),
+        half = window("_half_width_basis_points"),
+        rotation = window("_rotation_centidegrees"),
+        feather = window("_feather_basis_points"),
+    )
+}
+
+/// A one-line pointer to the matte, for surfaces that are not the matte's own.
+///
+/// The CC1/CC3/CC4 planners each own one node's *colour* controls; the matte is
+/// `plan_secondary_correction`'s subject. Repeating the full
+/// [`matte_parameter_legend`] in all four descriptions would push each past
+/// M36's kilobyte budget to describe a request none of them accepts, so they
+/// name the capability and the tool that expands it instead.
+///
+/// Deliberately terse. `plan_color_wheels` enumerates thirteen descriptor
+/// controls before this is appended and had 981 bytes of its M36 kilobyte
+/// spent already, so anything longer than a capability name and a tool name
+/// puts that tool over budget.
+/// `cc5_matte_tools_are_registered_read_only_inspectors` measures it.
+#[must_use]
+pub(crate) fn matte_parameter_pointer() -> String {
+    format!("CC5 matte: {MATTE_PLANNER_TOOL}")
+}
+
+/// The tool that owns the matte, named once so the pointers cannot drift.
+const MATTE_PLANNER_TOOL: &str = "plan_secondary_correction";
+
+/// Where the full legend is served, for `plan_secondary_correction` itself.
+///
+/// The matte is that tool's own subject, so repeating
+/// [`matte_parameter_legend`] there costs 975 bytes to tell a caller about the
+/// integers its ergonomic `windows[]`/`qualifier{}` request exists to hide —
+/// and the legend ends by recommending the very tool being described. It names
+/// the two surfaces that do enumerate the parameters instead.
+#[must_use]
+pub(crate) fn matte_legend_reference() -> String {
+    format!(
+        "windows[] and qualifier{{}} expand to the {} matte_* integers; add_effect and set_effect_param enumerate them in full, and a rejection here repeats that legend in details.matte_parameters.",
+        kinewright_core::MATTE_PARAMETER_COUNT,
+    )
+}
+
+/// Whether `effect` is a matte-capable kind whose listings need the legend.
+#[must_use]
+pub(crate) fn effect_carries_matte_parameters(effect: &str) -> bool {
+    kinewright_core::is_matte_capable_color_node(effect)
+}
+
+/// One descriptor's controls with the 47 matte parameters removed (CC5 §2.2).
+///
+/// Every enumerating surface — tool descriptions, planner summaries, planner
+/// rejection evidence, and a plan's `resolved_parameters` — reads its control
+/// list through here, so the matte can only ever be described by the legend.
+fn non_matte_parameters(
+    descriptor: kinewright_core::EffectDescriptor,
+) -> impl Iterator<Item = &'static kinewright_core::EffectParameterDescriptor> {
+    descriptor
+        .parameters
+        .iter()
+        .filter(|parameter| !kinewright_core::is_matte_parameter(parameter.name))
+}
+
+/// Drop the 47 matte parameters a caller did not explicitly name (CC5 §2.2).
+///
+/// A plan's `resolved_parameters` is an enumerating surface, so it obeys the
+/// same rule as every other: the matte is described by
+/// [`matte_parameter_legend`], not by 47 integers nobody asked for. A
+/// `matte_*` control the caller *did* name is kept, because a proposal must
+/// never hide a parameter it would write.
+fn retain_requested_matte_parameters(
+    resolved: &mut BTreeMap<String, i64>,
+    requested: &BTreeMap<String, i64>,
+) {
+    resolved.retain(|name, _| {
+        !kinewright_core::is_matte_parameter(name) || requested.contains_key(name)
+    });
+}
+
 /// The exact CC1 primary controls, derived from the Core descriptor so the
 /// tool description and the `unknown_primary_parameter` recovery evidence can
 /// never drift from the values Core actually validates.
 #[must_use]
 pub(crate) fn primary_parameter_documentation() -> Vec<Value> {
     effect_descriptor(PRIMARY_CORRECTION_EFFECT_NAME).map_or_else(Vec::new, |descriptor| {
-        descriptor
-            .parameters
-            .iter()
+        // CC5 §2.2: the 47 matte parameters are described by the legend that
+        // rides alongside this list, never enumerated.
+        non_matte_parameters(descriptor)
             .map(|parameter| {
                 json!({
                     "name": parameter.name,
@@ -789,9 +1038,7 @@ pub(crate) fn primary_parameter_documentation() -> Vec<Value> {
 #[must_use]
 pub(crate) fn primary_parameter_summary() -> String {
     effect_descriptor(PRIMARY_CORRECTION_EFFECT_NAME).map_or_else(String::new, |descriptor| {
-        descriptor
-            .parameters
-            .iter()
+        let controls = non_matte_parameters(descriptor)
             .map(|parameter| {
                 format!(
                     "{}={}..={}, neutral {}",
@@ -799,7 +1046,8 @@ pub(crate) fn primary_parameter_summary() -> String {
                 )
             })
             .collect::<Vec<_>>()
-            .join("; ")
+            .join("; ");
+        format!("{controls}; {}", matte_parameter_pointer())
     })
 }
 
@@ -1186,11 +1434,14 @@ pub(crate) fn effect_chain_manifest(effects: &[Effect]) -> Vec<Value> {
 
 /// Every descriptor control resolved against the stored effect, falling back
 /// to the descriptor neutral for controls the effect does not carry.
+///
+/// CC5 §2.2/§7: the 47 `matte_*` controls are filtered out for the same reason
+/// [`resolved_descriptor_parameters`] filters them — this feeds
+/// `effect_chain[].primary_parameters`, which is an enumerating surface, and
+/// the matte is described by the `color_nodes[].matte` object instead.
 fn resolved_primary_parameters(effect: &Effect) -> Option<BTreeMap<&'static str, ParamValue>> {
     effect_descriptor(PRIMARY_CORRECTION_EFFECT_NAME).map(|descriptor| {
-        descriptor
-            .parameters
-            .iter()
+        non_matte_parameters(descriptor)
             .map(|parameter| {
                 (
                     parameter.name,
@@ -1275,9 +1526,11 @@ pub(crate) fn plan_primary_correction(
         }
     }
 
-    let neutral_parameters = descriptor
-        .parameters
-        .iter()
+    // CC5 §2.2: an omitted matte parameter resolves to its neutral and the
+    // matte is inactive, so a fresh primary stores its ten CC1 controls and
+    // none of the 47 matte neutrals. Writing them would bloat every project
+    // JSON and would make a CC4-era node textually different for no effect.
+    let neutral_parameters = non_matte_parameters(descriptor)
         .map(|parameter| {
             (
                 parameter.name.to_owned(),
@@ -1327,6 +1580,7 @@ pub(crate) fn plan_primary_correction(
     for (name, value) in &args.parameters {
         resolved_parameters.insert(name.clone(), *value);
     }
+    retain_requested_matte_parameters(&mut resolved_parameters, &args.parameters);
     // Only controls whose value actually moves are written. An unchanged
     // control produces no operation, so an empty proposal stays empty.
     let changed = args
@@ -1662,6 +1916,19 @@ pub(crate) struct ColorNodePlan {
     /// CC4 LUT planners only: the bound asset's title, hash, provenance, and
     /// availability.
     pub lut_asset: Option<Value>,
+    /// CC5 §7: the resolved `matte` object this proposal produces, in the same
+    /// compact integer shape the `color_nodes` manifest reports. `None` for
+    /// every planner that does not touch a matte, so a CC4 response is
+    /// byte-unchanged.
+    pub matte: Option<Value>,
+    /// CC5 §7: the §4.2 coverage statistics measured on a scratch document
+    /// carrying this proposal, or a typed `matte_proof_unavailable` reason
+    /// when the analysis backend cannot render a matte proof.
+    pub predicted_coverage: Option<Value>,
+    /// CC5 §7: measured hue/saturation/luma statistics of an optional
+    /// `sample_roi`, returned as evidence whether or not the caller asked for
+    /// a derived qualifier.
+    pub sample_evidence: Option<Value>,
 }
 
 impl ColorNodePlan {
@@ -1767,6 +2034,50 @@ pub(crate) enum ColorNodePlanError {
         /// without a second round trip.
         allowed: Vec<u64>,
     },
+    // ---- CC5 §7 ----
+    #[error("send exactly one of target_effect_id or node_kind, not both")]
+    MatteTargetAmbiguous,
+    #[error("send target_effect_id or node_kind to name the node the matte belongs to")]
+    MatteTargetRequired,
+    #[error("clip {clip} carries no effect {effect}")]
+    MatteTargetNotFound { clip: ClipId, effect: EffectId },
+    #[error("effect {effect} is {name}, which is not a managed colour node")]
+    MatteTargetNotAColorNode { effect: EffectId, name: String },
+    #[error("{observed} cannot carry a matte")]
+    MatteUnsupportedKind { observed: &'static str },
+    #[error("{observed} is not a managed colour node kind")]
+    MatteUnknownKind { observed: String },
+    #[error("a matte carries at most {max} windows, {observed} requested")]
+    MatteWindowCount { observed: usize, max: usize },
+    #[error("{field} token {observed} is not recognized")]
+    MatteTokenNotRecognized {
+        field: &'static str,
+        observed: String,
+        allowed: &'static [&'static str],
+    },
+    #[error("windows[{index}].{field} token {observed} is not recognized")]
+    MatteWindowTokenNotRecognized {
+        index: usize,
+        field: &'static str,
+        observed: String,
+        allowed: &'static [&'static str],
+    },
+    #[error(
+        "node {effect} keyframes the Hold-only matte parameter {name}, so a static write would never render"
+    )]
+    MatteHoldOnlyParameterKeyframed { effect: EffectId, name: String },
+    #[error("sample_roi field {field} is invalid: {observed}")]
+    MatteSampleRoiInvalid {
+        field: &'static str,
+        observed: String,
+    },
+    #[error("sample_roi at frame {at} contains no visible pixel")]
+    MatteSampleRoiEmpty {
+        at: TimeCode,
+        pixel_rect: (u32, u32, u32, u32),
+    },
+    #[error("could not render the sample frame {at}: {message}")]
+    MatteSampleRenderFailed { at: TimeCode, message: String },
     #[error("the Core {0} descriptor is unavailable")]
     MissingDescriptor(&'static str),
     #[error("could not allocate a fresh effect id")]
@@ -1794,6 +2105,20 @@ impl ColorNodePlanError {
             Self::TooManyColorNodes { .. } => "too_many_color_nodes",
             Self::TooManyLutNodes { .. } => "too_many_lut_nodes",
             Self::UnknownLutAsset { .. } => "missing_lut_asset",
+            Self::MatteTargetAmbiguous => "matte_target_ambiguous",
+            Self::MatteTargetRequired => "matte_target_required",
+            Self::MatteTargetNotFound { .. } => "matte_target_not_found",
+            Self::MatteTargetNotAColorNode { .. } => "matte_target_not_a_color_node",
+            Self::MatteUnsupportedKind { .. } => "matte_unsupported_node_kind",
+            Self::MatteUnknownKind { .. } => "matte_unknown_node_kind",
+            Self::MatteWindowCount { .. } => "matte_window_count_out_of_range",
+            Self::MatteTokenNotRecognized { .. } | Self::MatteWindowTokenNotRecognized { .. } => {
+                "matte_token_not_recognized"
+            }
+            Self::MatteHoldOnlyParameterKeyframed { .. } => "matte_hold_only_parameter_keyframed",
+            Self::MatteSampleRoiInvalid { .. } => "matte_sample_roi_invalid",
+            Self::MatteSampleRoiEmpty { .. } => "matte_sample_roi_empty",
+            Self::MatteSampleRenderFailed { .. } => "matte_sample_render_failed",
             Self::MissingDescriptor(_) => "missing_color_node_descriptor",
             Self::EffectIdExhausted => "effect_id_exhausted",
             Self::CoreRejected(_) => "color_node_plan_core_rejected",
@@ -1864,6 +2189,11 @@ impl ColorNodePlanError {
                 "field": "parameters",
                 "observed": name,
                 "allowed": color_node_parameter_documentation(effect),
+                "matte_parameters": if effect_carries_matte_parameters(effect) {
+                    json!(matte_parameter_legend())
+                } else {
+                    Value::Null
+                },
                 "recovery_action": format!("Send one of the documented {effect} control names."),
                 "parameter": name,
             }),
@@ -1962,6 +2292,105 @@ impl ColorNodePlanError {
                 "clip_id": clip.0,
                 "lut_asset_id": lut_asset.0,
             }),
+            Self::MatteTargetAmbiguous => json!({
+                "field": "target_effect_id",
+                "observed": "target_effect_id and node_kind",
+                "allowed": "exactly one of target_effect_id or node_kind",
+                "recovery_action": "Send target_effect_id to matte one exact stored node, or node_kind to matte the clip's node of that kind.",
+            }),
+            Self::MatteTargetRequired => json!({
+                "field": "target_effect_id",
+                "observed": Value::Null,
+                "allowed": "exactly one of target_effect_id or node_kind",
+                "recovery_action": "Call get_color_context for the clip's colour_nodes, then send target_effect_id, or send node_kind for a new node.",
+            }),
+            Self::MatteTargetNotFound { clip, effect } => json!({
+                "field": "target_effect_id",
+                "observed": effect.0,
+                "allowed": "an effect id on the requested clip",
+                "recovery_action": "Call get_color_context for the clip's current effect ids.",
+                "clip_id": clip.0,
+            }),
+            Self::MatteTargetNotAColorNode { effect, name } => json!({
+                "field": "target_effect_id",
+                "observed": {"effect_id": effect.0, "name": name},
+                "allowed": MATTE_CAPABLE_NODE_NAMES,
+                "recovery_action": "A matte belongs to a managed correction node; target one of the matte-capable kinds.",
+            }),
+            // CC5 §2.1: a technical input transform normalizes the *whole*
+            // source, so a partially applied one is not a meaningful state.
+            Self::MatteUnsupportedKind { observed } => json!({
+                "field": "node_kind",
+                "observed": observed,
+                "allowed": MATTE_CAPABLE_NODE_NAMES,
+                "recovery_action": "A technical input transform normalizes the whole source, so a partially applied one is not a meaningful state (CC5 §2.1). Matte a primary_correction, color_wheels, color_curves, or creative_look node instead.",
+            }),
+            Self::MatteUnknownKind { observed } => json!({
+                "field": "node_kind",
+                "observed": observed,
+                "allowed": MATTE_CAPABLE_NODE_NAMES,
+                "recovery_action": "Send one of the four matte-capable managed colour node names.",
+            }),
+            Self::MatteWindowCount { observed, max } => json!({
+                "field": "windows",
+                "observed": observed,
+                "allowed": {"max": max},
+                "recovery_action": format!("Send at most {max} windows; combine them with union or intersection (CC5 §2.3)."),
+            }),
+            Self::MatteTokenNotRecognized {
+                field,
+                observed,
+                allowed,
+            } => json!({
+                "field": field,
+                "observed": observed,
+                "allowed": allowed,
+                "recovery_action": format!("Send {field} as one of {}.", allowed.join(" or ")),
+            }),
+            Self::MatteWindowTokenNotRecognized {
+                index,
+                field,
+                observed,
+                allowed,
+            } => json!({
+                "field": format!("windows[{index}].{field}"),
+                "observed": observed,
+                "allowed": allowed,
+                "recovery_action": format!("Send windows[{index}].{field} as one of {}.", allowed.join(" or ")),
+            }),
+            // CC5 §5.1: a token accepts Hold keyframes only, and an existing
+            // Hold curve wins over a static write at every frame from its first
+            // keyframe onward — so this is a refusal, not a warning.
+            Self::MatteHoldOnlyParameterKeyframed { effect, name } => json!({
+                "field": name,
+                "observed": format!("effect {effect} keyframes {name}"),
+                "allowed": "a Hold-only matte token with no automation, so the static value renders",
+                "recovery_action": format!("Clear the automation on {name} with ClearEffectKeyframes, then resend; or send SetEffectKeyframes with Hold keyframes to animate the token deliberately (CC5 §5.1)."),
+                "effect_id": effect.0,
+                "hold_only": true,
+            }),
+            Self::MatteSampleRoiInvalid { field, observed } => json!({
+                "field": field,
+                "observed": observed,
+                "allowed": "finite normalized coordinates with x, y >= 0, width, height > 0, and x + width, y + height <= 1",
+                "recovery_action": "Send sample_roi as a normalized 0..=1 rectangle inside the frame.",
+            }),
+            Self::MatteSampleRoiEmpty { at, pixel_rect } => json!({
+                "field": "sample_roi",
+                "observed": {
+                    "project_frame": at.0,
+                    "pixel_rect": {"x": pixel_rect.0, "y": pixel_rect.1, "width": pixel_rect.2, "height": pixel_rect.3},
+                    "visible_pixel_count": 0,
+                },
+                "allowed": "a region containing at least one pixel whose alpha is non-zero",
+                "recovery_action": "Sample a region the clip actually covers at this frame; a fully transparent region carries no colour to measure (CC2's visible-pixel rule).",
+            }),
+            Self::MatteSampleRenderFailed { at, message } => json!({
+                "field": "sample_roi",
+                "observed": {"project_frame": at.0, "message": message},
+                "allowed": "a frame the managed monitor proof can render",
+                "recovery_action": "Check get_media_status for the clip's asset, then retry at a frame the clip covers.",
+            }),
             Self::MissingDescriptor(effect) => json!({
                 "field": "effect",
                 "observed": effect,
@@ -1989,9 +2418,8 @@ impl ColorNodePlanError {
 #[must_use]
 pub(crate) fn color_node_parameter_documentation(effect: &str) -> Vec<Value> {
     effect_descriptor(effect).map_or_else(Vec::new, |descriptor| {
-        descriptor
-            .parameters
-            .iter()
+        // CC5 §2.2: base controls only; the matte legend accompanies the list.
+        non_matte_parameters(descriptor)
             .map(|parameter| {
                 json!({
                     "name": parameter.name,
@@ -2009,9 +2437,7 @@ pub(crate) fn color_node_parameter_documentation(effect: &str) -> Vec<Value> {
 #[must_use]
 pub(crate) fn color_wheels_parameter_summary() -> String {
     effect_descriptor(ColorNodeKind::Wheels.effect_name()).map_or_else(String::new, |descriptor| {
-        descriptor
-            .parameters
-            .iter()
+        let controls = non_matte_parameters(descriptor)
             .map(|parameter| {
                 format!(
                     "{}={}..={}, neutral {}",
@@ -2019,7 +2445,8 @@ pub(crate) fn color_wheels_parameter_summary() -> String {
                 )
             })
             .collect::<Vec<_>>()
-            .join("; ")
+            .join("; ");
+        format!("{controls}; {}", matte_parameter_pointer())
     })
 }
 
@@ -2031,9 +2458,7 @@ pub(crate) fn color_wheels_parameter_summary() -> String {
 #[must_use]
 pub(crate) fn lut_node_parameter_summary(kind: ColorNodeKind) -> String {
     effect_descriptor(kind.effect_name()).map_or_else(String::new, |descriptor| {
-        let controls = descriptor
-            .parameters
-            .iter()
+        let controls = non_matte_parameters(descriptor)
             .map(|parameter| {
                 if parameter.name == LUT_ASSET_ID_PARAMETER {
                     "lut_asset_id (project LUT asset id; see list_look_assets)".to_owned()
@@ -2046,7 +2471,14 @@ pub(crate) fn lut_node_parameter_summary(kind: ColorNodeKind) -> String {
             })
             .collect::<Vec<_>>()
             .join("; ");
-        format!("{controls}; {}", input_encoding_legend())
+        let mut summary = format!("{controls}; {}", input_encoding_legend());
+        // CC5 §2.1: `technical_lut` carries no matte, so only `creative_look`
+        // gains the legend.
+        if effect_carries_matte_parameters(kind.effect_name()) {
+            summary.push_str("; ");
+            summary.push_str(&matte_parameter_pointer());
+        }
+        summary
     })
 }
 
@@ -2213,6 +2645,7 @@ pub(crate) fn plan_color_wheels(
     for (name, value) in &args.parameters {
         resolved_parameters.insert(name.clone(), *value);
     }
+    retain_requested_matte_parameters(&mut resolved_parameters, &args.parameters);
 
     let changed = args
         .parameters
@@ -2296,6 +2729,9 @@ pub(crate) fn plan_color_wheels(
         no_change,
         insert_index: None,
         lut_asset: None,
+        matte: None,
+        predicted_coverage: None,
+        sample_evidence: None,
     })
 }
 
@@ -2660,6 +3096,9 @@ pub(crate) fn plan_color_curves(
         no_change,
         insert_index: None,
         lut_asset: None,
+        matte: None,
+        predicted_coverage: None,
+        sample_evidence: None,
     })
 }
 
@@ -2813,6 +3252,14 @@ pub(crate) fn color_node_value(
             )
         }
     };
+    // CC5 §2.6 rule 2: a matte that resolves to `m = 0` everywhere makes the
+    // node the exact identity, which Core reports as `matte_excluded`. Reading
+    // the reason through Core keeps the manifest, the inspector, and the
+    // renderer describing one node the same way.
+    let inactive_reason = kinewright_core::color_node_inactive_reason(effect).or(inactive_reason);
+    if let Some(warning) = matte_band_warning(effect_index, effect) {
+        warnings.push(warning);
+    }
     let mut value = json!({
         // Position in `clip.effects`, which is the compositor evaluation order.
         "stage_index": effect_index,
@@ -2835,12 +3282,136 @@ pub(crate) fn color_node_value(
         "keyframes": effect.keyframes,
         "warnings": warnings,
     });
+    // CC5 §7: absent entirely when the node carries no matte, so every CC4
+    // manifest is byte-unchanged.
+    if let Some(matte) = matte_manifest_value(effect)
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert("matte".to_owned(), matte);
+    }
     if !lut_fields.is_empty()
         && let Some(object) = value.as_object_mut()
     {
         object.append(&mut lut_fields);
     }
     Some(value)
+}
+
+// ---------------------------------------------------------------------------
+// CC5 §7 — the compact `matte` manifest object
+// ---------------------------------------------------------------------------
+
+/// The stable `combine` token for one resolved matte (CC5 §2.3).
+#[must_use]
+pub(crate) const fn matte_combine_token_name(matte: &MatteParams) -> &'static str {
+    if matte.intersects() {
+        "intersection"
+    } else {
+        "union"
+    }
+}
+
+/// One resolved window as the compact integer object the manifest reports.
+fn matte_window_value(window: &MatteWindowParams) -> Value {
+    json!({
+        "shape_token": window.shape_token,
+        "shape": if window.is_ellipse() { "ellipse" } else { "rect" },
+        "center_x_basis_points": window.center_x_bp,
+        "center_y_basis_points": window.center_y_bp,
+        "half_width_basis_points": window.half_width_bp,
+        "half_height_basis_points": window.half_height_bp,
+        "rotation_centidegrees": window.rotation_cd,
+        "feather_basis_points": window.feather_bp,
+        "invert": window.invert,
+    })
+}
+
+/// The CC5 §7 `matte` object for one colour node, or `None` when the node
+/// carries no matte.
+///
+/// Absent — not `null`, not an all-neutral object — whenever
+/// [`MatteParams::has_matte`] is false, so a CC4-era manifest is byte-unchanged
+/// (CC5 §7, §8).  `windows` is truncated to `window_count`, because a stored
+/// window past the count is preserved but never rendered (CC5 §2.2), and
+/// publishing it would describe geometry that affects no pixel.
+#[must_use]
+pub(crate) fn matte_manifest_value(effect: &Effect) -> Option<Value> {
+    if !kinewright_core::is_matte_capable_color_node(&effect.name) {
+        return None;
+    }
+    let matte = MatteParams::from_effect(effect);
+    if !matte.has_matte() {
+        return None;
+    }
+    let excluded = matte.node_excluded_by_matte();
+    let degenerate = matte.degenerate_bands();
+    Some(json!({
+        "enabled": matte.is_enabled(),
+        // CC5 §2.6 rule 2: an inverted empty matte or a zero mix makes the
+        // whole node the exact identity.
+        "active": !excluded,
+        "inactive_reason": if excluded {
+            json!(ColorNodeInactiveReason::MatteExcluded.as_str())
+        } else {
+            Value::Null
+        },
+        "window_count": matte.window_count,
+        "combine": matte_combine_token_name(&matte),
+        "combine_token": matte.combine_token,
+        "invert": matte.invert,
+        "mix_basis_points": matte.mix_bp,
+        "qualifier": {
+            "enabled": matte.qualifier.is_enabled(),
+            "hue_leg_disabled": matte.qualifier.hue_leg_disabled(),
+            "hue_center_centidegrees": matte.qualifier.hue_center_cd,
+            "hue_width_centidegrees": matte.qualifier.hue_width_cd,
+            "hue_softness_centidegrees": matte.qualifier.hue_softness_cd,
+            "saturation_low_basis_points": matte.qualifier.sat_low_bp,
+            "saturation_high_basis_points": matte.qualifier.sat_high_bp,
+            "saturation_softness_basis_points": matte.qualifier.sat_softness_bp,
+            "luma_low_basis_points": matte.qualifier.luma_low_bp,
+            "luma_high_basis_points": matte.qualifier.luma_high_bp,
+            "luma_softness_basis_points": matte.qualifier.luma_softness_bp,
+        },
+        // CC5 §2.2: stored windows past the count render nothing.
+        "windows": matte
+            .active_windows()
+            .map(matte_window_value)
+            .collect::<Vec<_>>(),
+        // CC5 §2.6: a band whose low edge resolved above its high edge selects
+        // nothing.  Core QA reports the same fact as
+        // `matte_band_inverted_by_automation`; the manifest must agree.
+        "degenerate_bands": degenerate,
+    }))
+}
+
+/// The `matte_band_inverted_by_automation` manifest warning (CC5 §2.6).
+///
+/// Emitted next to Core QA's issue of the same code so an agent reading the
+/// colour manifest sees the inversion without a second `get_qa_report` call.
+fn matte_band_warning(effect_index: usize, effect: &Effect) -> Option<Value> {
+    let matte = MatteParams::from_effect(effect);
+    if !kinewright_core::is_matte_capable_color_node(&effect.name)
+        || !matte.has_matte()
+        || !matte.qualifier.is_enabled()
+    {
+        return None;
+    }
+    let bands = matte.degenerate_bands();
+    if bands.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "code": "matte_band_inverted_by_automation",
+        "effect_id": effect.id.0,
+        "stage_index": effect_index,
+        "bands": bands,
+        "message": format!(
+            "effect {} resolves a matte {} band whose low edge is above its high edge, so that band selects nothing and the matte is empty (CC5 §2.6)",
+            effect.id,
+            bands.join(", "),
+        ),
+    }))
 }
 
 /// The ordered managed colour-node stack of one effect chain (CC3 §8).
@@ -2858,11 +3429,14 @@ pub(crate) fn color_node_manifest(effects: &[Effect], looks: &LookAssetContext) 
 
 /// Every descriptor control resolved against the stored effect, falling back
 /// to the descriptor neutral for controls the effect does not carry.
+///
+/// CC5 §2.2/§7: the 47 `matte_*` controls are filtered out. This is an
+/// enumerating surface, so it obeys the module rule — the matte is described
+/// by the sibling `matte` manifest object, which CC5 §7 makes absent entirely
+/// when the node carries no matte, so every CC4 manifest stays byte-unchanged.
 fn resolved_descriptor_parameters(effect: &Effect, name: &str) -> BTreeMap<String, i64> {
     effect_descriptor(name).map_or_else(BTreeMap::new, |descriptor| {
-        descriptor
-            .parameters
-            .iter()
+        non_matte_parameters(descriptor)
             .map(|parameter| {
                 (
                     parameter.name.to_owned(),
@@ -3592,6 +4166,7 @@ fn plan_lut_node(
     for (name, value) in &requested_parameters {
         resolved_parameters.insert(name.clone(), *value);
     }
+    retain_requested_matte_parameters(&mut resolved_parameters, &requested_parameters);
 
     let changed = requested_parameters
         .iter()
@@ -3679,7 +4254,1043 @@ fn plan_lut_node(
         no_change,
         insert_index: Some(insert_index),
         lut_asset: Some(looks.asset_summary(asset)),
+        matte: None,
+        predicted_coverage: None,
+        sample_evidence: None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// CC5 §7 — `plan_secondary_correction`
+// ---------------------------------------------------------------------------
+
+/// One ergonomic geometric window in a `plan_secondary_correction` request.
+///
+/// Every field is optional and falls back to the descriptor neutral, so a
+/// caller who only wants "an ellipse over the face" sends four numbers rather
+/// than eight (CC5 §7).
+#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MatteWindowRequest {
+    /// `rect` or `ellipse`, or the raw `1`/`2` token.
+    #[serde(default)]
+    pub shape: Option<String>,
+    /// Centre X in basis points of the frame width.
+    #[serde(default, alias = "center_x_basis_points")]
+    pub center_x: Option<i64>,
+    /// Centre Y in basis points of the frame height.
+    #[serde(default, alias = "center_y_basis_points")]
+    pub center_y: Option<i64>,
+    #[serde(default, alias = "half_width_basis_points")]
+    pub half_width: Option<i64>,
+    #[serde(default, alias = "half_height_basis_points")]
+    pub half_height: Option<i64>,
+    #[serde(default, alias = "rotation_centidegrees")]
+    pub rotation: Option<i64>,
+    #[serde(default, alias = "feather_basis_points")]
+    pub feather: Option<i64>,
+    /// Complement this window only, before the combine.
+    #[serde(default)]
+    pub invert: Option<bool>,
+}
+
+/// The ergonomic HSL qualifier of a `plan_secondary_correction` request.
+#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MatteQualifierRequest {
+    /// Omit to enable the qualifier whenever any band is named.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default, alias = "hue_center_centidegrees")]
+    pub hue_center: Option<i64>,
+    #[serde(default, alias = "hue_width_centidegrees")]
+    pub hue_width: Option<i64>,
+    #[serde(default, alias = "hue_softness_centidegrees")]
+    pub hue_softness: Option<i64>,
+    #[serde(default, alias = "saturation_low_basis_points")]
+    pub saturation_low: Option<i64>,
+    #[serde(default, alias = "saturation_high_basis_points")]
+    pub saturation_high: Option<i64>,
+    #[serde(default, alias = "saturation_softness_basis_points")]
+    pub saturation_softness: Option<i64>,
+    #[serde(default, alias = "luma_low_basis_points")]
+    pub luma_low: Option<i64>,
+    #[serde(default, alias = "luma_high_basis_points")]
+    pub luma_high: Option<i64>,
+    #[serde(default, alias = "luma_softness_basis_points")]
+    pub luma_softness: Option<i64>,
+}
+
+/// Arguments for the evidence-only CC5 secondary planner (CC5 §7).
+#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct SecondaryCorrectionPlanArgs {
+    /// Exact timeline revision returned by the preceding inspection.
+    pub expected_revision: TimelineRevision,
+    /// Stable visual media clip id carrying the correction node.
+    pub clip_id: ClipId,
+    /// Attach the matte to this exact stored colour node. Mutually exclusive
+    /// with `node_kind`.
+    #[serde(default)]
+    pub target_effect_id: Option<EffectId>,
+    /// One of `primary_correction`, `color_wheels`, `color_curves`, or
+    /// `creative_look`. `technical_lut` carries no matte (CC5 §2.1).
+    #[serde(default)]
+    pub node_kind: Option<String>,
+    /// Stack a new node of `node_kind` instead of matting the clip's existing
+    /// one in place.
+    #[serde(default)]
+    pub append: bool,
+    /// Up to four geometric windows.
+    #[serde(default)]
+    pub windows: Option<Vec<MatteWindowRequest>>,
+    /// The HSL qualifier leg.
+    #[serde(default)]
+    pub qualifier: Option<MatteQualifierRequest>,
+    /// `union` (default) or `intersection`.
+    #[serde(default)]
+    pub combine: Option<String>,
+    /// Complement the combined coverage before the mix.
+    #[serde(default)]
+    pub invert: Option<bool>,
+    /// Scales the final coverage, `0..=10000`. `0` makes the node inactive.
+    #[serde(default)]
+    pub mix_basis_points: Option<i64>,
+    /// Exact project frame at which `predicted_coverage` and `sample_roi` are
+    /// measured. Defaults to the clip's midpoint.
+    #[serde(default, alias = "frame")]
+    pub timecode: Option<TimeCode>,
+    /// Measure the hue/saturation/luma statistics of this normalized region as
+    /// evidence.
+    #[serde(default)]
+    pub sample_roi: Option<MatteSampleRoi>,
+    /// Also propose a qualifier from `sample_roi` by CC5 §7's pinned formula.
+    /// Ignored without `sample_roi`.
+    #[serde(default)]
+    pub derive_qualifier_from_sample: bool,
+    /// Optional explicit D65 assumption for a complete BT.709 source whose raw
+    /// white point is unknown.
+    #[serde(default)]
+    pub profile_assumption: Option<ColorSourceProfileAssumption>,
+}
+
+/// A normalized `0..=1` sample region, in the CC2 ROI shape.
+#[derive(Debug, Clone, Copy, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MatteSampleRoi {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// CC5 §7's pinned qualifier-derivation constants.
+///
+/// Named rather than inlined so the fixture asserts the constant, not a
+/// literal, and so the formula in the response cannot drift from the code.
+pub(crate) const MATTE_SAMPLE_HUE_WIDTH_CENTIDEGREES: i64 = 1_500;
+/// See [`MATTE_SAMPLE_HUE_WIDTH_CENTIDEGREES`].
+pub(crate) const MATTE_SAMPLE_SOFTNESS: i64 = 1_000;
+/// The band margin CC5 §7 adds outside the sampled p10/p90 percentiles.
+pub(crate) const MATTE_SAMPLE_BAND_MARGIN_BASIS_POINTS: i64 = 1_000;
+
+/// The stable reason token published when the analysis backend cannot render a
+/// matte proof, so `predicted_coverage` is `null` rather than invented.
+pub(crate) const MATTE_PROOF_UNAVAILABLE: &str = "matte_proof_unavailable";
+
+/// The CC5 §5.2 tracking-boundary statement, and CC5 §7's evidence posture.
+pub(crate) const MATTE_PLAN_BOUNDARY: &str = "plan_secondary_correction is request-driven and evidence-only: it plans exactly the windows and qualifier bands it was given, and performs no subject, face, skin, or object detection, segmentation, or ML matting (CC5 §11). derive_qualifier_from_sample is a colour picker on an explicitly supplied region, evaluated by the pinned CC5 §7 formula.";
+
+/// Resolve the `combine` token, rejecting anything outside the vocabulary.
+fn matte_combine_token(combine: Option<&str>) -> Result<Option<i64>, ColorNodePlanError> {
+    match combine {
+        None => Ok(None),
+        Some("union") => Ok(Some(0)),
+        Some("intersection" | "intersect") => Ok(Some(1)),
+        Some(other) => Err(ColorNodePlanError::MatteTokenNotRecognized {
+            field: "combine",
+            observed: other.to_owned(),
+            allowed: &["union", "intersection"],
+        }),
+    }
+}
+
+/// Resolve a window `shape` token, accepting the words and the raw integers.
+fn matte_shape_token(shape: Option<&str>, index: usize) -> Result<Option<i64>, ColorNodePlanError> {
+    match shape {
+        None => Ok(None),
+        Some("rect" | "rectangle" | "1") => Ok(Some(1)),
+        Some("ellipse" | "2") => Ok(Some(2)),
+        Some(other) => Err(ColorNodePlanError::MatteWindowTokenNotRecognized {
+            index,
+            field: "shape",
+            observed: other.to_owned(),
+            allowed: &["rect", "ellipse"],
+        }),
+    }
+}
+
+/// Expand a validated request into the exact `matte_*` integers it names.
+///
+/// Only parameters the caller actually named are produced: an omitted control
+/// resolves to its descriptor neutral (CC5 §2.2), so writing the other 40
+/// would store values nobody asked for and would make a matte-free node
+/// textually different for no rendered effect.
+fn matte_request_parameters(
+    args: &SecondaryCorrectionPlanArgs,
+    derived_qualifier: Option<&BTreeMap<String, i64>>,
+) -> Result<BTreeMap<String, i64>, ColorNodePlanError> {
+    let mut parameters = BTreeMap::new();
+    // Any CC5 request is a request for a matte, so the master switch is always
+    // part of the proposal. Without it every other value would be stored and
+    // ignored, which is the one failure a 47-integer expansion must not have.
+    parameters.insert("matte_enabled".to_owned(), 1);
+
+    if let Some(windows) = &args.windows {
+        if windows.len() > MATTE_WINDOW_LIMIT {
+            return Err(ColorNodePlanError::MatteWindowCount {
+                observed: windows.len(),
+                max: MATTE_WINDOW_LIMIT,
+            });
+        }
+        parameters.insert(
+            "matte_window_count".to_owned(),
+            i64::try_from(windows.len()).unwrap_or(0),
+        );
+        for (index, window) in windows.iter().enumerate() {
+            let Some(names) = kinewright_core::matte_window_parameter_names(index) else {
+                return Err(ColorNodePlanError::MatteWindowCount {
+                    observed: windows.len(),
+                    max: MATTE_WINDOW_LIMIT,
+                });
+            };
+            let mut set = |suffix: &str, value: Option<i64>| {
+                if let Some(value) = value
+                    && let Some(name) = names.iter().find(|name| name.ends_with(suffix))
+                {
+                    parameters.insert((*name).to_owned(), value);
+                }
+            };
+            set(
+                "_shape_token",
+                matte_shape_token(window.shape.as_deref(), index)?,
+            );
+            set("_center_x_basis_points", window.center_x);
+            set("_center_y_basis_points", window.center_y);
+            set("_half_width_basis_points", window.half_width);
+            set("_half_height_basis_points", window.half_height);
+            set("_rotation_centidegrees", window.rotation);
+            set("_feather_basis_points", window.feather);
+            set("_invert", window.invert.map(i64::from));
+        }
+    }
+
+    if let Some(token) = matte_combine_token(args.combine.as_deref())? {
+        parameters.insert("matte_combine_token".to_owned(), token);
+    }
+    if let Some(invert) = args.invert {
+        parameters.insert("matte_invert".to_owned(), i64::from(invert));
+    }
+    if let Some(mix) = args.mix_basis_points {
+        parameters.insert("matte_mix_basis_points".to_owned(), mix);
+    }
+
+    if let Some(qualifier) = &args.qualifier {
+        let mut named = BTreeMap::new();
+        let mut set = |name: &str, value: Option<i64>| {
+            if let Some(value) = value {
+                named.insert(name.to_owned(), value);
+            }
+        };
+        set("matte_hue_center_centidegrees", qualifier.hue_center);
+        set("matte_hue_width_centidegrees", qualifier.hue_width);
+        set("matte_hue_softness_centidegrees", qualifier.hue_softness);
+        set(
+            "matte_saturation_low_basis_points",
+            qualifier.saturation_low,
+        );
+        set(
+            "matte_saturation_high_basis_points",
+            qualifier.saturation_high,
+        );
+        set(
+            "matte_saturation_softness_basis_points",
+            qualifier.saturation_softness,
+        );
+        set("matte_luma_low_basis_points", qualifier.luma_low);
+        set("matte_luma_high_basis_points", qualifier.luma_high);
+        set("matte_luma_softness_basis_points", qualifier.luma_softness);
+        // An explicit `enabled` always wins; otherwise naming any band — here
+        // or by asking for one to be derived from a sample — is the request to
+        // enable the leg, because a band nobody evaluates is not a state a
+        // caller can have meant.
+        let enabled = qualifier
+            .enabled
+            .unwrap_or(!named.is_empty() || derived_qualifier.is_some());
+        parameters.insert("matte_qualifier_enabled".to_owned(), i64::from(enabled));
+        parameters.extend(named);
+    }
+
+    if let Some(derived) = derived_qualifier {
+        // Same rule as the bands below: an explicit `qualifier.enabled: false`
+        // is a request, and a derived sample is only evidence, so the derived
+        // enable never overrides it. Absent an explicit qualifier there is
+        // nothing to beat and the derived leg turns itself on.
+        parameters
+            .entry("matte_qualifier_enabled".to_owned())
+            .or_insert(1);
+        for (name, value) in derived {
+            // An explicit qualifier field always beats a derived one: the
+            // caller's number is a request, the sample is only evidence.
+            parameters.entry(name.clone()).or_insert(*value);
+        }
+    }
+
+    Ok(parameters)
+}
+
+/// Validate and construct an unapplied CC5 secondary proposal (CC5 §7).
+///
+/// Nothing is sent to Core: every operation is proved valid against a clone of
+/// the analyzed document and returned for the caller to submit through
+/// `prepare_edit_plan`.  `predicted_coverage` is measured on a second scratch
+/// clone, so neither the live document nor the analyzed snapshot is touched.
+///
+/// # Errors
+///
+/// Returns the first CC5 §7 rejection: a stale revision, an unusable clip, an
+/// ambiguous or absent target, a `technical_lut` target, more than four
+/// windows, an out-of-range control, or a Hold-only matte token the target
+/// node already keyframes.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn plan_secondary_correction(
+    document: &Document,
+    actual_revision: TimelineRevision,
+    analysis: &dyn kinewright_core::Analysis,
+    args: &SecondaryCorrectionPlanArgs,
+) -> Result<ColorNodePlan, ColorNodePlanError> {
+    if args.expected_revision != actual_revision {
+        return Err(ColorNodePlanError::RevisionConflict {
+            expected: args.expected_revision,
+            actual: actual_revision,
+        });
+    }
+    let (clip, source_profile, profile_assumption) =
+        managed_color_clip(document, args.clip_id, args.profile_assumption)?;
+
+    // ------------------------------------------------------------------
+    // Target resolution, before any operation exists.
+    // ------------------------------------------------------------------
+    if args.target_effect_id.is_some() && args.node_kind.is_some() {
+        return Err(ColorNodePlanError::MatteTargetAmbiguous);
+    }
+    let (kind, target_effect) = match (args.target_effect_id, args.node_kind.as_deref()) {
+        (Some(effect_id), _) => {
+            let Some(effect) = clip.effects.iter().find(|effect| effect.id == effect_id) else {
+                return Err(ColorNodePlanError::MatteTargetNotFound {
+                    clip: args.clip_id,
+                    effect: effect_id,
+                });
+            };
+            let Some(kind) = classify_color_node(effect) else {
+                return Err(ColorNodePlanError::MatteTargetNotAColorNode {
+                    effect: effect_id,
+                    name: effect.name.clone(),
+                });
+            };
+            if !kind.supports_matte() {
+                return Err(ColorNodePlanError::MatteUnsupportedKind {
+                    observed: kind.effect_name(),
+                });
+            }
+            (kind, Some(effect))
+        }
+        (None, Some(name)) => {
+            let Some(kind) = ColorNodeKind::from_effect_name(name) else {
+                return Err(ColorNodePlanError::MatteUnknownKind {
+                    observed: name.to_owned(),
+                });
+            };
+            if !kind.supports_matte() {
+                return Err(ColorNodePlanError::MatteUnsupportedKind {
+                    observed: kind.effect_name(),
+                });
+            }
+            let existing = if args.append {
+                None
+            } else {
+                existing_color_node(document, args.clip_id, kind).map(|node| node.effect)
+            };
+            (kind, existing)
+        }
+        (None, None) => return Err(ColorNodePlanError::MatteTargetRequired),
+    };
+    let effect_name = kind.effect_name();
+    let Some(descriptor) = effect_descriptor(effect_name) else {
+        return Err(ColorNodePlanError::MissingDescriptor(effect_name));
+    };
+
+    // ------------------------------------------------------------------
+    // Evidence: the sample ROI, and the qualifier it may derive.
+    // ------------------------------------------------------------------
+    let measured_at = match args.timecode {
+        Some(frame) => frame,
+        None => matte_plan_default_frame(document, clip)?,
+    };
+    let sample = match &args.sample_roi {
+        None => None,
+        Some(roi) => Some(measure_matte_sample_roi(
+            document,
+            analysis,
+            measured_at,
+            *roi,
+        )?),
+    };
+    let derived_qualifier = match (&sample, args.derive_qualifier_from_sample) {
+        (Some(sample), true) => Some(sample.derived_qualifier()),
+        _ => None,
+    };
+
+    // ------------------------------------------------------------------
+    // Expand and validate every requested integer against the descriptor.
+    // ------------------------------------------------------------------
+    let requested_parameters = matte_request_parameters(args, derived_qualifier.as_ref())?;
+    for (name, value) in &requested_parameters {
+        let Some(parameter) = descriptor.parameter(name) else {
+            return Err(ColorNodePlanError::UnknownParameter {
+                effect: effect_name,
+                name: name.clone(),
+            });
+        };
+        if !(parameter.min..=parameter.max).contains(value) {
+            return Err(ColorNodePlanError::ParameterOutOfRange {
+                effect: effect_name,
+                name: name.clone(),
+                value: *value,
+                min: parameter.min,
+                max: parameter.max,
+            });
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Operations. Nothing above this line constructed one.
+    // ------------------------------------------------------------------
+    let existing_color_node_count = managed_color_node_count(&clip.effects);
+    let existing_nodes_of_kind = clip
+        .effects
+        .iter()
+        .filter(|effect| classify_color_node(effect) == Some(kind))
+        .count();
+
+    let mut warnings = Vec::new();
+    let mut assumptions = vec![
+        "Omitted matte controls resolve to their descriptor neutrals; a node whose matte is not enabled is byte-identical to its CC4 self (CC5 §2.6, §8).".to_owned(),
+        MATTE_PLAN_BOUNDARY.to_owned(),
+    ];
+    if args.append && existing_nodes_of_kind > 0 {
+        assumptions.push(format!(
+            "append=true stacks a new {effect_name} node after the clip's existing {existing_nodes_of_kind}; ordered nodes compose serially and are not merged (CC3 §3.1)."
+        ));
+    }
+    if target_effect.is_some_and(|effect| MatteParams::from_effect(effect).has_matte()) {
+        assumptions.push(
+            "The targeted node already carries a matte; omitted controls keep their stored values rather than resetting to neutral (CC5 §2.2)."
+                .to_owned(),
+        );
+    }
+    for name in keyframed_parameters(
+        target_effect,
+        &requested_parameters
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    ) {
+        warnings.push(format!(
+            "clip {} node {} keyframes {name}; this proposal writes the static value, which automation overrides at render time",
+            args.clip_id,
+            target_effect.map_or(0, |effect| effect.id.0)
+        ));
+    }
+
+    let current = descriptor
+        .parameters
+        .iter()
+        .map(|parameter| {
+            (
+                parameter.name.to_owned(),
+                stored_parameter(target_effect, parameter.name, parameter.neutral),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut resolved_parameters = current.clone();
+    for (name, value) in &requested_parameters {
+        resolved_parameters.insert(name.clone(), *value);
+    }
+    retain_requested_matte_parameters(&mut resolved_parameters, &requested_parameters);
+
+    let changed = requested_parameters
+        .iter()
+        .filter(|(name, value)| current.get(*name) != Some(*value))
+        .map(|(name, value)| (name.clone(), *value))
+        .collect::<Vec<_>>();
+
+    // CC5 §5.1: a Hold-only token that already carries automation is written by
+    // that automation at every frame from its first keyframe onward, so a
+    // static write is guaranteed dead. Every other planner warns about a
+    // keyframed control and writes the static value anyway; here that would be
+    // a lie, so the plan refuses and names the recovery.
+    //
+    // Every requested token is checked, not only the ones in `changed`: the
+    // plan's manifest and `predicted_coverage` both describe the requested
+    // value, and a Hold curve that disagrees with it renders something else
+    // even when the stored static already matches (so nothing is written).
+    // Every CC5 request injects `matte_enabled: 1`, so a curve that already
+    // holds exactly the requested value at every keyframe is accepted — it
+    // renders exactly what the plan claims — which keeps a node with a
+    // `matte_enabled` Hold curve plannable (window slides and the like).
+    for (name, value) in &requested_parameters {
+        if !kinewright_core::is_hold_only_matte_parameter(name) {
+            continue;
+        }
+        let overridden = target_effect.is_some_and(|effect| {
+            effect.keyframes.get(name).is_some_and(|curve| {
+                curve
+                    .keyframes
+                    .iter()
+                    .any(|keyframe| keyframe.value != *value)
+            })
+        });
+        if overridden {
+            return Err(ColorNodePlanError::MatteHoldOnlyParameterKeyframed {
+                effect: target_effect.map_or(EffectId(0), |effect| effect.id),
+                name: name.clone(),
+            });
+        }
+    }
+
+    let mut insert_index = None;
+    let (effect_id, created_new_node, operations) = if let Some(effect) = target_effect {
+        let operations = changed
+            .iter()
+            .map(|(name, value)| Operation::SetEffectParam {
+                clip: args.clip_id,
+                effect: effect.id,
+                name: name.clone(),
+                value: ParamValue::Integer(*value),
+            })
+            .collect::<Vec<_>>();
+        (effect.id, false, operations)
+    } else {
+        let effect_id = next_effect_id(document).ok_or(ColorNodePlanError::EffectIdExhausted)?;
+        // CC5 §2.2: a fresh node stores only the values the caller moved off
+        // their neutrals, exactly as CC3 §2.4 stores only the curve points that
+        // exist.
+        let parameters = changed
+            .iter()
+            .filter(|(name, value)| {
+                descriptor
+                    .parameter(name)
+                    .is_none_or(|parameter| parameter.neutral != *value)
+            })
+            .map(|(name, value)| (name.clone(), ParamValue::Integer(*value)))
+            .collect::<BTreeMap<_, _>>();
+        let operations = if parameters.is_empty() {
+            Vec::new()
+        } else {
+            if existing_color_node_count >= COLOR_NODE_LIMIT_PER_LAYER {
+                return Err(ColorNodePlanError::TooManyColorNodes {
+                    clip: args.clip_id,
+                    actual: existing_color_node_count + 1,
+                    limit: COLOR_NODE_LIMIT_PER_LAYER,
+                });
+            }
+            // CC4 §3.2: a new node is inserted at the first stage-legal index,
+            // never appended, so an ordering rejection is unreachable through
+            // the ordinary path.
+            let index = stage_insert_index(&clip.effects, kind);
+            insert_index = Some(index);
+            vec![Operation::InsertEffect {
+                clip: args.clip_id,
+                index,
+                effect: Effect {
+                    id: effect_id,
+                    name: effect_name.to_owned(),
+                    parameters,
+                    keyframes: BTreeMap::new(),
+                },
+            }]
+        };
+        let created = !operations.is_empty();
+        (effect_id, created, operations)
+    };
+
+    let no_change = operations.is_empty();
+    let mut candidate = document.clone();
+    if !operations.is_empty() {
+        apply_batch(&mut candidate, &operations)
+            .map_err(|error| ColorNodePlanError::CoreRejected(error.to_string()))?;
+    }
+
+    // The proposal's own matte, read back off the scratch document rather than
+    // recomputed, so `matte` and `predicted_coverage` describe the same node.
+    let planned_effect = candidate
+        .clip(args.clip_id)
+        .and_then(|clip| clip.effects.iter().find(|effect| effect.id == effect_id))
+        .cloned();
+    let matte = planned_effect
+        .as_ref()
+        .and_then(matte_manifest_value)
+        .or(Some(Value::Null));
+    let predicted_coverage = Some(predicted_matte_coverage(
+        &candidate,
+        analysis,
+        measured_at,
+        args.clip_id,
+        effect_id,
+        no_change,
+    ));
+
+    Ok(ColorNodePlan {
+        kind,
+        expected_revision: args.expected_revision,
+        clip_id: args.clip_id,
+        effect_id,
+        created_new_node,
+        targets_existing_node: target_effect.is_some(),
+        source_profile,
+        profile_assumption,
+        requested_parameters,
+        resolved_parameters,
+        requested_curves: BTreeMap::new(),
+        resolved_curves: BTreeMap::new(),
+        operations,
+        existing_color_node_count,
+        existing_nodes_of_kind,
+        warnings,
+        assumptions,
+        no_change,
+        insert_index,
+        lut_asset: None,
+        matte,
+        predicted_coverage,
+        sample_evidence: sample.map(|sample| sample.value(measured_at, args)),
+    })
+}
+
+/// The frame a secondary proposal measures when the caller names none.
+fn matte_plan_default_frame(
+    document: &Document,
+    clip: &Clip,
+) -> Result<TimeCode, ColorNodePlanError> {
+    let duration = document
+        .clip_duration(clip)
+        .map_err(|error| ColorNodePlanError::CoreRejected(error.to_string()))?;
+    let midpoint = clip
+        .timeline_start
+        .0
+        .saturating_add(duration.0.max(1) / 2)
+        .max(0);
+    Ok(TimeCode(midpoint))
+}
+
+/// The CC5 §4.2 statistics of a proposal, measured on a scratch document.
+///
+/// Never invents a number: when the analysis backend cannot render a matte
+/// proof — which is the ordinary state until the media engine lands
+/// `matte_proof_for_document` — the value is `null` with the stable reason
+/// [`MATTE_PROOF_UNAVAILABLE`] and the backend's own message.
+fn predicted_matte_coverage(
+    candidate: &Document,
+    analysis: &dyn kinewright_core::Analysis,
+    at: TimeCode,
+    clip: ClipId,
+    effect: EffectId,
+    no_change: bool,
+) -> Value {
+    let unavailable = |reason: &str, detail: String| {
+        json!({
+            "statistics": Value::Null,
+            "reason": reason,
+            "message": detail,
+            "project_frame": at.0,
+            "recovery_action": "Commit the plan and call inspect_grade_matte, or retry once the analysis backend can render a matte proof; no coverage number is invented here.",
+        })
+    };
+    if no_change {
+        return unavailable(
+            "matte_plan_changes_nothing",
+            "the proposal writes no operation, so there is no proposed coverage to measure"
+                .to_owned(),
+        );
+    }
+    match analysis.matte_proof_for_document(Arc::new(candidate.clone()), at, clip, effect) {
+        Err(error) => unavailable(MATTE_PROOF_UNAVAILABLE, error.to_string()),
+        Ok(proof) => match kinewright_core::matte_coverage_statistics(&proof.coverage) {
+            Err(error) => unavailable(error.code(), error.to_string()),
+            Ok(statistics) => json!({
+                "statistics": statistics,
+                "reason": Value::Null,
+                "project_frame": at.0,
+                "raster": {"width": proof.coverage.width, "height": proof.coverage.height},
+                "matte_threshold": kinewright_core::MATTE_SCOPE_THRESHOLD,
+                "covered_pixel_count": statistics.covered_pixel_count,
+                "coverage_encoding": proof.metadata.coverage_encoding,
+                "coverage_scale": proof.metadata.coverage_scale,
+                "measured_on": "scratch document carrying the unapplied proposal; the analyzed document is untouched",
+            }),
+        },
+    }
+}
+
+/// Measured hue/saturation/luma statistics of one explicit sample region.
+///
+/// CC5 §7 calls this a colour picker on an explicitly supplied region, not
+/// detection: it looks exactly where it was told, and the arithmetic below is
+/// the document's.
+#[derive(Debug, Clone)]
+struct MatteSampleStatistics {
+    /// Pixels inside the region whose alpha is non-zero (CC2's visible rule).
+    visible_pixel_count: u64,
+    total_pixel_count: u64,
+    /// Median hue in hundredths of a degree over chromatic visible pixels.
+    hue_median_centidegrees: Option<i64>,
+    /// Visible pixels whose chroma is exactly zero, so their hue is undefined.
+    achromatic_pixel_count: u64,
+    saturation_p10_basis_points: i64,
+    saturation_median_basis_points: i64,
+    saturation_p90_basis_points: i64,
+    luma_p10_basis_points: i64,
+    luma_median_basis_points: i64,
+    luma_p90_basis_points: i64,
+    /// The pixel rectangle actually measured, after the CC2 ROI floor/ceil.
+    pixel_rect: (u32, u32, u32, u32),
+}
+
+impl MatteSampleStatistics {
+    /// CC5 §7's pinned derivation, and no other.
+    fn derived_qualifier(&self) -> BTreeMap<String, i64> {
+        let mut qualifier = BTreeMap::from([
+            (
+                "matte_saturation_low_basis_points".to_owned(),
+                (self.saturation_p10_basis_points - MATTE_SAMPLE_BAND_MARGIN_BASIS_POINTS).max(0),
+            ),
+            (
+                "matte_saturation_high_basis_points".to_owned(),
+                (self.saturation_p90_basis_points + MATTE_SAMPLE_BAND_MARGIN_BASIS_POINTS)
+                    .min(MATTE_MIX_BASIS_POINTS_MAX),
+            ),
+            (
+                "matte_saturation_softness_basis_points".to_owned(),
+                MATTE_SAMPLE_SOFTNESS,
+            ),
+            (
+                "matte_luma_low_basis_points".to_owned(),
+                (self.luma_p10_basis_points - MATTE_SAMPLE_BAND_MARGIN_BASIS_POINTS).max(0),
+            ),
+            (
+                "matte_luma_high_basis_points".to_owned(),
+                (self.luma_p90_basis_points + MATTE_SAMPLE_BAND_MARGIN_BASIS_POINTS)
+                    .min(MATTE_MIX_BASIS_POINTS_MAX),
+            ),
+            (
+                "matte_luma_softness_basis_points".to_owned(),
+                MATTE_SAMPLE_SOFTNESS,
+            ),
+        ]);
+        // CC5 §2.4: with no chromatic pixel the hue is undefined, so the hue
+        // leg stays at its 180° neutral, which disables it rather than
+        // selecting an arbitrary sector.
+        if let Some(hue) = self.hue_median_centidegrees {
+            qualifier.insert("matte_hue_center_centidegrees".to_owned(), hue);
+            qualifier.insert(
+                "matte_hue_width_centidegrees".to_owned(),
+                MATTE_SAMPLE_HUE_WIDTH_CENTIDEGREES,
+            );
+            qualifier.insert(
+                "matte_hue_softness_centidegrees".to_owned(),
+                MATTE_SAMPLE_SOFTNESS,
+            );
+        }
+        qualifier
+    }
+
+    fn value(&self, at: TimeCode, args: &SecondaryCorrectionPlanArgs) -> Value {
+        let (x, y, width, height) = self.pixel_rect;
+        json!({
+            "project_frame": at.0,
+            "requested_roi": args.sample_roi.map(|roi| json!({
+                "x": roi.x, "y": roi.y, "width": roi.width, "height": roi.height,
+            })),
+            "measured_pixel_rect": {"x": x, "y": y, "width": width, "height": height},
+            "visible_pixel_count": self.visible_pixel_count,
+            "total_pixel_count": self.total_pixel_count,
+            "achromatic_pixel_count": self.achromatic_pixel_count,
+            "hue_median_centidegrees": self.hue_median_centidegrees,
+            "saturation_basis_points": {
+                "p10": self.saturation_p10_basis_points,
+                "median": self.saturation_median_basis_points,
+                "p90": self.saturation_p90_basis_points,
+            },
+            "luma_basis_points": {
+                "p10": self.luma_p10_basis_points,
+                "median": self.luma_median_basis_points,
+                "p90": self.luma_p90_basis_points,
+            },
+            "derive_qualifier_from_sample": args.derive_qualifier_from_sample,
+            "derived_qualifier": if args.derive_qualifier_from_sample {
+                json!(self.derived_qualifier())
+            } else {
+                Value::Null
+            },
+            "formula": format!(
+                "CC5 §7, pinned: hue_center = median hue of chromatic visible ROI pixels, hue_width = {MATTE_SAMPLE_HUE_WIDTH_CENTIDEGREES}, hue_softness = {MATTE_SAMPLE_SOFTNESS}, sat_low = max(0, p10 - {MATTE_SAMPLE_BAND_MARGIN_BASIS_POINTS}), sat_high = min({MATTE_MIX_BASIS_POINTS_MAX}, p90 + {MATTE_SAMPLE_BAND_MARGIN_BASIS_POINTS}), sat_softness = {MATTE_SAMPLE_SOFTNESS}, luma likewise",
+            ),
+            "measurement_basis": "the managed monitor proof at this frame, decoded through display709 and re-encoded to the CC5 §2.4 grade709 selector space. The qualifier renders on the value entering the node, so a sample taken on the monitored composite is evidence, not a prediction.",
+            "evidence_only": true,
+        })
+    }
+}
+
+/// Measure one explicit normalized region of the managed monitor proof.
+#[allow(clippy::too_many_lines)]
+fn measure_matte_sample_roi(
+    document: &Document,
+    analysis: &dyn kinewright_core::Analysis,
+    at: TimeCode,
+    roi: MatteSampleRoi,
+) -> Result<MatteSampleStatistics, ColorNodePlanError> {
+    for (field, value) in [
+        ("sample_roi.x", roi.x),
+        ("sample_roi.y", roi.y),
+        ("sample_roi.width", roi.width),
+        ("sample_roi.height", roi.height),
+    ] {
+        if !value.is_finite() {
+            return Err(ColorNodePlanError::MatteSampleRoiInvalid {
+                field,
+                observed: format!("{value}"),
+            });
+        }
+    }
+    if roi.width <= 0.0
+        || roi.height <= 0.0
+        || roi.x < 0.0
+        || roi.y < 0.0
+        || roi.x + roi.width > 1.0
+        || roi.y + roi.height > 1.0
+    {
+        return Err(ColorNodePlanError::MatteSampleRoiInvalid {
+            field: "sample_roi",
+            observed: format!(
+                "x={} y={} width={} height={}",
+                roi.x, roi.y, roi.width, roi.height
+            ),
+        });
+    }
+    let proof = analysis
+        .monitor_proof_for_document(Arc::new(document.clone()), at)
+        .map_err(|error| ColorNodePlanError::MatteSampleRenderFailed {
+            at,
+            message: error.to_string(),
+        })?;
+    let image = &proof.image;
+    if image.width == 0 || image.height == 0 {
+        return Err(ColorNodePlanError::MatteSampleRenderFailed {
+            at,
+            message: format!("monitor proof raster is {}x{}", image.width, image.height),
+        });
+    }
+    // CC2's ROI rule: a start boundary floors and an exclusive end ceils, so
+    // the measured rectangle covers every pixel the caller named.
+    let scale = |value: f64, extent: u32| (value * f64::from(extent)).max(0.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let left = (scale(roi.x, image.width).floor() as u32).min(image.width.saturating_sub(1));
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let top = (scale(roi.y, image.height).floor() as u32).min(image.height.saturating_sub(1));
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let right = (scale(roi.x + roi.width, image.width).ceil() as u32)
+        .clamp(left.saturating_add(1), image.width);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let bottom = (scale(roi.y + roi.height, image.height).ceil() as u32)
+        .clamp(top.saturating_add(1), image.height);
+
+    let mut hues = Vec::new();
+    let mut saturations = Vec::new();
+    let mut lumas = Vec::new();
+    let mut total_pixel_count = 0_u64;
+    let mut achromatic_pixel_count = 0_u64;
+    for y in top..bottom {
+        for x in left..right {
+            total_pixel_count = total_pixel_count.saturating_add(1);
+            let index = ((u64::from(y) * u64::from(image.width)) + u64::from(x)).saturating_mul(4);
+            let Ok(index) = usize::try_from(index) else {
+                continue;
+            };
+            let Some(pixel) = image.pixels.get(index..index.saturating_add(4)) else {
+                continue;
+            };
+            // CC2's rule: a fully transparent pixel is not part of the
+            // population, and partial alpha is never a weight.
+            if pixel[3] == 0 {
+                continue;
+            }
+            let encoded = [0, 1, 2].map(|channel| {
+                let display = f32::from(pixel[channel]) / 255.0;
+                kinewright_media::color_pipeline::grade709_encode(
+                    kinewright_media::color_pipeline::decode_display709(display),
+                )
+                .clamp(0.0, 1.0)
+            });
+            let maximum = encoded[0].max(encoded[1]).max(encoded[2]);
+            let minimum = encoded[0].min(encoded[1]).min(encoded[2]);
+            let chroma = maximum - minimum;
+            let saturation = if maximum <= 0.0 {
+                0.0
+            } else {
+                chroma / maximum
+            };
+            let luma = 0.2126 * encoded[0] + 0.7152 * encoded[1] + 0.0722 * encoded[2];
+            saturations.push(basis_points_from_unit(saturation));
+            lumas.push(basis_points_from_unit(luma));
+            if chroma <= 0.0 {
+                achromatic_pixel_count = achromatic_pixel_count.saturating_add(1);
+            } else {
+                // CC5 §2.4's branch order, written out so the sample and the
+                // renderer agree on a tie. The comparisons are exact on
+                // purpose: `maximum` *is* one of the three encoded values, by
+                // construction, and CC5 §2.4 pins "the first matching branch in
+                // that written order" so both implementations resolve a tie the
+                // same way. An epsilon here would change which branch a tie
+                // takes and make the agent disagree with the renderer.
+                #[allow(clippy::float_cmp)]
+                let degrees = if maximum == encoded[0] {
+                    60.0 * (((encoded[1] - encoded[2]) / chroma).rem_euclid(6.0))
+                } else if maximum == encoded[1] {
+                    60.0 * (((encoded[2] - encoded[0]) / chroma) + 2.0)
+                } else {
+                    60.0 * (((encoded[0] - encoded[1]) / chroma) + 4.0)
+                };
+                #[allow(clippy::cast_possible_truncation)]
+                let centidegrees = (f64::from(degrees) * 100.0).round() as i64;
+                hues.push(centidegrees.rem_euclid(36_000));
+            }
+        }
+    }
+
+    let visible_pixel_count = u64::try_from(saturations.len()).unwrap_or(0);
+    if visible_pixel_count == 0 {
+        return Err(ColorNodePlanError::MatteSampleRoiEmpty {
+            at,
+            pixel_rect: (left, top, right - left, bottom - top),
+        });
+    }
+    saturations.sort_unstable();
+    lumas.sort_unstable();
+    Ok(MatteSampleStatistics {
+        visible_pixel_count,
+        total_pixel_count,
+        hue_median_centidegrees: circular_median_centidegrees(&mut hues),
+        achromatic_pixel_count,
+        saturation_p10_basis_points: percentile(&saturations, 10),
+        saturation_median_basis_points: percentile(&saturations, 50),
+        saturation_p90_basis_points: percentile(&saturations, 90),
+        luma_p10_basis_points: percentile(&lumas, 10),
+        luma_median_basis_points: percentile(&lumas, 50),
+        luma_p90_basis_points: percentile(&lumas, 90),
+        pixel_rect: (left, top, right - left, bottom - top),
+    })
+}
+
+/// `round(value · 10000)` clamped into the qualifier's basis-point range.
+fn basis_points_from_unit(value: f32) -> i64 {
+    #[allow(clippy::cast_possible_truncation)]
+    let rounded = (f64::from(value.clamp(0.0, 1.0)) * 10_000.0).round() as i64;
+    rounded.clamp(0, MATTE_MIX_BASIS_POINTS_MAX)
+}
+
+/// The nearest-rank percentile of an ascending slice, `0..=100`.
+///
+/// Nearest-rank rather than an interpolated percentile: every input is already
+/// an integer basis point, and interpolation would invent a value that no
+/// measured pixel carries.
+fn percentile(sorted: &[i64], percent: u64) -> i64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let last = sorted.len().saturating_sub(1);
+    let rank = u64::try_from(last).unwrap_or(0).saturating_mul(percent) / 100;
+    sorted[usize::try_from(rank).unwrap_or(last).min(last)]
+}
+
+/// The median hue on the circle, in hundredths of a degree.
+///
+/// A plain median of `0..=35999` is wrong at the red seam — `35900` and `100`
+/// are 2° apart but their arithmetic median is 18000, the opposite hue. This
+/// returns the sample minimising the summed circular distance to every other
+/// sample, which is a true circular median and needs no seam special case.
+///
+/// The minimiser is always one of the samples, so only the samples are scored.
+/// Scoring each candidate against every other is O(n²) and this runs over
+/// every chromatic pixel of a full-resolution ROI, so the sum is evaluated in
+/// closed form instead: sort once, concatenate the sorted samples with
+/// themselves shifted by one full turn so a window that crosses the seam stays
+/// contiguous, take prefix sums, and sweep the `±18000` half-turn boundary
+/// with a monotone pointer. For a candidate `c` the samples inside
+/// `[c, c + 18000]` contribute `sum(h) − c·k` and the rest — which are nearer
+/// the other way round the circle — contribute `(c + 36000)·k' − sum(h)`, both
+/// read off the prefix sums in O(1). Sorting dominates, so the whole function
+/// is O(n log n) and allocates one `2n + 1` prefix vector.
+///
+/// Ties keep the smallest sample, matching the ascending scan this replaced.
+fn circular_median_centidegrees(hues: &mut [i64]) -> Option<i64> {
+    if hues.is_empty() {
+        return None;
+    }
+    hues.sort_unstable();
+    let count = hues.len();
+    // Prefix sums over `hues ++ (hues + 36000)`. A hue is at most 35999 and a
+    // chromatic ROI has at most a few hundred million pixels, so the running
+    // total cannot approach `i64::MAX`.
+    let mut prefix = Vec::with_capacity(2 * count + 1);
+    let mut total = 0_i64;
+    prefix.push(total);
+    for value in hues
+        .iter()
+        .copied()
+        .chain(hues.iter().map(|hue| hue + 36_000))
+    {
+        total += value;
+        prefix.push(total);
+    }
+    let doubled = |index: usize| -> i64 {
+        if index < count {
+            hues[index]
+        } else {
+            hues[index - count] + 36_000
+        }
+    };
+    let as_i64 = |value: usize| i64::try_from(value).unwrap_or(i64::MAX);
+
+    // The first index past the half-turn boundary. Both the boundary and the
+    // window start advance with the candidate, so this never moves backwards
+    // and the sweep is linear.
+    let mut boundary = 0_usize;
+    let mut best = (i64::MAX, hues[0]);
+    for (index, candidate) in hues.iter().copied().enumerate() {
+        boundary = boundary.max(index);
+        while boundary < index + count && doubled(boundary) <= candidate + 18_000 {
+            boundary += 1;
+        }
+        let near = as_i64(boundary - index);
+        let far = as_i64(index + count - boundary);
+        let forward = (prefix[boundary] - prefix[index]) - candidate * near;
+        let backward = (candidate + 36_000) * far - (prefix[index + count] - prefix[boundary]);
+        let cost = forward + backward;
+        if cost < best.0 {
+            best = (cost, candidate);
+        }
+    }
+    Some(best.1)
 }
 
 // ---------------------------------------------------------------------------
@@ -6107,5 +7718,1383 @@ mod tests {
         let lut_asset = plan.lut_asset.expect("the plan names its asset");
         assert_eq!(lut_asset["availability"]["kind"], "missing");
         assert!(lut_asset["recovery_action"].is_string());
+    }
+
+    // -----------------------------------------------------------------------
+    // CC5 §7 — plan_secondary_correction
+    // -----------------------------------------------------------------------
+
+    /// An `Analysis` double that answers only what CC5 §7 needs.
+    ///
+    /// `matte_proof_for_document` is defaulted to `NotImplemented` on the trait
+    /// until the media engine lands it, so every CC5 agent path has to work
+    /// against a backend that cannot proof. This double answers with a
+    /// hand-built coverage when one is installed, and with the real
+    /// `NotImplemented` when one is not, so both branches are exercised.
+    #[derive(Debug, Default)]
+    struct MatteAnalysisDouble {
+        coverage: Option<kinewright_core::RgbaImage>,
+        monitor: Option<kinewright_core::RgbaImage>,
+    }
+
+    /// A `width × height` coverage raster whose codes come from `code(x, y)`.
+    ///
+    /// Written as a plain RGBA buffer rather than through any CC5 code path, so
+    /// a statistic can never be "proved" by the function that produced it.
+    fn coverage_raster(
+        width: u32,
+        height: u32,
+        code: impl Fn(u32, u32) -> u8,
+    ) -> kinewright_core::RgbaImage {
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let value = code(x, y);
+                pixels.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        kinewright_core::RgbaImage {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    impl kinewright_core::Analysis for MatteAnalysisDouble {
+        fn probe(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<kinewright_core::MediaAsset, MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+
+        fn media_availability(
+            &self,
+            _asset: &kinewright_core::MediaAsset,
+        ) -> MediaAvailabilityStatus {
+            MediaAvailabilityStatus {
+                kind: kinewright_core::MediaAvailabilityKind::OnlineVerified,
+                observed_fingerprint: None,
+                reason: None,
+            }
+        }
+
+        fn thumbnail_at(
+            &self,
+            _at: TimeCode,
+            _max_width: u32,
+        ) -> Result<kinewright_core::RgbaImage, MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+
+        fn monitor_proof_for_document(
+            &self,
+            _document: Arc<Document>,
+            _at: TimeCode,
+        ) -> Result<kinewright_core::MonitorProof, MediaError> {
+            self.monitor
+                .clone()
+                .map_or(Err(MediaError::NotImplemented), |image| {
+                    Ok(kinewright_core::MonitorProof {
+                        image,
+                        metadata: kinewright_core::MonitorProofMetadata::test_double(),
+                    })
+                })
+        }
+
+        fn matte_proof_for_document(
+            &self,
+            _document: Arc<Document>,
+            _at: TimeCode,
+            clip: ClipId,
+            effect: EffectId,
+        ) -> Result<kinewright_core::MatteProof, MediaError> {
+            let Some(coverage) = self.coverage.clone() else {
+                return Err(MediaError::NotImplemented);
+            };
+            Ok(kinewright_core::MatteProof {
+                metadata: kinewright_core::MatteProofMetadata {
+                    render: kinewright_core::MonitorProofMetadata::test_double(),
+                    clip,
+                    effect,
+                    node_kind: "color_wheels".to_owned(),
+                    coverage_encoding: kinewright_core::MATTE_COVERAGE_ENCODING.to_owned(),
+                    coverage_scale: kinewright_core::MATTE_COVERAGE_SCALE,
+                    raster_aspect_millionths: 1_777_778,
+                    matte_enabled: true,
+                    window_count: 1,
+                    qualifier_enabled: false,
+                },
+                coverage,
+            })
+        }
+
+        fn request_transcription(&self, _asset: kinewright_core::MediaAsset) {}
+
+        fn transcript_status(
+            &self,
+            _asset: &kinewright_core::MediaAsset,
+        ) -> kinewright_core::TranscriptStatus {
+            kinewright_core::TranscriptStatus::NotRequested
+        }
+
+        fn timeline_transcript(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+        ) -> Result<Vec<kinewright_core::TimelineTranscriptWord>, MediaError> {
+            Ok(Vec::new())
+        }
+
+        fn request_silence_detection(&self, _asset: kinewright_core::MediaAsset) {}
+
+        fn silence_status(
+            &self,
+            _asset: &kinewright_core::MediaAsset,
+        ) -> kinewright_core::SilenceStatus {
+            kinewright_core::SilenceStatus::NotRequested
+        }
+
+        fn timeline_silences(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+            _minimum_source_frames: TimeCode,
+        ) -> Result<Vec<kinewright_core::TimelineSilenceSpan>, MediaError> {
+            Ok(Vec::new())
+        }
+
+        fn request_scene_detection(&self, _asset: kinewright_core::MediaAsset) {}
+
+        fn scene_status(
+            &self,
+            _asset: &kinewright_core::MediaAsset,
+        ) -> kinewright_core::SceneStatus {
+            kinewright_core::SceneStatus::NotRequested
+        }
+
+        fn timeline_scene_changes(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+            _minimum_confidence_basis_points: u16,
+        ) -> Result<Vec<kinewright_core::TimelineSceneChange>, MediaError> {
+            Ok(Vec::new())
+        }
+
+        fn request_waveform(
+            &self,
+            _asset: kinewright_core::MediaAsset,
+            _request_generation: u64,
+        ) -> bool {
+            false
+        }
+
+        fn request_thumbnail(
+            &self,
+            _asset: kinewright_core::MediaAsset,
+            _source_at: TimeCode,
+            _max_width: u32,
+            _request_generation: u64,
+        ) -> bool {
+            false
+        }
+
+        fn visual_asset_results(
+            &self,
+        ) -> crossbeam_channel::Receiver<kinewright_core::VisualAssetResult> {
+            crossbeam_channel::never()
+        }
+    }
+
+    fn secondary_args(
+        target_effect_id: Option<EffectId>,
+        node_kind: Option<&str>,
+    ) -> SecondaryCorrectionPlanArgs {
+        SecondaryCorrectionPlanArgs {
+            expected_revision: TimelineRevision(0),
+            clip_id: ClipId(1),
+            target_effect_id,
+            node_kind: node_kind.map(str::to_owned),
+            append: false,
+            windows: None,
+            qualifier: None,
+            combine: None,
+            invert: None,
+            mix_basis_points: None,
+            timecode: Some(TimeCode(10)),
+            sample_roi: None,
+            derive_qualifier_from_sample: false,
+            profile_assumption: None,
+        }
+    }
+
+    /// One centred elliptical window plus a saturation-and-luma qualifier,
+    /// spelled out so the expansion is asserted against hand-written names and
+    /// values rather than against the code that produced them.
+    fn one_window_and_qualifier(args: &mut SecondaryCorrectionPlanArgs) {
+        args.windows = Some(vec![MatteWindowRequest {
+            shape: Some("ellipse".to_owned()),
+            center_x: Some(6_000),
+            center_y: Some(4_000),
+            half_width: Some(1_500),
+            half_height: Some(2_000),
+            rotation: Some(-4_500),
+            feather: Some(1_200),
+            invert: Some(false),
+        }]);
+        args.qualifier = Some(MatteQualifierRequest {
+            saturation_low: Some(3_000),
+            saturation_high: Some(9_000),
+            luma_low: Some(2_000),
+            luma_high: Some(8_500),
+            ..MatteQualifierRequest::default()
+        });
+        args.mix_basis_points = Some(7_500);
+    }
+
+    /// CC5 §7 / §9.2.15: the plan returns exact operations, binds to the
+    /// analyzed revision, and leaves the source document byte-identical.
+    #[test]
+    fn secondary_plan_emits_exact_matte_operations_and_never_applies() {
+        let mut document = document();
+        document.tracks[0].clips[0]
+            .effects
+            .push(wheels_node(5, integers([("gain_red_thousandths", 1_200)])));
+        let before = document.clone();
+
+        let mut args = secondary_args(Some(EffectId(5)), None);
+        one_window_and_qualifier(&mut args);
+        let plan = plan_secondary_correction(
+            &document,
+            TimelineRevision(0),
+            &MatteAnalysisDouble::default(),
+            &args,
+        )
+        .expect("valid secondary plan");
+
+        // Every operation, hand-written: the exact `matte_*` names CC5 §2.2
+        // generates and the exact integers the request named.
+        let expected = [
+            ("matte_enabled", 1),
+            ("matte_luma_high_basis_points", 8_500),
+            ("matte_luma_low_basis_points", 2_000),
+            ("matte_mix_basis_points", 7_500),
+            ("matte_qualifier_enabled", 1),
+            ("matte_saturation_high_basis_points", 9_000),
+            ("matte_saturation_low_basis_points", 3_000),
+            ("matte_window0_center_x_basis_points", 6_000),
+            ("matte_window0_center_y_basis_points", 4_000),
+            ("matte_window0_feather_basis_points", 1_200),
+            ("matte_window0_half_height_basis_points", 2_000),
+            ("matte_window0_half_width_basis_points", 1_500),
+            ("matte_window0_rotation_centidegrees", -4_500),
+            ("matte_window0_shape_token", 2),
+            ("matte_window_count", 1),
+        ];
+        assert_eq!(
+            plan.operations,
+            expected
+                .iter()
+                .map(|(name, value)| Operation::SetEffectParam {
+                    clip: ClipId(1),
+                    effect: EffectId(5),
+                    name: (*name).to_owned(),
+                    value: ParamValue::Integer(*value),
+                })
+                .collect::<Vec<_>>()
+        );
+        // `matte_window0_invert` was requested as `false`, which is its
+        // neutral, so no operation writes it — an unchanged control produces
+        // none (CC5 §2.2).
+        assert!(
+            !plan
+                .operations
+                .iter()
+                .any(|operation| format!("{operation:?}").contains("matte_window0_invert"))
+        );
+        assert!(plan.targets_existing_node);
+        assert!(!plan.created_new_node);
+        assert_eq!(plan.effect_id, EffectId(5));
+        assert_eq!(plan.kind, ColorNodeKind::Wheels);
+        assert!(!plan.no_change);
+        // Evidence only: the analyzed document is byte-identical afterwards.
+        assert_eq!(document, before);
+    }
+
+    /// CC5 §7: a new node is *inserted* at the stage-legal index, not appended,
+    /// and stores only the values the caller moved off their neutrals.
+    #[test]
+    fn secondary_plan_inserts_a_new_node_at_the_stage_legal_index() {
+        let mut document = document();
+        // A creative_look sits at the Look stage, so a new color_wheels node
+        // must land before it (CC4 §3.2).
+        document.lut_assets.push(LutAsset {
+            id: LutAssetId(1),
+            sha256: "a".repeat(64),
+            title: "look".to_owned(),
+            kind: kinewright_core::LutAssetKind::Cube3d,
+            size: 17,
+            byte_len: 1_024,
+            domain_min_millionths: [0; 3],
+            domain_max_millionths: [1_000_000; 3],
+            source: LutAssetSource::Builtin {
+                name: "neutral".to_owned(),
+            },
+        });
+        document.tracks[0].clips[0].effects.push(Effect {
+            id: EffectId(9),
+            name: "creative_look".to_owned(),
+            parameters: integers([("lut_asset_id", 1)]),
+            keyframes: BTreeMap::new(),
+        });
+
+        let mut args = secondary_args(None, Some("color_wheels"));
+        args.windows = Some(vec![MatteWindowRequest {
+            center_x: Some(2_500),
+            ..MatteWindowRequest::default()
+        }]);
+        let plan = plan_secondary_correction(
+            &document,
+            TimelineRevision(0),
+            &MatteAnalysisDouble::default(),
+            &args,
+        )
+        .expect("valid secondary plan");
+
+        assert_eq!(plan.insert_index, Some(0));
+        assert!(plan.created_new_node);
+        assert_eq!(
+            plan.operations,
+            vec![Operation::InsertEffect {
+                clip: ClipId(1),
+                index: 0,
+                effect: Effect {
+                    id: EffectId(10),
+                    name: "color_wheels".to_owned(),
+                    // Only the non-neutral values: `matte_window0_center_x` is
+                    // 2500 against a 5000 neutral, and the count and the master
+                    // switch are both off their neutrals.
+                    parameters: integers([
+                        ("matte_enabled", 1),
+                        ("matte_window0_center_x_basis_points", 2_500),
+                        ("matte_window_count", 1),
+                    ]),
+                    keyframes: BTreeMap::new(),
+                },
+            }]
+        );
+    }
+
+    /// CC5 §7: revision-gated, and a stale snapshot fails closed.
+    #[test]
+    fn secondary_plan_fails_closed_on_a_stale_revision() {
+        let document = document();
+        let mut args = secondary_args(None, Some("color_wheels"));
+        one_window_and_qualifier(&mut args);
+        args.expected_revision = TimelineRevision(3);
+
+        let error = plan_secondary_correction(
+            &document,
+            TimelineRevision(7),
+            &MatteAnalysisDouble::default(),
+            &args,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "revision_conflict");
+        let details = error.details();
+        assert_eq!(details["field"], "expected_revision");
+        assert_eq!(details["observed"], 3);
+        assert_eq!(details["allowed"], 7);
+    }
+
+    /// CC5 §2.1: a technical input transform normalizes the *whole* source, so
+    /// it carries no matte and naming it is a typed refusal.
+    #[test]
+    fn secondary_plan_rejects_a_technical_lut_target() {
+        let mut document = document();
+        document.tracks[0].clips[0].effects.push(Effect {
+            id: EffectId(4),
+            name: "technical_lut".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        });
+
+        for args in [
+            secondary_args(Some(EffectId(4)), None),
+            secondary_args(None, Some("technical_lut")),
+        ] {
+            let error = plan_secondary_correction(
+                &document,
+                TimelineRevision(0),
+                &MatteAnalysisDouble::default(),
+                &args,
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code(), "matte_unsupported_node_kind");
+            let details = error.details();
+            assert_eq!(details["field"], "node_kind");
+            assert_eq!(details["observed"], "technical_lut");
+            assert_eq!(details["allowed"], json!(MATTE_CAPABLE_NODE_NAMES));
+            assert!(
+                details["recovery_action"]
+                    .as_str()
+                    .unwrap()
+                    .contains("normalizes the whole source")
+            );
+        }
+    }
+
+    /// CC5 §2.2: every bound is validated against the Core descriptor before
+    /// any operation is constructed, with `field`/`observed`/`allowed`.
+    #[test]
+    fn secondary_plan_rejects_out_of_range_controls_with_the_exact_bounds() {
+        let mut document = document();
+        document.tracks[0].clips[0]
+            .effects
+            .push(wheels_node(5, BTreeMap::new()));
+
+        let mut args = secondary_args(Some(EffectId(5)), None);
+        args.windows = Some(vec![MatteWindowRequest {
+            // The centre range is deliberately wide so a tracked window may
+            // leave and re-enter frame; 20001 is one past its maximum.
+            center_x: Some(20_001),
+            ..MatteWindowRequest::default()
+        }]);
+        let error = plan_secondary_correction(
+            &document,
+            TimelineRevision(0),
+            &MatteAnalysisDouble::default(),
+            &args,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "color_node_parameter_out_of_range");
+        let details = error.details();
+        assert_eq!(details["field"], "matte_window0_center_x_basis_points");
+        assert_eq!(details["observed"], 20_001);
+        assert_eq!(details["allowed"], json!({"min": -10_000, "max": 20_000}));
+
+        // A half extent of zero is a degenerate window, so the minimum is 1.
+        let mut args = secondary_args(Some(EffectId(5)), None);
+        args.windows = Some(vec![MatteWindowRequest {
+            half_width: Some(0),
+            ..MatteWindowRequest::default()
+        }]);
+        let error = plan_secondary_correction(
+            &document,
+            TimelineRevision(0),
+            &MatteAnalysisDouble::default(),
+            &args,
+        )
+        .unwrap_err();
+        assert_eq!(
+            details_field(&error),
+            "matte_window0_half_width_basis_points"
+        );
+        assert_eq!(error.details()["allowed"], json!({"min": 1, "max": 10_000}));
+
+        // More than four windows is refused by the window rule itself, not by
+        // a descriptor bound, because there is no fifth window to name.
+        let mut args = secondary_args(Some(EffectId(5)), None);
+        args.windows = Some(vec![MatteWindowRequest::default(); 5]);
+        let error = plan_secondary_correction(
+            &document,
+            TimelineRevision(0),
+            &MatteAnalysisDouble::default(),
+            &args,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "matte_window_count_out_of_range");
+        assert_eq!(error.details()["observed"], 5);
+        assert_eq!(error.details()["allowed"], json!({"max": 4}));
+
+        // An unrecognized shape token names the vocabulary it violated.
+        let mut args = secondary_args(Some(EffectId(5)), None);
+        args.windows = Some(vec![MatteWindowRequest {
+            shape: Some("polygon".to_owned()),
+            ..MatteWindowRequest::default()
+        }]);
+        let error = plan_secondary_correction(
+            &document,
+            TimelineRevision(0),
+            &MatteAnalysisDouble::default(),
+            &args,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "matte_token_not_recognized");
+        assert_eq!(error.details()["field"], "windows[0].shape");
+        assert_eq!(error.details()["observed"], "polygon");
+        assert_eq!(error.details()["allowed"], json!(["rect", "ellipse"]));
+    }
+
+    fn details_field(error: &ColorNodePlanError) -> String {
+        error.details()["field"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// CC5 §5.1: `matte_window{j}_shape_token` accepts `Hold` keyframes only,
+    /// and an existing Hold curve wins over a static write at every frame from
+    /// its first keyframe onward — so the plan refuses rather than warning.
+    #[test]
+    fn secondary_plan_refuses_to_write_a_keyframed_hold_only_token() {
+        let mut with_token = document();
+        let mut node = wheels_node(5, BTreeMap::new());
+        node.keyframes.insert(
+            "matte_window0_shape_token".to_owned(),
+            kinewright_core::AutomationCurve {
+                keyframes: vec![kinewright_core::Keyframe {
+                    at: TimeCode(0),
+                    value: 1,
+                    interpolation: kinewright_core::KeyframeInterpolation::Hold,
+                }],
+            },
+        );
+        with_token.tracks[0].clips[0].effects.push(node);
+
+        let mut args = secondary_args(Some(EffectId(5)), None);
+        args.windows = Some(vec![MatteWindowRequest {
+            shape: Some("ellipse".to_owned()),
+            ..MatteWindowRequest::default()
+        }]);
+        let error = plan_secondary_correction(
+            &with_token,
+            TimelineRevision(0),
+            &MatteAnalysisDouble::default(),
+            &args,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "matte_hold_only_parameter_keyframed");
+        let details = error.details();
+        assert_eq!(details["field"], "matte_window0_shape_token");
+        assert_eq!(details["hold_only"], true);
+        assert!(
+            details["observed"]
+                .as_str()
+                .unwrap()
+                .contains("matte_window0_shape_token")
+        );
+        assert!(
+            details["allowed"]
+                .as_str()
+                .unwrap()
+                .contains("no automation")
+        );
+        assert!(
+            details["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("ClearEffectKeyframes")
+        );
+        // Every fully keyframable control keeps the ordinary CC3 posture: a
+        // warning, and the static value is still written.
+        let mut node = wheels_node(6, BTreeMap::new());
+        node.keyframes.insert(
+            "matte_mix_basis_points".to_owned(),
+            kinewright_core::AutomationCurve {
+                keyframes: vec![kinewright_core::Keyframe {
+                    at: TimeCode(0),
+                    value: 5_000,
+                    interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                }],
+            },
+        );
+        let mut second = document();
+        second.tracks[0].clips[0].effects.push(node);
+        let document = second;
+        let mut args = secondary_args(Some(EffectId(6)), None);
+        args.mix_basis_points = Some(7_500);
+        let plan = plan_secondary_correction(
+            &document,
+            TimelineRevision(0),
+            &MatteAnalysisDouble::default(),
+            &args,
+        )
+        .expect("a keyframed non-token control is a warning, not a refusal");
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|warning| warning.contains("matte_mix_basis_points"))
+        );
+    }
+
+    /// CC5 §7: `predicted_coverage` is `null` with the stable
+    /// `matte_proof_unavailable` reason while the engine cannot proof, and
+    /// carries the §4.2 statistics once it can. It is never invented.
+    #[test]
+    fn secondary_plan_predicted_coverage_is_measured_or_typed_unavailable() {
+        let mut document = document();
+        document.tracks[0].clips[0]
+            .effects
+            .push(wheels_node(5, BTreeMap::new()));
+        let mut args = secondary_args(Some(EffectId(5)), None);
+        one_window_and_qualifier(&mut args);
+
+        let unavailable = plan_secondary_correction(
+            &document,
+            TimelineRevision(0),
+            &MatteAnalysisDouble::default(),
+            &args,
+        )
+        .expect("valid plan")
+        .predicted_coverage
+        .expect("the field is always published");
+        assert_eq!(unavailable["statistics"], Value::Null);
+        assert_eq!(unavailable["reason"], MATTE_PROOF_UNAVAILABLE);
+        assert!(
+            unavailable["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("inspect_grade_matte")
+        );
+
+        // A 4 × 2 coverage: the left half fully covered, the right half not.
+        // Hand-derived: 4 covered of 8, so 5000 basis points.
+        let analysis = MatteAnalysisDouble {
+            coverage: Some(coverage_raster(4, 2, |x, _| if x < 2 { 255 } else { 0 })),
+            monitor: None,
+        };
+        let measured = plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
+            .expect("valid plan")
+            .predicted_coverage
+            .expect("the field is always published");
+        assert_eq!(measured["reason"], Value::Null);
+        assert_eq!(measured["covered_pixel_count"], 4);
+        assert_eq!(measured["statistics"]["total_pixel_count"], 8);
+        assert_eq!(measured["statistics"]["full_pixel_count"], 4);
+        assert_eq!(measured["statistics"]["partial_pixel_count"], 0);
+        assert_eq!(measured["statistics"]["covered_basis_points"], 5_000);
+        assert_eq!(
+            measured["matte_threshold"],
+            kinewright_core::MATTE_SCOPE_THRESHOLD
+        );
+        assert_eq!(measured["raster"], json!({"width": 4, "height": 2}));
+        // The scratch document the coverage was measured on is not the
+        // analyzed one: the source clip still carries no matte parameter.
+        assert!(
+            document.clip(ClipId(1)).unwrap().effects[0]
+                .parameters
+                .keys()
+                .all(|name| !name.starts_with("matte_"))
+        );
+    }
+
+    /// CC5 §7: `sample_roi` returns measured evidence, and only
+    /// `derive_qualifier_from_sample` turns it into a proposal — by the pinned
+    /// formula and no other.
+    ///
+    /// The monitor double returns a 4 × 2 raster whose left half is a
+    /// saturated red and whose right half is mid grey. The ROI names the left
+    /// half only, so every measured pixel is that one red.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn secondary_plan_sample_roi_is_evidence_until_derivation_is_requested() {
+        let mut document = document();
+        document.tracks[0].clips[0]
+            .effects
+            .push(wheels_node(5, BTreeMap::new()));
+        // Display-coded (200, 40, 40) on the left, (128, 128, 128) on the
+        // right. The plan measures only the left half.
+        let mut pixels = Vec::new();
+        for _ in 0..2 {
+            pixels.extend_from_slice(&[200, 40, 40, 255]);
+            pixels.extend_from_slice(&[200, 40, 40, 255]);
+            pixels.extend_from_slice(&[128, 128, 128, 255]);
+            pixels.extend_from_slice(&[128, 128, 128, 255]);
+        }
+        let analysis = MatteAnalysisDouble {
+            coverage: None,
+            monitor: Some(kinewright_core::RgbaImage {
+                width: 4,
+                height: 2,
+                pixels,
+            }),
+        };
+
+        let mut args = secondary_args(Some(EffectId(5)), None);
+        args.windows = Some(vec![MatteWindowRequest {
+            center_x: Some(2_500),
+            ..MatteWindowRequest::default()
+        }]);
+        args.sample_roi = Some(MatteSampleRoi {
+            x: 0.0,
+            y: 0.0,
+            width: 0.5,
+            height: 1.0,
+        });
+
+        // Without the opt-in the sample is evidence only: no qualifier
+        // parameter is proposed at all.
+        let evidence_only =
+            plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
+                .expect("valid plan");
+        let sample = evidence_only
+            .sample_evidence
+            .clone()
+            .expect("sample_roi always publishes its measurement");
+        assert_eq!(sample["visible_pixel_count"], 4);
+        assert_eq!(sample["total_pixel_count"], 4);
+        assert_eq!(sample["achromatic_pixel_count"], 0);
+        assert_eq!(
+            sample["measured_pixel_rect"],
+            json!({"x": 0, "y": 0, "width": 2, "height": 2})
+        );
+        assert_eq!(sample["derive_qualifier_from_sample"], false);
+        assert_eq!(sample["derived_qualifier"], Value::Null);
+        assert!(
+            evidence_only
+                .requested_parameters
+                .keys()
+                .all(|name| !name.starts_with("matte_hue")
+                    && !name.starts_with("matte_saturation")
+                    && !name.starts_with("matte_luma")),
+            "evidence must not become a proposal without the explicit opt-in"
+        );
+        // The measured hue of a red-dominant pixel sits near 0 degrees: with
+        // `max == r` the hue is `60 * ((g - b) / C mod 6)`, and `g == b` here,
+        // so the hue is exactly 0.
+        assert_eq!(sample["hue_median_centidegrees"], 0);
+        let saturation = sample["saturation_basis_points"]["median"]
+            .as_i64()
+            .unwrap();
+        assert!(
+            (5_000..=10_000).contains(&saturation),
+            "a saturated red must measure a high saturation, was {saturation}"
+        );
+
+        // With the opt-in, CC5 §7's pinned formula produces the qualifier.
+        args.derive_qualifier_from_sample = true;
+        let derived = plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
+            .expect("valid plan");
+        let requested = &derived.requested_parameters;
+        assert_eq!(requested["matte_qualifier_enabled"], 1);
+        assert_eq!(requested["matte_hue_center_centidegrees"], 0);
+        assert_eq!(
+            requested["matte_hue_width_centidegrees"],
+            MATTE_SAMPLE_HUE_WIDTH_CENTIDEGREES
+        );
+        assert_eq!(
+            requested["matte_hue_softness_centidegrees"],
+            MATTE_SAMPLE_SOFTNESS
+        );
+        assert_eq!(
+            requested["matte_saturation_softness_basis_points"],
+            MATTE_SAMPLE_SOFTNESS
+        );
+        assert_eq!(
+            requested["matte_luma_softness_basis_points"],
+            MATTE_SAMPLE_SOFTNESS
+        );
+        // The bands are the measured percentiles widened by the pinned margin
+        // and clamped to the descriptor range.
+        let p10 = sample["saturation_basis_points"]["p10"].as_i64().unwrap();
+        let p90 = sample["saturation_basis_points"]["p90"].as_i64().unwrap();
+        assert_eq!(
+            requested["matte_saturation_low_basis_points"],
+            (p10 - MATTE_SAMPLE_BAND_MARGIN_BASIS_POINTS).max(0)
+        );
+        assert_eq!(
+            requested["matte_saturation_high_basis_points"],
+            (p90 + MATTE_SAMPLE_BAND_MARGIN_BASIS_POINTS).min(10_000)
+        );
+        // The formula is published next to the numbers it produced.
+        let formula = derived.sample_evidence.unwrap()["formula"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(formula.contains("hue_width = 1500"));
+        assert!(formula.contains("p10 - 1000"));
+        assert!(formula.contains("p90 + 1000"));
+
+        // An explicit qualifier field always beats a derived one: the caller's
+        // number is a request, the sample is only evidence.
+        args.qualifier = Some(MatteQualifierRequest {
+            hue_center: Some(12_000),
+            ..MatteQualifierRequest::default()
+        });
+        let explicit = plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
+            .expect("valid plan");
+        assert_eq!(
+            explicit.requested_parameters["matte_hue_center_centidegrees"],
+            12_000
+        );
+    }
+
+    /// CC5 §7: an ROI outside the frame, or one containing no visible pixel, is
+    /// a typed refusal with `field`/`observed`/`allowed`.
+    #[test]
+    fn secondary_plan_rejects_an_unusable_sample_roi() {
+        let mut document = document();
+        document.tracks[0].clips[0]
+            .effects
+            .push(wheels_node(5, BTreeMap::new()));
+        let analysis = MatteAnalysisDouble {
+            coverage: None,
+            monitor: Some(kinewright_core::RgbaImage {
+                width: 4,
+                height: 2,
+                // Fully transparent: CC2's rule says a transparent pixel is not
+                // part of the population, and partial alpha is never a weight.
+                pixels: vec![0; 32],
+            }),
+        };
+
+        let mut args = secondary_args(Some(EffectId(5)), None);
+        args.windows = Some(vec![MatteWindowRequest {
+            center_x: Some(2_500),
+            ..MatteWindowRequest::default()
+        }]);
+        args.sample_roi = Some(MatteSampleRoi {
+            x: 0.8,
+            y: 0.0,
+            width: 0.5,
+            height: 1.0,
+        });
+        let error = plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
+            .unwrap_err();
+        assert_eq!(error.code(), "matte_sample_roi_invalid");
+        assert_eq!(error.details()["field"], "sample_roi");
+        assert!(
+            error.details()["allowed"]
+                .as_str()
+                .unwrap()
+                .contains("x + width")
+        );
+
+        args.sample_roi = Some(MatteSampleRoi {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        });
+        let error = plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
+            .unwrap_err();
+        assert_eq!(error.code(), "matte_sample_roi_empty");
+        assert_eq!(error.details()["observed"]["visible_pixel_count"], 0);
+        assert!(
+            error.details()["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("visible-pixel rule")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CC5 §7 — the `matte` manifest object
+    // -----------------------------------------------------------------------
+
+    /// CC5 §7: absent entirely when the node carries no matte, so every CC4
+    /// manifest is byte-unchanged.
+    #[test]
+    fn matte_manifest_object_is_absent_until_the_node_carries_a_matte() {
+        let looks = LookAssetContext::default();
+        let plain = wheels_node(5, integers([("gain_red_thousandths", 1_200)]));
+        let value = color_node_value(0, &plain, &looks).expect("a colour node");
+        assert!(
+            value.get("matte").is_none(),
+            "a CC4 manifest entry must be byte-unchanged"
+        );
+        assert!(matte_manifest_value(&plain).is_none());
+
+        // CC5 §2.6: `matte_enabled = 0` is still no matte at all, whatever the
+        // other 46 integers say.
+        let disabled = wheels_node(
+            5,
+            integers([("matte_enabled", 0), ("matte_window_count", 2)]),
+        );
+        assert!(matte_manifest_value(&disabled).is_none());
+
+        // Enabled but selecting everything at full strength is also inactive.
+        let neutral = wheels_node(5, integers([("matte_enabled", 1)]));
+        assert!(matte_manifest_value(&neutral).is_none());
+    }
+
+    /// CC5 §7: the compact integer object, with `windows` truncated to
+    /// `window_count`.
+    #[test]
+    fn matte_manifest_object_reports_the_resolved_matte_and_truncates_windows() {
+        let looks = LookAssetContext::default();
+        let node = wheels_node(
+            5,
+            integers([
+                ("matte_enabled", 1),
+                ("matte_window_count", 1),
+                ("matte_combine_token", 1),
+                ("matte_mix_basis_points", 7_500),
+                ("matte_qualifier_enabled", 1),
+                ("matte_hue_center_centidegrees", 3_000),
+                ("matte_hue_width_centidegrees", 1_500),
+                ("matte_window0_shape_token", 2),
+                ("matte_window0_center_x_basis_points", 6_000),
+                // Window 1 is stored but past the count, so it renders nothing
+                // and must not be published.
+                ("matte_window1_center_x_basis_points", 1_234),
+            ]),
+        );
+        let value = color_node_value(0, &node, &looks).expect("a colour node");
+        let matte = &value["matte"];
+
+        assert_eq!(matte["enabled"], true);
+        assert_eq!(matte["active"], true);
+        assert_eq!(matte["inactive_reason"], Value::Null);
+        assert_eq!(matte["window_count"], 1);
+        assert_eq!(matte["combine"], "intersection");
+        assert_eq!(matte["combine_token"], 1);
+        assert_eq!(matte["invert"], 0);
+        assert_eq!(matte["mix_basis_points"], 7_500);
+        assert_eq!(matte["qualifier"]["enabled"], true);
+        assert_eq!(matte["qualifier"]["hue_center_centidegrees"], 3_000);
+        assert_eq!(matte["qualifier"]["hue_width_centidegrees"], 1_500);
+        assert_eq!(matte["qualifier"]["hue_leg_disabled"], false);
+        // Omitted qualifier controls resolve to their descriptor neutrals.
+        assert_eq!(matte["qualifier"]["saturation_low_basis_points"], 0);
+        assert_eq!(matte["qualifier"]["saturation_high_basis_points"], 10_000);
+
+        let windows = matte["windows"].as_array().expect("a window list");
+        assert_eq!(windows.len(), 1, "windows truncate to window_count");
+        assert_eq!(windows[0]["shape"], "ellipse");
+        assert_eq!(windows[0]["shape_token"], 2);
+        assert_eq!(windows[0]["center_x_basis_points"], 6_000);
+        assert_eq!(windows[0]["center_y_basis_points"], 5_000);
+        assert_eq!(windows[0]["half_width_basis_points"], 2_500);
+    }
+
+    /// CC5 §2.6 rule 2: a zero mix, or an inverted empty matte, makes the whole
+    /// node the exact identity, reported as `matte_excluded`.
+    #[test]
+    fn matte_manifest_reports_the_node_excluded_by_its_matte() {
+        let looks = LookAssetContext::default();
+        // A non-neutral gain, so the node is not already the identity: Core
+        // tests the matte rule *last*, and a bypassed, neutral, or unbound node
+        // keeps the reason it already had.
+        for mut parameters in [
+            integers([("matte_enabled", 1), ("matte_mix_basis_points", 0)]),
+            integers([("matte_enabled", 1), ("matte_invert", 1)]),
+        ] {
+            parameters.insert(
+                "gain_red_thousandths".to_owned(),
+                ParamValue::Integer(1_200),
+            );
+            let node = wheels_node(5, parameters);
+            let value = color_node_value(0, &node, &looks).expect("a colour node");
+            assert_eq!(value["active"], false);
+            assert_eq!(value["inactive_reason"], "matte_excluded");
+            assert_eq!(value["matte"]["active"], false);
+            assert_eq!(value["matte"]["inactive_reason"], "matte_excluded");
+        }
+    }
+
+    /// CC5 §2.6: a band whose low edge resolved above its high edge selects
+    /// nothing, and the manifest says so with the same code Core QA uses.
+    #[test]
+    fn matte_manifest_warns_when_a_qualifier_band_is_inverted() {
+        let looks = LookAssetContext::default();
+        let node = wheels_node(
+            5,
+            integers([
+                ("matte_enabled", 1),
+                ("matte_qualifier_enabled", 1),
+                ("matte_saturation_low_basis_points", 9_000),
+                ("matte_saturation_high_basis_points", 1_000),
+            ]),
+        );
+        let value = color_node_value(0, &node, &looks).expect("a colour node");
+        let warning = value["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|warning| warning["code"] == "matte_band_inverted_by_automation")
+            .expect("the inverted band must be reported");
+        assert_eq!(warning["bands"], json!(["saturation"]));
+        assert_eq!(warning["effect_id"], 5);
+        assert_eq!(value["matte"]["degenerate_bands"], json!(["saturation"]));
+    }
+
+    /// CC5 §2.2, M36: no planner surface enumerates the 47 matte parameters,
+    /// and the legend states every bound the descriptors carry.
+    #[test]
+    fn planner_listings_summarise_the_matte_and_never_enumerate_it() {
+        // The base control lists are unchanged by CC5.
+        assert_eq!(primary_parameter_documentation().len(), 10);
+        assert_eq!(color_node_parameter_documentation("color_wheels").len(), 13);
+        for entry in primary_parameter_documentation()
+            .iter()
+            .chain(color_node_parameter_documentation("color_wheels").iter())
+        {
+            assert!(
+                !entry["name"].as_str().unwrap().starts_with("matte_"),
+                "an allowed-parameter list must never enumerate the matte"
+            );
+        }
+
+        // The one-line pointer rides on every planner summary, so a caller is
+        // told the capability exists and which tool expands it. It is
+        // deliberately terse: `plan_color_wheels` spends 981 of its M36
+        // kilobyte on thirteen descriptor controls before the pointer is
+        // appended, so the pointer names the capability and the one tool that
+        // expands it and nothing else. `inspect_grade_matte` is reachable from
+        // there and from the legend, and is not repeated here.
+        assert!(
+            matte_parameter_pointer().len() <= 42,
+            "the pointer is {} bytes; plan_color_wheels has only 42 to spare",
+            matte_parameter_pointer().len()
+        );
+        for summary in [
+            primary_parameter_summary(),
+            color_wheels_parameter_summary(),
+            lut_node_parameter_summary(ColorNodeKind::CreativeLook),
+        ] {
+            assert!(summary.contains("plan_secondary_correction"));
+            assert!(summary.contains("matte"));
+            assert!(
+                !summary.contains("matte_window0_"),
+                "a summary must never enumerate a generated window parameter"
+            );
+            assert!(summary.len() < 1_024, "summary is {} bytes", summary.len());
+        }
+        // `plan_secondary_correction`'s own description points at the two
+        // surfaces that enumerate the legend instead of repeating it, and does
+        // not recommend itself.
+        let reference = matte_legend_reference();
+        assert!(reference.contains("add_effect"));
+        assert!(reference.contains("details.matte_parameters"));
+        assert!(!reference.contains("plan_secondary_correction"));
+        assert!(!reference.contains("matte_window{j}_*"));
+        // CC5 §2.1: `technical_lut` carries no matte, so it gets no pointer.
+        let technical = lut_node_parameter_summary(ColorNodeKind::TechnicalLut);
+        assert!(!technical.contains("plan_secondary_correction"));
+
+        // The full legend appears where a caller writes raw parameters.
+        let legend = matte_parameter_legend();
+        assert!(legend.len() < 1_024, "legend is {} bytes", legend.len());
+        assert!(legend.contains("matte_window{j}_*"));
+        assert!(legend.contains("-10000..=20000"));
+        assert!(!legend.contains("matte_window0_"));
+
+        // A rejection carries the base list *and* the legend, so an agent that
+        // reached for a matte name is pointed at the right surface.
+        let error = plan_color_wheels(
+            &document(),
+            TimelineRevision(0),
+            &wheels_args(BTreeMap::from([("matte_glow".to_owned(), 1)])),
+        )
+        .unwrap_err();
+        let details = error.details();
+        assert_eq!(details["allowed"].as_array().unwrap().len(), 13);
+        assert!(
+            details["matte_parameters"]
+                .as_str()
+                .unwrap()
+                .contains("plan_secondary_correction")
+        );
+    }
+
+    /// A brute-force circular median, written the obvious O(n²) way so the
+    /// closed-form sweep is checked against a different algorithm rather than
+    /// against itself.
+    fn brute_force_circular_median(hues: &[i64]) -> Option<i64> {
+        let mut sorted = hues.to_vec();
+        sorted.sort_unstable();
+        let mut best: Option<(i64, i64)> = None;
+        for candidate in sorted.iter().copied() {
+            let cost = sorted
+                .iter()
+                .map(|hue| {
+                    let delta = (hue - candidate).abs();
+                    delta.min(36_000 - delta)
+                })
+                .sum::<i64>();
+            if best.is_none_or(|(best_cost, _)| cost < best_cost) {
+                best = Some((cost, candidate));
+            }
+        }
+        best.map(|(_, hue)| hue)
+    }
+
+    /// CC5 §7: the circular median is the sample minimising summed circular
+    /// distance, and it is computed in O(n log n) because it runs over every
+    /// chromatic pixel of a full-resolution ROI.
+    #[test]
+    fn circular_median_agrees_with_brute_force_and_survives_two_million_samples() {
+        assert_eq!(circular_median_centidegrees(&mut []), None);
+
+        // A deterministic, dependency-free generator: a 64-bit LCG. Random-ish
+        // inputs, reproducible failures.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = |modulus: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            i64::try_from((state >> 33) % modulus).unwrap()
+        };
+
+        let mut cases: Vec<Vec<i64>> = vec![
+            vec![0],
+            vec![0, 18_000],
+            vec![35_900, 100],
+            // The red seam, straddled: 359° and 1°. A plain median answers
+            // 18000, the opposite hue; the circular median must answer one of
+            // the reds.
+            vec![35_900, 35_950, 35_990, 10, 60, 100],
+            vec![35_990, 10],
+            // Two antipodal clusters, where the tie-break matters.
+            vec![0, 0, 18_000, 18_000],
+            // Everything on one point.
+            vec![12_345; 9],
+        ];
+        for size in [1_usize, 2, 3, 5, 17, 64, 200] {
+            // Uniform over the whole circle.
+            cases.push((0..size).map(|_| next(36_000)).collect());
+            // A tight cluster straddling the seam.
+            cases.push(
+                (0..size)
+                    .map(|_| (next(1_200) + 35_400).rem_euclid(36_000))
+                    .collect(),
+            );
+            // Two clusters, one of them across the seam.
+            cases.push(
+                (0..size)
+                    .map(|index| {
+                        if index % 2 == 0 {
+                            (next(600) + 35_700).rem_euclid(36_000)
+                        } else {
+                            next(600) + 12_000
+                        }
+                    })
+                    .collect(),
+            );
+        }
+
+        for case in &cases {
+            let mut subject = case.clone();
+            let measured = circular_median_centidegrees(&mut subject);
+            assert_eq!(
+                measured,
+                brute_force_circular_median(case),
+                "circular median disagreed with brute force on {case:?}"
+            );
+        }
+
+        // The seam case, spelled out: every sample is within 1° of red, so the
+        // answer must be a red and never the opposite hue.
+        let mut seam = vec![35_900, 35_950, 35_990, 10, 60, 100];
+        let median = circular_median_centidegrees(&mut seam).unwrap();
+        assert!(
+            median >= 35_000 || median <= 1_000,
+            "the seam median must be a red, was {median}"
+        );
+
+        // Two million samples is the order of a 1080p full-frame ROI. The old
+        // double loop took tens of minutes; this must be a fraction of a
+        // second. The threshold is generous so a loaded CI box does not flake,
+        // but it is four orders of magnitude below quadratic.
+        let mut large = (0..2_000_000_i64)
+            .map(|index| (index * 7_919) % 36_000)
+            .collect::<Vec<_>>();
+        let started = std::time::Instant::now();
+        let measured = circular_median_centidegrees(&mut large).expect("a median exists");
+        let elapsed = started.elapsed();
+        assert!((0..36_000).contains(&measured));
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "two million samples took {elapsed:?}; the sweep is not O(n log n)"
+        );
+    }
+
+    /// CC5 §2.2/§7: a primary node's manifests describe the ten CC1 controls
+    /// and nothing else. The matte is described by the `matte` object, which
+    /// CC5 §7 makes absent entirely when the node carries none — so a CC4
+    /// manifest is byte-unchanged.
+    #[test]
+    fn primary_node_manifests_never_enumerate_the_matte() {
+        let mut document = document();
+        document.tracks[0].clips[0].effects.push(Effect {
+            id: EffectId(7),
+            name: PRIMARY_CORRECTION_EFFECT_NAME.to_owned(),
+            parameters: integers([("exposure_milli_stops", 250)]),
+            keyframes: BTreeMap::new(),
+        });
+        let effects = &document.tracks[0].clips[0].effects;
+        let looks = LookAssetContext::new(&document, None, None);
+
+        let nodes = color_node_manifest(effects, &looks);
+        let parameters = nodes[0]["parameters"].as_object().unwrap();
+        assert_eq!(
+            parameters.len(),
+            10,
+            "a matte-free primary node reports its ten CC1 controls: {:?}",
+            parameters.keys().collect::<Vec<_>>()
+        );
+        assert!(parameters.keys().all(|name| !name.starts_with("matte_")));
+        assert_eq!(parameters["exposure_milli_stops"], 250);
+        assert!(
+            nodes[0].get("matte").is_none(),
+            "a node with no matte carries no matte object"
+        );
+
+        let chain = effect_chain_manifest(effects);
+        let primary_parameters = chain[0]["primary_parameters"].as_object().unwrap();
+        assert_eq!(
+            primary_parameters.len(),
+            10,
+            "effect_chain[].primary_parameters reports the same ten: {:?}",
+            primary_parameters.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            primary_parameters
+                .keys()
+                .all(|name| !name.starts_with("matte_"))
+        );
+
+        // Setting a real matte adds the `matte` object and still adds no
+        // parameter: one window, so it is not the inactive neutral matte.
+        for (name, value) in [("matte_enabled", 1), ("matte_window_count", 1)] {
+            document.tracks[0].clips[0].effects[0]
+                .parameters
+                .insert(name.to_owned(), ParamValue::Integer(value));
+        }
+        let effects = &document.tracks[0].clips[0].effects;
+        let matted = color_node_manifest(effects, &looks);
+        assert_eq!(matted[0]["parameters"].as_object().unwrap().len(), 10);
+        assert_eq!(matted[0]["matte"]["enabled"], true);
+        assert_eq!(matted[0]["matte"]["window_count"], 1);
+        assert_eq!(
+            effect_chain_manifest(effects)[0]["primary_parameters"]
+                .as_object()
+                .unwrap()
+                .len(),
+            10
+        );
+    }
+
+    /// CC5 §7: "explicit beats derived" applies to `qualifier.enabled` too. A
+    /// caller who asks for the bands to be derived *and* says the leg is off
+    /// gets the bands and an off leg, not a silent override.
+    #[test]
+    fn secondary_plan_explicit_qualifier_disable_survives_a_derived_qualifier() {
+        let mut document = document();
+        document.tracks[0].clips[0]
+            .effects
+            .push(wheels_node(5, BTreeMap::new()));
+        let analysis = MatteAnalysisDouble {
+            coverage: None,
+            monitor: Some(kinewright_core::RgbaImage {
+                width: 2,
+                height: 1,
+                pixels: vec![200, 40, 40, 255, 200, 40, 40, 255],
+            }),
+        };
+        let mut args = secondary_args(Some(EffectId(5)), None);
+        args.sample_roi = Some(MatteSampleRoi {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        });
+        args.derive_qualifier_from_sample = true;
+        args.qualifier = Some(MatteQualifierRequest {
+            enabled: Some(false),
+            ..MatteQualifierRequest::default()
+        });
+
+        let plan = plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
+            .expect("valid plan");
+        assert_eq!(
+            plan.requested_parameters["matte_qualifier_enabled"], 0,
+            "an explicit qualifier.enabled: false must beat the derived enable"
+        );
+        // The derived bands are still proposed: only the switch was refused.
+        assert!(
+            plan.requested_parameters
+                .contains_key("matte_hue_center_centidegrees")
+        );
+
+        // Without the explicit `false`, deriving turns the leg on.
+        args.qualifier = None;
+        let derived = plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
+            .expect("valid plan");
+        assert_eq!(derived.requested_parameters["matte_qualifier_enabled"], 1);
+
+        // An empty `qualifier: {}` alongside a derivation is not an explicit
+        // "off" either: the derived bands are the request to enable the leg.
+        args.qualifier = Some(MatteQualifierRequest::default());
+        let empty = plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
+            .expect("valid plan");
+        assert_eq!(empty.requested_parameters["matte_qualifier_enabled"], 1);
+    }
+
+    /// CC5 §5.1: the Hold-only refusal is about a *dead write*, so it fires
+    /// only for a token the plan would actually move. Every CC5 request injects
+    /// `matte_enabled: 1`, and refusing on the whole request made a node with a
+    /// `matte_enabled` Hold curve unable to receive any plan at all.
+    #[test]
+    fn secondary_plan_moves_a_window_on_a_node_whose_matte_enabled_is_keyframed() {
+        let hold = |value: i64| kinewright_core::AutomationCurve {
+            keyframes: vec![kinewright_core::Keyframe {
+                at: TimeCode(0),
+                value,
+                interpolation: kinewright_core::KeyframeInterpolation::Hold,
+            }],
+        };
+        let mut document = document();
+        let mut node = wheels_node(
+            5,
+            integers([
+                ("matte_enabled", 1),
+                ("matte_window_count", 1),
+                ("matte_invert", 0),
+            ]),
+        );
+        node.keyframes.insert("matte_enabled".to_owned(), hold(1));
+        node.keyframes.insert("matte_invert".to_owned(), hold(0));
+        document.tracks[0].clips[0].effects.push(node);
+        let analysis = MatteAnalysisDouble::default();
+
+        // Only the window centre moves. `matte_enabled` and `matte_window_count`
+        // are already at the requested values, so the plan writes neither, and
+        // the curve on `matte_enabled` overrides nothing.
+        let mut args = secondary_args(Some(EffectId(5)), None);
+        args.windows = Some(vec![MatteWindowRequest {
+            center_x: Some(7_000),
+            ..MatteWindowRequest::default()
+        }]);
+        let plan = plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
+            .expect("a window move must not be refused by an unrelated Hold curve");
+        assert_eq!(
+            plan.operations,
+            vec![Operation::SetEffectParam {
+                clip: ClipId(1),
+                effect: EffectId(5),
+                name: "matte_window0_center_x_basis_points".to_owned(),
+                value: ParamValue::Integer(7_000),
+            }]
+        );
+        // The keyframed control is still called out, as every other planner
+        // calls out automation it did not write.
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|warning| warning.contains("matte_enabled")),
+            "{:?}",
+            plan.warnings
+        );
+
+        // Toggling `matte_invert` against its own Hold curve is still refused:
+        // that write really would be dead.
+        args.invert = Some(true);
+        let error = plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
+            .unwrap_err();
+        assert_eq!(error.code(), "matte_hold_only_parameter_keyframed");
+        assert_eq!(error.details()["field"], "matte_invert");
+
+        // And a Hold curve that already holds exactly the requested value is
+        // not a dead write, because the render already agrees with the plan.
+        args.invert = Some(false);
+        plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
+            .expect("a curve that already holds the requested value is not overridden");
     }
 }

@@ -17,12 +17,14 @@ use std::{
 
 use eframe::egui;
 use kinewright_core::{
-    Analysis, Document, MonitorProof, NormalizedRoi, ScopeComparison, ScopeEvidence, ScopeRequest,
-    ScopeResolution, ScopeStage, TimeCode, compare_scope_evidence, measure_scope,
+    Analysis, Document, MatteRegionDescription, MonitorProof, NormalizedRoi, RgbaImage,
+    ScopeComparison, ScopeEvidence, ScopeRequest, ScopeResolution, ScopeStage, TimeCode,
+    compare_scope_evidence, matte_coverage_statistics, matte_scoped_frame, measure_scope,
 };
 
 use crate::{
     app::KinewrightApp,
+    matte_overlay_ui::{AnalysisMatteProofSource, MatteProofSource, MatteTarget},
     theme::{self, color, radius, type_size},
 };
 
@@ -215,6 +217,17 @@ struct QueuedSample {
     source: Arc<dyn ScopeProofSource>,
     document: Arc<Document>,
     frame: TimeCode,
+    /// The matte the measurement is scoped to, when the panel is matte-scoped
+    /// (CC5 §4.3). The coverage is rendered after the monitor proof, on the
+    /// same worker, from the same document and frame.
+    matte: Option<MatteSample>,
+}
+
+/// The matte-scoping half of one request.
+#[derive(Clone)]
+struct MatteSample {
+    source: Arc<dyn MatteProofSource>,
+    target: MatteTarget,
 }
 
 impl std::fmt::Debug for QueuedSample {
@@ -224,6 +237,7 @@ impl std::fmt::Debug for QueuedSample {
             .field("generation", &self.generation)
             .field("key", &self.key)
             .field("frame", &self.frame)
+            .field("matte", &self.matte.as_ref().map(|matte| matte.target))
             .finish_non_exhaustive()
     }
 }
@@ -320,6 +334,11 @@ pub(crate) struct ColorScopesState {
     pub(crate) error: Option<String>,
     /// True when the last ROI the user typed had to be clamped into range.
     pub(crate) roi_clamped: bool,
+    /// Whether the next measurement is scoped to a matte (CC5 §4.3).
+    matte_scoped: bool,
+    /// The matte-carrying node the scoping would use, as the inspector's
+    /// expanded matte section reports it.
+    matte_target: Option<MatteTarget>,
     /// How many worker threads this panel has started. Single-flight means it
     /// advances once per render actually begun, not once per request.
     #[cfg(test)]
@@ -346,6 +365,8 @@ impl Default for ColorScopesState {
             response_rx,
             error: None,
             roi_clamped: false,
+            matte_scoped: false,
+            matte_target: None,
             #[cfg(test)]
             spawned_workers: 0,
         }
@@ -365,6 +386,68 @@ impl ColorScopesState {
 
     pub(crate) fn set_kind(&mut self, kind: ScopeKind) {
         self.kind = kind;
+    }
+
+    /// Whether the panel measures inside a matte (CC5 §4.3).
+    #[must_use]
+    pub(crate) const fn is_matte_scoped(&self) -> bool {
+        self.effective_matte_region().is_some()
+    }
+
+    /// The region a measurement taken *now* would actually be scoped to.
+    ///
+    /// This — not the raw target — is what a measurement and its reference have
+    /// in common or do not: with the toggle off, the panel measures the whole
+    /// frame whatever node happens to be expanded, so the expanded node
+    /// changing underneath it changes nothing about the pixels it counts.
+    #[must_use]
+    const fn effective_matte_region(&self) -> Option<MatteTarget> {
+        if self.matte_scoped {
+            self.matte_target
+        } else {
+            None
+        }
+    }
+
+    /// Whether the toggle is on, whether or not a node is currently expanded.
+    ///
+    /// Kept separate from [`Self::is_matte_scoped`] so a section that closes
+    /// and reopens does not silently turn the toggle off.
+    #[must_use]
+    pub(crate) const fn matte_scope_requested(&self) -> bool {
+        self.matte_scoped
+    }
+
+    /// The matte a scoped measurement would use.
+    #[must_use]
+    pub(crate) const fn matte_target(&self) -> Option<MatteTarget> {
+        self.matte_target
+    }
+
+    /// Point the panel at the node whose matte section is expanded, and say
+    /// whether the toggle is on.
+    ///
+    /// A change to the **effective region** invalidates the current evidence
+    /// *and* the reference: a matte-scoped measurement covers a different
+    /// population than an unscoped one, and `compare_scope_evidence` refuses to
+    /// difference them (CC5 §4.3), so retaining a reference across the toggle
+    /// would only produce the "incomparable" banner.
+    ///
+    /// The *raw* target moving is deliberately not enough. Merely expanding a
+    /// matte section — which every card does on a click, whether or not anyone
+    /// intends to scope anything — pushes the target from `None` to `Some`, and
+    /// invalidating on that would throw away a captured reference for a change
+    /// that cannot alter one measured pixel while the toggle is off.
+    pub(crate) fn set_matte_scope(&mut self, scoped: bool, target: Option<MatteTarget>) {
+        if self.matte_scoped == scoped && self.matte_target == target {
+            return;
+        }
+        let previous = self.effective_matte_region();
+        self.matte_scoped = scoped;
+        self.matte_target = target;
+        if self.effective_matte_region() != previous {
+            self.invalidate(false);
+        }
     }
 
     /// ROI changes invalidate both the current proof and any reference shot;
@@ -420,12 +503,17 @@ impl ColorScopesState {
         revision: u64,
         frame: TimeCode,
     ) {
+        let matte = self.effective_matte_region().map(|target| MatteSample {
+            source: Arc::new(AnalysisMatteProofSource(Arc::clone(&analysis))),
+            target,
+        });
         self.request_sample_from(
             Arc::new(AnalysisProofSource(analysis)),
             document,
             session_id,
             revision,
             frame,
+            matte,
         );
     }
 
@@ -447,6 +535,7 @@ impl ColorScopesState {
         session_id: u64,
         revision: u64,
         frame: TimeCode,
+        matte: Option<MatteSample>,
     ) {
         let key = ScopeRequestKey {
             session_id,
@@ -466,6 +555,7 @@ impl ColorScopesState {
             source,
             document,
             frame,
+            matte,
         };
         if self.worker_is_running() {
             // The running worker's result belongs to an older generation and is
@@ -487,6 +577,7 @@ impl ColorScopesState {
             source,
             document,
             frame,
+            matte,
         } = sample;
         let cancelled = Arc::new(AtomicBool::new(false));
         let response_tx = self.response_tx.clone();
@@ -508,10 +599,28 @@ impl ColorScopesState {
                     completion.delivered = true;
                     return;
                 }
-                let result = source.monitor_proof(document, frame).and_then(|proof| {
-                    scope_measurement_from_proof(proof, key, roi, expected_resolution)
-                        .map_err(|error| error.to_string())
-                });
+                let result = source
+                    .monitor_proof(Arc::clone(&document), frame)
+                    .and_then(|proof| {
+                        // CC5 §4.3: the coverage is rendered for the same
+                        // document, frame, and raster, and only the measured
+                        // region changes. The CC2 engine is untouched.
+                        let coverage = matte
+                            .as_ref()
+                            .map(|matte| {
+                                matte
+                                    .source
+                                    .matte_proof(
+                                        document,
+                                        frame,
+                                        matte.target.clip,
+                                        matte.target.effect,
+                                    )
+                                    .map(|proof| (matte.target, proof.coverage))
+                            })
+                            .transpose()?;
+                        scope_measurement_from_proof(proof, key, roi, expected_resolution, coverage)
+                    });
                 completion.deliver(result);
             });
         let Ok(handle) = spawn_result else {
@@ -701,6 +810,7 @@ impl KinewrightApp {
             ui.colored_label(color::TEXT_MUTED, format!("· frame {frame}"));
         });
         self.scope_roi_controls(ui);
+        self.scope_matte_controls(ui);
 
         let can_sample = !self.color_scopes.is_pending();
         let mut sample = false;
@@ -818,6 +928,58 @@ impl KinewrightApp {
         );
     }
 
+    /// The CC5 §4.3 matte-scoped toggle.
+    ///
+    /// The stage is unchanged — a matte-scoped measurement is still taken at
+    /// `monitoring/post-composite` — and so is the ROI, which composes with it:
+    /// the measured set is their intersection.
+    fn scope_matte_controls(&mut self, ui: &mut egui::Ui) {
+        let target = self.matte_overlay.expanded();
+        // What the *toggle* holds, not what it currently achieves: with no
+        // section expanded the control is disabled, and drawing it unchecked
+        // would say the user turned it off when nobody did — and would silently
+        // reappear checked the moment a section opened again.
+        let mut scoped = self.color_scopes.matte_scope_requested();
+        ui.horizontal_wrapped(|ui| {
+            let toggle = ui
+                .add_enabled(
+                    target.is_some(),
+                    egui::Checkbox::new(&mut scoped, "Matte-scoped"),
+                )
+                .on_hover_text(
+                    "Measure only the pixels this correction's matte touched, threshold \
+                     m > 0 (CC5 §4.3). Composes with the ROI.",
+                )
+                .on_disabled_hover_text(
+                    "Expand a matte section on a colour node to scope the scopes to its coverage.",
+                );
+            if toggle.changed() {
+                self.color_scopes.set_matte_scope(scoped, target);
+            } else if self.color_scopes.matte_target() != target {
+                // The expanded node changed under a live toggle: rescope rather
+                // than keep measuring a node nobody is looking at.
+                let requested = self.color_scopes.matte_scope_requested();
+                self.color_scopes.set_matte_scope(requested, target);
+            }
+            match target {
+                Some(target) => ui.colored_label(
+                    color::TEXT_MUTED,
+                    format!("node clip {} effect {}", target.clip.0, target.effect.0),
+                ),
+                None => ui.colored_label(color::TEXT_MUTED, "no matte section expanded"),
+            };
+            // The checkbox now keeps the state the user set it to even while it
+            // is disabled, so a toggle that is on but cannot bite has to say so
+            // rather than look like a measurement nobody is getting.
+            if self.color_scopes.matte_scope_requested() && !self.color_scopes.is_matte_scoped() {
+                ui.colored_label(
+                    color::STATUS_WARNING,
+                    "measuring the whole frame until a matte section is expanded",
+                );
+            }
+        });
+    }
+
     fn scope_roi_controls(&mut self, ui: &mut egui::Ui) {
         let mut roi = self.color_scopes.roi;
         ui.horizontal_wrapped(|ui| {
@@ -887,6 +1049,18 @@ impl KinewrightApp {
                 format!("{}×{}", measurement.width, measurement.height),
             );
             ui.colored_label(color::TEXT_MUTED, measurement.stage.as_str());
+            if let Some(region) = &measurement.evidence.metadata.matte_region {
+                ui.colored_label(
+                    color::STATUS_SUCCESS,
+                    format!(
+                        "matte_region clip {} effect {} · {} · {} px covered",
+                        region.clip.0,
+                        region.effect.0,
+                        region.threshold,
+                        region.covered_pixel_count
+                    ),
+                );
+            }
             ui.colored_label(
                 color::TEXT_MUTED,
                 format!("{} · {}", measurement.backend, measurement.adapter),
@@ -925,13 +1099,37 @@ fn scope_measurement_from_proof(
     key: ScopeRequestKey,
     roi: ScopeRoi,
     expected_resolution: (u32, u32),
-) -> Result<ScopeMeasurement, kinewright_core::ScopeError> {
+    matte: Option<(MatteTarget, RgbaImage)>,
+) -> Result<ScopeMeasurement, String> {
     let request = ScopeRequest {
         stage: ScopeStage::MonitoringPostComposite,
         roi: roi.to_core(),
         resolution: ScopeResolution::default(),
     };
-    let evidence = measure_scope(&proof.image, key.frame.0, &request)?;
+    let (image, region) = match matte {
+        // CC5 §4.3: `A = 255 if m > 0 else 0` on an analysis-only copy, handed
+        // to the unchanged CC2 engine, which already excludes alpha-zero
+        // pixels from every statistic. The document, the render, and the
+        // layer's own alpha are never touched.
+        Some((target, coverage)) => {
+            let statistics =
+                matte_coverage_statistics(&coverage).map_err(|error| error.to_string())?;
+            let scoped =
+                matte_scoped_frame(&proof.image, &coverage).map_err(|error| error.to_string())?;
+            (
+                scoped,
+                Some(MatteRegionDescription::new(
+                    target.clip,
+                    target.effect,
+                    statistics.covered_pixel_count,
+                )),
+            )
+        }
+        None => (proof.image, None),
+    };
+    let mut evidence =
+        measure_scope(&image, key.frame.0, &request).map_err(|error| error.to_string())?;
+    evidence.metadata.matte_region = region;
     Ok(ScopeMeasurement {
         key,
         width: evidence.metadata.source_resolution.width,
@@ -1211,6 +1409,7 @@ mod tests {
             1,
             0,
             TimeCode(1),
+            None,
         );
         source.wait_for_started(1);
         assert_eq!(state.spawned_workers, 1);
@@ -1222,6 +1421,7 @@ mod tests {
             1,
             0,
             TimeCode(2),
+            None,
         );
         state.request_sample_from(
             Arc::clone(&source) as Arc<_>,
@@ -1229,6 +1429,7 @@ mod tests {
             1,
             0,
             TimeCode(3),
+            None,
         );
 
         assert_eq!(
@@ -1279,6 +1480,7 @@ mod tests {
             1,
             0,
             TimeCode(1),
+            None,
         );
         source.wait_for_started(1);
         let first_generation = state.generation;
@@ -1288,6 +1490,7 @@ mod tests {
             1,
             0,
             TimeCode(5),
+            None,
         );
         assert_ne!(state.generation, first_generation);
         assert!(
@@ -1671,6 +1874,7 @@ mod tests {
             key,
             ScopeRoi::full_frame(),
             (4, 2),
+            None,
         )
         .expect("full raster proof");
         assert!(full.full_resolution);
@@ -1682,6 +1886,7 @@ mod tests {
             key,
             ScopeRoi::full_frame(),
             (4, 2),
+            None,
         )
         .expect("proxy raster proof");
         assert!(!proxy.full_resolution);
@@ -1692,6 +1897,7 @@ mod tests {
             key,
             ScopeRoi::full_frame(),
             (4, 2),
+            None,
         )
         .expect("unclaimed proof");
         assert!(!unclaimed.full_resolution);
@@ -1795,5 +2001,251 @@ mod tests {
             gpu_claim: false,
             evidence,
         }
+    }
+
+    /// CC5 §4.3: a matte-scoped measurement is the same stage, the same
+    /// engine, and the same raster — only the measured region changes. On a
+    /// 4 × 2 double whose coverage is the top row, the population is exactly
+    /// the covered set and the outside is exactly the transparent count.
+    #[test]
+    fn a_matte_scoped_measurement_measures_the_covered_set_and_nothing_else() {
+        let key = ScopeRequestKey {
+            session_id: 1,
+            revision: 0,
+            frame: TimeCode::ZERO,
+            roi: ScopeRoi::full_frame(),
+        };
+        let target = MatteTarget::new(kinewright_core::ClipId(4), kinewright_core::EffectId(5));
+        // Top row covered, bottom row untouched.
+        let coverage = RgbaImage {
+            width: 4,
+            height: 2,
+            pixels: (0..8)
+                .flat_map(|index| {
+                    let code = if index < 4 { 255 } else { 0 };
+                    [code, code, code, 255]
+                })
+                .collect(),
+        };
+        let scoped = scope_measurement_from_proof(
+            test_proof(4, 2, true),
+            key,
+            ScopeRoi::full_frame(),
+            (4, 2),
+            Some((target, coverage)),
+        )
+        .expect("a matte-scoped measurement");
+
+        assert_eq!(
+            scoped.evidence.metadata.visible_pixel_count, 4,
+            "the population is exactly the covered pixels"
+        );
+        assert_eq!(
+            scoped.evidence.metadata.transparent_pixel_count, 4,
+            "outside the matte is exactly the transparent set"
+        );
+        assert_eq!(
+            scoped.stage,
+            ScopeStage::MonitoringPostComposite,
+            "matte scoping is a region, not a pipeline stage"
+        );
+        let region = scoped
+            .evidence
+            .metadata
+            .matte_region
+            .clone()
+            .expect("the region is recorded on the evidence");
+        assert_eq!(region.clip, target.clip);
+        assert_eq!(region.effect, target.effect);
+        assert_eq!(region.threshold, kinewright_core::MATTE_SCOPE_THRESHOLD);
+        assert_eq!(region.covered_pixel_count, 4);
+
+        // An unscoped measurement of the same frame measures everything, and
+        // core refuses to difference the two populations.
+        let unscoped = scope_measurement_from_proof(
+            test_proof(4, 2, true),
+            key,
+            ScopeRoi::full_frame(),
+            (4, 2),
+            None,
+        )
+        .expect("an unscoped measurement");
+        assert_eq!(unscoped.evidence.metadata.visible_pixel_count, 8);
+        assert!(unscoped.evidence.metadata.matte_region.is_none());
+        assert!(
+            compare_scope_evidence(&unscoped.evidence, &scoped.evidence).is_err(),
+            "a matte-scoped result must not be differenced against an unscoped one"
+        );
+        assert!(
+            compare_scope_evidence(&scoped.evidence, &scoped.evidence).is_ok(),
+            "two measurements of the same region still compare"
+        );
+    }
+
+    /// A coverage raster of the wrong size is a typed refusal, not a silent
+    /// mismatch.
+    #[test]
+    fn a_coverage_raster_of_the_wrong_size_is_refused() {
+        let key = ScopeRequestKey {
+            session_id: 1,
+            revision: 0,
+            frame: TimeCode::ZERO,
+            roi: ScopeRoi::full_frame(),
+        };
+        let coverage = RgbaImage {
+            width: 2,
+            height: 1,
+            pixels: vec![255, 255, 255, 255, 255, 255, 255, 255],
+        };
+        let error = scope_measurement_from_proof(
+            test_proof(4, 2, true),
+            key,
+            ScopeRoi::full_frame(),
+            (4, 2),
+            Some((
+                MatteTarget::new(kinewright_core::ClipId(4), kinewright_core::EffectId(5)),
+                coverage,
+            )),
+        )
+        .expect_err("a mismatched coverage raster must fail");
+        assert!(
+            error.contains("matte coverage raster"),
+            "the refusal names the mismatch: {error}"
+        );
+    }
+
+    /// Toggling the matte scope drops both the current evidence and the
+    /// reference: the two cover different populations.
+    #[test]
+    fn toggling_the_matte_scope_invalidates_the_reference() {
+        let key = ScopeRequestKey {
+            session_id: 1,
+            revision: 0,
+            frame: TimeCode::ZERO,
+            roi: ScopeRoi::full_frame(),
+        };
+        let mut state = ColorScopesState {
+            current: Some(test_measurement(key, [10, 10, 10])),
+            current_context: Some(key),
+            ..ColorScopesState::default()
+        };
+        assert!(state.capture_reference());
+        assert!(state.has_reference());
+        assert!(!state.is_matte_scoped(), "the panel starts unscoped");
+
+        let target = MatteTarget::new(kinewright_core::ClipId(4), kinewright_core::EffectId(5));
+        state.set_matte_scope(true, Some(target));
+        assert!(state.is_matte_scoped());
+        assert_eq!(state.matte_target(), Some(target));
+        assert!(
+            !state.has_reference(),
+            "the reference cannot survive a rescope"
+        );
+        assert!(state.current.is_none());
+
+        // Without a target the toggle cannot scope anything.
+        state.set_matte_scope(true, None);
+        assert!(!state.is_matte_scoped());
+    }
+
+    /// With the toggle **on**, the expanded section moving from one node to
+    /// another *is* a rescope: the two mattes cover different populations, and
+    /// `compare_scope_evidence` refuses to difference them (CC5 §4.3). The
+    /// captured reference cannot survive it — and restating the same target
+    /// must not cost one either.
+    #[test]
+    fn a_scoped_panel_invalidates_the_reference_when_the_expanded_node_moves() {
+        let key = ScopeRequestKey {
+            session_id: 1,
+            revision: 0,
+            frame: TimeCode::ZERO,
+            roi: ScopeRoi::full_frame(),
+        };
+        let first = MatteTarget::new(kinewright_core::ClipId(4), kinewright_core::EffectId(5));
+        let second = MatteTarget::new(kinewright_core::ClipId(4), kinewright_core::EffectId(6));
+        let mut state = ColorScopesState {
+            current_context: Some(key),
+            ..ColorScopesState::default()
+        };
+
+        // Scoped to the first node, with a measurement captured under it.
+        state.set_matte_scope(true, Some(first));
+        assert_eq!(state.effective_matte_region(), Some(first));
+        state.current = Some(test_measurement(key, [10, 10, 10]));
+        assert!(state.capture_reference());
+
+        // The inspector expands a *different* node's matte section.
+        state.set_matte_scope(true, Some(second));
+        assert_eq!(state.matte_target(), Some(second));
+        assert!(state.is_matte_scoped(), "the toggle is still on");
+        assert!(
+            !state.has_reference(),
+            "a reference measured inside another node's matte is not comparable"
+        );
+        assert!(state.current.is_none(), "nor is the current measurement");
+
+        // Restating the same target measures the same pixels, so the shot
+        // stands.
+        state.current = Some(test_measurement(key, [20, 20, 20]));
+        assert!(state.capture_reference());
+        state.set_matte_scope(true, Some(second));
+        assert!(
+            state.has_reference() && state.current.is_some(),
+            "an unchanged effective region invalidates nothing"
+        );
+
+        // And turning the toggle off is a rescope in its own right.
+        state.set_matte_scope(false, Some(second));
+        assert!(!state.has_reference());
+    }
+
+    /// Expanding and collapsing a matte section while the toggle is **off**
+    /// measures exactly the same pixels throughout, so it must not cost the
+    /// user a captured reference. The panel invalidates on the effective
+    /// region, not on the raw target.
+    #[test]
+    fn a_reference_survives_expanding_a_matte_section_with_the_toggle_off() {
+        let key = ScopeRequestKey {
+            session_id: 1,
+            revision: 0,
+            frame: TimeCode::ZERO,
+            roi: ScopeRoi::full_frame(),
+        };
+        let mut state = ColorScopesState {
+            current: Some(test_measurement(key, [10, 10, 10])),
+            current_context: Some(key),
+            ..ColorScopesState::default()
+        };
+        assert!(state.capture_reference());
+        assert!(state.has_reference());
+        assert!(!state.matte_scope_requested(), "the toggle starts off");
+
+        let first = MatteTarget::new(kinewright_core::ClipId(4), kinewright_core::EffectId(5));
+        let second = MatteTarget::new(kinewright_core::ClipId(4), kinewright_core::EffectId(6));
+
+        // A card reports its section open, then a different card's, then none.
+        for target in [Some(first), Some(second), None] {
+            state.set_matte_scope(false, target);
+            assert_eq!(state.matte_target(), target, "the panel still tracks it");
+            assert!(
+                !state.is_matte_scoped(),
+                "an off toggle scopes nothing whatever is expanded"
+            );
+            assert!(
+                state.has_reference(),
+                "an unscoped panel measures the whole frame either way: the \
+                 reference is still comparable"
+            );
+            assert!(
+                state.current.is_some(),
+                "and the current measurement is not thrown away either"
+            );
+        }
+
+        // Turning the toggle on with a target does change the population, and
+        // that still invalidates.
+        state.set_matte_scope(true, Some(first));
+        assert!(state.is_matte_scoped());
+        assert!(!state.has_reference(), "a real rescope still invalidates");
     }
 }

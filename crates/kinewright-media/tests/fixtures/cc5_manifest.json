@@ -1,0 +1,675 @@
+{
+  "contract": "CC5 secondaries",
+  "contract_token": "cc5_secondaries",
+  "manifest_version": 1,
+  "nodes": [
+    "technical_lut",
+    "primary_correction",
+    "color_wheels",
+    "color_curves",
+    "creative_look"
+  ],
+  "matte_capable_nodes": {
+    "technical_lut": false,
+    "primary_correction": true,
+    "color_wheels": true,
+    "color_curves": true,
+    "creative_look": true
+  },
+  "descriptor_sizes": {
+    "technical_lut": 4,
+    "primary_correction": 57,
+    "color_wheels": 60,
+    "color_curves": 180,
+    "creative_look": 51
+  },
+  "matte_parameter_count": 47,
+  "matte_window_limit": 4,
+  "matte_controls": [
+    {
+      "name": "matte_enabled",
+      "min": 0,
+      "max": 1,
+      "neutral": 0
+    },
+    {
+      "name": "matte_window_count",
+      "min": 0,
+      "max": 4,
+      "neutral": 0
+    },
+    {
+      "name": "matte_combine_token",
+      "min": 0,
+      "max": 1,
+      "neutral": 0
+    },
+    {
+      "name": "matte_invert",
+      "min": 0,
+      "max": 1,
+      "neutral": 0
+    },
+    {
+      "name": "matte_mix_basis_points",
+      "min": 0,
+      "max": 10000,
+      "neutral": 10000
+    },
+    {
+      "name": "matte_qualifier_enabled",
+      "min": 0,
+      "max": 1,
+      "neutral": 0
+    },
+    {
+      "name": "matte_hue_center_centidegrees",
+      "min": 0,
+      "max": 35999,
+      "neutral": 0
+    },
+    {
+      "name": "matte_hue_width_centidegrees",
+      "min": 0,
+      "max": 18000,
+      "neutral": 18000
+    },
+    {
+      "name": "matte_hue_softness_centidegrees",
+      "min": 0,
+      "max": 18000,
+      "neutral": 0
+    },
+    {
+      "name": "matte_saturation_low_basis_points",
+      "min": 0,
+      "max": 10000,
+      "neutral": 0
+    },
+    {
+      "name": "matte_saturation_high_basis_points",
+      "min": 0,
+      "max": 10000,
+      "neutral": 10000
+    },
+    {
+      "name": "matte_saturation_softness_basis_points",
+      "min": 0,
+      "max": 10000,
+      "neutral": 0
+    },
+    {
+      "name": "matte_luma_low_basis_points",
+      "min": 0,
+      "max": 10000,
+      "neutral": 0
+    },
+    {
+      "name": "matte_luma_high_basis_points",
+      "min": 0,
+      "max": 10000,
+      "neutral": 10000
+    },
+    {
+      "name": "matte_luma_softness_basis_points",
+      "min": 0,
+      "max": 10000,
+      "neutral": 0
+    }
+  ],
+  "matte_window_controls": [
+    {
+      "name": "matte_window0_shape_token",
+      "min": 1,
+      "max": 2,
+      "neutral": 1
+    },
+    {
+      "name": "matte_window0_center_x_basis_points",
+      "min": -10000,
+      "max": 20000,
+      "neutral": 5000
+    },
+    {
+      "name": "matte_window0_center_y_basis_points",
+      "min": -10000,
+      "max": 20000,
+      "neutral": 5000
+    },
+    {
+      "name": "matte_window0_half_width_basis_points",
+      "min": 1,
+      "max": 10000,
+      "neutral": 2500
+    },
+    {
+      "name": "matte_window0_half_height_basis_points",
+      "min": 1,
+      "max": 10000,
+      "neutral": 2500
+    },
+    {
+      "name": "matte_window0_rotation_centidegrees",
+      "min": -18000,
+      "max": 18000,
+      "neutral": 0
+    },
+    {
+      "name": "matte_window0_feather_basis_points",
+      "min": 0,
+      "max": 10000,
+      "neutral": 0
+    },
+    {
+      "name": "matte_window0_invert",
+      "min": 0,
+      "max": 1,
+      "neutral": 0
+    }
+  ],
+  "rasters": {
+    "width": 64,
+    "height": 36,
+    "raster_aspect": "16/9",
+    "pixel_centre": "((x + 0.5)/64, (y + 0.5)/36)",
+    "field_raster": "r = 0.05 + 0.9x/63, g = 0.05 + 0.9y/35, b = 0.05 + 0.45(x/63 + y/35); no channel is ever 0",
+    "parity_raster": "the CC3 §10.2 192 samples as a 16 × 12 grid of 4 × 3-pixel blocks",
+    "parity_block_width": 4,
+    "parity_block_height": 3,
+    "centred_window_pixels": 576,
+    "centred_window_outside_pixels": 1728,
+    "centred_window_basis_points": 2500
+  },
+  "window_anchors": {
+    "centred_rect_2500": 576,
+    "pixel_square_rect_rotation_0": 196,
+    "pixel_square_rect_rotation_4500": 220,
+    "pixel_square_ellipse": 164,
+    "ellipse_bounding_box": [
+      25,
+      38,
+      11,
+      24
+    ],
+    "ellipse_interior_margin_pixels_squared": 1.34,
+    "ellipse_exterior_margin_pixels_squared": 2.66,
+    "union": 864,
+    "intersection": 288,
+    "overlap": 288,
+    "union_with_inverted_window": 2016
+  },
+  "buffer": {
+    "grade_buffer_worst_case_bytes": 17680,
+    "compositor_required_storage_buffer_binding_size": 32768,
+    "compositor_required_storage_buffers_per_shader_stage": 1,
+    "grade_abi_version": 3,
+    "matte_block_words": 64,
+    "matte_window_words": 12,
+    "matte_window_base_word": 16,
+    "matte_payload_offset_word": 15,
+    "curve_payload_words": 196
+  },
+  "tolerances": {
+    "monitor_cpu_gpu_max_code": 2.0,
+    "monitor_cpu_gpu_p99_code": 1.0,
+    "monitor_cpu_gpu_mean_code": 0.5,
+    "linear_cpu_gpu_max": 0.0015,
+    "linear_cpu_gpu_p99": 0.00075,
+    "linear_cpu_gpu_mean": 0.00025,
+    "linear_over_range_p99": 0.0009765625,
+    "linear_over_range_mean": 0.0009765625,
+    "linear_gate_in_gamut": 1.0,
+    "linear_gate_domain": 2.0,
+    "minimum_changed_linear_basis_points": 500.0,
+    "feather_non_dyadic": 1.5e-07,
+    "qualifier_anchor": 1e-06,
+    "matte_proof_feathered_code": 1,
+    "outside_the_matte": "exactly zero changed samples, f32::to_bits identical; no tolerance exists"
+  },
+  "tracking": {
+    "owner": "kinewright-agent",
+    "media_scope": "the generated clip, the analytic box, and the containment of the keyframed window",
+    "source": "640x360 25 fps, 100 frames: solid 0x303030 background, 80x80 white overlay, x = 320 + 120 sin(2πt/8) − 40, y = 180 + 60 sin(2πt/8) − 40, bt709/tv tagged",
+    "sample_frames": [
+      0,
+      4,
+      9,
+      14,
+      19,
+      24,
+      29,
+      34,
+      39,
+      44,
+      49,
+      54,
+      59,
+      64,
+      69,
+      74,
+      79,
+      84,
+      89,
+      94,
+      99
+    ],
+    "step_frames": 5,
+    "search_radius_percent": 25,
+    "max_width": 512,
+    "half_width_basis_points": 1300,
+    "half_height_basis_points": 1800,
+    "derived_margin_x_basis_points": 675,
+    "derived_margin_y_basis_points": 689,
+    "layer_scales": [
+      0.5,
+      1.0
+    ],
+    "matte_track_tolerance_basis_points": 200,
+    "matte_track_smoothed_tolerance_basis_points": 600,
+    "matte_track_max_step_basis_points": 800,
+    "matte_track_dead_zone_basis_points": 0,
+    "constants_asserted_by": "kinewright-agent: the tracking constants live in the agent crate, which media does not link"
+  },
+  "performance": {
+    "stack": "sixteen color_curves nodes, each with four windows and an enabled qualifier",
+    "resolution": [
+      1920,
+      1080
+    ],
+    "soft_budget_milliseconds": 41.7,
+    "gate": "recorded evidence only; a regression must be visible, but the timing is never asserted",
+    "evidence_fields": [
+      "minimum_milliseconds",
+      "mean_milliseconds",
+      "samples_milliseconds",
+      "matte_free_milliseconds",
+      "empty_stack_milliseconds",
+      "empty_stack_samples_milliseconds",
+      "node_stack_milliseconds",
+      "readback_note",
+      "soft_budget_met_by_node_stack",
+      "soft_budget_milliseconds",
+      "soft_budget_met",
+      "gate",
+      "note"
+    ]
+  },
+  "required_evidence": [
+    "cc5_rasters",
+    "cc5_control_bounds",
+    "cc5_containment",
+    "cc5_window_geometry",
+    "cc5_feather",
+    "cc5_combine",
+    "cc5_qualifier",
+    "cc5_mix_and_invert",
+    "cc5_keyframed_window",
+    "cc5_gpu_cpu_parity",
+    "cc5_matte_proof",
+    "cc5_matte_scoped_scopes",
+    "cc5_tracked_shot",
+    "cc5_migration_and_mask",
+    "cc5_buffer_and_limits",
+    "cc5_performance",
+    "cc5_skin_and_product"
+  ],
+  "required_fixtures": [
+    {
+      "item": 1,
+      "name": "affected-pixel containment",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item, the §9.1 rasters the gate is measured on, and the §9.0.2 sweep of every matte control at its minimum, maximum, and an interior value",
+          "tests": [
+            "cc5_rasters_cover_their_controls_and_land_on_pixel_centres",
+            "cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu",
+            "cc5_every_matte_control_bound_matches_a_hand_derived_expected_value"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 2,
+      "name": "window geometry anchors",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item, including the 45° aspect gate, the ellipse margins, the §9.0.2 hand-derived window-control extremes with their GPU rasters, and §2.3's defensive hw/hh <= 0 clause",
+          "tests": [
+            "cc5_window_geometry_anchors_are_hand_derived_on_cpu_and_gpu",
+            "cc5_every_matte_control_bound_matches_a_hand_derived_expected_value",
+            "cc5_degenerate_window_half_extents_weigh_exactly_zero"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 3,
+      "name": "feather",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc5_feather_anchors_and_symmetry_match_the_contract"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 4,
+      "name": "combine",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc5_window_combine_is_hand_derived_on_cpu_and_gpu"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 5,
+      "name": "qualifier anchors",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item, including the degenerate-band QA report and the §9.0.2 hand-derived qualifier-control extremes",
+          "tests": [
+            "cc5_qualifier_anchors_match_the_hand_derived_values",
+            "cc5_every_matte_control_bound_matches_a_hand_derived_expected_value"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 6,
+      "name": "mix and invert",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc5_mix_and_invert_scale_the_coverage_exactly"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 7,
+      "name": "keyframed window motion",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item, including the NonHoldKeyframeParameter rejection",
+          "tests": [
+            "cc5_keyframed_window_motion_moves_the_covered_set"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 8,
+      "name": "CPU/GPU parity",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item, on both lanes",
+          "tests": [
+            "cc5_gpu_compositor_matches_the_cpu_reference_on_software_fallback",
+            "cc5_gpu_compositor_matches_the_cpu_reference_on_hardware",
+            "cc5_matte_gpu_anchors_hold_on_hardware"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs",
+            "crates/kinewright-media/src/compositor.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 9,
+      "name": "matte proof fidelity",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item, through Compositor::render_matte and Analysis::matte_proof_for_document, including every typed refusal",
+          "tests": [
+            "cc5_matte_proof_matches_the_cpu_reference_coverage",
+            "cc5_matte_proof_reports_exact_window_coverage_and_metadata",
+            "cc5_matte_proof_fails_typed_instead_of_returning_a_blank_frame",
+            "cc5_matte_proof_refuses_a_clip_that_is_not_visible_at_the_frame",
+            "cc5_matte_proof_ignores_a_layer_above_the_target_clip",
+            "cc5_matte_proof_follows_a_keyframed_window_center"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs",
+            "crates/kinewright-media/src/engine.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 10,
+      "name": "matte-scoped scopes and proof variants",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the analysis-only scoped frame, its counts, the ROI intersection, and the compare_scope_evidence rule",
+          "tests": [
+            "cc5_matte_scoped_scopes_measure_exactly_the_affected_set"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs"
+          ]
+        },
+        {
+          "owner": "kinewright-agent",
+          "scope": "the get_video_scopes_v2 matte_region request field and render_color_proof's inside_only/outside_only variants",
+          "tests": [
+            "matte_scoped_scopes_measure_exactly_the_covered_population",
+            "matte_scoped_scopes_intersect_with_an_explicit_roi",
+            "matte_scoped_scopes_refuse_when_the_coverage_cannot_be_rendered",
+            "matte_scoped_scopes_refuse_a_coverage_raster_of_a_different_size",
+            "matte_scoped_evidence_reaches_cores_comparison_guard_and_delta",
+            "unscoped_scopes_carry_no_matte_region_key",
+            "render_color_proof_validates_matte_comparison_before_rendering",
+            "render_color_proof_outside_only_toggles_matte_invert_on_a_scratch_copy",
+            "render_color_proof_outside_only_clears_a_keyframed_matte_invert_on_the_scratch_copy",
+            "render_color_proof_coverage_returns_the_matte_proof_image",
+            "render_color_proof_omits_matte_comparison_when_none_was_requested"
+          ],
+          "sources": [
+            "crates/kinewright-agent/src/color_scopes.rs",
+            "crates/kinewright-agent/src/server.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 11,
+      "name": "tracked-shot proof",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the generated clip, the analytic even-snapped box, and CPU/GPU containment of the keyframed window at every frame 0..99 at layer scale 0.5 and 1.0",
+          "tests": [
+            "cc5_tracked_shot_window_contains_the_subject_at_every_frame"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs"
+          ]
+        },
+        {
+          "owner": "kinewright-agent",
+          "scope": "track_matte_window: observations, smoothed curves, tolerances, the max_step precondition, the coordinate conversion, and the prepared plan",
+          "tests": [
+            "track_matte_window_prepares_two_keyframe_operations_without_committing",
+            "track_matte_window_refuses_when_confidence_is_too_low",
+            "track_matte_window_refuses_a_keyframed_layer_transform",
+            "track_matte_window_refuses_a_window_past_the_active_count",
+            "matte_track_smoothing_uses_the_pinned_m40_constants_and_lags_the_last_sample",
+            "matte_centre_conversion_uses_the_pixel_centre_over_the_full_extent",
+            "matte_track_box_percent_rescales_the_window_by_the_layer_scale",
+            "track_matte_window_smoothed_curve_contains_the_subject_at_every_frame"
+          ],
+          "sources": [
+            "crates/kinewright-agent/src/server.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 12,
+      "name": "migration and mask regression",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc5_migration_is_bit_identical_and_the_mask_never_interacts",
+            "a_pre_cc5_document_renders_bit_identically"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs",
+            "crates/kinewright-media/src/compositor.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 13,
+      "name": "buffer and limits",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc5_buffer_layout_limits_and_abi_constants_hold",
+            "matte_block_layout_is_the_cc5_word_map"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs",
+            "crates/kinewright-media/src/compositor.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 14,
+      "name": "serialization and history",
+      "owners": [
+        {
+          "owner": "kinewright-core",
+          "scope": "the whole item, in crates/kinewright-core/tests/cc5_core.rs",
+          "tests": [
+            "every_matte_capable_kind_carries_the_forty_seven_generated_parameters",
+            "technical_lut_carries_no_matte_parameter",
+            "matte_bounds_accept_the_extremes_and_reject_one_step_beyond",
+            "matte_tokens_and_counts_accept_only_hold_keyframes",
+            "the_matte_inactivity_truth_table_is_read_off_the_stored_integers",
+            "a_matte_excluded_node_reports_the_new_inactive_reason",
+            "a_two_window_matte_survives_save_reopen_replay_and_undo"
+          ],
+          "sources": [
+            "crates/kinewright-core/tests/cc5_core.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 15,
+      "name": "agent plan-not-apply",
+      "owners": [
+        {
+          "owner": "kinewright-agent",
+          "scope": "the whole item: plan_secondary_correction, inspect_grade_matte, render_color_proof, and track_matte_window commit nothing",
+          "tests": [
+            "secondary_plan_emits_exact_matte_operations_and_never_applies",
+            "secondary_plan_fails_closed_on_a_stale_revision",
+            "secondary_plan_predicted_coverage_is_measured_or_typed_unavailable",
+            "secondary_plan_rejects_a_technical_lut_target",
+            "secondary_plan_rejects_out_of_range_controls_with_the_exact_bounds",
+            "inspect_grade_matte_reports_the_cc5_coverage_statistics",
+            "inspect_grade_matte_surfaces_an_unavailable_proof_as_a_typed_refusal",
+            "inspect_grade_matte_refuses_nodes_that_cannot_carry_a_matte",
+            "cc5_matte_tools_are_registered_read_only_inspectors",
+            "cc5_secondary_plan_and_commit_land_the_matte_parameters"
+          ],
+          "sources": [
+            "crates/kinewright-agent/src/color_status.rs",
+            "crates/kinewright-agent/src/server.rs",
+            "crates/kinewright-agent/tests/mcp_server.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 16,
+      "name": "performance evidence",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item, recorded on both lanes; the soft budget is recorded, never gated",
+          "tests": [
+            "cc5_performance_evidence_is_recorded_on_software_fallback",
+            "cc5_performance_evidence_is_recorded_on_hardware"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 17,
+      "name": "skin and product qualifier fixtures",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc5_skin_and_product_qualifiers_select_only_their_patch"
+          ],
+          "sources": [
+            "crates/kinewright-media/src/cc5_fixtures.rs"
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest_self_test": {
+    "rule": "CC5 §9.0.4: every declared tolerance and constant is asserted equal to the code the fixtures gate with",
+    "test": "cc5_manifest_declares_every_required_fixture_and_constant",
+    "inventory_test": "cc5_declared_test_names_exist_in_their_source_files",
+    "sources_rule": "every test name declared under required_fixtures[].owners[].tests is asserted to exist as a #[test] function in one of that owner's sources[], via include_str! at compile time"
+  },
+  "gpu_contexts": {
+    "software": "required: lavapipe/llvmpipe adapter with exact backend+adapter provenance; this is the default CC5 lane",
+    "software_unavailable_opt_in": "optional: set KINEWRIGHT_CC1_ALLOW_HARDWARE_GPU=1 to run the default lane on the physical adapter when no lavapipe/llvmpipe adapter exists; evidence then records software_fallback=false, gpu_claim=true, lane=hardware_optin",
+    "hardware": "required on a physical-GPU lane: run cc5_gpu_compositor_matches_the_cpu_reference_on_hardware and cc5_performance_evidence_is_recorded_on_hardware --ignored --nocapture"
+  }
+}

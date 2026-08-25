@@ -63,13 +63,15 @@ use crate::{
     color_status::{
         CC1_STAGE_NAMES, ColorContextArgs, ColorCurvesPlanArgs, ColorNodePlan, ColorNodePlanError,
         ColorProofError, ColorWheelsPlanArgs, LegacyLookConversion, LookAssetContext,
-        LookComparison, LutNodePlanArgs, PrimaryCorrectionPlanArgs, PrimaryPlanError,
-        RenderColorProofArgs, active_layer_source_classification,
-        color_context_value_with_assumptions, color_context_value_with_options,
-        color_curves_request_summary, color_node_manifest, color_wheels_parameter_summary,
-        effect_chain_manifest, legacy_look_conversion, legacy_stage_warnings, look_assets_value,
-        lut_node_parameter_summary, plan_color_curves, plan_color_wheels, plan_creative_look,
-        plan_primary_correction, plan_technical_lut, primary_parameter_summary, raw_only_conflict,
+        LookComparison, LutNodePlanArgs, MatteComparison, PrimaryCorrectionPlanArgs,
+        PrimaryPlanError, RenderColorProofArgs, SecondaryCorrectionPlanArgs,
+        active_layer_source_classification, color_context_value_with_assumptions,
+        color_context_value_with_options, color_curves_request_summary, color_node_manifest,
+        color_wheels_parameter_summary, effect_chain_manifest, legacy_look_conversion,
+        legacy_stage_warnings, look_assets_value, lut_node_parameter_summary,
+        matte_legend_reference, plan_color_curves, plan_color_wheels, plan_creative_look,
+        plan_primary_correction, plan_secondary_correction, plan_technical_lut,
+        primary_parameter_summary, raw_only_conflict,
     },
     export_queue::{ExportJobId, ExportQueue, ExportQueueError, QueueExportRequest},
     pacing::{DialoguePacingGap, dialogue_pacing_gaps},
@@ -107,6 +109,9 @@ const DEFAULT_TRACKING_WIDTH: u32 = 256;
 const DEFAULT_REFRAME_DEAD_ZONE_PERCENT: u8 = 6;
 const DEFAULT_REFRAME_MAXIMUM_STEP_PERCENT: u8 = 2;
 const MAX_TRACKING_SAMPLES: usize = 120;
+/// The CC5 §2.2 matte-invert control, named once so the `outside_only` proof
+/// variant and its test cannot drift apart.
+const MATTE_INVERT_PARAMETER: &str = "matte_invert";
 /// Compact marker-label sidecar for deterministic subject-tracking evidence.
 ///
 /// Effects intentionally accept only registered render parameters, so this
@@ -826,6 +831,21 @@ impl KinewrightMcp {
                 self.color_node_plan("plan_creative_look", |document, revision| {
                     plan_creative_look(document, revision, &args, &looks)
                 })
+            }
+            "plan_secondary_correction" => {
+                let args: SecondaryCorrectionPlanArgs =
+                    decode_args("plan_secondary_correction", arguments)?;
+                self.color_node_plan("plan_secondary_correction", |document, revision| {
+                    plan_secondary_correction(document, revision, self.analysis.as_ref(), &args)
+                })
+            }
+            "inspect_grade_matte" => {
+                let args: InspectGradeMatteArgs = decode_args("inspect_grade_matte", arguments)?;
+                self.inspect_grade_matte(&args)
+            }
+            "track_matte_window" => {
+                let args: TrackMatteWindowArgs = decode_args("track_matte_window", arguments)?;
+                self.track_matte_window(&args)
             }
             "list_look_assets" => self.list_look_assets(),
             "import_lut_asset" => {
@@ -2364,6 +2384,21 @@ impl KinewrightMcp {
             "operations": operations,
             "next": "Review these exact operations; submit them through prepare_edit_plan at the same revision if the edit is requested.",
         });
+        // CC5 §7: inserted rather than written into the literal above, so a
+        // CC3/CC4 plan response is byte-unchanged — the keys are absent, not
+        // null, when the planner does not touch a matte.
+        let mut value = value;
+        if let Some(object) = value.as_object_mut() {
+            for (key, field) in [
+                ("matte", plan.matte),
+                ("predicted_coverage", plan.predicted_coverage),
+                ("sample_roi_evidence", plan.sample_evidence),
+            ] {
+                if let Some(field) = field {
+                    object.insert(key.to_owned(), field);
+                }
+            }
+        }
         Ok(success_structured(
             format!(
                 "prepared evidence-only {} proposal for clip {} at revision {}; no operation was applied",
@@ -2391,6 +2426,19 @@ impl KinewrightMcp {
         if args.look_comparison.is_some() && args.effect_id.is_none() {
             return Ok(color_proof_error_result(
                 ColorProofError::LookComparisonRequiresEffectId,
+            ));
+        }
+        // CC5 §7: `matte_comparison` is valid only alongside `effect_id`, and
+        // both comparisons select what the AFTER cell renders, so exactly one
+        // may be sent.
+        if args.matte_comparison.is_some() && args.effect_id.is_none() {
+            return Ok(color_proof_error_result(
+                ColorProofError::MatteComparisonRequiresEffectId,
+            ));
+        }
+        if args.matte_comparison.is_some() && args.look_comparison.is_some() {
+            return Ok(color_proof_error_result(
+                ColorProofError::MatteComparisonConflictsWithLookComparison,
             ));
         }
         // Resolve the stored node before any render work: an unrenderable
@@ -2433,6 +2481,35 @@ impl KinewrightMcp {
                             kind: kind.effect_name(),
                         },
                     ));
+                }
+                // CC5 §7: a matte comparison needs a node that both may carry a
+                // matte and actually does. Both are checked before any render
+                // work, so an unrenderable request costs nothing.
+                if args.matte_comparison.is_some() {
+                    if !kind.supports_matte() {
+                        return Ok(color_proof_error_result(
+                            ColorProofError::MatteComparisonUnsupportedKind {
+                                effect: effect_id,
+                                kind: kind.effect_name(),
+                            },
+                        ));
+                    }
+                    let clip_local = args
+                        .timecode
+                        .0
+                        .checked_sub(
+                            document
+                                .clip(args.clip_id)
+                                .map_or(0, |clip| clip.timeline_start.0),
+                        )
+                        .map_or(TimeCode::ZERO, TimeCode);
+                    if !kinewright_core::MatteParams::from_effect(&stored.evaluated_at(clip_local))
+                        .has_matte()
+                    {
+                        return Ok(color_proof_error_result(
+                            ColorProofError::MatteComparisonNoMatte { effect: effect_id },
+                        ));
+                    }
                 }
                 Some((effect_id, kind))
             }
@@ -2728,6 +2805,14 @@ impl KinewrightMcp {
             apply_batch(&mut candidate, operations).map_err(|error| error.to_string())?;
             Ok(Arc::new(candidate))
         };
+        // CC5 §7: the scratch automation this proof had to remove to render the
+        // variant it names, published in the manifest so the removal is a
+        // stated fact rather than an invisible difference from the document.
+        let mut cleared_keyframes: Vec<&'static str> = Vec::new();
+        let clip_local = args
+            .timecode
+            .checked_sub(clip.timeline_start)
+            .unwrap_or(TimeCode::ZERO);
         let (before_operations, after_operations) = match stored_node {
             None => (Vec::new(), plan.operations.clone()),
             Some((effect_id, _)) => {
@@ -2735,10 +2820,68 @@ impl KinewrightMcp {
                     clip: args.clip_id,
                     effect: effect_id,
                 }];
-                let after = match look_comparison {
-                    LookComparison::Before => remove.clone(),
-                    LookComparison::After => Vec::new(),
-                    LookComparison::Bypass => vec![Operation::SetEffectParam {
+                // CC5 §7: `inside_only` is the document exactly as stored, and
+                // `outside_only` is a scratch copy with `matte_invert` toggled,
+                // so the two variants partition the raster.
+                let after = match (args.matte_comparison, look_comparison) {
+                    (Some(MatteComparison::OutsideOnly), _) => {
+                        let stored_effect = document.clip(args.clip_id).and_then(|clip| {
+                            clip.effects.iter().find(|effect| effect.id == effect_id)
+                        });
+                        // `matte_invert` is Hold-only but it *is* keyframable,
+                        // and automation beats the stored static value at every
+                        // frame from its first keyframe onward. So the value to
+                        // complement is the one this frame actually renders,
+                        // and the static write only lands once the curve is out
+                        // of the way — otherwise the "outside" cell would
+                        // silently render the inside and the manifest would say
+                        // otherwise. The clear is emitted on the scratch copy
+                        // only, and only when a curve exists, so a node without
+                        // automation produces the byte-identical single
+                        // operation it always did.
+                        let rendered_invert = stored_effect
+                            .and_then(|effect| {
+                                effect.integer_parameter_at(MATTE_INVERT_PARAMETER, clip_local)
+                            })
+                            .map_or_else(
+                                || {
+                                    stored_effect
+                                        .map(kinewright_core::MatteParams::from_effect)
+                                        .is_some_and(|matte| matte.is_inverted())
+                                },
+                                |value| value != 0,
+                            );
+                        let keyframed = stored_effect.is_some_and(|effect| {
+                            effect
+                                .keyframes
+                                .get(MATTE_INVERT_PARAMETER)
+                                .is_some_and(|curve| !curve.keyframes.is_empty())
+                        });
+                        if keyframed {
+                            cleared_keyframes.push(MATTE_INVERT_PARAMETER);
+                        }
+                        let mut operations = Vec::new();
+                        if keyframed {
+                            operations.push(Operation::ClearEffectKeyframes {
+                                clip: args.clip_id,
+                                effect: effect_id,
+                                name: MATTE_INVERT_PARAMETER.to_owned(),
+                            });
+                        }
+                        operations.push(Operation::SetEffectParam {
+                            clip: args.clip_id,
+                            effect: effect_id,
+                            name: MATTE_INVERT_PARAMETER.to_owned(),
+                            value: ParamValue::Integer(i64::from(!rendered_invert)),
+                        });
+                        operations
+                    }
+                    (Some(MatteComparison::Coverage | MatteComparison::InsideOnly), _) => {
+                        Vec::new()
+                    }
+                    (None, LookComparison::Before) => remove.clone(),
+                    (None, LookComparison::After) => Vec::new(),
+                    (None, LookComparison::Bypass) => vec![Operation::SetEffectParam {
                         clip: args.clip_id,
                         effect: effect_id,
                         name: kinewright_core::COLOR_NODE_BYPASS_PARAMETER.to_owned(),
@@ -2836,6 +2979,59 @@ impl KinewrightMcp {
                 ),
             }));
         }
+        // CC5 §7: `coverage` replaces the AFTER cell with the §4.1 proof
+        // image itself. It is rendered here, after the BEFORE/AFTER rasters
+        // have been proved to match the document raster, so the coverage is
+        // asserted to be the same size as the picture it describes.
+        let mut after = after;
+        let mut matte_coverage = None;
+        if matches!(args.matte_comparison, Some(MatteComparison::Coverage))
+            && let Some((effect_id, _)) = stored_node
+        {
+            let proof = match self.analysis.matte_proof_for_document(
+                Arc::clone(&after_document),
+                args.timecode,
+                args.clip_id,
+                effect_id,
+            ) {
+                Ok(proof) => proof,
+                Err(error) => {
+                    return Ok(color_proof_error_result(
+                        ColorProofError::MatteProofUnavailable {
+                            effect: effect_id,
+                            message: error.to_string(),
+                        },
+                    ));
+                }
+            };
+            if proof.coverage.width != before.image.width
+                || proof.coverage.height != before.image.height
+            {
+                return Ok(color_proof_error_result(ColorProofError::InvalidImage {
+                    stage: "matte_coverage",
+                    message: format!(
+                        "coverage raster {}x{} does not match the proof raster {}x{}",
+                        proof.coverage.width,
+                        proof.coverage.height,
+                        before.image.width,
+                        before.image.height,
+                    ),
+                }));
+            }
+            matte_coverage = kinewright_core::matte_coverage_statistics(&proof.coverage)
+                .ok()
+                .map(|statistics| {
+                    serde_json::json!({
+                        "statistics": statistics,
+                        "covered_pixel_count": statistics.covered_pixel_count,
+                        "matte_threshold": kinewright_core::MATTE_SCOPE_THRESHOLD,
+                        "coverage_encoding": proof.metadata.coverage_encoding,
+                        "coverage_scale": proof.metadata.coverage_scale,
+                        "raster_aspect_millionths": proof.metadata.raster_aspect_millionths,
+                    })
+                });
+            after.image = proof.coverage;
+        }
         // CC4 §8: the manifest *asserts* that the bypass variant is the
         // byte-identical twin of the node-removed variant. A difference means
         // a bypassed node still contributed something, so the proof is refused
@@ -2932,6 +3128,28 @@ impl KinewrightMcp {
             .timecode
             .checked_sub(clip.timeline_start)
             .unwrap_or(TimeCode::ZERO);
+        // CC5 §7, hoisted out of the manifest literal so the `json!` macro
+        // stays inside its recursion budget.
+        let matte_comparison_manifest = args.matte_comparison.map(|variant| {
+            serde_json::json!({
+                "variant": variant.as_str(),
+                "effect_id": stored_node.map(|(effect_id, _)| effect_id.0),
+                "kind": stored_node.map(|(_, kind)| kind.effect_name()),
+                "after_cell": match variant {
+                    MatteComparison::Coverage => "the CC5 §4.1 coverage image, R = G = B = round(255 * m), alpha 255",
+                    MatteComparison::InsideOnly => "the document as stored: the correction applies inside the matte and nowhere else",
+                    MatteComparison::OutsideOnly => "a scratch copy with matte_invert toggled: the correction applies outside the matte and nowhere else",
+                },
+                "after_operations": after_operations,
+                // CC5 §7: `matte_invert` is Hold-only but keyframable, and a
+                // static write under an existing curve is dead. `outside_only`
+                // therefore clears that curve on the scratch copy, and names it
+                // here; empty for every other variant and for a node with no
+                // `matte_invert` automation.
+                "cleared_keyframes": cleared_keyframes,
+                "coverage": matte_coverage,
+            })
+        });
         let manifest = serde_json::json!({
             "timeline_revision": actual_revision.0,
             "clip_id": args.clip_id.0,
@@ -3064,6 +3282,15 @@ impl KinewrightMcp {
             "objective": objective,
             "next": "Review the mapped BEFORE/AFTER cells and exact unapplied operations; submit through prepare_edit_plan at the same revision only if the edit is requested.",
         });
+        // CC5 §7: inserted rather than written into the literal above, which is
+        // already at the `json!` macro's recursion budget. Absent entirely when
+        // no matte variant was requested, so a CC4 manifest is byte-unchanged.
+        let mut manifest = manifest;
+        if let Some(matte_comparison) = matte_comparison_manifest
+            && let Some(object) = manifest.as_object_mut()
+        {
+            object.insert("matte_comparison".to_owned(), matte_comparison);
+        }
         let mut result = CallToolResult::success(vec![
             ContentBlock::text(format!(
                 "CC1 colour proof clip={} asset={} project_frame={} revision={} BEFORE|AFTER",
@@ -3650,7 +3877,7 @@ impl KinewrightMcp {
             box_percent,
             search_radius_percent: search_radius,
             max_width,
-            excluded_effect_name: "mask",
+            excluded_effect: args.effect_id,
         }) {
             Ok(tracked) => tracked,
             Err(error) => return Ok(error_text(error)),
@@ -3722,6 +3949,604 @@ impl KinewrightMcp {
         Ok(success_structured(
             format!(
                 "tracked mask effect {} on clip {} across {} samples as edit plan {}; inspect the preview, then commit it at timeline revision {revision}",
+                args.effect_id,
+                args.clip_id,
+                observations.len(),
+                plan.id,
+            ),
+            structured,
+        ))
+    }
+
+    /// Measure one colour node's matte coverage at one exact project frame
+    /// (CC5 §4.2).
+    ///
+    /// Read-only: it renders a scratch proof through the analysis backend and
+    /// mutates nothing at all.
+    #[allow(clippy::too_many_lines)]
+    fn inspect_grade_matte(
+        &self,
+        args: &InspectGradeMatteArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        if let Some(expected) = args.expected_revision
+            && expected != revision
+        {
+            return Ok(revision_conflict_text(expected, revision));
+        }
+        let Some(clip) = document.clip(args.clip_id) else {
+            return Ok(matte_error_result(
+                "matte_clip_not_found",
+                &format!("clip {} does not exist", args.clip_id),
+                &serde_json::json!({
+                    "field": "clip_id",
+                    "observed": args.clip_id.0,
+                    "allowed": "an existing clip id",
+                    "recovery_action": "Call get_timeline_state or get_color_context for the current clip ids.",
+                }),
+            ));
+        };
+        let Some(effect) = clip
+            .effects
+            .iter()
+            .find(|effect| effect.id == args.effect_id)
+        else {
+            return Ok(matte_error_result(
+                "matte_effect_not_found",
+                &format!(
+                    "effect {} does not exist on clip {}",
+                    args.effect_id, args.clip_id
+                ),
+                &serde_json::json!({
+                    "field": "effect_id",
+                    "observed": args.effect_id.0,
+                    "allowed": "an effect id on the requested clip",
+                    "recovery_action": "Call get_color_context for the clip's colour_nodes.",
+                    "clip_id": args.clip_id.0,
+                }),
+            ));
+        };
+        let Some(kind) = kinewright_core::classify_color_node(effect) else {
+            return Ok(matte_error_result(
+                "matte_effect_not_a_color_node",
+                &format!("effect {} is {}", args.effect_id, effect.name),
+                &serde_json::json!({
+                    "field": "effect_id",
+                    "observed": {"effect_id": args.effect_id.0, "name": effect.name},
+                    "allowed": crate::color_status::MATTE_CAPABLE_NODE_NAMES,
+                    // CC5 §1: the layer `mask` effect is a compositing alpha
+                    // operation, not a colour node, and is never a secondary.
+                    "recovery_action": "A matte belongs to a managed correction node. The layer `mask` effect is a compositing alpha operation, not a matte; inspect it with get_clip_info.",
+                }),
+            ));
+        };
+        if !kind.supports_matte() {
+            return Ok(matte_error_result(
+                "matte_unsupported_node_kind",
+                &format!("{} cannot carry a matte", kind.effect_name()),
+                &serde_json::json!({
+                    "field": "effect_id",
+                    "observed": kind.effect_name(),
+                    "allowed": crate::color_status::MATTE_CAPABLE_NODE_NAMES,
+                    "recovery_action": "A technical input transform normalizes the whole source, so a partially applied one is not a meaningful state (CC5 §2.1).",
+                }),
+            ));
+        }
+
+        // CC5 §2.6: every inactivity question is answered on the *evaluated*
+        // stored integers, never on floats and never on the authored values.
+        let clip_local = args
+            .timecode
+            .0
+            .checked_sub(clip.timeline_start.0)
+            .map_or(TimeCode::ZERO, TimeCode);
+        let evaluated = effect.evaluated_at(clip_local);
+        let matte = kinewright_core::MatteParams::from_effect(&evaluated);
+        let inactive_reason = kinewright_core::color_node_inactive_reason(&evaluated);
+        let resolved = matte_parameter_object(&matte);
+
+        let image = match self.analysis.matte_proof_for_document(
+            Arc::clone(&document),
+            args.timecode,
+            args.clip_id,
+            args.effect_id,
+        ) {
+            Ok(proof) => proof,
+            Err(error) => {
+                // The engine may not implement matte proofs yet, and a node
+                // that is inactive or matte-free fails typed rather than
+                // returning a blank frame (CC5 §4.1). Both surface here as one
+                // stable code with the backend's own message attached, so a
+                // caller never mistakes "could not measure" for "empty".
+                return Ok(matte_error_result(
+                    crate::color_status::MATTE_PROOF_UNAVAILABLE,
+                    &format!(
+                        "could not render a matte proof for effect {} on clip {} at project frame {}: {error}",
+                        args.effect_id, args.clip_id, args.timecode
+                    ),
+                    &serde_json::json!({
+                        "field": "effect_id",
+                        "observed": {
+                            "effect_id": args.effect_id.0,
+                            "clip_id": args.clip_id.0,
+                            "project_frame": args.timecode.0,
+                            "message": error.to_string(),
+                            "node_kind": kind.effect_name(),
+                            "active": inactive_reason.is_none(),
+                            "inactive_reason": inactive_reason.map(kinewright_core::ColorNodeInactiveReason::as_str),
+                            "has_matte": matte.has_matte(),
+                        },
+                        "allowed": "an active matte-carrying colour node rendered by a backend that implements matte proofs",
+                        "recovery_action": "Enable the node's matte with plan_secondary_correction, clear its bypass, or retry once this build's renderer supports matte proofs; no coverage is invented here.",
+                        "resolved_matte": resolved,
+                    }),
+                ));
+            }
+        };
+
+        let statistics = match kinewright_core::matte_coverage_statistics(&image.coverage) {
+            Ok(statistics) => statistics,
+            Err(error) => {
+                return Ok(matte_error_result(
+                    error.code(),
+                    &error.to_string(),
+                    &serde_json::json!({
+                        "field": "coverage",
+                        "observed": error.to_string(),
+                        "allowed": "a coverage raster with R = G = B and an opaque alpha (CC5 §4.1)",
+                        "recovery_action": "The renderer returned a raster that is not a coverage proof; report this build's provenance.",
+                    }),
+                ));
+            }
+        };
+
+        let include_image = args.include_image.unwrap_or(true);
+        let png = if include_image {
+            Some(encode_png(&image.coverage)?)
+        } else {
+            None
+        };
+        let structured = serde_json::json!({
+            "timeline_revision": revision.0,
+            "clip_id": args.clip_id.0,
+            "effect_id": args.effect_id.0,
+            "project_frame": args.timecode.0,
+            "clip_local_frame": clip_local.0,
+            "kind": kind.effect_name(),
+            "role": kind.role(),
+            "color_stage": kind.stage().as_str(),
+            // CC5 §1: the two coverage concepts are named apart on every
+            // surface, so a reader cannot mistake one for the other.
+            "surface": "Matte (this correction)",
+            "distinct_from": "Mask (layer alpha), which is a compositing operation and is never a CC1 secondary",
+            "active": inactive_reason.is_none(),
+            "inactive_reason": inactive_reason.map_or(serde_json::Value::Null, |reason| serde_json::json!(reason.as_str())),
+            "matte": crate::color_status::matte_manifest_value(&evaluated),
+            "resolved_matte_parameters": resolved,
+            "statistics": statistics,
+            // CC5 §4.3's threshold, restated at the level a caller reads it.
+            "matte_threshold": kinewright_core::MATTE_SCOPE_THRESHOLD,
+            "covered_pixel_count": statistics.covered_pixel_count,
+            "raster": {
+                "width": image.coverage.width,
+                "height": image.coverage.height,
+            },
+            "raster_aspect_millionths": image.metadata.raster_aspect_millionths,
+            "coverage_encoding": image.metadata.coverage_encoding,
+            "coverage_scale": image.metadata.coverage_scale,
+            "coverage_histogram_buckets": kinewright_core::MATTE_COVERAGE_HISTOGRAM_BUCKETS,
+            "provenance": {
+                "render": image.metadata.render,
+                "clip_id": image.metadata.clip.0,
+                "effect_id": image.metadata.effect.0,
+                "node_kind": image.metadata.node_kind,
+                "matte_enabled": image.metadata.matte_enabled,
+                "window_count": image.metadata.window_count,
+                "qualifier_enabled": image.metadata.qualifier_enabled,
+            },
+            "image_included": include_image,
+            "evidence_only": true,
+            "applied": false,
+        });
+        let mut content = vec![ContentBlock::text(format!(
+            "matte coverage clip={} effect={} kind={} project_frame={} covered={}/{} pixels ({} bp)",
+            args.clip_id,
+            args.effect_id,
+            kind.effect_name(),
+            args.timecode,
+            statistics.covered_pixel_count,
+            statistics.total_pixel_count,
+            statistics.covered_basis_points,
+        ))];
+        if let Some(png) = png {
+            content.push(ContentBlock::image(BASE64.encode(png), "image/png"));
+        }
+        let mut result = CallToolResult::success(content);
+        result.structured_content = Some(structured);
+        Ok(result)
+    }
+    /// Track one matte window through a clip and return an unapplied keyframe
+    /// plan (CC5 §5.2).
+    ///
+    /// Commits nothing: the two `SetEffectKeyframes` operations are returned
+    /// as a prepared edit plan, exactly like `track_mask_region`.
+    #[allow(clippy::too_many_lines)]
+    fn track_matte_window(&self, args: &TrackMatteWindowArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        if let Some(expected) = args.expected_revision
+            && expected != revision
+        {
+            return Ok(revision_conflict_text(expected, revision));
+        }
+        let Some(clip) = document.clip(args.clip_id) else {
+            return Ok(error_text(format!("clip {} does not exist", args.clip_id)));
+        };
+        if !matches!(clip.content, ClipContent::Media) {
+            return Ok(error_text("matte window tracking requires a media clip"));
+        }
+        let Some(effect) = clip
+            .effects
+            .iter()
+            .find(|effect| effect.id == args.effect_id)
+        else {
+            return Ok(error_text(format!(
+                "effect {} does not exist on clip {}",
+                args.effect_id, args.clip_id
+            )));
+        };
+        let Some(kind) = kinewright_core::classify_color_node(effect) else {
+            return Ok(error_text(format!(
+                "effect {} is {}; matte window tracking requires a matte-capable colour node",
+                args.effect_id, effect.name
+            )));
+        };
+        if !kind.supports_matte() {
+            return Ok(matte_error_result(
+                "matte_unsupported_node_kind",
+                &format!("{} cannot carry a matte", kind.effect_name()),
+                &serde_json::json!({
+                    "field": "effect_id",
+                    "observed": kind.effect_name(),
+                    "allowed": crate::color_status::MATTE_CAPABLE_NODE_NAMES,
+                    "recovery_action": "Track a window on a primary_correction, color_wheels, color_curves, or creative_look node (CC5 §2.1).",
+                }),
+            ));
+        }
+        let window_index = usize::from(args.window_index);
+        if window_index >= kinewright_core::MATTE_WINDOW_LIMIT {
+            return Ok(matte_error_result(
+                "matte_window_index_out_of_range",
+                &format!("window_index {} is outside 0..=3", args.window_index),
+                &serde_json::json!({
+                    "field": "window_index",
+                    "observed": args.window_index,
+                    "allowed": {"min": 0, "max": kinewright_core::MATTE_WINDOW_LIMIT - 1},
+                    "recovery_action": "A matte carries at most four windows (CC5 §2.2).",
+                }),
+            ));
+        }
+
+        let duration = match document.clip_duration(clip) {
+            Ok(duration) => duration,
+            Err(error) => return Ok(error_text(error.to_string())),
+        };
+        let start = args.start_local_frame.unwrap_or(TimeCode::ZERO);
+        let end = args.end_local_frame.unwrap_or(duration);
+        if start < TimeCode::ZERO || end > duration || end <= start {
+            return Ok(error_text(format!(
+                "tracking range {start}..{end} is outside clip-local range 0..{duration}"
+            )));
+        }
+        let step = args.step_frames.unwrap_or(DEFAULT_TRACKING_STEP_FRAMES);
+        if !(1..=120).contains(&step) {
+            return Ok(error_text("step_frames must be in 1..=120"));
+        }
+        let sample_frames = tracking_sample_frames(start..end, step);
+        if sample_frames.len() > MAX_TRACKING_SAMPLES {
+            return Ok(error_text(format!(
+                "tracking would render {} samples; increase step_frames to stay at or below {MAX_TRACKING_SAMPLES}",
+                sample_frames.len()
+            )));
+        }
+        let search_radius = args
+            .search_radius_percent
+            .unwrap_or(DEFAULT_TRACKING_SEARCH_RADIUS_PERCENT);
+        if !(1..=25).contains(&search_radius) {
+            return Ok(error_text("search_radius_percent must be in 1..=25"));
+        }
+        let max_width = args.max_width.unwrap_or(DEFAULT_TRACKING_WIDTH);
+        if !(64..=512).contains(&max_width) {
+            return Ok(error_text("max_width must be in 64..=512"));
+        }
+        let minimum_confidence = args
+            .minimum_confidence_basis_points
+            .unwrap_or(DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS);
+        if !(0..=10_000).contains(&minimum_confidence) {
+            return Ok(error_text(
+                "minimum_confidence_basis_points must be in 0..=10000",
+            ));
+        }
+
+        let Some(first_local) = sample_frames.first().copied() else {
+            return Ok(error_text("tracking requires at least one sample"));
+        };
+        // CC5 §5.2: the window is stored in *layer* uv while the tracker
+        // measures the *composite*, so the layer transform must be resolvable
+        // and static across the tracked range. A keyframed scale or offset
+        // would make one composite pixel mean a different layer position at
+        // every sample, which no single conversion can express.
+        let transform = match resolve_static_layer_transform(effect_chain(clip), &sample_frames) {
+            Ok(transform) => transform,
+            Err(unsupported) => {
+                return Ok(matte_error_result(
+                    "matte_track_layer_transform_unsupported",
+                    &format!(
+                        "clip {} keyframes its layer {} over the tracked range",
+                        args.clip_id, unsupported.field
+                    ),
+                    &serde_json::json!({
+                        "field": unsupported.field,
+                        "observed": unsupported.observed,
+                        "allowed": "a layer scale and offset that resolve to one value across the whole tracked range",
+                        "recovery_action": "Clear the transform automation over the tracked range, or track a range across which the layer transform is static; the composite-to-layer conversion is a single affine map and cannot follow a moving frame (CC5 §5.2).",
+                        "clip_id": args.clip_id.0,
+                        "range": {"start": start.0, "end": end.0},
+                    }),
+                ));
+            }
+        };
+
+        let evaluated = effect.evaluated_at(first_local);
+        let matte = kinewright_core::MatteParams::from_effect(&evaluated);
+        if window_index >= matte.window_count {
+            return Ok(matte_error_result(
+                "matte_window_not_active",
+                &format!(
+                    "effect {} resolves matte_window_count {} at clip-local frame {first_local}, so window {} renders nothing",
+                    args.effect_id, matte.window_count, args.window_index
+                ),
+                &serde_json::json!({
+                    "field": "window_index",
+                    "observed": args.window_index,
+                    "allowed": {"max_active_index": matte.window_count.saturating_sub(1), "window_count": matte.window_count},
+                    // CC5 §2.2: a window at index >= window_count is preserved
+                    // but never rendered, so tracking it would animate geometry
+                    // that affects no pixel.
+                    "recovery_action": "Raise matte_window_count with plan_secondary_correction so the window renders, then track it.",
+                }),
+            ));
+        }
+        let Some(window) = matte.window(window_index).copied() else {
+            return Ok(error_text("matte window index is outside 0..=3"));
+        };
+
+        // CC5 §5.2: the tracking box is the window's axis-aligned bounding box
+        // mapped into the composited thumbnail, so it is rescaled by the layer
+        // scale. `box_percent` is a full width/height, hence the factor two.
+        let box_percent = [
+            matte_track_box_percent(window.half_width_bp, transform.scale),
+            matte_track_box_percent(window.half_height_bp, transform.scale),
+        ];
+        if box_percent.iter().any(|value| !(1..=75).contains(value)) {
+            return Ok(matte_error_result(
+                "matte_track_window_size_unsupported",
+                &format!(
+                    "window {} maps to a {}x{} percent template on the composite",
+                    args.window_index, box_percent[0], box_percent[1]
+                ),
+                &serde_json::json!({
+                    "field": "window_index",
+                    "observed": {
+                        "box_percent": box_percent,
+                        "half_width_basis_points": window.half_width_bp,
+                        "half_height_basis_points": window.half_height_bp,
+                        "layer_scale": transform.scale,
+                    },
+                    "allowed": {"min_percent": 1, "max_percent": 75},
+                    "recovery_action": "Shrink the window's half extents to bound the subject before tracking; a template covering most of the frame has no distinguishing content to match.",
+                }),
+            ));
+        }
+        let composite_centre = transform.layer_to_composite([
+            basis_points_to_unit(window.center_x_bp),
+            basis_points_to_unit(window.center_y_bp),
+        ]);
+        let center_percent = [
+            unit_to_percent(composite_centre[0]),
+            unit_to_percent(composite_centre[1]),
+        ];
+
+        let tracked = match self.track_clip_region(&RegionTrackingRequest {
+            document: &document,
+            clip_id: args.clip_id,
+            clip_timeline_start: clip.timeline_start,
+            sample_frames: &sample_frames,
+            center_percent,
+            box_percent,
+            search_radius_percent: search_radius,
+            max_width,
+            // CC5 §5.2: excluding *this exact node* by id removes the feedback
+            // a matte-scoped correction would otherwise create — as the window
+            // moves the graded picture changes inside it and a SAD template
+            // would chase its own output — while leaving every other grade and
+            // every other effect, including a second node of the same kind,
+            // intact.
+            excluded_effect: args.effect_id,
+        }) {
+            Ok(tracked) => tracked,
+            Err(error) => return Ok(error_text(error)),
+        };
+
+        let mut observations = Vec::new();
+        let mut low_confidence_samples = Vec::new();
+        for observation in &tracked.observations {
+            let composite = [
+                matte_track_centre_basis_points(observation.center[0], tracked.width),
+                matte_track_centre_basis_points(observation.center[1], tracked.height),
+            ];
+            let layer = transform.composite_to_layer_basis_points(composite);
+            let record = serde_json::json!({
+                "local_frame": observation.local_frame.0,
+                "project_frame": observation.project_frame.0,
+                "center_x_basis_points": layer[0],
+                "center_y_basis_points": layer[1],
+                "composite_center_x_basis_points": composite[0],
+                "composite_center_y_basis_points": composite[1],
+                "center_pixel": observation.center,
+                "confidence_basis_points": observation.confidence_basis_points,
+            });
+            if i64::from(observation.confidence_basis_points) < minimum_confidence {
+                low_confidence_samples.push(record);
+                continue;
+            }
+            observations.push((observation.local_frame, layer, record));
+        }
+
+        // CC5 §5.2: two surviving samples is the minimum a Linear curve can be
+        // built from, and the roadmap's manual fallback is the recovery.
+        if observations.len() < MATTE_TRACK_MINIMUM_SAMPLES {
+            return Ok(matte_error_result(
+                "tracking_confidence_too_low",
+                &format!(
+                    "only {} of {} samples reached {minimum_confidence} basis points of confidence",
+                    observations.len(),
+                    tracked.observations.len()
+                ),
+                &serde_json::json!({
+                    "field": "minimum_confidence_basis_points",
+                    "observed": {
+                        "surviving_samples": observations.len(),
+                        "total_samples": tracked.observations.len(),
+                        "minimum_confidence_basis_points": minimum_confidence,
+                        "low_confidence_samples": low_confidence_samples,
+                    },
+                    "allowed": {"minimum_surviving_samples": MATTE_TRACK_MINIMUM_SAMPLES},
+                    "recovery_action": "Lower minimum_confidence_basis_points, shorten the tracked range, raise max_width, or set the window keyframes by hand; the tracker has no occlusion handling and will not invent a position it did not measure.",
+                }),
+            ));
+        }
+
+        // CC5 §5.2 / M40: raw tracker centres stutter, and tracker noise must
+        // not become visible matte motion. The dead zone is deliberately zero
+        // - a dead zone lags, which is right for a virtual camera and wrong for
+        // a matte, which must stay on the subject.
+        let smoothed = [0_usize, 1].map(|axis| {
+            kinewright_core::stabilize_tracked_centres_basis_points(
+                &observations
+                    .iter()
+                    .map(|(_, layer, _)| layer[axis])
+                    .collect::<Vec<_>>(),
+                kinewright_core::MATTE_WINDOW_CENTER_MIN_BASIS_POINTS,
+                kinewright_core::MATTE_WINDOW_CENTER_MAX_BASIS_POINTS,
+                MATTE_TRACK_DEAD_ZONE_BASIS_POINTS,
+                MATTE_TRACK_MAX_STEP_BASIS_POINTS,
+            )
+        });
+
+        let Some(names) = kinewright_core::matte_window_parameter_names(window_index) else {
+            return Ok(error_text("matte window index is outside 0..=3"));
+        };
+        let parameter = |suffix: &str| {
+            names
+                .iter()
+                .find(|name| name.ends_with(suffix))
+                .copied()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let curve_for = |axis: usize| AutomationCurve {
+            keyframes: observations
+                .iter()
+                .enumerate()
+                .map(|(index, (local_frame, _, _))| Keyframe {
+                    at: *local_frame,
+                    value: smoothed[axis].get(index).copied().unwrap_or_default(),
+                    // CC5 §5.2: sustained movement gets continuous velocity;
+                    // M40 rejected eased per-segment curves.
+                    interpolation: KeyframeInterpolation::Linear,
+                })
+                .collect(),
+        };
+        let x_name = parameter("_center_x_basis_points");
+        let y_name = parameter("_center_y_basis_points");
+        let x_curve = curve_for(0);
+        let y_curve = curve_for(1);
+        let operations = vec![
+            Operation::SetEffectKeyframes {
+                clip: args.clip_id,
+                effect: args.effect_id,
+                name: x_name.clone(),
+                curve: x_curve.clone(),
+            },
+            Operation::SetEffectKeyframes {
+                clip: args.clip_id,
+                effect: args.effect_id,
+                name: y_name.clone(),
+                curve: y_curve.clone(),
+            },
+        ];
+        let plan = match self.prepare_operations(revision, &document, operations) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "tracked matte window keyframes do not fit the current clip: {error}"
+                )));
+            }
+        };
+
+        let structured = serde_json::json!({
+            "timeline_revision": revision.0,
+            "clip_id": args.clip_id.0,
+            "effect_id": args.effect_id.0,
+            "kind": kind.effect_name(),
+            "window_index": args.window_index,
+            "range": {"start": start.0, "end": end.0, "step_frames": step},
+            "observations": observations
+                .iter()
+                .map(|(_, _, record)| record.clone())
+                .collect::<Vec<_>>(),
+            "low_confidence_samples": low_confidence_samples,
+            "minimum_confidence_basis_points": minimum_confidence,
+            "curves": {
+                x_name.clone(): x_curve,
+                y_name.clone(): y_curve,
+            },
+            "parameters": [x_name, y_name],
+            // CC5 §5.2: the pinned M40 smoothing policy, published so a reader
+            // can reproduce the smoothed curve from the raw observations.
+            "window_stabilization": {
+                "median_filter": true,
+                "dead_zone_basis_points": MATTE_TRACK_DEAD_ZONE_BASIS_POINTS,
+                "maximum_step_basis_points": MATTE_TRACK_MAX_STEP_BASIS_POINTS,
+                "minimum_basis_points": kinewright_core::MATTE_WINDOW_CENTER_MIN_BASIS_POINTS,
+                "maximum_basis_points": kinewright_core::MATTE_WINDOW_CENTER_MAX_BASIS_POINTS,
+                "interpolation": "Linear",
+                "known_systematic_lag": "the three-sample median filter replaces the final sample with median(o[n-3], o[n-2], o[n-1]), so the last smoothed value lags a moving subject by one inter-sample displacement (CC5 §5.2)",
+            },
+            "coordinate_space": {
+                "measured_on": "composited thumbnail, whose uv is the output frame",
+                "written_in": "layer uv, which is where the matte is evaluated",
+                "thumbnail": {"width": tracked.width, "height": tracked.height},
+                "layer_scale": transform.scale,
+                "layer_offset": [transform.offset_x, transform.offset_y],
+                "pixel_to_basis_points": "centre_bp = round((pixel + 0.5) * 10000 / extent)",
+                "composite_to_layer": "u_layer = (u_composite - 0.5) / scale - (offset_x, offset_y) / (2 * scale) + 0.5",
+                "box_percent": box_percent,
+                "box_percent_rule": "the window bounding box rescaled by the layer scale: box_percent = [2 * hw * scale * 100, 2 * hh * scale * 100] (CC5 §5.2)",
+            },
+            // CC5 §5.2's provenance marker, mirroring M40's.
+            "tracking_boundary": MATTE_TRACKING_BOUNDARY,
+            "prepared_edit_plan": {
+                "plan_id": plan.id,
+                "expected_revision": revision,
+                "preview": plan.preview,
+            },
+            "applied": false,
+        });
+        Ok(success_structured(
+            format!(
+                "tracked matte window {} on effect {} of clip {} across {} samples as edit plan {}; inspect the preview, then commit it at timeline revision {revision}",
+                args.window_index,
                 args.effect_id,
                 args.clip_id,
                 observations.len(),
@@ -3868,7 +4693,7 @@ impl KinewrightMcp {
             ],
             search_radius_percent: search_radius,
             max_width,
-            excluded_effect_name: "reframe",
+            excluded_effect: args.effect_id,
         }) {
             Ok(tracked) => tracked,
             Err(error) => return Ok(error_text(error)),
@@ -4083,7 +4908,7 @@ impl KinewrightMcp {
             for candidate in &mut track.clips {
                 candidate
                     .effects
-                    .retain(|effect| effect.name != request.excluded_effect_name);
+                    .retain(|effect| effect.id != request.excluded_effect);
             }
         }
         isolated.tracks.retain(|track| !track.clips.is_empty());
@@ -7494,6 +8319,59 @@ struct TrackMaskArgs {
     max_width: Option<u32>,
 }
 
+/// Arguments for the read-only CC5 matte inspector (CC5 §4.2).
+#[derive(Debug, Deserialize, JsonSchema)]
+struct InspectGradeMatteArgs {
+    /// Exact timeline revision returned by the preceding inspection. When
+    /// supplied, a stale snapshot fails closed.
+    #[serde(default)]
+    expected_revision: Option<TimelineRevision>,
+    /// Stable visual media clip id carrying the correction node.
+    clip_id: ClipId,
+    /// Stable matte-carrying colour node id on that clip.
+    effect_id: EffectId,
+    /// Exact project frame to measure.
+    #[serde(alias = "frame")]
+    timecode: TimeCode,
+    /// Attach the coverage PNG. Defaults to true.
+    #[serde(default)]
+    include_image: Option<bool>,
+}
+
+/// Arguments for the CC5 matte window tracker (CC5 §5.2).
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TrackMatteWindowArgs {
+    /// Exact timeline revision returned by the preceding inspection.
+    #[serde(default)]
+    expected_revision: Option<TimelineRevision>,
+    /// Stable visual media clip id carrying the correction node.
+    clip_id: ClipId,
+    /// Stable matte-carrying colour node id on that clip.
+    effect_id: EffectId,
+    /// Which of the node's up-to-four windows to track, `0..=3`.
+    window_index: u8,
+    /// First clip-local frame to track. Defaults to zero.
+    #[serde(default)]
+    start_local_frame: Option<TimeCode>,
+    /// Exclusive clip-local end frame. Defaults to the clip duration.
+    #[serde(default)]
+    end_local_frame: Option<TimeCode>,
+    /// Distance between tracked keyframes. Defaults to 5; valid range 1..=120.
+    #[serde(default)]
+    step_frames: Option<i64>,
+    /// Search radius around the previous center as a frame percentage.
+    /// Defaults to 10; valid range 1..=25.
+    #[serde(default)]
+    search_radius_percent: Option<u8>,
+    /// Analysis render width. Defaults to 256; valid range 64..=512.
+    #[serde(default)]
+    max_width: Option<u32>,
+    /// Samples below this confidence are dropped and reported. Defaults to
+    /// 5000; fewer than two survivors fails with `tracking_confidence_too_low`.
+    #[serde(default)]
+    minimum_confidence_basis_points: Option<i64>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct StoryboardArgs {
     /// Optional half-open range in exact project frames. Omit for the full timeline.
@@ -8370,6 +9248,15 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "plan_secondary_correction",
+            format!(
+                "Validate a CC5 secondary request - up to four geometric windows, an HSL qualifier, combine, invert, and mix - against the current revision, visual clip type, and Core descriptor, then return the exact unapplied matte_* operations plus predicted_coverage measured on a scratch document. Target one stored node with target_effect_id, or a kind with node_kind; an existing node of that kind is matted in place unless append=true. technical_lut carries no matte (CC5 §2.1). Optional sample_roi returns measured hue/saturation/luma evidence, and derive_qualifier_from_sample proposes a qualifier from it by the pinned formula. This is evidence-only and never mutates the document. {}",
+                matte_legend_reference()
+            ),
+            schema_object::<SecondaryCorrectionPlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "plan_color_curves",
             format!(
                 "Validate a CC3 color_curves request against the current revision, visual clip type, and Core descriptor, then return unapplied AddEffect/SetEffectParam operations. A clip that already carries a color_curves node is edited in place unless append=true stacks another, and curves omitted from the request keep their current points. This is evidence-only and never mutates the document. {}",
@@ -8832,6 +9719,20 @@ fn inspector_tools() -> Vec<Tool> {
             "track_mask_region",
             "Track an existing bounded mask region through one media clip using deterministic sequential template matching on isolated compositor frames. Returns confidence observations plus revision-gated SetEffectKeyframes operations for the mask center; it never silently mutates the timeline. Set mask width and height to 75 percent or less before tracking.",
             schema_object::<TrackMaskArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "inspect_grade_matte",
+            "Measure one colour node's matte coverage at one exact project frame: covered/full/partial pixel counts, covered_basis_points, a 16-bucket coverage histogram, the tightest bounding box, the coverage-weighted centroid, the resolved 47 matte integers, active/inactive_reason, full renderer provenance, and a PNG of the coverage itself. This is the Matte (this correction), not the Mask (layer alpha) - the two never interact. Read-only; it mutates nothing. A node that is inactive, carries no matte, or that this build cannot proof fails typed rather than returning a blank frame.",
+            schema_object::<InspectGradeMatteArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "track_matte_window",
+            format!(
+                "Track one matte window through a media clip by deterministic sequential template matching on composited thumbnails that exclude the tracked node itself, then return raw observations, the M40-smoothed curves, and a revision-gated prepared edit plan of two SetEffectKeyframes on the window centre. It commits nothing. Smoothing is pinned: three-sample median filter, dead zone {MATTE_TRACK_DEAD_ZONE_BASIS_POINTS}, maximum step {MATTE_TRACK_MAX_STEP_BASIS_POINTS} basis points, Linear interpolation. Boundary: {MATTE_TRACKING_BOUNDARY}",
+            ),
+            schema_object::<TrackMatteWindowArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -9765,7 +10666,11 @@ struct RegionTrackingRequest<'a> {
     box_percent: [i64; 2],
     search_radius_percent: u8,
     max_width: u32,
-    excluded_effect_name: &'a str,
+    /// CC5 §5.2: exactly one effect id, not every effect sharing a name.
+    /// This narrows the exclusion from *every effect with that name* to the one
+    /// node being tracked, so a clip carrying two masks keeps the second mask's
+    /// alpha in the tracking thumbnails — which is the correct behaviour.
+    excluded_effect: EffectId,
 }
 
 struct TrackedRegion {
@@ -9902,6 +10807,261 @@ pub(crate) fn decode_reframe_subject_provenance(
         effect,
         samples,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// CC5 §5.2 — matte window tracking
+// ---------------------------------------------------------------------------
+
+/// A dead zone deliberately lags. That is right for a virtual camera and wrong
+/// for a matte, which must stay on the subject (CC5 §5.2).
+pub(crate) const MATTE_TRACK_DEAD_ZONE_BASIS_POINTS: i64 = 0;
+
+/// 8 % of the frame between samples; at the default 5-frame step, 1.6 % per
+/// frame — well above ordinary subject motion, while still rejecting a tracker
+/// jump to a false match across the frame (CC5 §5.2).
+pub(crate) const MATTE_TRACK_MAX_STEP_BASIS_POINTS: i64 = 800;
+
+/// Default confidence floor below which a tracked sample is dropped.
+const DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS: i64 = 5_000;
+
+/// Fewer surviving samples than this cannot describe motion, so the tool fails
+/// typed rather than emitting a one-point curve (CC5 §5.2).
+const MATTE_TRACK_MINIMUM_SAMPLES: usize = 2;
+
+/// CC5 §5.2's provenance marker, stated so the tool's reach is not inferred.
+const MATTE_TRACKING_BOUNDARY: &str = "tracks the explicitly supplied window rectangle by normalized SAD template match on composited thumbnails; no learned object, face, or skin detection, no scale or rotation estimation, and no occlusion handling. rotation_centidegrees, half_width_basis_points, and half_height_basis_points are never written.";
+
+/// One layer's resolved geometric transform over a tracked range (CC5 §5.2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LayerTransform {
+    /// Product of every `scale_percent / 100` on the layer.
+    scale: f64,
+    /// Sum of every `x_percent / 50`, in the compositor's own units.
+    offset_x: f64,
+    /// Sum of every `y_percent / 50`, in the compositor's own units.
+    offset_y: f64,
+}
+
+impl LayerTransform {
+    /// The identity layer: no scale, no offset.
+    const IDENTITY: Self = Self {
+        scale: 1.0,
+        offset_x: 0.0,
+        offset_y: 0.0,
+    };
+
+    /// Map a layer uv to the composited frame's uv (CC5 §5.2).
+    ///
+    /// Derived from `compositor.wgsl`'s vertex stage, which places the layer
+    /// quad at NDC `p = q·scale + (offset_x, −offset_y)` and hands the
+    /// fragment stage `uv.y = (1 − ndc.y)/2`. The two sign flips on y — the
+    /// shader's own negation and the flip built into the uv convention —
+    /// cancel exactly, so **both** axes carry `+offset/2`:
+    ///
+    /// `u_composite = scale·(u_layer − 0.5) + (offset_x, offset_y)/2 + 0.5`
+    ///
+    /// `offset_x`/`offset_y` are the compositor's own accumulated units, i.e.
+    /// `sum(percent) / 50`, exactly as `EffectUniform::OffsetX`/`OffsetY` are
+    /// accumulated by the compositor.
+    fn layer_to_composite(self, layer: [f64; 2]) -> [f64; 2] {
+        [
+            (layer[0] - 0.5).mul_add(self.scale, self.offset_x / 2.0) + 0.5,
+            (layer[1] - 0.5).mul_add(self.scale, self.offset_y / 2.0) + 0.5,
+        ]
+    }
+
+    /// CC5 §5.2's normative composite → layer conversion, in basis points.
+    ///
+    /// The exact inverse of [`Self::layer_to_composite`]:
+    ///
+    /// `u_layer = (u_composite − 0.5)/scale − (offset_x, offset_y)/(2·scale) + 0.5`
+    fn composite_to_layer_basis_points(self, composite: [i64; 2]) -> [i64; 2] {
+        let convert = |value: i64, offset: f64| {
+            if self.scale <= 0.0 {
+                return value;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let unit = value as f64 / 10_000.0;
+            let layer = (unit - 0.5 - offset / 2.0) / self.scale + 0.5;
+            #[allow(clippy::cast_possible_truncation)]
+            let basis_points = (layer * 10_000.0).round() as i64;
+            basis_points.clamp(
+                kinewright_core::MATTE_WINDOW_CENTER_MIN_BASIS_POINTS,
+                kinewright_core::MATTE_WINDOW_CENTER_MAX_BASIS_POINTS,
+            )
+        };
+        [
+            convert(composite[0], self.offset_x),
+            convert(composite[1], self.offset_y),
+        ]
+    }
+}
+
+/// A layer-transform parameter that moves across the tracked range.
+struct LayerTransformUnsupported {
+    field: &'static str,
+    observed: serde_json::Value,
+}
+
+/// Resolve one layer's static scale and offset across every sampled frame.
+///
+/// CC5 §5.2 requires the composite → layer conversion to be one affine map, so
+/// a `scale` or `offset` whose resolved value differs between samples is a
+/// typed refusal rather than a silently-wrong conversion. A keyframe curve that
+/// happens to resolve to one constant value is accepted: the rule is about the
+/// values the renderer uses, not about the presence of automation.
+fn resolve_static_layer_transform(
+    effects: &[Effect],
+    sample_frames: &[TimeCode],
+) -> Result<LayerTransform, LayerTransformUnsupported> {
+    let mut resolved: Option<LayerTransform> = None;
+    for frame in sample_frames {
+        let mut transform = LayerTransform::IDENTITY;
+        for effect in effects {
+            let Some(descriptor) = kinewright_core::effect_descriptor(&effect.name) else {
+                continue;
+            };
+            for parameter in descriptor.parameters {
+                let value = effect
+                    .integer_parameter_at(parameter.name, *frame)
+                    .unwrap_or(parameter.neutral);
+                #[allow(clippy::cast_precision_loss)]
+                let value = value as f64;
+                match parameter.uniform {
+                    kinewright_core::EffectUniform::Scale => transform.scale *= value / 100.0,
+                    kinewright_core::EffectUniform::OffsetX => transform.offset_x += value / 50.0,
+                    kinewright_core::EffectUniform::OffsetY => transform.offset_y += value / 50.0,
+                    _ => {}
+                }
+            }
+        }
+        match resolved {
+            None => resolved = Some(transform),
+            Some(first) => {
+                for (field, first_value, value) in [
+                    ("scale", first.scale, transform.scale),
+                    ("offset_x", first.offset_x, transform.offset_x),
+                    ("offset_y", first.offset_y, transform.offset_y),
+                ] {
+                    if (first_value - value).abs() > f64::EPSILON {
+                        return Err(LayerTransformUnsupported {
+                            field,
+                            observed: serde_json::json!({
+                                "parameter": field,
+                                "at_first_sample": first_value,
+                                "at_frame": frame.0,
+                                "value_at_frame": value,
+                            }),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(resolved.unwrap_or(LayerTransform::IDENTITY))
+}
+
+/// The clip's effect chain, borrowed for transform resolution.
+fn effect_chain(clip: &Clip) -> &[Effect] {
+    &clip.effects
+}
+
+/// CC5 §5.2's tracker-pixel to matte-basis-point conversion.
+///
+/// The tracker's own `pixel_to_basis_points` divides by `extent − 1`, because
+/// it names a *sample position* on a lattice. A matte centre names a *fraction
+/// of the extent*, so it divides by `extent` and adds the half-pixel that puts
+/// the sample at the pixel centre. The two are deliberately different functions
+/// and must not be interchanged; §9.2.11 records the ≤ 17 bp divergence.
+fn matte_track_centre_basis_points(pixel: u32, extent: u32) -> i64 {
+    if extent == 0 {
+        return 0;
+    }
+    // round((pixel + 0.5) * 10000 / extent), in exact integer arithmetic:
+    // (2*pixel + 1) * 10000 / (2*extent), rounded half up by adding `extent`.
+    let numerator = (u64::from(pixel).saturating_mul(2).saturating_add(1)).saturating_mul(10_000);
+    let denominator = u64::from(extent).saturating_mul(2);
+    i64::try_from(numerator.saturating_add(u64::from(extent)) / denominator).unwrap_or(10_000)
+}
+
+/// The tracking template width or height, as a whole frame percentage.
+///
+/// CC5 §5.2: the box is the window's bounding box *on the composite*, so a
+/// half extent stored in layer basis points is doubled and rescaled by the
+/// layer scale.
+fn matte_track_box_percent(half_extent_basis_points: i64, scale: f64) -> i64 {
+    #[allow(clippy::cast_precision_loss)]
+    let half = half_extent_basis_points as f64 / 10_000.0;
+    #[allow(clippy::cast_possible_truncation)]
+    let percent = (2.0 * half * scale * 100.0).round() as i64;
+    percent
+}
+
+/// A `0..=10000` basis-point control as a `0.0..=1.0` fraction.
+fn basis_points_to_unit(basis_points: i64) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let value = basis_points as f64;
+    value / 10_000.0
+}
+
+/// A normalized coordinate as the tracker's whole-percent seed, clamped.
+fn unit_to_percent(unit: f64) -> u8 {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let percent = (unit * 100.0).round().clamp(0.0, 100.0) as u8;
+    percent
+}
+
+/// The CC5 §4.2 matte parameters as one compact integer object.
+fn matte_parameter_object(matte: &kinewright_core::MatteParams) -> serde_json::Value {
+    serde_json::json!({
+        "matte_enabled": matte.enabled,
+        "matte_window_count": matte.window_count,
+        "matte_combine_token": matte.combine_token,
+        "matte_invert": matte.invert,
+        "matte_mix_basis_points": matte.mix_bp,
+        "matte_qualifier_enabled": matte.qualifier.enabled,
+        "matte_hue_center_centidegrees": matte.qualifier.hue_center_cd,
+        "matte_hue_width_centidegrees": matte.qualifier.hue_width_cd,
+        "matte_hue_softness_centidegrees": matte.qualifier.hue_softness_cd,
+        "matte_saturation_low_basis_points": matte.qualifier.sat_low_bp,
+        "matte_saturation_high_basis_points": matte.qualifier.sat_high_bp,
+        "matte_saturation_softness_basis_points": matte.qualifier.sat_softness_bp,
+        "matte_luma_low_basis_points": matte.qualifier.luma_low_bp,
+        "matte_luma_high_basis_points": matte.qualifier.luma_high_bp,
+        "matte_luma_softness_basis_points": matte.qualifier.luma_softness_bp,
+        // CC5 §2.2: stored windows past the count render nothing, so only the
+        // active ones are published.
+        "windows": matte
+            .active_windows()
+            .enumerate()
+            .map(|(index, window)| serde_json::json!({
+                "index": index,
+                "shape_token": window.shape_token,
+                "center_x_basis_points": window.center_x_bp,
+                "center_y_basis_points": window.center_y_bp,
+                "half_width_basis_points": window.half_width_bp,
+                "half_height_basis_points": window.half_height_bp,
+                "rotation_centidegrees": window.rotation_cd,
+                "feather_basis_points": window.feather_bp,
+                "invert": window.invert,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// One typed CC5 refusal in the CC1/CC2 `field`/`observed`/`allowed` shape.
+fn matte_error_result(code: &str, message: &str, details: &serde_json::Value) -> CallToolResult {
+    error_structured(
+        message.to_owned(),
+        serde_json::json!({
+            "code": code,
+            "message": message,
+            "details": details,
+            "evidence_only": true,
+            "applied": false,
+        }),
+    )
 }
 
 fn tracked_subject_bounds(
@@ -10469,6 +11629,339 @@ mod tracking_tests {
             height,
             pixels,
         }
+    }
+
+    /// CC5 §5.2's pixel → matte basis-point conversion, and the divergence
+    /// from the tracker's own `extent − 1` denominator.
+    ///
+    /// The two are deliberately different functions: the tracker's names a
+    /// *sample position* on a lattice, the matte's names a *fraction of the
+    /// extent*. Asserting the divergence explicitly means a refactor cannot
+    /// quietly swap them.
+    #[test]
+    fn matte_centre_conversion_uses_the_pixel_centre_over_the_full_extent() {
+        // round((pixel + 0.5) * 10000 / extent), hand-computed.
+        // extent 512: (0 + 0.5) * 10000 / 512 = 9.765625 -> 10
+        assert_eq!(matte_track_centre_basis_points(0, 512), 10);
+        // (255 + 0.5) * 10000 / 512 = 4990.234375 -> 4990
+        assert_eq!(matte_track_centre_basis_points(255, 512), 4990);
+        // (256 + 0.5) * 10000 / 512 = 5009.765625 -> 5010
+        assert_eq!(matte_track_centre_basis_points(256, 512), 5010);
+        // (511 + 0.5) * 10000 / 512 = 9990.234375 -> 9990
+        assert_eq!(matte_track_centre_basis_points(511, 512), 9990);
+        // extent 288: (144 + 0.5) * 10000 / 288 = 5017.361 -> 5017
+        assert_eq!(matte_track_centre_basis_points(144, 288), 5017);
+
+        // The tracker's own conversion divides by `extent - 1` and adds no
+        // half pixel. The two agree in the middle and diverge most at the
+        // edges, by 10 bp on a 512-wide thumbnail and 17 bp on a 288-tall one
+        // — the divergence CC5 §9.2.11 records so a refactor cannot quietly
+        // swap them.
+        for (pixel, extent, expected_divergence) in [
+            (0_u32, 512_u32, 10_i64),
+            (511, 512, 10),
+            (0, 288, 17),
+            (287, 288, 17),
+        ] {
+            let matte = matte_track_centre_basis_points(pixel, extent);
+            let lattice = i64::from(pixel_to_basis_points(pixel, extent));
+            assert_eq!(
+                (matte - lattice).abs(),
+                expected_divergence,
+                "pixel {pixel} of {extent}: matte {matte} vs lattice {lattice}"
+            );
+        }
+        // In the middle of the raster the two coincide, which is why only the
+        // edges bound the error.
+        assert_eq!(
+            matte_track_centre_basis_points(255, 512),
+            i64::from(pixel_to_basis_points(255, 512))
+        );
+    }
+
+    /// CC5 §5.2: `box_percent` is the window bounding box *on the composite*,
+    /// so it is doubled and rescaled by the layer scale.
+    #[test]
+    fn matte_track_box_percent_rescales_the_window_by_the_layer_scale() {
+        // hw = 2500 bp = 0.25 of the width; 2 * 0.25 * 1.0 * 100 = 50 percent.
+        assert_eq!(matte_track_box_percent(2_500, 1.0), 50);
+        // At scale 0.5 the same window covers half as much of the composite.
+        assert_eq!(matte_track_box_percent(2_500, 0.5), 25);
+        assert_eq!(matte_track_box_percent(1_300, 1.0), 26);
+        assert_eq!(matte_track_box_percent(1_800, 0.5), 18);
+    }
+
+    /// CC5 §5.2's normative conversion, pinned against the *compositor*, not
+    /// against its own inverse.
+    ///
+    /// `compositor.wgsl` places the layer quad at NDC
+    /// `p = q·scale + (offset_x, −offset_y)` and the fragment stage reads
+    /// `uv.y = (1 − ndc.y)/2`, so the shader's y negation and the uv flip
+    /// cancel and *both* axes carry `+offset/2`:
+    ///
+    /// `u_composite = scale·(u_layer − 0.5) + offset/2 + 0.5`.
+    ///
+    /// A round-trip test cannot see a sign error that appears in both
+    /// directions, so every case here is a hand-worked absolute value.
+    #[test]
+    fn layer_transform_offsets_move_the_window_the_way_the_compositor_does() {
+        // At scale 1 an offset of 1.0 shifts the picture half a frame. The
+        // composite point 10000 bp (the bottom edge) therefore came from the
+        // layer's *centre*, 5000 bp — not from 15000 bp, which is what a
+        // doubly-negated y produced.
+        let vertical_shift = LayerTransform {
+            scale: 1.0,
+            offset_x: 0.0,
+            offset_y: 1.0,
+        };
+        assert_eq!(
+            vertical_shift.composite_to_layer_basis_points([5_000, 10_000]),
+            [5_000, 5_000]
+        );
+        // Forward, the same fact: the layer centre lands on the bottom edge.
+        let composite = vertical_shift.layer_to_composite([0.5, 0.5]);
+        assert!((composite[0] - 0.5).abs() < 1e-12, "{composite:?}");
+        assert!((composite[1] - 1.0).abs() < 1e-12, "{composite:?}");
+
+        // The symmetric x case, which was already right and must stay right.
+        let horizontal_shift = LayerTransform {
+            scale: 1.0,
+            offset_x: 1.0,
+            offset_y: 0.0,
+        };
+        assert_eq!(
+            horizontal_shift.composite_to_layer_basis_points([10_000, 5_000]),
+            [5_000, 5_000]
+        );
+        let composite = horizontal_shift.layer_to_composite([0.5, 0.5]);
+        assert!((composite[0] - 1.0).abs() < 1e-12, "{composite:?}");
+        assert!((composite[1] - 0.5).abs() < 1e-12, "{composite:?}");
+
+        // A negative y offset moves the picture the other way, by the same
+        // half-frame: the layer centre lands on the top edge.
+        let negative_y = LayerTransform {
+            scale: 1.0,
+            offset_x: 0.0,
+            offset_y: -1.0,
+        };
+        assert_eq!(
+            negative_y.composite_to_layer_basis_points([5_000, 0]),
+            [5_000, 5_000]
+        );
+
+        // Hand-worked from the forward formula at scale 0.5 with both offsets
+        // non-zero: offsets (0.4, -0.2).
+        //   u_c.x = 0.5·(0.25 − 0.5) + 0.4/2 + 0.5 = 0.575  -> 5750 bp
+        //   u_c.y = 0.5·(0.75 − 0.5) − 0.2/2 + 0.5 = 0.525  -> 5250 bp
+        let both = LayerTransform {
+            scale: 0.5,
+            offset_x: 0.4,
+            offset_y: -0.2,
+        };
+        let composite = both.layer_to_composite([0.25, 0.75]);
+        assert!((composite[0] - 0.575).abs() < 1e-12, "{composite:?}");
+        assert!((composite[1] - 0.525).abs() < 1e-12, "{composite:?}");
+        assert_eq!(
+            both.composite_to_layer_basis_points([5_750, 5_250]),
+            [2_500, 7_500]
+        );
+
+        // And the two directions still compose to the identity.
+        for (scale, offset_x, offset_y) in [(1.0, 0.0, 0.0), (0.5, 0.0, 0.0), (0.5, 0.4, -0.2)] {
+            let transform = LayerTransform {
+                scale,
+                offset_x,
+                offset_y,
+            };
+            for layer in [[0.5, 0.5], [0.25, 0.75], [0.1, 0.9]] {
+                let composite = transform.layer_to_composite(layer);
+                #[allow(clippy::cast_possible_truncation)]
+                let basis_points = [
+                    (composite[0] * 10_000.0).round() as i64,
+                    (composite[1] * 10_000.0).round() as i64,
+                ];
+                let back = transform.composite_to_layer_basis_points(basis_points);
+                #[allow(clippy::cast_possible_truncation)]
+                let expected = [
+                    (layer[0] * 10_000.0).round() as i64,
+                    (layer[1] * 10_000.0).round() as i64,
+                ];
+                // One basis point of rounding at each of the two conversions.
+                assert!(
+                    (back[0] - expected[0]).abs() <= 2 && (back[1] - expected[1]).abs() <= 2,
+                    "scale {scale} offset ({offset_x}, {offset_y}): {layer:?} -> {composite:?} -> {back:?}, expected {expected:?}"
+                );
+            }
+        }
+    }
+
+    /// CC5 §5.2, worked by hand at `scale = 0.5`.
+    ///
+    /// A layer centre of `(0.25, 0.75)` sits at composite
+    /// `(0.25 − 0.5)·0.5 + 0.5 = 0.375` and `(0.75 − 0.5)·0.5 + 0.5 = 0.625`,
+    /// i.e. 3750 and 6250 basis points. Converting back must recover 2500 and
+    /// 7500 exactly.
+    #[test]
+    fn layer_transform_matches_the_hand_worked_half_scale_case() {
+        let transform = LayerTransform {
+            scale: 0.5,
+            offset_x: 0.0,
+            offset_y: 0.0,
+        };
+        assert_eq!(
+            transform.composite_to_layer_basis_points([3_750, 6_250]),
+            [2_500, 7_500]
+        );
+        // An off-frame composite centre stays legal: CC5 §2.2's centre range
+        // is deliberately wide so a tracked window may leave and re-enter.
+        assert_eq!(
+            transform.composite_to_layer_basis_points([0, 10_000]),
+            [-5_000, 15_000]
+        );
+        // And the bounds clamp rather than wrapping.
+        assert_eq!(
+            transform.composite_to_layer_basis_points([-20_000, 30_000]),
+            [
+                kinewright_core::MATTE_WINDOW_CENTER_MIN_BASIS_POINTS,
+                kinewright_core::MATTE_WINDOW_CENTER_MAX_BASIS_POINTS
+            ]
+        );
+    }
+
+    /// CC5 §5.2 / M40: the smoothing constants are pinned here, and the
+    /// three-sample median filter's last-sample lag is reproduced by hand.
+    #[test]
+    fn matte_track_smoothing_uses_the_pinned_m40_constants_and_lags_the_last_sample() {
+        // A dead zone deliberately lags, which is wrong for a matte.
+        assert_eq!(MATTE_TRACK_DEAD_ZONE_BASIS_POINTS, 0);
+        // 8 % of the frame between samples.
+        assert_eq!(MATTE_TRACK_MAX_STEP_BASIS_POINTS, 800);
+
+        // A steadily moving subject, 200 bp per sample.
+        let observations = [1_000_i64, 1_200, 1_400, 1_600, 1_800];
+        let smoothed = kinewright_core::stabilize_tracked_centres_basis_points(
+            &observations,
+            kinewright_core::MATTE_WINDOW_CENTER_MIN_BASIS_POINTS,
+            kinewright_core::MATTE_WINDOW_CENTER_MAX_BASIS_POINTS,
+            MATTE_TRACK_DEAD_ZONE_BASIS_POINTS,
+            MATTE_TRACK_MAX_STEP_BASIS_POINTS,
+        );
+        assert_eq!(smoothed.len(), observations.len());
+        // CC5 §5.2's stated systematic lag: the filter replaces the final
+        // sample with median(o[n-3], o[n-2], o[n-1]) = median(1400, 1600,
+        // 1800) = 1600, one inter-sample displacement behind the true 1800.
+        assert!(
+            smoothed[4] <= 1_600,
+            "the last smoothed value must lag by one inter-sample displacement, was {}",
+            smoothed[4]
+        );
+        assert_eq!(observations[4] - smoothed[4], 200);
+
+        // One-sample noise is rejected, which was M40's first fix.
+        let noisy = [5_000_i64, 5_000, 9_000, 5_000, 5_000];
+        let filtered = kinewright_core::stabilize_tracked_centres_basis_points(
+            &noisy,
+            kinewright_core::MATTE_WINDOW_CENTER_MIN_BASIS_POINTS,
+            kinewright_core::MATTE_WINDOW_CENTER_MAX_BASIS_POINTS,
+            MATTE_TRACK_DEAD_ZONE_BASIS_POINTS,
+            MATTE_TRACK_MAX_STEP_BASIS_POINTS,
+        );
+        assert!(
+            filtered.iter().all(|value| *value == 5_000),
+            "a single 9000 spike must not survive the median filter: {filtered:?}"
+        );
+    }
+
+    /// CC5 §5.2: a layer whose scale or offset moves across the tracked range
+    /// cannot be expressed as one affine map, so the tool refuses.
+    #[test]
+    fn static_layer_transform_refuses_a_keyframed_scale_or_offset() {
+        let frames = [TimeCode(0), TimeCode(5), TimeCode(10)];
+
+        // No transform effect at all is the identity.
+        assert_eq!(
+            resolve_static_layer_transform(&[], &frames).ok(),
+            Some(LayerTransform::IDENTITY)
+        );
+
+        // A static transform resolves once and is accepted.
+        let static_transform = [Effect {
+            id: EffectId(2),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(50))]),
+            keyframes: BTreeMap::new(),
+        }];
+        let resolved = resolve_static_layer_transform(&static_transform, &frames)
+            .unwrap_or_else(|_| panic!("a static transform is one affine map"));
+        assert!((resolved.scale - 0.5).abs() < f64::EPSILON);
+
+        // A keyframe curve that resolves to one constant value is *also*
+        // accepted: the rule is about the values the renderer uses, not about
+        // the presence of automation.
+        let mut constant = static_transform[0].clone();
+        constant.keyframes.insert(
+            "scale_percent".to_owned(),
+            AutomationCurve {
+                keyframes: vec![Keyframe {
+                    at: TimeCode(0),
+                    value: 50,
+                    interpolation: KeyframeInterpolation::Hold,
+                }],
+            },
+        );
+        assert!(resolve_static_layer_transform(&[constant], &frames).is_ok());
+
+        // A moving scale is refused, with the field and both observed values.
+        let mut moving = static_transform[0].clone();
+        moving.keyframes.insert(
+            "scale_percent".to_owned(),
+            AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode(0),
+                        value: 50,
+                        interpolation: KeyframeInterpolation::Linear,
+                    },
+                    Keyframe {
+                        at: TimeCode(10),
+                        value: 100,
+                        interpolation: KeyframeInterpolation::Linear,
+                    },
+                ],
+            },
+        );
+        let unsupported = resolve_static_layer_transform(&[moving], &frames)
+            .expect_err("a moving scale cannot be one affine map");
+        assert_eq!(unsupported.field, "scale");
+        assert_eq!(unsupported.observed["parameter"], "scale");
+        assert_eq!(unsupported.observed["at_first_sample"], 0.5);
+        assert_eq!(unsupported.observed["at_frame"], 5);
+
+        // A moving offset is refused the same way.
+        let mut moving_offset = static_transform[0].clone();
+        moving_offset.keyframes.insert(
+            "x_percent".to_owned(),
+            AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode(0),
+                        value: 0,
+                        interpolation: KeyframeInterpolation::Linear,
+                    },
+                    Keyframe {
+                        at: TimeCode(10),
+                        value: 20,
+                        interpolation: KeyframeInterpolation::Linear,
+                    },
+                ],
+            },
+        );
+        assert_eq!(
+            resolve_static_layer_transform(&[moving_offset], &frames)
+                .err()
+                .map(|unsupported| unsupported.field),
+            Some("offset_x")
+        );
     }
 
     #[test]
@@ -11170,6 +12663,11 @@ mod tests {
         /// `bypass = 1`, so a bypass path that is not actually lossless can be
         /// exercised (CC4 §8).
         bypass_leaks_pixel: Option<u8>,
+        /// CC5 §4.1: the coverage raster this double answers a matte proof
+        /// with. `None` keeps the trait's real `NotImplemented` default, which
+        /// is what the production engine still returns, so both branches of
+        /// every CC5 agent path are exercised.
+        matte_coverage: Option<RgbaImage>,
     }
 
     impl Playback for NoopMedia {
@@ -11396,6 +12894,33 @@ mod tests {
                 width: 2,
                 height: 2,
                 pixels: vec![0; 16],
+            })
+        }
+
+        fn matte_proof_for_document(
+            &self,
+            _document: Arc<Document>,
+            _at: TimeCode,
+            clip: ClipId,
+            effect: EffectId,
+        ) -> Result<kinewright_core::MatteProof, MediaError> {
+            let Some(coverage) = self.matte_coverage.clone() else {
+                return Err(MediaError::NotImplemented);
+            };
+            Ok(kinewright_core::MatteProof {
+                metadata: kinewright_core::MatteProofMetadata {
+                    render: MonitorProofMetadata::test_double(),
+                    clip,
+                    effect,
+                    node_kind: "color_wheels".to_owned(),
+                    coverage_encoding: kinewright_core::MATTE_COVERAGE_ENCODING.to_owned(),
+                    coverage_scale: kinewright_core::MATTE_COVERAGE_SCALE,
+                    raster_aspect_millionths: 1_777_778,
+                    matte_enabled: true,
+                    window_count: 1,
+                    qualifier_enabled: false,
+                },
+                coverage,
             })
         }
 
@@ -13336,6 +14861,7 @@ mod tests {
         let proof_args = || RenderColorProofArgs {
             effect_id: None,
             look_comparison: None,
+            matte_comparison: None,
             expected_revision: TimelineRevision(0),
             clip_id: ClipId(1),
             timecode: TimeCode(12),
@@ -13538,6 +15064,7 @@ mod tests {
             .render_color_proof(&RenderColorProofArgs {
                 effect_id: None,
                 look_comparison: None,
+                matte_comparison: None,
                 expected_revision: TimelineRevision(0),
                 clip_id: ClipId(1),
                 timecode: TimeCode(12),
@@ -13794,6 +15321,1745 @@ mod tests {
                 .unwrap()
                 .text
                 .contains("relink_media")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CC5 §4.2 / §5.2 / §7 — the matte agent surface
+    // -----------------------------------------------------------------------
+
+    /// A `width × height` coverage raster whose codes come from `code(x, y)`.
+    ///
+    /// Built as a plain RGBA buffer, so no CC5 code path can prove its own
+    /// statistics.
+    fn matte_coverage_raster(width: u32, height: u32, code: impl Fn(u32, u32) -> u8) -> RgbaImage {
+        let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 4);
+        for y in 0..height {
+            for x in 0..width {
+                let value = code(x, y);
+                pixels.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        RgbaImage {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    /// A service whose clip carries one matted `color_wheels` node.
+    fn matte_service(coverage: Option<RgbaImage>) -> (KinewrightMcp, Core) {
+        matte_service_with(coverage, BTreeMap::new(), Vec::new())
+    }
+
+    fn matte_service_with(
+        coverage: Option<RgbaImage>,
+        extra_matte_parameters: BTreeMap<String, i64>,
+        extra_effects: Vec<Effect>,
+    ) -> (KinewrightMcp, Core) {
+        let (seed, playback, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed_document)) =
+            seed.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut document = (*seed_document).clone();
+        // A managed CC1 source: an unknown-primaries fixture is refused before
+        // any proof or matte work happens.
+        document.media_pool[0].color_description = ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: ColorMatrix::Bt709,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: ColorProvenance::StreamMetadata,
+        };
+        document.lut_assets.push(kinewright_core::LutAsset {
+            id: kinewright_core::LutAssetId(1),
+            sha256: "b".repeat(64),
+            title: "transform".to_owned(),
+            kind: kinewright_core::LutAssetKind::Cube3d,
+            size: 17,
+            byte_len: 1_024,
+            domain_min_millionths: [0; 3],
+            domain_max_millionths: [1_000_000; 3],
+            source: kinewright_core::LutAssetSource::Builtin {
+                name: "neutral".to_owned(),
+            },
+        });
+        let mut parameters = BTreeMap::from([
+            (
+                "gain_red_thousandths".to_owned(),
+                ParamValue::Integer(1_200),
+            ),
+            ("matte_enabled".to_owned(), ParamValue::Integer(1)),
+            ("matte_window_count".to_owned(), ParamValue::Integer(1)),
+        ]);
+        for (name, value) in extra_matte_parameters {
+            parameters.insert(name, ParamValue::Integer(value));
+        }
+        // Extras go first so an Input-stage node such as `technical_lut` sits
+        // ahead of the Correction-stage wheels node Core's ordering rule
+        // requires (CC4 §3.2).
+        document.tracks[0].clips[0].effects = extra_effects
+            .into_iter()
+            .chain(std::iter::once(Effect {
+                id: EffectId(1),
+                name: "color_wheels".to_owned(),
+                parameters,
+                keyframes: BTreeMap::new(),
+            }))
+            .collect();
+        let media = Arc::new(NoopMedia {
+            matte_coverage: coverage,
+            ..NoopMedia::default()
+        });
+        let core = Core::spawn(document).unwrap();
+        let service =
+            KinewrightMcp::new(core.clone(), playback, media, ConfirmationBroker::default());
+        (service, core)
+    }
+
+    /// A service whose clip carries one matted `color_wheels` node and whose
+    /// analysis backend answers thumbnails from `frames`.
+    fn matte_track_service(
+        frames: BTreeMap<TimeCode, RgbaImage>,
+        extra_matte_parameters: BTreeMap<String, i64>,
+        extra_effects: Vec<Effect>,
+    ) -> (KinewrightMcp, Core) {
+        let (seed, playback, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed_document)) =
+            seed.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut document = (*seed_document).clone();
+        let mut parameters = BTreeMap::from([
+            ("matte_enabled".to_owned(), ParamValue::Integer(1)),
+            ("matte_window_count".to_owned(), ParamValue::Integer(1)),
+        ]);
+        for (name, value) in extra_matte_parameters {
+            parameters.insert(name, ParamValue::Integer(value));
+        }
+        document.tracks[0].clips[0].effects = std::iter::once(Effect {
+            id: EffectId(1),
+            name: "color_wheels".to_owned(),
+            parameters,
+            keyframes: BTreeMap::new(),
+        })
+        .chain(extra_effects)
+        .collect();
+        let media = Arc::new(NoopMedia {
+            thumbnail_frames: frames,
+            ..NoopMedia::default()
+        });
+        let core = Core::spawn(document).unwrap();
+        let service =
+            KinewrightMcp::new(core.clone(), playback, media, ConfirmationBroker::default());
+        (service, core)
+    }
+
+    /// CC5 §4.2: the statistics are measured off a hand-built coverage, so
+    /// every expected value below is derived by hand rather than by the code
+    /// that produced it.
+    #[test]
+    fn inspect_grade_matte_reports_the_cc5_coverage_statistics() {
+        // A 4 × 2 coverage:
+        //   row 0: 255 255 128   0
+        //   row 1: 255 255 128   0
+        // Hand-derived: 6 covered (m > 0), 4 full (code 255), 2 partial,
+        // 8 total, floor(6 * 10000 / 8) = 7500 basis points. The bounding box
+        // of the covered set is columns 0..3 of rows 0..2, i.e. x 0..7500 of
+        // the width and the whole height. Buckets are
+        // min(15, floor(code * 16 / 256)): code 0 -> 0, 128 -> 8, 255 -> 15.
+        let coverage = matte_coverage_raster(4, 2, |x, _| match x {
+            0 | 1 => 255,
+            2 => 128,
+            _ => 0,
+        });
+        let (service, _core) = matte_service(Some(coverage));
+
+        let result = service
+            .inspect_grade_matte(&InspectGradeMatteArgs {
+                expected_revision: Some(TimelineRevision(0)),
+                clip_id: ClipId(1),
+                effect_id: EffectId(1),
+                timecode: TimeCode(10),
+                include_image: None,
+            })
+            .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        let structured = result.structured_content.clone().unwrap();
+
+        let statistics = &structured["statistics"];
+        assert_eq!(statistics["covered_pixel_count"], 6);
+        assert_eq!(statistics["full_pixel_count"], 4);
+        assert_eq!(statistics["partial_pixel_count"], 2);
+        assert_eq!(statistics["total_pixel_count"], 8);
+        assert_eq!(statistics["covered_basis_points"], 7_500);
+        assert_eq!(statistics["weighted_by_coverage"], true);
+        let histogram = statistics["coverage_histogram"].as_array().unwrap();
+        assert_eq!(histogram.len(), 16);
+        assert_eq!(histogram[0], 2, "the two code-0 pixels land in bucket 0");
+        assert_eq!(histogram[8], 2, "the two code-128 pixels land in bucket 8");
+        assert_eq!(
+            histogram[15], 4,
+            "the four code-255 pixels land in bucket 15"
+        );
+        let total = histogram
+            .iter()
+            .map(|count| count.as_u64().unwrap())
+            .sum::<u64>();
+        assert_eq!(total, 8, "the buckets cover every pixel, code 0 included");
+
+        // CC5 §4.3's threshold is reported at the level a caller reads it.
+        assert_eq!(structured["matte_threshold"], "coverage_greater_than_zero");
+        assert_eq!(structured["covered_pixel_count"], 6);
+        assert_eq!(structured["raster"], json!({"width": 4, "height": 2}));
+        assert_eq!(structured["coverage_encoding"], "linear_coverage_u8");
+        assert_eq!(structured["coverage_scale"], 255);
+        assert_eq!(structured["kind"], "color_wheels");
+        assert_eq!(structured["active"], true);
+        assert_eq!(structured["inactive_reason"], serde_json::Value::Null);
+        // CC5 §1: the two coverage concepts are named apart.
+        assert_eq!(structured["surface"], "Matte (this correction)");
+        assert!(
+            structured["distinct_from"]
+                .as_str()
+                .unwrap()
+                .contains("Mask (layer alpha)")
+        );
+        // The full 47 integers, as a compact object.
+        let resolved = &structured["resolved_matte_parameters"];
+        assert_eq!(resolved["matte_enabled"], 1);
+        assert_eq!(resolved["matte_window_count"], 1);
+        assert_eq!(resolved["matte_mix_basis_points"], 10_000);
+        assert_eq!(resolved["matte_hue_width_centidegrees"], 18_000);
+        assert_eq!(resolved["windows"].as_array().unwrap().len(), 1);
+        assert_eq!(resolved["windows"][0]["half_width_basis_points"], 2_500);
+        // Renderer provenance rides along, unchanged from the monitor proof.
+        assert_eq!(structured["provenance"]["node_kind"], "color_wheels");
+        assert_eq!(structured["provenance"]["window_count"], 1);
+        assert_eq!(
+            structured["provenance"]["render"]["render_kind"],
+            "test_double"
+        );
+
+        // A PNG is attached by default and suppressed on request.
+        assert_eq!(structured["image_included"], true);
+        assert!(
+            result
+                .content
+                .iter()
+                .any(|block| block.as_image().is_some()),
+            "include_image defaults to true"
+        );
+        let without = service
+            .inspect_grade_matte(&InspectGradeMatteArgs {
+                expected_revision: None,
+                clip_id: ClipId(1),
+                effect_id: EffectId(1),
+                timecode: TimeCode(10),
+                include_image: Some(false),
+            })
+            .unwrap();
+        assert!(
+            without
+                .content
+                .iter()
+                .all(|block| block.as_image().is_none())
+        );
+    }
+
+    /// CC5 §4.1: a backend that cannot proof fails typed. It never returns a
+    /// blank frame, and it never invents a coverage number.
+    #[test]
+    fn inspect_grade_matte_surfaces_an_unavailable_proof_as_a_typed_refusal() {
+        let (service, _core) = matte_service(None);
+        let result = service
+            .inspect_grade_matte(&InspectGradeMatteArgs {
+                expected_revision: None,
+                clip_id: ClipId(1),
+                effect_id: EffectId(1),
+                timecode: TimeCode(10),
+                include_image: None,
+            })
+            .unwrap();
+
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "matte_proof_unavailable");
+        assert_eq!(structured["applied"], false);
+        let details = &structured["details"];
+        assert_eq!(details["field"], "effect_id");
+        assert_eq!(details["observed"]["effect_id"], 1);
+        assert_eq!(details["observed"]["node_kind"], "color_wheels");
+        assert_eq!(details["observed"]["has_matte"], true);
+        assert!(
+            details["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("no coverage is invented here")
+        );
+        // The resolved matte is still published: the refusal is about the
+        // render, not about the request.
+        assert_eq!(details["resolved_matte"]["matte_enabled"], 1);
+    }
+
+    /// CC5 §2.1: `technical_lut` carries no matte, and the layer `mask` effect
+    /// is a compositing alpha operation, not a colour node.
+    #[test]
+    fn inspect_grade_matte_refuses_nodes_that_cannot_carry_a_matte() {
+        let (service, _core) = matte_service_with(
+            None,
+            BTreeMap::new(),
+            vec![
+                Effect {
+                    id: EffectId(2),
+                    name: "mask".to_owned(),
+                    parameters: BTreeMap::new(),
+                    keyframes: BTreeMap::new(),
+                },
+                Effect {
+                    id: EffectId(3),
+                    name: "technical_lut".to_owned(),
+                    parameters: BTreeMap::from([(
+                        "lut_asset_id".to_owned(),
+                        ParamValue::Integer(1),
+                    )]),
+                    keyframes: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let mask = service
+            .inspect_grade_matte(&InspectGradeMatteArgs {
+                expected_revision: None,
+                clip_id: ClipId(1),
+                effect_id: EffectId(2),
+                timecode: TimeCode(10),
+                include_image: None,
+            })
+            .unwrap();
+        let structured = mask.structured_content.unwrap();
+        assert_eq!(structured["code"], "matte_effect_not_a_color_node");
+        assert!(
+            structured["details"]["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("compositing alpha operation")
+        );
+
+        let technical = service
+            .inspect_grade_matte(&InspectGradeMatteArgs {
+                expected_revision: None,
+                clip_id: ClipId(1),
+                effect_id: EffectId(3),
+                timecode: TimeCode(10),
+                include_image: None,
+            })
+            .unwrap();
+        let structured = technical.structured_content.unwrap();
+        assert_eq!(structured["code"], "matte_unsupported_node_kind");
+        assert_eq!(structured["details"]["observed"], "technical_lut");
+        assert_eq!(
+            structured["details"]["allowed"],
+            json!(crate::color_status::MATTE_CAPABLE_NODE_NAMES)
+        );
+    }
+
+    /// CC5 §7: `matte_comparison` is valid only alongside `effect_id`, is
+    /// mutually exclusive with `look_comparison`, and needs a node that both
+    /// may carry a matte and actually does. Every check runs before any render.
+    #[test]
+    fn render_color_proof_validates_matte_comparison_before_rendering() {
+        let (service, _core) = matte_service_with(
+            None,
+            BTreeMap::new(),
+            vec![Effect {
+                id: EffectId(3),
+                name: "color_curves".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::new(),
+            }],
+        );
+        let proof = |effect_id: Option<EffectId>,
+                     matte: Option<MatteComparison>,
+                     look: Option<LookComparison>| {
+            service
+                .render_color_proof(&RenderColorProofArgs {
+                    expected_revision: TimelineRevision(0),
+                    clip_id: ClipId(1),
+                    timecode: TimeCode(10),
+                    profile_assumption: None,
+                    parameters: BTreeMap::new(),
+                    effect_id,
+                    look_comparison: look,
+                    matte_comparison: matte,
+                })
+                .unwrap()
+                .structured_content
+                .unwrap()
+        };
+
+        let without_effect = proof(None, Some(MatteComparison::Coverage), None);
+        assert_eq!(
+            without_effect["code"],
+            "matte_comparison_requires_effect_id"
+        );
+        assert_eq!(without_effect["details"]["field"], "matte_comparison");
+
+        let both = proof(
+            Some(EffectId(1)),
+            Some(MatteComparison::InsideOnly),
+            Some(LookComparison::Before),
+        );
+        assert_eq!(
+            both["code"],
+            "matte_comparison_conflicts_with_look_comparison"
+        );
+        assert!(
+            both["details"]["allowed"]
+                .as_str()
+                .unwrap()
+                .contains("exactly one")
+        );
+
+        // A matte-capable node that carries no matte has no coverage to
+        // partition, so the proof refuses rather than rendering a blank frame.
+        let no_matte = proof(Some(EffectId(3)), Some(MatteComparison::OutsideOnly), None);
+        assert_eq!(no_matte["code"], "matte_proof_no_matte");
+        assert_eq!(no_matte["details"]["observed"]["has_matte"], false);
+        assert!(
+            no_matte["details"]["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("plan_secondary_correction")
+        );
+    }
+
+    /// CC5 §7: `matte_invert` is Hold-only but keyframable, so `outside_only`
+    /// must get the curve out of the way on its scratch copy — otherwise the
+    /// static write is dead, the "outside" cell renders the *inside*, and the
+    /// manifest says `outside_only` about a picture that is not.
+    #[test]
+    fn render_color_proof_outside_only_clears_a_keyframed_matte_invert_on_the_scratch_copy() {
+        let (service, core) = matte_service(None);
+        // A Hold curve that turns the matte inversion *on* from frame 0. The
+        // stored static value stays 0, so a planner reading only the static
+        // value would toggle to 1 and render exactly the inside cell.
+        let Event::DocumentChanged { revision, .. } = core
+            .request(Command::Do(Operation::SetEffectKeyframes {
+                clip: ClipId(1),
+                effect: EffectId(1),
+                name: "matte_invert".to_owned(),
+                curve: kinewright_core::AutomationCurve {
+                    keyframes: vec![kinewright_core::Keyframe {
+                        at: TimeCode(0),
+                        value: 1,
+                        interpolation: kinewright_core::KeyframeInterpolation::Hold,
+                    }],
+                },
+            }))
+            .unwrap()
+        else {
+            panic!("expected the keyframe to apply");
+        };
+        assert_eq!(revision, TimelineRevision(1));
+
+        let result = service
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(1),
+                clip_id: ClipId(1),
+                timecode: TimeCode(10),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+                effect_id: Some(EffectId(1)),
+                look_comparison: None,
+                matte_comparison: Some(MatteComparison::OutsideOnly),
+            })
+            .unwrap();
+        let manifest = result.structured_content.unwrap();
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "outside_only proof refused: {manifest}"
+        );
+        let comparison = &manifest["matte_comparison"];
+        assert_eq!(comparison["variant"], "outside_only");
+        // The curve is cleared first, then the complement of the value the
+        // curve renders at this frame is written. The rendered value is 1, so
+        // the outside cell writes 0 — not 1, which is what complementing the
+        // stored static value would have produced.
+        assert_eq!(
+            comparison["after_operations"],
+            json!([
+                {"ClearEffectKeyframes": {"clip": 1, "effect": 1, "name": "matte_invert"}},
+                {"SetEffectParam": {
+                    "clip": 1,
+                    "effect": 1,
+                    "name": "matte_invert",
+                    "value": 0,
+                }},
+            ])
+        );
+        assert_eq!(comparison["cleared_keyframes"], json!(["matte_invert"]));
+
+        // Scratch only: the live document keeps its automation untouched.
+        let Event::QueryResult(QueryResult::Document(document)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected a document");
+        };
+        let effect = &document.clip(ClipId(1)).unwrap().effects[0];
+        assert_eq!(
+            effect.keyframes["matte_invert"].keyframes[0].value, 1,
+            "the live document must still carry the curve"
+        );
+        assert!(!effect.parameters.contains_key("matte_invert"));
+
+        // A node with no `matte_invert` automation is byte-unchanged: one
+        // operation, and an empty `cleared_keyframes`.
+        let (plain, _) = matte_service(None);
+        let plain = plain
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(10),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+                effect_id: Some(EffectId(1)),
+                look_comparison: None,
+                matte_comparison: Some(MatteComparison::OutsideOnly),
+            })
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(
+            plain["matte_comparison"]["cleared_keyframes"],
+            json!([]),
+            "a node with no matte_invert curve clears nothing"
+        );
+    }
+
+    /// CC5 §7: `outside_only` renders a scratch copy with `matte_invert`
+    /// toggled, and the manifest states exactly which variant it rendered.
+    #[test]
+    fn render_color_proof_outside_only_toggles_matte_invert_on_a_scratch_copy() {
+        let (service, core) = matte_service(None);
+        let result = service
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(10),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+                effect_id: Some(EffectId(1)),
+                look_comparison: None,
+                matte_comparison: Some(MatteComparison::OutsideOnly),
+            })
+            .unwrap();
+        let manifest = result.structured_content.unwrap();
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "outside_only proof refused: {manifest}"
+        );
+        let comparison = &manifest["matte_comparison"];
+        assert_eq!(comparison["variant"], "outside_only");
+        assert_eq!(comparison["effect_id"], 1);
+        assert_eq!(comparison["kind"], "color_wheels");
+        assert!(
+            comparison["after_cell"]
+                .as_str()
+                .unwrap()
+                .contains("matte_invert toggled")
+        );
+        // The exact scratch operation, hand-written.
+        assert_eq!(
+            comparison["after_operations"],
+            json!([{"SetEffectParam": {
+                "clip": 1,
+                "effect": 1,
+                "name": "matte_invert",
+                "value": 1,
+            }}])
+        );
+        // `inside_only` renders the document exactly as stored, so it has no
+        // scratch operation at all.
+        let inside = service
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(10),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+                effect_id: Some(EffectId(1)),
+                look_comparison: None,
+                matte_comparison: Some(MatteComparison::InsideOnly),
+            })
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(inside["matte_comparison"]["variant"], "inside_only");
+        assert_eq!(inside["matte_comparison"]["after_operations"], json!([]));
+        assert_eq!(inside["applied"], false);
+
+        // Read-only: the live document never gained `matte_invert`.
+        let Event::QueryResult(QueryResult::Document(document)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected a document");
+        };
+        assert_eq!(
+            document.clip(ClipId(1)).unwrap().effects[0]
+                .parameters
+                .get("matte_invert"),
+            None
+        );
+    }
+
+    /// CC5 §7: `coverage` replaces the AFTER cell with the §4.1 proof image
+    /// itself, and reports the measured coverage next to it.
+    #[test]
+    fn render_color_proof_coverage_returns_the_matte_proof_image() {
+        // 320 × 180 is the fixture raster; the left third is covered.
+        let coverage = matte_coverage_raster(320, 180, |x, _| u8::from(x < 106) * 255);
+        let (service, _core) = matte_service(Some(coverage));
+        let manifest = service
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(10),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+                effect_id: Some(EffectId(1)),
+                look_comparison: None,
+                matte_comparison: Some(MatteComparison::Coverage),
+            })
+            .unwrap()
+            .structured_content
+            .unwrap();
+
+        let comparison = &manifest["matte_comparison"];
+        assert_eq!(comparison["variant"], "coverage");
+        // 106 columns of 320, over 180 rows: 106 * 180 = 19080 of 57600, and
+        // floor(19080 * 10000 / 57600) = 3312 basis points.
+        assert_eq!(comparison["coverage"]["covered_pixel_count"], 19_080);
+        assert_eq!(
+            comparison["coverage"]["statistics"]["covered_basis_points"],
+            3_312
+        );
+        assert_eq!(
+            comparison["coverage"]["matte_threshold"],
+            "coverage_greater_than_zero"
+        );
+        assert_eq!(comparison["coverage"]["coverage_scale"], 255);
+    }
+
+    /// CC5 §7: a CC4 proof is byte-unchanged — no `matte_comparison` key at all
+    /// when none was requested.
+    #[test]
+    fn render_color_proof_omits_matte_comparison_when_none_was_requested() {
+        let (service, _core) = matte_service(None);
+        let manifest = service
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(10),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+                effect_id: Some(EffectId(1)),
+                look_comparison: None,
+                matte_comparison: None,
+            })
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert!(manifest.get("matte_comparison").is_none());
+    }
+
+    /// A 320 × 180 frame carrying one 40 × 40 bright box centred on `centre`.
+    ///
+    /// The `box_frame` pattern from `mod tracking_tests`, at the fixture
+    /// raster: a static dark background with one high-contrast subject, which
+    /// is what pins a normalized SAD template match at zero displacement error.
+    fn matte_box_frame(centre: [u32; 2]) -> RgbaImage {
+        let (width, height) = (320_u32, 180_u32);
+        let mut pixels = vec![0_u8; (width * height * 4) as usize];
+        for pixel in pixels.as_chunks_mut::<4>().0.iter_mut() {
+            *pixel = [48, 48, 48, 255];
+        }
+        for y in centre[1].saturating_sub(20)..(centre[1] + 20).min(height) {
+            for x in centre[0].saturating_sub(20)..(centre[0] + 20).min(width) {
+                let index = ((y * width + x) * 4) as usize;
+                pixels[index..index + 4].copy_from_slice(&[235, 235, 235, 255]);
+            }
+        }
+        RgbaImage {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    /// A 320 × 180 frame of deterministic per-frame noise.
+    ///
+    /// Every frame is unlike every other, so a SAD template match has nothing
+    /// to lock onto and the confidence gate fires.
+    fn matte_noise_frame(frame: i64) -> RgbaImage {
+        let (width, height) = (320_u32, 180_u32);
+        let seed = u32::try_from(frame.rem_euclid(4_096)).unwrap_or(0);
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                // An avalanche mix, so the field has no translational symmetry
+                // a shifted template could exploit.
+                let mut hash = x.wrapping_mul(0x9E37_79B9)
+                    ^ y.wrapping_mul(0x85EB_CA6B)
+                    ^ seed.wrapping_mul(0xC2B2_AE35);
+                hash ^= hash >> 15;
+                hash = hash.wrapping_mul(0x2545_F491);
+                hash ^= hash >> 13;
+                let value = u8::try_from(hash & 0xFF).unwrap_or(0);
+                pixels.extend_from_slice(&[value, value.wrapping_add(83), value, 255]);
+            }
+        }
+        RgbaImage {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    /// CC5 §5.2: track one window on a synthetic moving subject and return a
+    /// prepared plan of exactly two keyframe operations, committing nothing.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn track_matte_window_prepares_two_keyframe_operations_without_committing() {
+        // The subject travels from x = 80 to x = 240 across frames 0..=40,
+        // 4 pixels per frame, at a constant y = 90.
+        let frames = (0..=40)
+            .map(|frame| {
+                (
+                    TimeCode(frame),
+                    matte_box_frame([u32::try_from(80 + frame * 4).unwrap(), 90]),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        // Seed the window on the subject at frame 0: pixel 80 of 320 is 2500
+        // basis points of the width, and pixel 90 of 180 is 5000 of the height.
+        let (service, core) = matte_track_service(
+            frames,
+            BTreeMap::from([("matte_window0_center_x_basis_points".to_owned(), 2_500)]),
+            Vec::new(),
+        );
+
+        let result = service
+            .track_matte_window(&TrackMatteWindowArgs {
+                expected_revision: Some(TimelineRevision(0)),
+                clip_id: ClipId(1),
+                effect_id: EffectId(1),
+                window_index: 0,
+                start_local_frame: Some(TimeCode(0)),
+                end_local_frame: Some(TimeCode(41)),
+                step_frames: Some(10),
+                search_radius_percent: Some(25),
+                max_width: Some(320),
+                minimum_confidence_basis_points: None,
+            })
+            .unwrap();
+        let structured = result.structured_content.clone().unwrap();
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "tracking refused: {structured}"
+        );
+
+        // Five samples at 0, 10, 20, 30, 40.
+        let observations = structured["observations"].as_array().unwrap();
+        assert_eq!(observations.len(), 5);
+        assert_eq!(
+            observations
+                .iter()
+                .map(|observation| observation["local_frame"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![0, 10, 20, 30, 40]
+        );
+        // Raw centres, hand-derived through CC5 §5.2's conversion at scale 1:
+        // the subject centre is pixel x = 80 + 4 * frame, and
+        // round((pixel + 0.5) * 10000 / 320) gives 2516, 3766, 5016, 6266,
+        // 7516. The tracker seeds from the window centre, so the first sample
+        // is the seeded position and the rest are matched.
+        let raw = observations
+            .iter()
+            .map(|observation| observation["center_x_basis_points"].as_i64().unwrap())
+            .collect::<Vec<_>>();
+        for (index, expected) in [2_516_i64, 3_766, 5_016, 6_266, 7_516].iter().enumerate() {
+            assert!(
+                (raw[index] - expected).abs() <= 200,
+                "sample {index}: raw {} against the analytic {expected}",
+                raw[index]
+            );
+        }
+        // A static subject on the vertical axis: every raw y stays at the
+        // seeded centre, round((89.5 + 0.5) * 10000 / 180) = 5000.
+        for observation in observations {
+            assert!((observation["center_y_basis_points"].as_i64().unwrap() - 5_000).abs() <= 200);
+            assert!(observation["confidence_basis_points"].as_u64().unwrap() >= 5_000);
+        }
+
+        // The smoothed curve differs from the raw observations, and the last
+        // sample lags by one inter-sample displacement exactly as CC5 §5.2
+        // states.
+        let smoothed = structured["curves"]["matte_window0_center_x_basis_points"]["keyframes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|keyframe| keyframe["value"].as_i64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(smoothed.len(), 5);
+        assert!(
+            smoothed[4] < raw[4],
+            "the median filter must lag the final sample: smoothed {} against raw {}",
+            smoothed[4],
+            raw[4]
+        );
+        assert!(
+            (raw[4] - smoothed[4]) <= 2 * (raw[4] - raw[3]),
+            "the lag is bounded by one inter-sample displacement"
+        );
+        // Every keyframe is Linear: sustained movement gets continuous
+        // velocity, and M40 rejected eased per-segment curves.
+        for keyframe in structured["curves"]["matte_window0_center_x_basis_points"]["keyframes"]
+            .as_array()
+            .unwrap()
+        {
+            assert_eq!(keyframe["interpolation"], "linear");
+        }
+
+        // The pinned M40 constants ride in the response.
+        let stabilization = &structured["window_stabilization"];
+        assert_eq!(stabilization["median_filter"], true);
+        assert_eq!(stabilization["dead_zone_basis_points"], 0);
+        assert_eq!(stabilization["maximum_step_basis_points"], 800);
+        assert_eq!(stabilization["minimum_basis_points"], -10_000);
+        assert_eq!(stabilization["maximum_basis_points"], 20_000);
+        assert_eq!(stabilization["interpolation"], "Linear");
+
+        // CC5 §5.2's conversion is stated, not inferred.
+        let space = &structured["coordinate_space"];
+        assert_eq!(
+            space["pixel_to_basis_points"],
+            "centre_bp = round((pixel + 0.5) * 10000 / extent)"
+        );
+        assert_eq!(
+            space["composite_to_layer"],
+            "u_layer = (u_composite - 0.5) / scale - (offset_x, offset_y) / (2 * scale) + 0.5"
+        );
+        assert_eq!(space["layer_scale"], 1.0);
+        // hw = 2500 bp at scale 1 is a 50 percent template.
+        assert_eq!(space["box_percent"], json!([50, 50]));
+
+        // CC5 §5.2's provenance marker.
+        let boundary = structured["tracking_boundary"].as_str().unwrap();
+        assert!(boundary.contains("normalized SAD template match"));
+        assert!(boundary.contains("no learned object, face, or skin detection"));
+        assert!(boundary.contains("rotation_centidegrees"));
+
+        // The prepared plan carries exactly the two keyframe operations, and
+        // neither is destructive.
+        let preview = &structured["prepared_edit_plan"]["preview"];
+        assert_eq!(preview["operation_count"], 2);
+        assert_eq!(preview["destructive_operations"], json!([]));
+        assert_eq!(preview["expected_revision"], 0);
+        assert_eq!(preview["before_clips"], preview["after_clips"]);
+        // The two parameters CC5 §5.2 writes, and no others: rotation and the
+        // half extents are never written.
+        assert_eq!(
+            structured["parameters"],
+            json!([
+                "matte_window0_center_x_basis_points",
+                "matte_window0_center_y_basis_points"
+            ])
+        );
+        assert_eq!(
+            structured["curves"].as_object().unwrap().len(),
+            2,
+            "exactly two curves are proposed"
+        );
+        assert_eq!(structured["applied"], false);
+
+        // Nothing was committed: the live node still carries no automation.
+        let Event::QueryResult(QueryResult::Document(document)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected a document");
+        };
+        assert!(
+            document
+                .clip(ClipId(1))
+                .unwrap()
+                .effects
+                .iter()
+                .all(|effect| effect.keyframes.is_empty()),
+            "track_matte_window commits nothing"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CC5 §9.2.11, agent half: the tracked shot.
+    //
+    // The media crate owns the generated clip and proves containment for a
+    // *simulated* smoother; the real `track_matte_window` lives here, so the
+    // same containment gate is run against the curve the tool actually emits.
+    // The shot is the media crate's recipe, restated because its generator and
+    // its analytic helpers are `pub(crate)` to `kinewright-media`.
+    // -----------------------------------------------------------------------
+
+    /// The §9.2.11 tracked shot's raster and subject, from the media recipe.
+    const TRACKED_SHOT_WIDTH: u32 = 640;
+    const TRACKED_SHOT_HEIGHT: u32 = 360;
+    const TRACKED_SHOT_FRAMES: i64 = 100;
+    const TRACKED_SHOT_FPS: i64 = 25;
+    /// The white subject is 80 × 80 pixels.
+    const TRACKED_SHOT_BOX: i64 = 80;
+    /// §9.2.11's window half extents, in basis points of width and of height.
+    const TRACKED_SHOT_HALF_WIDTH_BASIS_POINTS: i64 = 1_300;
+    const TRACKED_SHOT_HALF_HEIGHT_BASIS_POINTS: i64 = 1_800;
+    /// The subject's own half extents in the same units: half of the 80 px box
+    /// is `40 / 640 = 625` bp of the width and `40 / 360 = 1111.1` bp of the
+    /// height, which is the `625` / `1111` §9.2.11 states. The exact fraction
+    /// is used on the vertical axis because it is the stricter of the two.
+    const TRACKED_SHOT_SUBJECT_HALF_WIDTH_BASIS_POINTS: f64 = 625.0;
+    const TRACKED_SHOT_SUBJECT_HALF_HEIGHT_BASIS_POINTS: f64 = 40.0 * 10_000.0 / 360.0;
+    /// §9.2.11's derived margin budget: `1300 − 625` and `1800 − 1111`.
+    const TRACKED_SHOT_MARGIN_BUDGET_X_BASIS_POINTS: f64 = 675.0;
+    const TRACKED_SHOT_MARGIN_BUDGET_Y_BASIS_POINTS: f64 = 689.0;
+    /// §9.2.11's tolerances: the raw observations may miss the analytic centre
+    /// by 200 bp, and the smoothed curve — which pays the median filter's lag
+    /// on top of that error — by 600 bp.
+    const TRACKED_SHOT_RAW_TOLERANCE_BASIS_POINTS: f64 = 200.0;
+    const TRACKED_SHOT_SMOOTHED_TOLERANCE_BASIS_POINTS: f64 = 600.0;
+    /// The measured worst `|raw − analytic|` of the real tracker on this shot,
+    /// in basis points, at samples 9 (x) and 19 (y).
+    const TRACKED_SHOT_WORST_RAW_X_BASIS_POINTS: f64 = 55.0;
+    const TRACKED_SHOT_WORST_RAW_Y_BASIS_POINTS: f64 = 180.888_888_888_888_7;
+    /// The measured worst `|smoothed − analytic|`, both at sample 99.
+    const TRACKED_SHOT_WORST_SMOOTHED_X_BASIS_POINTS: f64 = 366.75;
+    const TRACKED_SHOT_WORST_SMOOTHED_Y_BASIS_POINTS: f64 = 292.0;
+    /// The measured worst containment margin over all 100 frames, both at
+    /// frame 99: `675 − 366.75` and `688.9 − 292`.
+    const TRACKED_SHOT_WORST_MARGIN_X_BASIS_POINTS: f64 = 308.25;
+    const TRACKED_SHOT_WORST_MARGIN_Y_BASIS_POINTS: f64 = 396.888_888_888_888_7;
+
+    /// The analytic top-left corner of the subject at clip-local `frame`.
+    ///
+    /// The media crate generates the shot with
+    /// `overlay=x='320+120*sin(2*PI*t/8)-40':y='180+60*sin(2*PI*t/8)-40'` over
+    /// a solid `0x303030` 640 × 360 background at 25 fps. `overlay` exposes
+    /// `t` as *time*, so `t = frame / 25`, and the realised box snaps to even
+    /// pixel offsets because that clip is muxed `yuv420p`; the expectation is
+    /// therefore `2·floor(edge / 2)`. Restated rather than imported:
+    /// `cc5_fixtures.rs::analytic_box_corner` is `pub(crate)` to the media
+    /// crate and cannot be called from here.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    fn tracked_shot_box_corner(frame: i64) -> (i64, i64) {
+        let seconds = frame as f64 / TRACKED_SHOT_FPS as f64;
+        let phase = (2.0 * std::f64::consts::PI * seconds / 8.0).sin();
+        let snap = |value: f64| 2 * (value / 2.0).floor() as i64;
+        (
+            snap(320.0 + 120.0 * phase - 40.0),
+            snap(180.0 + 60.0 * phase - 40.0),
+        )
+    }
+
+    /// The exact window centre, in basis points, that centres the analytic box
+    /// in the window at `frame`. Kept fractional: rounding it to the integer
+    /// the tool emits would hide up to half a basis point of the error this
+    /// test measures.
+    #[allow(clippy::cast_precision_loss)]
+    fn tracked_shot_centre_basis_points(frame: i64) -> [f64; 2] {
+        let (x, y) = tracked_shot_box_corner(frame);
+        [
+            (x + TRACKED_SHOT_BOX / 2) as f64 * 10_000.0 / f64::from(TRACKED_SHOT_WIDTH),
+            (y + TRACKED_SHOT_BOX / 2) as f64 * 10_000.0 / f64::from(TRACKED_SHOT_HEIGHT),
+        ]
+    }
+
+    /// One frame of the tracked shot as an RGBA thumbnail.
+    ///
+    /// The background is solid on purpose: §5.2's box rule makes the SAD
+    /// template *window* sized rather than subject sized, and a featureless
+    /// background is what pins the match on the subject instead of on some
+    /// other piece of texture inside the template.
+    fn tracked_shot_frame(frame: i64) -> RgbaImage {
+        let (width, height) = (TRACKED_SHOT_WIDTH, TRACKED_SHOT_HEIGHT);
+        let mut pixels = vec![0_u8; (width * height * 4) as usize];
+        for pixel in pixels.as_chunks_mut::<4>().0.iter_mut() {
+            *pixel = [0x30, 0x30, 0x30, 255];
+        }
+        let (left, top) = tracked_shot_box_corner(frame);
+        for y in top..top + TRACKED_SHOT_BOX {
+            for x in left..left + TRACKED_SHOT_BOX {
+                let y = u32::try_from(y).expect("the subject stays inside the raster");
+                let x = u32::try_from(x).expect("the subject stays inside the raster");
+                let index = ((y * width + x) * 4) as usize;
+                pixels[index..index + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        RgbaImage {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    /// A service whose only clip is the §9.2.11 tracked shot — 100 frames of
+    /// 640 × 360 at 25 fps — carrying one matted `color_wheels` node whose
+    /// window 0 is the contract's 1300 × 1800 bp rect, and whose analysis
+    /// backend answers thumbnails with the generated frames.
+    ///
+    /// The window centre is left at its neutral 5000 / 5000, which *is* the
+    /// analytic centre at frame 0 — the tracker seeds from the stored centre,
+    /// so seeding it anywhere else would inject an error the shot does not
+    /// have. The clip starts at timeline frame 0, so clip-local and project
+    /// frames coincide and the thumbnail map is keyed by either.
+    fn tracked_shot_service() -> (KinewrightMcp, Core) {
+        let asset = MediaAsset {
+            id: AssetId(1),
+            path: PathBuf::from("cc5-tracked-shot.mp4"),
+            name: "cc5-tracked-shot".to_owned(),
+            duration: TimeCode(TRACKED_SHOT_FRAMES),
+            fps: Rational::new(u32::try_from(TRACKED_SHOT_FPS).unwrap(), 1).unwrap(),
+            kind: MediaKind::Video,
+            resolution: Some((TRACKED_SHOT_WIDTH, TRACKED_SHOT_HEIGHT)),
+            source_fingerprint: MediaSourceFingerprint::default(),
+            color_description: ColorDescription::default(),
+        };
+        let document = Document {
+            catalog: kinewright_core::MediaCatalog::default(),
+            audio_mix: kinewright_core::AudioMix::default(),
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![Clip {
+                    id: ClipId(1),
+                    asset: asset.id,
+                    source_range: TimeCode::ZERO..TimeCode(TRACKED_SHOT_FRAMES),
+                    content: ClipContent::Media,
+                    timeline_start: TimeCode::ZERO,
+                    effects: vec![Effect {
+                        id: EffectId(1),
+                        name: "color_wheels".to_owned(),
+                        parameters: BTreeMap::from([
+                            ("matte_enabled".to_owned(), ParamValue::Integer(1)),
+                            ("matte_window_count".to_owned(), ParamValue::Integer(1)),
+                            (
+                                "matte_window0_half_width_basis_points".to_owned(),
+                                ParamValue::Integer(TRACKED_SHOT_HALF_WIDTH_BASIS_POINTS),
+                            ),
+                            (
+                                "matte_window0_half_height_basis_points".to_owned(),
+                                ParamValue::Integer(TRACKED_SHOT_HALF_HEIGHT_BASIS_POINTS),
+                            ),
+                        ]),
+                        keyframes: BTreeMap::new(),
+                    }],
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                }],
+            }],
+            media_pool: vec![asset],
+            markers: Vec::new(),
+            fps: Rational::new(u32::try_from(TRACKED_SHOT_FPS).unwrap(), 1).unwrap(),
+            resolution: (TRACKED_SHOT_WIDTH, TRACKED_SHOT_HEIGHT),
+            duration: TimeCode(TRACKED_SHOT_FRAMES),
+            color_context: kinewright_core::ColorContext::default(),
+            lut_assets: Vec::new(),
+        };
+        let media = Arc::new(NoopMedia {
+            thumbnail_frames: (0..TRACKED_SHOT_FRAMES)
+                .map(|frame| (TimeCode(frame), tracked_shot_frame(frame)))
+                .collect(),
+            ..NoopMedia::default()
+        });
+        let playback: Arc<dyn Playback> = media.clone();
+        let analysis: Arc<dyn Analysis> = media;
+        let core = Core::spawn(document).unwrap();
+        let service = KinewrightMcp::new(
+            core.clone(),
+            playback,
+            analysis,
+            ConfirmationBroker::default(),
+        );
+        (service, core)
+    }
+
+    /// CC5 §9.2.11, agent half. The *smoothed* curve `track_matte_window`
+    /// prepares, linearly interpolated between its sample keyframes, keeps the
+    /// analytic subject box inside the 1300 × 1800 bp window at **every**
+    /// frame `0..=99` — not only at the 21 frames the tracker sampled.
+    ///
+    /// The media crate's
+    /// `cc5_tracked_shot_window_contains_the_subject_at_every_frame` runs this
+    /// gate against ground truth and against a *simulated* smoother; the real
+    /// tool lives here, so this runs it against the curve the tool actually
+    /// emitted for the same shot. Interpolation is
+    /// [`AutomationCurve::value_at`], which is precisely the evaluator
+    /// `Effect::evaluated_at` calls and therefore precisely the rule the media
+    /// gate uses — a hand-rolled lerp here could agree with the contract and
+    /// disagree with the timeline.
+    #[test]
+    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+    fn track_matte_window_smoothed_curve_contains_the_subject_at_every_frame() {
+        let (service, _core) = tracked_shot_service();
+
+        // The media recipe's tracking call: step 5, radius 25, max_width 512.
+        // The analysis double answers thumbnails at the frames' own raster, so
+        // the tracker measures 640 × 360 and `max_width` only records the
+        // recipe.
+        let result = service
+            .track_matte_window(&TrackMatteWindowArgs {
+                expected_revision: Some(TimelineRevision(0)),
+                clip_id: ClipId(1),
+                effect_id: EffectId(1),
+                window_index: 0,
+                start_local_frame: Some(TimeCode(0)),
+                end_local_frame: Some(TimeCode(TRACKED_SHOT_FRAMES)),
+                step_frames: Some(5),
+                search_radius_percent: Some(25),
+                max_width: Some(512),
+                minimum_confidence_basis_points: None,
+            })
+            .unwrap();
+        let structured = result.structured_content.clone().unwrap();
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "tracking refused: {structured}"
+        );
+        // The window really is the contract's: `2 · hw · scale · 100` is 26
+        // percent of the width and 36 percent of the height at scale 1.
+        assert_eq!(
+            structured["coordinate_space"]["box_percent"],
+            json!([26, 36])
+        );
+        assert_eq!(
+            structured["coordinate_space"]["thumbnail"],
+            json!({"width": TRACKED_SHOT_WIDTH, "height": TRACKED_SHOT_HEIGHT})
+        );
+
+        // `tracking_sample_frames(0..100, 5)` distributes 20 even intervals
+        // across the 99-frame span: 0, 4, 9, …, 94, 99. Not multiples of five,
+        // and the media fixture's sequence exactly.
+        let observations = structured["observations"].as_array().unwrap();
+        let sample_frames = observations
+            .iter()
+            .map(|observation| observation["local_frame"].as_i64().unwrap())
+            .collect::<Vec<_>>();
+        let expected_samples = std::iter::once(0)
+            .chain((4..TRACKED_SHOT_FRAMES).step_by(5))
+            .collect::<Vec<_>>();
+        assert_eq!(expected_samples.len(), 21);
+        assert_eq!(*expected_samples.last().unwrap(), 99);
+        assert_eq!(
+            sample_frames, expected_samples,
+            "every sample must survive the confidence floor, at the media fixture's own frames"
+        );
+
+        // --- §9.2.11: the raw observations stay within 200 bp --------------
+        let mut worst_raw = [0.0_f64; 2];
+        let mut worst_raw_frame = [0_i64; 2];
+        for observation in observations {
+            let frame = observation["local_frame"].as_i64().unwrap();
+            let analytic = tracked_shot_centre_basis_points(frame);
+            for (axis, name) in [
+                (0_usize, "center_x_basis_points"),
+                (1, "center_y_basis_points"),
+            ] {
+                let observed = observation[name].as_i64().unwrap() as f64;
+                let error = (observed - analytic[axis]).abs();
+                assert!(
+                    error <= TRACKED_SHOT_RAW_TOLERANCE_BASIS_POINTS,
+                    "frame {frame}, axis {axis}: the raw observation {observed} bp misses the \
+                     analytic {} bp by {error} bp, past §9.2.11's {} bp raw tolerance",
+                    analytic[axis],
+                    TRACKED_SHOT_RAW_TOLERANCE_BASIS_POINTS
+                );
+                if error > worst_raw[axis] {
+                    worst_raw[axis] = error;
+                    worst_raw_frame[axis] = frame;
+                }
+            }
+            assert!(observation["confidence_basis_points"].as_u64().unwrap() >= 5_000);
+        }
+
+        // --- the smoothed curves the tool prepared -------------------------
+        let curve_for = |axis: usize| {
+            let name = if axis == 0 {
+                "matte_window0_center_x_basis_points"
+            } else {
+                "matte_window0_center_y_basis_points"
+            };
+            serde_json::from_value::<AutomationCurve>(structured["curves"][name].clone())
+                .expect("the tool publishes ordinary automation curves")
+        };
+        let curves = [curve_for(0), curve_for(1)];
+        let mut worst_smoothed = [0.0_f64; 2];
+        let mut worst_smoothed_frame = [0_i64; 2];
+        for (axis, curve) in curves.iter().enumerate() {
+            curve.validate().expect("a valid curve");
+            assert_eq!(
+                curve
+                    .keyframes
+                    .iter()
+                    .map(|keyframe| keyframe.at.0)
+                    .collect::<Vec<_>>(),
+                expected_samples,
+                "axis {axis}: one keyframe per surviving sample"
+            );
+            for keyframe in &curve.keyframes {
+                assert_eq!(keyframe.interpolation, KeyframeInterpolation::Linear);
+                let analytic = tracked_shot_centre_basis_points(keyframe.at.0);
+                let error = (keyframe.value as f64 - analytic[axis]).abs();
+                assert!(
+                    error <= TRACKED_SHOT_SMOOTHED_TOLERANCE_BASIS_POINTS,
+                    "frame {}, axis {axis}: the smoothed centre {} bp misses the analytic {} bp \
+                     by {error} bp, past §9.2.11's {} bp smoothed tolerance",
+                    keyframe.at.0,
+                    keyframe.value,
+                    analytic[axis],
+                    TRACKED_SHOT_SMOOTHED_TOLERANCE_BASIS_POINTS
+                );
+                if error > worst_smoothed[axis] {
+                    worst_smoothed[axis] = error;
+                    worst_smoothed_frame[axis] = keyframe.at.0;
+                }
+            }
+        }
+        // The smoother is not a pass-through: it costs lag, and the lag is
+        // what the margin budget below is spent on.
+        assert!(
+            worst_smoothed[0] > 0.0 && worst_smoothed[1] > 0.0,
+            "a smoothed curve identical to ground truth would not exercise the margin budget"
+        );
+
+        // --- §9.2.11: containment at EVERY frame, not only the samples -----
+        //
+        // The window is `[cx ± 1300, cy ± 1800]` and the subject box is
+        // `[analytic ± (625, 1111.1)]`, both in basis points of the frame
+        // extent, so the margin on each axis collapses to
+        // `half_extent − subject_half_extent − |centre error|`. The four edge
+        // comparisons are written out anyway: containment is the assertion the
+        // contract makes, and the margin is the evidence.
+        let half_extent = [
+            TRACKED_SHOT_HALF_WIDTH_BASIS_POINTS as f64,
+            TRACKED_SHOT_HALF_HEIGHT_BASIS_POINTS as f64,
+        ];
+        let subject_half_extent = [
+            TRACKED_SHOT_SUBJECT_HALF_WIDTH_BASIS_POINTS,
+            TRACKED_SHOT_SUBJECT_HALF_HEIGHT_BASIS_POINTS,
+        ];
+        let budget = [
+            TRACKED_SHOT_MARGIN_BUDGET_X_BASIS_POINTS,
+            TRACKED_SHOT_MARGIN_BUDGET_Y_BASIS_POINTS,
+        ];
+        let mut worst_margin = [f64::INFINITY; 2];
+        let mut worst_margin_frame = [0_i64; 2];
+        let mut frames_asserted = 0_i64;
+        for frame in 0..TRACKED_SHOT_FRAMES {
+            let analytic = tracked_shot_centre_basis_points(frame);
+            for axis in 0..2 {
+                let centre = curves[axis]
+                    .value_at(TimeCode(frame))
+                    .expect("the curve covers the whole clip") as f64;
+                let window = [centre - half_extent[axis], centre + half_extent[axis]];
+                let subject = [
+                    analytic[axis] - subject_half_extent[axis],
+                    analytic[axis] + subject_half_extent[axis],
+                ];
+                assert!(
+                    subject[0] >= window[0] && subject[1] <= window[1],
+                    "frame {frame}, axis {axis}: the subject {subject:?} leaves the tracked \
+                     window {window:?}"
+                );
+                let margin = (subject[0] - window[0]).min(window[1] - subject[1]);
+                if margin < worst_margin[axis] {
+                    worst_margin[axis] = margin;
+                    worst_margin_frame[axis] = frame;
+                }
+            }
+            frames_asserted += 1;
+        }
+        assert_eq!(
+            frames_asserted, TRACKED_SHOT_FRAMES,
+            "containment is asserted at every frame, interpolated between the 21 samples"
+        );
+        for axis in 0..2 {
+            assert!(
+                worst_margin[axis] > 0.0 && worst_margin[axis] <= budget[axis],
+                "axis {axis}: the measured worst margin {} bp at frame {} must be positive and \
+                 inside §9.2.11's {} bp budget",
+                worst_margin[axis],
+                worst_margin_frame[axis],
+                budget[axis]
+            );
+        }
+        // The measured evidence, pinned. Every number below is a measurement
+        // of the real tool on the real shot rather than arithmetic on the
+        // contract's constants, so a regression in the tracker or in the
+        // smoother moves it. The tracker is integer SAD over synthetic frames
+        // and the curve evaluator is integer, so the run is exactly
+        // reproducible and an exact comparison is honest.
+        //
+        // Both smoothed peaks and both margin minima land on frame 99, which
+        // is §5.2's stated last-sample median substitution: the filter
+        // replaces `o[n-1]` with `median(o[n-3], o[n-2], o[n-1])`, so the last
+        // value lags a moving subject and spends the most margin.
+        for (label, measured, recorded, frame, expected_frame) in [
+            (
+                "raw_x",
+                worst_raw[0],
+                TRACKED_SHOT_WORST_RAW_X_BASIS_POINTS,
+                worst_raw_frame[0],
+                9,
+            ),
+            (
+                "raw_y",
+                worst_raw[1],
+                TRACKED_SHOT_WORST_RAW_Y_BASIS_POINTS,
+                worst_raw_frame[1],
+                19,
+            ),
+            (
+                "smoothed_x",
+                worst_smoothed[0],
+                TRACKED_SHOT_WORST_SMOOTHED_X_BASIS_POINTS,
+                worst_smoothed_frame[0],
+                99,
+            ),
+            (
+                "smoothed_y",
+                worst_smoothed[1],
+                TRACKED_SHOT_WORST_SMOOTHED_Y_BASIS_POINTS,
+                worst_smoothed_frame[1],
+                99,
+            ),
+            (
+                "margin_x",
+                worst_margin[0],
+                TRACKED_SHOT_WORST_MARGIN_X_BASIS_POINTS,
+                worst_margin_frame[0],
+                99,
+            ),
+            (
+                "margin_y",
+                worst_margin[1],
+                TRACKED_SHOT_WORST_MARGIN_Y_BASIS_POINTS,
+                worst_margin_frame[1],
+                99,
+            ),
+        ] {
+            assert!(
+                (measured - recorded).abs() <= 1.0e-6,
+                "{label}: the measured value is {measured} bp, not the recorded {recorded} bp"
+            );
+            assert_eq!(
+                frame, expected_frame,
+                "{label}: the worst frame moved from {expected_frame} to {frame}"
+            );
+        }
+        // The margin and the lag are one measurement seen twice, not two
+        // independent literals: the sample frame carrying the worst lag is one
+        // of the hundred frames checked above, so the worst margin can never
+        // exceed the budget less that lag. Here the two are equal to the bp,
+        // because the worst lag falls on sample frame 99 rather than on an
+        // interpolated frame between two samples.
+        for axis in 0..2 {
+            assert!(
+                worst_margin[axis] <= budget[axis] - worst_smoothed[axis] + 1.0e-6,
+                "axis {axis}: a worst margin of {} bp is larger than the {} bp budget less the \
+                 {} bp worst lag, which no frame can be",
+                worst_margin[axis],
+                budget[axis],
+                worst_smoothed[axis]
+            );
+        }
+    }
+
+    /// CC5 §5.2: fewer than two samples above the confidence floor is the
+    /// roadmap's manual fallback, reported typed with field/observed/allowed.
+    #[test]
+    fn track_matte_window_refuses_when_confidence_is_too_low() {
+        // Every frame carries a completely different deterministic pattern, so
+        // no template matches its successor and the confidence floor rejects
+        // every sample after the seeded first one. This is the shape of a real
+        // failure: the tracker has no occlusion handling, so a subject that
+        // vanishes leaves nothing to match.
+        let frames = (0..=40)
+            .map(|frame| (TimeCode(frame), matte_noise_frame(frame)))
+            .collect::<BTreeMap<_, _>>();
+        let (service, _core) = matte_track_service(frames, BTreeMap::new(), Vec::new());
+
+        let result = service
+            .track_matte_window(&TrackMatteWindowArgs {
+                expected_revision: None,
+                clip_id: ClipId(1),
+                effect_id: EffectId(1),
+                window_index: 0,
+                start_local_frame: Some(TimeCode(0)),
+                end_local_frame: Some(TimeCode(41)),
+                step_frames: Some(10),
+                search_radius_percent: Some(25),
+                max_width: Some(320),
+                // Only a perfect match survives, which the seeded first sample
+                // alone reports.
+                minimum_confidence_basis_points: Some(10_000),
+            })
+            .unwrap();
+
+        let structured = result.structured_content.unwrap();
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "expected a refusal: {structured}"
+        );
+        assert_eq!(structured["code"], "tracking_confidence_too_low");
+        let details = &structured["details"];
+        assert_eq!(details["field"], "minimum_confidence_basis_points");
+        assert_eq!(
+            details["observed"]["minimum_confidence_basis_points"],
+            10_000
+        );
+        assert_eq!(details["allowed"], json!({"minimum_surviving_samples": 2}));
+        assert!(details["observed"]["surviving_samples"].as_u64().unwrap() < 2);
+        assert!(
+            details["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("will not invent a position")
+        );
+    }
+
+    /// CC5 §5.2: the composite → layer conversion is a single affine map, so a
+    /// layer whose transform moves across the range is a typed refusal.
+    #[test]
+    fn track_matte_window_refuses_a_keyframed_layer_transform() {
+        let mut transform = Effect {
+            id: EffectId(2),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        };
+        transform.keyframes.insert(
+            "scale_percent".to_owned(),
+            AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode(0),
+                        value: 50,
+                        interpolation: KeyframeInterpolation::Linear,
+                    },
+                    Keyframe {
+                        at: TimeCode(40),
+                        value: 100,
+                        interpolation: KeyframeInterpolation::Linear,
+                    },
+                ],
+            },
+        );
+        let frames = BTreeMap::from([(TimeCode(0), matte_box_frame([160, 90]))]);
+        let (service, _core) = matte_track_service(frames, BTreeMap::new(), vec![transform]);
+
+        let result = service
+            .track_matte_window(&TrackMatteWindowArgs {
+                expected_revision: None,
+                clip_id: ClipId(1),
+                effect_id: EffectId(1),
+                window_index: 0,
+                start_local_frame: Some(TimeCode(0)),
+                end_local_frame: Some(TimeCode(41)),
+                step_frames: Some(10),
+                search_radius_percent: None,
+                max_width: None,
+                minimum_confidence_basis_points: None,
+            })
+            .unwrap();
+
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(
+            structured["code"],
+            "matte_track_layer_transform_unsupported"
+        );
+        let details = &structured["details"];
+        assert_eq!(details["field"], "scale");
+        assert_eq!(details["observed"]["at_first_sample"], 0.5);
+        assert!(
+            details["allowed"]
+                .as_str()
+                .unwrap()
+                .contains("one value across the whole tracked range")
+        );
+        assert!(
+            details["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("single affine map")
+        );
+    }
+
+    /// CC5 §2.2: a window at index >= `matte_window_count` is stored but never
+    /// rendered, so tracking it would animate geometry that affects no pixel.
+    #[test]
+    fn track_matte_window_refuses_a_window_past_the_active_count() {
+        let frames = BTreeMap::from([(TimeCode(0), matte_box_frame([160, 90]))]);
+        let (service, _core) = matte_track_service(frames, BTreeMap::new(), Vec::new());
+
+        let result = service
+            .track_matte_window(&TrackMatteWindowArgs {
+                expected_revision: None,
+                clip_id: ClipId(1),
+                effect_id: EffectId(1),
+                // The fixture node resolves `matte_window_count = 1`.
+                window_index: 2,
+                start_local_frame: None,
+                end_local_frame: None,
+                step_frames: None,
+                search_radius_percent: None,
+                max_width: None,
+                minimum_confidence_basis_points: None,
+            })
+            .unwrap();
+
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "matte_window_not_active");
+        assert_eq!(structured["details"]["field"], "window_index");
+        assert_eq!(structured["details"]["observed"], 2);
+        assert_eq!(structured["details"]["allowed"]["window_count"], 1);
+    }
+
+    /// CC5 §5.2: `excluded_effect` narrows the tracker's exclusion from *every*
+    /// effect sharing a name to exactly the one being tracked.
+    ///
+    /// Two `mask` effects on one clip: tracking the first must leave the
+    /// second's alpha in the tracking thumbnails, which is the correct
+    /// behaviour and the delta CC5 §9.2.12 asserts.
+    #[test]
+    fn region_tracking_excludes_exactly_one_effect_by_id() {
+        let frames = BTreeMap::from([
+            (TimeCode(0), matte_box_frame([160, 90])),
+            (TimeCode(10), matte_box_frame([160, 90])),
+        ]);
+        let masks = vec![
+            Effect {
+                id: EffectId(7),
+                name: "mask".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::new(),
+            },
+            Effect {
+                id: EffectId(8),
+                name: "mask".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::new(),
+            },
+        ];
+        let (service, _core) = matte_track_service(frames, BTreeMap::new(), masks);
+        let (_, document) = service.snapshot().unwrap();
+
+        let request = |excluded: EffectId| RegionTrackingRequest {
+            document: &document,
+            clip_id: ClipId(1),
+            clip_timeline_start: TimeCode::ZERO,
+            sample_frames: &[TimeCode(0), TimeCode(10)],
+            center_percent: [50, 50],
+            box_percent: [25, 25],
+            search_radius_percent: 25,
+            max_width: 320,
+            excluded_effect: excluded,
+        };
+        // Both calls succeed; the point is that the *identity* selects which
+        // effect is removed, so a second effect of the same name survives.
+        assert!(service.track_clip_region(&request(EffectId(7))).is_ok());
+        assert!(service.track_clip_region(&request(EffectId(8))).is_ok());
+        // The document itself is never touched by tracking isolation.
+        assert_eq!(
+            document
+                .clip(ClipId(1))
+                .unwrap()
+                .effects
+                .iter()
+                .filter(|effect| effect.name == "mask")
+                .count(),
+            2
+        );
+    }
+
+    /// CC5 §2.6: a qualifier band whose low edge resolved above its high edge
+    /// selects nothing, and `get_qa_report` surfaces Core's
+    /// `matte_band_inverted_by_automation` issue for it.
+    #[test]
+    fn qa_report_surfaces_an_inverted_matte_band() {
+        let (service, _core) = matte_service_with(
+            None,
+            BTreeMap::from([
+                ("matte_qualifier_enabled".to_owned(), 1),
+                ("matte_saturation_low_basis_points".to_owned(), 9_000),
+                ("matte_saturation_high_basis_points".to_owned(), 1_000),
+            ]),
+            Vec::new(),
+        );
+
+        let report = service.qa_report().unwrap();
+        let text = report.content[0].as_text().unwrap().text.clone();
+        let report: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let issue = report["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|issue| issue["code"] == "matte_band_inverted_by_automation")
+            .unwrap_or_else(|| panic!("the inverted band must be reported: {report}"));
+        assert!(
+            issue["message"]
+                .as_str()
+                .unwrap()
+                .contains("selects nothing")
+        );
+
+        // A band that is not inverted produces no issue at all.
+        let (clean, _core) = matte_service_with(
+            None,
+            BTreeMap::from([
+                ("matte_qualifier_enabled".to_owned(), 1),
+                ("matte_saturation_low_basis_points".to_owned(), 1_000),
+                ("matte_saturation_high_basis_points".to_owned(), 9_000),
+            ]),
+            Vec::new(),
+        );
+        let text = clean.qa_report().unwrap().content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .clone();
+        let clean_report: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(
+            !clean_report["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| issue["code"] == "matte_band_inverted_by_automation")
+        );
+    }
+
+    /// CC5 §7: the three matte tools are registered, read-only, and
+    /// `inspect_grade_matte` is an Inspector by explicit override because the
+    /// `inspect_` prefix matches no inference rule.
+    #[test]
+    fn cc5_matte_tools_are_registered_read_only_inspectors() {
+        let tools = KinewrightMcp::tools().unwrap();
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<BTreeSet<_>>();
+        for name in [
+            "inspect_grade_matte",
+            "track_matte_window",
+            "plan_secondary_correction",
+        ] {
+            assert!(names.contains(name), "missing CC5 tool {name}");
+            let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+            assert_eq!(
+                tool.annotations.as_ref().unwrap().read_only_hint,
+                Some(true),
+                "{name} must be read-only"
+            );
+        }
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 74);
+
+        // M36: every colour planner and every CC5 tool stays inside the
+        // kilobyte description budget, measured on the *registered* descriptor
+        // rather than on a copy of the literal, so a descriptor-derived legend
+        // that grows is caught here. `plan_secondary_correction` carries a
+        // pointer to the matte legend, not the legend itself; the four other
+        // planners carry only `matte_parameter_pointer`.
+        for name in [
+            "plan_primary_correction",
+            "plan_color_wheels",
+            "plan_color_curves",
+            "plan_creative_look",
+            "plan_technical_lut",
+            "plan_secondary_correction",
+            "inspect_grade_matte",
+            "track_matte_window",
+        ] {
+            let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+            let description = tool.description.as_deref().unwrap_or_default();
+            assert!(
+                description.len() < 1_024,
+                "{name} description is {} bytes, over the M36 1 KB budget",
+                description.len()
+            );
+        }
+        // The matte's own planner must not repeat the 47-parameter legend, and
+        // must not recommend itself.
+        let secondary = tools
+            .iter()
+            .find(|tool| tool.name == "plan_secondary_correction")
+            .unwrap();
+        let secondary = secondary.description.as_deref().unwrap_or_default();
+        assert!(
+            !secondary.contains("matte_window{j}_*"),
+            "plan_secondary_correction must not carry the full matte legend"
+        );
+        assert!(
+            !secondary.contains("Prefer plan_secondary_correction"),
+            "plan_secondary_correction must not recommend itself"
+        );
+        assert!(secondary.contains("details.matte_parameters"));
+        // The legend itself is still served, in full, by the two enumerating
+        // surfaces the pointer names.
+        for name in ["add_effect", "set_effect_param"] {
+            let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+            assert!(
+                tool.description
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("matte_window{j}_*"),
+                "{name} must still enumerate the matte legend"
+            );
+        }
+
+        let capabilities = crate::runtime::capabilities(&tools);
+        let kind = |name: &str| {
+            capabilities
+                .iter()
+                .find(|capability| capability.name == name)
+                .unwrap_or_else(|| panic!("{name} must be a capability"))
+                .kind
+        };
+        assert_eq!(
+            kind("inspect_grade_matte"),
+            crate::runtime::CapabilityKind::Inspector
+        );
+        // These two are inferred correctly by their name prefixes and need no
+        // override entry.
+        assert_eq!(
+            kind("track_matte_window"),
+            crate::runtime::CapabilityKind::Inspector
+        );
+        assert_eq!(
+            kind("plan_secondary_correction"),
+            crate::runtime::CapabilityKind::Planner
         );
     }
 
@@ -14397,6 +17663,7 @@ mod tests {
             .render_color_proof(&RenderColorProofArgs {
                 effect_id: None,
                 look_comparison: None,
+                matte_comparison: None,
                 expected_revision: TimelineRevision(0),
                 clip_id: ClipId(1),
                 timecode: TimeCode(12),
@@ -14459,6 +17726,7 @@ mod tests {
                 .render_color_proof(&RenderColorProofArgs {
                     effect_id: None,
                     look_comparison: None,
+                    matte_comparison: None,
                     expected_revision: TimelineRevision(0),
                     clip_id: ClipId(1),
                     timecode: TimeCode(12),
@@ -14483,6 +17751,7 @@ mod tests {
             .render_color_proof(&RenderColorProofArgs {
                 effect_id: None,
                 look_comparison: None,
+                matte_comparison: None,
                 expected_revision: TimelineRevision(0),
                 clip_id: ClipId(1),
                 timecode: TimeCode(12),
@@ -14510,6 +17779,7 @@ mod tests {
             .render_color_proof(&RenderColorProofArgs {
                 effect_id: None,
                 look_comparison: None,
+                matte_comparison: None,
                 expected_revision: TimelineRevision(0),
                 clip_id: ClipId(1),
                 timecode: TimeCode(12),
@@ -14543,6 +17813,7 @@ mod tests {
             .render_color_proof(&RenderColorProofArgs {
                 effect_id: None,
                 look_comparison: None,
+                matte_comparison: None,
                 expected_revision: TimelineRevision(0),
                 clip_id: ClipId(1),
                 timecode: TimeCode(12),
@@ -14705,6 +17976,7 @@ mod tests {
             .render_color_proof(&RenderColorProofArgs {
                 effect_id: None,
                 look_comparison: None,
+                matte_comparison: None,
                 expected_revision: TimelineRevision(0),
                 clip_id: ClipId(1),
                 timecode: TimeCode(12),
@@ -17908,6 +21180,7 @@ mod tests {
                 parameters: BTreeMap::new(),
                 effect_id: Some(EffectId(9)),
                 look_comparison: Some(LookComparison::Bypass),
+                matte_comparison: None,
             })
             .unwrap();
         assert_eq!(refused.is_error, Some(true));
@@ -17958,6 +21231,7 @@ mod tests {
                 parameters: BTreeMap::new(),
                 effect_id: Some(EffectId(9)),
                 look_comparison: Some(LookComparison::Bypass),
+                matte_comparison: None,
             })
             .unwrap();
         assert_eq!(proof.is_error, Some(false), "{:?}", proof.content);
@@ -18263,6 +21537,7 @@ mod tests {
                 parameters: BTreeMap::from([("exposure_milli_stops".to_owned(), 100)]),
                 effect_id: Some(EffectId(1)),
                 look_comparison: None,
+                matte_comparison: None,
             })
             .unwrap();
         assert_eq!(conflict.is_error, Some(true));
@@ -18280,6 +21555,7 @@ mod tests {
                 parameters: BTreeMap::new(),
                 effect_id: None,
                 look_comparison: Some(LookComparison::Bypass),
+                matte_comparison: None,
             })
             .unwrap();
         assert_eq!(orphan.is_error, Some(true));
@@ -18317,6 +21593,7 @@ mod tests {
                 parameters: BTreeMap::new(),
                 effect_id: Some(EffectId(4)),
                 look_comparison: Some(LookComparison::Bypass),
+                matte_comparison: None,
             })
             .unwrap();
         assert_eq!(unsupported.is_error, Some(true));
@@ -18356,6 +21633,7 @@ mod tests {
                 parameters: BTreeMap::new(),
                 effect_id: Some(EffectId(9)),
                 look_comparison: Some(LookComparison::Bypass),
+                matte_comparison: None,
             })
             .unwrap();
         // The LUT node is no longer refused up front. The proof proceeds to

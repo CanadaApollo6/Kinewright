@@ -7,14 +7,14 @@ use std::{
 use kinewright_core::{
     AssetId, ClipId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
     ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Document, Effect,
-    FrameTexture, MediaError, MediaSourceFingerprint, Rational, TimeCode, Title,
-    classify_source_with_assumption,
+    EffectId, FrameTexture, MatteProofError, MediaError, MediaSourceFingerprint, Rational,
+    TimeCode, Title, classify_source_with_assumption,
 };
 
 use crate::{
     TimelineVisualLayer,
     cache::FrameCache,
-    compositor::{Compositor, CompositorLayer, DeliveryFrame, GpuContext},
+    compositor::{Compositor, CompositorLayer, DeliveryFrame, GpuContext, MatteRenderTarget},
     decode::VideoDecoder,
     derived_cache::CacheStats,
     frame::WorkingFrame,
@@ -56,6 +56,33 @@ impl RenderScale {
     pub(crate) fn output_resolution(self, source: (u32, u32)) -> (u32, u32) {
         bounded_resolution(source, self.max_width())
     }
+}
+
+/// One staged visual layer, in production z-order, before any output
+/// transform is selected.
+///
+/// The originating clip is carried alongside the decoded frame because a
+/// matte proof addresses a *clip*, while the compositor addresses layers
+/// positionally (CC5 §4.1): the two are reconciled here, on the same layer
+/// slice the ordinary render composites, so a proof can never target a layer
+/// the production path would not have produced.
+struct DecodedLayer {
+    clip: ClipId,
+    frame: WorkingFrame,
+    effects: Vec<Effect>,
+    transition: TransitionRenderParams,
+}
+
+/// One rendered CC5 matte coverage raster: one byte per pixel, in row-major
+/// order, carrying `round(255 · clamp(m, 0, 1))` with no transfer function.
+///
+/// The raster is reported rather than assumed so the caller can derive its
+/// full-resolution claim from what actually came back, exactly as the monitor
+/// proof does.
+pub(crate) struct MatteCoverage {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) coverage: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -266,14 +293,7 @@ impl FrameRenderer {
     ) -> Result<FrameTexture, MediaError> {
         let decoded_layers =
             self.decoded_layers(document, project_at, resolution, scale, strategy)?;
-        let layers = decoded_layers
-            .iter()
-            .map(|(frame, effects, transition)| CompositorLayer {
-                frame,
-                effects,
-                transition: *transition,
-            })
-            .collect::<Vec<_>>();
+        let layers = compositor_layers(&decoded_layers);
         self.compositor.render_monitor_with_luts(
             resolution,
             &layers,
@@ -302,20 +322,73 @@ impl FrameRenderer {
     ) -> Result<DeliveryFrame, MediaError> {
         let decoded_layers =
             self.decoded_layers(document, project_at, resolution, scale, strategy)?;
-        let layers = decoded_layers
-            .iter()
-            .map(|(frame, effects, transition)| CompositorLayer {
-                frame,
-                effects,
-                transition: *transition,
-            })
-            .collect::<Vec<_>>();
+        let layers = compositor_layers(&decoded_layers);
         self.compositor.render_delivery_with_luts(
             resolution,
             &layers,
             &document.color_context.delivery,
             Some(&self.lut_library),
         )
+    }
+
+    /// Render one clip's CC5 matte coverage instead of its colour.
+    ///
+    /// The layers are resolved exactly as [`Self::render`] resolves them — the
+    /// same `visual_layers_at` order, the same decode, the same
+    /// keyframe-evaluated effects — and the *target clip's* layer index is
+    /// handed to the compositor, which composites that layer alone with the
+    /// CC5 §3.2 matte-debug selector set. A clip that is not an active visual
+    /// layer at this frame therefore cannot be proved, and fails typed rather
+    /// than proving whatever layer happened to sit at that index.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed [`MatteProofError`] failures when the clip is not an
+    /// active visual layer, or when its target node is missing, is not a
+    /// colour node, is inactive at this frame, or carries no matte, plus the
+    /// ordinary colour-context, decode, and GPU readback failures.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_matte(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+        strategy: DecodeStrategy,
+        clip: ClipId,
+        effect: EffectId,
+    ) -> Result<MatteCoverage, MediaError> {
+        let decoded_layers =
+            self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+        // Not `EffectNotFound`: the effect id was never inspected here, and a
+        // clip that is simply off screen at this frame is a different failure
+        // with a different recovery than a node id that does not exist. CC5
+        // §4.1 requires a typed refusal rather than a blank frame; it does not
+        // require the refusal to misdescribe itself.
+        let layer_index = decoded_layers
+            .iter()
+            .position(|layer| layer.clip == clip)
+            .ok_or(MatteProofError::ClipNotVisible {
+                clip,
+                at: project_at,
+            })?;
+        let layers = compositor_layers(&decoded_layers);
+        let coverage = self.compositor.render_matte(
+            resolution,
+            &layers,
+            Some(&self.lut_library),
+            MatteRenderTarget {
+                layer_index,
+                clip,
+                effect,
+            },
+        )?;
+        let (width, height) = resolution;
+        Ok(MatteCoverage {
+            width,
+            height,
+            coverage,
+        })
     }
 
     /// Decode and stage every visual layer for one project frame, in
@@ -327,7 +400,7 @@ impl FrameRenderer {
         resolution: (u32, u32),
         scale: RenderScale,
         strategy: DecodeStrategy,
-    ) -> Result<Vec<(WorkingFrame, Vec<Effect>, TransitionRenderParams)>, MediaError> {
+    ) -> Result<Vec<DecodedLayer>, MediaError> {
         validate_managed_context(document)?;
         let layer_specs = visual_layers_at(document, project_at)?;
         let mut decoded_layers = Vec::with_capacity(layer_specs.len());
@@ -352,7 +425,12 @@ impl FrameRenderer {
                         &asset.source_fingerprint,
                         &asset.color_description,
                     )?;
-                    decoded_layers.push((frame, layer.effects, layer.transition));
+                    decoded_layers.push(DecodedLayer {
+                        clip: layer.source.clip,
+                        frame,
+                        effects: layer.effects,
+                        transition: layer.transition,
+                    });
                 }
                 TimelineVisualLayer::Title(layer) => {
                     let key = (layer.clip, resolution, layer.title.clone());
@@ -366,7 +444,12 @@ impl FrameRenderer {
                         self.cache_title_frame(key, frame.clone());
                         frame
                     };
-                    decoded_layers.push((frame, layer.effects, layer.transition));
+                    decoded_layers.push(DecodedLayer {
+                        clip: layer.clip,
+                        frame,
+                        effects: layer.effects,
+                        transition: layer.transition,
+                    });
                 }
             }
         }
@@ -623,6 +706,18 @@ fn validate_managed_context(document: &Document) -> Result<(), MediaError> {
         document.color_context.monitoring,
         document.color_context.delivery,
     )))
+}
+
+/// Borrow the staged layers as compositor layers, preserving z-order.
+fn compositor_layers(layers: &[DecodedLayer]) -> Vec<CompositorLayer<'_, WorkingFrame>> {
+    layers
+        .iter()
+        .map(|layer| CompositorLayer {
+            frame: &layer.frame,
+            effects: &layer.effects,
+            transition: layer.transition,
+        })
+        .collect()
 }
 
 fn bounded_resolution(source: (u32, u32), max_width: Option<u32>) -> (u32, u32) {

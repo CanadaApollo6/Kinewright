@@ -14,11 +14,12 @@ use kinewright_core::{
     COLOR_NODE_LIMIT_PER_LAYER, Clip, ClipContent, ClipId, ColorContext, ColorCurveChannel,
     ColorDescription, ColorNodeInactiveReason, ColorNodeKind, ColorWheelsParams, Command, Core,
     CurvePoints, DeliveryProfile, Document, Effect, EffectId, EffectUniform, Event, JournalCommand,
-    Keyframe, KeyframeInterpolation, MANAGED_COLOR_NODE_NAMES, MediaAsset, MediaKind, OpError,
-    Operation, ParamValue, QaSeverity, Rational, ResolvedCurves, TimeCode, Track, TrackId,
-    TrackKind, active_color_nodes, classify_color_node, color_curve_parameter_names,
-    color_node_inactive_reason, delivery_conformance, effect_compatibility_stage,
-    effect_descriptor, is_managed_color_node, managed_color_node_count, qa_document,
+    Keyframe, KeyframeInterpolation, MANAGED_COLOR_NODE_NAMES, MATTE_PARAMETER_COUNT, MediaAsset,
+    MediaKind, OpError, Operation, ParamValue, QaSeverity, Rational, ResolvedCurves, TimeCode,
+    Track, TrackId, TrackKind, active_color_nodes, classify_color_node,
+    color_curve_parameter_names, color_node_inactive_reason, delivery_conformance,
+    effect_compatibility_stage, effect_descriptor, is_managed_color_node, managed_color_node_count,
+    qa_document,
 };
 
 /// A path that always exists so `missing_media` never masks a colour issue.
@@ -142,7 +143,12 @@ fn color_wheels_descriptor_matches_the_published_control_table() {
         ("bypass", 0, 1, 0),
     ];
 
-    assert_eq!(descriptor.parameters.len(), expected.len());
+    // CC5 §2.2 appends 47 matte parameters after this table; they are pinned
+    // in `cc5_core.rs`, and the CC3 controls keep their positions and bounds.
+    assert_eq!(
+        descriptor.parameters.len(),
+        expected.len() + MATTE_PARAMETER_COUNT
+    );
     for (parameter, (name, min, max, neutral)) in descriptor.parameters.iter().zip(expected) {
         assert_eq!(
             (
@@ -167,7 +173,8 @@ fn color_curves_descriptor_expands_the_published_patterns() {
     let descriptor = effect_descriptor("color_curves").expect("color_curves must be registered");
     assert_eq!(COLOR_CURVE_PARAMETER_COUNT, 33);
     assert_eq!(COLOR_CURVES_PARAMETER_COUNT, 133);
-    assert_eq!(descriptor.parameters.len(), 133);
+    // CC5 §2.2 appends 47 matte parameters after the 133 curve parameters.
+    assert_eq!(descriptor.parameters.len(), 133 + MATTE_PARAMETER_COUNT);
 
     let mut expected: Vec<(String, i64, i64, i64)> = Vec::new();
     for curve in ["master", "red", "green", "blue"] {

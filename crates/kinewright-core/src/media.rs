@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::{
     AssetId, ClipId, ColorDescription, Document, EffectId, LutAsset, LutAssetId, MediaAsset,
-    MediaSourceFingerprint, Rational, TimeCode, TrackId,
+    MediaSourceFingerprint, NormalizedRoi, Rational, SCOPE_BASIS_POINTS, TimeCode, TrackId,
 };
 
 /// The runtime truth about whether an imported source can currently be read.
@@ -435,6 +435,462 @@ impl MonitorProofMetadata {
 pub struct MonitorProof {
     pub image: RgbaImage,
     pub metadata: MonitorProofMetadata,
+}
+
+/// Stable coverage encoding recorded in every [`MatteProofMetadata`].
+///
+/// The coverage raster carries `round(255 · clamp(m, 0, 1))` in all three
+/// colour channels with an opaque alpha and **no transfer function at all**.
+/// It is an integer quantization of a coverage scalar, not a monitoring
+/// transform, which is why it is named separately from a monitor proof.
+pub const MATTE_COVERAGE_ENCODING: &str = "linear_coverage_u8";
+
+/// Full coverage in [`MATTE_COVERAGE_ENCODING`]: `m = 1` encodes to code 255.
+pub const MATTE_COVERAGE_SCALE: u16 = 255;
+
+/// Provenance and resolved matte identity for one full-raster matte proof.
+///
+/// This composes [`MonitorProofMetadata`] rather than extending
+/// [`MonitorProofRenderKind`]: that vocabulary names the renderer
+/// implementation (`GpuPreview` / `TestDouble`), not an output target. Adding
+/// a `Matte` render kind would make provenance mean two things at once, so the
+/// output target is stated by this struct's own fields instead.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct MatteProofMetadata {
+    /// Renderer provenance, reused unchanged from the managed monitor proof.
+    pub render: MonitorProofMetadata,
+    /// The clip whose colour node was inspected.
+    pub clip: ClipId,
+    /// The matte-carrying colour node's effect identity.
+    pub effect: EffectId,
+    /// The colour-node kind that carries the matte, such as `color_wheels`.
+    pub node_kind: String,
+    /// Always [`MATTE_COVERAGE_ENCODING`].
+    pub coverage_encoding: String,
+    /// Always [`MATTE_COVERAGE_SCALE`].
+    pub coverage_scale: u16,
+    /// Rendered raster aspect ratio (`width / height`) in millionths.
+    pub raster_aspect_millionths: i64,
+    /// The node's resolved `matte_enabled` state.
+    pub matte_enabled: bool,
+    /// Number of resolved matte windows contributing to the coverage.
+    pub window_count: u8,
+    /// True when the node's qualifier contributes to the coverage.
+    pub qualifier_enabled: bool,
+}
+
+/// One full-raster matte coverage proof and its renderer provenance.
+///
+/// `coverage` is `R = G = B = round(255 · m)` with `A = 255` everywhere; see
+/// [`MATTE_COVERAGE_ENCODING`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatteProof {
+    pub coverage: RgbaImage,
+    pub metadata: MatteProofMetadata,
+}
+
+/// Typed failures produced while rendering a matte proof.
+///
+/// A matte proof never returns a blank frame: a node that contributes nothing
+/// fails with a stable code instead, so a caller cannot mistake "no coverage
+/// was requested" for "coverage is empty".
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MatteProofError {
+    #[error("matte_proof_node_inactive: colour node is inactive: {reason}")]
+    NodeInactive {
+        /// Stable inactivity reason token, such as `bypassed` or `matte_excluded`.
+        reason: String,
+    },
+    #[error("matte_proof_no_matte: colour node carries no matte")]
+    NoMatte,
+    #[error("matte_proof_effect_not_found: clip {clip} carries no effect {effect}")]
+    EffectNotFound { clip: ClipId, effect: EffectId },
+    /// The clip exists but is not an active visual layer at the proved frame.
+    ///
+    /// Distinct from [`Self::EffectNotFound`] on purpose: "your node id is
+    /// wrong" and "your node is fine but this clip is not on screen at this
+    /// timecode" have different recoveries, and collapsing them sent callers
+    /// hunting for a node that was never missing (CC5 §4.1).
+    #[error("matte_proof_clip_not_visible: clip {clip} is not an active visual layer at {at}")]
+    ClipNotVisible {
+        clip: ClipId,
+        /// The project frame at which the clip was not on screen.
+        at: TimeCode,
+    },
+    #[error(
+        "matte_proof_not_a_color_node: effect {effect} on clip {clip} is {name}, which cannot carry a matte"
+    )]
+    NotAColorNode {
+        clip: ClipId,
+        effect: EffectId,
+        /// The effect name that was found instead of a matte-capable node.
+        name: String,
+    },
+}
+
+impl MatteProofError {
+    /// Stable machine-readable status code for agent and UI consumers.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NodeInactive { .. } => "matte_proof_node_inactive",
+            Self::NoMatte => "matte_proof_no_matte",
+            Self::EffectNotFound { .. } => "matte_proof_effect_not_found",
+            Self::ClipNotVisible { .. } => "matte_proof_clip_not_visible",
+            Self::NotAColorNode { .. } => "matte_proof_not_a_color_node",
+        }
+    }
+}
+
+impl From<MatteProofError> for MediaError {
+    fn from(error: MatteProofError) -> Self {
+        Self::Backend(error.to_string())
+    }
+}
+
+/// Typed failures produced while measuring a coverage raster.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MatteCoverageError {
+    #[error("matte_coverage_invalid_dimensions: coverage raster is {observed}, allowed {allowed}")]
+    InvalidDimensions {
+        /// The rejected `WIDTHxHEIGHT` raster.
+        observed: String,
+        /// The requirement that was violated.
+        allowed: &'static str,
+    },
+    #[error(
+        "matte_coverage_buffer_length_mismatch: coverage buffer is {observed} bytes, allowed {allowed} bytes"
+    )]
+    BufferLengthMismatch { observed: usize, allowed: u64 },
+    #[error(
+        "matte_coverage_alpha_not_opaque: coverage pixel ({x}, {y}) has alpha {observed}, allowed {allowed}"
+    )]
+    AlphaNotOpaque {
+        x: u32,
+        y: u32,
+        observed: u8,
+        allowed: u8,
+    },
+    #[error(
+        "matte_coverage_not_grey: coverage pixel ({x}, {y}) is ({red}, {green}, {blue}), allowed {allowed}"
+    )]
+    NotGrey {
+        x: u32,
+        y: u32,
+        red: u8,
+        green: u8,
+        blue: u8,
+        /// The requirement that was violated.
+        allowed: &'static str,
+    },
+    #[error("matte_coverage_overflow: coverage statistic {operation} overflowed")]
+    ArithmeticOverflow { operation: &'static str },
+}
+
+impl MatteCoverageError {
+    /// Stable machine-readable status code for agent and UI consumers.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidDimensions { .. } => "matte_coverage_invalid_dimensions",
+            Self::BufferLengthMismatch { .. } => "matte_coverage_buffer_length_mismatch",
+            Self::AlphaNotOpaque { .. } => "matte_coverage_alpha_not_opaque",
+            Self::NotGrey { .. } => "matte_coverage_not_grey",
+            Self::ArithmeticOverflow { .. } => "matte_coverage_overflow",
+        }
+    }
+}
+
+impl From<MatteCoverageError> for MediaError {
+    fn from(error: MatteCoverageError) -> Self {
+        Self::Backend(error.to_string())
+    }
+}
+
+/// Number of buckets in a [`MatteCoverageStatistics`] coverage histogram.
+pub const MATTE_COVERAGE_HISTOGRAM_BUCKETS: usize = 16;
+
+/// Deterministic integer statistics of one matte coverage raster.
+///
+/// Every value is derived from the 8-bit coverage codes alone: no floating
+/// point is used, and no project state is consulted.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct MatteCoverageStatistics {
+    /// Pixels with `m > 0`: the set the correction touched at all.
+    pub covered_pixel_count: u64,
+    /// Pixels at code 255.
+    pub full_pixel_count: u64,
+    /// Pixels in codes `1..=254`.
+    pub partial_pixel_count: u64,
+    /// Every pixel in the raster, covered or not.
+    pub total_pixel_count: u64,
+    /// `floor(covered · 10000 / total)`, the CC2 integer-floor rule.
+    pub covered_basis_points: u32,
+    /// Counts for `bucket = min(15, floor(code · 16 / 256))`, over **every**
+    /// pixel including code 0, so the buckets sum to `total_pixel_count`.
+    pub coverage_histogram: [u64; MATTE_COVERAGE_HISTOGRAM_BUCKETS],
+    /// The tightest half-open pixel rectangle containing every `m > 0` pixel,
+    /// converted to basis points, or `None` when coverage is empty.
+    ///
+    /// The pixel rectangle `[left, right) × [top, bottom)` converts with the
+    /// CC2 ROI rule read in reverse: a start boundary floors and an exclusive
+    /// end boundary ceils, so the reported rectangle covers every covered
+    /// pixel completely.  Concretely
+    /// `x = floor(left · 10000 / width)` and
+    /// `width = ceil(right · 10000 / width) − x`, and likewise on the vertical
+    /// axis.  Feeding the result back through
+    /// [`NormalizedRoi::to_pixels`](crate::NormalizedRoi::to_pixels) therefore
+    /// never drops a covered pixel.
+    pub bounding_box_basis_points: Option<NormalizedRoi>,
+    /// The coverage-weighted centroid `Σ m·p / Σ m` in basis points, with `p`
+    /// the pixel centre `((x + 0.5) / width, (y + 0.5) / height)`, rounded
+    /// half away from zero.  `None` when coverage is empty.
+    ///
+    /// This is a statistic *of the matte*, not a colour measurement, so
+    /// weighting by partial coverage is correct here and does not contradict
+    /// CC2's "partial alpha is not a weight" rule, which governs scope inputs.
+    pub centroid_basis_points: Option<(i64, i64)>,
+    /// Always true: the centroid above is coverage-weighted.
+    pub weighted_by_coverage: bool,
+}
+
+/// Measure a matte coverage raster.
+///
+/// The raster must be exactly what a matte proof produces: `R = G = B` in
+/// every pixel and `A = 255` everywhere.  Both requirements are checked rather
+/// than assumed, because a caller can hand this function any RGBA image and a
+/// silently mis-encoded coverage would produce plausible but wrong statistics.
+///
+/// # Errors
+///
+/// Returns [`MatteCoverageError`] for zero dimensions, a pixel buffer whose
+/// length contradicts the dimensions, a non-opaque or non-grey pixel, or
+/// statistic arithmetic that cannot be represented.
+pub fn matte_coverage_statistics(
+    coverage: &RgbaImage,
+) -> Result<MatteCoverageStatistics, MatteCoverageError> {
+    if coverage.width == 0 || coverage.height == 0 {
+        return Err(MatteCoverageError::InvalidDimensions {
+            observed: format!("{}x{}", coverage.width, coverage.height),
+            allowed: "width and height must both be non-zero",
+        });
+    }
+    let total_pixel_count = u64::from(coverage.width)
+        .checked_mul(u64::from(coverage.height))
+        .ok_or(MatteCoverageError::ArithmeticOverflow {
+            operation: "total_pixel_count",
+        })?;
+    let allowed_bytes =
+        total_pixel_count
+            .checked_mul(4)
+            .ok_or(MatteCoverageError::ArithmeticOverflow {
+                operation: "pixel buffer length",
+            })?;
+    if usize::try_from(allowed_bytes).ok() != Some(coverage.pixels.len()) {
+        return Err(MatteCoverageError::BufferLengthMismatch {
+            observed: coverage.pixels.len(),
+            allowed: allowed_bytes,
+        });
+    }
+
+    let scan = scan_coverage(coverage)?;
+
+    let covered_basis_points = u32::try_from(
+        scan.covered_pixel_count
+            .checked_mul(u64::from(SCOPE_BASIS_POINTS))
+            .ok_or(MatteCoverageError::ArithmeticOverflow {
+                operation: "covered_basis_points",
+            })?
+            / total_pixel_count,
+    )
+    .map_err(|_| MatteCoverageError::ArithmeticOverflow {
+        operation: "covered_basis_points",
+    })?;
+
+    let bounding_box_basis_points = if scan.covered_pixel_count == 0 {
+        None
+    } else {
+        Some(coverage_bounding_box(
+            (scan.left, scan.right, coverage.width),
+            (scan.top, scan.bottom, coverage.height),
+        )?)
+    };
+    let centroid_basis_points = if scan.coverage_sum == 0 {
+        None
+    } else {
+        Some((
+            weighted_centre(scan.weighted_x, scan.coverage_sum, coverage.width)?,
+            weighted_centre(scan.weighted_y, scan.coverage_sum, coverage.height)?,
+        ))
+    };
+
+    Ok(MatteCoverageStatistics {
+        covered_pixel_count: scan.covered_pixel_count,
+        full_pixel_count: scan.full_pixel_count,
+        partial_pixel_count: scan.partial_pixel_count,
+        total_pixel_count,
+        covered_basis_points,
+        coverage_histogram: scan.coverage_histogram,
+        bounding_box_basis_points,
+        centroid_basis_points,
+        weighted_by_coverage: true,
+    })
+}
+
+/// Per-pixel coverage evidence accumulated by [`scan_coverage`].
+struct CoverageScan {
+    covered_pixel_count: u64,
+    full_pixel_count: u64,
+    partial_pixel_count: u64,
+    coverage_histogram: [u64; MATTE_COVERAGE_HISTOGRAM_BUCKETS],
+    /// Half-open pixel bounds of the covered set, valid only when
+    /// `covered_pixel_count` is non-zero.
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+    /// `Σ m`, and `Σ m·(2p + 1)` on each axis, for the weighted centroid.
+    coverage_sum: u128,
+    weighted_x: u128,
+    weighted_y: u128,
+}
+
+/// Walk a validated coverage raster once, rejecting any pixel that is not an
+/// opaque grey coverage sample.
+fn scan_coverage(coverage: &RgbaImage) -> Result<CoverageScan, MatteCoverageError> {
+    let mut scan = CoverageScan {
+        covered_pixel_count: 0,
+        full_pixel_count: 0,
+        partial_pixel_count: 0,
+        coverage_histogram: [0; MATTE_COVERAGE_HISTOGRAM_BUCKETS],
+        left: u32::MAX,
+        top: u32::MAX,
+        right: 0,
+        bottom: 0,
+        coverage_sum: 0,
+        weighted_x: 0,
+        weighted_y: 0,
+    };
+    let (pixels, _) = coverage.pixels.as_chunks::<4>();
+    let mut samples = pixels.iter();
+    for y in 0..coverage.height {
+        for x in 0..coverage.width {
+            // The caller validated the buffer length against the dimensions,
+            // so the iterator cannot run out; a defensive error keeps that
+            // from becoming a panic if the check ever changes.
+            let &[code, green, blue, alpha] =
+                samples
+                    .next()
+                    .ok_or(MatteCoverageError::ArithmeticOverflow {
+                        operation: "pixel buffer length",
+                    })?;
+            if alpha != 255 {
+                return Err(MatteCoverageError::AlphaNotOpaque {
+                    x,
+                    y,
+                    observed: alpha,
+                    allowed: 255,
+                });
+            }
+            if green != code || blue != code {
+                return Err(MatteCoverageError::NotGrey {
+                    x,
+                    y,
+                    red: code,
+                    green,
+                    blue,
+                    allowed: "red, green, and blue must be equal",
+                });
+            }
+            // `code / 16` is `min(15, floor(code * 16 / 256))` for every 8-bit
+            // code, computed without a division that could round differently.
+            scan.coverage_histogram[usize::from(code >> 4)] += 1;
+            if code == 0 {
+                continue;
+            }
+            scan.covered_pixel_count += 1;
+            if code == 255 {
+                scan.full_pixel_count += 1;
+            } else {
+                scan.partial_pixel_count += 1;
+            }
+            scan.left = scan.left.min(x);
+            scan.top = scan.top.min(y);
+            scan.right = scan.right.max(x + 1);
+            scan.bottom = scan.bottom.max(y + 1);
+            let weight = u128::from(code);
+            scan.coverage_sum += weight;
+            scan.weighted_x += weight * (u128::from(x) * 2 + 1);
+            scan.weighted_y += weight * (u128::from(y) * 2 + 1);
+        }
+    }
+    Ok(scan)
+}
+
+/// Convert a half-open pixel rectangle to a normalized basis-point rectangle,
+/// flooring each start boundary and ceiling each exclusive end boundary.
+fn coverage_bounding_box(
+    horizontal: (u32, u32, u32),
+    vertical: (u32, u32, u32),
+) -> Result<NormalizedRoi, MatteCoverageError> {
+    let (left, right, width) = horizontal;
+    let (top, bottom, height) = vertical;
+    let (x_basis_points, width_basis_points) = coverage_span(left, right, width)?;
+    let (y_basis_points, height_basis_points) = coverage_span(top, bottom, height)?;
+    Ok(NormalizedRoi::new(
+        x_basis_points,
+        y_basis_points,
+        width_basis_points,
+        height_basis_points,
+    ))
+}
+
+/// One axis of [`coverage_bounding_box`], returning `(start, extent)`.
+fn coverage_span(start: u32, end: u32, extent: u32) -> Result<(u32, u32), MatteCoverageError> {
+    let scale = u64::from(SCOPE_BASIS_POINTS);
+    let extent = u64::from(extent);
+    let start_basis_points = u64::from(start) * scale / extent;
+    let end_basis_points = (u64::from(end) * scale).div_ceil(extent);
+    let overflow = MatteCoverageError::ArithmeticOverflow {
+        operation: "bounding_box_basis_points",
+    };
+    let start_basis_points = u32::try_from(start_basis_points).map_err(|_| overflow.clone())?;
+    let end_basis_points = u32::try_from(end_basis_points).map_err(|_| overflow.clone())?;
+    let span = end_basis_points
+        .checked_sub(start_basis_points)
+        .ok_or(overflow)?;
+    Ok((start_basis_points, span))
+}
+
+/// `Σ m·(2p + 1) · 5000 / (extent · Σ m)` rounded half away from zero, which
+/// is `Σ m·centre / Σ m` in basis points for pixel centres `(p + 0.5)`.
+fn weighted_centre(
+    weighted: u128,
+    coverage_sum: u128,
+    extent: u32,
+) -> Result<i64, MatteCoverageError> {
+    let overflow = MatteCoverageError::ArithmeticOverflow {
+        operation: "centroid_basis_points",
+    };
+    let half_scale = u128::from(SCOPE_BASIS_POINTS) / 2;
+    let numerator = weighted
+        .checked_mul(half_scale)
+        .ok_or_else(|| overflow.clone())?;
+    let denominator = coverage_sum
+        .checked_mul(u128::from(extent))
+        .ok_or_else(|| overflow.clone())?;
+    // Every value is non-negative, so half-up rounding is half away from zero.
+    let doubled_denominator = denominator.checked_mul(2).ok_or_else(|| overflow.clone())?;
+    let rounded = numerator
+        .checked_mul(2)
+        .and_then(|doubled| doubled.checked_add(denominator))
+        .ok_or_else(|| overflow.clone())?
+        / doubled_denominator;
+    i64::try_from(rounded).map_err(|_| overflow)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -968,6 +1424,42 @@ pub trait Analysis: Send + Sync {
     ) -> Result<MonitorProof, MediaError> {
         Err(MediaError::NotImplemented)
     }
+    /// Render one exact project frame's matte coverage for a single colour
+    /// node, at the document's full resolution.
+    ///
+    /// Like [`Analysis::monitor_proof_for_document`] this is deliberately
+    /// separate from thumbnail and monitor rendering. The backend must render
+    /// the target clip in isolation, so no other layer composites over the
+    /// coverage, at the document's full raster; a proxy raster cannot
+    /// establish coverage conformance. The readback applies **no transfer at
+    /// all**: the coverage image is `round(255 · clamp(m, 0, 1))` in every
+    /// colour channel with `A = 255`, an integer quantization of a coverage
+    /// scalar rather than a monitoring transform.
+    ///
+    /// The returned [`MatteProofMetadata::render`] is ordinary renderer
+    /// provenance: [`MonitorProofRenderKind`] names the renderer
+    /// implementation, not an output target, and is never extended with a
+    /// matte value. The output target is stated by the matte metadata's own
+    /// fields.
+    ///
+    /// Stateful backends must use a branch-scoped renderer and must not mutate
+    /// the live playback document or reuse a stale proxy surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the backend cannot render an isolated
+    /// full-resolution coverage frame. A node that is inactive or carries no
+    /// matte fails typed — see [`MatteProofError`] — rather than returning a
+    /// blank frame.
+    fn matte_proof_for_document(
+        &self,
+        _document: Arc<Document>,
+        _at: TimeCode,
+        _clip: ClipId,
+        _effect: EffectId,
+    ) -> Result<MatteProof, MediaError> {
+        Err(MediaError::NotImplemented)
+    }
     /// Queue derived speech recognition without blocking the caller. Repeated
     /// requests for the same asset are coalesced by the implementation.
     fn request_transcription(&self, asset: MediaAsset);
@@ -1427,5 +1919,116 @@ mod tests {
             MediaAvailabilityKind::OnlineUnverified
         );
         assert!(report.summary().contains("relink or recovery"));
+    }
+
+    /// A backend that implements only the trait's required methods.
+    ///
+    /// Its whole job is to prove that a new defaulted method — CC5's
+    /// [`Analysis::matte_proof_for_document`] — cannot silently break an
+    /// existing implementation and never invents a proof of its own.
+    struct MinimalAnalysis {
+        visual_results: Receiver<VisualAssetResult>,
+    }
+
+    impl MinimalAnalysis {
+        fn new() -> Self {
+            let (_sender, visual_results) = crossbeam_channel::unbounded();
+            Self { visual_results }
+        }
+    }
+
+    impl Analysis for MinimalAnalysis {
+        fn probe(&self, _path: &Path) -> Result<MediaAsset, MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+
+        fn thumbnail_at(&self, _t: TimeCode, _max_w: u32) -> Result<RgbaImage, MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+
+        fn request_transcription(&self, _asset: MediaAsset) {}
+
+        fn transcript_status(&self, _asset: &MediaAsset) -> TranscriptStatus {
+            TranscriptStatus::NotRequested
+        }
+
+        fn timeline_transcript(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+        ) -> Result<Vec<TimelineTranscriptWord>, MediaError> {
+            Ok(Vec::new())
+        }
+
+        fn request_silence_detection(&self, _asset: MediaAsset) {}
+
+        fn silence_status(&self, _asset: &MediaAsset) -> SilenceStatus {
+            SilenceStatus::NotRequested
+        }
+
+        fn timeline_silences(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+            _minimum_source_frames: TimeCode,
+        ) -> Result<Vec<TimelineSilenceSpan>, MediaError> {
+            Ok(Vec::new())
+        }
+
+        fn request_scene_detection(&self, _asset: MediaAsset) {}
+
+        fn scene_status(&self, _asset: &MediaAsset) -> SceneStatus {
+            SceneStatus::NotRequested
+        }
+
+        fn timeline_scene_changes(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+            _minimum_confidence_basis_points: u16,
+        ) -> Result<Vec<TimelineSceneChange>, MediaError> {
+            Ok(Vec::new())
+        }
+
+        fn request_waveform(&self, _asset: MediaAsset, _request_generation: u64) -> bool {
+            false
+        }
+
+        fn request_thumbnail(
+            &self,
+            _asset: MediaAsset,
+            _source_at: TimeCode,
+            _max_width: u32,
+            _request_generation: u64,
+        ) -> bool {
+            false
+        }
+
+        fn visual_asset_results(&self) -> Receiver<VisualAssetResult> {
+            self.visual_results.clone()
+        }
+    }
+
+    /// CC5 §4.1: the matte proof is a defaulted trait method, so a backend
+    /// that cannot render coverage fails typed rather than returning a frame.
+    #[test]
+    fn matte_proof_defaults_to_not_implemented() {
+        let analysis = MinimalAnalysis::new();
+        let document = Arc::new(document_with_video_audio_and_unused());
+
+        assert_eq!(
+            analysis.matte_proof_for_document(
+                Arc::clone(&document),
+                TimeCode::ZERO,
+                ClipId(1),
+                EffectId(1),
+            ),
+            Err(MediaError::NotImplemented)
+        );
+        // The monitor proof default is unchanged.
+        assert_eq!(
+            analysis.monitor_proof_for_document(document, TimeCode::ZERO),
+            Err(MediaError::NotImplemented)
+        );
     }
 }

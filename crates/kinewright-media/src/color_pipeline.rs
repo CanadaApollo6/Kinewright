@@ -13,8 +13,9 @@ use std::sync::Arc;
 use kinewright_core::{
     COLOR_CURVE_MIN_POINTS, COLOR_NODE_LIMIT_PER_LAYER, ColorBitDepth, ColorCurveChannel,
     ColorDescription, ColorMatrix, ColorNodeKind, ColorPrimaries, ColorRange, ColorTransfer,
-    ColorWheelsParams, ColorWhitePoint, CurvePoints, Effect, LutAssetId, LutNodeParams, ParamValue,
-    ResolvedCurves, active_color_nodes, effect_descriptor, managed_color_node_count,
+    ColorWheelsParams, ColorWhitePoint, CurvePoints, Effect, LutAssetId, LutNodeParams,
+    MatteParams, MatteQualifierParams, MatteWindowParams, ParamValue, ResolvedCurves,
+    active_color_nodes, effect_descriptor, is_matte_parameter, managed_color_node_count,
 };
 
 use crate::lut::CubeLut;
@@ -705,6 +706,13 @@ impl PrimaryCorrection {
         }
 
         for (name, value) in &effect.parameters {
+            // CC5 §2.1: `primary_correction` is matte-capable, so its Core
+            // descriptor carries the 47 `matte_*` parameters. They are
+            // resolved by `MatteParams::from_effect` and are not CC1 controls,
+            // so they must not be read as an unimplemented Core parameter.
+            if is_matte_parameter(name) {
+                continue;
+            }
             let Some(core_parameter) = descriptor.parameter(name) else {
                 return Err(ColorPipelineError::UnknownPrimaryParameter(name.clone()));
             };
@@ -872,9 +880,15 @@ impl PrimaryCorrection {
 }
 
 /// Apply serialized primary nodes in vector order without an RGB clamp between
-/// nodes.  This is the CC1 compatibility spelling of [`apply_color_nodes`] for
-/// a stack that contains only `primary_correction` nodes; it additionally
+/// nodes.  This is the CC1 compatibility spelling of [`apply_color_nodes_at`]
+/// for a stack that contains only `primary_correction` nodes; it additionally
 /// re-validates each node's integer controls.
+///
+/// **This is the matte-free primary path** (CC5 §3.4).  It keeps its CC1
+/// signature because it takes no position: a [`PrimaryCorrection`] value is
+/// the resolved CC1 control set, which carries no matte, so every node here is
+/// applied at full strength everywhere.  A matte-scoped primary must go
+/// through [`resolve_color_nodes_with`] and [`apply_color_nodes_at`].
 ///
 /// # Errors
 ///
@@ -885,7 +899,7 @@ pub fn apply_primary_corrections(
 ) -> Result<[f32; 3], ColorPipelineError> {
     for correction in corrections {
         correction.validate()?;
-        linear_rgb = apply_color_node(&ColorNode::Primary(*correction), linear_rgb);
+        linear_rgb = apply_color_node(&ColorNode::Primary(*correction, None), linear_rgb);
     }
     Ok(linear_rgb)
 }
@@ -1656,6 +1670,452 @@ impl Lut3d {
 }
 
 // ---------------------------------------------------------------------------
+// CC5 §2.3--§2.5: the per-node matte.
+//
+// This is the **independent CPU reference**.  It is written from the CC5
+// contract text alone and deliberately shares no code with the compositor's
+// matte-block builder or with `compositor.wgsl` (CC5 §3.4, CC3's rule), so the
+// parity fixtures compare two independent implementations of the same written
+// equations.
+// ---------------------------------------------------------------------------
+
+/// Basis points per unit of a matte control (CC5 §2.2).
+const MATTE_BASIS_POINTS_PER_UNIT: f64 = 10_000.0;
+/// Hundredths of a degree per degree of a matte angle control (CC5 §2.2).
+const MATTE_CENTIDEGREES_PER_DEGREE: f64 = 100.0;
+/// The `matte_window{j}_shape_token` value that selects the ellipse (CC5 §2.2).
+const MATTE_ELLIPSE_SHAPE_TOKEN: i64 = 2;
+/// The hue half-width, in degrees, at or above which the hue leg is disabled
+/// entirely — achromatic pixels included (CC5 §2.4).
+const MATTE_HUE_LEG_DISABLED_DEGREES: f32 = 180.0;
+/// One full turn in degrees, for the hue wrap in CC5 §2.4.
+const MATTE_HUE_FULL_TURN_DEGREES: f32 = 360.0;
+/// Degrees per hexagonal hue sector (CC5 §2.4).
+const MATTE_HUE_SECTOR_DEGREES: f32 = 60.0;
+/// Sectors in the hexagonal hue formula (CC5 §2.4).
+const MATTE_HUE_SECTORS: f32 = 6.0;
+
+/// The geometric shape of one matte window (CC5 §2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatteWindowShape {
+    /// `shape_token == 1`: `D = max(|n.x|, |n.y|)`.
+    Rect,
+    /// `shape_token == 2`: `D = sqrt(n.x² + n.y²)`.
+    Ellipse,
+}
+
+/// One geometric matte window resolved to render-ready floats (CC5 §2.3).
+///
+/// `cos_t` and `sin_t` are solved once here in `f64` and rounded once to
+/// `f32`, exactly as the GPU matte block stores them, so both implementations
+/// consume identical constants rather than each evaluating a transcendental.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MatteWindow {
+    shape: MatteWindowShape,
+    cx: f32,
+    cy: f32,
+    hw: f32,
+    hh: f32,
+    cos_t: f32,
+    sin_t: f32,
+    feather: f32,
+    invert: bool,
+}
+
+impl MatteWindow {
+    /// Resolve one window's stored integers (CC5 §2.2, §2.3).
+    ///
+    /// Basis points become uv fractions and centidegrees become a `(cos, sin)`
+    /// pair; no clamping happens here, because Core already clamped the stored
+    /// integers to their descriptor ranges.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    pub fn from_params(params: &MatteWindowParams) -> Self {
+        let unit = |basis_points: i64| (basis_points as f64 / MATTE_BASIS_POINTS_PER_UNIT) as f32;
+        let radians = (params.rotation_cd as f64 / MATTE_CENTIDEGREES_PER_DEGREE).to_radians();
+        Self {
+            shape: if params.shape_token == MATTE_ELLIPSE_SHAPE_TOKEN {
+                MatteWindowShape::Ellipse
+            } else {
+                MatteWindowShape::Rect
+            },
+            cx: unit(params.center_x_bp),
+            cy: unit(params.center_y_bp),
+            hw: unit(params.half_width_bp),
+            hh: unit(params.half_height_bp),
+            cos_t: radians.cos() as f32,
+            sin_t: radians.sin() as f32,
+            feather: unit(params.feather_bp),
+            invert: params.invert >= 1,
+        }
+    }
+
+    /// The window's shape.
+    #[must_use]
+    pub const fn shape(&self) -> MatteWindowShape {
+        self.shape
+    }
+
+    /// The window centre `(cx, cy)` in layer uv.
+    #[must_use]
+    pub const fn center(&self) -> [f32; 2] {
+        [self.cx, self.cy]
+    }
+
+    /// The half-extents `(hw, hh)`: `hw` in fractions of the frame width, `hh`
+    /// in fractions of the frame height (CC5 §2.3).
+    #[must_use]
+    pub const fn half_extents(&self) -> [f32; 2] {
+        [self.hw, self.hh]
+    }
+
+    /// The host-solved `(cosT, sinT)` pair the shader also consumes.
+    #[must_use]
+    pub const fn rotation_cos_sin(&self) -> [f32; 2] {
+        [self.cos_t, self.sin_t]
+    }
+
+    /// The symmetric feather band half-width, in units of the normalized
+    /// field.
+    #[must_use]
+    pub const fn feather(&self) -> f32 {
+        self.feather
+    }
+
+    /// Whether this window's own weight is complemented before the combine.
+    #[must_use]
+    pub const fn is_inverted(&self) -> bool {
+        self.invert
+    }
+
+    /// The normalized distance field `D` at `uv` (CC5 §2.3).
+    ///
+    /// A degenerate half-extent yields [`f32::INFINITY`], which drives both
+    /// feather branches to `w = 0`. This is the contract's defensive rule
+    /// (CC5 §2.3) stated as a distance rather than as a separate early
+    /// return; the shader guards the same case explicitly, and both agree on
+    /// `w = 0` for every degenerate window.
+    fn distance(&self, uv: [f32; 2], aspect: f32) -> f32 {
+        if self.hw <= 0.0 || self.hh <= 0.0 {
+            return f32::INFINITY;
+        }
+        let dx = (uv[0] - self.cx) * aspect;
+        let dy = uv[1] - self.cy;
+        let qx = dx * self.cos_t + dy * self.sin_t;
+        let qy = -dx * self.sin_t + dy * self.cos_t;
+        let nx = qx / (self.hw * aspect);
+        let ny = qy / self.hh;
+        match self.shape {
+            MatteWindowShape::Rect => nx.abs().max(ny.abs()),
+            // Written as the contract writes it.  `mul_add` is deliberately
+            // not used: a fused multiply-add rounds once where the shader
+            // rounds twice, which is exactly the kind of silent divergence the
+            // independent-reference rule exists to catch.
+            MatteWindowShape::Ellipse => (nx * nx + ny * ny).sqrt(),
+        }
+    }
+
+    /// This window's weight at `uv`, including its own invert (CC5 §2.3).
+    ///
+    /// `aspect` is the **output raster aspect** `W / H`, supplied by the host;
+    /// it is never sniffed from a texture size.  The `feather <= 0` hard
+    /// branch is mandatory: `smoothstep` with equal edges is undefined.
+    #[must_use]
+    pub fn weight(&self, uv: [f32; 2], aspect: f32) -> f32 {
+        let distance = self.distance(uv, aspect);
+        let weight = if self.feather <= 0.0 {
+            if distance <= 1.0 { 1.0 } else { 0.0 }
+        } else {
+            1.0 - smoothstep(1.0 - self.feather, 1.0 + self.feather, distance)
+        };
+        if self.invert { 1.0 - weight } else { weight }
+    }
+}
+
+/// The three selectors the CC5 §2.4 qualifier judges, in the `grade709`
+/// encoding, on a local clamped copy.
+///
+/// `hue` is `None` exactly when `C == 0`, which is the contract's "hue
+/// undefined" state — modelled as an absent value rather than a sentinel angle
+/// so the achromatic rule cannot be reached by accident.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MatteSelectors {
+    chroma: f32,
+    saturation: f32,
+    luma: f32,
+    hue: Option<f32>,
+}
+
+/// The CC5 §2.4 HSL qualifier resolved to render-ready floats.
+///
+/// Angles are degrees and the band edges are unit fractions, matching the GPU
+/// matte block word for word.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MatteQualifier {
+    hue_center: f32,
+    hue_width: f32,
+    hue_softness: f32,
+    sat_low: f32,
+    sat_high: f32,
+    sat_softness: f32,
+    luma_low: f32,
+    luma_high: f32,
+    luma_softness: f32,
+}
+
+impl MatteQualifier {
+    /// Resolve the qualifier's stored integers (CC5 §2.2, §2.4).
+    ///
+    /// This conversion does **not** consult `enabled`; whether the leg
+    /// participates at all is [`Matte::from_params`]'s question.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    pub fn from_params(params: &MatteQualifierParams) -> Self {
+        let degrees =
+            |centidegrees: i64| (centidegrees as f64 / MATTE_CENTIDEGREES_PER_DEGREE) as f32;
+        let unit = |basis_points: i64| (basis_points as f64 / MATTE_BASIS_POINTS_PER_UNIT) as f32;
+        Self {
+            hue_center: degrees(params.hue_center_cd),
+            hue_width: degrees(params.hue_width_cd),
+            hue_softness: degrees(params.hue_softness_cd),
+            sat_low: unit(params.sat_low_bp),
+            sat_high: unit(params.sat_high_bp),
+            sat_softness: unit(params.sat_softness_bp),
+            luma_low: unit(params.luma_low_bp),
+            luma_high: unit(params.luma_high_bp),
+            luma_softness: unit(params.luma_softness_bp),
+        }
+    }
+
+    /// The hue band centre, half-width, and shoulder, in degrees.
+    #[must_use]
+    pub const fn hue_degrees(&self) -> [f32; 3] {
+        [self.hue_center, self.hue_width, self.hue_softness]
+    }
+
+    /// The saturation band low edge, high edge, and shoulder, in `0..=1`.
+    #[must_use]
+    pub const fn saturation_band(&self) -> [f32; 3] {
+        [self.sat_low, self.sat_high, self.sat_softness]
+    }
+
+    /// The luma band low edge, high edge, and shoulder, in `0..=1`.
+    #[must_use]
+    pub const fn luma_band(&self) -> [f32; 3] {
+        [self.luma_low, self.luma_high, self.luma_softness]
+    }
+
+    /// The CC5 §2.4 selectors of the value **entering** the node.
+    ///
+    /// The `grade709` encoding and the `[0, 1]` clamp are local to this
+    /// function: CC1 §2.2.5 is preserved because the clamped copy never
+    /// escapes and the pipeline value is untouched.
+    ///
+    /// The exact `==` tests against `maximum` are normative, not sloppy: the
+    /// hexagonal formula selects a branch by *which channel is the maximum*,
+    /// and the written branch order is what resolves a tie.  A tolerance here
+    /// would let the reference and the shader disagree at the sector seams.
+    #[allow(clippy::float_cmp)]
+    fn selectors(linear_rgb_in: [f32; 3]) -> MatteSelectors {
+        let clamped = linear_rgb_in.map(|value| grade709_encode(value).clamp(0.0, 1.0));
+        let [red, green, blue] = clamped;
+        let maximum = red.max(green).max(blue);
+        let minimum = red.min(green).min(blue);
+        let chroma = maximum - minimum;
+        let saturation = if maximum <= 0.0 {
+            0.0
+        } else {
+            chroma / maximum
+        };
+        let luma = BT709_LUMA_RED * red + BT709_LUMA_GREEN * green + BT709_LUMA_BLUE * blue;
+        // The written branch order is normative: a tie is resolved by the
+        // first matching channel, red before green before blue, so this
+        // reference and the shader agree on the seam.
+        let hue = if chroma == 0.0 {
+            None
+        } else if maximum == red {
+            Some(MATTE_HUE_SECTOR_DEGREES * ((green - blue) / chroma).rem_euclid(MATTE_HUE_SECTORS))
+        } else if maximum == green {
+            Some(MATTE_HUE_SECTOR_DEGREES * ((blue - red) / chroma + 2.0))
+        } else {
+            Some(MATTE_HUE_SECTOR_DEGREES * ((red - green) / chroma + 4.0))
+        };
+        MatteSelectors {
+            chroma,
+            saturation,
+            luma,
+            hue,
+        }
+    }
+
+    /// One CC5 §2.4 band: `min` of the two shoulders, never a product, so the
+    /// interior is exactly `1` and the shoulders cannot interact.
+    ///
+    /// A degenerate band (`lo > hi`) evaluates to `0` — no clamp, no reorder,
+    /// no error (CC5 §2.6).
+    fn band(value: f32, low: f32, high: f32, softness: f32) -> f32 {
+        if low > high {
+            return 0.0;
+        }
+        if softness <= 0.0 {
+            return if low <= value && value <= high {
+                1.0
+            } else {
+                0.0
+            };
+        }
+        smoothstep(low - softness, low, value).min(1.0 - smoothstep(high, high + softness, value))
+    }
+
+    /// The hue leg (CC5 §2.4), including the normative achromatic rule.
+    fn hue_weight(&self, hue: Option<f32>) -> f32 {
+        if self.hue_width >= MATTE_HUE_LEG_DISABLED_DEGREES {
+            return 1.0;
+        }
+        let Some(hue) = hue else {
+            return 0.0;
+        };
+        let separation = (hue - self.hue_center).abs();
+        let separation = separation.min(MATTE_HUE_FULL_TURN_DEGREES - separation);
+        if self.hue_softness <= 0.0 {
+            if separation <= self.hue_width {
+                1.0
+            } else {
+                0.0
+            }
+        } else {
+            1.0 - smoothstep(
+                self.hue_width,
+                self.hue_width + self.hue_softness,
+                separation,
+            )
+        }
+    }
+
+    /// The qualifier weight of the value entering the node (CC5 §2.4).
+    #[must_use]
+    pub fn weight(&self, linear_rgb_in: [f32; 3]) -> f32 {
+        let selectors = Self::selectors(linear_rgb_in);
+        self.hue_weight(selectors.hue)
+            * Self::band(
+                selectors.saturation,
+                self.sat_low,
+                self.sat_high,
+                self.sat_softness,
+            )
+            * Self::band(
+                selectors.luma,
+                self.luma_low,
+                self.luma_high,
+                self.luma_softness,
+            )
+    }
+}
+
+/// One node's resolved matte: the windows, the qualifier, the invert, and the
+/// mix (CC5 §2.5).
+///
+/// A [`Matte`] exists only when Core's integer test says the matte is active,
+/// so a node that carries one **always** takes the blend path and a node that
+/// does not **never** does — which is what makes "a pre-CC5 project renders
+/// bit-identically" provable rather than approximate (CC5 §2.5, rule 4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Matte {
+    windows: Vec<MatteWindow>,
+    combine_union: bool,
+    qualifier: Option<MatteQualifier>,
+    invert: bool,
+    mix: f32,
+}
+
+impl Matte {
+    /// Resolve a keyframe-evaluated node's matte parameters (CC5 §2.6).
+    ///
+    /// Returns `None` for an inactive matte — the master switch off, or an
+    /// enabled matte that selects everything at full strength — because such a
+    /// node must be byte-identical to its CC4 self.
+    #[must_use]
+    pub fn from_params(params: &MatteParams) -> Option<Self> {
+        if params.is_inactive_matte() {
+            return None;
+        }
+        Some(Self {
+            windows: params
+                .active_windows()
+                .map(MatteWindow::from_params)
+                .collect(),
+            combine_union: !params.intersects(),
+            qualifier: params
+                .qualifier
+                .is_enabled()
+                .then(|| MatteQualifier::from_params(&params.qualifier)),
+            invert: params.is_inverted(),
+            mix: params.mix(),
+        })
+    }
+
+    /// The active windows, in index order.
+    #[must_use]
+    pub fn windows(&self) -> &[MatteWindow] {
+        &self.windows
+    }
+
+    /// Whether the windows combine by union (`max`) rather than intersection
+    /// (`min`).
+    #[must_use]
+    pub const fn is_union(&self) -> bool {
+        self.combine_union
+    }
+
+    /// The HSL qualifier leg, when enabled.
+    #[must_use]
+    pub const fn qualifier(&self) -> Option<&MatteQualifier> {
+        self.qualifier.as_ref()
+    }
+
+    /// Whether the combined coverage is complemented before the mix.
+    #[must_use]
+    pub const fn is_inverted(&self) -> bool {
+        self.invert
+    }
+
+    /// The final coverage scale, `0.0..=1.0`.
+    #[must_use]
+    pub const fn mix(&self) -> f32 {
+        self.mix
+    }
+
+    /// The combined geometric weight (CC5 §2.3): `1` with no window, `max`
+    /// under union, `min` under intersection.
+    fn window_weight(&self, uv: [f32; 2], aspect: f32) -> f32 {
+        let mut combined: Option<f32> = None;
+        for window in &self.windows {
+            let weight = window.weight(uv, aspect);
+            combined = Some(match combined {
+                None => weight,
+                Some(previous) if self.combine_union => previous.max(weight),
+                Some(previous) => previous.min(weight),
+            });
+        }
+        combined.unwrap_or(1.0)
+    }
+
+    /// The coverage `m ∈ [0, 1]` at one pixel (CC5 §2.5).
+    ///
+    /// `rgb_in` is the value **entering** this node, not the original frame:
+    /// each managed node stays a pure function of its own input.
+    #[must_use]
+    pub fn coverage(&self, uv: [f32; 2], aspect: f32, rgb_in: [f32; 3]) -> f32 {
+        let raw = self.window_weight(uv, aspect)
+            * self
+                .qualifier
+                .map_or(1.0, |qualifier| qualifier.weight(rgb_in));
+        let inverted = if self.invert { 1.0 - raw } else { raw };
+        inverted * self.mix
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CC3 §3.1: the ordered node stack.
 // ---------------------------------------------------------------------------
 
@@ -1675,19 +2135,26 @@ impl Lut3d {
 /// order here is [`kinewright_core::MANAGED_COLOR_NODE_NAMES`] stage order,
 /// which is a readability choice only: the executed order is always the
 /// `clip.effects` vector order.
+/// CC5 §3.4 attaches the optional matte to the four matte-capable variants as
+/// a second payload field rather than wrapping the enum in a struct: the enum
+/// stays the node, `technical_lut` keeps a shape in which a matte is
+/// *unrepresentable*, and no existing payload type has to give up `Copy`.
+/// `None` is the CC4 shape and takes the CC4 path, byte for byte.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum ColorNode {
-    /// The CC4 technical input transform (stage 0).
+    /// The CC4 technical input transform (stage 0).  It carries no matte:
+    /// a partially applied source normalization is not a meaningful state
+    /// (CC5 §2.1).
     TechnicalLut(LutNode),
-    /// The CC1 managed SDR primary correction.
-    Primary(PrimaryCorrection),
-    /// The CC3 ASC CDL slope/offset/power wheels.
-    Wheels(ColorWheels),
-    /// The CC3 master/red/green/blue curves.
-    Curves(ColorCurves),
-    /// The CC4 creative look (stage 2).
-    CreativeLook(LutNode),
+    /// The CC1 managed SDR primary correction, with its optional CC5 matte.
+    Primary(PrimaryCorrection, Option<Matte>),
+    /// The CC3 ASC CDL slope/offset/power wheels, with its optional CC5 matte.
+    Wheels(ColorWheels, Option<Matte>),
+    /// The CC3 master/red/green/blue curves, with its optional CC5 matte.
+    Curves(ColorCurves, Option<Matte>),
+    /// The CC4 creative look (stage 2), with its optional CC5 matte.
+    CreativeLook(LutNode, Option<Matte>),
 }
 
 impl ColorNode {
@@ -1696,10 +2163,10 @@ impl ColorNode {
     pub const fn kind(&self) -> ColorNodeKind {
         match self {
             Self::TechnicalLut(_) => ColorNodeKind::TechnicalLut,
-            Self::Primary(_) => ColorNodeKind::Primary,
-            Self::Wheels(_) => ColorNodeKind::Wheels,
-            Self::Curves(_) => ColorNodeKind::Curves,
-            Self::CreativeLook(_) => ColorNodeKind::CreativeLook,
+            Self::Primary(..) => ColorNodeKind::Primary,
+            Self::Wheels(..) => ColorNodeKind::Wheels,
+            Self::Curves(..) => ColorNodeKind::Curves,
+            Self::CreativeLook(..) => ColorNodeKind::CreativeLook,
         }
     }
 
@@ -1707,18 +2174,35 @@ impl ColorNode {
     #[must_use]
     pub const fn lut_node(&self) -> Option<&LutNode> {
         match self {
-            Self::TechnicalLut(node) | Self::CreativeLook(node) => Some(node),
-            Self::Primary(_) | Self::Wheels(_) | Self::Curves(_) => None,
+            Self::TechnicalLut(node) | Self::CreativeLook(node, _) => Some(node),
+            Self::Primary(..) | Self::Wheels(..) | Self::Curves(..) => None,
+        }
+    }
+
+    /// This node's active matte, or `None` when it carries none (CC5 §2.6).
+    ///
+    /// `None` is normative, not an optimization: it is what makes
+    /// [`apply_color_nodes_at`] skip the blend entirely, and
+    /// `x + (y − x)·1.0` is not bit-identical to `y` in `f32` (CC5 §2.5,
+    /// rule 4).
+    #[must_use]
+    pub const fn matte(&self) -> Option<&Matte> {
+        match self {
+            Self::TechnicalLut(_) => None,
+            Self::Primary(_, matte)
+            | Self::Wheels(_, matte)
+            | Self::Curves(_, matte)
+            | Self::CreativeLook(_, matte) => matte.as_ref(),
         }
     }
 }
 
 fn apply_color_node(node: &ColorNode, linear_rgb: [f32; 3]) -> [f32; 3] {
     match node {
-        ColorNode::TechnicalLut(lut) | ColorNode::CreativeLook(lut) => lut.apply(linear_rgb),
-        ColorNode::Primary(correction) => correction.apply(linear_rgb),
-        ColorNode::Wheels(wheels) => wheels.apply(linear_rgb),
-        ColorNode::Curves(curves) => curves.apply(linear_rgb),
+        ColorNode::TechnicalLut(lut) | ColorNode::CreativeLook(lut, _) => lut.apply(linear_rgb),
+        ColorNode::Primary(correction, _) => correction.apply(linear_rgb),
+        ColorNode::Wheels(wheels, _) => wheels.apply(linear_rgb),
+        ColorNode::Curves(curves, _) => curves.apply(linear_rgb),
     }
 }
 
@@ -1782,37 +2266,79 @@ pub fn resolve_color_nodes_with(
     let mut nodes = Vec::with_capacity(count);
     for (index, kind) in active_color_nodes(effects) {
         let effect = &effects[index];
+        // CC5 §2.6: the matte question is answered on Core's stored integers.
+        // `active_color_nodes` has already dropped every node Core reports
+        // inactive, `MatteExcluded` included, so a node that reaches this loop
+        // either carries a matte the renderer must evaluate or none at all.
+        let matte = Matte::from_params(&MatteParams::from_effect(effect));
         nodes.push(match kind {
             ColorNodeKind::TechnicalLut => ColorNode::TechnicalLut(LutNode::from_params(
                 &LutNodeParams::from_effect(effect),
                 library,
             )?),
-            ColorNodeKind::Primary => ColorNode::Primary(PrimaryCorrection::from_effect(effect)?),
-            ColorNodeKind::Wheels => ColorNode::Wheels(ColorWheels::from_params(
-                &ColorWheelsParams::from_effect(effect),
-            )),
-            ColorNodeKind::Curves => ColorNode::Curves(ColorCurves::from_resolved(
-                &ResolvedCurves::from_effect(effect),
-            )),
-            ColorNodeKind::CreativeLook => ColorNode::CreativeLook(LutNode::from_params(
-                &LutNodeParams::from_effect(effect),
-                library,
-            )?),
+            ColorNodeKind::Primary => {
+                ColorNode::Primary(PrimaryCorrection::from_effect(effect)?, matte)
+            }
+            ColorNodeKind::Wheels => ColorNode::Wheels(
+                ColorWheels::from_params(&ColorWheelsParams::from_effect(effect)),
+                matte,
+            ),
+            ColorNodeKind::Curves => ColorNode::Curves(
+                ColorCurves::from_resolved(&ResolvedCurves::from_effect(effect)),
+                matte,
+            ),
+            ColorNodeKind::CreativeLook => ColorNode::CreativeLook(
+                LutNode::from_params(&LutNodeParams::from_effect(effect), library)?,
+                matte,
+            ),
         });
     }
     Ok(nodes)
 }
 
-/// Apply a resolved node stack in vector order, with no RGB clamp between
-/// nodes (CC3 §3.1).
+/// Apply a resolved node stack in vector order **at one position**, with no
+/// RGB clamp between nodes (CC3 §3.1, CC5 §2.5, §3.4).
 ///
-/// Each node consumes scene-linear working RGB and produces scene-linear
-/// working RGB.  An empty stack is the exact identity.
+/// `uv` is the layer output quad uv with `u.y = 0` at the top, evaluated at
+/// the pixel centre `((x + 0.5) / W, (y + 0.5) / H)`; `aspect` is the output
+/// raster aspect `W / H`, supplied by the caller rather than sniffed.  Each
+/// node consumes scene-linear working RGB and produces scene-linear working
+/// RGB.  An empty stack is the exact identity.
+///
+/// This replaces CC3's two-argument `apply_color_nodes`.  The positionless
+/// spelling is deliberately **not** kept as a wrapper: it would have to invent
+/// a position, and applying a matte-scoped correction to every pixel is
+/// precisely the failure CC5 exists to prevent (CC5 §3.4).
+///
+/// Two normative branches, neither an optimization (CC5 §2.5, rules 4 and 5):
+///
+/// * a node with no matte is applied directly, because `x + (y − x)·1.0` is
+///   not bit-identical to `y` in `f32`;
+/// * a coverage of exactly `0` returns `x` untouched, because
+///   `x + (node(x) − x)·0.0` maps `−0.0` to `+0.0` and maps any `x` to `NaN`
+///   whenever `node(x)` is non-finite, which CC1 §2.2.5's no-clamp rule makes
+///   reachable on over-range input.
 #[must_use]
-pub fn apply_color_nodes(nodes: &[ColorNode], rgb: [f32; 3]) -> [f32; 3] {
+pub fn apply_color_nodes_at(
+    nodes: &[ColorNode],
+    rgb: [f32; 3],
+    uv: [f32; 2],
+    aspect: f32,
+) -> [f32; 3] {
     let mut linear_rgb = rgb;
     for node in nodes {
-        linear_rgb = apply_color_node(node, linear_rgb);
+        let Some(matte) = node.matte() else {
+            linear_rgb = apply_color_node(node, linear_rgb);
+            continue;
+        };
+        let coverage = matte.coverage(uv, aspect, linear_rgb);
+        if coverage == 0.0 {
+            continue;
+        }
+        let corrected = apply_color_node(node, linear_rgb);
+        linear_rgb = std::array::from_fn(|channel| {
+            linear_rgb[channel] + (corrected[channel] - linear_rgb[channel]) * coverage
+        });
     }
     linear_rgb
 }
@@ -2718,6 +3244,16 @@ mod tests {
         values.map(f32::to_bits)
     }
 
+    /// The CC5 §3.4 reference at the centre of a square raster.
+    ///
+    /// Every CC1/CC3/CC4 case below carries no matte, so the position and the
+    /// aspect are immaterial and the result is the CC4 path byte for byte;
+    /// `matte_free_nodes_take_the_cc4_path_bit_identically` is the assertion
+    /// that says so.
+    fn apply_stack(nodes: &[ColorNode], rgb: [f32; 3]) -> [f32; 3] {
+        apply_color_nodes_at(nodes, rgb, [0.5, 0.5], 1.0)
+    }
+
     #[test]
     fn grade709_matches_the_contract_anchors() {
         // Every value is CC3 §2.1's worked-anchor table, normative to 2e-5.
@@ -3046,14 +3582,12 @@ mod tests {
         // wheels then curves, red: D(E(0.18)*1.2) = 0.250_770_15, then the
         // master curve on E of that gives D(...) = 0.355_061_1.
         let sample = [0.18_f32; 3];
-        assert_close(apply_color_nodes(&wheels_first, sample)[0], 0.355_061, 2e-5);
+        assert_close(apply_stack(&wheels_first, sample)[0], 0.355_061, 2e-5);
         // curves then wheels, red: the master curve gives 0.262_430_5, then
         // D(E(0.262_430_5) * 1.2) = 0.369_891_6.
-        assert_close(apply_color_nodes(&curves_first, sample)[0], 0.369_892, 2e-5);
+        assert_close(apply_stack(&curves_first, sample)[0], 0.369_892, 2e-5);
         assert!(
-            (apply_color_nodes(&wheels_first, sample)[0]
-                - apply_color_nodes(&curves_first, sample)[0])
-                .abs()
+            (apply_stack(&wheels_first, sample)[0] - apply_stack(&curves_first, sample)[0]).abs()
                 > 1e-2
         );
     }
@@ -3061,7 +3595,7 @@ mod tests {
     #[test]
     fn inactive_nodes_are_skipped_bit_identically() {
         let sample = [0.18_f32, -0.05, 2.5];
-        let baseline = apply_color_nodes(&[], sample);
+        let baseline = apply_stack(&[], sample);
         assert_eq!(bits(baseline), bits(sample));
 
         let identity = [(0, 0), (10_000, 10_000)];
@@ -3075,7 +3609,7 @@ mod tests {
         for effect in &inactive {
             let nodes = resolve_color_nodes(std::slice::from_ref(effect)).expect("inactive node");
             assert!(nodes.is_empty(), "{} was not skipped", effect.name);
-            assert_eq!(bits(apply_color_nodes(&nodes, sample)), bits(sample));
+            assert_eq!(bits(apply_stack(&nodes, sample)), bits(sample));
         }
     }
 
@@ -3111,10 +3645,13 @@ mod tests {
             ..PrimaryCorrection::default()
         };
         let sample = [0.18_f32, 0.35, 0.90];
-        let nodes = [ColorNode::Primary(first), ColorNode::Primary(second)];
+        let nodes = [
+            ColorNode::Primary(first, None),
+            ColorNode::Primary(second, None),
+        ];
         assert_eq!(
             bits(apply_primary_corrections(sample, &[first, second]).expect("valid controls")),
-            bits(apply_color_nodes(&nodes, sample))
+            bits(apply_stack(&nodes, sample))
         );
     }
 
@@ -3123,7 +3660,7 @@ mod tests {
     //
     // Every expected value below is transcribed from the CC4 contract text or
     // derived by hand from the §3.5 equations. No expectation is obtained by
-    // calling `Lut3d::lookup`, `LutNode::apply`, or `apply_color_nodes`
+    // calling `Lut3d::lookup`, `LutNode::apply`, or `apply_color_nodes_at`
     // (CC4 §10.1.1).
     // -----------------------------------------------------------------------
 
@@ -3746,7 +4283,7 @@ mod tests {
         let wheels = wheels_effect_with_id(9, &[("gain_master_thousandths", 1_200)]);
         let baseline = resolve_color_nodes_with(std::slice::from_ref(&wheels), &library)
             .expect("wheels alone");
-        let expected = apply_color_nodes(&baseline, sample);
+        let expected = apply_stack(&baseline, sample);
         assert_eq!(baseline.len(), 1);
 
         // The same asset with an active node really does change the frame, so
@@ -3756,7 +4293,7 @@ mod tests {
             resolve_color_nodes_with(&[wheels.clone(), active], &library).expect("look resolves");
         assert_eq!(with_look.len(), 2);
         assert_eq!(with_look[1].kind(), ColorNodeKind::CreativeLook);
-        assert_ne!(bits(apply_color_nodes(&with_look, sample)), bits(expected));
+        assert_ne!(bits(apply_stack(&with_look, sample)), bits(expected));
 
         for (label, effect) in [
             (
@@ -3775,7 +4312,7 @@ mod tests {
                 .expect("an inactive LUT node never needs its asset");
             assert_eq!(nodes.len(), 1, "{label} must be dropped entirely");
             assert_eq!(
-                bits(apply_color_nodes(&nodes, sample)),
+                bits(apply_stack(&nodes, sample)),
                 bits(expected),
                 "{label} must be bit-identical to the node removed"
             );
@@ -3860,7 +4397,7 @@ mod tests {
         );
 
         let sample = [0.18_f32, 0.35, 0.62];
-        let forward = apply_color_nodes(&stack, sample);
+        let forward = apply_stack(&stack, sample);
 
         let mut reversed = ordered.clone();
         reversed.reverse();
@@ -3868,7 +4405,7 @@ mod tests {
             resolve_color_nodes_with(&reversed, &library).expect("reversed stack resolves");
         assert_eq!(reversed_stack[0].kind(), ColorNodeKind::CreativeLook);
         assert_eq!(reversed_stack[4].kind(), ColorNodeKind::TechnicalLut);
-        let backward = apply_color_nodes(&reversed_stack, sample);
+        let backward = apply_stack(&reversed_stack, sample);
 
         assert_ne!(bits(forward), bits(backward));
         let separation = (0..3)
@@ -3887,8 +4424,8 @@ mod tests {
         let mut two_reversed = two.clone();
         two_reversed.reverse();
         let technical_first =
-            apply_color_nodes(&resolve_color_nodes_with(&two, &library).unwrap(), sample);
-        let look_first = apply_color_nodes(
+            apply_stack(&resolve_color_nodes_with(&two, &library).unwrap(), sample);
+        let look_first = apply_stack(
             &resolve_color_nodes_with(&two_reversed, &library).unwrap(),
             sample,
         );
@@ -3922,15 +4459,805 @@ mod tests {
             ColorNodeKind::TechnicalLut
         );
         assert_eq!(
-            ColorNode::CreativeLook(node.clone()).kind(),
+            ColorNode::CreativeLook(node.clone(), None).kind(),
             ColorNodeKind::CreativeLook
         );
         assert!(ColorNode::TechnicalLut(node.clone()).lut_node().is_some());
-        assert!(ColorNode::CreativeLook(node).lut_node().is_some());
+        assert!(ColorNode::CreativeLook(node, None).lut_node().is_some());
         assert!(
-            ColorNode::Primary(PrimaryCorrection::default())
+            ColorNode::Primary(PrimaryCorrection::default(), None)
                 .lut_node()
                 .is_none()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CC5 §2.3--§2.5: the matte.
+    //
+    // Every expected value below is derived by hand from the CC5 contract
+    // equations, or transcribed independently in f64 here.  No expectation is
+    // obtained by calling `Matte::coverage`, `MatteWindow::weight`,
+    // `MatteQualifier::weight`, `apply_color_nodes_at`, or the compositor
+    // (CC5 §9.0.1).
+    // -----------------------------------------------------------------------
+
+    /// The CC5 §9.1 raster: 64 x 36, so `a = 16/9` and there are 2304 pixels.
+    const MATTE_RASTER_WIDTH: usize = 64;
+    /// The CC5 §9.1 raster height.
+    const MATTE_RASTER_HEIGHT: usize = 36;
+    /// The CC5 §9.1 raster aspect `a = W / H`.
+    const MATTE_RASTER_ASPECT: f32 = 64.0 / 36.0;
+    /// A neutral mid-grey sample: every window-only case is independent of it.
+    const MATTE_NEUTRAL_SAMPLE: [f32; 3] = [0.18; 3];
+
+    /// The CC5 §3.4 pixel centre of raster cell `(x, y)`.
+    #[allow(clippy::cast_precision_loss)]
+    fn matte_uv(x: usize, y: usize) -> [f32; 2] {
+        [
+            (x as f32 + 0.5) / MATTE_RASTER_WIDTH as f32,
+            (y as f32 + 0.5) / MATTE_RASTER_HEIGHT as f32,
+        ]
+    }
+
+    /// A `color_wheels` effect carrying `matte_enabled = 1` plus `parameters`.
+    fn matte_effect(parameters: &[(&str, i64)]) -> Effect {
+        let mut stored = vec![("matte_enabled".to_owned(), 1_i64)];
+        stored.extend(
+            parameters
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), *value)),
+        );
+        color_node_effect(9, "color_wheels", stored)
+    }
+
+    /// The resolved matte of an enabled `color_wheels` matte block.
+    fn matte(parameters: &[(&str, i64)]) -> Matte {
+        Matte::from_params(&MatteParams::from_effect(&matte_effect(parameters)))
+            .expect("an enabled, non-neutral matte must resolve")
+    }
+
+    /// One rect or ellipse window, in CC5 §2.2 stored integers.
+    fn window_parameters(
+        shape_token: i64,
+        centre: (i64, i64),
+        half: (i64, i64),
+        rotation_cd: i64,
+        feather_bp: i64,
+    ) -> Vec<(&'static str, i64)> {
+        vec![
+            ("matte_window_count", 1),
+            ("matte_window0_shape_token", shape_token),
+            ("matte_window0_center_x_basis_points", centre.0),
+            ("matte_window0_center_y_basis_points", centre.1),
+            ("matte_window0_half_width_basis_points", half.0),
+            ("matte_window0_half_height_basis_points", half.1),
+            ("matte_window0_rotation_centidegrees", rotation_cd),
+            ("matte_window0_feather_basis_points", feather_bp),
+        ]
+    }
+
+    /// Every raster cell whose coverage is non-zero, in raster order.
+    fn covered_cells(matte: &Matte) -> Vec<(usize, usize)> {
+        let mut covered = Vec::new();
+        for y in 0..MATTE_RASTER_HEIGHT {
+            for x in 0..MATTE_RASTER_WIDTH {
+                if matte.coverage(matte_uv(x, y), MATTE_RASTER_ASPECT, MATTE_NEUTRAL_SAMPLE) > 0.0 {
+                    covered.push((x, y));
+                }
+            }
+        }
+        covered
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_wrap)]
+    fn matte_window_geometry_matches_the_hand_derived_pixel_counts() {
+        // §9.2.2, anchor 1.  A centred rect with `hw = hh = 0.25` selects
+        // `|u.x - 0.5| <= 0.25` and `|u.y - 0.5| <= 0.25` — the aspect factor
+        // cancels exactly at theta = 0 (§2.3).  With pixel centres at
+        // `(x + 0.5)/64` and `(y + 0.5)/36` that is `16 <= x <= 47` and
+        // `9 <= y <= 26`: 32 x 18 = 576 of 2304 pixels, exactly 2500 basis
+        // points.  No pixel centre is on the boundary: the tightest margins
+        // are |n.x| = 0.96875 / 1.03125 at x = 16 / 15 and |n.y| = 0.94444 /
+        // 1.05555 at y = 9 / 8.
+        let centred = matte(&window_parameters(1, (5_000, 5_000), (2_500, 2_500), 0, 0));
+        let mut inside = 0_usize;
+        for y in 0..MATTE_RASTER_HEIGHT {
+            for x in 0..MATTE_RASTER_WIDTH {
+                let coverage =
+                    centred.coverage(matte_uv(x, y), MATTE_RASTER_ASPECT, MATTE_NEUTRAL_SAMPLE);
+                let expected = (16..=47).contains(&x) && (9..=26).contains(&y);
+                // `feather = 0` takes the hard branch, so the weight is
+                // exactly 1 or exactly 0 — never an epsilon (§2.3).
+                assert_eq!(
+                    coverage.to_bits(),
+                    if expected { 1.0_f32 } else { 0.0_f32 }.to_bits(),
+                    "centred rect at ({x}, {y}) resolved to {coverage}"
+                );
+                inside += usize::from(expected);
+            }
+        }
+        assert_eq!(inside, 576);
+        assert_eq!(
+            MATTE_RASTER_WIDTH * MATTE_RASTER_HEIGHT - inside,
+            1_728,
+            "the outside set is the containment gate's population"
+        );
+
+        // §9.2.2, anchor 2.  `hw = 0.1125`, `hh = 0.2`: `hw * a = hh = 0.2`,
+        // so the field is 7.2 pixels in every direction.  Pixel offsets from
+        // the raster centre are `dx = x - 31.5`, `dy = y - 17.5`, both
+        // half-integers, so `|d| <= 7.2` is `|d| <= 6.5`: 14 columns
+        // (25..=38) x 14 rows (11..=24) = 196.
+        let square = matte(&window_parameters(1, (5_000, 5_000), (1_125, 2_000), 0, 0));
+        let unrotated = covered_cells(&square);
+        assert_eq!(unrotated.len(), 196);
+        assert!(
+            unrotated
+                .iter()
+                .all(|(x, y)| (25..=38).contains(x) && (11..=24).contains(y)),
+            "the unrotated pixel square is columns 25..=38 by rows 11..=24"
+        );
+
+        // §9.2.2, anchor 3 — **the aspect gate**.  Rotated 45 degrees the
+        // condition is `|dx + dy| <= 7.2 * sqrt(2) = 10.18234` and
+        // `|dy - dx| <= 10.18234`; both are integers (`x + y - 49` and
+        // `y - x + 14`), so it is `<= 10`, and their sum `2 * dy` is odd, so
+        // exactly one of them is odd.  Counting gives 220.
+        let rotated = matte(&window_parameters(
+            1,
+            (5_000, 5_000),
+            (1_125, 2_000),
+            4_500,
+            0,
+        ));
+        let rotated_cells = covered_cells(&rotated);
+        assert_eq!(rotated_cells.len(), 220);
+        for &(x, y) in &rotated_cells {
+            let sum = x as i64 + y as i64 - 49;
+            let difference = y as i64 - x as i64 + 14;
+            assert!(
+                sum.abs() <= 10 && difference.abs() <= 10 && (sum + difference) % 2 != 0,
+                "({x}, {y}) is outside the hand-derived 45 degree set"
+            );
+        }
+        // The covered set is symmetric under `(dx, dy) -> (dy, dx)`, which is
+        // true only when the aspect correction is applied: without it a 45
+        // degree rotation on a 16:9 raster shears the window (§2.3).
+        let offsets: std::collections::BTreeSet<(i64, i64)> = rotated_cells
+            .iter()
+            .map(|&(x, y)| (2 * x as i64 - 63, 2 * y as i64 - 35))
+            .collect();
+        let swapped: std::collections::BTreeSet<(i64, i64)> =
+            offsets.iter().map(|&(dx, dy)| (dy, dx)).collect();
+        assert_eq!(offsets, swapped, "the 45 degree set must be swap-symmetric");
+
+        // §9.2.2, anchor 4.  The same half-extents as an ellipse:
+        // `dx^2 + dy^2 <= 51.84`.  Per quadrant the row counts are
+        // 7, 7, 7, 6, 6, 5, 3 = 41, so 4 * 41 = 164, and the bounding box is
+        // 14 x 14.  `(2i+1)^2 + (2j+1)^2 = 207.36` has no integer solution, so
+        // no pixel centre is on the boundary; the tightest interior margin is
+        // 1.34 px^2 at (+-5.5, +-4.5) and the tightest exterior margin is
+        // 2.66 px^2 at (+-3.5, +-6.5).
+        let ellipse = matte(&window_parameters(2, (5_000, 5_000), (1_125, 2_000), 0, 0));
+        let ellipse_cells = covered_cells(&ellipse);
+        assert_eq!(ellipse_cells.len(), 164);
+        let columns: std::collections::BTreeSet<usize> =
+            ellipse_cells.iter().map(|&(x, _)| x).collect();
+        let rows: std::collections::BTreeSet<usize> =
+            ellipse_cells.iter().map(|&(_, y)| y).collect();
+        assert_eq!((columns.len(), rows.len()), (14, 14));
+        assert_eq!(
+            (
+                *columns.first().expect("a column"),
+                *columns.last().expect("a column"),
+                *rows.first().expect("a row"),
+                *rows.last().expect("a row"),
+            ),
+            (25, 38, 11, 24)
+        );
+
+        // The ellipse is circular in pixels exactly when `hw * a == hh`, and
+        // for this half-extent pair that holds as exact f32 equality on the
+        // constants the shader also consumes.
+        let resolved = ellipse.windows()[0].half_extents();
+        for aspect in [64.0 / 36.0, 16.0 / 9.0, 1920.0 / 1080.0_f32] {
+            assert_eq!(
+                (resolved[0] * aspect).to_bits(),
+                resolved[1].to_bits(),
+                "hw * a must equal hh bit for bit at a = {aspect}"
+            );
+        }
+
+        // §2.3's defensive rule: a degenerate half-extent makes that window's
+        // weight 0, with no error and no clamp.
+        let degenerate = MatteWindow::from_params(&MatteWindowParams {
+            half_width_bp: 0,
+            ..MatteWindowParams::NEUTRAL
+        });
+        assert_eq!(
+            degenerate.weight([0.5, 0.5], MATTE_RASTER_ASPECT).to_bits(),
+            0.0_f32.to_bits()
+        );
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn matte_feather_matches_the_hand_derived_smoothstep() {
+        // §9.2.3.  A rect centred at `(0.5, 0.0)` with `hw = hh = 0.5` makes
+        // `D = u.y / 0.5` along `u.x = 0.5`, which is exact in f32 for every
+        // dyadic `u.y`, so these anchors test the smoothstep and not the
+        // rounding of the distance field.
+        let feathered = matte(&window_parameters(1, (5_000, 0), (5_000, 5_000), 0, 4_000));
+        let weight_at = |distance_half: f32| {
+            feathered.coverage(
+                [0.5, distance_half],
+                MATTE_RASTER_ASPECT,
+                MATTE_NEUTRAL_SAMPLE,
+            )
+        };
+
+        // `f = 0.4`: `w = 1 - smoothstep(0.6, 1.4, D)`.
+        // D = 0.8 -> t = 0.25 -> s = 0.15625 -> w = 0.84375.
+        assert_eq!(weight_at(0.4).to_bits(), 0.843_75_f32.to_bits());
+        // D = 1.0 -> t = 0.5 -> s = 0.5 -> w = 0.5, exact at the edge.
+        assert_eq!(weight_at(0.5).to_bits(), 0.5_f32.to_bits());
+        // D = 1.2 -> t = 0.75 -> s = 0.84375 -> w = 0.15625.  `4000 / 10000`
+        // is not a dyadic rational, so `1 - f` and `1 + f` each round and `t`
+        // lands one ulp above 0.75; the deviation is 1.2e-7, which is why this
+        // one anchor is asserted to within two ulps rather than bit for bit.
+        assert_close(weight_at(0.6), 0.156_25, 1.5e-7);
+        // The band straddles the edge: `w = 1` at `D <= 1 - f` and `w = 0` at
+        // `D >= 1 + f`, both exactly.
+        assert_eq!(weight_at(0.3).to_bits(), 1.0_f32.to_bits());
+        assert_eq!(weight_at(0.7).to_bits(), 0.0_f32.to_bits());
+        // Symmetry: `w(1 - d) + w(1 + d) = 1`, so `1 - w` is the exact
+        // complement of the same shape with the same band.
+        // `u.y = (1 -+ delta) / 2` for delta = 0.1, 0.2, 0.4, written as the
+        // dyadic literals so the halving is exact.
+        for (below, above) in [(0.45_f32, 0.55_f32), (0.4, 0.6), (0.3, 0.7)] {
+            assert_close(weight_at(below) + weight_at(above), 1.0, 1.5e-7);
+        }
+
+        // `f = 0.25` is dyadic, so the same three smoothstep anchors — now at
+        // D = 0.875, 1.0, 1.125 — and the symmetry are exact in f32.
+        let dyadic = matte(&window_parameters(1, (5_000, 0), (5_000, 5_000), 0, 2_500));
+        let dyadic_at = |distance_half: f32| {
+            dyadic.coverage(
+                [0.5, distance_half],
+                MATTE_RASTER_ASPECT,
+                MATTE_NEUTRAL_SAMPLE,
+            )
+        };
+        assert_eq!(dyadic_at(0.437_5).to_bits(), 0.843_75_f32.to_bits());
+        assert_eq!(dyadic_at(0.5).to_bits(), 0.5_f32.to_bits());
+        assert_eq!(dyadic_at(0.562_5).to_bits(), 0.156_25_f32.to_bits());
+        for (below, above) in [(0.45_f32, 0.55_f32), (0.437_5, 0.562_5), (0.375, 0.625)] {
+            assert_eq!(
+                (dyadic_at(below) + dyadic_at(above)).to_bits(),
+                1.0_f32.to_bits(),
+                "D = {} and D = {} must be exact complements",
+                below * 2.0,
+                above * 2.0
+            );
+        }
+
+        // The affected set of a feathered centred rect is exactly `{D < 1.4}`,
+        // measured against an independent f64 transcription of §2.3.  The
+        // tightest margin on this raster is |D - 1.4| = 0.00625, four orders
+        // of magnitude above f32 noise.
+        let banded = matte(&window_parameters(
+            1,
+            (5_000, 5_000),
+            (2_500, 2_500),
+            0,
+            4_000,
+        ));
+        let mut affected = 0_usize;
+        for y in 0..MATTE_RASTER_HEIGHT {
+            for x in 0..MATTE_RASTER_WIDTH {
+                let spec_x = ((x as f64 + 0.5) / 64.0 - 0.5) / 0.25;
+                let spec_y = ((y as f64 + 0.5) / 36.0 - 0.5) / 0.25;
+                let spec_distance = spec_x.abs().max(spec_y.abs());
+                let coverage =
+                    banded.coverage(matte_uv(x, y), MATTE_RASTER_ASPECT, MATTE_NEUTRAL_SAMPLE);
+                assert_eq!(
+                    coverage > 0.0,
+                    spec_distance < 1.4,
+                    "({x}, {y}) D = {spec_distance} resolved to {coverage}"
+                );
+                if spec_distance >= 1.4 {
+                    assert_eq!(coverage.to_bits(), 0.0_f32.to_bits());
+                } else {
+                    affected += 1;
+                }
+            }
+        }
+        assert!(
+            affected > 576,
+            "a 0.4 feather must reach further than the hard-edged 576"
+        );
+    }
+
+    #[test]
+    fn matte_windows_combine_by_union_and_intersection() {
+        // §9.2.4.  Window A is the centred 2500/2500 rect (columns 16..=47);
+        // window B is the same rect at `center_x = 7500` (columns 32..=63).
+        // Both cover 576 pixels over rows 9..=26 and overlap on columns
+        // 32..=47, which is 16 x 18 = 288.  Inclusion-exclusion gives
+        // 576 + 576 - 288 = 864 for the union.
+        let two_windows = |combine_token: i64, invert_a: i64| {
+            matte(&[
+                ("matte_window_count", 2),
+                ("matte_combine_token", combine_token),
+                ("matte_window0_center_x_basis_points", 5_000),
+                ("matte_window0_center_y_basis_points", 5_000),
+                ("matte_window0_half_width_basis_points", 2_500),
+                ("matte_window0_half_height_basis_points", 2_500),
+                ("matte_window0_invert", invert_a),
+                ("matte_window1_center_x_basis_points", 7_500),
+                ("matte_window1_center_y_basis_points", 5_000),
+                ("matte_window1_half_width_basis_points", 2_500),
+                ("matte_window1_half_height_basis_points", 2_500),
+            ])
+        };
+        let union = covered_cells(&two_windows(0, 0));
+        assert_eq!(union.len(), 864);
+        assert!(
+            union
+                .iter()
+                .all(|&(x, y)| (16..=63).contains(&x) && (9..=26).contains(&y))
+        );
+        let intersection = covered_cells(&two_windows(1, 0));
+        assert_eq!(intersection.len(), 288);
+        assert!(
+            intersection
+                .iter()
+                .all(|&(x, y)| (32..=47).contains(&x) && (9..=26).contains(&y))
+        );
+
+        // Per-window invert inside a union: `!A | B` is the complement of
+        // `A & !B`, which is 576 - 288 = 288 pixels, so 2304 - 288 = 2016.
+        assert_eq!(covered_cells(&two_windows(0, 1)).len(), 2_016);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn matte_qualifier_matches_the_hand_derived_anchors() {
+        // §9.2.5.  The anchors are stated on `grade709`-encoded triples, so
+        // they are fed to the qualifier as `grade709_decode(e)` — the value
+        // entering the node — and the qualifier re-encodes them itself.
+        let encoded = |e: [f32; 3]| e.map(grade709_decode);
+
+        // e = (0.8, 0.2, 0.2): M = 0.8 = r, mn = 0.2, C = 0.6, S = C/M = 0.75,
+        // Y = 0.2126*0.8 + 0.7152*0.2 + 0.0722*0.2 = 0.32756, H = 0 because
+        // g == b makes (g - b)/C exactly zero.
+        let warm = MatteQualifier::selectors(encoded([0.8, 0.2, 0.2]));
+        assert_close(warm.chroma, 0.6, 2e-6);
+        assert_close(warm.saturation, 0.75, 2e-6);
+        assert_close(warm.luma, 0.327_56, 2e-6);
+        assert_eq!(
+            warm.hue.expect("a chromatic pixel").to_bits(),
+            0.0_f32.to_bits()
+        );
+
+        // Wraparound: e = (0.8, 0.2, 0.35) keeps M = r and C = 0.6, and
+        // (g - b)/C = -0.25, so H = 60 * (5.75) = 345.
+        let wrapped = MatteQualifier::selectors(encoded([0.8, 0.2, 0.35]));
+        assert_close(wrapped.hue.expect("a chromatic pixel"), 345.0, 1e-3);
+
+        // Achromatic: e = (0.5, 0.5, 0.5) has C = 0, so the hue is undefined.
+        let grey = MatteQualifier::selectors(encoded([0.5, 0.5, 0.5]));
+        assert_eq!(grey.chroma.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(grey.saturation.to_bits(), 0.0_f32.to_bits());
+        assert_close(grey.luma, 0.5, 2e-6);
+        assert!(grey.hue.is_none());
+
+        let qualifier = |parameters: &[(&str, i64)]| {
+            let mut stored = vec![("matte_qualifier_enabled", 1_i64)];
+            stored.extend_from_slice(parameters);
+            matte(&stored)
+        };
+        let weight = |parameters: &[(&str, i64)], e: [f32; 3]| {
+            qualifier(parameters).coverage([0.5, 0.5], MATTE_RASTER_ASPECT, encoded(e))
+        };
+
+        // H = 0 inside a +-30 degree band with no softness: q = 1 exactly.
+        assert_eq!(
+            weight(
+                &[
+                    ("matte_hue_center_centidegrees", 0),
+                    ("matte_hue_width_centidegrees", 3_000),
+                ],
+                [0.8, 0.2, 0.2],
+            )
+            .to_bits(),
+            1.0_f32.to_bits()
+        );
+        // H = 345 against a band centred on 350 with a 10 degree half-width:
+        // dh = 5 <= 10, so h = 1.  The seam is crossed, not the long way.
+        assert_eq!(
+            weight(
+                &[
+                    ("matte_hue_center_centidegrees", 35_000),
+                    ("matte_hue_width_centidegrees", 1_000),
+                ],
+                [0.8, 0.2, 0.35],
+            )
+            .to_bits(),
+            1.0_f32.to_bits()
+        );
+        // H = 345 against a band centred on 2 degrees: dh = min(343, 17) = 17,
+        // t = (17 - 10)/10 = 0.7, smoothstep = 0.49 * (3 - 1.4) = 0.784, so
+        // h = 0.216.
+        assert_close(
+            weight(
+                &[
+                    ("matte_hue_center_centidegrees", 200),
+                    ("matte_hue_width_centidegrees", 1_000),
+                    ("matte_hue_softness_centidegrees", 1_000),
+                ],
+                [0.8, 0.2, 0.35],
+            ),
+            0.216,
+            1e-4,
+        );
+        // Achromatic, both normative branches: a named hue excludes grey, and
+        // the 180 degree half-width disables the hue leg and includes it.
+        assert_eq!(
+            weight(&[("matte_hue_width_centidegrees", 3_000)], [0.5, 0.5, 0.5],).to_bits(),
+            0.0_f32.to_bits()
+        );
+        assert_eq!(
+            weight(&[("matte_hue_width_centidegrees", 18_000)], [0.5, 0.5, 0.5],).to_bits(),
+            1.0_f32.to_bits()
+        );
+        // Saturation softness: S = 0.75 against the band 0.8..1.0 with a 0.1
+        // shoulder is min(smoothstep(0.7, 0.8, 0.75), 1) = min(0.5, 1) = 0.5.
+        assert_close(
+            weight(
+                &[
+                    ("matte_saturation_low_basis_points", 8_000),
+                    ("matte_saturation_high_basis_points", 10_000),
+                    ("matte_saturation_softness_basis_points", 1_000),
+                ],
+                [0.8, 0.2, 0.2],
+            ),
+            0.5,
+            1e-5,
+        );
+        // The luma leg brackets Y = 0.32756 to within a basis point.
+        for (low, high, expected) in [
+            (3_275_i64, 3_276_i64, 1.0_f32),
+            (0, 3_275, 0.0),
+            (3_276, 10_000, 0.0),
+        ] {
+            assert_eq!(
+                weight(
+                    &[
+                        ("matte_luma_low_basis_points", low),
+                        ("matte_luma_high_basis_points", high),
+                    ],
+                    [0.8, 0.2, 0.2],
+                )
+                .to_bits(),
+                expected.to_bits(),
+                "luma band {low}..{high}"
+            );
+        }
+        // A degenerate band evaluates to 0 — no clamp, no reorder, no error.
+        assert_eq!(
+            weight(
+                &[
+                    ("matte_saturation_low_basis_points", 8_000),
+                    ("matte_saturation_high_basis_points", 2_000),
+                ],
+                [0.8, 0.2, 0.2],
+            )
+            .to_bits(),
+            0.0_f32.to_bits()
+        );
+        assert_eq!(
+            MatteQualifier::band(0.5, 0.8, 0.2, 0.1).to_bits(),
+            0.0_f32.to_bits()
+        );
+    }
+
+    /// CC3 §2.1 `grade709_encode` transcribed independently in f64.
+    fn spec_grade709_encode_f64(x: f64) -> f64 {
+        const ALPHA: f64 = 1.099_296_826_809_442;
+        const BETA: f64 = 0.018_053_968_510_807;
+        let sign = if x > 0.0 {
+            1.0
+        } else if x < 0.0 {
+            -1.0
+        } else {
+            0.0
+        };
+        let magnitude = x.abs();
+        if magnitude < BETA {
+            sign * 4.5 * magnitude
+        } else {
+            sign * (ALPHA * magnitude.powf(0.45) - (ALPHA - 1.0))
+        }
+    }
+
+    /// CC3 §2.1 `grade709_decode` transcribed independently in f64.
+    fn spec_grade709_decode_f64(e: f64) -> f64 {
+        const ALPHA: f64 = 1.099_296_826_809_442;
+        const BETA_ENCODED: f64 = 4.5 * 0.018_053_968_510_807;
+        let sign = if e > 0.0 {
+            1.0
+        } else if e < 0.0 {
+            -1.0
+        } else {
+            0.0
+        };
+        let magnitude = e.abs();
+        if magnitude < BETA_ENCODED {
+            sign * magnitude / 4.5
+        } else {
+            sign * ((magnitude + (ALPHA - 1.0)) / ALPHA).powf(1.0 / 0.45)
+        }
+    }
+
+    /// `color_wheels` with `gain_master_thousandths = 1500` and every other
+    /// control neutral: slope 1.5, offset 0, power 1 (CC3 §2.2), in f64.
+    fn spec_gain_master_1500_f64(x: f64) -> f64 {
+        spec_grade709_decode_f64(1.5 * spec_grade709_encode_f64(x))
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation)]
+    fn matte_mix_and_invert_scale_the_coverage() {
+        // §9.2.6.  A 0.4 feather evaluated exactly on the edge gives
+        // `m_raw = 0.5`; `matte_mix = 6000` scales it to 0.3.
+        let mixed = matte(&[
+            ("matte_window_count", 1),
+            ("matte_window0_center_x_basis_points", 5_000),
+            ("matte_window0_center_y_basis_points", 0),
+            ("matte_window0_half_width_basis_points", 5_000),
+            ("matte_window0_half_height_basis_points", 5_000),
+            ("matte_window0_feather_basis_points", 4_000),
+            ("matte_mix_basis_points", 6_000),
+        ]);
+        let edge_uv = [0.5_f32, 0.5];
+        let coverage = mixed.coverage(edge_uv, MATTE_RASTER_ASPECT, MATTE_NEUTRAL_SAMPLE);
+        assert_eq!(coverage.to_bits(), 0.3_f32.to_bits());
+
+        // `out = x + (node(x) - x) * 0.3`, against an independent f64
+        // transcription of the wheels node, on three samples: mid grey, a
+        // negative undershoot, and an over-range highlight.
+        let node = wheels_effect(&[("gain_master_thousandths", 1_500)]);
+        let mut effect = node;
+        for (name, value) in [
+            ("matte_enabled", 1_i64),
+            ("matte_window_count", 1),
+            ("matte_window0_center_x_basis_points", 5_000),
+            ("matte_window0_center_y_basis_points", 0),
+            ("matte_window0_half_width_basis_points", 5_000),
+            ("matte_window0_half_height_basis_points", 5_000),
+            ("matte_window0_feather_basis_points", 4_000),
+            ("matte_mix_basis_points", 6_000),
+        ] {
+            effect
+                .parameters
+                .insert(name.to_owned(), ParamValue::Integer(value));
+        }
+        let nodes =
+            resolve_color_nodes(std::slice::from_ref(&effect)).expect("a matte-carrying node");
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].matte().is_some());
+        for sample in [[0.18_f32; 3], [-0.05, 0.5, 1.5], [0.9, 0.02, 0.4]] {
+            let actual = apply_color_nodes_at(&nodes, sample, edge_uv, MATTE_RASTER_ASPECT);
+            for channel in 0..3 {
+                let x = f64::from(sample[channel]);
+                let expected = x + (spec_gain_master_1500_f64(x) - x) * 0.3;
+                assert_close(actual[channel], expected as f32, 2e-5);
+            }
+        }
+
+        // `matte_invert` is a true complement of the feather band:
+        // `m_raw = 0.15625` becomes 0.84375, exactly.
+        let inverted = matte(&[
+            ("matte_window_count", 1),
+            ("matte_window0_center_x_basis_points", 5_000),
+            ("matte_window0_center_y_basis_points", 0),
+            ("matte_window0_half_width_basis_points", 5_000),
+            ("matte_window0_half_height_basis_points", 5_000),
+            ("matte_window0_feather_basis_points", 2_500),
+            ("matte_invert", 1),
+        ]);
+        assert_eq!(
+            inverted
+                .coverage([0.5, 0.562_5], MATTE_RASTER_ASPECT, MATTE_NEUTRAL_SAMPLE)
+                .to_bits(),
+            0.843_75_f32.to_bits()
+        );
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn zero_coverage_is_an_exact_per_pixel_identity() {
+        // §2.5.5.  `x + (node(x) - x) * 0.0` is not the identity in f32: it
+        // maps -0.0 to +0.0 and maps any x to NaN when node(x) is non-finite.
+        // The `m == 0` branch is therefore normative, not an optimization.
+        let mut effect = wheels_effect(&[
+            ("gain_master_thousandths", 4_000),
+            ("gain_red_thousandths", 4_000),
+            ("gamma_master_thousandths", 4_000),
+            ("gamma_red_thousandths", 4_000),
+        ]);
+        for (name, value) in [
+            ("matte_enabled", 1_i64),
+            ("matte_window_count", 1),
+            ("matte_window0_center_x_basis_points", 5_000),
+            ("matte_window0_center_y_basis_points", 5_000),
+            ("matte_window0_half_width_basis_points", 2_500),
+            ("matte_window0_half_height_basis_points", 2_500),
+        ] {
+            effect
+                .parameters
+                .insert(name.to_owned(), ParamValue::Integer(value));
+        }
+        let nodes = resolve_color_nodes(std::slice::from_ref(&effect)).expect("a matte node");
+        let outside = matte_uv(0, 0);
+        let inside = matte_uv(32, 18);
+        let matte = nodes[0].matte().expect("an active matte");
+        assert_eq!(
+            matte
+                .coverage(outside, MATTE_RASTER_ASPECT, [4.0; 3])
+                .to_bits(),
+            0.0_f32.to_bits()
+        );
+
+        // Slope 16 and power 16 on linear 4.0 overflows f32 to +inf in red.
+        let overflowed = apply_color_node(&nodes[0], [4.0; 3]);
+        assert_eq!(overflowed[0], f32::INFINITY);
+        let held = apply_color_nodes_at(&nodes, [4.0; 3], outside, MATTE_RASTER_ASPECT);
+        assert_eq!(
+            bits(held),
+            bits([4.0; 3]),
+            "a non-finite node output must not leak through m = 0"
+        );
+        assert!(held.iter().all(|value| !value.is_nan()));
+
+        // Signed zero survives: -0.0 and +0.0 have different bits.
+        let signed_zero = [-0.0_f32, -0.0, -0.0];
+        assert_eq!(
+            bits(apply_color_nodes_at(
+                &nodes,
+                signed_zero,
+                outside,
+                MATTE_RASTER_ASPECT
+            )),
+            bits(signed_zero)
+        );
+
+        // Inside the window the same stack does move the sample.
+        let moved = apply_color_nodes_at(&nodes, [0.18; 3], inside, MATTE_RASTER_ASPECT);
+        assert_ne!(bits(moved), bits([0.18_f32; 3]));
+    }
+
+    #[test]
+    fn matte_free_nodes_take_the_cc4_path_bit_identically() {
+        // §2.5.4.  A node without a matte must not take the blend path at all,
+        // because `x + (y - x) * 1.0` is not bit-identical to `y` in f32.
+        let effects = [
+            wheels_effect(&[("gain_red_thousandths", 1_200)]),
+            curve_effect(
+                ColorCurveChannel::Master,
+                &[(0, 0), (5_000, 6_000), (10_000, 10_000)],
+                0,
+            ),
+        ];
+        let nodes = resolve_color_nodes(&effects).expect("a matte-free stack");
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.iter().all(|node| node.matte().is_none()));
+        for sample in [
+            [0.18_f32; 3],
+            [-0.05, 0.5, 1.5],
+            [0.0, 1.0, 4.0],
+            [-0.0, -0.0, -0.0],
+        ] {
+            let mut expected = sample;
+            for node in &nodes {
+                expected = apply_color_node(node, expected);
+            }
+            assert_eq!(
+                bits(apply_color_nodes_at(
+                    &nodes,
+                    sample,
+                    [0.123, 0.789],
+                    MATTE_RASTER_ASPECT
+                )),
+                bits(expected),
+                "matte-free node stack moved {sample:?}"
+            );
+            // The result is independent of the position, which is what makes
+            // a pre-CC5 project render bit-identically.
+            assert_eq!(
+                bits(apply_color_nodes_at(&nodes, sample, [0.9, 0.1], 1.0)),
+                bits(expected)
+            );
+            // An empty stack is the exact identity at every position.
+            assert_eq!(
+                bits(apply_color_nodes_at(
+                    &[],
+                    sample,
+                    [0.25, 0.75],
+                    MATTE_RASTER_ASPECT
+                )),
+                bits(sample)
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn resolve_color_nodes_attaches_active_mattes_and_skips_excluded_nodes() {
+        let with_matte = |parameters: &[(&str, i64)]| {
+            let mut effect = wheels_effect(&[("gain_red_thousandths", 1_200)]);
+            for (name, value) in parameters {
+                effect
+                    .parameters
+                    .insert((*name).to_owned(), ParamValue::Integer(*value));
+            }
+            resolve_color_nodes(std::slice::from_ref(&effect)).expect("a resolvable node")
+        };
+
+        // §2.6 rule 1: an inactive matte attaches nothing.
+        for inactive in [
+            vec![("matte_enabled", 0_i64), ("matte_window_count", 2)],
+            vec![("matte_enabled", 1), ("matte_mix_basis_points", 10_000)],
+        ] {
+            let nodes = with_matte(&inactive);
+            assert_eq!(nodes.len(), 1);
+            assert!(
+                nodes[0].matte().is_none(),
+                "{inactive:?} must resolve to no matte"
+            );
+        }
+
+        // §2.6 rule 2: `MatteExcluded` drops the node entirely, so bypass and
+        // a zero-mix matte are losslessly identical to removing the node.
+        for excluded in [
+            vec![("matte_enabled", 1_i64), ("matte_mix_basis_points", 0)],
+            vec![("matte_enabled", 1), ("matte_invert", 1)],
+        ] {
+            assert!(
+                with_matte(&excluded).is_empty(),
+                "{excluded:?} must be skipped as MatteExcluded"
+            );
+        }
+
+        // An active matte is attached to the node and carries its windows.
+        let nodes = with_matte(&[
+            ("matte_enabled", 1),
+            ("matte_window_count", 2),
+            ("matte_combine_token", 1),
+            ("matte_qualifier_enabled", 1),
+            ("matte_hue_width_centidegrees", 3_000),
+            ("matte_mix_basis_points", 5_000),
+        ]);
+        let matte = nodes[0].matte().expect("an active matte");
+        assert_eq!(matte.windows().len(), 2);
+        assert!(!matte.is_union());
+        assert!(!matte.is_inverted());
+        assert!(matte.qualifier().is_some());
+        assert_eq!(matte.mix().to_bits(), 0.5_f32.to_bits());
+        assert_eq!(
+            matte.qualifier().expect("a qualifier").hue_degrees()[1],
+            30.0
+        );
+
+        // `technical_lut` cannot carry a matte at all: Core resolves the
+        // neutral block, and the variant has no place to put one.
+        let technical = lut_effect(1, "technical_lut", 1, &[("matte_enabled", 1)]);
+        let library = builtin_library();
+        let resolved = resolve_color_nodes_with(std::slice::from_ref(&technical), &library)
+            .expect("a LUT node");
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved[0].matte().is_none());
     }
 }

@@ -39,6 +39,9 @@ const MAX_HISTOGRAM_BINS: usize = 256;
 const DEFAULT_WAVEFORM_COLUMNS: usize = 64;
 const MAX_WAVEFORM_COLUMNS: usize = 256;
 const MAX_VECTOR_BINS: usize = 64;
+/// The stable code published when a matte-scoped measurement cannot resolve the
+/// coverage it was asked to scope to (CC5 §4.3).
+const MATTE_REGION_UNAVAILABLE: &str = "matte_region_unavailable";
 
 /// One `plan_shot_match` call renders one full-resolution monitor proof per
 /// candidate.  The candidate list is therefore capped exactly like the
@@ -129,6 +132,11 @@ pub(crate) struct VideoScopesV2Args {
     /// Normalized geometric region.  Omission means the full raster.
     #[serde(default)]
     pub roi: Option<ScopeRoiArgs>,
+    /// CC5 §4.3: restrict the measured population to one colour node's matte
+    /// coverage.  Composable with `roi`, in which case the measured set is
+    /// their intersection.  The stage is unchanged — only the region is.
+    #[serde(default)]
+    pub matte_region: Option<MatteRegionArgs>,
     /// `full_resolution` (default) or `proxy`.  A proxy request is explicit
     /// and is surfaced as such in every provenance record.
     #[serde(default, alias = "sampling_resolution")]
@@ -181,6 +189,16 @@ pub(crate) struct ScopeRoiArgs {
     pub right: Option<f64>,
     #[serde(default)]
     pub bottom: Option<f64>,
+}
+
+/// The matte a CC5 §4.3 measurement is scoped to.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MatteRegionArgs {
+    /// Clip carrying the matte-scoping colour node.
+    pub clip_id: ClipId,
+    /// The matte-carrying colour node's effect id.
+    pub effect_id: kinewright_core::EffectId,
 }
 
 /// Evidence-only shot analysis request.
@@ -477,6 +495,10 @@ struct ScopeRequest {
     /// Whether `step_frames` came from the caller or from the bounded default.
     step_source: &'static str,
     roi: NormalizedRoi,
+    /// CC5 §4.3: the matte the measurement was scoped to, `None` when
+    /// unscoped.  Carried on the request so every response level can report it
+    /// and `compare_scope_evidence` can refuse a cross-population difference.
+    matte_region: Option<MatteRegionArgs>,
     resolution: SamplingResolution,
     histogram_bins: usize,
     waveform_columns: usize,
@@ -489,6 +511,9 @@ struct RenderedSample {
     frame: TimeCode,
     image: RgbaImage,
     provenance: Value,
+    /// CC5 §4.3: coverage pixels above the pinned `m > 0` threshold in the
+    /// scoping matte at this frame, `None` for an unscoped measurement.
+    covered_pixel_count: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -622,6 +647,7 @@ pub(crate) fn video_scopes_v2(
         args.frames.as_deref(),
         args.step_frames,
         args.roi.as_ref(),
+        args.matte_region,
         args.resolution.as_deref(),
         args.proxy_sampling,
         args.max_width,
@@ -662,6 +688,8 @@ pub(crate) fn analyze_color_shot(
         args.frames.as_deref(),
         args.step_frames,
         args.roi.as_ref(),
+        // CC5 §4.3: matte scoping is offered by get_video_scopes_v2 only.
+        None,
         args.resolution.as_deref(),
         args.proxy_sampling,
         args.max_width,
@@ -733,6 +761,8 @@ pub(crate) fn plan_shot_match(
         None,
         None,
         args.roi.as_ref(),
+        // CC5 §4.3: matte scoping is offered by get_video_scopes_v2 only.
+        None,
         args.resolution.as_deref(),
         args.proxy_sampling,
         args.max_width,
@@ -747,7 +777,7 @@ pub(crate) fn plan_shot_match(
         "summary": shot_evidence(&reference_rendered, &reference_scope_evidence, &request),
         // Routed through the same override `scope_response` applies, so the
         // reference cannot report `full_resolution: true` for a proxy sample.
-        "scope_evidence": core_evidence_value(&request, &reference_scope_evidence)?,
+        "scope_evidence": core_evidence_value(&request, &reference_scope_evidence, None)?,
         "resolution": request.resolution.value(),
         "full_resolution": !request.resolution.proxy,
     });
@@ -775,6 +805,8 @@ pub(crate) fn plan_shot_match(
             None,
             None,
             args.roi.as_ref(),
+            // CC5 §4.3: matte scoping is offered by get_video_scopes_v2 only.
+            None,
             args.resolution.as_deref(),
             args.proxy_sampling,
             args.max_width,
@@ -850,7 +882,7 @@ pub(crate) fn plan_shot_match(
             "shot": shot_evidence(&rendered, &candidate_scope_evidence, &candidate_request),
             "signed_deltas": deltas,
             "scope_comparison": comparison_value(&candidate_request, &scope_comparison)?,
-            "scope_evidence": core_evidence_value(&candidate_request, &candidate_scope_evidence)?,
+            "scope_evidence": core_evidence_value(&candidate_request, &candidate_scope_evidence, None)?,
             "proposed_parameters": proposed_parameters,
             "proposal_details": proposal.details,
             "resolution": candidate_request.resolution.value(),
@@ -961,6 +993,7 @@ fn build_scope_request(
     explicit_frames: Option<&[TimeCode]>,
     step_frames: Option<TimeCode>,
     roi: Option<&ScopeRoiArgs>,
+    matte_region: Option<MatteRegionArgs>,
     resolution: Option<&str>,
     proxy_sampling: bool,
     max_width: Option<u32>,
@@ -1007,6 +1040,7 @@ fn build_scope_request(
         step_frames: selection.step_frames,
         step_source: selection.step_source,
         roi,
+        matte_region,
         resolution,
         histogram_bins,
         waveform_columns,
@@ -1161,10 +1195,13 @@ fn render_samples(
                     .thumbnail_for_document(Arc::clone(document), *frame, request.resolution.max_width)
                     .map_err(|error| ScopeError::render(&error, *frame))?;
                 validate_image(&image, *frame)?;
+                let (image, covered_pixel_count) =
+                    apply_matte_region(document, analysis, request, *frame, image)?;
                 Ok(RenderedSample {
                     frame: *frame,
                     image,
                     provenance: request.resolution.value(),
+                    covered_pixel_count,
                 })
             } else {
                 let proof = analysis
@@ -1189,14 +1226,84 @@ fn render_samples(
                         ),
                     ));
                 }
+                let provenance = full_provenance(&proof.metadata);
+                let (image, covered_pixel_count) =
+                    apply_matte_region(document, analysis, request, *frame, proof.image)?;
                 Ok(RenderedSample {
                     frame: *frame,
-                    image: proof.image,
-                    provenance: full_provenance(&proof.metadata),
+                    image,
+                    provenance,
+                    covered_pixel_count,
                 })
             }
         })
         .collect()
+}
+
+/// Build the CC5 §4.3 analysis-only frame copy a matte-scoped scope measures.
+///
+/// The document, the render, and the layer alpha are never touched: the matte
+/// proof is rendered for the same document, frame, and raster, its dimensions
+/// are asserted against the measured raster, and Core's `matte_scoped_frame`
+/// produces a *copy* whose alpha is `255` where `m > 0` and `0` elsewhere.
+///
+/// The threshold is the pinned [`kinewright_core::MATTE_SCOPE_THRESHOLD`]: a
+/// pixel the correction touched at all was affected, so the scope's population
+/// is exactly the affected set.  `m >= 0.5` would silently discard half of
+/// every feather band and make the scope disagree with the containment gate.
+fn apply_matte_region(
+    document: &Arc<Document>,
+    analysis: &dyn Analysis,
+    request: &ScopeRequest,
+    frame: TimeCode,
+    image: RgbaImage,
+) -> Result<(RgbaImage, Option<u64>), ScopeError> {
+    let Some(region) = request.matte_region else {
+        return Ok((image, None));
+    };
+    let proof = analysis
+        .matte_proof_for_document(Arc::clone(document), frame, region.clip_id, region.effect_id)
+        .map_err(|error| {
+            ScopeError::new(
+                MATTE_REGION_UNAVAILABLE,
+                format!(
+                    "could not render the matte proof for clip {} effect {} at project frame {frame}: {error}",
+                    region.clip_id, region.effect_id
+                ),
+            )
+            .with_details(json!({
+                "field": "matte_region",
+                "observed": {
+                    "clip_id": region.clip_id.0,
+                    "effect_id": region.effect_id.0,
+                    "project_frame": frame.0,
+                    "message": error.to_string(),
+                },
+                "allowed": "an active matte-carrying colour node this build's renderer can proof",
+                "recovery_action": "Call inspect_grade_matte for the node's coverage, or drop matte_region; no population is invented here.",
+            }))
+        })?;
+    let covered_pixel_count = kinewright_core::matte_coverage_statistics(&proof.coverage)
+        .map(|statistics| statistics.covered_pixel_count)
+        .map_err(|error| {
+            ScopeError::new(error.code(), error.to_string()).with_details(json!({
+                "field": "matte_region",
+                "observed": error.to_string(),
+                "allowed": "a coverage raster with R = G = B and an opaque alpha (CC5 §4.1)",
+                "recovery_action": "The renderer returned a raster that is not a coverage proof; report this build's provenance.",
+            }))
+        })?;
+    // CC5 §4.3: the coverage and the measured raster must be the same size, or
+    // the region names pixels that do not correspond.
+    let scoped = kinewright_core::matte_scoped_frame(&image, &proof.coverage).map_err(|error| {
+        ScopeError::new("matte_region_raster_mismatch", error.to_string()).with_details(json!({
+            "field": "matte_region",
+            "observed": format!("{}x{}", proof.coverage.width, proof.coverage.height),
+            "allowed": format!("{}x{}", image.width, image.height),
+            "recovery_action": "Measure at full resolution: a proxy raster cannot be intersected with a full-raster matte proof (CC5 §4.3).",
+        }))
+    })?;
+    Ok((scoped, Some(covered_pixel_count)))
 }
 
 fn validate_image(image: &RgbaImage, frame: TimeCode) -> Result<(), ScopeError> {
@@ -1230,6 +1337,65 @@ fn full_provenance(metadata: &MonitorProofMetadata) -> Value {
     })
 }
 
+/// The CC5 §4.3 `matte_region` description for one measurement.
+///
+/// `ScopeStage` is deliberately not extended: a matte-scoped scope is still
+/// measured at `monitoring_post_composite` and only the *region* changes, so
+/// the stage vocabulary keeps meaning exactly one thing.
+fn matte_region_description(
+    request: &ScopeRequest,
+    covered_pixel_count: u64,
+) -> Option<kinewright_core::MatteRegionDescription> {
+    let region = request.matte_region?;
+    Some(kinewright_core::MatteRegionDescription::new(
+        region.clip_id,
+        region.effect_id,
+        covered_pixel_count,
+    ))
+}
+
+/// The coverage total a whole response reports: the maximum over its samples.
+///
+/// A matte moves, so summing or averaging across frames would name a
+/// population no single measurement had.  The maximum is the honest bound on
+/// the affected set anywhere in the sampled span, and every sample also
+/// carries its own exact count.
+fn aggregate_covered_pixel_count(rendered: &[RenderedSample]) -> u64 {
+    rendered
+        .iter()
+        .filter_map(|sample| sample.covered_pixel_count)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Attach the CC5 §4.3 matte fields to one serialized evidence object.
+///
+/// Reported at every level, so a caller cannot read a matte-scoped number as
+/// an unscoped one from any nesting depth of the response.
+fn attach_matte_region(
+    value: &mut Value,
+    region: Option<&kinewright_core::MatteRegionDescription>,
+) {
+    let (Some(object), Some(region)) = (value.as_object_mut(), region) else {
+        return;
+    };
+    let serialized = serde_json::to_value(region).unwrap_or(Value::Null);
+    if let Some(metadata) = object.get_mut("metadata")
+        && let Some(metadata) = metadata.as_object_mut()
+    {
+        metadata.insert("matte_region".to_owned(), serialized.clone());
+    }
+    object.insert("matte_region".to_owned(), serialized);
+    object.insert(
+        "matte_threshold".to_owned(),
+        json!(kinewright_core::MATTE_SCOPE_THRESHOLD),
+    );
+    object.insert(
+        "covered_pixel_count".to_owned(),
+        json!(region.covered_pixel_count),
+    );
+}
+
 /// Grid scopes whose density arrays dominate the serialized payload.
 const DENSITY_GRID_KEYS: [&str; 3] = ["waveform", "parade", "vectorscope"];
 
@@ -1244,6 +1410,7 @@ const DENSITY_GRID_KEYS: [&str; 3] = ["waveform", "parade", "vectorscope"];
 fn core_evidence_value(
     request: &ScopeRequest,
     evidence: &ScopeEvidence,
+    matte_region: Option<&kinewright_core::MatteRegionDescription>,
 ) -> Result<Value, ScopeError> {
     let mut value = serde_json::to_value(evidence).map_err(|error| {
         ScopeError::new(
@@ -1270,6 +1437,7 @@ fn core_evidence_value(
         json!(DENSITY_GRID_KEYS)
     };
     value["full_resolution"] = Value::Bool(!request.resolution.proxy);
+    attach_matte_region(&mut value, matte_region);
     Ok(value)
 }
 
@@ -1301,7 +1469,12 @@ fn scope_response(
     rendered: &[RenderedSample],
 ) -> Result<Value, ScopeError> {
     let core_evidence = measure_core_scopes(request, rendered)?;
-    let core_value = core_evidence_value(request, &core_evidence)?;
+    // CC5 §4.3: the whole-response coverage bounds the affected set anywhere in
+    // the sampled span; each sample below reports its own exact count.
+    // `measure_core_scopes` stamped the typed field, so the JSON decoration is
+    // read back off it rather than computed a second time.
+    let matte_region = core_evidence.metadata.matte_region.clone();
+    let core_value = core_evidence_value(request, &core_evidence, matte_region.as_ref())?;
     let mut samples = Vec::with_capacity(rendered.len());
     for sample in rendered {
         let evidence = measure_core_scopes(request, std::slice::from_ref(sample))?;
@@ -1358,6 +1531,17 @@ fn scope_response(
     // engine that produced them explicitly rather than leaving callers to infer
     // it from the typed field shapes.
     value["provenance"]["scope_engine"] = json!("kinewright_core::measure_scopes");
+    // CC5 §4.3: at the top level too, plus the exact analysis-only construction
+    // so a reader knows the document, the render, and the layer alpha were not
+    // touched.
+    attach_matte_region(&mut value, matte_region.as_ref());
+    if matte_region.is_some() {
+        value["matte_region_construction"] = json!(
+            "analysis-only RGBA copy with A = 255 where m > 0 and A = 0 elsewhere, handed to the unchanged CC2 engine; the document, the render, and the layer alpha are never modified"
+        );
+        value["provenance"]["matte_region"] =
+            serde_json::to_value(&matte_region).unwrap_or(Value::Null);
+    }
     Ok(value)
 }
 
@@ -1384,8 +1568,20 @@ fn measure_core_scopes(
         .iter()
         .map(|sample| ScopeFrame::new(sample.frame.0, &sample.image))
         .collect::<Vec<_>>();
-    measure_scopes(&frames, &core_request)
-        .map_err(|error| ScopeError::new("scope_measurement_failed", error.to_string()))
+    let mut evidence = measure_scopes(&frames, &core_request)
+        .map_err(|error| ScopeError::new("scope_measurement_failed", error.to_string()))?;
+    // CC5 §4.3: Core measures whatever raster it is handed and cannot know the
+    // population was restricted to a matte, so the agent stamps the typed
+    // description onto the evidence *here* — at the one place every measurement
+    // passes through — rather than onto the per-sample JSON clones only.
+    // `compare_scope_evidence`'s cross-population guard and its
+    // `matte_covered_pixel_delta` read that typed field, so a measurement that
+    // reaches the comparison without it is silently differenced against an
+    // unscoped one. Every JSON `matte_region` decoration below is now a copy of
+    // this field rather than a second, independently computed answer.
+    evidence.metadata.matte_region =
+        matte_region_description(request, aggregate_covered_pixel_count(rendered));
+    Ok(evidence)
 }
 
 fn sample_value(sample: &RenderedSample, evidence: &ScopeEvidence, proxy: bool) -> Value {
@@ -1393,14 +1589,22 @@ fn sample_value(sample: &RenderedSample, evidence: &ScopeEvidence, proxy: bool) 
     if proxy {
         metadata.full_resolution = false;
     }
-    json!({
+    // CC5 §4.3: each sample carries its own exact coverage count, because a
+    // matte moves and a per-frame number is the only one that is a fact.
+    // `measure_core_scopes` already stamped it — this evidence was measured
+    // from this one sample — and the JSON decoration is read back off the typed
+    // field so the two can never disagree.
+    let region = metadata.matte_region.clone();
+    let mut value = json!({
         "project_frame": sample.frame.0,
         "image": {"width": sample.image.width, "height": sample.image.height},
         "metadata": metadata,
         "statistics": evidence.statistics,
         "clipping": evidence.clipping,
         "provenance": sample.provenance,
-    })
+    });
+    attach_matte_region(&mut value, region.as_ref());
+    value
 }
 
 fn shot_stats(evidence: &ScopeEvidence) -> ShotStats {
@@ -1896,9 +2100,12 @@ mod tests {
 
     use super::*;
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     struct StubAnalysis {
         frames: BTreeMap<TimeCode, RgbaImage>,
+        /// CC5 §4.3: the coverage raster this double scopes to. `None` keeps
+        /// the trait's real `NotImplemented` default.
+        coverage: Option<RgbaImage>,
     }
 
     impl StubAnalysis {
@@ -1925,6 +2132,33 @@ mod tests {
 
         fn thumbnail_at(&self, at: TimeCode, _max_width: u32) -> Result<RgbaImage, MediaError> {
             Ok(self.frame(at))
+        }
+
+        fn matte_proof_for_document(
+            &self,
+            _document: Arc<Document>,
+            _at: TimeCode,
+            clip: ClipId,
+            effect: kinewright_core::EffectId,
+        ) -> Result<kinewright_core::MatteProof, MediaError> {
+            let Some(coverage) = self.coverage.clone() else {
+                return Err(MediaError::NotImplemented);
+            };
+            Ok(kinewright_core::MatteProof {
+                metadata: kinewright_core::MatteProofMetadata {
+                    render: MonitorProofMetadata::test_double(),
+                    clip,
+                    effect,
+                    node_kind: "color_wheels".to_owned(),
+                    coverage_encoding: kinewright_core::MATTE_COVERAGE_ENCODING.to_owned(),
+                    coverage_scale: kinewright_core::MATTE_COVERAGE_SCALE,
+                    raster_aspect_millionths: 2_000_000,
+                    matte_enabled: true,
+                    window_count: 1,
+                    qualifier_enabled: false,
+                },
+                coverage,
+            })
         }
 
         fn monitor_proof_for_document(
@@ -2372,6 +2606,7 @@ mod tests {
         let document = Arc::new(two_shot_document());
         let original = (*document).clone();
         let analysis = StubAnalysis {
+            coverage: None,
             frames: BTreeMap::from([
                 (
                     TimeCode(0),
@@ -2501,6 +2736,7 @@ mod tests {
         };
         let plan = |candidate: RgbaImage| {
             let analysis = StubAnalysis {
+                coverage: None,
                 frames: BTreeMap::from([
                     (TimeCode(0), base(128, 128, 128)),
                     (TimeCode(30), candidate),
@@ -2620,6 +2856,7 @@ mod tests {
             });
         let document = Arc::new(document);
         let analysis = StubAnalysis {
+            coverage: None,
             frames: BTreeMap::from([
                 (
                     TimeCode(0),
@@ -2753,6 +2990,7 @@ mod tests {
             pixels: vec![128, 128, 128, 255, 128, 128, 128, 255],
         };
         let analysis = StubAnalysis {
+            coverage: None,
             frames: BTreeMap::from([(TimeCode(0), frame.clone()), (TimeCode(30), frame)]),
         };
         let result = plan_shot_match(
@@ -2794,6 +3032,7 @@ mod tests {
     fn shot_match_rejects_more_than_the_candidate_cap_before_rendering() {
         let document = Arc::new(two_shot_document());
         let analysis = StubAnalysis {
+            coverage: None,
             frames: BTreeMap::from([(TimeCode(0), image())]),
         };
         let error = plan_shot_match(
@@ -2826,6 +3065,7 @@ mod tests {
     fn shot_match_marks_a_proxy_sample_at_every_level() {
         let document = Arc::new(two_shot_document());
         let analysis = StubAnalysis {
+            coverage: None,
             frames: BTreeMap::from([
                 (
                     TimeCode(0),
@@ -2913,6 +3153,7 @@ mod tests {
     fn temporal_shot_analysis_and_proxy_provenance_are_explicit() {
         let document = Arc::new(two_shot_document());
         let analysis = StubAnalysis {
+            coverage: None,
             frames: BTreeMap::from([
                 (
                     TimeCode::ZERO,
@@ -2976,6 +3217,7 @@ mod tests {
             TimelineRevision(3),
             &analysis,
             &VideoScopesV2Args {
+                matte_region: None,
                 expected_revision: Some(TimelineRevision(3)),
                 stage: "monitoring_post_composite".to_owned(),
                 timecode: Some(TimeCode::ZERO),
@@ -3024,6 +3266,7 @@ mod tests {
     fn evidence_payloads_stay_small_by_default() {
         let document = Arc::new(two_shot_document());
         let analysis = StubAnalysis {
+            coverage: None,
             frames: BTreeMap::from([
                 (
                     TimeCode(0),
@@ -3128,5 +3371,433 @@ mod tests {
         .unwrap();
         assert!(with_grids["scopes"]["core_evidence"]["waveform"].is_object());
         assert!(serde_json::to_vec(&with_grids).unwrap().len() > analysis_bytes);
+    }
+
+    // -----------------------------------------------------------------------
+    // CC5 §4.3 — matte-scoped scopes
+    // -----------------------------------------------------------------------
+
+    /// A one-clip 4 × 2 document carrying one matted `color_wheels` node.
+    fn matte_scope_document() -> Document {
+        let mut document = two_shot_document();
+        document.tracks[0].clips.truncate(1);
+        document.media_pool.truncate(1);
+        document.media_pool[0].resolution = Some((4, 2));
+        document.resolution = (4, 2);
+        document.duration = TimeCode(30);
+        document.tracks[0].clips[0].effects = vec![kinewright_core::Effect {
+            id: kinewright_core::EffectId(1),
+            name: "color_wheels".to_owned(),
+            parameters: BTreeMap::from([
+                (
+                    "matte_enabled".to_owned(),
+                    kinewright_core::ParamValue::Integer(1),
+                ),
+                (
+                    "matte_window_count".to_owned(),
+                    kinewright_core::ParamValue::Integer(1),
+                ),
+            ]),
+            keyframes: BTreeMap::new(),
+        }];
+        document
+    }
+
+    /// A 4 × 2 RGBA raster whose codes come from `code(x, y)`.
+    fn raster_4x2(code: impl Fn(u32, u32) -> [u8; 4]) -> RgbaImage {
+        let mut pixels = Vec::with_capacity(32);
+        for y in 0..2 {
+            for x in 0..4 {
+                pixels.extend_from_slice(&code(x, y));
+            }
+        }
+        RgbaImage {
+            width: 4,
+            height: 2,
+            pixels,
+        }
+    }
+
+    /// CC5 §4.3: every measurement the agent produces carries its typed
+    /// `matte_region`, not just the per-sample JSON clones — so Core's
+    /// cross-population guard and its `matte_covered_pixel_delta` are reachable
+    /// from the agent's own evidence rather than being dead code.
+    #[test]
+    fn matte_scoped_evidence_reaches_cores_comparison_guard_and_delta() {
+        let document = Arc::new(matte_scope_document());
+        let grey = || raster_4x2(|_, _| [128, 128, 128, 255]);
+        // Two mattes over the same picture: the first covers the left half
+        // (4 pixels), the second only the left column (2 pixels).
+        let covering = |columns: u32| StubAnalysis {
+            frames: BTreeMap::from([(TimeCode(0), grey())]),
+            coverage: Some(raster_4x2(|x, _| {
+                let code = if x < columns { 255 } else { 0 };
+                [code, code, code, 255]
+            })),
+        };
+        let region = Some(MatteRegionArgs {
+            clip_id: ClipId(1),
+            effect_id: kinewright_core::EffectId(1),
+        });
+        let measure = |matte_region, analysis: &StubAnalysis| {
+            let request = build_scope_request(
+                &document,
+                "monitoring_post_composite",
+                Some(TimeCode::ZERO),
+                None,
+                None,
+                None,
+                None,
+                matte_region,
+                None,
+                false,
+                None,
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+            let rendered = render_samples(&document, analysis, &request).unwrap();
+            measure_core_scopes(&request, &rendered).unwrap()
+        };
+
+        let wide = measure(region, &covering(2));
+        let narrow = measure(region, &covering(1));
+        let unscoped = measure(None, &covering(2));
+
+        // The typed field is the thing under test: it must be on the evidence
+        // itself, not only on the serialized samples.
+        assert_eq!(
+            wide.metadata
+                .matte_region
+                .as_ref()
+                .map(|region| region.covered_pixel_count),
+            Some(4)
+        );
+        assert_eq!(
+            narrow
+                .metadata
+                .matte_region
+                .as_ref()
+                .map(|region| region.covered_pixel_count),
+            Some(2)
+        );
+        assert!(unscoped.metadata.matte_region.is_none());
+
+        // A matte-scoped measurement and an unscoped one describe different
+        // populations, so Core refuses to difference them — in both directions.
+        assert!(matches!(
+            compare_scope_evidence(&wide, &unscoped),
+            Err(kinewright_core::ScopeComparisonError::MatteRegionMismatch { .. })
+        ));
+        assert!(matches!(
+            compare_scope_evidence(&unscoped, &wide),
+            Err(kinewright_core::ScopeComparisonError::MatteRegionMismatch { .. })
+        ));
+
+        // Two measurements of the *same* matte are comparable, and the change
+        // in covered population is reported rather than refused: a qualifier
+        // matte's coverage legitimately moves with the colour entering it.
+        let comparison = compare_scope_evidence(&wide, &narrow).expect("same region compares");
+        assert_eq!(
+            comparison.matte_covered_pixel_delta,
+            Some(kinewright_core::SignedDelta {
+                reference: 4,
+                candidate: 2,
+                delta: -2,
+            })
+        );
+        // Two unscoped measurements have no matte delta at all.
+        assert!(
+            compare_scope_evidence(&unscoped, &unscoped)
+                .expect("unscoped compares")
+                .matte_covered_pixel_delta
+                .is_none()
+        );
+    }
+
+    /// CC5 §4.3: the measured population is exactly the affected set, and the
+    /// unaffected pixels become transparent in the analysis-only copy.
+    ///
+    /// Hand-derived on a 4 × 2 raster: the left two columns are covered, so 4
+    /// pixels are inside and 4 outside. `transparent_pixel_count` must equal
+    /// the outside count exactly.
+    #[test]
+    fn matte_scoped_scopes_measure_exactly_the_covered_population() {
+        let document = Arc::new(matte_scope_document());
+        let analysis = StubAnalysis {
+            frames: BTreeMap::from([(TimeCode(0), raster_4x2(|_, _| [128, 128, 128, 255]))]),
+            coverage: Some(raster_4x2(|x, _| {
+                let code = if x < 2 { 255 } else { 0 };
+                [code, code, code, 255]
+            })),
+        };
+
+        let value = video_scopes_v2(
+            &document,
+            TimelineRevision(3),
+            &analysis,
+            &VideoScopesV2Args {
+                matte_region: Some(MatteRegionArgs {
+                    clip_id: ClipId(1),
+                    effect_id: kinewright_core::EffectId(1),
+                }),
+                expected_revision: Some(TimelineRevision(3)),
+                stage: "monitoring_post_composite".to_owned(),
+                timecode: Some(TimeCode::ZERO),
+                range: None,
+                frames: None,
+                step_frames: None,
+                roi: None,
+                resolution: None,
+                proxy_sampling: false,
+                max_width: None,
+                bins: None,
+                columns: None,
+                include_grids: Some(false),
+            },
+        )
+        .unwrap();
+
+        // CC5 §4.3, the central assertion: the transparent set is exactly the
+        // uncovered set, and the visible set is exactly the covered one.
+        let metadata = &value["core_evidence"]["metadata"];
+        assert_eq!(metadata["transparent_pixel_count"], 4);
+        assert_eq!(metadata["visible_pixel_count"], 4);
+        assert_eq!(metadata["roi_pixel_count"], 8);
+
+        // The region is reported at every level, with the pinned threshold.
+        for level in [&value, &value["core_evidence"], &value["sample_results"][0]] {
+            assert_eq!(level["matte_region"]["clip"], 1);
+            assert_eq!(level["matte_region"]["effect"], 1);
+            assert_eq!(
+                level["matte_region"]["threshold"],
+                kinewright_core::MATTE_SCOPE_THRESHOLD
+            );
+            assert_eq!(level["matte_region"]["covered_pixel_count"], 4);
+            assert_eq!(
+                level["matte_threshold"],
+                kinewright_core::MATTE_SCOPE_THRESHOLD
+            );
+            assert_eq!(level["covered_pixel_count"], 4);
+        }
+        // `ScopeMeasurementMetadata` carries it too, so `compare_scope_evidence`
+        // can refuse a cross-population difference.
+        assert_eq!(
+            value["sample_results"][0]["metadata"]["matte_region"]["covered_pixel_count"],
+            4
+        );
+        // The stage is unchanged: only the region moved.
+        assert_eq!(value["stage"], "monitoring_post_composite");
+        assert_eq!(value["render_stage"], "monitoring_post_composite");
+        assert!(
+            value["matte_region_construction"]
+                .as_str()
+                .unwrap()
+                .contains("A = 255 where m > 0")
+        );
+    }
+
+    /// CC5 §4.3: `matte_region` composes with `roi`, and the measured set is
+    /// their intersection.
+    ///
+    /// The ROI is the left half of a 4 × 2 raster — columns 0 and 1 — and the
+    /// coverage is column 0 only, so the intersection is 2 pixels.
+    #[test]
+    fn matte_scoped_scopes_intersect_with_an_explicit_roi() {
+        let document = Arc::new(matte_scope_document());
+        let analysis = StubAnalysis {
+            frames: BTreeMap::from([(TimeCode(0), raster_4x2(|_, _| [128, 128, 128, 255]))]),
+            coverage: Some(raster_4x2(|x, _| {
+                let code = if x < 1 { 255 } else { 0 };
+                [code, code, code, 255]
+            })),
+        };
+
+        let value = video_scopes_v2(
+            &document,
+            TimelineRevision(3),
+            &analysis,
+            &VideoScopesV2Args {
+                matte_region: Some(MatteRegionArgs {
+                    clip_id: ClipId(1),
+                    effect_id: kinewright_core::EffectId(1),
+                }),
+                expected_revision: Some(TimelineRevision(3)),
+                stage: "monitoring_post_composite".to_owned(),
+                timecode: Some(TimeCode::ZERO),
+                range: None,
+                frames: None,
+                step_frames: None,
+                roi: Some(ScopeRoiArgs {
+                    x: Some(0.0),
+                    y: Some(0.0),
+                    width: Some(0.5),
+                    height: Some(1.0),
+                    left: None,
+                    top: None,
+                    right: None,
+                    bottom: None,
+                }),
+                resolution: None,
+                proxy_sampling: false,
+                max_width: None,
+                bins: None,
+                columns: None,
+                include_grids: Some(false),
+            },
+        )
+        .unwrap();
+
+        let metadata = &value["core_evidence"]["metadata"];
+        // The ROI bounds the population to 4 pixels; the matte leaves 2.
+        assert_eq!(metadata["roi_pixel_count"], 4);
+        assert_eq!(metadata["visible_pixel_count"], 2);
+        assert_eq!(metadata["transparent_pixel_count"], 2);
+        // The coverage count is a property of the *matte*, not of the ROI, so
+        // it still reports the whole covered set.
+        assert_eq!(value["matte_region"]["covered_pixel_count"], 2);
+    }
+
+    /// CC5 §4.3: a backend that cannot render the coverage is a typed refusal.
+    /// No population is invented, and no unscoped result is silently returned.
+    #[test]
+    fn matte_scoped_scopes_refuse_when_the_coverage_cannot_be_rendered() {
+        let document = Arc::new(matte_scope_document());
+        let analysis = StubAnalysis {
+            frames: BTreeMap::from([(TimeCode(0), raster_4x2(|_, _| [128, 128, 128, 255]))]),
+            coverage: None,
+        };
+
+        let error = video_scopes_v2(
+            &document,
+            TimelineRevision(3),
+            &analysis,
+            &VideoScopesV2Args {
+                matte_region: Some(MatteRegionArgs {
+                    clip_id: ClipId(1),
+                    effect_id: kinewright_core::EffectId(1),
+                }),
+                expected_revision: Some(TimelineRevision(3)),
+                stage: "monitoring_post_composite".to_owned(),
+                timecode: Some(TimeCode::ZERO),
+                range: None,
+                frames: None,
+                step_frames: None,
+                roi: None,
+                resolution: None,
+                proxy_sampling: false,
+                max_width: None,
+                bins: None,
+                columns: None,
+                include_grids: Some(false),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "matte_region_unavailable");
+        let details = error.details();
+        assert_eq!(details["field"], "matte_region");
+        assert_eq!(details["observed"]["clip_id"], 1);
+        assert_eq!(details["observed"]["effect_id"], 1);
+        assert!(
+            details["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("no population is invented here")
+        );
+    }
+
+    /// CC5 §4.3: a coverage raster that does not match the measured raster is
+    /// a typed mismatch, not a silently misaligned measurement.
+    #[test]
+    fn matte_scoped_scopes_refuse_a_coverage_raster_of_a_different_size() {
+        let document = Arc::new(matte_scope_document());
+        let analysis = StubAnalysis {
+            frames: BTreeMap::from([(TimeCode(0), raster_4x2(|_, _| [128, 128, 128, 255]))]),
+            coverage: Some(RgbaImage {
+                width: 2,
+                height: 1,
+                pixels: vec![255, 255, 255, 255, 0, 0, 0, 255],
+            }),
+        };
+
+        let error = video_scopes_v2(
+            &document,
+            TimelineRevision(3),
+            &analysis,
+            &VideoScopesV2Args {
+                matte_region: Some(MatteRegionArgs {
+                    clip_id: ClipId(1),
+                    effect_id: kinewright_core::EffectId(1),
+                }),
+                expected_revision: Some(TimelineRevision(3)),
+                stage: "monitoring_post_composite".to_owned(),
+                timecode: Some(TimeCode::ZERO),
+                range: None,
+                frames: None,
+                step_frames: None,
+                roi: None,
+                resolution: None,
+                proxy_sampling: false,
+                max_width: None,
+                bins: None,
+                columns: None,
+                include_grids: Some(false),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "matte_region_raster_mismatch");
+        assert_eq!(error.details()["observed"], "2x1");
+        assert_eq!(error.details()["allowed"], "4x2");
+    }
+
+    /// CC5 §4.3: an unscoped response is byte-unchanged — no `matte_region`
+    /// key anywhere, so a CC2 consumer reads exactly what it always did.
+    #[test]
+    fn unscoped_scopes_carry_no_matte_region_key() {
+        let document = Arc::new(matte_scope_document());
+        let analysis = StubAnalysis {
+            frames: BTreeMap::from([(TimeCode(0), raster_4x2(|_, _| [128, 128, 128, 255]))]),
+            coverage: Some(raster_4x2(|_, _| [255, 255, 255, 255])),
+        };
+
+        let value = video_scopes_v2(
+            &document,
+            TimelineRevision(3),
+            &analysis,
+            &VideoScopesV2Args {
+                matte_region: None,
+                expected_revision: Some(TimelineRevision(3)),
+                stage: "monitoring_post_composite".to_owned(),
+                timecode: Some(TimeCode::ZERO),
+                range: None,
+                frames: None,
+                step_frames: None,
+                roi: None,
+                resolution: None,
+                proxy_sampling: false,
+                max_width: None,
+                bins: None,
+                columns: None,
+                include_grids: Some(false),
+            },
+        )
+        .unwrap();
+
+        assert!(value.get("matte_region").is_none());
+        assert!(value.get("matte_threshold").is_none());
+        assert!(value["core_evidence"].get("matte_region").is_none());
+        assert!(value["sample_results"][0].get("matte_region").is_none());
+        // `.get()` rather than an index: an explicit `null` would also be a
+        // byte-level change to the unscoped response.
+        assert!(
+            value["sample_results"][0]["metadata"]
+                .get("matte_region")
+                .is_none()
+        );
+        // Every pixel is measured, because nothing scoped the population.
+        assert_eq!(value["core_evidence"]["metadata"]["visible_pixel_count"], 8);
     }
 }

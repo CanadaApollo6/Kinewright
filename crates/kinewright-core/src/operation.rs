@@ -3236,7 +3236,8 @@ fn validate_curve(
     // CC3 §6 policy 1: `{curve}_point_count` switches the whole curve
     // discontinuously, so only `Hold` keyframes are legal. Any other
     // interpolation would resolve intermediate point counts that no author
-    // ever authored.
+    // ever authored. CC4 §6 and CC5 §5.1 extend the same rule to LUT and
+    // matte tokens and counts.
     if is_hold_only_parameter(effect_name, name) {
         for keyframe in &curve.keyframes {
             if keyframe.interpolation != KeyframeInterpolation::Hold {
@@ -3272,22 +3273,29 @@ fn validate_curve(
 /// CC3 §6 policy 1 covers `{curve}_point_count`, which switches a whole curve
 /// discontinuously. CC4 §6 adds a LUT node's `lut_asset_id` and
 /// `input_encoding_token`: interpolating between two asset ids or two transfer
-/// functions is meaningless, so the same typed rejection applies.
+/// functions is meaningless, so the same typed rejection applies. CC5 §5.1
+/// generalizes the same rule to a matte's tokens and counts — `matte_enabled`,
+/// `matte_window_count`, `matte_combine_token`, `matte_invert`, and each
+/// window's `shape_token` and `invert` — on the four matte-capable kinds.
+/// Every other matte control, including the mix, the window geometry, and
+/// every qualifier scalar, keeps every interpolation.
 fn is_hold_only_parameter(effect_name: &str, name: &str) -> bool {
-    if is_curve_point_count_parameter(effect_name, name) {
-        return true;
-    }
-    crate::is_lut_color_node(effect_name)
-        && (name == crate::LUT_ASSET_ID_PARAMETER || name == crate::LUT_INPUT_ENCODING_PARAMETER)
-}
-
-/// Whether `name` is the `{curve}_point_count` control of a `color_curves`
-/// node.
-fn is_curve_point_count_parameter(effect_name: &str, name: &str) -> bool {
-    crate::ColorNodeKind::from_effect_name(effect_name) == Some(crate::ColorNodeKind::Curves)
+    let Some(kind) = crate::ColorNodeKind::from_effect_name(effect_name) else {
+        return false;
+    };
+    if kind == crate::ColorNodeKind::Curves
         && crate::ColorCurveChannel::ALL
             .into_iter()
             .any(|curve| curve.point_count_parameter() == name)
+    {
+        return true;
+    }
+    if kind.is_lut()
+        && (name == crate::LUT_ASSET_ID_PARAMETER || name == crate::LUT_INPUT_ENCODING_PARAMETER)
+    {
+        return true;
+    }
+    kind.supports_matte() && crate::is_hold_only_matte_parameter(name)
 }
 
 /// Reject a `color_curves` node whose stored static points are not strictly

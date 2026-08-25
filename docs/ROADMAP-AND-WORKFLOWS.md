@@ -210,10 +210,26 @@ The first three cycle intentions are:
    `plan_creative_look`, and look proofs. The contract is
    `CC4-LOOK-MANAGEMENT.md`.
 
+8. **CC5 secondaries — implemented 2026-08-25, pending platform smoke.** A
+   matte belongs to its correction node: `primary_correction`, `color_wheels`,
+   `color_curves`, and `creative_look` carry an optional matte of up to four
+   aspect-corrected rotatable windows (rect/ellipse, symmetric feather,
+   per-window invert, union/intersection) and an HSL qualifier evaluated on
+   the node input in `grade709`, applied as `out = x + (node(x) − x)·m` with a
+   per-pixel exact identity at `m = 0`; alpha is never touched and the layer
+   `mask` effect is unchanged. The GPU node stack carries a 64-word matte
+   block per node and a matte-debug selector that renders coverage; an
+   independent CPU reference evaluates the same contract at pixel centres;
+   `matte_proof_for_document`, `inspect_grade_matte`, matte-scoped scopes
+   through the unchanged CC2 engine, `track_matte_window` on the existing
+   tracker with M40 smoothing, and `plan_secondary_correction` complete the
+   agent surface; the inspector gains a matte section, a preview overlay with
+   drag editing, and a matte view. The contract is `CC5-SECONDARIES.md`.
+
 Before CC3 started, a six-lane review of CC1 and CC2 (2026-08-24) fixed the
 defects recorded in `CHANGELOG.md` and hardened both fixture suites so that
 every control has an analytic expected value and no parity case is vacuous.
-The next primary colour slice is **CC5 secondaries**.
+The next primary colour slice is **CC6 QC and managed delivery**.
 
 Within that cadence, three workstreams remain active:
 
@@ -266,8 +282,9 @@ deliberate limits that define the remaining colour work:
   clipping, waveform, RGB parade, vectorscope, geometric ROI, temporal sampling,
   and signed reference comparison. The same typed engine feeds the non-blocking
   editor panel and the read-only agent analysis/matching tools.
-- Masks and tracking exist, but the current compositor applies the mask to final
-  layer alpha. That is **not** yet an effect-scoped colour secondary.
+- The layer `mask` effect applies to final layer alpha and remains a
+  compositing operation. Since CC5, effect-scoped colour secondaries are the
+  node-owned mattes on the managed colour nodes, which never touch alpha.
 - CC0 preserves explicit source, working, monitoring, and delivery colour
   descriptions with provenance and confidence. Probe keeps unknown values honest;
   editors and agents can inspect them and apply an undoable metadata override.
@@ -387,8 +404,8 @@ constructors, compositor inputs, `ExportSettings`, and FFmpeg stream/container
 metadata. Later stages cannot treat those surfaces as implicit or start before the
 required earlier exit gate passes.
 
-**Current status (2026-08-25): CC0, M41, CC1, M42, CC2, CC3, and CC4 are
-complete apart from the CC3/CC4 hands-on platform smoke gates.** CC0's exit evidence
+**Current status (2026-08-25): CC0, M41, CC1, M42, CC2, CC3, CC4, and CC5 are
+complete apart from the CC3/CC4/CC5 hands-on platform smoke gates.** CC0's exit evidence
 includes legacy project migration, known/partial/unknown and 10-bit probe fixtures,
 visible human and agent inspection, an undoable source override, delivery rejection
 outside the current contract, and an encoded file decoded again to verify its
@@ -407,7 +424,10 @@ GPU node-stack ABI, the wheel and curve-editor widgets, and evidence-only
 wheel/curve planners. CC4 adds project-owned hashed LUT assets with a
 relocatable sidecar store, the ordered technical/creative LUT nodes, the
 built-in looks as generated assets, the human `.cube` workflow, and look
-planners. CC5 secondaries is the next primary colour slice.
+planners. CC5 adds node-owned mattes (windows, HSL qualifier, feather,
+keyframes, tracking), matte inspection, and matte-scoped scopes with an
+affected-pixel containment gate. CC6 QC and managed delivery is the next
+primary colour slice.
 
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |

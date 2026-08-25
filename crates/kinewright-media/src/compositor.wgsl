@@ -56,8 +56,9 @@ struct LayerParams {
 //
 //   header.x  active node count (inactive nodes are never written, CC3 3.3)
 //   header.y  word index, into `words`, where the curve payload region starts
-//   header.z  ABI version, currently 2 (CC4 4.2 added the LUT kinds)
-//   header.w  reserved, 0
+//   header.z  ABI version, currently 3 (CC5 3.1 gave `v11` a meaning)
+//   header.w  CC5 3.2 matte-debug selector: 0 renders colour, k > 0 returns
+//             the coverage of active node k - 1 instead
 //
 // `words` begins at byte 16, so `words[0]` is the buffer's word 4 and node
 // record `i` occupies `words[i * 16 .. i * 16 + 16]`:
@@ -78,6 +79,16 @@ const GRADE_NODE_STRIDE: u32 = 16u;
 const GRADE_NODE_VALUES: u32 = 4u;
 // `[count, x0, y0, m0, ... x15, y15, m15]` for one curve.
 const GRADE_CURVE_SLOT_WORDS: u32 = 49u;
+// CC5 3.1: word index of `v11`, the matte payload word offset, inside a node
+// record.  `0` means the node carries no matte at all.
+const GRADE_NODE_MATTE_OFFSET: u32 = 15u;
+// CC5 3.1: window `j` of a matte block starts here, twelve words apart.
+const MATTE_WINDOW_BASE: u32 = 16u;
+const MATTE_WINDOW_STRIDE: u32 = 12u;
+
+// CC5 3.3: the coverage of the node named by `header.w`, captured while the
+// node stack runs so `fragment_main` can return it without a second pass.
+var<private> matte_debug_coverage: f32 = 0.0;
 
 @group(0) @binding(0) var layer_texture: texture_2d<f32>;
 @group(0) @binding(1) var layer_sampler: sampler;
@@ -446,12 +457,219 @@ fn apply_lut_node(values: u32, rgb: vec3<f32>) -> vec3<f32> {
     return rgb + (decoded - rgb) * mix_amount;
 }
 
+// CC5 2.3: `smoothstep(A, B, x) = t*t*(3 - 2t)`, `t = clamp((x - A)/(B - A), 0, 1)`.
+// Written out rather than calling the builtin so the shader and the CPU
+// reference transcribe the same three lines of the contract, and so the
+// `A == B` case is never reached: every caller guards it.
+fn matte_smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = clamp((x - a) / (b - a), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// CC5 2.3: one geometric window's weight at `uv`, in the aspect-corrected
+// normalized field.  `base` is the matte block's word index; `aspect` is the
+// host-supplied output raster aspect from block word 5, never sniffed from
+// `textureDimensions`.
+fn matte_window_weight(base: u32, index: u32, uv: vec2<f32>, aspect: f32) -> f32 {
+    let w = base + MATTE_WINDOW_BASE + index * MATTE_WINDOW_STRIDE;
+    let shape = u32(round(grade_buffer.words[w]));
+    let cx = grade_buffer.words[w + 1u];
+    let cy = grade_buffer.words[w + 2u];
+    let hw = grade_buffer.words[w + 3u];
+    let hh = grade_buffer.words[w + 4u];
+    let cos_t = grade_buffer.words[w + 5u];
+    let sin_t = grade_buffer.words[w + 6u];
+    let feather = grade_buffer.words[w + 7u];
+    let invert = grade_buffer.words[w + 8u];
+    var weight = 0.0;
+    // CC5 2.3: a degenerate half-extent is not reachable through the edit path
+    // or through keyframes, but a hostile or future buffer must not fail the
+    // render: the window simply contributes nothing.  No error, no clamp.
+    if hw > 0.0 && hh > 0.0 {
+        // `d` is the offset from the centre divided by the raster height, so
+        // it is isotropic in pixels; `hw * aspect` and `hh` are both half
+        // extents in units of raster height, so `n` is dimensionless with the
+        // boundary at `|n| = 1`.
+        let d = vec2<f32>((uv.x - cx) * aspect, uv.y - cy);
+        let q = vec2<f32>(
+            d.x * cos_t + d.y * sin_t,
+            -d.x * sin_t + d.y * cos_t,
+        );
+        let n = vec2<f32>(q.x / (hw * aspect), q.y / hh);
+        var dist = max(abs(n.x), abs(n.y));
+        if shape == 2u {
+            dist = sqrt(n.x * n.x + n.y * n.y);
+        }
+        if feather <= 0.0 {
+            // The hard branch is mandatory: `smoothstep` with `A == B` is
+            // undefined.
+            if dist <= 1.0 {
+                weight = 1.0;
+            }
+        } else {
+            // The band straddles the edge, so `1 - w` is the exact complement
+            // of the same shape with the same band.
+            weight = 1.0 - matte_smoothstep(1.0 - feather, 1.0 + feather, dist);
+        }
+    }
+    if invert >= 0.5 {
+        weight = 1.0 - weight;
+    }
+    return weight;
+}
+
+// CC5 2.4: one qualifier band.  `min` rather than a product so the interior is
+// exactly 1 and the two shoulders cannot interact.
+fn matte_band(v: f32, lo: f32, hi: f32, s: f32) -> f32 {
+    if lo > hi {
+        // Degenerate resolved band (CC5 2.6): evaluates to 0, no clamp, no
+        // reorder, no error.
+        return 0.0;
+    }
+    if s <= 0.0 {
+        if lo <= v && v <= hi {
+            return 1.0;
+        }
+        return 0.0;
+    }
+    return min(
+        matte_smoothstep(lo - s, lo, v),
+        1.0 - matte_smoothstep(hi, hi + s, v),
+    );
+}
+
+// CC5 2.4: the HSL qualifier, evaluated on the value ENTERING the node, in the
+// CC3 `grade709` encoding, on a local clamped copy.  The clamp never escapes
+// this function, so CC1 2.2.5 is preserved.
+fn matte_qualifier_weight(base: u32, rgb_in: vec3<f32>) -> f32 {
+    let e = vec3<f32>(
+        grade709_encode(rgb_in.r),
+        grade709_encode(rgb_in.g),
+        grade709_encode(rgb_in.b),
+    );
+    let c = clamp(e, vec3<f32>(0.0), vec3<f32>(1.0));
+    let high = max(c.r, max(c.g, c.b));
+    let low = min(c.r, min(c.g, c.b));
+    let chroma = high - low;
+    var sat = 0.0;
+    if high > 0.0 {
+        sat = chroma / high;
+    }
+    let luma = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    let hue_center = grade_buffer.words[base + 6u];
+    let hue_width = grade_buffer.words[base + 7u];
+    let hue_softness = grade_buffer.words[base + 8u];
+    // CC5 2.4 achromatic rule: a 180 degree half-width disables the hue leg
+    // entirely, achromatic pixels included; otherwise an undefined hue is
+    // excluded.  It is a numeric test, not a special-cased flag.
+    var hue_weight = 1.0;
+    if hue_width < 180.0 {
+        if chroma == 0.0 {
+            hue_weight = 0.0;
+        } else {
+            // Ties take the first matching branch in this written order, so
+            // both implementations agree.
+            var hue = 0.0;
+            if high == c.r {
+                let k = (c.g - c.b) / chroma;
+                hue = 60.0 * (k - 6.0 * floor(k / 6.0));
+            } else if high == c.g {
+                hue = 60.0 * ((c.b - c.r) / chroma + 2.0);
+            } else {
+                hue = 60.0 * ((c.r - c.g) / chroma + 4.0);
+            }
+            var dh = abs(hue - hue_center);
+            dh = min(dh, 360.0 - dh);
+            if hue_softness <= 0.0 {
+                if dh <= hue_width {
+                    hue_weight = 1.0;
+                } else {
+                    hue_weight = 0.0;
+                }
+            } else {
+                hue_weight = 1.0 - matte_smoothstep(hue_width, hue_width + hue_softness, dh);
+            }
+        }
+    }
+    return hue_weight
+        * matte_band(
+            sat,
+            grade_buffer.words[base + 9u],
+            grade_buffer.words[base + 10u],
+            grade_buffer.words[base + 11u],
+        )
+        * matte_band(
+            luma,
+            grade_buffer.words[base + 12u],
+            grade_buffer.words[base + 13u],
+            grade_buffer.words[base + 14u],
+        );
+}
+
+// CC5 2.5: the resolved coverage of one node's matte block.
+//
+// `max` / `min` are exact at 0 and 1 and idempotent, so the affected set is
+// exactly the union or the intersection of the shapes.
+fn matte_coverage(base: u32, uv: vec2<f32>, rgb_in: vec3<f32>) -> f32 {
+    let window_count = u32(round(grade_buffer.words[base]));
+    let combine = u32(round(grade_buffer.words[base + 1u]));
+    let qualifier_enabled = grade_buffer.words[base + 2u];
+    let invert = grade_buffer.words[base + 3u];
+    let mix_amount = grade_buffer.words[base + 4u];
+    let aspect = grade_buffer.words[base + 5u];
+    var windows = 1.0;
+    if window_count > 0u {
+        if combine == 1u {
+            windows = 1.0;
+            for (var j = 0u; j < window_count; j++) {
+                windows = min(windows, matte_window_weight(base, j, uv, aspect));
+            }
+        } else {
+            windows = 0.0;
+            for (var j = 0u; j < window_count; j++) {
+                windows = max(windows, matte_window_weight(base, j, uv, aspect));
+            }
+        }
+    }
+    var qualifier = 1.0;
+    if qualifier_enabled >= 0.5 {
+        qualifier = matte_qualifier_weight(base, rgb_in);
+    }
+    var m = windows * qualifier;
+    if invert >= 0.5 {
+        m = 1.0 - m;
+    }
+    return m * mix_amount;
+}
+
+// CC3 3.1 / CC4 4.2: one node's transform, dispatched by storage tag.  An
+// unrecognized kind stays the identity, so a host that writes a tag this
+// shader does not know cannot silently apply the wrong maths.
+fn apply_node_kind(kind: u32, base: u32, values: u32, rgb: vec3<f32>) -> vec3<f32> {
+    if kind == 1u {
+        return apply_primary_node(rgb, values);
+    } else if kind == 2u {
+        return apply_wheels_node(values, rgb);
+    } else if kind == 3u {
+        return apply_curves_node(u32(round(grade_buffer.words[base + 1u])), rgb);
+    } else if kind == 4u {
+        // CC4 4.2: `technical_lut`.
+        return apply_lut_node(values, rgb);
+    } else if kind == 5u {
+        // CC4 4.2: `creative_look`.  The two kinds are mathematically
+        // identical and differ only in stage, role, and mix bounds, all of
+        // which the host resolved before the record was written.
+        return apply_lut_node(values, rgb);
+    }
+    return rgb;
+}
+
 // CC3 3.1: one ordered node stack executed in serialized `clip.effects` order.
 // The renderer must not flatten, reorder, or merge nodes, and no RGB clamp
 // occurs between them.  Inactive nodes are never written to the buffer
 // (CC3 3.3); the `bypass` word is still honoured so a stale buffer cannot
 // silently apply a bypassed node.
-fn apply_color_nodes(input_rgb: vec3<f32>) -> vec3<f32> {
+fn apply_color_nodes(input_rgb: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     var corrected = input_rgb;
     for (var index = 0u; index < grade_buffer.header.x; index++) {
         let base = index * GRADE_NODE_STRIDE;
@@ -460,20 +678,30 @@ fn apply_color_nodes(input_rgb: vec3<f32>) -> vec3<f32> {
         }
         let kind = u32(round(grade_buffer.words[base]));
         let values = base + GRADE_NODE_VALUES;
-        if kind == 1u {
-            corrected = apply_primary_node(corrected, values);
-        } else if kind == 2u {
-            corrected = apply_wheels_node(values, corrected);
-        } else if kind == 3u {
-            corrected = apply_curves_node(u32(round(grade_buffer.words[base + 1u])), corrected);
-        } else if kind == 4u {
-            // CC4 4.2: `technical_lut`.
-            corrected = apply_lut_node(values, corrected);
-        } else if kind == 5u {
-            // CC4 4.2: `creative_look`.  The two kinds are mathematically
-            // identical and differ only in stage, role, and mix bounds, all of
-            // which the host resolved before the record was written.
-            corrected = apply_lut_node(values, corrected);
+        let matte_base = u32(round(grade_buffer.words[base + GRADE_NODE_MATTE_OFFSET]));
+        if matte_base == 0u {
+            // CC5 2.5.4, normative and NOT an optimization: a node without an
+            // active matte must not take the blend at all, because
+            // `x + (y - x) * 1.0` is not bit-identical to `y` in f32.  This is
+            // the CC4 path, untouched, and it is what makes "a pre-CC5 project
+            // renders bit-identically" provable rather than approximate.
+            corrected = apply_node_kind(kind, base, values, corrected);
+        } else {
+            // CC5 2.4: the qualifier reads the value ENTERING this node.
+            let m = matte_coverage(matte_base, uv, corrected);
+            if index + 1u == grade_buffer.header.w {
+                matte_debug_coverage = m;
+            }
+            if m == 0.0 {
+                // CC5 2.5.5, normative and NOT an optimization: at exactly
+                // zero coverage the transform must not be blended in.
+                // `x + (node(x) - x) * 0.0` maps `-0.0` to `+0.0` and maps any
+                // `x` to NaN whenever `node(x)` is non-finite, which CC1
+                // 2.2.5's no-clamp rule makes reachable on over-range input.
+            } else {
+                let node = apply_node_kind(kind, base, values, corrected);
+                corrected = corrected + (node - corrected) * m;
+            }
         }
     }
     return corrected;
@@ -512,8 +740,17 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if params.input_linear > 0.5 {
         linear_rgb = sampled.rgb;
     }
+    matte_debug_coverage = 0.0;
     if grade_buffer.header.x > 0u {
-        linear_rgb = apply_color_nodes(linear_rgb);
+        linear_rgb = apply_color_nodes(linear_rgb, input.uv);
+    }
+    // CC5 3.3: the matte-debug return happens immediately after the node
+    // stack, BEFORE the legacy stage, the key, the fade, the crop, and the
+    // mask, so nothing downstream perturbs the coverage; alpha is forced to 1
+    // so a CC2 measurement cannot discard it.
+    if grade_buffer.header.w > 0u {
+        let coverage = matte_debug_coverage;
+        return vec4<f32>(coverage, coverage, coverage, 1.0);
     }
     var output_linear = linear_rgb;
     var alpha = clamp(sampled.a * params.opacity, 0.0, 1.0);

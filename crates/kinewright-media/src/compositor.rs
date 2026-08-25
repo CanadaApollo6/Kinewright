@@ -9,11 +9,12 @@ use std::{
 
 use half::f16;
 use kinewright_core::{
-    COLOR_NODE_LIMIT_PER_LAYER, ColorContext, ColorCurveChannel, ColorDescription, ColorNodeKind,
-    ColorWheelChannel, ColorWheelsParams, CurvePoints, Effect, EffectParameterDescriptor,
-    EffectUniform, FrameTexture, LutNodeParams, MediaError, MonitorProofMetadata,
-    MonitorProofRenderKind, ParamValue, ResolvedCurves, classify_color_node,
-    color_node_inactive_reason, effect_descriptor, managed_color_node_count,
+    COLOR_NODE_LIMIT_PER_LAYER, ClipId, ColorContext, ColorCurveChannel, ColorDescription,
+    ColorNodeKind, ColorWheelChannel, ColorWheelsParams, CurvePoints, Effect, EffectId,
+    EffectParameterDescriptor, EffectUniform, FrameTexture, LutNodeParams, MATTE_WINDOW_LIMIT,
+    MatteParams, MatteProofError, MediaError, MonitorProofMetadata, MonitorProofRenderKind,
+    ParamValue, ResolvedCurves, classify_color_node, color_node_inactive_reason, effect_descriptor,
+    managed_color_node_count,
 };
 
 use crate::{
@@ -57,10 +58,30 @@ const GRADE_CURVE_SLOT_WORDS: usize = 49;
 const GRADE_CURVE_PAYLOAD_WORDS: usize = 4 * GRADE_CURVE_SLOT_WORDS;
 /// The storage-buffer ABI version written into `header.z`.
 ///
-/// CC4 4.2 takes this `1 -> 2`: the buffer now carries node kinds whose
+/// CC4 4.2 took this `1 -> 2`: the buffer carries node kinds whose
 /// interpretation depends on a companion texture binding (the LUT atlas), so a
 /// consumer that understands only the CC3 kinds cannot safely read it.
-const GRADE_ABI_VERSION: u32 = 2;
+///
+/// CC5 3.1 takes it `2 -> 3`: `v11` stopped being a reserved zero and became
+/// the matte payload word offset, so a CC4 consumer would read a matte-gated
+/// node as an unmasked correction applied to the whole raster.
+const GRADE_ABI_VERSION: u32 = 3;
+
+/// CC5 3.1: the matte block is 64 words (256 bytes) in the payload region.
+const MATTE_BLOCK_WORDS: usize = 64;
+/// CC5 3.1: one window occupies twelve words of the matte block.
+const MATTE_WINDOW_WORDS: usize = 12;
+/// CC5 3.1: window `j` starts at `MATTE_WINDOW_BASE_WORD + 12 * j`.
+const MATTE_WINDOW_BASE_WORD: usize = 16;
+const _: () = assert!(
+    MATTE_WINDOW_BASE_WORD + MATTE_WINDOW_LIMIT * MATTE_WINDOW_WORDS == MATTE_BLOCK_WORDS,
+    "the CC5 3.1 matte block is exactly its header plus four window slots"
+);
+/// Word index of `v11` inside a node record: the matte payload word offset.
+///
+/// `0` means *no matte*, unambiguous because `words[0]` is always the first
+/// record's `kind`.
+const GRADE_NODE_MATTE_OFFSET_WORD: usize = GRADE_NODE_VALUE_OFFSET + 11;
 /// The `grade709` range of one curve-coordinate basis point.
 const CURVE_BASIS_POINT_SCALE: f32 = 10_000.0;
 
@@ -117,16 +138,19 @@ const LUT_ATLAS_CACHE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// binding is not available on every supported downlevel backend.
 pub const COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE: u32 = 1;
 
-/// CC3 3.2's worst case is sixteen nodes that are all curve nodes:
-/// `16 + 16 * 64 + 16 * 4 * 49 * 4 = 13584` bytes.  The negotiated limit is
-/// the next power of two so the ABI has headroom for a future value block.
-pub const COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE: u64 = 16_384;
+/// CC5 3.1's worst case is sixteen curve nodes that each carry a matte:
+/// `16 + 16 * 64 + 16 * 4 * 49 * 4 + 16 * 64 * 4 = 17680` bytes, which no
+/// longer fits the CC3 binding size.  The negotiated limit is the next power
+/// of two, following CC3's stated convention.  The binding *count* stays `1`.
+pub const COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE: u64 = 32_768;
 
-/// The largest buffer [`grade_buffer_bytes`] can produce, asserted against the
-/// negotiated binding size by `grade_buffer_worst_case_fits_the_binding_size`.
+/// The largest buffer [`grade_buffer_bytes_with_matte`] can produce, asserted
+/// against the negotiated binding size by
+/// `grade_buffer_worst_case_fits_the_binding_size`.
 const GRADE_BUFFER_WORST_CASE_BYTES: usize = GRADE_HEADER_BYTES
     + COLOR_NODE_LIMIT_PER_LAYER * GRADE_NODE_BYTES
-    + COLOR_NODE_LIMIT_PER_LAYER * GRADE_CURVE_PAYLOAD_WORDS * 4;
+    + COLOR_NODE_LIMIT_PER_LAYER * GRADE_CURVE_PAYLOAD_WORDS * 4
+    + COLOR_NODE_LIMIT_PER_LAYER * MATTE_BLOCK_WORDS * 4;
 
 /// Add the minimum limits required by the production compositor to a device
 /// request. This deliberately preserves stronger caller requirements while
@@ -295,6 +319,81 @@ pub struct CompositorLayer<'a, F = FrameTexture> {
     pub frame: &'a F,
     pub effects: &'a [Effect],
     pub transition: TransitionRenderParams,
+}
+
+/// Which layer's grade buffer carries the CC5 3.2 matte-debug selector.
+///
+/// The selector is a word of the *layer's own* storage buffer, not a global
+/// render mode, so it is resolved per layer and every other layer renders
+/// colour exactly as it always did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MatteDebugSelection {
+    /// Index into the composited layer slice.
+    layer_index: usize,
+    /// Zero-based index of the target node among the layer's *active* nodes.
+    active_node: usize,
+}
+
+/// The colour node whose matte coverage [`Compositor::render_matte`] renders.
+///
+/// `clip` is carried only so the typed [`MatteProofError`] failures can name
+/// the clip a caller asked about; the compositor itself addresses layers
+/// positionally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatteRenderTarget {
+    /// Index into the composited layer slice.
+    pub layer_index: usize,
+    /// The clip the layer was staged from, for error reporting.
+    pub clip: ClipId,
+    /// The matte-carrying colour node on that layer.
+    pub effect: EffectId,
+}
+
+/// Resolve a matte-proof target to its index among a layer's *active* nodes.
+///
+/// CC5 3.2: an inactive node is not written to the buffer and therefore shifts
+/// the indices of the nodes after it, so the active index is resolved at the
+/// requested frame from the same evaluated effects the serializer walks. A
+/// target that is inactive, carries no matte, is not a colour node, or is
+/// absent fails typed rather than silently selecting a different node.
+fn matte_debug_active_index(
+    effects: &[Effect],
+    clip: ClipId,
+    effect_id: EffectId,
+) -> Result<usize, MatteProofError> {
+    let mut active = 0_usize;
+    for effect in effects {
+        let is_target = effect.id == effect_id;
+        let Some(_kind) = classify_color_node(effect) else {
+            if is_target {
+                return Err(MatteProofError::NotAColorNode {
+                    clip,
+                    effect: effect_id,
+                    name: effect.name.clone(),
+                });
+            }
+            continue;
+        };
+        if let Some(reason) = color_node_inactive_reason(effect) {
+            if is_target {
+                return Err(MatteProofError::NodeInactive {
+                    reason: reason.as_str().to_owned(),
+                });
+            }
+            continue;
+        }
+        if is_target {
+            if !MatteParams::from_effect(effect).has_matte() {
+                return Err(MatteProofError::NoMatte);
+            }
+            return Ok(active);
+        }
+        active += 1;
+    }
+    Err(MatteProofError::EffectNotFound {
+        clip,
+        effect: effect_id,
+    })
 }
 
 #[doc(hidden)]
@@ -794,7 +893,7 @@ impl Compositor {
         library: Option<&LutLibrary>,
     ) -> Result<FrameTexture, MediaError> {
         let (width, height) = resolution;
-        let (output, resources, encoder) = self.composite(width, height, layers, library)?;
+        let (output, resources, encoder) = self.composite(width, height, layers, library, None)?;
         let readback = self.readback_for(width, height, &output, encoder, monitoring);
         self.release_layer_textures(resources);
         readback
@@ -835,10 +934,91 @@ impl Compositor {
         library: Option<&LutLibrary>,
     ) -> Result<DeliveryFrame, MediaError> {
         let (width, height) = resolution;
-        let (output, resources, encoder) = self.composite(width, height, layers, library)?;
+        let (output, resources, encoder) = self.composite(width, height, layers, library, None)?;
         let readback = self.readback_rgba16(width, height, &output, encoder, delivery);
         self.release_layer_textures(resources);
         readback
+    }
+
+    /// Render one layer's CC5 matte coverage instead of its colour.
+    ///
+    /// The named layer is composited **alone** into a cleared target, so no
+    /// other layer can paint over the coverage, and its grade buffer carries
+    /// the CC5 3.2 matte-debug selector: the shader returns
+    /// `vec4(m, m, m, 1)` immediately after the node stack, before the legacy
+    /// stage, the key, the fade, the crop, and the mask, so nothing downstream
+    /// perturbs `m` and no alpha byte is consulted.
+    ///
+    /// The result is one coverage byte per pixel, `round(255 * clamp(m, 0, 1))`
+    /// with **no transfer function at all** — an integer quantization of a
+    /// coverage scalar, which is why it does not share the monitor readback.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed [`MatteProofError`] failures when the target effect
+    /// is missing, is not a colour node, is inactive at this frame, or carries
+    /// no matte, plus the ordinary composite and GPU mapping failures.
+    pub fn render_matte<F: CompositorInput>(
+        &self,
+        resolution: (u32, u32),
+        layers: &[CompositorLayer<'_, F>],
+        library: Option<&LutLibrary>,
+        target: MatteRenderTarget,
+    ) -> Result<Vec<u8>, MediaError> {
+        let layer = layers.get(target.layer_index).ok_or_else(|| {
+            MediaError::Backend(format!(
+                "matte_proof_layer_not_found: layer {} was requested, {} were composited",
+                target.layer_index,
+                layers.len()
+            ))
+        })?;
+        let active_node = matte_debug_active_index(layer.effects, target.clip, target.effect)?;
+        let (width, height) = resolution;
+        let isolated = [CompositorLayer {
+            frame: layer.frame,
+            effects: layer.effects,
+            transition: layer.transition,
+        }];
+        let (output, resources, encoder) = self.composite(
+            width,
+            height,
+            &isolated,
+            library,
+            Some(MatteDebugSelection {
+                layer_index: 0,
+                active_node,
+            }),
+        )?;
+        let readback = self.readback_matte(width, height, &output, encoder);
+        self.release_layer_textures(resources);
+        readback
+    }
+
+    /// Read one coverage byte per pixel off the `Rgba16Float` target.
+    ///
+    /// Deliberately not routed through the monitor or delivery readbacks: the
+    /// coverage carries no transfer function, so applying one would report a
+    /// display code where the contract requires `round(255 * m)`.
+    fn readback_matte(
+        &self,
+        width: u32,
+        height: u32,
+        output: &wgpu::Texture,
+        encoder: wgpu::CommandEncoder,
+    ) -> Result<Vec<u8>, MediaError> {
+        let mut coverage = Vec::with_capacity(
+            usize::try_from(width)
+                .unwrap_or_default()
+                .saturating_mul(usize::try_from(height).unwrap_or_default()),
+        );
+        self.for_each_linear_pixel(width, height, output, encoder, |linear| {
+            // The three colour channels are written identically by the shader;
+            // reading red keeps the quantization single-sourced.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            coverage.push((linear[0].clamp(0.0, 1.0) * 255.0).round() as u8);
+            Ok(())
+        })?;
+        Ok(coverage)
     }
 
     /// Record one composite pass into an `Rgba16Float` render target.
@@ -852,6 +1032,7 @@ impl Compositor {
         height: u32,
         layers: &[CompositorLayer<'_, F>],
         library: Option<&LutLibrary>,
+        matte_debug: Option<MatteDebugSelection>,
     ) -> Result<(wgpu::Texture, Vec<LayerResources>, wgpu::CommandEncoder), MediaError> {
         if width == 0 || height == 0 {
             return Err(MediaError::Backend(
@@ -873,8 +1054,13 @@ impl Compositor {
             view_formats: &[],
         });
         let mut resources = Vec::with_capacity(layers.len());
-        for layer in layers {
-            match self.layer_resources(layer, width, height, library) {
+        for (index, layer) in layers.iter().enumerate() {
+            // CC5 3.2: the selector lives in this layer's own grade buffer, so
+            // only the targeted layer ever renders coverage.
+            let debug_node = matte_debug
+                .filter(|selection| selection.layer_index == index)
+                .map(|selection| selection.active_node);
+            match self.layer_resources(layer, width, height, library, debug_node) {
                 Ok(resource) => resources.push(resource),
                 Err(error) => {
                     self.release_layer_textures(resources);
@@ -1008,6 +1194,7 @@ impl Compositor {
         width: u32,
         height: u32,
         library: Option<&LutLibrary>,
+        matte_debug_node: Option<usize>,
     ) -> Result<LayerResources, MediaError> {
         let expected_len = usize::try_from(layer.frame.width())
             .unwrap_or_default()
@@ -1067,7 +1254,8 @@ impl Compositor {
         } else {
             0.0
         };
-        let grade_bytes = grade_buffer_bytes_with_luts(layer.effects, library)?;
+        let grade_bytes =
+            grade_buffer_bytes_for(layer.effects, library, (width, height), matte_debug_node)?;
         let grade = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Kinewright managed colour nodes"),
             size: u64::try_from(grade_bytes.len()).unwrap_or(u64::MAX),
@@ -1535,7 +1723,7 @@ impl Compositor {
         library: Option<&LutLibrary>,
     ) -> Result<Vec<f32>, MediaError> {
         let (width, height) = resolution;
-        let (output, resources, encoder) = self.composite(width, height, layers, library)?;
+        let (output, resources, encoder) = self.composite(width, height, layers, library, None)?;
         let mut values = Vec::with_capacity(
             usize::try_from(width)
                 .unwrap_or_default()
@@ -1821,9 +2009,71 @@ struct GradeNodeRecord {
     /// `v0 .. v11` of the node record. Primary uses `v0..v9` exactly as CC1
     /// wrote them; wheels use `v0..v2` slope, `v3..v5` offset, `v6..v8` power;
     /// curves leave the whole block zero and carry a payload instead.
+    ///
+    /// CC5 3.1: `v11` is overwritten with the matte payload word offset by the
+    /// serializer, so no kind may use it for a value.
     values: [f32; GRADE_NODE_VALUE_WORDS],
     /// The `4 * 49` curve payload words, empty for every other kind.
     payload: Vec<f32>,
+    /// CC5 3.1: the 64-word matte block, `None` for a node whose matte is
+    /// inactive.  An inactive matte writes no block at all and leaves `v11`
+    /// zero, which is what makes a pre-CC5 project render bit-identically.
+    matte: Option<[f32; MATTE_BLOCK_WORDS]>,
+}
+
+/// CC5 3.1: build one node's 64-word matte block.
+///
+/// Every stored integer is converted here, once, so the shader consumes plain
+/// floats and never re-derives a unit.  `cosT` / `sinT` are solved in `f64`
+/// and rounded once to `f32`, so the CPU reference and the shader consume
+/// *identical* constants rather than two independently rounded rotations
+/// (CC5 2.3).
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn matte_block_words(matte: &MatteParams, raster_aspect: f32) -> [f32; MATTE_BLOCK_WORDS] {
+    // Basis points to a `0..=1` scale. `0..=10000` is exactly representable in
+    // `f32`, so both endpoints are exact; the `f64` divide keeps the single
+    // rounding at the end.
+    let basis_points = |value: i64| (value as f64 / 10_000.0) as f32;
+    // Hundredths of a degree to degrees.
+    let centidegrees = |value: i64| (value as f64 / 100.0) as f32;
+
+    let mut words = [0.0_f32; MATTE_BLOCK_WORDS];
+    words[0] = matte.window_count as f32;
+    words[1] = if matte.intersects() { 1.0 } else { 0.0 };
+    words[2] = if matte.qualifier.is_enabled() {
+        1.0
+    } else {
+        0.0
+    };
+    words[3] = if matte.is_inverted() { 1.0 } else { 0.0 };
+    words[4] = matte.mix();
+    words[5] = raster_aspect;
+    words[6] = centidegrees(matte.qualifier.hue_center_cd);
+    words[7] = centidegrees(matte.qualifier.hue_width_cd);
+    words[8] = centidegrees(matte.qualifier.hue_softness_cd);
+    words[9] = basis_points(matte.qualifier.sat_low_bp);
+    words[10] = basis_points(matte.qualifier.sat_high_bp);
+    words[11] = basis_points(matte.qualifier.sat_softness_bp);
+    words[12] = basis_points(matte.qualifier.luma_low_bp);
+    words[13] = basis_points(matte.qualifier.luma_high_bp);
+    words[14] = basis_points(matte.qualifier.luma_softness_bp);
+    // word 15 stays the reserved 0.0.
+    for (index, window) in matte.active_windows().enumerate() {
+        let base = MATTE_WINDOW_BASE_WORD + index * MATTE_WINDOW_WORDS;
+        let theta = (window.rotation_cd as f64 / 100.0).to_radians();
+        words[base] = window.shape_token as f32;
+        words[base + 1] = basis_points(window.center_x_bp);
+        words[base + 2] = basis_points(window.center_y_bp);
+        words[base + 3] = basis_points(window.half_width_bp);
+        words[base + 4] = basis_points(window.half_height_bp);
+        words[base + 5] = theta.cos() as f32;
+        words[base + 6] = theta.sin() as f32;
+        words[base + 7] = basis_points(window.feather_bp);
+        words[base + 8] = if window.is_inverted() { 1.0 } else { 0.0 };
+        // words `+9 .. +11` stay the reserved 0.0; windows at index
+        // `>= window_count` stay entirely zero and are never read.
+    }
+    words
 }
 
 /// Serialize the ordered managed colour-node stack into one storage buffer
@@ -1843,8 +2093,12 @@ struct GradeNodeRecord {
 /// byte 16   words[0]: node record 0, then record 1, ... stride 64 bytes
 ///           record = [kind, payload_word_offset, bypass, reserved, v0 .. v11] as f32
 /// byte 16 + 64 * active_count
-///           curve payloads, 196 words each, in node-record order
-///           slot = [count, x0, y0, m0, ... x15, y15, m15], red, green, blue, master
+///           payload region, in node-record order; for one node the curve
+///           payload comes first, then its CC5 matte block
+///           curve payload = 196 words,
+///             slot = [count, x0, y0, m0, ... x15, y15, m15],
+///             ordered red, green, blue, master
+///           matte block  = 64 words (CC5 3.1), addressed by the record's v11
 /// ```
 ///
 /// Every stored word offset is an index into `words` (that is, into the buffer
@@ -1870,6 +2124,20 @@ pub(crate) fn grade_buffer_bytes(effects: &[Effect]) -> Result<Vec<u8>, MediaErr
     grade_buffer_bytes_with_luts(effects, None)
 }
 
+/// The output raster aspect `a = W / H` the matte block carries (CC5 2.3).
+///
+/// Host-supplied rather than sniffed from `textureDimensions`, and computed
+/// once per render from the resolution the compositor already owns, so the
+/// shader and the CPU reference consume the same value.
+#[allow(clippy::cast_precision_loss)]
+fn raster_aspect_of(resolution: (u32, u32)) -> f32 {
+    let (width, height) = resolution;
+    if height == 0 {
+        return 1.0;
+    }
+    width as f32 / height as f32
+}
+
 /// Serialize the ordered managed colour-node stack, resolving CC4 LUT nodes
 /// against the verified library.
 ///
@@ -1882,11 +2150,70 @@ pub(crate) fn grade_buffer_bytes(effects: &[Effect]) -> Result<Vec<u8>, MediaErr
 /// # Errors
 ///
 /// As [`grade_buffer_bytes`], plus `too_many_lut_nodes` and
-/// `missing_lut_asset` from [`managed_lut_slots`].
-#[allow(clippy::cast_precision_loss)]
+/// `missing_lut_asset` from [`managed_lut_slots`], and
+/// `matte_requires_raster_aspect` when any node carries an active matte:
+/// matte serialization needs the raster aspect, so such stacks must go
+/// through [`grade_buffer_bytes_with_matte`] / [`grade_buffer_bytes_for`].
+#[cfg(test)]
 pub(crate) fn grade_buffer_bytes_with_luts(
     effects: &[Effect],
     library: Option<&LutLibrary>,
+) -> Result<Vec<u8>, MediaError> {
+    if effects.iter().any(|effect| {
+        classify_color_node(effect).is_some()
+            && color_node_inactive_reason(effect).is_none()
+            && MatteParams::from_effect(effect).has_matte()
+    }) {
+        return Err(MediaError::Backend(
+            "matte_requires_raster_aspect: a matte-carrying stack must be serialized through \
+             grade_buffer_bytes_for, which supplies the output raster aspect (CC5 3.2)"
+                .to_owned(),
+        ));
+    }
+    // No matte block is written, so the aspect word is never emitted and the
+    // placeholder cannot reach a shader.
+    grade_buffer_bytes_with_matte(effects, library, 1.0, None)
+}
+
+/// [`grade_buffer_bytes_with_matte`] with the raster aspect derived from the
+/// output resolution the compositor already owns (CC5 3.2).
+pub(crate) fn grade_buffer_bytes_for(
+    effects: &[Effect],
+    library: Option<&LutLibrary>,
+    resolution: (u32, u32),
+    matte_debug_node: Option<usize>,
+) -> Result<Vec<u8>, MediaError> {
+    grade_buffer_bytes_with_matte(
+        effects,
+        library,
+        raster_aspect_of(resolution),
+        matte_debug_node,
+    )
+}
+
+/// Serialize the ordered managed colour-node stack with CC5 matte blocks.
+///
+/// `raster_aspect` is `W / H` of the *output* raster and is written into every
+/// matte block's word 5; `matte_debug_node` is the zero-based index of an
+/// **active** node whose coverage the shader should return instead of colour,
+/// stored as `header.w = index + 1` (CC5 3.2). The index is resolved against
+/// the records this call actually writes, so an inactive node earlier in the
+/// stack shifts it — which is why callers resolve it from the same evaluated
+/// effects.
+///
+/// A node whose matte is inactive (CC5 2.6) gets no block and keeps `v11 = 0`,
+/// so the buffer, and therefore the render, is byte-identical to CC4.
+///
+/// # Errors
+///
+/// As [`grade_buffer_bytes_with_luts`], plus `matte_debug_node_out_of_range`
+/// when the selector names a node this stack did not write.
+#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+pub(crate) fn grade_buffer_bytes_with_matte(
+    effects: &[Effect],
+    library: Option<&LutLibrary>,
+    raster_aspect: f32,
+    matte_debug_node: Option<usize>,
 ) -> Result<Vec<u8>, MediaError> {
     let managed = managed_color_node_count(effects);
     if managed > COLOR_NODE_LIMIT_PER_LAYER {
@@ -1908,21 +2235,32 @@ pub(crate) fn grade_buffer_bytes_with_luts(
         if color_node_inactive_reason(effect).is_some() {
             continue;
         }
+        // CC5 2.6 / 3.1: the matte is resolved from the same evaluated
+        // integers the inactivity test above used.  `technical_lut` carries no
+        // `matte_*` parameter, so `MatteParams::from_effect` returns the
+        // neutral for it and no block is ever written.
+        let matte = MatteParams::from_effect(effect);
+        let matte_block = matte
+            .has_matte()
+            .then(|| matte_block_words(&matte, raster_aspect));
         records.push(match kind {
             ColorNodeKind::Primary => GradeNodeRecord {
                 kind,
                 values: primary_node_values(effect)?,
                 payload: Vec::new(),
+                matte: matte_block,
             },
             ColorNodeKind::Wheels => GradeNodeRecord {
                 kind,
                 values: wheels_node_values(&ColorWheelsParams::from_effect(effect)),
                 payload: Vec::new(),
+                matte: matte_block,
             },
             ColorNodeKind::Curves => GradeNodeRecord {
                 kind,
                 values: [0.0; GRADE_NODE_VALUE_WORDS],
                 payload: curve_payload_words(&ResolvedCurves::from_effect(effect)),
+                matte: matte_block,
             },
             ColorNodeKind::TechnicalLut | ColorNodeKind::CreativeLook => {
                 let slot_index = next_lut_slot;
@@ -1938,17 +2276,36 @@ pub(crate) fn grade_buffer_bytes_with_luts(
                     kind,
                     values: lut_node_values(&LutNodeParams::from_effect(effect), slot_index, slot),
                     payload: Vec::new(),
+                    matte: matte_block,
                 }
             }
         });
     }
 
     let count = records.len();
+    if let Some(node) = matte_debug_node
+        && node >= count
+    {
+        return Err(MediaError::Backend(format!(
+            "matte_debug_node_out_of_range: active node {node} was requested, \
+             the layer wrote {count} active colour nodes"
+        )));
+    }
     let payload_word_offset = count.saturating_mul(GRADE_NODE_WORDS);
     // A zero-node stack still allocates one record so the runtime-sized
     // `array<f32>` binding stays valid; the shader skips it on `header.x`.
     let record_words = count.max(1).saturating_mul(GRADE_NODE_WORDS);
-    let payload_words: usize = records.iter().map(|record| record.payload.len()).sum();
+    let payload_words: usize = records
+        .iter()
+        .map(|record| {
+            record.payload.len()
+                + if record.matte.is_some() {
+                    MATTE_BLOCK_WORDS
+                } else {
+                    0
+                }
+        })
+        .sum();
     let mut words = vec![0.0_f32; record_words.saturating_add(payload_words)];
     let mut next_payload = payload_word_offset;
     for (index, record) in records.iter().enumerate() {
@@ -1972,6 +2329,15 @@ pub(crate) fn grade_buffer_bytes_with_luts(
             words[next_payload..end].copy_from_slice(&record.payload);
             next_payload = end;
         }
+        // CC5 3.1: payloads are appended in node order; for one node the curve
+        // payload comes first, then the matte block.  `v11` is the block's own
+        // word index, so the shader needs no per-kind arithmetic to find it.
+        if let Some(block) = record.matte.as_ref() {
+            let end = next_payload.saturating_add(MATTE_BLOCK_WORDS);
+            words[next_payload..end].copy_from_slice(block);
+            words[base + GRADE_NODE_MATTE_OFFSET_WORD] = next_payload as f32;
+            next_payload = end;
+        }
     }
 
     let mut bytes = Vec::with_capacity(GRADE_HEADER_BYTES + words.len() * 4);
@@ -1979,7 +2345,9 @@ pub(crate) fn grade_buffer_bytes_with_luts(
         u32::try_from(count).unwrap_or(u32::MAX),
         u32::try_from(payload_word_offset).unwrap_or(u32::MAX),
         GRADE_ABI_VERSION,
-        0,
+        // CC5 3.2: `header.w` is the matte-debug selector. `0` is normal
+        // rendering; `k > 0` returns the coverage of active node `k - 1`.
+        matte_debug_node.map_or(0, |node| u32::try_from(node + 1).unwrap_or(u32::MAX)),
     ];
     for value in header {
         bytes.extend_from_slice(&value.to_le_bytes());
@@ -2388,7 +2756,9 @@ mod tests {
             limits.max_storage_buffer_binding_size,
             COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE
         );
-        assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE, 16_384);
+        // CC5 3.1: sixteen curve-plus-matte nodes no longer fit 16 KiB, so the
+        // binding SIZE doubles while the binding COUNT stays 1.
+        assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE, 32_768);
 
         // CC4 4.1/10.3.8. The LUT atlas is one depth-packed 3D texture on the
         // binding that already existed, so the storage constants above are
@@ -2420,9 +2790,11 @@ mod tests {
             wgpu::Limits::default().max_texture_dimension_3d
                 >= COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D
         );
-        // CC4 4.2: the buffer now carries kinds whose meaning depends on a
-        // companion texture binding.
-        assert_eq!(GRADE_ABI_VERSION, 2);
+        // CC4 4.2 took the ABI to 2 (kinds whose meaning depends on a
+        // companion texture binding); CC5 3.1 takes it to 3, because a CC4
+        // consumer would read `v11` as a reserved zero and silently render an
+        // unmasked correction over the whole raster.
+        assert_eq!(GRADE_ABI_VERSION, 3);
     }
 
     #[test]
@@ -2453,13 +2825,24 @@ mod tests {
 
     #[test]
     #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::float_cmp)]
     fn grade_buffer_worst_case_fits_the_negotiated_binding_size() {
-        // CC3 3.2's worst case, written out: sixteen curve nodes.
-        assert_eq!(GRADE_BUFFER_WORST_CASE_BYTES, 13_584);
+        // CC5 3.1's worst case, written out by hand: sixteen curve nodes that
+        // each carry a matte.
+        //   16 header
+        // + 16 * 64                = 1024   node records
+        // + 16 * (4 * 49 * 4)      = 12544  curve payloads
+        // + 16 * (64 * 4)          = 4096   matte blocks
+        //                          = 17680
+        assert_eq!(16 + 16 * 64 + 16 * (4 * 49 * 4) + 16 * (64 * 4), 17_680);
+        assert_eq!(GRADE_BUFFER_WORST_CASE_BYTES, 17_680);
+        assert_eq!(MATTE_BLOCK_WORDS, 64);
+        assert_eq!(MATTE_WINDOW_WORDS, 12);
+        assert_eq!(MATTE_WINDOW_BASE_WORD, 16);
         assert!(
             GRADE_BUFFER_WORST_CASE_BYTES as u64 <= COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE
         );
-        let stack = (0..COLOR_NODE_LIMIT_PER_LAYER)
+        let matte_free = (0..COLOR_NODE_LIMIT_PER_LAYER)
             .map(|index| {
                 curves(
                     index as u64 + 1,
@@ -2468,20 +2851,59 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let bytes = grade_buffer_bytes(&stack).expect("sixteen curve nodes fit the buffer");
+        // CC3's worst case is still exactly what it was: the matte block is
+        // additional, never a widening of the record or of the payload.
+        let matte_free_bytes =
+            grade_buffer_bytes(&matte_free).expect("sixteen curve nodes fit the buffer");
+        assert_eq!(matte_free_bytes.len(), 13_584);
+
+        let stack = matte_free
+            .iter()
+            .cloned()
+            .map(|effect| with_matte(effect, &[("matte_window_count", 1)]))
+            .collect::<Vec<_>>();
+        let bytes = grade_buffer_bytes_for(&stack, None, (64, 36), None)
+            .expect("sixteen curve-plus-matte nodes fit the buffer");
         assert_eq!(bytes.len(), GRADE_BUFFER_WORST_CASE_BYTES);
         assert_eq!(grade_header(&bytes, 0), 16);
         assert_eq!(grade_header(&bytes, 1), 256);
-        // Every curve node points at its own 196-word payload slice.
+        assert_eq!(grade_header(&bytes, 2), 3);
+        assert_eq!(grade_header(&bytes, 3), 0);
+        // Every node points at its own 196-word curve payload followed by its
+        // own 64-word matte block, and no two regions overlap.
+        let mut regions: Vec<(usize, usize)> = Vec::new();
         for index in 0..COLOR_NODE_LIMIT_PER_LAYER {
             let base = index * GRADE_NODE_WORDS;
             assert!((grade_word(&bytes, base) - 3.0).abs() < 1e-6);
-            let expected = 256 + index * GRADE_CURVE_PAYLOAD_WORDS;
+            let expected_payload = 256 + index * (GRADE_CURVE_PAYLOAD_WORDS + MATTE_BLOCK_WORDS);
+            let payload = grade_word(&bytes, base + 1);
+            let matte = grade_word(&bytes, base + GRADE_NODE_MATTE_OFFSET_WORD);
             assert!(
-                (grade_word(&bytes, base + 1) - expected as f32).abs() < 1e-6,
+                (payload - expected_payload as f32).abs() < 1e-6,
                 "node {index} payload offset"
             );
+            assert!(
+                (matte - (expected_payload + GRADE_CURVE_PAYLOAD_WORDS) as f32).abs() < 1e-6,
+                "node {index} matte offset"
+            );
+            regions.push((
+                expected_payload,
+                expected_payload + GRADE_CURVE_PAYLOAD_WORDS,
+            ));
+            regions.push((
+                expected_payload + GRADE_CURVE_PAYLOAD_WORDS,
+                expected_payload + GRADE_CURVE_PAYLOAD_WORDS + MATTE_BLOCK_WORDS,
+            ));
         }
+        regions.sort_unstable();
+        for pair in regions.windows(2) {
+            assert!(pair[0].1 <= pair[1].0, "payload regions overlap: {pair:?}");
+        }
+        let (_, last_end) = *regions.last().expect("sixteen nodes wrote regions");
+        assert_eq!(
+            GRADE_HEADER_BYTES + last_end * 4,
+            GRADE_BUFFER_WORST_CASE_BYTES
+        );
     }
 
     #[test]
@@ -2786,6 +3208,111 @@ mod tests {
 
     fn wheels(id: u64, parameters: &[(&str, i64)]) -> Effect {
         effect_with(id, "color_wheels", parameters)
+    }
+
+    /// Turn the master switch on and merge the supplied `matte_*` overrides
+    /// into an existing colour node, leaving every other parameter alone.
+    fn with_matte(mut effect: Effect, parameters: &[(&str, i64)]) -> Effect {
+        effect
+            .parameters
+            .insert("matte_enabled".to_owned(), ParamValue::Integer(1));
+        for (name, value) in parameters {
+            effect
+                .parameters
+                .insert((*name).to_owned(), ParamValue::Integer(*value));
+        }
+        effect
+    }
+
+    /// The word index of node `index`'s matte block, read from its own `v11`.
+    fn matte_base(bytes: &[u8], index: usize) -> usize {
+        let word = grade_word(
+            bytes,
+            index * GRADE_NODE_WORDS + GRADE_NODE_MATTE_OFFSET_WORD,
+        );
+        assert!(word >= 0.0, "a matte offset is never negative");
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let base = word.round() as usize;
+        base
+    }
+
+    /// One word of node `index`'s matte block.
+    fn matte_word(bytes: &[u8], index: usize, word: usize) -> f32 {
+        grade_word(bytes, matte_base(bytes, index) + word)
+    }
+
+    /// The CC5 9.1 containment raster: 64 x 36, `a = 16/9`, every channel in
+    /// `[0.05, 0.95]` and strictly varying, with no channel ever exactly 0 —
+    /// a zero would let "exactly 0 outside changed" pass for the wrong reason
+    /// under a gain node.
+    #[allow(clippy::cast_precision_loss)]
+    fn cc5_field_raster() -> WorkingFrame {
+        let (width, height) = (64_u32, 36_u32);
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let fx = x as f32 / 63.0;
+                let fy = y as f32 / 35.0;
+                pixels.push(f16::from_f32(0.05 + 0.9 * fx));
+                pixels.push(f16::from_f32(0.05 + 0.9 * fy));
+                pixels.push(f16::from_f32(0.05 + 0.45 * (fx + fy)));
+                pixels.push(f16::from_f32(1.0));
+            }
+        }
+        WorkingFrame {
+            width,
+            height,
+            pixels: Arc::new(pixels),
+        }
+    }
+
+    /// A uniform scene-linear frame of an arbitrary shape.
+    fn uniform_frame(width: u32, height: u32, rgb: [f32; 3]) -> WorkingFrame {
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..(width * height) {
+            pixels.extend(rgb.map(f16::from_f32));
+            pixels.push(f16::from_f32(1.0));
+        }
+        WorkingFrame {
+            width,
+            height,
+            pixels: Arc::new(pixels),
+        }
+    }
+
+    /// CC3 2.1's `grade709` decode, transcribed here in f64 rather than
+    /// called, so a qualifier fixture's input is its own statement.
+    #[allow(clippy::cast_possible_truncation)]
+    fn cc5_grade709_decode(v: f64) -> f32 {
+        let (s, a) = (v.signum(), v.abs());
+        if a < 0.081_242_86 {
+            (s * a / 4.5) as f32
+        } else {
+            (s * ((a + 0.099_296_8) / 1.099_296_8).powf(2.222_222_3)) as f32
+        }
+    }
+
+    /// Render one layer's matte coverage through the production path.
+    fn render_coverage(
+        compositor: &Compositor,
+        frame: &WorkingFrame,
+        effects: &[Effect],
+        effect_id: u64,
+    ) -> Result<Vec<u8>, MediaError> {
+        compositor.render_matte(
+            (frame.width, frame.height),
+            &[CompositorLayer {
+                frame,
+                effects,
+                transition: TransitionRenderParams::default(),
+            }],
+            None,
+            MatteRenderTarget {
+                layer_index: 0,
+                clip: ClipId(1),
+                effect: EffectId(effect_id),
+            },
+        )
     }
 
     /// A `color_curves` effect with one channel's point list expanded into the
@@ -5179,5 +5706,1058 @@ mod tests {
                 .any(|pixel| pixel[..3] != [12, 18, 24]),
             "title layer did not change any compositor output pixels"
         );
+    }
+
+    // ================= CC5 secondaries: matte block and shader =============
+
+    /// CC5 3.1's word map, written out by hand.
+    ///
+    /// Every word is a literal derived from the stored integer by the unit
+    /// conversion the contract states, so a silent reordering of the block —
+    /// which the shader would happily read as a different matte — fails here
+    /// rather than as a wrong picture.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn matte_block_layout_is_the_cc5_word_map() {
+        let node = with_matte(
+            wheels(1, &[("gain_master_thousandths", 1_500)]),
+            &[
+                ("matte_window_count", 1),
+                ("matte_combine_token", 1),
+                ("matte_invert", 1),
+                ("matte_mix_basis_points", 6_000),
+                ("matte_qualifier_enabled", 1),
+                ("matte_hue_center_centidegrees", 3_000),
+                ("matte_hue_width_centidegrees", 1_500),
+                ("matte_hue_softness_centidegrees", 500),
+                ("matte_saturation_low_basis_points", 2_000),
+                ("matte_saturation_high_basis_points", 9_000),
+                ("matte_saturation_softness_basis_points", 500),
+                ("matte_luma_low_basis_points", 1_000),
+                ("matte_luma_high_basis_points", 8_000),
+                ("matte_luma_softness_basis_points", 250),
+                ("matte_window0_shape_token", 1),
+                ("matte_window0_center_x_basis_points", 3_000),
+                ("matte_window0_center_y_basis_points", 7_000),
+                ("matte_window0_half_width_basis_points", 1_250),
+                ("matte_window0_half_height_basis_points", 2_000),
+                ("matte_window0_rotation_centidegrees", 4_500),
+                ("matte_window0_feather_basis_points", 1_000),
+                ("matte_window0_invert", 1),
+            ],
+        );
+        let bytes = grade_buffer_bytes_for(std::slice::from_ref(&node), None, (64, 36), None)
+            .expect("a wheels node with a matte serializes");
+
+        // One record, no curve payload, so the block starts at word 16 and
+        // `v11` says so rather than the shader deriving it per kind.
+        assert_eq!(grade_header(&bytes, 0), 1);
+        assert_eq!(grade_header(&bytes, 1), 16);
+        assert_eq!(grade_header(&bytes, 2), 3);
+        assert_eq!(grade_header(&bytes, 3), 0);
+        assert_eq!(matte_base(&bytes, 0), 16);
+        assert_eq!(
+            bytes.len(),
+            GRADE_HEADER_BYTES + (16 + MATTE_BLOCK_WORDS) * 4
+        );
+
+        // The kind's own value words are untouched: `gain_master 1500` is a
+        // 1.5 slope on all three channels, unit gamma, zero lift.
+        for channel in 0..3 {
+            assert_eq!(grade_word(&bytes, GRADE_NODE_VALUE_OFFSET + channel), 1.5);
+            assert_eq!(
+                grade_word(&bytes, GRADE_NODE_VALUE_OFFSET + 3 + channel),
+                0.0
+            );
+            assert_eq!(
+                grade_word(&bytes, GRADE_NODE_VALUE_OFFSET + 6 + channel),
+                1.0
+            );
+        }
+
+        let word = |index: usize| matte_word(&bytes, 0, index);
+        assert_eq!(word(0), 1.0, "window_count");
+        assert_eq!(word(1), 1.0, "combine_token: intersection");
+        assert_eq!(word(2), 1.0, "qualifier_enabled");
+        assert_eq!(word(3), 1.0, "matte_invert");
+        assert_eq!(word(4), 0.6, "matte_mix 6000 bp");
+        // `a = W / H` is host supplied, never sniffed from the texture.
+        assert_eq!(word(5), 64.0_f32 / 36.0_f32, "raster_aspect");
+        assert_eq!(word(5), 16.0_f32 / 9.0_f32);
+        assert_eq!(word(6), 30.0, "hue_center 3000 cd");
+        assert_eq!(word(7), 15.0, "hue_width 1500 cd");
+        assert_eq!(word(8), 5.0, "hue_softness 500 cd");
+        assert_eq!(word(9), 0.2, "sat_low");
+        assert_eq!(word(10), 0.9, "sat_high");
+        assert_eq!(word(11), 0.05, "sat_softness");
+        assert_eq!(word(12), 0.1, "luma_low");
+        assert_eq!(word(13), 0.8, "luma_high");
+        assert_eq!(word(14), 0.025, "luma_softness");
+        assert_eq!(word(15), 0.0, "reserved");
+
+        assert_eq!(MATTE_WINDOW_BASE_WORD, 16);
+        assert_eq!(word(16), 1.0, "shape: rect");
+        assert_eq!(word(17), 0.3, "cx");
+        assert_eq!(word(18), 0.7, "cy");
+        assert_eq!(word(19), 0.125, "hw");
+        assert_eq!(word(20), 0.2, "hh");
+        // cos 45 = sin 45 = sqrt(2)/2 = 0.70710678118654752440, whose nearest
+        // f32 is 0x3f3504f3. Solved on the host in f64 and rounded once, so
+        // the shader and the CPU reference consume the same constant.
+        assert_eq!(word(21).to_bits(), 0x3f35_04f3, "cosT");
+        assert_eq!(word(22).to_bits(), 0x3f35_04f3, "sinT");
+        assert_eq!(word(21), 0.707_106_77_f32);
+        assert_eq!(word(23), 0.1, "feather");
+        assert_eq!(word(24), 1.0, "per-window invert");
+        for reserved in 25..28 {
+            assert_eq!(word(reserved), 0.0, "window 0 reserved word {reserved}");
+        }
+        // Windows at index >= window_count are written as zeros.
+        for index in 28..MATTE_BLOCK_WORDS {
+            assert_eq!(word(index), 0.0, "inactive window word {index}");
+        }
+    }
+
+    /// CC5 2.6 / 3.1: `v11 == 0` whenever the node carries no live matte, and
+    /// `technical_lut` can never carry one at all.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn matte_offset_is_zero_without_a_live_matte() {
+        let plain = wheels(1, &[("gain_master_thousandths", 1_500)]);
+        let bytes = grade_buffer_bytes_for(std::slice::from_ref(&plain), None, (64, 36), None)
+            .expect("a matte-free wheels node serializes");
+        assert_eq!(grade_word(&bytes, GRADE_NODE_MATTE_OFFSET_WORD), 0.0);
+        assert_eq!(bytes.len(), GRADE_HEADER_BYTES + 16 * 4);
+
+        // The master switch off ignores every other matte control.
+        let mut disabled = with_matte(plain.clone(), &[("matte_window_count", 2)]);
+        disabled
+            .parameters
+            .insert("matte_enabled".to_owned(), ParamValue::Integer(0));
+        let disabled_bytes =
+            grade_buffer_bytes_for(std::slice::from_ref(&disabled), None, (64, 36), None)
+                .expect("a disabled matte serializes");
+        assert_eq!(disabled_bytes, bytes, "an inactive matte writes no block");
+
+        // Enabled but selecting everything at full strength is equally
+        // inactive: no window, no qualifier, no invert, full mix.
+        let vacuous = with_matte(plain, &[("matte_mix_basis_points", 10_000)]);
+        let vacuous_bytes =
+            grade_buffer_bytes_for(std::slice::from_ref(&vacuous), None, (64, 36), None)
+                .expect("a vacuous matte serializes");
+        assert_eq!(vacuous_bytes, bytes);
+
+        // `technical_lut` carries no `matte_*` parameter, so a hand-edited
+        // file naming one cannot make a source normalization partial.
+        let luts = TestLuts::build("cc5-technical-lut-matte", &[lut_b_cube()]);
+        let technical = with_matte(
+            effect_with(
+                7,
+                "technical_lut",
+                &[("lut_asset_id", 1), ("mix_basis_points", 10_000)],
+            ),
+            &[("matte_window_count", 1), ("matte_mix_basis_points", 2_500)],
+        );
+        let technical_bytes = grade_buffer_bytes_for(
+            std::slice::from_ref(&technical),
+            Some(luts.library()),
+            (64, 36),
+            None,
+        )
+        .expect("a technical LUT node serializes against its library");
+        assert_eq!(
+            grade_header(&technical_bytes, 0),
+            1,
+            "the LUT node is active"
+        );
+        assert_eq!(
+            grade_word(&technical_bytes, GRADE_NODE_MATTE_OFFSET_WORD),
+            0.0,
+            "v11 is always zero on a technical_lut record"
+        );
+        // The node is not excluded either: a matte parameter on a technical
+        // LUT is inert, not a way to switch the source normalization off.
+        assert!(color_node_inactive_reason(&technical).is_none());
+    }
+
+    /// CC5 8.1: a pre-CC5 document renders bit-identically.
+    ///
+    /// The provable form of "before and after": a stack that stores no
+    /// `matte_*` parameter and the same stack carrying a *disabled* matte
+    /// serialize to the same bytes and render to the same `to_bits` — because
+    /// 2.5.4 makes the shader skip the blend entirely rather than multiplying
+    /// by a coverage of 1.
+    #[test]
+    fn a_pre_cc5_document_renders_bit_identically() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let frame = cc5_field_raster();
+        let pre_cc5 = vec![
+            wheels(
+                1,
+                &[
+                    ("gain_master_thousandths", 1_500),
+                    ("lift_master_basis_points", 200),
+                ],
+            ),
+            curves(2, "master", &[(0, 0), (5_000, 6_000), (10_000, 10_000)]),
+        ];
+        let with_disabled = pre_cc5
+            .iter()
+            .cloned()
+            .map(|effect| {
+                let mut effect = with_matte(
+                    effect,
+                    &[
+                        ("matte_window_count", 2),
+                        ("matte_qualifier_enabled", 1),
+                        ("matte_mix_basis_points", 3_000),
+                    ],
+                );
+                effect
+                    .parameters
+                    .insert("matte_enabled".to_owned(), ParamValue::Integer(0));
+                effect
+            })
+            .collect::<Vec<_>>();
+
+        let before = grade_buffer_bytes_for(&pre_cc5, None, (64, 36), None).expect("pre-CC5 stack");
+        let after =
+            grade_buffer_bytes_for(&with_disabled, None, (64, 36), None).expect("disabled matte");
+        assert_eq!(before, after, "an inactive matte changes no buffer byte");
+
+        let baseline = render_linear(&compositor, &frame, &pre_cc5);
+        let rendered = render_linear(&compositor, &frame, &with_disabled);
+        assert_eq!(baseline.len(), 64 * 36 * 4);
+        for (index, (a, b)) in baseline.iter().zip(rendered.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "channel {index} moved: {a} vs {b}"
+            );
+        }
+    }
+
+    /// CC5 9.2.1, the central gate: exactly the pixels inside the window
+    /// change, and every pixel outside is `to_bits`-identical to the render
+    /// with no node at all.
+    #[test]
+    fn matte_containment_changes_only_inside_pixels() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        assert_matte_containment(&compositor);
+    }
+
+    fn assert_matte_containment(compositor: &Compositor) {
+        let frame = cc5_field_raster();
+        // The window is |u.x - 0.5| <= 0.25 and |u.y - 0.5| <= 0.25, which on
+        // a 64 x 36 raster of pixel centres is x in 16..=47 (32 columns) and
+        // y in 9..=26 (18 rows): 576 of 2304 pixels, 2500 basis points. No
+        // pixel centre lies on the boundary.
+        let inside = |x: usize, y: usize| (16..=47).contains(&x) && (9..=26).contains(&y);
+        let mut expected_inside = 0_usize;
+        for y in 0..36 {
+            for x in 0..64 {
+                if inside(x, y) {
+                    expected_inside += 1;
+                }
+            }
+        }
+        assert_eq!(expected_inside, 576);
+        assert_eq!(2304 - expected_inside, 1728);
+
+        let window = [
+            ("matte_window_count", 1),
+            ("matte_window0_shape_token", 1),
+            ("matte_window0_center_x_basis_points", 5_000),
+            ("matte_window0_center_y_basis_points", 5_000),
+            ("matte_window0_half_width_basis_points", 2_500),
+            ("matte_window0_half_height_basis_points", 2_500),
+            ("matte_window0_feather_basis_points", 0),
+        ];
+        let node = with_matte(wheels(1, &[("gain_master_thousandths", 1_500)]), &window);
+        let mut inverted = node.clone();
+        inverted
+            .parameters
+            .insert("matte_invert".to_owned(), ParamValue::Integer(1));
+
+        let baseline = render_linear(compositor, &frame, &[]);
+        let matted = render_linear(compositor, &frame, std::slice::from_ref(&node));
+        let complement = render_linear(compositor, &frame, std::slice::from_ref(&inverted));
+
+        let mut changed = 0_usize;
+        let mut complement_changed = 0_usize;
+        for y in 0..36_usize {
+            for x in 0..64_usize {
+                let pixel = (y * 64 + x) * 4;
+                let rgb_changed =
+                    (0..3).any(|c| baseline[pixel + c].to_bits() != matted[pixel + c].to_bits());
+                let rgb_changed_inv = (0..3)
+                    .any(|c| baseline[pixel + c].to_bits() != complement[pixel + c].to_bits());
+                if inside(x, y) {
+                    assert!(rgb_changed, "inside pixel ({x}, {y}) did not change");
+                    for c in 0..3 {
+                        assert_eq!(
+                            baseline[pixel + c].to_bits(),
+                            complement[pixel + c].to_bits(),
+                            "inverted matte moved inside pixel ({x}, {y}) channel {c}"
+                        );
+                    }
+                    changed += 1;
+                } else {
+                    for c in 0..3 {
+                        assert_eq!(
+                            baseline[pixel + c].to_bits(),
+                            matted[pixel + c].to_bits(),
+                            "outside pixel ({x}, {y}) channel {c} moved"
+                        );
+                    }
+                    assert!(
+                        rgb_changed_inv,
+                        "inverted matte left outside pixel ({x}, {y}) unchanged"
+                    );
+                    complement_changed += 1;
+                }
+                // CC1 2.2.4: no CC5 code path writes alpha.
+                assert_eq!(baseline[pixel + 3].to_bits(), matted[pixel + 3].to_bits());
+                assert_eq!(
+                    baseline[pixel + 3].to_bits(),
+                    complement[pixel + 3].to_bits()
+                );
+            }
+        }
+        assert_eq!(changed, 576);
+        assert_eq!(complement_changed, 1728);
+    }
+
+    /// CC5 2.5.5: at exactly zero coverage the node's transform is not
+    /// blended in, so `-0.0` keeps its sign bit and a non-finite node output
+    /// cannot poison a pixel the matte never selected.
+    #[test]
+    fn zero_coverage_is_an_exact_identity() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        assert_zero_coverage_identity(&compositor);
+    }
+
+    fn assert_zero_coverage_identity(compositor: &Compositor) {
+        // Red carries `-0.0`, green carries `4.0`, blue a plain negative. A
+        // wheels node with slope 16 and power 16 drives `4.0` to a non-finite
+        // value through `grade709`, which CC1 2.2.5's no-clamp rule makes
+        // reachable, and `x + (node(x) - x) * 0.0` would map every outside
+        // pixel of that channel to NaN.
+        //
+        // The `-0.0` sample rides along, but the assertion below is
+        // bit-equality against the *no-node* render rather than a sign claim:
+        // the working surface's own upload and sample path normalizes `-0.0`
+        // to `+0.0` before the node stack ever sees it, so the sign gate of
+        // CC5 2.5.5 belongs to the CPU reference. What this fixture proves is
+        // that the matte does not perturb the outside pixel either way.
+        let mut pixels = Vec::with_capacity(64 * 36 * 4);
+        for _ in 0..(64 * 36) {
+            pixels.push(f16::from_f32(-0.0));
+            pixels.push(f16::from_f32(4.0));
+            pixels.push(f16::from_f32(-0.25));
+            pixels.push(f16::from_f32(1.0));
+        }
+        let frame = WorkingFrame {
+            width: 64,
+            height: 36,
+            pixels: Arc::new(pixels),
+        };
+        let extreme = [
+            ("gain_master_thousandths", 4_000),
+            ("gain_red_thousandths", 4_000),
+            ("gain_green_thousandths", 4_000),
+            ("gain_blue_thousandths", 4_000),
+            ("gamma_master_thousandths", 4_000),
+            ("gamma_red_thousandths", 4_000),
+            ("gamma_green_thousandths", 4_000),
+            ("gamma_blue_thousandths", 4_000),
+        ];
+        let node = with_matte(
+            wheels(1, &extreme),
+            &[
+                ("matte_window_count", 1),
+                ("matte_window0_center_x_basis_points", 5_000),
+                ("matte_window0_center_y_basis_points", 5_000),
+                ("matte_window0_half_width_basis_points", 2_500),
+                ("matte_window0_half_height_basis_points", 2_500),
+            ],
+        );
+        let baseline = render_linear(compositor, &frame, &[]);
+        let matted = render_linear(compositor, &frame, std::slice::from_ref(&node));
+        let inside = |x: usize, y: usize| (16..=47).contains(&x) && (9..=26).contains(&y);
+        let mut saw_non_finite = false;
+        let mut saw_negative_zero = false;
+        for y in 0..36_usize {
+            for x in 0..64_usize {
+                let pixel = (y * 64 + x) * 4;
+                if inside(x, y) {
+                    saw_non_finite |= !matted[pixel + 1].is_finite();
+                } else {
+                    for c in 0..4 {
+                        assert_eq!(
+                            baseline[pixel + c].to_bits(),
+                            matted[pixel + c].to_bits(),
+                            "outside pixel ({x}, {y}) channel {c} moved"
+                        );
+                    }
+                    assert_eq!(
+                        matted[pixel + 2].to_bits(),
+                        (-0.25_f32).to_bits(),
+                        "a negative value did not survive outside the matte at ({x}, {y})"
+                    );
+                    saw_negative_zero = true;
+                }
+            }
+        }
+        assert!(
+            saw_non_finite,
+            "the over-range sample must actually reach a non-finite node output"
+        );
+        assert!(
+            saw_negative_zero,
+            "the fixture must exercise outside pixels"
+        );
+    }
+
+    /// CC5 9.2.2: hand-counted window geometry, read straight off the matte
+    /// render at `feather = 0`, so every code is an exact `0` or `255`.
+    ///
+    /// The rotated case is the aspect gate: without the `a = W / H`
+    /// correction a 45 degree rotation on a 16:9 raster shears the window into
+    /// a parallelogram and the covered set stops being symmetric under
+    /// `(dx, dy) -> (dy, dx)`.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn matte_window_geometry_anchors() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        assert_matte_window_geometry(&compositor);
+    }
+
+    fn assert_matte_window_geometry(compositor: &Compositor) {
+        let frame = uniform_frame(64, 36, [0.25, 0.5, 0.75]);
+        // hw * a = 0.1125 * 16/9 = 0.2 = hh, so the field is isotropic in
+        // pixels: 0.2 * 36 = 7.2 px in both directions.
+        let square = |extra: &[(&str, i64)]| {
+            let mut parameters = vec![
+                ("matte_window_count", 1),
+                ("matte_window0_center_x_basis_points", 5_000),
+                ("matte_window0_center_y_basis_points", 5_000),
+                ("matte_window0_half_width_basis_points", 1_125),
+                ("matte_window0_half_height_basis_points", 2_000),
+                ("matte_window0_feather_basis_points", 0),
+            ];
+            parameters.extend_from_slice(extra);
+            with_matte(
+                wheels(1, &[("gain_master_thousandths", 1_500)]),
+                &parameters,
+            )
+        };
+        let covered = |coverage: &[u8]| {
+            for (index, code) in coverage.iter().enumerate() {
+                assert!(
+                    *code == 0 || *code == 255,
+                    "feather 0 must be an exact step, pixel {index} read {code}"
+                );
+            }
+            coverage
+                .iter()
+                .enumerate()
+                .filter(|(_, code)| **code == 255)
+                .map(|(index, _)| (index % 64, index / 64))
+                .collect::<Vec<_>>()
+        };
+
+        // Rect, rotation 0: |dx| <= 7.2 and |dy| <= 7.2 with dx = x - 31.5 and
+        // dy = y - 17.5, so 14 columns x 14 rows = 196 pixels.
+        let axis_aligned = render_coverage(
+            compositor,
+            &frame,
+            std::slice::from_ref(&square(&[("matte_window0_shape_token", 1)])),
+            1,
+        )
+        .expect("axis-aligned rect coverage");
+        let axis_set = covered(&axis_aligned);
+        assert_eq!(axis_set.len(), 196);
+
+        // Rect, rotation 45 degrees: |dx + dy| <= 7.2 * sqrt(2) = 10.18234 and
+        // |dy - dx| <= 10.18234. Both sums are integers, so the condition is
+        // |s| <= 10, |t| <= 10, s + t odd: 11 * 10 + 10 * 11 = 220 pixels.
+        let rotated = render_coverage(
+            compositor,
+            &frame,
+            std::slice::from_ref(&square(&[
+                ("matte_window0_shape_token", 1),
+                ("matte_window0_rotation_centidegrees", 4_500),
+            ])),
+            1,
+        )
+        .expect("rotated rect coverage");
+        let rotated_set = covered(&rotated);
+        assert_eq!(rotated_set.len(), 220);
+        // Symmetric under (dx, dy) -> (dy, dx), i.e. (x, y) -> (y + 14, x - 14).
+        for (x, y) in &rotated_set {
+            let mirrored = (y + 14, x.wrapping_sub(14));
+            assert!(
+                rotated_set.contains(&mirrored),
+                "the rotated window is not symmetric at ({x}, {y}); the aspect \
+                 correction was not applied"
+            );
+        }
+
+        // Ellipse, rotation 0: dx^2 + dy^2 <= 0.04 * 36^2 = 51.84. Counted per
+        // quadrant 7 + 7 + 7 + 6 + 6 + 5 + 3 = 41, so 4 * 41 = 164 pixels.
+        // (2i+1)^2 + (2j+1)^2 = 207.36 has no integer solution, so no pixel
+        // centre lies on the boundary; the smallest interior margin is 1.34
+        // px^2 and the smallest exterior margin 2.66 px^2.
+        let ellipse = render_coverage(
+            compositor,
+            &frame,
+            std::slice::from_ref(&square(&[("matte_window0_shape_token", 2)])),
+            1,
+        )
+        .expect("ellipse coverage");
+        let ellipse_set = covered(&ellipse);
+        assert_eq!(ellipse_set.len(), 164);
+        let min_x = ellipse_set.iter().map(|(x, _)| *x).min().expect("coverage");
+        let max_x = ellipse_set.iter().map(|(x, _)| *x).max().expect("coverage");
+        let min_y = ellipse_set.iter().map(|(_, y)| *y).min().expect("coverage");
+        let max_y = ellipse_set.iter().map(|(_, y)| *y).max().expect("coverage");
+        assert_eq!((max_x - min_x + 1, max_y - min_y + 1), (14, 14));
+        // Circular in pixels: `hw * a` and `hh` are the same f32 bit pattern.
+        let aspect = 64.0_f32 / 36.0_f32;
+        assert_eq!((0.1125_f32 * aspect).to_bits(), 0.2_f32.to_bits());
+        assert_eq!(
+            (0.1125_f32 * (16.0_f32 / 9.0_f32)).to_bits(),
+            0.2_f32.to_bits()
+        );
+        assert_eq!(
+            (0.1125_f32 * (1920.0_f32 / 1080.0_f32)).to_bits(),
+            0.2_f32.to_bits()
+        );
+    }
+
+    /// CC5 9.2.3: the feather is `1 - smoothstep(1 - f, 1 + f, D)`, so the
+    /// band straddles the edge and `w = 0.5` exactly at `D = 1`.
+    ///
+    /// The raster is 40 wide, where `(x + 0.5) * 10000 / 40 = 250x + 125` is
+    /// an integer, so `D = |250x + 125 - cx| / hw` lands on exact tenths. With
+    /// `cx = 5125` and `hw = 2500`, `D = |x - 20| / 10`.
+    #[test]
+    fn matte_feather_coverage_codes() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        assert_matte_feather_codes(&compositor);
+    }
+
+    fn assert_matte_feather_codes(compositor: &Compositor) {
+        let frame = uniform_frame(40, 8, [0.25, 0.5, 0.75]);
+        let node = with_matte(
+            wheels(1, &[("gain_master_thousandths", 1_500)]),
+            &[
+                ("matte_window_count", 1),
+                ("matte_window0_shape_token", 1),
+                ("matte_window0_center_x_basis_points", 5_125),
+                ("matte_window0_center_y_basis_points", 5_000),
+                ("matte_window0_half_width_basis_points", 2_500),
+                ("matte_window0_half_height_basis_points", 10_000),
+                ("matte_window0_feather_basis_points", 4_000),
+            ],
+        );
+        let coverage = render_coverage(compositor, &frame, std::slice::from_ref(&node), 1)
+            .expect("feathered coverage");
+        assert_eq!(coverage.len(), 40 * 8);
+        let code_at = |x: usize| {
+            let column = (0..8).map(|y| coverage[y * 40 + x]).collect::<Vec<_>>();
+            for code in &column {
+                assert_eq!(*code, column[0], "column {x} is not constant: {column:?}");
+            }
+            column[0]
+        };
+        // f = 0.4, so t = (D - 0.6) / 0.8.
+        // D = 0.8: t = 0.25, smoothstep = 0.0625 * 2.5 = 0.15625,
+        //          w = 0.84375, round(255 * w) = round(215.15625) = 215.
+        assert_eq!(code_at(12), 215);
+        assert_eq!(code_at(28), 215);
+        // D = 1.0: t = 0.5, smoothstep = 0.25 * 2.0 = 0.5, w = 0.5,
+        //          round(255 * 0.5) = round(127.5) = 128 (half away from zero).
+        assert_eq!(code_at(10), 128);
+        assert_eq!(code_at(30), 128);
+        // D = 1.2: t = 0.75, smoothstep = 0.5625 * 1.5 = 0.84375,
+        //          w = 0.15625, round(255 * w) = round(39.84375) = 40.
+        assert_eq!(code_at(8), 40);
+        assert_eq!(code_at(32), 40);
+        // The affected set is exactly {D < 1.4}: D = 1.4 gives t = 1 and w = 0.
+        assert_eq!(code_at(6), 0);
+        assert_eq!(code_at(34), 0);
+        assert_eq!(code_at(7), 11, "D = 1.3 gives w = 0.04296875");
+        for x in 0..6 {
+            assert_eq!(code_at(x), 0, "column {x} lies beyond the band");
+        }
+        for x in 35..40 {
+            assert_eq!(code_at(x), 0, "column {x} lies beyond the band");
+        }
+        // The interior of the band is saturated and the symmetry
+        // w(1 - d) + w(1 + d) = 1 holds on the sampled pairs.
+        assert_eq!(code_at(20), 255, "D = 0 is fully covered");
+        assert_eq!(u16::from(code_at(12)) + u16::from(code_at(8)), 255);
+
+        // `feather = 0` takes the hard branch and yields exact 0 / 255.
+        let mut hard = node.clone();
+        hard.parameters.insert(
+            "matte_window0_feather_basis_points".to_owned(),
+            ParamValue::Integer(0),
+        );
+        let hard_coverage = render_coverage(compositor, &frame, std::slice::from_ref(&hard), 1)
+            .expect("hard-edged coverage");
+        for (index, code) in hard_coverage.iter().enumerate() {
+            assert!(
+                *code == 0 || *code == 255,
+                "feather 0 must be an exact step, pixel {index} read {code}"
+            );
+        }
+    }
+
+    /// CC5 9.2.5: qualifier anchors, hand-computed from encoded triples and
+    /// fed to the compositor as `grade709_decode(e)`.
+    #[test]
+    fn matte_qualifier_anchors() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        assert_matte_qualifier_anchors(&compositor);
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn assert_matte_qualifier_anchors(compositor: &Compositor) {
+        let qualifier = |extra: &[(&str, i64)]| {
+            let mut parameters = vec![
+                ("matte_qualifier_enabled", 1),
+                ("matte_window_count", 0),
+                ("matte_hue_center_centidegrees", 0),
+                ("matte_hue_width_centidegrees", 3_000),
+                ("matte_hue_softness_centidegrees", 0),
+                ("matte_saturation_low_basis_points", 7_000),
+                ("matte_saturation_high_basis_points", 8_000),
+                ("matte_saturation_softness_basis_points", 0),
+                ("matte_luma_low_basis_points", 3_000),
+                ("matte_luma_high_basis_points", 3_500),
+                ("matte_luma_softness_basis_points", 0),
+            ];
+            parameters.extend_from_slice(extra);
+            with_matte(
+                wheels(1, &[("gain_master_thousandths", 1_500)]),
+                &parameters,
+            )
+        };
+        let uniform = |e: [f64; 3]| {
+            uniform_frame(
+                16,
+                9,
+                [
+                    cc5_grade709_decode(e[0]),
+                    cc5_grade709_decode(e[1]),
+                    cc5_grade709_decode(e[2]),
+                ],
+            )
+        };
+        let all = |coverage: &[u8], code: u8| {
+            assert_eq!(coverage.len(), 16 * 9);
+            for (index, actual) in coverage.iter().enumerate() {
+                assert_eq!(*actual, code, "pixel {index}");
+            }
+        };
+
+        // e = (0.8, 0.2, 0.2): M = c.r, C = 0.6, S = C / M = 0.75,
+        // Y = 0.2126*0.8 + 0.7152*0.2 + 0.0722*0.2 = 0.32756, H = 0 degrees.
+        // Hue |0 - 0| = 0 <= 30, S inside 0.70..0.80, Y inside 0.30..0.35, so
+        // q = 1 at every pixel.
+        let selected = qualifier(&[]);
+        all(
+            &render_coverage(
+                compositor,
+                &uniform([0.8, 0.2, 0.2]),
+                std::slice::from_ref(&selected),
+                1,
+            )
+            .expect("qualifier coverage"),
+            255,
+        );
+        // Move the saturation band off 0.75 and the same pixel is rejected.
+        all(
+            &render_coverage(
+                compositor,
+                &uniform([0.8, 0.2, 0.2]),
+                std::slice::from_ref(&qualifier(&[
+                    ("matte_saturation_low_basis_points", 8_000),
+                    ("matte_saturation_high_basis_points", 10_000),
+                ])),
+                1,
+            )
+            .expect("qualifier coverage"),
+            0,
+        );
+        // Hue: e = (0.2, 0.8, 0.2) has M = c.g, so H = 60 * ((b - r)/C + 2)
+        // = 120 degrees, which is 120 away from a 30 degree half-width at 0.
+        all(
+            &render_coverage(
+                compositor,
+                &uniform([0.2, 0.8, 0.2]),
+                std::slice::from_ref(&qualifier(&[
+                    ("matte_saturation_low_basis_points", 0),
+                    ("matte_saturation_high_basis_points", 10_000),
+                    ("matte_luma_low_basis_points", 0),
+                    ("matte_luma_high_basis_points", 10_000),
+                ])),
+                1,
+            )
+            .expect("qualifier coverage"),
+            0,
+        );
+        // CC5 2.4's achromatic rule, both branches. e = (0.5, 0.5, 0.5) has
+        // C = 0 exactly, so a named hue excludes it and a 180 degree
+        // half-width includes it.
+        let achromatic_bands = [
+            ("matte_saturation_low_basis_points", 0),
+            ("matte_saturation_high_basis_points", 10_000),
+            ("matte_luma_low_basis_points", 0),
+            ("matte_luma_high_basis_points", 10_000),
+        ];
+        let mut named_hue = achromatic_bands.to_vec();
+        named_hue.push(("matte_hue_width_centidegrees", 3_000));
+        all(
+            &render_coverage(
+                compositor,
+                &uniform([0.5, 0.5, 0.5]),
+                std::slice::from_ref(&qualifier(&named_hue)),
+                1,
+            )
+            .expect("qualifier coverage"),
+            0,
+        );
+        let mut hue_off = achromatic_bands.to_vec();
+        hue_off.push(("matte_hue_width_centidegrees", 18_000));
+        all(
+            &render_coverage(
+                compositor,
+                &uniform([0.5, 0.5, 0.5]),
+                std::slice::from_ref(&qualifier(&hue_off)),
+                1,
+            )
+            .expect("qualifier coverage"),
+            255,
+        );
+        // A degenerate resolved band evaluates to 0, with no clamp and no
+        // reordering (CC5 2.6).
+        let mut degenerate = achromatic_bands.to_vec();
+        degenerate.push(("matte_hue_width_centidegrees", 18_000));
+        degenerate.push(("matte_saturation_low_basis_points", 9_000));
+        degenerate.push(("matte_saturation_high_basis_points", 1_000));
+        all(
+            &render_coverage(
+                compositor,
+                &uniform([0.5, 0.5, 0.5]),
+                std::slice::from_ref(&qualifier(&degenerate)),
+                1,
+            )
+            .expect("qualifier coverage"),
+            0,
+        );
+    }
+
+    /// CC5 3.2: `header.w` names the node's index among the *active* nodes, so
+    /// an inactive node earlier in the stack shifts it. A proof request for an
+    /// inactive or matte-free node fails typed rather than selecting a
+    /// different node.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn matte_debug_selector_resolves_the_active_index() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let neutral = wheels(1, &[]);
+        let left = with_matte(
+            wheels(2, &[("gain_master_thousandths", 1_500)]),
+            &[
+                ("matte_window_count", 1),
+                ("matte_window0_center_x_basis_points", 2_500),
+                ("matte_window0_center_y_basis_points", 5_000),
+                ("matte_window0_half_width_basis_points", 2_500),
+                ("matte_window0_half_height_basis_points", 10_000),
+            ],
+        );
+        let right = with_matte(
+            wheels(3, &[("gain_master_thousandths", 1_500)]),
+            &[
+                ("matte_window_count", 1),
+                ("matte_window0_center_x_basis_points", 7_500),
+                ("matte_window0_center_y_basis_points", 5_000),
+                ("matte_window0_half_width_basis_points", 2_500),
+                ("matte_window0_half_height_basis_points", 10_000),
+            ],
+        );
+        let matte_free = wheels(4, &[("gain_master_thousandths", 1_500)]);
+        let stack = vec![neutral, left, right, matte_free];
+
+        // The neutral node is inactive and is not written, so the two matted
+        // nodes are active 0 and 1.
+        assert!(color_node_inactive_reason(&stack[0]).is_some());
+        assert_eq!(
+            matte_debug_active_index(&stack, ClipId(1), EffectId(2)).expect("left is active"),
+            0
+        );
+        assert_eq!(
+            matte_debug_active_index(&stack, ClipId(1), EffectId(3)).expect("right is active"),
+            1
+        );
+
+        let frame = uniform_frame(64, 36, [0.25, 0.5, 0.75]);
+        let coverage = render_coverage(&compositor, &frame, &stack, 3).expect("right coverage");
+        // |u.x - 0.75| <= 0.25 is x in 32..=63; the left window would have
+        // selected x in 0..=31.
+        for y in 0..36_usize {
+            for x in 0..64_usize {
+                let expected = u8::from(x >= 32) * 255;
+                assert_eq!(
+                    coverage[y * 64 + x],
+                    expected,
+                    "pixel ({x}, {y}) selected the wrong node's window"
+                );
+            }
+        }
+
+        // Typed failures, never a blank frame.
+        let inactive = render_coverage(&compositor, &frame, &stack, 1)
+            .expect_err("an inactive node cannot be proved");
+        let MediaError::Backend(message) = inactive else {
+            panic!("expected a backend error");
+        };
+        assert!(
+            message.starts_with("matte_proof_node_inactive:"),
+            "unexpected message: {message}"
+        );
+        assert!(message.contains("neutral"), "unexpected message: {message}");
+        let no_matte = render_coverage(&compositor, &frame, &stack, 4)
+            .expect_err("a matte-free node cannot be proved");
+        let MediaError::Backend(message) = no_matte else {
+            panic!("expected a backend error");
+        };
+        assert!(
+            message.starts_with("matte_proof_no_matte:"),
+            "unexpected message: {message}"
+        );
+        let missing = render_coverage(&compositor, &frame, &stack, 99)
+            .expect_err("an absent effect cannot be proved");
+        let MediaError::Backend(message) = missing else {
+            panic!("expected a backend error");
+        };
+        assert!(
+            message.starts_with("matte_proof_effect_not_found:"),
+            "unexpected message: {message}"
+        );
+    }
+
+    /// CC5 3.2 / 9.2.13: the layer quad is scaled uniformly in NDC, so its
+    /// pixel aspect equals the OUTPUT raster aspect at every `params.scale`.
+    ///
+    /// The quad spans NDC `[-s, s]` on both axes, which is `s * W` by `s * H`
+    /// pixels, so the per-pixel step of the height-normalized offset `d` is
+    /// `a / (s * W) = 1 / (s * H)` on x and `1 / (s * H)` on y — isotropic in
+    /// pixels for every `s`. A circular window therefore stays circular.
+    #[test]
+    #[allow(clippy::cast_precision_loss, clippy::naive_bytecount)]
+    fn layer_quad_pixel_aspect_equals_the_raster_aspect() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let (width, height) = (64_usize, 36_usize);
+        let aspect = 64.0_f64 / 36.0_f64;
+        for (scale_percent, scale) in [(50_i64, 0.5_f64), (100, 1.0), (200, 2.0)] {
+            // The vertex math, restated: quad width and height in pixels.
+            let quad_width = scale * 64.0_f64;
+            let quad_height = scale * 36.0_f64;
+            assert!(
+                (quad_width / quad_height - aspect).abs() < 1e-12,
+                "quad pixel aspect at scale {scale} is not the raster aspect"
+            );
+
+            let frame = uniform_frame(64, 36, [0.25, 0.5, 0.75]);
+            let stack = vec![
+                effect_with(9, "transform", &[("scale_percent", scale_percent)]),
+                with_matte(
+                    wheels(1, &[("gain_master_thousandths", 1_500)]),
+                    &[
+                        ("matte_window_count", 1),
+                        ("matte_window0_shape_token", 2),
+                        ("matte_window0_center_x_basis_points", 5_000),
+                        ("matte_window0_center_y_basis_points", 5_000),
+                        ("matte_window0_half_width_basis_points", 1_125),
+                        ("matte_window0_half_height_basis_points", 2_000),
+                        ("matte_window0_feather_basis_points", 0),
+                    ],
+                ),
+            ];
+            let coverage =
+                render_coverage(&compositor, &frame, &stack, 1).expect("scaled coverage");
+
+            // Independent f64 transcription of CC5 2.3 for this quad.
+            let mut expected = Vec::new();
+            for y in 0..height {
+                for x in 0..width {
+                    let dx = (x as f64 - 31.5) / (36.0 * scale);
+                    let dy = (y as f64 - 17.5) / (36.0 * scale);
+                    if dx * dx + dy * dy <= 0.04 {
+                        expected.push((x, y));
+                    }
+                }
+            }
+            let observed = coverage
+                .iter()
+                .enumerate()
+                .filter(|(_, code)| **code == 255)
+                .map(|(index, _)| (index % width, index / width))
+                .collect::<Vec<_>>();
+            assert_eq!(observed, expected, "coverage at scale {scale}");
+            assert!(!expected.is_empty());
+            let min_x = expected.iter().map(|(x, _)| *x).min().expect("coverage");
+            let max_x = expected.iter().map(|(x, _)| *x).max().expect("coverage");
+            let min_y = expected.iter().map(|(_, y)| *y).min().expect("coverage");
+            let max_y = expected.iter().map(|(_, y)| *y).max().expect("coverage");
+            assert_eq!(
+                max_x - min_x,
+                max_y - min_y,
+                "the circle is not circular in pixels at scale {scale}"
+            );
+        }
+        // The scale-1 anchor is the hand-counted 164.
+        let frame = uniform_frame(64, 36, [0.25, 0.5, 0.75]);
+        let coverage = render_coverage(
+            &compositor,
+            &frame,
+            std::slice::from_ref(&with_matte(
+                wheels(1, &[("gain_master_thousandths", 1_500)]),
+                &[
+                    ("matte_window_count", 1),
+                    ("matte_window0_shape_token", 2),
+                    ("matte_window0_center_x_basis_points", 5_000),
+                    ("matte_window0_center_y_basis_points", 5_000),
+                    ("matte_window0_half_width_basis_points", 1_125),
+                    ("matte_window0_half_height_basis_points", 2_000),
+                ],
+            )),
+            1,
+        )
+        .expect("unscaled coverage");
+        assert_eq!(coverage.iter().filter(|code| **code == 255).count(), 164);
+    }
+
+    /// CC5 3.3: every matte-capable kind takes the matte branch, because the
+    /// kind dispatch is single-sourced in `apply_node_kind` and both arms of
+    /// the `matte_base` test call it.
+    #[test]
+    fn every_matte_capable_kind_takes_the_matte_branch() {
+        for kind in ColorNodeKind::ALL {
+            let tag = kind.storage_buffer_tag();
+            assert!(
+                COMPOSITOR_SHADER_SOURCE.contains(&format!("kind == {tag}u")),
+                "compositor.wgsl has no dispatch for {kind:?}"
+            );
+        }
+        // Exactly one dispatch site, reached from both arms.
+        assert_eq!(
+            COMPOSITOR_SHADER_SOURCE
+                .matches("fn apply_node_kind(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            COMPOSITOR_SHADER_SOURCE
+                .matches("apply_node_kind(kind, base, values, corrected)")
+                .count(),
+            2,
+            "the matte branch and the matte-free branch must share one dispatch"
+        );
+        assert!(COMPOSITOR_SHADER_SOURCE.contains("if matte_base == 0u {"));
+        assert!(COMPOSITOR_SHADER_SOURCE.contains("matte_coverage(matte_base, uv, corrected)"));
+        // CC5 2.5.5's exact-identity branch is normative, not an optimization.
+        assert!(COMPOSITOR_SHADER_SOURCE.contains("if m == 0.0 {"));
+        // The debug return happens right after the node stack.
+        assert!(COMPOSITOR_SHADER_SOURCE.contains("if grade_buffer.header.w > 0u {"));
+    }
+
+    /// The legacy two-argument serializer refuses a matte-carrying stack
+    /// rather than inventing a raster aspect for it.
+    #[test]
+    fn the_matte_free_serializer_refuses_a_matte() {
+        let node = with_matte(
+            wheels(1, &[("gain_master_thousandths", 1_500)]),
+            &[("matte_window_count", 1)],
+        );
+        let error = grade_buffer_bytes_with_luts(std::slice::from_ref(&node), None)
+            .expect_err("a matte needs the raster aspect");
+        let MediaError::Backend(message) = error else {
+            panic!("expected a backend error");
+        };
+        assert!(
+            message.starts_with("matte_requires_raster_aspect:"),
+            "unexpected message: {message}"
+        );
+    }
+
+    /// The matte-debug selector is validated against the records this stack
+    /// actually wrote.
+    #[test]
+    fn matte_debug_selector_is_bounds_checked() {
+        let node = wheels(1, &[("gain_master_thousandths", 1_500)]);
+        let error = grade_buffer_bytes_for(std::slice::from_ref(&node), None, (64, 36), Some(1))
+            .expect_err("only one active node was written");
+        let MediaError::Backend(message) = error else {
+            panic!("expected a backend error");
+        };
+        assert!(
+            message.starts_with("matte_debug_node_out_of_range:"),
+            "unexpected message: {message}"
+        );
+        let bytes = grade_buffer_bytes_for(std::slice::from_ref(&node), None, (64, 36), Some(0))
+            .expect("active node 0 exists");
+        assert_eq!(grade_header(&bytes, 3), 1, "header.w is index + 1");
+    }
+
+    /// The CC5 GPU anchors rerun on a real adapter.
+    ///
+    /// The default lane is the deterministic software rasterizer; this lane
+    /// proves the same hand-derived counts and coverage codes on hardware,
+    /// where the distance field, the smoothstep, and the `f16` render target
+    /// are a different implementation entirely. Ignored by default because a
+    /// physical adapter is not universally available.
+    #[test]
+    #[ignore = "requires a real (non-fallback) GPU adapter"]
+    fn cc5_matte_gpu_anchors_hold_on_hardware() {
+        let context = GpuContext::headless(false)
+            .expect("CC5 hardware matte evidence requires a non-fallback adapter");
+        let metadata = context.monitor_proof_metadata();
+        println!(
+            "CC_GPU_LANE lane=hardware backend={};adapter={};software_fallback={}",
+            metadata.backend, metadata.adapter, metadata.software_fallback
+        );
+        assert!(
+            !metadata.software_fallback,
+            "this lane must acquire a real non-CPU adapter; observed {}",
+            metadata.adapter
+        );
+        let compositor = Compositor::new(context);
+        assert_matte_containment(&compositor);
+        assert_zero_coverage_identity(&compositor);
+        assert_matte_window_geometry(&compositor);
+        assert_matte_feather_codes(&compositor);
+        assert_matte_qualifier_anchors(&compositor);
     }
 }

@@ -124,6 +124,9 @@ pub(crate) struct KinewrightApp {
     pub(crate) media_cache_clear_result: Option<kinewright_core::MediaCacheClearResult>,
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) color_scopes: crate::color_scopes_ui::ColorScopesState,
+    /// CC5 §6 matte overlay: the expanded section's identity, the selected
+    /// window, the live drag, and the matte-view coverage worker.
+    pub(crate) matte_overlay: crate::matte_overlay_ui::MatteOverlayState,
     pub(crate) playing: bool,
     pub(crate) meter_levels: [f32; 2],
     pub(crate) resume_after_scrub: bool,
@@ -289,6 +292,7 @@ impl KinewrightApp {
             media_cache_clear_result: None,
             texture: None,
             color_scopes: crate::color_scopes_ui::ColorScopesState::default(),
+            matte_overlay: crate::matte_overlay_ui::MatteOverlayState::default(),
             playing: false,
             meter_levels: [0.0; 2],
             resume_after_scrub: false,
@@ -1539,6 +1543,10 @@ impl KinewrightApp {
                     .inner_margin(egui::Margin::same(theme::margin(space::THREE))),
             )
             .show(ui, |ui| self.agent_panel(ui));
+        // The matte overlay's permission lives exactly one frame: the inspector
+        // has just had its turn, so a report nobody restated expires here
+        // (CC5 §6).
+        self.matte_overlay.expire_unreported();
     }
 }
 

@@ -13,7 +13,7 @@
 //! fixture that claims to reuse it.
 //!
 //! Per CC4 §10.1 rule 1 no expected value in this file is obtained by calling
-//! `Lut3d::lookup`, `LutNode::apply`, `apply_color_nodes`, the compositor, or
+//! `Lut3d::lookup`, `LutNode::apply`, `apply_color_nodes_at`, the compositor, or
 //! the shader. Expected values are either literal constants transcribed from
 //! the contract tables or computed by the `spec_*_f64` functions below, which
 //! are an independent f64 transcription of §2.6 and §3.5.
@@ -46,7 +46,7 @@ use kinewright_core::{
     LUT_ASSET_ID_MAX, LUT_NODE_LIMIT_PER_LAYER, LutAsset, LutAssetId, LutAssetKind, LutAssetSource,
     LutAvailabilityKind, LutNodeParams, MANAGED_COLOR_NODE_NAMES, OpError, Operation, ParamValue,
     QaSeverity, TimeCode, active_color_nodes, color_node_inactive_reason, effect_descriptor,
-    qa_document, validate_lut_asset,
+    is_matte_parameter, qa_document, validate_lut_asset,
 };
 use serde_json::{Value, json};
 
@@ -71,7 +71,7 @@ use crate::{
         json_hash, neutral_ramp, primary_effect, representative_curves, representative_wheels,
     },
     color_pipeline::{
-        ColorNode, LutInputEncoding, apply_color_nodes, encode_monitor_rgba8,
+        ColorNode, LutInputEncoding, apply_color_nodes_at, encode_monitor_rgba8,
         resolve_color_nodes_with,
     },
     compositor::grade_buffer_bytes_with_luts,
@@ -755,18 +755,52 @@ fn cpu_nodes(effects: &[Effect], library: &LutLibrary) -> Vec<ColorNode> {
     resolve_color_nodes_with(effects, library).expect("CC4 fixture node stack must resolve")
 }
 
+/// The CC5 §3.4 pixel-centre uv of raster index `index`,
+/// `((x + 0.5) / W, (y + 0.5) / H)`, matching the rasterizer's
+/// `@builtin(position)` convention.
+#[allow(clippy::cast_precision_loss)]
+fn pixel_centre_uv(frame: &WorkingFrame, index: usize) -> [f32; 2] {
+    let width = (frame.width.max(1)) as usize;
+    let x = index % width;
+    let y = index / width;
+    [
+        (x as f32 + 0.5) / frame.width.max(1) as f32,
+        (y as f32 + 0.5) / frame.height.max(1) as f32,
+    ]
+}
+
+/// The output raster aspect `a = W / H` the host supplies to the matte
+/// (CC5 §3.2).
+#[allow(clippy::cast_precision_loss)]
+fn raster_aspect(frame: &WorkingFrame) -> f32 {
+    frame.width.max(1) as f32 / frame.height.max(1) as f32
+}
+
+/// The CC5 §3.4 reference at the centre of a square raster.
+///
+/// No CC4 node stack carries a matte, so the position and the aspect are
+/// immaterial and the result is bit-identical to the pre-CC5 positionless
+/// reference — which is the point of CC5 §2.5's mandatory matte-free branch.
+fn apply_stack(nodes: &[ColorNode], rgb: [f32; 3]) -> [f32; 3] {
+    apply_color_nodes_at(nodes, rgb, [0.5, 0.5], 1.0)
+}
+
 /// The production CPU reference in the linear working domain, including the
 /// normative `Rgba16Float` storage quantization.
 fn cpu_reference_linear(frame: &WorkingFrame, nodes: &[ColorNode]) -> Vec<f32> {
+    let aspect = raster_aspect(frame);
     frame
         .pixels
         .as_chunks::<4>()
         .0
         .iter()
-        .flat_map(|rgba| {
-            let output = apply_color_nodes(
+        .enumerate()
+        .flat_map(|(index, rgba)| {
+            let output = apply_color_nodes_at(
                 nodes,
                 [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()],
+                pixel_centre_uv(frame, index),
+                aspect,
             );
             output
                 .into_iter()
@@ -777,15 +811,19 @@ fn cpu_reference_linear(frame: &WorkingFrame, nodes: &[ColorNode]) -> Vec<f32> {
 }
 
 fn cpu_reference_monitor(frame: &WorkingFrame, nodes: &[ColorNode]) -> Vec<u8> {
+    let aspect = raster_aspect(frame);
     frame
         .pixels
         .as_chunks::<4>()
         .0
         .iter()
-        .flat_map(|rgba| {
-            let output = apply_color_nodes(
+        .enumerate()
+        .flat_map(|(index, rgba)| {
+            let output = apply_color_nodes_at(
                 nodes,
                 [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()],
+                pixel_centre_uv(frame, index),
+                aspect,
             );
             let quantized = output.map(|value| f16::from_f32(value).to_f32());
             encode_monitor_rgba8([quantized[0], quantized[1], quantized[2], rgba[3].to_f32()])
@@ -2691,7 +2729,9 @@ fn cc4_lut_slots_limits_and_abi_constants_hold() {
     assert_eq!(COMPOSITOR_LUT_SLOTS_PER_LAYER, LUT_NODE_LIMIT_PER_LAYER);
     assert_eq!(COMPOSITOR_LEGACY_LUT_SLOT, 4);
     assert_eq!(COMPOSITOR_LUT_ATLAS_SLOTS, 5);
-    assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE, 16_384);
+    // CC5 §3.1 widens the binding to hold sixteen curve-plus-matte nodes;
+    // the binding *count* is unchanged, which is the portability claim.
+    assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE, 32_768);
     assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, 1);
     assert_eq!(COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D, 512);
     assert!(
@@ -2743,8 +2783,9 @@ fn cc4_lut_slots_limits_and_abi_constants_hold() {
     assert_eq!(grade_header_word(&bytes, 0), 4, "four active nodes");
     assert_eq!(
         grade_header_word(&bytes, 2),
-        2,
-        "CC4 §4.2 takes GRADE_ABI_VERSION from 1 to 2"
+        3,
+        "CC4 §4.2 took GRADE_ABI_VERSION from 1 to 2; CC5 §3.1 takes it to 3, because a \
+         consumer that understands only the CC4 kinds would read v11 as a reserved zero"
     );
     const EXPECTED_SLOTS: [(f32, f32, f32); 4] = [
         (0.0, 2.0, 0.0),
@@ -3306,7 +3347,7 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
         // code, at the §10.3.10 gate.
         let mut cpu_display_error = 0.0_f64;
         for (pixel, rgba) in samples.iter().enumerate() {
-            let out = apply_color_nodes(
+            let out = apply_stack(
                 &nodes,
                 [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()],
             );
@@ -4632,8 +4673,21 @@ fn cc4_manifest_declares_every_required_fixture_and_constant() {
         let declared = manifest["lut_node_controls"][name]
             .as_array()
             .unwrap_or_else(|| panic!("the manifest must declare the {name} controls"));
-        assert_eq!(declared.len(), descriptor.parameters.len());
-        for (row, parameter) in declared.iter().zip(descriptor.parameters) {
+        // CC5 §2.2 adds 47 `matte_*` parameters to `creative_look`'s
+        // descriptor. They are CC5's table, declared by the CC5 manifest, so
+        // this CC4 table counts the LUT controls only.
+        let lut_controls = descriptor
+            .parameters
+            .iter()
+            .filter(|parameter| !is_matte_parameter(parameter.name))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lut_controls.len(),
+            4,
+            "{name} carries four CC4 LUT controls beside any CC5 matte parameters"
+        );
+        assert_eq!(declared.len(), lut_controls.len());
+        for (row, parameter) in declared.iter().zip(lut_controls) {
             assert_eq!(row["name"], parameter.name, "{name}");
             assert_eq!(row["min"], parameter.min, "{name}.{}", parameter.name);
             assert_eq!(row["max"], parameter.max, "{name}.{}", parameter.name);
@@ -4751,7 +4805,7 @@ fn cc4_manifest_declares_every_required_fixture_and_constant() {
         atlas["grade_abi_version"],
         u64::from(grade_header_word(&empty, 2))
     );
-    assert_eq!(atlas["grade_abi_version"], 2);
+    assert_eq!(atlas["grade_abi_version"], 3);
 
     // --- §10.2 raster -----------------------------------------------------
     let raster = &manifest["raster"];
@@ -5001,7 +5055,7 @@ fn cc4_input_encoding_tokens_are_hand_derived_and_dispatched() {
         // f16, so this is the very value the working frame hands the node, and
         // the comparison is not limited by the `Rgba16Float` storage step the
         // way a readback would be.
-        let cpu = apply_color_nodes(&cpu_nodes(&stack, luts.library()), INPUT);
+        let cpu = apply_stack(&cpu_nodes(&stack, luts.library()), INPUT);
         assert_rgb_within(cpu, expected, CPU_TOLERANCE, &format!("{name}: CPU"));
         let rendered = block_rgb(
             &gpu_linear(
@@ -5048,7 +5102,7 @@ fn cc4_input_encoding_tokens_are_hand_derived_and_dispatched() {
         let encoding = LutInputEncoding::from_token(token).expect("a documented token");
         let spec = look.apply(encoding, 1.0, OVER_RANGE.map(f64::from));
         let stack = [creative_look(1, 2, token, 10_000)];
-        let cpu = apply_color_nodes(&cpu_nodes(&stack, luts.library()), OVER_RANGE);
+        let cpu = apply_stack(&cpu_nodes(&stack, luts.library()), OVER_RANGE);
         let expected = spec.map(|value| value as f32);
         assert_rgb_within(
             cpu,

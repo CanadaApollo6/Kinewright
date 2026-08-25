@@ -55,7 +55,7 @@ use crate::{
         working_frame, write_evidence_artefact,
     },
     color_pipeline::{
-        ColorNode, apply_color_nodes, decode_bt709, encode_monitor_rgba8, grade709_decode,
+        ColorNode, apply_color_nodes_at, decode_bt709, encode_monitor_rgba8, grade709_decode,
         grade709_encode, resolve_color_nodes,
     },
     decode::probe_path,
@@ -353,18 +353,52 @@ fn cpu_nodes(effects: &[Effect]) -> Vec<ColorNode> {
     resolve_color_nodes(effects).expect("CC3 fixture node stack must resolve")
 }
 
+/// The CC5 §3.4 pixel-centre uv of raster index `index`,
+/// `((x + 0.5) / W, (y + 0.5) / H)`, matching the rasterizer's
+/// `@builtin(position)` convention.
+#[allow(clippy::cast_precision_loss)]
+fn pixel_centre_uv(frame: &WorkingFrame, index: usize) -> [f32; 2] {
+    let width = (frame.width.max(1)) as usize;
+    let x = index % width;
+    let y = index / width;
+    [
+        (x as f32 + 0.5) / frame.width.max(1) as f32,
+        (y as f32 + 0.5) / frame.height.max(1) as f32,
+    ]
+}
+
+/// The output raster aspect `a = W / H` the host supplies to the matte
+/// (CC5 §3.2).
+#[allow(clippy::cast_precision_loss)]
+fn raster_aspect(frame: &WorkingFrame) -> f32 {
+    frame.width.max(1) as f32 / frame.height.max(1) as f32
+}
+
+/// The CC5 §3.4 reference at the centre of a square raster.
+///
+/// No CC3 node stack carries a matte, so the position and the aspect are
+/// immaterial and the result is bit-identical to the pre-CC5 positionless
+/// reference — which is the point of CC5 §2.5's mandatory matte-free branch.
+fn apply_stack(nodes: &[ColorNode], rgb: [f32; 3]) -> [f32; 3] {
+    apply_color_nodes_at(nodes, rgb, [0.5, 0.5], 1.0)
+}
+
 /// The independent CPU reference in the linear working domain, including the
 /// normative `Rgba16Float` storage quantization.
 fn cpu_reference_linear(frame: &WorkingFrame, nodes: &[ColorNode]) -> Vec<f32> {
+    let aspect = raster_aspect(frame);
     frame
         .pixels
         .as_chunks::<4>()
         .0
         .iter()
-        .flat_map(|rgba| {
-            let output = apply_color_nodes(
+        .enumerate()
+        .flat_map(|(index, rgba)| {
+            let output = apply_color_nodes_at(
                 nodes,
                 [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()],
+                pixel_centre_uv(frame, index),
+                aspect,
             );
             output
                 .into_iter()
@@ -375,15 +409,19 @@ fn cpu_reference_linear(frame: &WorkingFrame, nodes: &[ColorNode]) -> Vec<f32> {
 }
 
 fn cpu_reference_monitor(frame: &WorkingFrame, nodes: &[ColorNode]) -> Vec<u8> {
+    let aspect = raster_aspect(frame);
     frame
         .pixels
         .as_chunks::<4>()
         .0
         .iter()
-        .flat_map(|rgba| {
-            let output = apply_color_nodes(
+        .enumerate()
+        .flat_map(|(index, rgba)| {
+            let output = apply_color_nodes_at(
                 nodes,
                 [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()],
+                pixel_centre_uv(frame, index),
+                aspect,
             );
             let quantized = output.map(|value| f16::from_f32(value).to_f32());
             encode_monitor_rgba8([quantized[0], quantized[1], quantized[2], rgba[3].to_f32()])
@@ -1078,7 +1116,7 @@ fn cc3_grade709_is_a_bijection_and_matches_the_documented_anchors() {
     );
     let gain_anchor = wheels_effect(1, &[("gain_red_thousandths", 1_200)]);
     assert_close(
-        apply_color_nodes(&cpu_nodes(std::slice::from_ref(&gain_anchor)), [0.18; 3])[0],
+        apply_stack(&cpu_nodes(std::slice::from_ref(&gain_anchor)), [0.18; 3])[0],
         0.250_771,
         ANCHOR_TOLERANCE,
         "wheels gain_red = 1200 at 0.18",
@@ -1091,7 +1129,7 @@ fn cc3_grade709_is_a_bijection_and_matches_the_documented_anchors() {
         ],
     );
     assert_close(
-        apply_color_nodes(
+        apply_stack(
             &cpu_nodes(std::slice::from_ref(&lift_gamma_anchor)),
             [0.18; 3],
         )[0],
@@ -1107,7 +1145,7 @@ fn cc3_grade709_is_a_bijection_and_matches_the_documented_anchors() {
         )],
     );
     assert_close(
-        apply_color_nodes(&cpu_nodes(std::slice::from_ref(&curve_anchor)), [0.18; 3])[0],
+        apply_stack(&cpu_nodes(std::slice::from_ref(&curve_anchor)), [0.18; 3])[0],
         0.262_441,
         ANCHOR_TOLERANCE,
         "curves master (0,0) (5000,6000) (10000,10000) at 0.18",
@@ -1477,7 +1515,7 @@ fn cc3_every_control_bound_matches_a_hand_derived_expected_value() {
             let mut expectations = Vec::new();
             for sample in BOUNDARY_SAMPLES {
                 let expected = spec_wheels_apply_f64(&parameters, [f64::from(sample); 3]);
-                let actual = apply_color_nodes(&nodes, [sample; 3]);
+                let actual = apply_stack(&nodes, [sample; 3]);
                 for channel in 0..3 {
                     assert_matches_spec(
                         actual[channel],
@@ -1517,7 +1555,7 @@ fn cc3_every_control_bound_matches_a_hand_derived_expected_value() {
         let effect = with_parameter(&wheels_effect(1, &bypass_parameters), "bypass", token);
         let nodes = cpu_nodes(std::slice::from_ref(&effect));
         for sample in BOUNDARY_SAMPLES {
-            let actual = apply_color_nodes(&nodes, [sample; 3]);
+            let actual = apply_stack(&nodes, [sample; 3]);
             if identity {
                 assert_eq!(
                     actual.map(f32::to_bits),
@@ -1565,7 +1603,7 @@ fn cc3_every_control_bound_matches_a_hand_derived_expected_value() {
         let mut expectations = Vec::new();
         for sample in BOUNDARY_SAMPLES {
             let expected = spec_curves_apply_f64(&curves, [f64::from(sample); 3]);
-            let actual = apply_color_nodes(&nodes, [sample; 3]);
+            let actual = apply_stack(&nodes, [sample; 3]);
             for channel in 0..3 {
                 assert_matches_spec(
                     actual[channel],
@@ -1598,7 +1636,7 @@ fn cc3_every_control_bound_matches_a_hand_derived_expected_value() {
     let composed_nodes = cpu_nodes(std::slice::from_ref(&composed_effect));
     for sample in BOUNDARY_SAMPLES {
         let expected = spec_curves_apply_f64(&composed, [f64::from(sample); 3]);
-        let actual = apply_color_nodes(&composed_nodes, [sample; 3]);
+        let actual = apply_stack(&composed_nodes, [sample; 3]);
         for channel in 0..3 {
             assert_matches_spec(
                 actual[channel],
@@ -1646,7 +1684,7 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
             let effect = wheels_effect(1, &[(name, value)]);
             let nodes = cpu_nodes(std::slice::from_ref(&effect));
             for sample in &raster {
-                for channel in apply_color_nodes(&nodes, *sample) {
+                for channel in apply_stack(&nodes, *sample) {
                     assert!(
                         channel.is_finite(),
                         "color_wheels {name}={value} produced {channel} on {sample:?}"
@@ -1662,7 +1700,7 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
         let effect = curves_effect(2, &curves);
         let nodes = cpu_nodes(std::slice::from_ref(&effect));
         for sample in &raster {
-            for channel in apply_color_nodes(&nodes, *sample) {
+            for channel in apply_stack(&nodes, *sample) {
                 assert!(
                     channel.is_finite(),
                     "color_curves {name} produced {channel} on {sample:?}"
@@ -1689,7 +1727,7 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
         "the f64 spec value for slope=16, power=16 on 4.0 should be ~1.1e53, not {}",
         extreme_expected[0]
     );
-    let extreme_output = apply_color_nodes(&extreme_nodes, [4.0; 3]);
+    let extreme_output = apply_stack(&extreme_nodes, [4.0; 3]);
     assert_eq!(
         extreme_output[0],
         f32::INFINITY,
@@ -1702,7 +1740,7 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
     );
     let mut extreme_infinities = 0_usize;
     for sample in &raster {
-        for channel in apply_color_nodes(&extreme_nodes, *sample) {
+        for channel in apply_stack(&extreme_nodes, *sample) {
             assert!(
                 !channel.is_nan(),
                 "the simultaneous extreme must never produce NaN on {sample:?}"
@@ -1771,7 +1809,7 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
     // Over-range input survives every stage: a mild node keeps 4.0 above 1.0.
     let mild = representative_wheels(4);
     let mild_nodes = cpu_nodes(std::slice::from_ref(&mild));
-    let mild_output = apply_color_nodes(&mild_nodes, [4.0; 3]);
+    let mild_output = apply_stack(&mild_nodes, [4.0; 3]);
     for channel in mild_output {
         assert!(
             channel > 1.0 && channel.is_finite(),
@@ -1800,7 +1838,7 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
     assert_eq!(diagonal_nodes.len(), 1);
     let mut worst_diagonal = 0.0_f32;
     for sample in &raster {
-        let output = apply_color_nodes(&diagonal_nodes, *sample);
+        let output = apply_stack(&diagonal_nodes, *sample);
         for channel in 0..3 {
             let error = (output[channel] - sample[channel]).abs();
             assert!(
@@ -1818,7 +1856,7 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
     let zero_gain = wheels_effect(6, &zero_gain_parameters);
     let zero_gain_nodes = cpu_nodes(std::slice::from_ref(&zero_gain));
     for sample in &raster {
-        let output = apply_color_nodes(&zero_gain_nodes, *sample);
+        let output = apply_stack(&zero_gain_nodes, *sample);
         assert_eq!(
             output[0].to_bits(),
             0.0_f32.to_bits(),
@@ -1835,7 +1873,7 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
     let lifted_nodes = cpu_nodes(std::slice::from_ref(&lifted));
     let lifted_expected = spec_wheels_apply_f64(&lifted_parameters, [0.0; 3])[0];
     for sample in &raster {
-        let output = apply_color_nodes(&lifted_nodes, *sample);
+        let output = apply_stack(&lifted_nodes, *sample);
         assert_matches_spec(
             output[0],
             lifted_expected,
@@ -2076,7 +2114,7 @@ fn cc3_collinear_sixteen_point_curve_is_identity_without_the_short_circuit() {
 
     let mut worst_cpu = 0.0_f32;
     for sample in cc3_parity_raster() {
-        let output = apply_color_nodes(&nodes, sample);
+        let output = apply_stack(&nodes, sample);
         for channel in 0..3 {
             let error = (output[channel] - sample[channel]).abs();
             assert!(

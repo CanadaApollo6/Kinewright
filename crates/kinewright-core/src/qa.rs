@@ -173,6 +173,23 @@ pub fn qa_document(document: &Document) -> QaReport {
                         None,
                     ));
                 }
+                if let Some(inversion) = matte_band_inversion(effect) {
+                    let at = TimeCode(clip.timeline_start.0.saturating_add(inversion.at.0));
+                    issues.push(issue(
+                        QaSeverity::Warning,
+                        "matte_band_inverted_by_automation",
+                        format!(
+                            "Clip {} effect {} resolves a matte {} band at frame {} whose low edge is above its high edge, so that band selects nothing and the matte is empty (CC5 §2.6).",
+                            clip.id,
+                            effect.id,
+                            inversion.bands.join(" and "),
+                            at.0
+                        ),
+                        Some(track.id),
+                        Some(clip.id),
+                        Some(at..TimeCode(at.0.saturating_add(1))),
+                    ));
+                }
                 if let Some(truncation) = curve_truncation(effect) {
                     let at = TimeCode(clip.timeline_start.0.saturating_add(truncation.at.0));
                     issues.push(issue(
@@ -476,6 +493,24 @@ struct CurveTruncation {
     curves: Vec<String>,
 }
 
+/// The frames a bounded matte band scan examines.
+///
+/// The scan evaluates each matte-capable node at frame zero plus every
+/// keyframe frame of that node's band parameters, which is where an inverted
+/// band can appear: the four edges are the only controls whose ordering the
+/// rule tests, and `bypass` and `matte_enabled` decide whether an inversion is
+/// reportable at all. A crossing that exists strictly between two keyframes -
+/// possible when the two edges use different keyframe frames or easings - is
+/// still evaluated correctly at render time by the §2.6 rule; QA simply does
+/// not sample every frame of the clip. Bounded, like the CC3 truncation scan,
+/// so pathological automation cannot make a QA pass unbounded.
+const MATTE_BAND_SCAN_FRAME_LIMIT: usize = 256;
+
+struct MatteBandInversion {
+    at: TimeCode,
+    bands: Vec<String>,
+}
+
 /// Every `lut_asset_id` one node references that the document does not own.
 ///
 /// Both the stored static value and every `Hold` keyframe value count, exactly
@@ -544,6 +579,62 @@ fn curve_truncation(effect: &Effect) -> Option<CurveTruncation> {
                 .into_iter()
                 .map(|curve| format!("the {} curve", curve.name()))
                 .collect(),
+        });
+    }
+    None
+}
+
+/// Report the first frame at which a matte-capable node resolves a qualifier
+/// band whose low edge is above its high edge (CC5 §2.6).
+///
+/// Non-blocking: the band evaluates to `0`, which is a legal resolved state,
+/// not an error. A bypassed node is the exact identity and an inactive matte
+/// is never evaluated, so neither is reported; a disabled qualifier is not
+/// reported either, because its bands do not participate in the coverage.
+fn matte_band_inversion(effect: &Effect) -> Option<MatteBandInversion> {
+    if !crate::is_matte_capable_color_node(&effect.name) {
+        return None;
+    }
+    let mut frames = vec![TimeCode::ZERO];
+    for (name, curve) in &effect.keyframes {
+        if !matches!(
+            name.as_str(),
+            "matte_saturation_low_basis_points"
+                | "matte_saturation_high_basis_points"
+                | "matte_luma_low_basis_points"
+                | "matte_luma_high_basis_points"
+                | "matte_qualifier_enabled"
+                | "matte_enabled"
+                | crate::COLOR_NODE_BYPASS_PARAMETER
+        ) {
+            continue;
+        }
+        for keyframe in &curve.keyframes {
+            frames.push(keyframe.at);
+        }
+    }
+    frames.sort_unstable();
+    frames.dedup();
+    frames.truncate(MATTE_BAND_SCAN_FRAME_LIMIT);
+    for at in frames {
+        let evaluated = effect.evaluated_at(at);
+        // An inactive node (bypassed, neutral, unbound, or matte-excluded) is
+        // the exact identity at this frame: its matte is never evaluated, so a
+        // crossed band on it is not a rendering concern.
+        if crate::color_node_inactive_reason(&evaluated).is_some() {
+            continue;
+        }
+        let matte = crate::MatteParams::from_effect(&evaluated);
+        if !matte.has_matte() || !matte.qualifier.is_enabled() {
+            continue;
+        }
+        let bands = matte.degenerate_bands();
+        if bands.is_empty() {
+            continue;
+        }
+        return Some(MatteBandInversion {
+            at,
+            bands: bands.into_iter().map(ToOwned::to_owned).collect(),
         });
     }
     None

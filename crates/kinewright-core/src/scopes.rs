@@ -21,7 +21,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::RgbaImage;
+use crate::{ClipId, EffectId, RgbaImage};
 
 /// The fixed full-scale used for RGB and luma percentile codes.
 pub const SCOPE_SAMPLE_SCALE: u32 = 65_535;
@@ -90,6 +90,47 @@ impl ScopeStage {
 /// Compatibility spelling for callers that use the roadmap's pipeline-stage
 /// terminology.
 pub type ScopePipelineStage = ScopeStage;
+
+/// The pinned matte-scoping threshold token: a pixel is in the measured
+/// population when its coverage is greater than zero.
+///
+/// `m > 0` is the set the correction touched at all, which is exactly the set
+/// the CC5 containment gate measures.  A `m >= 0.5` threshold would silently
+/// discard half of every feather band and make a scope disagree with that
+/// gate, so the threshold is a constant rather than a parameter.
+pub const MATTE_SCOPE_THRESHOLD: &str = "coverage_greater_than_zero";
+
+/// The matte a measurement was scoped to.
+///
+/// A matte-scoped measurement is still taken at
+/// [`ScopeStage::MonitoringPostComposite`]; only the measured *region*
+/// changes.  `ScopeStage` is deliberately not extended: a matte is not a
+/// pipeline boundary, and a new stage value would make stage equality in
+/// [`compare_scope_evidence`] mean two different things at once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MatteRegionDescription {
+    /// The clip carrying the matte-scoping colour node.
+    pub clip: ClipId,
+    /// The matte-carrying colour node's effect identity.
+    pub effect: EffectId,
+    /// Always [`MATTE_SCOPE_THRESHOLD`].
+    pub threshold: String,
+    /// Coverage pixels above the threshold in the scoping matte.
+    pub covered_pixel_count: u64,
+}
+
+impl MatteRegionDescription {
+    /// Describe a matte region with the pinned [`MATTE_SCOPE_THRESHOLD`].
+    #[must_use]
+    pub fn new(clip: ClipId, effect: EffectId, covered_pixel_count: u64) -> Self {
+        Self {
+            clip,
+            effect,
+            threshold: MATTE_SCOPE_THRESHOLD.to_owned(),
+            covered_pixel_count,
+        }
+    }
+}
 
 /// Normalized geometric region of interest, expressed in basis points of the
 /// source raster.
@@ -491,6 +532,14 @@ pub struct ScopeMeasurementMetadata {
     pub roi_pixel_count: u64,
     pub transparent_pixel_count: u64,
     pub visible_pixel_count: u64,
+    /// The matte this measurement was scoped to, when it was matte-scoped.
+    ///
+    /// Absent from serialized evidence when unset, and defaulted on read, so
+    /// evidence recorded before matte scoping existed still loads and still
+    /// compares as unscoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub matte_region: Option<MatteRegionDescription>,
 }
 
 /// A raster resolution recorded in source and measurement metadata.
@@ -754,6 +803,63 @@ pub enum ScopeError {
     RoiPixelCountOverflow,
     #[error("ROI contains no non-transparent pixels")]
     NoVisiblePixels,
+    #[error(
+        "matte coverage raster {}x{} does not match the measured raster {}x{}",
+        observed.width,
+        observed.height,
+        allowed.width,
+        allowed.height
+    )]
+    MatteRegionRasterMismatch {
+        observed: ScopeRasterResolution,
+        allowed: ScopeRasterResolution,
+    },
+}
+
+/// Build the analysis-only frame copy a matte-scoped measurement measures.
+///
+/// The returned image carries the source RGB unchanged and
+/// `A = 255 if m > 0 else 0`, where `m` is the coverage code of a matte proof
+/// raster (`R = G = B = round(255 · m)`; the red channel is read).  Because the
+/// CC2 engine already excludes alpha-zero pixels from every scope and
+/// statistic, handing it this copy measures exactly the covered set with no
+/// change to the engine, the document, the render, or the layer's own alpha.
+///
+/// The threshold is the pinned [`MATTE_SCOPE_THRESHOLD`]: a pixel the
+/// correction touched at all is in the population.
+///
+/// # Errors
+///
+/// Returns [`ScopeError::MatteRegionRasterMismatch`] when the coverage raster
+/// does not have the measured frame's dimensions, or the usual image errors
+/// for zero dimensions and a pixel buffer whose length contradicts them.
+pub fn matte_scoped_frame(rgba: &RgbaImage, coverage: &RgbaImage) -> Result<RgbaImage, ScopeError> {
+    validate_image(rgba)?;
+    validate_image(coverage)?;
+    if rgba.width != coverage.width || rgba.height != coverage.height {
+        return Err(ScopeError::MatteRegionRasterMismatch {
+            observed: ScopeRasterResolution {
+                width: coverage.width,
+                height: coverage.height,
+            },
+            allowed: ScopeRasterResolution {
+                width: rgba.width,
+                height: rgba.height,
+            },
+        });
+    }
+    let mut pixels = rgba.pixels.clone();
+    let (scoped, _) = pixels.as_chunks_mut::<4>();
+    let (samples, _) = coverage.pixels.as_chunks::<4>();
+    for (pixel, sample) in scoped.iter_mut().zip(samples) {
+        // The coverage raster is grey, so its red channel is `round(255 * m)`.
+        pixel[3] = u8::from(sample[0] > 0) * 255;
+    }
+    Ok(RgbaImage {
+        width: rgba.width,
+        height: rgba.height,
+        pixels,
+    })
 }
 
 /// Measure one frame using its explicit project-frame number.
@@ -872,6 +978,11 @@ pub fn measure_scopes(
             .ok_or(ScopeError::RoiPixelCountOverflow)?,
         transparent_pixel_count,
         visible_pixel_count,
+        // The engine measures whatever raster it is handed.  Matte scoping is
+        // applied by the caller through `matte_scoped_frame`, which is what
+        // keeps the CC2 engine unchanged, so the caller also records the
+        // region description on the result.
+        matte_region: None,
     }))
 }
 
@@ -1371,6 +1482,12 @@ pub struct ScopeComparison {
     pub waveform: ScopeGridDelta,
     pub parade: RgbParadeDelta,
     pub vectorscope: ScopeGridDelta,
+    /// Signed change in the matte-covered population (candidate − reference)
+    /// when both sides were measured under a matte region; `None` otherwise.
+    /// The count is reported rather than compared because a qualifier matte's
+    /// coverage depends on the colour entering the node (CC5 §4.3).
+    #[serde(default)]
+    pub matte_covered_pixel_delta: Option<SignedDelta>,
 }
 
 /// Errors comparing evidence that was measured under incompatible contracts.
@@ -1383,6 +1500,11 @@ pub enum ScopeComparisonError {
     },
     #[error("scope ROIs differ")]
     RoiMismatch,
+    #[error("scope matte regions differ: reference {reference:?}, candidate {candidate:?}")]
+    MatteRegionMismatch {
+        reference: Option<MatteRegionDescription>,
+        candidate: Option<MatteRegionDescription>,
+    },
     #[error("scope output dimensions differ for {scope}")]
     ResolutionMismatch { scope: &'static str },
     #[error("signed delta overflowed for {metric}")]
@@ -1423,6 +1545,32 @@ pub fn compare_scope_evidence(
     if reference.metadata.normalized_roi != candidate.metadata.normalized_roi {
         return Err(ScopeComparisonError::RoiMismatch);
     }
+    // A matte-scoped measurement covers a different population than an
+    // unscoped one, exactly as a different ROI does, so the two must not be
+    // differenced.  Both sides must be unscoped or name the same matte.
+    // The matte region is compared on what was *requested* (clip, effect,
+    // threshold), not on the measured covered population: a qualifier matte's
+    // coverage is a function of the colour entering the node, so a before/after
+    // pair legitimately differs in count. The count difference is reported as
+    // a signed delta rather than refusing the comparison.
+    let same_region = match (
+        &reference.metadata.matte_region,
+        &candidate.metadata.matte_region,
+    ) {
+        (None, None) => true,
+        (Some(reference), Some(candidate)) => {
+            reference.clip == candidate.clip
+                && reference.effect == candidate.effect
+                && reference.threshold == candidate.threshold
+        }
+        _ => false,
+    };
+    if !same_region {
+        return Err(ScopeComparisonError::MatteRegionMismatch {
+            reference: reference.metadata.matte_region.clone(),
+            candidate: candidate.metadata.matte_region.clone(),
+        });
+    }
     if reference.histograms.bins != candidate.histograms.bins
         || reference.histograms.red.len() != candidate.histograms.red.len()
         || reference.histograms.green.len() != candidate.histograms.green.len()
@@ -1459,6 +1607,17 @@ pub fn compare_scope_evidence(
         candidate_frames: candidate.metadata.project_frames.clone(),
         roi: reference.metadata.normalized_roi,
         reference_visible_pixel_count: reference.metadata.visible_pixel_count,
+        matte_covered_pixel_delta: match (
+            &reference.metadata.matte_region,
+            &candidate.metadata.matte_region,
+        ) {
+            (Some(reference), Some(candidate)) => Some(signed(
+                reference.covered_pixel_count,
+                candidate.covered_pixel_count,
+                "matte_covered_pixel_count",
+            )?),
+            _ => None,
+        },
         candidate_visible_pixel_count: candidate.metadata.visible_pixel_count,
         roi_pixel_count: signed(
             reference.metadata.roi_pixel_count,

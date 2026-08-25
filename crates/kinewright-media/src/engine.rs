@@ -12,13 +12,15 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use kinewright_core::{
-    Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, BeatStatus, Document, Export,
-    ExportCancellation, ExportSettings, FrameTexture, LutAvailabilityKind, LutAvailabilityStatus,
-    MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult,
-    MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory, MediaError, MediaEvent,
-    MonitorProof, Playback, PlaybackState, ProgressSink, Rational, RgbaImage, SceneStatus,
-    SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, TranscriptStatus, VisualAssetResult, export_lut_preflight_with,
+    Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, BeatStatus, ClipId, Document,
+    EffectId, Export, ExportCancellation, ExportSettings, FrameTexture, LutAvailabilityKind,
+    LutAvailabilityStatus, MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE, MatteParams, MatteProof,
+    MatteProofError, MatteProofMetadata, MediaAsset, MediaAvailabilityKind,
+    MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus,
+    MediaCacheInventory, MediaError, MediaEvent, MonitorProof, Playback, PlaybackState,
+    ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat,
+    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus,
+    VisualAssetResult, export_lut_preflight_with,
 };
 
 use crate::{
@@ -149,6 +151,70 @@ impl PublishedLattices {
             self.publish(sha256, lut);
         }
     }
+}
+
+/// Locate one clip's colour node, returning the clip's timeline start
+/// alongside the *stored* effect.
+///
+/// The stored effect is returned rather than an evaluated one because the
+/// caller needs the clip's timeline start to evaluate it at the requested
+/// frame, and evaluating twice at two different frames is exactly the drift
+/// CC5 3.2 forbids.
+fn locate_color_node(
+    document: &Document,
+    clip: ClipId,
+    effect: EffectId,
+) -> Result<(TimeCode, &kinewright_core::Effect), MatteProofError> {
+    let target = document
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .find(|candidate| candidate.id == clip)
+        .ok_or(MatteProofError::EffectNotFound { clip, effect })?;
+    let node = target
+        .effects
+        .iter()
+        .find(|candidate| candidate.id == effect)
+        .ok_or(MatteProofError::EffectNotFound { clip, effect })?;
+    Ok((target.timeline_start, node))
+}
+
+/// Reduce a document to the target clip's track and clip.
+///
+/// CC5 4.1: a matte proof renders the coverage of one node on one clip, so no
+/// other layer may composite over it. Removing every other track and clip is
+/// stronger than trusting z-order, and it also keeps the proof honest when the
+/// target sits under an opaque layer. `lut_assets` is retained so the surviving
+/// clip's LUT nodes still bind (CC4 2.4).
+fn matte_proof_scratch_document(
+    document: &Document,
+    clip: ClipId,
+    effect: EffectId,
+) -> Result<Document, MatteProofError> {
+    let mut scratch = document.clone();
+    scratch
+        .tracks
+        .retain(|track| track.clips.iter().any(|candidate| candidate.id == clip));
+    for track in &mut scratch.tracks {
+        track.clips.retain(|candidate| candidate.id == clip);
+    }
+    if scratch.tracks.is_empty() {
+        return Err(MatteProofError::EffectNotFound { clip, effect });
+    }
+    Ok(scratch)
+}
+
+/// `round(1e6 * W / H)` for the rendered raster.
+///
+/// The proof records the aspect it rendered at because CC5 2.3's window
+/// geometry is aspect-corrected: a coverage image without its aspect cannot be
+/// checked against the CPU reference.
+#[allow(clippy::cast_possible_truncation)]
+fn raster_aspect_millionths(width: u32, height: u32) -> i64 {
+    if height == 0 {
+        return 0;
+    }
+    (f64::from(width) * 1_000_000.0 / f64::from(height)).round() as i64
 }
 
 /// Bind one document's LUT assets to already-published lattices (CC4 2.4).
@@ -780,6 +846,93 @@ impl Analysis for FfmpegMediaEngine {
         })
     }
 
+    fn matte_proof_for_document(
+        &self,
+        document: Arc<Document>,
+        at: TimeCode,
+        clip: ClipId,
+        effect: EffectId,
+    ) -> Result<MatteProof, MediaError> {
+        // Resolve the node against the document the caller named, before any
+        // rendering, so an absent clip or effect is a typed answer rather than
+        // a compositor-shaped one, and so the metadata below describes the
+        // node that was actually asked about.
+        let (timeline_start, target) = locate_color_node(&document, clip, effect)?;
+        let node_kind = target.name.clone();
+        // CC5 3.2: matte identity is resolved at the requested frame, after
+        // keyframe evaluation, exactly as the renderer resolves the active
+        // index it proves.
+        let local_at = at.checked_sub(timeline_start).unwrap_or(TimeCode::ZERO);
+        let matte = MatteParams::from_effect(&target.evaluated_at(local_at));
+
+        // Proof rendering is isolated from the playback worker for the same
+        // reasons as the monitor proof, and the document is additionally
+        // reduced to the target clip's track and clip so no other layer can
+        // composite over the coverage (CC5 4.1).
+        let scratch = matte_proof_scratch_document(&document, clip, effect)?;
+        let mut renderer = FrameRenderer::new(self.gpu.clone());
+        // CC4 2.4: bind THIS document's lattices; the reduction keeps
+        // `lut_assets`, so the target clip's LUT nodes still resolve.
+        renderer.set_lut_library(self.document_lut_library(&scratch)?);
+        let resolution = scratch.resolution;
+        // Bind the scale once so the render and the claim it produces cannot
+        // drift apart.
+        let scale = RenderScale::FullResolution;
+        let raster = renderer.render_matte(
+            &scratch,
+            at,
+            resolution,
+            scale,
+            DecodeStrategy::Seek,
+            clip,
+            effect,
+        )?;
+
+        let pixel_count = usize::try_from(raster.width)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(usize::try_from(raster.height).unwrap_or(usize::MAX));
+        if raster.coverage.len() != pixel_count {
+            return Err(MediaError::Backend(format!(
+                "matte_proof_coverage_size_mismatch: {} coverage bytes for a {}x{} raster",
+                raster.coverage.len(),
+                raster.width,
+                raster.height
+            )));
+        }
+        let mut pixels = Vec::with_capacity(pixel_count.saturating_mul(4));
+        for coverage in &raster.coverage {
+            // R = G = B = round(255 * m) with an opaque alpha: CC5 writes no
+            // alpha, so the proof states full opacity rather than reporting a
+            // coverage byte a compositor could mistake for one.
+            pixels.extend_from_slice(&[*coverage, *coverage, *coverage, u8::MAX]);
+        }
+        Ok(MatteProof {
+            coverage: RgbaImage {
+                width: raster.width,
+                height: raster.height,
+                pixels,
+            },
+            metadata: MatteProofMetadata {
+                // CC1 5: the full-raster claim is derived from the render that
+                // actually happened, not asserted by the caller.
+                render: self.gpu.monitor_proof_metadata_for(
+                    scale,
+                    (raster.width, raster.height),
+                    resolution,
+                ),
+                clip,
+                effect,
+                node_kind,
+                coverage_encoding: MATTE_COVERAGE_ENCODING.to_owned(),
+                coverage_scale: MATTE_COVERAGE_SCALE,
+                raster_aspect_millionths: raster_aspect_millionths(raster.width, raster.height),
+                matte_enabled: matte.is_enabled(),
+                window_count: u8::try_from(matte.window_count).unwrap_or(u8::MAX),
+                qualifier_enabled: matte.qualifier.is_enabled(),
+            },
+        })
+    }
+
     fn request_waveform(&self, asset: MediaAsset, request_generation: u64) -> bool {
         self.visual_assets
             .request_waveform(asset, request_generation)
@@ -1324,16 +1477,18 @@ mod tests {
     use std::fs;
 
     use kinewright_core::{
-        Clip, ClipContent, ClipId, Effect, EffectId, LutAsset, LutAssetId, LutAssetKind,
-        LutAssetSource, MediaKind, MediaSourceFingerprint, ParamValue, Title, Track, TrackId,
-        TrackKind,
+        AutomationCurve, Clip, ClipContent, Effect, Keyframe, KeyframeInterpolation, LutAsset,
+        LutAssetId, LutAssetKind, LutAssetSource, MediaKind, MediaSourceFingerprint, ParamValue,
+        Title, Track, TrackId, TrackKind,
     };
 
     use super::*;
     use crate::{
+        cc1_fixtures::fallback_gpu,
+        initialize_ffmpeg,
         lut::parse_cube_lut,
         sha256::{sha256_bytes, source_fingerprint},
-        test_support::TempDirectory,
+        test_support::{GeneratedMedia, TempDirectory, single_clip_document},
     };
 
     fn asset(path: PathBuf, fingerprint: MediaSourceFingerprint) -> MediaAsset {
@@ -1669,5 +1824,443 @@ mod tests {
             media_availability(&directory_asset).kind,
             MediaAvailabilityKind::OfflineMissing
         );
+    }
+
+    /// A 64x36 solid source: the matte proof asserts *geometry*, so the
+    /// picture only has to decode, and the raster has to be small enough to
+    /// state a pixel-exact expectation.
+    fn matte_source(label: &str) -> GeneratedMedia {
+        GeneratedMedia::ffmpeg(
+            label,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=gray:size=64x36:rate=30:duration=1",
+                "-frames:v",
+                "30",
+                "-c:v",
+                "ffv1",
+                "-pix_fmt",
+                "yuv444p",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-colorspace",
+                "bt709",
+                "-color_range",
+                "tv",
+            ],
+            "mkv",
+        )
+    }
+
+    /// A `color_wheels` node whose gain is off neutral, so the node is active
+    /// and the proof is about the matte rather than about CC3 3.3.
+    fn wheels_node(id: u64, parameters: &[(&str, i64)]) -> Effect {
+        let mut stored = vec![("gain_master_thousandths", 1_500_i64)];
+        stored.extend_from_slice(parameters);
+        Effect {
+            id: EffectId(id),
+            name: "color_wheels".to_owned(),
+            parameters: stored
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), ParamValue::Integer(value)))
+                .collect(),
+            keyframes: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// One centred 2500/2500 rect window with no feather: on a 64x36 raster
+    /// its pixel centres are `x in 16..48`, `y in 9..27`.
+    const CENTERED_RECT: &[(&str, i64)] = &[
+        ("matte_enabled", 1),
+        ("matte_window_count", 1),
+        ("matte_window0_shape_token", 1),
+        ("matte_window0_center_x_basis_points", 5_000),
+        ("matte_window0_center_y_basis_points", 5_000),
+        ("matte_window0_half_width_basis_points", 2_500),
+        ("matte_window0_half_height_basis_points", 2_500),
+        ("matte_window0_feather_basis_points", 0),
+    ];
+
+    /// Stage a single-clip 64x36 document carrying one effect stack.
+    fn matte_document(media: &GeneratedMedia, effects: Vec<Effect>) -> Arc<Document> {
+        let mut asset =
+            probe_path(media.path(), AssetId(1)).expect("the matte source should probe");
+        assert_eq!(asset.resolution, Some((64, 36)));
+        // The proof is about matte geometry, so the source colour is stated
+        // explicitly rather than inferred: an unknown-primaries source would
+        // fail the managed decode before any coverage existed.
+        asset.color_description = kinewright_core::ColorDescription {
+            primaries: kinewright_core::ColorPrimaries::Bt709,
+            transfer: kinewright_core::ColorTransfer::Bt709,
+            matrix: kinewright_core::ColorMatrix::Bt709,
+            range: kinewright_core::ColorRange::Limited,
+            white_point: kinewright_core::ColorWhitePoint::D65,
+            bit_depth: kinewright_core::ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: kinewright_core::ColorProvenance::UserOverride,
+        };
+        let mut document = single_clip_document(asset);
+        document.tracks[0].clips[0].effects = effects;
+        assert_eq!(document.resolution, (64, 36));
+        Arc::new(document)
+    }
+
+    /// The set of pixel indices the proof reports as covered, asserting the
+    /// coverage encoding itself on every pixel: opaque, grey, and bi-level for
+    /// a `feather = 0` window.
+    fn covered_indices(proof: &MatteProof) -> std::collections::BTreeSet<usize> {
+        let mut covered = std::collections::BTreeSet::new();
+        for (index, pixel) in proof.coverage.pixels.as_chunks::<4>().0.iter().enumerate() {
+            assert_eq!(pixel[3], u8::MAX, "pixel {index} is not opaque");
+            assert_eq!(pixel[0], pixel[1], "pixel {index} is not grey");
+            assert_eq!(pixel[1], pixel[2], "pixel {index} is not grey");
+            assert!(
+                pixel[0] == 0 || pixel[0] == 255,
+                "a feather-free window has no partial coverage; pixel {index} is {}",
+                pixel[0]
+            );
+            if pixel[0] == 255 {
+                covered.insert(index);
+            }
+        }
+        covered
+    }
+
+    /// CC5 4.1: the coverage of a centred, feather-free rect window is exact,
+    /// opaque, and carries the resolved matte identity as metadata.
+    #[test]
+    fn cc5_matte_proof_reports_exact_window_coverage_and_metadata() {
+        initialize_ffmpeg().expect("FFmpeg should initialize for the matte proof fixture");
+        let gpu = fallback_gpu().context();
+        let media = matte_source("matte-proof-coverage");
+        let document = matte_document(&media, vec![wheels_node(7, CENTERED_RECT)]);
+        let engine = FfmpegMediaEngine::new_with_gpu(gpu)
+            .expect("media engine should start for the matte proof fixture");
+
+        let proof = engine
+            .matte_proof_for_document(
+                Arc::clone(&document),
+                TimeCode::ZERO,
+                ClipId(1),
+                EffectId(7),
+            )
+            .expect("the matte proof should render");
+        assert_eq!((proof.coverage.width, proof.coverage.height), (64, 36));
+        let covered = covered_indices(&proof);
+        let expected = (0..64 * 36)
+            .filter(|index| {
+                let (x, y) = (index % 64, index / 64);
+                (16..48).contains(&x) && (9..27).contains(&y)
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(expected.len(), 576);
+        assert_eq!(
+            covered, expected,
+            "the covered set is not the 2500/2500 rect"
+        );
+        assert_eq!(64 * 36 - covered.len(), 1_728);
+
+        assert_eq!(proof.metadata.clip, ClipId(1));
+        assert_eq!(proof.metadata.effect, EffectId(7));
+        assert_eq!(proof.metadata.node_kind, "color_wheels");
+        assert_eq!(proof.metadata.coverage_encoding, MATTE_COVERAGE_ENCODING);
+        assert_eq!(proof.metadata.coverage_scale, 255);
+        // round(1e6 * 64 / 36)
+        assert_eq!(proof.metadata.raster_aspect_millionths, 1_777_778);
+        assert!(proof.metadata.matte_enabled);
+        assert_eq!(proof.metadata.window_count, 1);
+        assert!(!proof.metadata.qualifier_enabled);
+        assert!(
+            proof.metadata.render.full_resolution,
+            "an isolated proof renders the document raster at full scale"
+        );
+    }
+
+    /// CC5 4.1: a proof never returns a blank frame. Each refusal is typed and
+    /// carries its stable code.
+    #[test]
+    fn cc5_matte_proof_fails_typed_instead_of_returning_a_blank_frame() {
+        initialize_ffmpeg().expect("FFmpeg should initialize for the matte proof fixture");
+        let gpu = fallback_gpu().context();
+        let media = matte_source("matte-proof-typed-failures");
+        let mut bypassed = CENTERED_RECT.to_vec();
+        bypassed.push(("bypass", 1));
+        let mut disabled = CENTERED_RECT.to_vec();
+        disabled[0] = ("matte_enabled", 0);
+        let document = matte_document(
+            &media,
+            vec![
+                wheels_node(7, &bypassed),
+                wheels_node(8, &disabled),
+                wheels_node(9, CENTERED_RECT),
+            ],
+        );
+        let engine = FfmpegMediaEngine::new_with_gpu(gpu)
+            .expect("media engine should start for the matte proof fixture");
+        let refusal = |effect: u64| {
+            let error = engine
+                .matte_proof_for_document(
+                    Arc::clone(&document),
+                    TimeCode::ZERO,
+                    ClipId(1),
+                    EffectId(effect),
+                )
+                .expect_err("a refusing node must not render a frame");
+            let MediaError::Backend(message) = error else {
+                panic!("a matte proof refusal is a backend error");
+            };
+            message
+        };
+
+        let inactive = refusal(7);
+        assert!(
+            inactive.starts_with("matte_proof_node_inactive:"),
+            "unexpected message: {inactive}"
+        );
+        assert!(
+            inactive.contains("bypassed"),
+            "the reason token must be reported: {inactive}"
+        );
+        let no_matte = refusal(8);
+        assert!(
+            no_matte.starts_with("matte_proof_no_matte:"),
+            "unexpected message: {no_matte}"
+        );
+        let absent = refusal(99);
+        assert!(
+            absent.starts_with("matte_proof_effect_not_found:"),
+            "unexpected message: {absent}"
+        );
+        // The clip itself is still provable, so the refusals above are about
+        // the named node rather than about a broken document.
+        engine
+            .matte_proof_for_document(
+                Arc::clone(&document),
+                TimeCode::ZERO,
+                ClipId(1),
+                EffectId(9),
+            )
+            .expect("the matte-carrying node on the same clip still proves");
+    }
+
+    /// CC5 4.1: a clip that exists but is not an active visual layer at the
+    /// proved frame is its **own** refusal.
+    ///
+    /// This used to report `matte_proof_effect_not_found`, which named a node
+    /// that was never missing and sent the caller hunting for the wrong thing.
+    /// The two failures have different recoveries — "fix the effect id" versus
+    /// "prove a frame the clip is on screen at" — so they carry different
+    /// codes.
+    #[test]
+    fn cc5_matte_proof_refuses_a_clip_that_is_not_visible_at_the_frame() {
+        initialize_ffmpeg().expect("FFmpeg should initialize for the matte proof fixture");
+        let gpu = fallback_gpu().context();
+        let media = matte_source("matte-proof-clip-not-visible");
+        let document = matte_document(&media, vec![wheels_node(7, CENTERED_RECT)]);
+        let engine = FfmpegMediaEngine::new_with_gpu(gpu)
+            .expect("media engine should start for the matte proof fixture");
+
+        // The claim is only worth making if the same clip and node prove
+        // cleanly at a frame the clip *is* on screen at, so state that first.
+        let clip = &document.tracks[0].clips[0];
+        let past_the_end = TimeCode(
+            clip.timeline_start.0 + clip.source_range.end.0 - clip.source_range.start.0 + 10,
+        );
+        assert!(past_the_end > clip.timeline_start);
+        engine
+            .matte_proof_for_document(
+                Arc::clone(&document),
+                TimeCode::ZERO,
+                ClipId(1),
+                EffectId(7),
+            )
+            .expect("the clip proves at a frame it is visible at");
+
+        let error = engine
+            .matte_proof_for_document(Arc::clone(&document), past_the_end, ClipId(1), EffectId(7))
+            .expect_err("a clip that is off screen must not render a coverage frame");
+        let MediaError::Backend(message) = error else {
+            panic!("a matte proof refusal is a backend error");
+        };
+        assert!(
+            message.starts_with("matte_proof_clip_not_visible:"),
+            "unexpected message: {message}"
+        );
+        // The refusal names the clip and the frame it was asked about, which
+        // is the whole difference from the effect-not-found code.
+        assert!(
+            message.contains(&format!("{}", ClipId(1))),
+            "the refusal must name the clip: {message}"
+        );
+        assert!(
+            message.contains(&format!("{past_the_end}")),
+            "the refusal must name the frame: {message}"
+        );
+        assert_eq!(
+            kinewright_core::MatteProofError::ClipNotVisible {
+                clip: ClipId(1),
+                at: past_the_end,
+            }
+            .code(),
+            "matte_proof_clip_not_visible"
+        );
+        // And the node itself is still findable, so this is not the absent-id
+        // failure wearing a new name.
+        let absent = engine
+            .matte_proof_for_document(
+                Arc::clone(&document),
+                TimeCode::ZERO,
+                ClipId(1),
+                EffectId(99),
+            )
+            .expect_err("an absent node still refuses");
+        let MediaError::Backend(absent) = absent else {
+            panic!("a matte proof refusal is a backend error");
+        };
+        assert!(
+            absent.starts_with("matte_proof_effect_not_found:"),
+            "unexpected message: {absent}"
+        );
+    }
+
+    /// CC5 4.1: the scratch document is reduced to the target clip's track and
+    /// clip, so an opaque layer above it cannot composite over the coverage.
+    #[test]
+    fn cc5_matte_proof_ignores_a_layer_above_the_target_clip() {
+        initialize_ffmpeg().expect("FFmpeg should initialize for the matte proof fixture");
+        let gpu = fallback_gpu().context();
+        let media = matte_source("matte-proof-isolation");
+        let document = matte_document(&media, vec![wheels_node(7, CENTERED_RECT)]);
+        let mut covered_document = (*document).clone();
+        let mut covering = covered_document.tracks[0].clips[0].clone();
+        covering.id = ClipId(2);
+        covering.effects = Vec::new();
+        covered_document.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![covering],
+        });
+        let covered_document = Arc::new(covered_document);
+        let engine = FfmpegMediaEngine::new_with_gpu(gpu)
+            .expect("media engine should start for the matte proof fixture");
+
+        // The isolation claim is only worth making if the covering layer would
+        // otherwise be visible, so state that first.
+        let plain = engine
+            .monitor_proof_for_document(Arc::clone(&document), TimeCode::ZERO)
+            .expect("the single-layer monitor proof should render");
+        let obscured = engine
+            .monitor_proof_for_document(Arc::clone(&covered_document), TimeCode::ZERO)
+            .expect("the covered monitor proof should render");
+        assert_ne!(
+            plain.image.pixels, obscured.image.pixels,
+            "the second layer must really composite over the target"
+        );
+
+        let alone = engine
+            .matte_proof_for_document(
+                Arc::clone(&document),
+                TimeCode::ZERO,
+                ClipId(1),
+                EffectId(7),
+            )
+            .expect("the single-layer proof should render");
+        let under_a_layer = engine
+            .matte_proof_for_document(
+                Arc::clone(&covered_document),
+                TimeCode::ZERO,
+                ClipId(1),
+                EffectId(7),
+            )
+            .expect("the covered proof should render");
+        assert_eq!(
+            covered_indices(&under_a_layer),
+            covered_indices(&alone),
+            "an opaque layer above the target changed its coverage"
+        );
+    }
+
+    /// CC5 3.2: the matte is resolved at the requested frame, after keyframe
+    /// evaluation, so a tracked window moves with its curve.
+    #[test]
+    fn cc5_matte_proof_follows_a_keyframed_window_center() {
+        initialize_ffmpeg().expect("FFmpeg should initialize for the matte proof fixture");
+        let gpu = fallback_gpu().context();
+        let media = matte_source("matte-proof-keyframes");
+        // A full-height window, so only the keyframed x centre selects.
+        let mut node = wheels_node(
+            7,
+            &[
+                ("matte_enabled", 1),
+                ("matte_window_count", 1),
+                ("matte_window0_shape_token", 1),
+                ("matte_window0_center_x_basis_points", 2_500),
+                ("matte_window0_center_y_basis_points", 5_000),
+                ("matte_window0_half_width_basis_points", 2_500),
+                ("matte_window0_half_height_basis_points", 10_000),
+                ("matte_window0_feather_basis_points", 0),
+            ],
+        );
+        node.keyframes.insert(
+            "matte_window0_center_x_basis_points".to_owned(),
+            AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode::ZERO,
+                        value: 2_500,
+                        interpolation: KeyframeInterpolation::Linear,
+                    },
+                    Keyframe {
+                        at: TimeCode(20),
+                        value: 7_500,
+                        interpolation: KeyframeInterpolation::Linear,
+                    },
+                ],
+            },
+        );
+        let document = matte_document(&media, vec![node]);
+        let engine = FfmpegMediaEngine::new_with_gpu(gpu)
+            .expect("media engine should start for the matte proof fixture");
+
+        let at_start = covered_indices(
+            &engine
+                .matte_proof_for_document(
+                    Arc::clone(&document),
+                    TimeCode::ZERO,
+                    ClipId(1),
+                    EffectId(7),
+                )
+                .expect("frame 0 proof"),
+        );
+        let at_end = covered_indices(
+            &engine
+                .matte_proof_for_document(
+                    Arc::clone(&document),
+                    TimeCode(20),
+                    ClipId(1),
+                    EffectId(7),
+                )
+                .expect("frame 20 proof"),
+        );
+        assert!(!at_start.is_empty() && !at_end.is_empty());
+        assert!(
+            at_start.is_disjoint(&at_end),
+            "a window that travelled a full width must not overlap itself"
+        );
+        assert!(
+            at_start.iter().all(|index| index % 64 < 32),
+            "at frame 0 the window sits on the left half"
+        );
+        assert!(
+            at_end.iter().all(|index| index % 64 >= 32),
+            "at frame 20 the window sits on the right half"
+        );
+        assert_eq!(at_start.len(), 32 * 36);
+        assert_eq!(at_end.len(), 32 * 36);
     }
 }

@@ -944,7 +944,7 @@ fn plan_subject_reframe_scaled(
             maximum_step,
         )?
     } else {
-        stabilized_focus_values(
+        stabilize_tracked_centres_basis_points(
             &horizontal_observations,
             min_x,
             max_x,
@@ -968,7 +968,7 @@ fn plan_subject_reframe_scaled(
             maximum_step,
         )?
     } else {
-        stabilized_focus_values(
+        stabilize_tracked_centres_basis_points(
             &vertical_observations,
             min_y,
             max_y,
@@ -1103,7 +1103,13 @@ fn containment_aware_focus_values(
     if observations.is_empty() {
         return Ok(Vec::new());
     }
-    let desired = stabilized_focus_values(observations, minimum, maximum, dead_zone, maximum_step);
+    let desired = stabilize_tracked_centres_basis_points(
+        observations,
+        minimum,
+        maximum,
+        dead_zone,
+        maximum_step,
+    );
     let mut reachable: Vec<(i64, i64)> = Vec::with_capacity(containment.len());
     for (index, &(allowed_minimum, allowed_maximum)) in containment.iter().enumerate() {
         let (reachable_minimum, reachable_maximum) =
@@ -1142,7 +1148,27 @@ fn containment_aware_focus_values(
     Ok(values)
 }
 
-fn stabilized_focus_values(
+/// Smooth a sequence of tracked centres in basis points (M40; CC5 §5.2).
+///
+/// A three-sample median filter first, which rejects the one-sample noise a
+/// template matcher produces, and then a reactive controller that moves the
+/// smoothed value toward the observation by at most `maximum_step` per sample,
+/// ignoring displacements inside `dead_zone` and clamping into
+/// `minimum..=maximum`.
+///
+/// The median filter replaces the *final* sample with
+/// `median(o[n-3], o[n-2], o[n-1])`, so the last smoothed value lags a moving
+/// subject by one inter-sample displacement. That is stated rather than
+/// hidden: callers account for it in their tolerances.
+///
+/// The subject-reframe planner calls it with the M40 constants; CC5's matte
+/// tracker calls the same function with `dead_zone = 0` — a matte must stay on
+/// its subject rather than deliberately lag — and `maximum_step = 800` basis
+/// points. The body is byte-for-byte the private `stabilized_focus_values`
+/// this function was promoted from, so every existing multicam curve is
+/// unchanged.
+#[must_use]
+pub fn stabilize_tracked_centres_basis_points(
     observations: &[i64],
     minimum: i64,
     maximum: i64,
@@ -1565,7 +1591,7 @@ mod tests {
 
     #[test]
     fn subject_reframe_rejects_a_last_frame_tracking_outlier() {
-        let values = stabilized_focus_values(&[50, 50, 34, 35, 80], 25, 75, 6, 25);
+        let values = stabilize_tracked_centres_basis_points(&[50, 50, 34, 35, 80], 25, 75, 6, 25);
 
         assert_eq!(values, vec![50, 50, 41, 41, 41]);
     }

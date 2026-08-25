@@ -182,9 +182,9 @@
     "compositor_legacy_lut_slot": 4,
     "compositor_lut_atlas_slots": 5,
     "compositor_required_texture_dimension_3d": 512,
-    "compositor_required_storage_buffer_binding_size": 16384,
+    "compositor_required_storage_buffer_binding_size": 32768,
     "compositor_required_storage_buffers_per_shader_stage": 1,
-    "grade_abi_version": 2,
+    "grade_abi_version": 3,
     "worst_case_atlas_depth": 325,
     "mixed_size_atlas_extent": [
       65,

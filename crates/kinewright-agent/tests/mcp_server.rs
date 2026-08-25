@@ -558,6 +558,307 @@ async fn cc1_color_context_plan_and_commit_advance_the_revision_exactly_once() {
     server.shutdown();
 }
 
+/// CC5 §7 / §9.2.15: `plan_secondary_correction` → `prepare_edit_plan` →
+/// `commit_edit_plan` lands the exact `matte_*` parameters across the live
+/// transport, and the plan itself applies nothing.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn cc5_secondary_plan_and_commit_land_the_matte_parameters() {
+    let generated = managed_color_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let context = invoke_capability(&client, "get_color_context", json!({})).await;
+    let revision = context.structured_content.as_ref().unwrap()["timeline_revision"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(revision, 0);
+
+    // A matte on a node that does not exist yet: the planner allocates it and
+    // inserts it at the stage-legal index.
+    let plan = invoke_capability(
+        &client,
+        "plan_secondary_correction",
+        json!({
+            "expected_revision": revision,
+            "clip_id": 1,
+            "node_kind": "color_wheels",
+            "windows": [{
+                "shape": "ellipse",
+                "center_x": 6_000,
+                "center_y": 4_000,
+                "half_width": 1_500,
+                "half_height": 2_000,
+                "feather": 1_200,
+            }],
+            "qualifier": {
+                "saturation_low": 3_000,
+                "saturation_high": 9_000,
+            },
+            "mix_basis_points": 7_500,
+        }),
+    )
+    .await;
+    assert_eq!(plan.is_error, Some(false));
+    let plan = plan
+        .structured_content
+        .as_ref()
+        .expect("plan_secondary_correction must publish exact operations")
+        .clone();
+    assert_eq!(plan["applied"], false);
+    assert_eq!(plan["evidence_only"], true);
+    assert_eq!(plan["kind"], "color_wheels");
+    assert_eq!(plan["created_new_node"], true);
+    assert_eq!(plan["insert_index"], 0);
+    let target_effect_id = plan["target_effect_id"].as_u64().unwrap();
+    // Every requested integer is echoed back under its generated name.
+    assert_eq!(plan["requested_parameters"]["matte_enabled"], 1);
+    assert_eq!(plan["requested_parameters"]["matte_window_count"], 1);
+    assert_eq!(plan["requested_parameters"]["matte_window0_shape_token"], 2);
+    assert_eq!(
+        plan["requested_parameters"]["matte_window0_feather_basis_points"],
+        1_200
+    );
+    assert_eq!(plan["requested_parameters"]["matte_qualifier_enabled"], 1);
+    assert_eq!(
+        plan["requested_parameters"]["matte_mix_basis_points"],
+        7_500
+    );
+    // The proposal's own matte, in the CC5 §7 manifest shape.
+    assert_eq!(plan["matte"]["enabled"], true);
+    assert_eq!(plan["matte"]["window_count"], 1);
+    assert_eq!(plan["matte"]["combine"], "union");
+    assert_eq!(plan["matte"]["mix_basis_points"], 7_500);
+    assert_eq!(plan["matte"]["windows"].as_array().unwrap().len(), 1);
+    assert_eq!(plan["matte"]["windows"][0]["shape"], "ellipse");
+    // Nothing is applied by the plan itself.
+    assert_eq!(query_document(&core).tracks[0].clips[0].effects.len(), 0);
+
+    // A stale revision fails closed before anything is prepared.
+    let stale = invoke_capability(
+        &client,
+        "plan_secondary_correction",
+        json!({
+            "expected_revision": revision + 9,
+            "clip_id": 1,
+            "node_kind": "color_wheels",
+            "windows": [{"center_x": 6_000}],
+        }),
+    )
+    .await;
+    assert_eq!(stale.is_error, Some(true));
+
+    // CC5 §2.1: a technical input transform cannot carry a matte.
+    let technical = invoke_capability(
+        &client,
+        "plan_secondary_correction",
+        json!({
+            "expected_revision": revision,
+            "clip_id": 1,
+            "node_kind": "technical_lut",
+            "windows": [{"center_x": 6_000}],
+        }),
+    )
+    .await;
+    assert_eq!(technical.is_error, Some(true));
+    assert_eq!(
+        technical.structured_content.as_ref().unwrap()["code"],
+        "matte_unsupported_node_kind"
+    );
+
+    let prepared = prepare_plan(&client, revision, plan["operations"].clone()).await;
+    assert_eq!(prepared.is_error, Some(false));
+    let committed = client
+        .call_tool(commit_request(revision, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false));
+
+    // The exact `matte_*` integers landed on the stored node, and nothing the
+    // caller did not ask for was written.
+    let after = query_document(&core);
+    let effects = &after.tracks[0].clips[0].effects;
+    assert_eq!(effects.len(), 1);
+    assert_eq!(effects[0].name, "color_wheels");
+    assert_eq!(effects[0].id.0, target_effect_id);
+    for (name, value) in [
+        ("matte_enabled", 1),
+        ("matte_window_count", 1),
+        ("matte_mix_basis_points", 7_500),
+        ("matte_qualifier_enabled", 1),
+        ("matte_saturation_low_basis_points", 3_000),
+        ("matte_saturation_high_basis_points", 9_000),
+        ("matte_window0_shape_token", 2),
+        ("matte_window0_center_x_basis_points", 6_000),
+        ("matte_window0_center_y_basis_points", 4_000),
+        ("matte_window0_half_width_basis_points", 1_500),
+        ("matte_window0_half_height_basis_points", 2_000),
+        ("matte_window0_feather_basis_points", 1_200),
+    ] {
+        assert_eq!(
+            effects[0].parameters.get(name),
+            Some(&ParamValue::Integer(value)),
+            "committed node must carry {name} = {value}"
+        );
+    }
+    // CC5 §2.2: an omitted control resolves to its neutral and is not stored.
+    for name in [
+        "matte_invert",
+        "matte_combine_token",
+        "matte_window0_invert",
+        "matte_window0_rotation_centidegrees",
+        "matte_window1_center_x_basis_points",
+    ] {
+        assert_eq!(
+            effects[0].parameters.get(name),
+            None,
+            "a neutral control must not be stored"
+        );
+    }
+
+    // The manifest now carries the CC5 §7 `matte` object.
+    let after_context = invoke_capability(&client, "get_color_context", json!({})).await;
+    let after_context = after_context.structured_content.as_ref().unwrap();
+    assert_eq!(
+        after_context["timeline_revision"].as_u64().unwrap(),
+        revision + 1,
+        "one committed plan must advance the revision exactly once"
+    );
+    let nodes = after_context["clips"][0]["color_nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1);
+    let matte = &nodes[0]["matte"];
+    assert_eq!(matte["enabled"], true);
+    assert_eq!(matte["active"], true);
+    assert_eq!(matte["window_count"], 1);
+    assert_eq!(matte["mix_basis_points"], 7_500);
+    assert_eq!(matte["qualifier"]["enabled"], true);
+    assert_eq!(matte["qualifier"]["saturation_low_basis_points"], 3_000);
+    assert_eq!(matte["qualifier"]["saturation_high_basis_points"], 9_000);
+    // The hue leg stays at its 180 degree neutral, which disables it, so a
+    // qualifier that names only saturation does not drop every grey pixel.
+    assert_eq!(matte["qualifier"]["hue_leg_disabled"], true);
+    let windows = matte["windows"].as_array().unwrap();
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0]["shape"], "ellipse");
+    assert_eq!(windows[0]["center_x_basis_points"], 6_000);
+    assert_eq!(windows[0]["feather_basis_points"], 1_200);
+
+    // A node whose colour controls are all neutral is the exact identity, so
+    // CC5 §2.6 reports it inactive and there is no coverage to inspect however
+    // capable the renderer is. Give the node something to do first, so the
+    // inspection below is a real measurement rather than a refusal the test
+    // would have to accept either way.
+    let wheels = invoke_capability(
+        &client,
+        "plan_color_wheels",
+        json!({
+            "expected_revision": revision + 1,
+            "clip_id": 1,
+            "parameters": {"gain_red_thousandths": 1_200},
+        }),
+    )
+    .await;
+    assert_eq!(wheels.is_error, Some(false));
+    let wheels = wheels.structured_content.as_ref().unwrap().clone();
+    assert_eq!(
+        wheels["target_effect_id"].as_u64().unwrap(),
+        target_effect_id,
+        "the grade must land on the matted node, not on a second one"
+    );
+    let prepared = prepare_plan(&client, revision + 1, wheels["operations"].clone()).await;
+    assert_eq!(prepared.is_error, Some(false));
+    assert_eq!(
+        client
+            .call_tool(commit_request(revision + 1, &prepared))
+            .await
+            .unwrap()
+            .is_error,
+        Some(false)
+    );
+
+    // CC5 §7: the matte-scoped surfaces refuse honestly while this build's
+    // renderer cannot proof a matte, rather than inventing coverage.
+    let inspect = invoke_capability(
+        &client,
+        "inspect_grade_matte",
+        json!({
+            "expected_revision": revision + 2,
+            "clip_id": 1,
+            "effect_id": target_effect_id,
+            "timecode": 0,
+        }),
+    )
+    .await;
+    let inspect_body = inspect.structured_content.as_ref().unwrap();
+    if inspect.is_error == Some(true) {
+        // A test that accepts both branches asserts nothing: a renderer that
+        // silently stopped producing matte proofs would look exactly like a
+        // green run. Refusing is a *skip*, and skipping is opt-in, on the same
+        // workspace variable the media crate's GPU tests use.
+        assert!(
+            std::env::var("KINEWRIGHT_GPU_TESTS_MAY_SKIP")
+                .ok()
+                .as_deref()
+                == Some("1"),
+            "inspect_grade_matte refused: {inspect_body}. Set KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 \
+             to accept an unavailable matte proof on a machine with no usable adapter."
+        );
+        assert_eq!(inspect_body["code"], "matte_proof_unavailable");
+        assert_eq!(inspect_body["applied"], false);
+        assert_eq!(inspect_body["details"]["observed"]["has_matte"], true);
+        eprintln!(
+            "SKIPPED: KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 and this build cannot render a matte proof; \
+             inspect_grade_matte's measured statistics were not exercised."
+        );
+    } else {
+        // Once the engine lands matte proofs, the statistics must describe the
+        // same node the manifest just published.
+        assert_eq!(inspect_body["effect_id"], target_effect_id);
+        assert_eq!(inspect_body["kind"], "color_wheels");
+        assert_eq!(
+            inspect_body["matte_threshold"],
+            "coverage_greater_than_zero"
+        );
+        let total = inspect_body["statistics"]["total_pixel_count"]
+            .as_u64()
+            .unwrap();
+        let covered = inspect_body["statistics"]["covered_pixel_count"]
+            .as_u64()
+            .unwrap();
+        // One ellipse well inside the frame plus a saturation band: the matte
+        // must select a strict, non-empty subset of the frame. An empty matte
+        // and a matte that degenerated to the whole frame both fail here.
+        assert!(total > 0);
+        assert!(covered > 0, "the matte covered nothing: {inspect_body}");
+        assert!(
+            covered < total,
+            "the matte covered the whole frame: {inspect_body}"
+        );
+        assert_eq!(inspect_body["covered_pixel_count"], covered);
+    }
+
+    // Read-only either way: the committed revision did not move.
+    assert_eq!(
+        invoke_capability(&client, "get_color_context", json!({}))
+            .await
+            .structured_content
+            .as_ref()
+            .unwrap()["timeline_revision"]
+            .as_u64()
+            .unwrap(),
+        revision + 2
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
 /// CC3 §8/§10.3 fixture 11: `plan_color_wheels` is evidence-only over the real
 /// transport, its exact operations survive prepare/commit, and the resulting
 /// node is visible in the ordered `color_nodes` manifest afterwards.

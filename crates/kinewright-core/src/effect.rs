@@ -557,6 +557,771 @@ pub const fn color_curve_parameter_names(
     curve.parameter_names()
 }
 
+/// The ten CC1 `primary_correction` controls, before the CC5 matte
+/// parameters are appended (CC1 §4).
+const PRIMARY_CORRECTION_PARAMETERS: [EffectParameterDescriptor; 10] = [
+    EffectParameterDescriptor {
+        name: "exposure_milli_stops",
+        min: -5_000,
+        max: 5_000,
+        neutral: 0,
+        uniform: EffectUniform::PrimaryExposure,
+    },
+    EffectParameterDescriptor {
+        name: "temperature_percent",
+        min: -100,
+        max: 100,
+        neutral: 0,
+        uniform: EffectUniform::PrimaryTemperature,
+    },
+    EffectParameterDescriptor {
+        name: "tint_percent",
+        min: -100,
+        max: 100,
+        neutral: 0,
+        uniform: EffectUniform::PrimaryTint,
+    },
+    EffectParameterDescriptor {
+        name: "contrast_percent",
+        min: -100,
+        max: 100,
+        neutral: 0,
+        uniform: EffectUniform::PrimaryContrast,
+    },
+    EffectParameterDescriptor {
+        name: "contrast_pivot_basis_points",
+        min: 0,
+        max: 10_000,
+        neutral: 5_000,
+        uniform: EffectUniform::PrimaryPivot,
+    },
+    EffectParameterDescriptor {
+        name: "blacks_percent",
+        min: -100,
+        max: 100,
+        neutral: 0,
+        uniform: EffectUniform::Blacks,
+    },
+    EffectParameterDescriptor {
+        name: "shadows_percent",
+        min: -100,
+        max: 100,
+        neutral: 0,
+        uniform: EffectUniform::Shadows,
+    },
+    EffectParameterDescriptor {
+        name: "highlights_percent",
+        min: -100,
+        max: 100,
+        neutral: 0,
+        uniform: EffectUniform::Highlights,
+    },
+    EffectParameterDescriptor {
+        name: "whites_percent",
+        min: -100,
+        max: 100,
+        neutral: 0,
+        uniform: EffectUniform::Whites,
+    },
+    EffectParameterDescriptor {
+        name: "saturation_percent",
+        min: -100,
+        max: 100,
+        neutral: 0,
+        uniform: EffectUniform::PrimarySaturation,
+    },
+];
+
+// ---------------------------------------------------------------------------
+// CC5 §2.2 matte parameters
+// ---------------------------------------------------------------------------
+
+/// The most geometric windows one matte may carry (CC5 §2.2).
+pub const MATTE_WINDOW_LIMIT: usize = 4;
+/// [`MATTE_WINDOW_LIMIT`] as the `matte_window_count` descriptor maximum.
+const MATTE_WINDOW_LIMIT_I64: i64 = 4;
+const _: () = assert!(MATTE_WINDOW_LIMIT == 4 && MATTE_WINDOW_LIMIT_I64 == 4);
+
+/// Matte controls that belong to the node rather than to one window
+/// (CC5 §2.2, first table).
+pub const MATTE_CONTROL_PARAMETER_COUNT: usize = 15;
+
+/// Controls one geometric window owns (CC5 §2.2, second table).
+pub const MATTE_WINDOW_PARAMETER_COUNT: usize = 8;
+
+/// Every parameter a matte-carrying node gains: 15 node controls plus
+/// `4 × 8` window controls (CC5 §2.2).
+pub const MATTE_PARAMETER_COUNT: usize =
+    MATTE_CONTROL_PARAMETER_COUNT + MATTE_WINDOW_LIMIT * MATTE_WINDOW_PARAMETER_COUNT;
+
+/// The `matte_hue_width_centidegrees` value that disables the hue leg
+/// entirely, achromatic pixels included (CC5 §2.4).
+///
+/// It is simultaneously that control's maximum and its neutral: 180° is a
+/// half-width covering the whole wheel, so the boundary of the range is the
+/// switch rather than a special-cased flag.
+pub const MATTE_HUE_WIDTH_DISABLE_CENTIDEGREES: i64 = 18_000;
+
+/// Full coverage in `matte_mix_basis_points`, and that control's neutral.
+pub const MATTE_MIX_BASIS_POINTS_MAX: i64 = 10_000;
+
+/// Inclusive minimum of a window centre, in basis points of the frame extent
+/// (CC5 §2.2). Off-frame centres are legal so a tracked window may leave and
+/// re-enter the picture.
+pub const MATTE_WINDOW_CENTER_MIN_BASIS_POINTS: i64 = -10_000;
+/// Inclusive maximum of a window centre (CC5 §2.2).
+pub const MATTE_WINDOW_CENTER_MAX_BASIS_POINTS: i64 = 20_000;
+/// Inclusive minimum of a window half-extent (CC5 §2.2). A zero half-extent is
+/// not authorable, which is why keyframes can never resolve a degenerate
+/// window.
+pub const MATTE_WINDOW_HALF_EXTENT_MIN_BASIS_POINTS: i64 = 1;
+/// Inclusive maximum of a window half-extent (CC5 §2.2).
+pub const MATTE_WINDOW_HALF_EXTENT_MAX_BASIS_POINTS: i64 = 10_000;
+/// Inclusive rotation limit in hundredths of a degree (CC5 §2.2). A window is
+/// symmetric under 180°, so `±18000` covers every orientation.
+pub const MATTE_WINDOW_ROTATION_LIMIT_CENTIDEGREES: i64 = 18_000;
+
+/// The saturation band token reported by [`MatteParams::degenerate_bands`].
+pub const MATTE_SATURATION_BAND: &str = "saturation";
+/// The luma band token reported by [`MatteParams::degenerate_bands`].
+pub const MATTE_LUMA_BAND: &str = "luma";
+
+const fn matte_control(
+    name: &'static str,
+    min: i64,
+    max: i64,
+    neutral: i64,
+) -> EffectParameterDescriptor {
+    EffectParameterDescriptor {
+        name,
+        min,
+        max,
+        neutral,
+        uniform: EffectUniform::ColorNode,
+    }
+}
+
+/// Expand the CC5 §2.2 parameter patterns.
+///
+/// `@controls` emits the fifteen node-owned controls in table order;
+/// `@window {j}` emits window `j`'s eight controls with their names built by
+/// `concat!`, so the 32 window parameters are generated rather than
+/// transcribed while every entry stays a plain `&'static str` in a `const`
+/// table that agents and the compositor can read without allocating. This is
+/// how CC3 generates its 133 curve parameters.
+macro_rules! matte_parameter_table {
+    (@controls) => {
+        [
+            matte_control("matte_enabled", 0, 1, 0),
+            matte_control("matte_window_count", 0, MATTE_WINDOW_LIMIT_I64, 0),
+            matte_control("matte_combine_token", 0, 1, 0),
+            matte_control("matte_invert", 0, 1, 0),
+            matte_control(
+                "matte_mix_basis_points",
+                0,
+                MATTE_MIX_BASIS_POINTS_MAX,
+                MATTE_MIX_BASIS_POINTS_MAX,
+            ),
+            matte_control("matte_qualifier_enabled", 0, 1, 0),
+            matte_control("matte_hue_center_centidegrees", 0, 35_999, 0),
+            matte_control(
+                "matte_hue_width_centidegrees",
+                0,
+                MATTE_HUE_WIDTH_DISABLE_CENTIDEGREES,
+                MATTE_HUE_WIDTH_DISABLE_CENTIDEGREES,
+            ),
+            matte_control("matte_hue_softness_centidegrees", 0, 18_000, 0),
+            matte_control("matte_saturation_low_basis_points", 0, 10_000, 0),
+            matte_control("matte_saturation_high_basis_points", 0, 10_000, 10_000),
+            matte_control("matte_saturation_softness_basis_points", 0, 10_000, 0),
+            matte_control("matte_luma_low_basis_points", 0, 10_000, 0),
+            matte_control("matte_luma_high_basis_points", 0, 10_000, 10_000),
+            matte_control("matte_luma_softness_basis_points", 0, 10_000, 0),
+        ]
+    };
+    (@window $index:literal) => {
+        [
+            matte_control(concat!("matte_window", $index, "_shape_token"), 1, 2, 1),
+            matte_control(
+                concat!("matte_window", $index, "_center_x_basis_points"),
+                MATTE_WINDOW_CENTER_MIN_BASIS_POINTS,
+                MATTE_WINDOW_CENTER_MAX_BASIS_POINTS,
+                5_000,
+            ),
+            matte_control(
+                concat!("matte_window", $index, "_center_y_basis_points"),
+                MATTE_WINDOW_CENTER_MIN_BASIS_POINTS,
+                MATTE_WINDOW_CENTER_MAX_BASIS_POINTS,
+                5_000,
+            ),
+            matte_control(
+                concat!("matte_window", $index, "_half_width_basis_points"),
+                MATTE_WINDOW_HALF_EXTENT_MIN_BASIS_POINTS,
+                MATTE_WINDOW_HALF_EXTENT_MAX_BASIS_POINTS,
+                2_500,
+            ),
+            matte_control(
+                concat!("matte_window", $index, "_half_height_basis_points"),
+                MATTE_WINDOW_HALF_EXTENT_MIN_BASIS_POINTS,
+                MATTE_WINDOW_HALF_EXTENT_MAX_BASIS_POINTS,
+                2_500,
+            ),
+            matte_control(
+                concat!("matte_window", $index, "_rotation_centidegrees"),
+                -MATTE_WINDOW_ROTATION_LIMIT_CENTIDEGREES,
+                MATTE_WINDOW_ROTATION_LIMIT_CENTIDEGREES,
+                0,
+            ),
+            matte_control(
+                concat!("matte_window", $index, "_feather_basis_points"),
+                0,
+                10_000,
+                0,
+            ),
+            matte_control(concat!("matte_window", $index, "_invert"), 0, 1, 0),
+        ]
+    };
+}
+
+const MATTE_CONTROL_PARAMETERS: [EffectParameterDescriptor; MATTE_CONTROL_PARAMETER_COUNT] =
+    matte_parameter_table!(@controls);
+
+const MATTE_WINDOW_PARAMETERS: [[EffectParameterDescriptor; MATTE_WINDOW_PARAMETER_COUNT];
+    MATTE_WINDOW_LIMIT] = [
+    matte_parameter_table!(@window 0),
+    matte_parameter_table!(@window 1),
+    matte_parameter_table!(@window 2),
+    matte_parameter_table!(@window 3),
+];
+
+/// The 47 matte descriptors: the fifteen node controls, then window `0..=3`.
+const MATTE_PARAMETERS: [EffectParameterDescriptor; MATTE_PARAMETER_COUNT] = {
+    let mut parameters = [MATTE_CONTROL_PARAMETERS[0]; MATTE_PARAMETER_COUNT];
+    let mut index = 0;
+    while index < MATTE_CONTROL_PARAMETER_COUNT {
+        parameters[index] = MATTE_CONTROL_PARAMETERS[index];
+        index += 1;
+    }
+    let mut window = 0;
+    while window < MATTE_WINDOW_LIMIT {
+        let mut control = 0;
+        while control < MATTE_WINDOW_PARAMETER_COUNT {
+            parameters
+                [MATTE_CONTROL_PARAMETER_COUNT + window * MATTE_WINDOW_PARAMETER_COUNT + control] =
+                MATTE_WINDOW_PARAMETERS[window][control];
+            control += 1;
+        }
+        window += 1;
+    }
+    parameters
+};
+
+const MATTE_PARAMETER_NAMES: [&str; MATTE_PARAMETER_COUNT] = {
+    let mut names = [""; MATTE_PARAMETER_COUNT];
+    let mut index = 0;
+    while index < MATTE_PARAMETER_COUNT {
+        names[index] = MATTE_PARAMETERS[index].name;
+        index += 1;
+    }
+    names
+};
+
+const MATTE_WINDOW_PARAMETER_NAMES: [[&str; MATTE_WINDOW_PARAMETER_COUNT]; MATTE_WINDOW_LIMIT] = {
+    let mut names = [[""; MATTE_WINDOW_PARAMETER_COUNT]; MATTE_WINDOW_LIMIT];
+    let mut window = 0;
+    while window < MATTE_WINDOW_LIMIT {
+        let mut control = 0;
+        while control < MATTE_WINDOW_PARAMETER_COUNT {
+            names[window][control] = MATTE_WINDOW_PARAMETERS[window][control].name;
+            control += 1;
+        }
+        window += 1;
+    }
+    names
+};
+
+const MATTE_ENABLED_INDEX: usize = 0;
+const MATTE_WINDOW_COUNT_INDEX: usize = 1;
+const MATTE_COMBINE_TOKEN_INDEX: usize = 2;
+const MATTE_INVERT_INDEX: usize = 3;
+const MATTE_MIX_INDEX: usize = 4;
+const MATTE_QUALIFIER_ENABLED_INDEX: usize = 5;
+const MATTE_HUE_CENTER_INDEX: usize = 6;
+const MATTE_HUE_WIDTH_INDEX: usize = 7;
+const MATTE_HUE_SOFTNESS_INDEX: usize = 8;
+const MATTE_SATURATION_LOW_INDEX: usize = 9;
+const MATTE_SATURATION_HIGH_INDEX: usize = 10;
+const MATTE_SATURATION_SOFTNESS_INDEX: usize = 11;
+const MATTE_LUMA_LOW_INDEX: usize = 12;
+const MATTE_LUMA_HIGH_INDEX: usize = 13;
+const MATTE_LUMA_SOFTNESS_INDEX: usize = 14;
+
+const MATTE_WINDOW_SHAPE_INDEX: usize = 0;
+const MATTE_WINDOW_CENTER_X_INDEX: usize = 1;
+const MATTE_WINDOW_CENTER_Y_INDEX: usize = 2;
+const MATTE_WINDOW_HALF_WIDTH_INDEX: usize = 3;
+const MATTE_WINDOW_HALF_HEIGHT_INDEX: usize = 4;
+const MATTE_WINDOW_ROTATION_INDEX: usize = 5;
+const MATTE_WINDOW_FEATHER_INDEX: usize = 6;
+const MATTE_WINDOW_INVERT_INDEX: usize = 7;
+
+/// The 47 matte descriptors every matte-capable kind carries (CC5 §2.2).
+///
+/// Appended verbatim to each of the four matte-capable descriptors, so the
+/// bounds and neutrals cannot drift between kinds.
+#[must_use]
+pub const fn matte_parameters() -> &'static [EffectParameterDescriptor; MATTE_PARAMETER_COUNT] {
+    &MATTE_PARAMETERS
+}
+
+/// The 47 matte parameter names, node controls first, then window `0..=3`.
+///
+/// A matte reset writes exactly these names to their neutrals.
+#[must_use]
+pub const fn matte_parameter_names() -> &'static [&'static str; MATTE_PARAMETER_COUNT] {
+    &MATTE_PARAMETER_NAMES
+}
+
+/// The eight parameter names window `j` owns, or `None` past window 3.
+#[must_use]
+pub const fn matte_window_parameter_names(
+    window: usize,
+) -> Option<&'static [&'static str; MATTE_WINDOW_PARAMETER_COUNT]> {
+    if window >= MATTE_WINDOW_LIMIT {
+        return None;
+    }
+    Some(&MATTE_WINDOW_PARAMETER_NAMES[window])
+}
+
+/// The eight descriptors window `j` owns, or `None` past window 3.
+#[must_use]
+pub const fn matte_window_parameters(
+    window: usize,
+) -> Option<&'static [EffectParameterDescriptor; MATTE_WINDOW_PARAMETER_COUNT]> {
+    if window >= MATTE_WINDOW_LIMIT {
+        return None;
+    }
+    Some(&MATTE_WINDOW_PARAMETERS[window])
+}
+
+/// Whether `name` is one of the 47 CC5 matte parameters.
+///
+/// Name-based rather than kind-based: `technical_lut` carries none of them, so
+/// naming one there is the ordinary [`crate::OpError::UnknownEffectParam`]
+/// rejection (CC5 §2.1).
+#[must_use]
+pub fn is_matte_parameter(name: &str) -> bool {
+    MATTE_PARAMETER_NAMES.contains(&name)
+}
+
+/// Whether a node kind may carry a matte (CC5 §2.1).
+#[must_use]
+pub const fn matte_capable(kind: ColorNodeKind) -> bool {
+    kind.supports_matte()
+}
+
+/// Whether an effect name is a matte-capable managed colour node (CC5 §2.1).
+#[must_use]
+pub fn is_matte_capable_color_node(name: &str) -> bool {
+    ColorNodeKind::from_effect_name(name).is_some_and(ColorNodeKind::supports_matte)
+}
+
+/// Whether a matte parameter accepts `Hold` keyframes only (CC5 §5.1).
+///
+/// Tokens and counts switch discontinuously: interpolating between union and
+/// intersection, or between one window and three, resolves states nobody
+/// authored. Every other matte control — the window geometry, the mix, and
+/// every qualifier scalar — is fully keyframable with any interpolation.
+#[must_use]
+pub fn is_hold_only_matte_parameter(name: &str) -> bool {
+    if matches!(
+        name,
+        "matte_enabled"
+            | "matte_window_count"
+            | "matte_combine_token"
+            | "matte_invert"
+            | "matte_qualifier_enabled"
+    ) {
+        return true;
+    }
+    MATTE_WINDOW_PARAMETER_NAMES.iter().any(|window| {
+        window[MATTE_WINDOW_SHAPE_INDEX] == name || window[MATTE_WINDOW_INVERT_INDEX] == name
+    })
+}
+
+/// Append the 47 matte parameters to one kind's own control table (CC5 §2.2).
+///
+/// `N` is checked against the base table's length at compile time, so a kind
+/// whose control table grows cannot silently drop a matte parameter.
+const fn with_matte_parameters<const N: usize>(
+    base: &[EffectParameterDescriptor],
+) -> [EffectParameterDescriptor; N] {
+    assert!(
+        N == base.len() + MATTE_PARAMETER_COUNT,
+        "a matte-capable descriptor is its own controls plus the 47 matte parameters"
+    );
+    let mut parameters = [COLOR_NODE_BYPASS_DESCRIPTOR; N];
+    let mut index = 0;
+    while index < base.len() {
+        parameters[index] = base[index];
+        index += 1;
+    }
+    let mut matte = 0;
+    while matte < MATTE_PARAMETER_COUNT {
+        parameters[base.len() + matte] = MATTE_PARAMETERS[matte];
+        matte += 1;
+    }
+    parameters
+}
+
+/// One geometric window resolved to its stored integers (CC5 §2.2, §2.3).
+///
+/// Callers pass a *keyframe-evaluated* effect ([`Effect::evaluated_at`]); this
+/// type performs no automation evaluation of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatteWindowParams {
+    /// `1` rect, `2` ellipse — the `mask.shape_token` vocabulary, reused.
+    pub shape_token: i64,
+    /// Centre `x` in basis points of the frame width.
+    pub center_x_bp: i64,
+    /// Centre `y` in basis points of the frame height.
+    pub center_y_bp: i64,
+    /// Half width in basis points of the frame width.
+    pub half_width_bp: i64,
+    /// Half height in basis points of the frame height.
+    pub half_height_bp: i64,
+    /// Rotation in hundredths of a degree, clockwise as the viewer sees it.
+    pub rotation_cd: i64,
+    /// Symmetric feather band in basis points of the normalized field.
+    pub feather_bp: i64,
+    /// `1` complements this window only, before the combine.
+    pub invert: i64,
+}
+
+impl MatteWindowParams {
+    /// The window every matte-capable node resolves when nothing is stored: a
+    /// centred rect covering the middle half of the frame, unfeathered.
+    pub const NEUTRAL: Self = Self {
+        shape_token: 1,
+        center_x_bp: 5_000,
+        center_y_bp: 5_000,
+        half_width_bp: 2_500,
+        half_height_bp: 2_500,
+        rotation_cd: 0,
+        feather_bp: 0,
+        invert: 0,
+    };
+
+    fn resolve(effect: &Effect, window: usize) -> Self {
+        let Some(table) = matte_window_parameters(window) else {
+            return Self::NEUTRAL;
+        };
+        let stored = |index: usize| {
+            let descriptor = table[index];
+            stored_integer(effect, descriptor.name, descriptor.neutral)
+                .clamp(descriptor.min, descriptor.max)
+        };
+        Self {
+            shape_token: stored(MATTE_WINDOW_SHAPE_INDEX),
+            center_x_bp: stored(MATTE_WINDOW_CENTER_X_INDEX),
+            center_y_bp: stored(MATTE_WINDOW_CENTER_Y_INDEX),
+            half_width_bp: stored(MATTE_WINDOW_HALF_WIDTH_INDEX),
+            half_height_bp: stored(MATTE_WINDOW_HALF_HEIGHT_INDEX),
+            rotation_cd: stored(MATTE_WINDOW_ROTATION_INDEX),
+            feather_bp: stored(MATTE_WINDOW_FEATHER_INDEX),
+            invert: stored(MATTE_WINDOW_INVERT_INDEX),
+        }
+    }
+
+    /// Whether the stored shape token selects the ellipse (CC5 §2.3).
+    #[must_use]
+    pub const fn is_ellipse(self) -> bool {
+        self.shape_token == 2
+    }
+
+    /// Whether this window's own coverage is complemented before the combine.
+    #[must_use]
+    pub const fn is_inverted(self) -> bool {
+        self.invert >= 1
+    }
+}
+
+/// The HSL qualifier resolved to its stored integers (CC5 §2.2, §2.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatteQualifierParams {
+    /// `matte_qualifier_enabled`, `0` or `1`.
+    pub enabled: i64,
+    /// Hue band centre in hundredths of a degree, `0..=35999`.
+    pub hue_center_cd: i64,
+    /// Hue half-width. [`MATTE_HUE_WIDTH_DISABLE_CENTIDEGREES`] disables the
+    /// hue leg entirely, achromatic pixels included (CC5 §2.4).
+    pub hue_width_cd: i64,
+    /// Hue shoulder width beyond the half-width.
+    pub hue_softness_cd: i64,
+    /// Saturation band low edge in basis points.
+    pub sat_low_bp: i64,
+    /// Saturation band high edge in basis points.
+    pub sat_high_bp: i64,
+    /// Saturation band shoulder width in basis points.
+    pub sat_softness_bp: i64,
+    /// Luma band low edge in basis points.
+    pub luma_low_bp: i64,
+    /// Luma band high edge in basis points.
+    pub luma_high_bp: i64,
+    /// Luma band shoulder width in basis points.
+    pub luma_softness_bp: i64,
+}
+
+impl MatteQualifierParams {
+    /// The all-neutral qualifier: disabled, hue leg off, both bands full.
+    pub const NEUTRAL: Self = Self {
+        enabled: 0,
+        hue_center_cd: 0,
+        hue_width_cd: MATTE_HUE_WIDTH_DISABLE_CENTIDEGREES,
+        hue_softness_cd: 0,
+        sat_low_bp: 0,
+        sat_high_bp: 10_000,
+        sat_softness_bp: 0,
+        luma_low_bp: 0,
+        luma_high_bp: 10_000,
+        luma_softness_bp: 0,
+    };
+
+    /// Whether the qualifier leg participates in the coverage.
+    #[must_use]
+    pub const fn is_enabled(self) -> bool {
+        self.enabled >= 1
+    }
+
+    /// Whether the hue leg is disabled by a 180° half-width (CC5 §2.4).
+    #[must_use]
+    pub const fn hue_leg_disabled(self) -> bool {
+        self.hue_width_cd >= MATTE_HUE_WIDTH_DISABLE_CENTIDEGREES
+    }
+
+    /// Whether the saturation band's low edge is above its high edge.
+    #[must_use]
+    pub const fn saturation_band_inverted(self) -> bool {
+        self.sat_low_bp > self.sat_high_bp
+    }
+
+    /// Whether the luma band's low edge is above its high edge.
+    #[must_use]
+    pub const fn luma_band_inverted(self) -> bool {
+        self.luma_low_bp > self.luma_high_bp
+    }
+}
+
+/// Every matte control of one node resolved to its stored integer (CC5 §2.2).
+///
+/// Callers pass a *keyframe-evaluated* effect ([`Effect::evaluated_at`]); this
+/// type performs no automation evaluation of its own. Omitted parameters
+/// resolve to their descriptor neutrals and out-of-range values are clamped
+/// defensively, so a rendered frame can never fail — neither case is reachable
+/// through the edit path, which rejects both atomically.
+///
+/// Every §2.6 question is answered on these integers, never on floats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatteParams {
+    /// `matte_enabled`, the master switch. `0` makes the node byte-identical
+    /// to its CC4 self.
+    pub enabled: i64,
+    /// Active windows, `0..=4`. Windows at index `>= window_count` are stored
+    /// but never rendered.
+    pub window_count: usize,
+    /// `0` union, `1` intersection.
+    pub combine_token: i64,
+    /// `1` complements the combined coverage before the mix.
+    pub invert: i64,
+    /// `matte_mix_basis_points`, `0..=10000`: scales the final coverage.
+    pub mix_bp: i64,
+    /// The HSL qualifier leg.
+    pub qualifier: MatteQualifierParams,
+    /// All four windows, resolved whether or not they are active.
+    pub windows: [MatteWindowParams; MATTE_WINDOW_LIMIT],
+}
+
+impl MatteParams {
+    /// The matte a node carries when it stores no `matte_*` parameter: an
+    /// inactive matte, which is what makes a pre-CC5 project render
+    /// bit-identically (CC5 §8).
+    pub const NEUTRAL: Self = Self {
+        enabled: 0,
+        window_count: 0,
+        combine_token: 0,
+        invert: 0,
+        mix_bp: MATTE_MIX_BASIS_POINTS_MAX,
+        qualifier: MatteQualifierParams::NEUTRAL,
+        windows: [MatteWindowParams::NEUTRAL; MATTE_WINDOW_LIMIT],
+    };
+
+    /// Resolve a keyframe-evaluated matte-capable node.
+    ///
+    /// An effect whose kind carries no matte — `technical_lut`, or any effect
+    /// outside the managed stack — resolves to [`Self::NEUTRAL`], so a
+    /// hand-edited file cannot make a technical input transform partial.
+    #[must_use]
+    pub fn from_effect(effect: &Effect) -> Self {
+        if !is_matte_capable_color_node(&effect.name) {
+            return Self::NEUTRAL;
+        }
+        let stored = |index: usize| {
+            let descriptor = MATTE_CONTROL_PARAMETERS[index];
+            stored_integer(effect, descriptor.name, descriptor.neutral)
+                .clamp(descriptor.min, descriptor.max)
+        };
+        let window_count = usize::try_from(stored(MATTE_WINDOW_COUNT_INDEX)).unwrap_or(0);
+        Self {
+            enabled: stored(MATTE_ENABLED_INDEX),
+            window_count: window_count.min(MATTE_WINDOW_LIMIT),
+            combine_token: stored(MATTE_COMBINE_TOKEN_INDEX),
+            invert: stored(MATTE_INVERT_INDEX),
+            mix_bp: stored(MATTE_MIX_INDEX),
+            qualifier: MatteQualifierParams {
+                enabled: stored(MATTE_QUALIFIER_ENABLED_INDEX),
+                hue_center_cd: stored(MATTE_HUE_CENTER_INDEX),
+                hue_width_cd: stored(MATTE_HUE_WIDTH_INDEX),
+                hue_softness_cd: stored(MATTE_HUE_SOFTNESS_INDEX),
+                sat_low_bp: stored(MATTE_SATURATION_LOW_INDEX),
+                sat_high_bp: stored(MATTE_SATURATION_HIGH_INDEX),
+                sat_softness_bp: stored(MATTE_SATURATION_SOFTNESS_INDEX),
+                luma_low_bp: stored(MATTE_LUMA_LOW_INDEX),
+                luma_high_bp: stored(MATTE_LUMA_HIGH_INDEX),
+                luma_softness_bp: stored(MATTE_LUMA_SOFTNESS_INDEX),
+            },
+            windows: [
+                MatteWindowParams::resolve(effect, 0),
+                MatteWindowParams::resolve(effect, 1),
+                MatteWindowParams::resolve(effect, 2),
+                MatteWindowParams::resolve(effect, 3),
+            ],
+        }
+    }
+
+    /// Whether the master switch is on.
+    #[must_use]
+    pub const fn is_enabled(&self) -> bool {
+        self.enabled >= 1
+    }
+
+    /// Whether the combined coverage is complemented before the mix.
+    #[must_use]
+    pub const fn is_inverted(&self) -> bool {
+        self.invert >= 1
+    }
+
+    /// Whether the windows combine by intersection rather than union.
+    #[must_use]
+    pub const fn intersects(&self) -> bool {
+        self.combine_token >= 1
+    }
+
+    /// The active windows, in index order (CC5 §2.3).
+    pub fn active_windows(&self) -> std::slice::Iter<'_, MatteWindowParams> {
+        self.windows[..self.window_count].iter()
+    }
+
+    /// One stored window, active or not, or `None` past window 3.
+    #[must_use]
+    pub const fn window(&self, index: usize) -> Option<&MatteWindowParams> {
+        if index >= MATTE_WINDOW_LIMIT {
+            return None;
+        }
+        Some(&self.windows[index])
+    }
+
+    /// Whether the matte is inactive, so no matte block is written and the
+    /// node is byte-identical to its CC4 self (CC5 §2.6, rule 1).
+    ///
+    /// True when the master switch is off, or when the matte is enabled but
+    /// selects everything at full strength: no window, no qualifier, no
+    /// invert, and full mix.
+    #[must_use]
+    pub const fn is_inactive_matte(&self) -> bool {
+        if !self.is_enabled() {
+            return true;
+        }
+        self.window_count == 0
+            && !self.qualifier.is_enabled()
+            && self.invert == 0
+            && self.mix_bp == MATTE_MIX_BASIS_POINTS_MAX
+    }
+
+    /// Whether the node carries a matte the renderer must evaluate.
+    #[must_use]
+    pub const fn has_matte(&self) -> bool {
+        !self.is_inactive_matte()
+    }
+
+    /// Whether the matte makes the whole node the exact identity (CC5 §2.6,
+    /// rule 2), reported as [`ColorNodeInactiveReason::MatteExcluded`].
+    ///
+    /// Either the mix is zero, or an empty matte is inverted, which is `m = 0`
+    /// at every pixel.
+    #[must_use]
+    pub const fn node_excluded_by_matte(&self) -> bool {
+        if !self.is_enabled() {
+            return false;
+        }
+        self.mix_bp == 0
+            || (self.window_count == 0 && !self.qualifier.is_enabled() && self.invert >= 1)
+    }
+
+    /// The qualifier bands whose low edge resolved above their high edge
+    /// (CC5 §2.6).
+    ///
+    /// Such a band evaluates to `0` — no clamping, no reordering, no error —
+    /// and QA reports it as `matte_band_inverted_by_automation`. The test is
+    /// arithmetic: whether the qualifier is enabled at all is the reporter's
+    /// question, not this accessor's.
+    #[must_use]
+    pub fn degenerate_bands(&self) -> Vec<&'static str> {
+        let mut bands = Vec::new();
+        if self.qualifier.saturation_band_inverted() {
+            bands.push(MATTE_SATURATION_BAND);
+        }
+        if self.qualifier.luma_band_inverted() {
+            bands.push(MATTE_LUMA_BAND);
+        }
+        bands
+    }
+
+    /// The evaluated mix as a coverage scale in `0.0..=1.0`.
+    ///
+    /// `0..=10000` is exactly representable in `f32`, so the conversion is
+    /// exact and the endpoints are precisely `0.0` and `1.0`.
+    #[must_use]
+    pub fn mix(&self) -> f32 {
+        let clamped = self.mix_bp.clamp(0, MATTE_MIX_BASIS_POINTS_MAX);
+        f32::from(u16::try_from(clamped).unwrap_or_default()) / 10_000.0
+    }
+}
+
+/// Parameters in the `primary_correction` descriptor: ten CC1 controls plus
+/// the 47 CC5 matte parameters (CC5 §2.2).
+pub const PRIMARY_CORRECTION_DESCRIPTOR_PARAMETER_COUNT: usize = 10 + MATTE_PARAMETER_COUNT;
+/// Parameters in the `color_wheels` descriptor: twelve CC3 controls, `bypass`,
+/// and the 47 CC5 matte parameters (CC5 §2.2).
+pub const COLOR_WHEELS_DESCRIPTOR_PARAMETER_COUNT: usize = 13 + MATTE_PARAMETER_COUNT;
+/// Parameters in the `color_curves` descriptor: the 133 CC3 curve parameters
+/// plus the 47 CC5 matte parameters (CC5 §2.2).
+pub const COLOR_CURVES_DESCRIPTOR_PARAMETER_COUNT: usize =
+    COLOR_CURVES_PARAMETER_COUNT + MATTE_PARAMETER_COUNT;
+/// Parameters in the `creative_look` descriptor: four CC4 controls plus the 47
+/// CC5 matte parameters (CC5 §2.2). `technical_lut` keeps its four: a
+/// partially applied source normalization is not a meaningful state.
+pub const CREATIVE_LOOK_DESCRIPTOR_PARAMETER_COUNT: usize = 4 + MATTE_PARAMETER_COUNT;
+
+const PRIMARY_CORRECTION_DESCRIPTOR_PARAMETERS: [EffectParameterDescriptor;
+    PRIMARY_CORRECTION_DESCRIPTOR_PARAMETER_COUNT] =
+    with_matte_parameters(&PRIMARY_CORRECTION_PARAMETERS);
+const COLOR_WHEELS_DESCRIPTOR_PARAMETERS: [EffectParameterDescriptor;
+    COLOR_WHEELS_DESCRIPTOR_PARAMETER_COUNT] = with_matte_parameters(&COLOR_WHEELS_PARAMETERS);
+const COLOR_CURVES_DESCRIPTOR_PARAMETERS: [EffectParameterDescriptor;
+    COLOR_CURVES_DESCRIPTOR_PARAMETER_COUNT] = with_matte_parameters(&COLOR_CURVES_PARAMETERS);
+const CREATIVE_LOOK_DESCRIPTOR_PARAMETERS: [EffectParameterDescriptor;
+    CREATIVE_LOOK_DESCRIPTOR_PARAMETER_COUNT] = with_matte_parameters(&CREATIVE_LOOK_PARAMETERS);
+
 /// Built-in effect metadata used by validation, rendering, and agent documentation.
 pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
     EffectDescriptor {
@@ -726,86 +1491,15 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
     },
     EffectDescriptor {
         name: "primary_correction",
-        parameters: &[
-            EffectParameterDescriptor {
-                name: "exposure_milli_stops",
-                min: -5_000,
-                max: 5_000,
-                neutral: 0,
-                uniform: EffectUniform::PrimaryExposure,
-            },
-            EffectParameterDescriptor {
-                name: "temperature_percent",
-                min: -100,
-                max: 100,
-                neutral: 0,
-                uniform: EffectUniform::PrimaryTemperature,
-            },
-            EffectParameterDescriptor {
-                name: "tint_percent",
-                min: -100,
-                max: 100,
-                neutral: 0,
-                uniform: EffectUniform::PrimaryTint,
-            },
-            EffectParameterDescriptor {
-                name: "contrast_percent",
-                min: -100,
-                max: 100,
-                neutral: 0,
-                uniform: EffectUniform::PrimaryContrast,
-            },
-            EffectParameterDescriptor {
-                name: "contrast_pivot_basis_points",
-                min: 0,
-                max: 10_000,
-                neutral: 5_000,
-                uniform: EffectUniform::PrimaryPivot,
-            },
-            EffectParameterDescriptor {
-                name: "blacks_percent",
-                min: -100,
-                max: 100,
-                neutral: 0,
-                uniform: EffectUniform::Blacks,
-            },
-            EffectParameterDescriptor {
-                name: "shadows_percent",
-                min: -100,
-                max: 100,
-                neutral: 0,
-                uniform: EffectUniform::Shadows,
-            },
-            EffectParameterDescriptor {
-                name: "highlights_percent",
-                min: -100,
-                max: 100,
-                neutral: 0,
-                uniform: EffectUniform::Highlights,
-            },
-            EffectParameterDescriptor {
-                name: "whites_percent",
-                min: -100,
-                max: 100,
-                neutral: 0,
-                uniform: EffectUniform::Whites,
-            },
-            EffectParameterDescriptor {
-                name: "saturation_percent",
-                min: -100,
-                max: 100,
-                neutral: 0,
-                uniform: EffectUniform::PrimarySaturation,
-            },
-        ],
+        parameters: &PRIMARY_CORRECTION_DESCRIPTOR_PARAMETERS,
     },
     EffectDescriptor {
         name: "color_wheels",
-        parameters: &COLOR_WHEELS_PARAMETERS,
+        parameters: &COLOR_WHEELS_DESCRIPTOR_PARAMETERS,
     },
     EffectDescriptor {
         name: "color_curves",
-        parameters: &COLOR_CURVES_PARAMETERS,
+        parameters: &COLOR_CURVES_DESCRIPTOR_PARAMETERS,
     },
     EffectDescriptor {
         name: "technical_lut",
@@ -813,7 +1507,7 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
     },
     EffectDescriptor {
         name: "creative_look",
-        parameters: &CREATIVE_LOOK_PARAMETERS,
+        parameters: &CREATIVE_LOOK_DESCRIPTOR_PARAMETERS,
     },
     EffectDescriptor {
         name: "look_lut",
@@ -1185,6 +1879,19 @@ impl ColorNodeKind {
         matches!(self, Self::TechnicalLut | Self::CreativeLook)
     }
 
+    /// Whether this kind may carry a CC5 matte (CC5 §2.1).
+    ///
+    /// Every kind but `technical_lut`: a technical input transform normalizes
+    /// the *whole* source, and a partially applied source normalization is not
+    /// a meaningful state — the same argument that pins its
+    /// `mix_basis_points`. Its descriptor therefore carries no `matte_*`
+    /// parameter at all, so naming one is the ordinary
+    /// [`crate::OpError::UnknownEffectParam`] rejection.
+    #[must_use]
+    pub const fn supports_matte(self) -> bool {
+        !matches!(self, Self::TechnicalLut)
+    }
+
     /// The descriptor parameter table for a LUT node kind (CC4 §5).
     const fn lut_parameters(self) -> Option<&'static [EffectParameterDescriptor; 4]> {
         match self {
@@ -1255,6 +1962,13 @@ pub enum ColorNodeInactiveReason {
     /// referenced id to exist. The state exists so a resolved node can never
     /// index a missing asset.
     Unbound,
+    /// An enabled matte resolves to `m = 0` at every pixel (CC5 §2.6): its
+    /// `matte_mix_basis_points` is `0`, or an empty matte is inverted.
+    ///
+    /// The node is the exact identity, so it is not written to the grade
+    /// buffer and is skipped by the CPU reference: a zero-mix matte is
+    /// losslessly identical to removing the node, bit for bit.
+    MatteExcluded,
 }
 
 impl ColorNodeInactiveReason {
@@ -1265,6 +1979,7 @@ impl ColorNodeInactiveReason {
             Self::Bypassed => "bypassed",
             Self::Neutral => "neutral",
             Self::Unbound => "unbound",
+            Self::MatteExcluded => "matte_excluded",
         }
     }
 }
@@ -1598,18 +2313,29 @@ pub fn classify_color_node(effect: &Effect) -> Option<ColorNodeKind> {
 /// The caller passes a *keyframe-evaluated* effect ([`Effect::evaluated_at`]);
 /// CC3 §3.3 resolves keyframes first, then tests inactivity on the stored
 /// integers. `primary_correction` has neither a `bypass` control nor a CC1
-/// neutral short-circuit, so it is always reported active and its CC1
-/// rendering is unchanged.
+/// neutral short-circuit, so it is reported active unless CC5 §2.6's matte
+/// rule excludes it, and its CC1 rendering is unchanged.
 #[must_use]
 pub fn color_node_inactive_reason(effect: &Effect) -> Option<ColorNodeInactiveReason> {
-    match classify_color_node(effect)? {
+    let kind = classify_color_node(effect)?;
+    let reason = match kind {
         ColorNodeKind::Primary => None,
         ColorNodeKind::Wheels => ColorWheelsParams::from_effect(effect).inactive_reason(),
         ColorNodeKind::Curves => ResolvedCurves::from_effect(effect).inactive_reason(),
         ColorNodeKind::TechnicalLut | ColorNodeKind::CreativeLook => {
             LutNodeParams::from_effect(effect).inactive_reason()
         }
+    };
+    if reason.is_some() {
+        return reason;
     }
+    // CC5 §2.6 rule 2, tested last so a bypassed, neutral, or unbound node
+    // keeps reporting the reason it already had: a matte cannot make an
+    // already-identity node report a different cause.
+    if kind.supports_matte() && MatteParams::from_effect(effect).node_excluded_by_matte() {
+        return Some(ColorNodeInactiveReason::MatteExcluded);
+    }
+    None
 }
 
 /// The managed colour nodes a renderer must evaluate, with their positions in

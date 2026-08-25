@@ -8,10 +8,12 @@ use kinewright_core::{
     ColorWheelControl, ColorWheelControlSet, ColorWheelsParams, Document, EFFECT_DESCRIPTORS,
     Effect, EffectId, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER,
     LUT_MIX_BASIS_POINTS_MAX, LUT_MIX_PARAMETER, LutAsset, LutAssetId, LutAssetSource,
-    LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams, MARKER_COLOR_TOKEN_COUNT, Marker,
-    MarkerId, MediaKind, Operation, ParamValue, ResolvedCurves, TITLE_COLORS, TITLE_FONT_SIZES,
-    TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition, Transition, color_node_inactive_reason,
-    effect_compatibility_stage, is_audio_effect, is_legacy_display_effect, is_lut_color_node,
+    LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams, MARKER_COLOR_TOKEN_COUNT,
+    MATTE_MIX_BASIS_POINTS_MAX, MATTE_WINDOW_LIMIT, Marker, MarkerId, MatteParams,
+    MatteQualifierParams, MatteWindowParams, MediaKind, Operation, ParamValue, ResolvedCurves,
+    TITLE_COLORS, TITLE_FONT_SIZES, TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition,
+    Transition, color_node_inactive_reason, effect_compatibility_stage, is_audio_effect,
+    is_legacy_display_effect, is_lut_color_node, is_matte_capable_color_node, is_matte_parameter,
 };
 use kinewright_media::BuiltinLook;
 
@@ -19,6 +21,7 @@ use crate::{
     app::KinewrightApp,
     color_wheel_widget::{self, ColorWheelState, color_wheel},
     curve_editor_widget::{self, curve_editor},
+    matte_overlay_ui::{MatteHit, MatteTarget},
     media_workflow::{paint_source_status, source_display_state},
     theme::{self, color, space, type_size},
     timeline_ui::{is_internal_marker, linked_members, linked_transition_operations},
@@ -55,6 +58,15 @@ pub(crate) struct InspectorEdits {
     /// The card that released an A/B hold itself this frame, which retires the
     /// app's mirror without a second restore.
     ab_released: Option<(ClipId, EffectId)>,
+    /// The matte section that was expanded this frame, if any (CC5 §6).
+    ///
+    /// The viewer renders before the inspector, so it reads the previous
+    /// frame's report: a card that stops rendering therefore stops the overlay
+    /// on the next frame rather than leaving the viewer eating pointer input.
+    matte_expanded: Option<MatteTarget>,
+    /// The window a card asked the overlay to select, with the window count
+    /// the card could see, so the overlay can clamp the request (CC5 §6).
+    matte_selected_window: Option<(usize, usize)>,
     /// Refusals a card produced while building a batch, for the app's error
     /// log.
     ///
@@ -134,7 +146,7 @@ impl InspectorEdits {
     /// Record one frame of a live control gesture that needs several
     /// operations to express a single value, such as a speed change that also
     /// retimes the linked audio.
-    fn extend_live(
+    pub(crate) fn extend_live(
         &mut self,
         operations: impl IntoIterator<Item = Operation>,
         coalesce_key: String,
@@ -146,7 +158,7 @@ impl InspectorEdits {
         }
     }
 
-    fn begin_gesture(&mut self) {
+    pub(crate) fn begin_gesture(&mut self) {
         self.gesture_started = true;
     }
 
@@ -163,6 +175,30 @@ impl InspectorEdits {
     /// Report that a card released its own hold, so the app's mirror retires.
     fn record_ab_release(&mut self, clip: ClipId, effect: EffectId) {
         self.ab_released = Some((clip, effect));
+    }
+
+    /// Report that this frame drew an expanded matte section (CC5 §6).
+    fn record_matte_expanded(&mut self, target: MatteTarget) {
+        self.matte_expanded = Some(target);
+    }
+
+    /// Ask the overlay to draw handles on one window (CC5 §6).
+    ///
+    /// `window_count` travels with the index: the overlay stores a bare `usize`
+    /// and has no document of its own, so the clamp has to come from the card
+    /// that read the count.
+    fn record_matte_window_selection(&mut self, window: usize, window_count: usize) {
+        self.matte_selected_window = Some((window, window_count));
+    }
+
+    #[cfg(test)]
+    const fn matte_expanded(&self) -> Option<MatteTarget> {
+        self.matte_expanded
+    }
+
+    #[cfg(test)]
+    const fn matte_selected_window(&self) -> Option<(usize, usize)> {
+        self.matte_selected_window
     }
 
     /// Record a refusal the app should surface through the error log.
@@ -690,7 +726,7 @@ pub(crate) fn is_live_drag(slider: &egui::Response) -> bool {
 
 impl KinewrightApp {
     /// Route one inspector frame's edits to the core actor.
-    fn submit_inspector_edits(&mut self, edits: InspectorEdits) {
+    pub(crate) fn submit_inspector_edits(&mut self, edits: InspectorEdits) {
         // Mirror the A/B hold before the operations go out: the frame loop
         // needs a record even for the frame the hold opens, because that is
         // the frame after which the card may stop rendering (CC4 §7).
@@ -706,6 +742,16 @@ impl KinewrightApp {
                 .is_some_and(|held| held.record.clip == clip && held.record.effect == effect)
         {
             self.look_ab_hold = None;
+        }
+        // The overlay's input policy is the inspector's report, one frame old
+        // (CC5 §6). Only an expansion is recorded: this path also carries the
+        // viewer's own overlay drags, which draw no card, and reporting "no
+        // section" from there would retire the report the drag is acting on.
+        if let Some(target) = edits.matte_expanded {
+            self.matte_overlay.report_expanded(target);
+        }
+        if let Some((window, window_count)) = edits.matte_selected_window {
+            self.matte_overlay.select_window(window, window_count);
         }
         // Refusals go out before the operations so a card that both refused
         // one action and produced another still reports the refusal.
@@ -1737,8 +1783,14 @@ fn lut_node_section(
             .parameters
             .iter()
             .map(|parameter| parameter.name)
+            .filter(|name| !is_matte_parameter(name))
             .collect();
         color_node_keyframe_rows(ui, clip.id, effect, &names, pending);
+        // CC5 §2.1: a technical input transform normalizes the whole source,
+        // so it carries no matte and gets no section.
+        if kind == ColorNodeKind::CreativeLook {
+            matte_section(ui, clip, effect, pending);
+        }
     });
 }
 
@@ -1754,14 +1806,9 @@ fn look_mix_row(
     params: LutNodeParams,
     pending: &mut InspectorEdits,
 ) {
-    let mut percent = mix_percent(params.mix_basis_points);
+    let mut percent = mix_percent(params.mix_basis_points, LUT_MIX_BASIS_POINTS_MAX);
     ui.horizontal(|ui| {
-        let slider = ui.add(
-            egui::Slider::new(&mut percent, 0..=100)
-                .text("Mix")
-                .integer()
-                .suffix(" %"),
-        );
+        let slider = ui.add(mix_slider(&mut percent, LUT_MIX_BASIS_POINTS_MAX, "Mix").suffix(" %"));
         if slider.drag_started() {
             pending.begin_gesture();
         }
@@ -1782,9 +1829,36 @@ fn look_mix_row(
     });
 }
 
-/// `mix_basis_points` as the slider's whole percent.
-fn mix_percent(basis_points: i64) -> i64 {
-    basis_points.clamp(0, LUT_MIX_BASIS_POINTS_MAX) / 100
+/// A `*_mix_basis_points` as its slider's whole percent.
+///
+/// `max_basis_points` is the bound of the parameter being shown, not a shared
+/// constant: `mix_basis_points` and `matte_mix_basis_points` are separate
+/// contracts (CC4 §7, CC5 §2.2) that happen to agree on 10000 today, and
+/// clamping one to the other's bound is a coincidence waiting to become a bug.
+fn mix_percent(basis_points: i64, max_basis_points: i64) -> i64 {
+    basis_points.clamp(0, max_basis_points) / 100
+}
+
+/// The whole-percent range a mix slider offers, derived from the same bound
+/// [`mix_percent`] converts against.
+///
+/// Hard-coding `0..=100` beside a `mix_percent(bp, MAX)` call ties the control
+/// to today's coincidence that both mix contracts stop at 10000 bp: raise one
+/// descriptor's `max` and the slider would silently clamp the value the card
+/// just read back down, which reads as a control that refuses to hold what the
+/// document stores.
+fn mix_percent_range(max_basis_points: i64) -> std::ops::RangeInclusive<i64> {
+    0..=(max_basis_points.max(0) / 100)
+}
+
+/// A whole-percent mix slider bounded by its own parameter's max.
+///
+/// Shared by the look mix (CC4 §7) and the matte mix (CC5 §2.2) so neither can
+/// be built with the other's bound.
+fn mix_slider<'a>(percent: &'a mut i64, max_basis_points: i64, text: &str) -> egui::Slider<'a> {
+    egui::Slider::new(percent, mix_percent_range(max_basis_points))
+        .text(text.to_owned())
+        .integer()
 }
 
 /// The press-and-hold A/B control (CC4 §7).
@@ -2043,6 +2117,11 @@ fn primary_correction_section(
         });
 
         for parameter in descriptor.parameters {
+            // CC5 §6: the 47 matte integers belong to the matte section, never
+            // to a generic slider loop.
+            if !should_render_effect_parameter(descriptor, parameter.name) {
+                continue;
+            }
             let mut value = effect
                 .parameters
                 .get(parameter.name)
@@ -2100,6 +2179,7 @@ fn primary_correction_section(
                 }
             });
         }
+        matte_section(ui, clip, effect, pending);
     });
 }
 
@@ -2139,6 +2219,19 @@ fn color_node_reset_operations(
             COLOR_NODE_BYPASS_PARAMETER,
             0,
         ));
+        // CC5 §5: resetting a matte-capable node resets its matte too. The
+        // matte parameters are independently bounded, so unlike the curve
+        // points they need no ordering strategy.
+        for parameter in descriptor.parameters {
+            if is_matte_parameter(parameter.name) && matte_reset_needs_write(effect, parameter) {
+                operations.push(effect_param_operation(
+                    clip,
+                    effect.id,
+                    parameter.name,
+                    parameter.neutral,
+                ));
+            }
+        }
         for parameter in descriptor.parameters {
             if parameter_is_keyframed(effect, parameter.name) {
                 operations.push(clear_keyframes_operation(clip, effect.id, parameter.name));
@@ -2155,17 +2248,869 @@ fn color_node_reset_operations(
         if parameter.name == LUT_ASSET_ID_PARAMETER && is_lut_color_node(descriptor.name) {
             continue;
         }
-        operations.push(effect_param_operation(
-            clip,
-            effect.id,
-            parameter.name,
-            parameter.neutral,
-        ));
+        if !is_matte_parameter(parameter.name) || matte_reset_needs_write(effect, parameter) {
+            operations.push(effect_param_operation(
+                clip,
+                effect.id,
+                parameter.name,
+                parameter.neutral,
+            ));
+        }
         if parameter_is_keyframed(effect, parameter.name) {
             operations.push(clear_keyframes_operation(clip, effect.id, parameter.name));
         }
     }
     operations
+}
+
+/// Whether a reset has to write this matte parameter's neutral.
+///
+/// An omitted parameter already resolves to its neutral (CC5 §2.2), and one
+/// stored *at* its neutral is already there, so writing either changes nothing
+/// except to add an entry. Resetting a CC4-era node that never carried a matte
+/// would otherwise grow its stored JSON by all 47, and a one-window node by the
+/// 24 belonging to the three empty slots.
+///
+/// The keyframe clear is deliberately **not** gated on this: a static neutral
+/// under an automation curve still renders the curve, so the clear is what
+/// makes the reset a reset.
+fn matte_reset_needs_write(
+    effect: &Effect,
+    parameter: &kinewright_core::EffectParameterDescriptor,
+) -> bool {
+    match effect.parameters.get(parameter.name) {
+        None => false,
+        Some(stored) => *stored != ParamValue::Integer(parameter.neutral),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CC5 §6 matte section
+// ---------------------------------------------------------------------------
+
+/// The `matte_*` node controls the section writes by name.
+///
+/// The names are the CC5 §2.2 contract strings rather than indices into
+/// [`kinewright_core::matte_parameter_names`], so a reordering of that table
+/// cannot silently retarget a control here; a test asserts every one of them is
+/// a real matte parameter.
+const MATTE_ENABLED_PARAMETER: &str = "matte_enabled";
+const MATTE_WINDOW_COUNT_PARAMETER: &str = "matte_window_count";
+const MATTE_COMBINE_PARAMETER: &str = "matte_combine_token";
+const MATTE_INVERT_PARAMETER: &str = "matte_invert";
+const MATTE_MIX_PARAMETER: &str = "matte_mix_basis_points";
+
+/// The qualifier leg's ten parameters, enable first, in descriptor order.
+const MATTE_QUALIFIER_PARAMETERS: [&str; 10] = [
+    "matte_qualifier_enabled",
+    "matte_hue_center_centidegrees",
+    "matte_hue_width_centidegrees",
+    "matte_hue_softness_centidegrees",
+    "matte_saturation_low_basis_points",
+    "matte_saturation_high_basis_points",
+    "matte_saturation_softness_basis_points",
+    "matte_luma_low_basis_points",
+    "matte_luma_high_basis_points",
+    "matte_luma_softness_basis_points",
+];
+
+/// Human labels for the qualifier scalars, in [`MATTE_QUALIFIER_PARAMETERS`]
+/// order after the enable toggle.
+const MATTE_QUALIFIER_LABELS: [&str; 9] = [
+    "Hue centre (cd)",
+    "Hue width (cd)",
+    "Hue softness (cd)",
+    "Sat low (bp)",
+    "Sat high (bp)",
+    "Sat softness (bp)",
+    "Luma low (bp)",
+    "Luma high (bp)",
+    "Luma softness (bp)",
+];
+
+/// The label of the tracking control (CC5 §6).
+pub(crate) const MATTE_TRACK_BUTTON_LABEL: &str = "Track window…";
+
+/// Why the tracking control is present but disabled (CC5 §6).
+pub(crate) const MATTE_TRACK_BUTTON_TOOLTIP: &str = "Tracking is agent-driven in CC5: ask the \
+     agent to run track_matte_window. The app has no agent-tool call path, so this button would \
+     pretend to work. Once the prepared plan is committed, its keyframes appear on this card.";
+
+/// CC5 defers manual keyframe authoring, and says so rather than implying it.
+const MATTE_KEYFRAME_NOTE: &str = "Automation is shown and clearable here. Setting keyframes by \
+     hand is deferred in CC5 (§11); editing a keyframed control writes its static value.";
+
+/// The Hold-only rule, surfaced where the tokens are (CC5 §5.1).
+const MATTE_HOLD_ONLY_NOTE: &str =
+    "Tokens and counts accept Hold keyframes only; core rejects any other interpolation.";
+
+/// Stable coalesce key for one window-move gesture (CC5 §6).
+pub(crate) fn matte_window_move_coalesce_key(
+    clip: ClipId,
+    effect: EffectId,
+    window: usize,
+) -> String {
+    format!("matte_window_move:{}:{}:{window}", clip.0, effect.0)
+}
+
+/// Stable coalesce key for one window-resize gesture (CC5 §6).
+pub(crate) fn matte_window_resize_coalesce_key(
+    clip: ClipId,
+    effect: EffectId,
+    window: usize,
+) -> String {
+    format!("matte_window_resize:{}:{}:{window}", clip.0, effect.0)
+}
+
+/// Stable coalesce key for one window-rotate gesture (CC5 §6).
+pub(crate) fn matte_window_rotate_coalesce_key(
+    clip: ClipId,
+    effect: EffectId,
+    window: usize,
+) -> String {
+    format!("matte_window_rotate:{}:{}:{window}", clip.0, effect.0)
+}
+
+/// Stable coalesce key for one matte mix drag (CC5 §6).
+pub(crate) fn matte_mix_coalesce_key(clip: ClipId, effect: EffectId) -> String {
+    format!("matte_mix:{}:{}", clip.0, effect.0)
+}
+
+/// The coalesce key one overlay gesture belongs to (CC5 §6).
+pub(crate) fn matte_gesture_coalesce_key(
+    hit: MatteHit,
+    clip: ClipId,
+    effect: EffectId,
+    window: usize,
+) -> String {
+    match hit {
+        MatteHit::Move => matte_window_move_coalesce_key(clip, effect, window),
+        MatteHit::Resize(_) => matte_window_resize_coalesce_key(clip, effect, window),
+        MatteHit::Rotate => matte_window_rotate_coalesce_key(clip, effect, window),
+    }
+}
+
+/// A per-control key for the matte scalars the overlay never drives.
+fn matte_parameter_coalesce_key(clip: ClipId, effect: EffectId, name: &str) -> String {
+    format!("matte_param:{}:{}:{name}", clip.0, effect.0)
+}
+
+/// One window's eight stored integers, in `matte_window_parameter_names` order.
+fn matte_window_values(window: &MatteWindowParams) -> [i64; 8] {
+    [
+        window.shape_token,
+        window.center_x_bp,
+        window.center_y_bp,
+        window.half_width_bp,
+        window.half_height_bp,
+        window.rotation_cd,
+        window.feather_bp,
+        window.invert,
+    ]
+}
+
+/// Write window `index` to `values`: one `SetEffectParam` per control that
+/// actually changes.
+///
+/// Every window control is independently bounded, so the batch is valid in any
+/// order and every intermediate document is valid — which is what lets the
+/// remove path shift a later window down before it decrements the count.
+///
+/// `stored` is what the slot holds now. A parameter already at its new value is
+/// skipped, the same rule [`matte_reset_needs_write`] applies: re-stating a
+/// value writes it into the stored map, which is how a shift down the window
+/// list turns unstored neutrals into stored ones and grows the project file
+/// with parameters nobody set.
+#[must_use]
+pub(crate) fn matte_window_edit_operations(
+    clip: ClipId,
+    effect: EffectId,
+    index: usize,
+    values: &MatteWindowParams,
+    stored: &MatteWindowParams,
+) -> Vec<Operation> {
+    let Some(names) = kinewright_core::matte_window_parameter_names(index) else {
+        return Vec::new();
+    };
+    names
+        .iter()
+        .zip(matte_window_values(values))
+        .zip(matte_window_values(stored))
+        .filter(|((_, value), previous)| value != previous)
+        .map(|((name, value), _)| effect_param_operation(clip, effect, name, value))
+        .collect()
+}
+
+/// Move window `from`'s automation onto window `to`, or clear `to`'s when
+/// `from` is `None` (CC5 §5.1).
+///
+/// CC5 §5.1 makes a window's centre, half-extents, rotation and feather fully
+/// keyframable and its tokens `Hold`-keyframable, so a slot rewrite that moved
+/// only the eight stored integers would leave the rewritten window rendering
+/// the *previous* occupant's curves — and a keyframed parameter is resolved from
+/// its curve, so those curves override the values the rewrite just wrote. The
+/// tracks travel with the values, which is also what makes a tracked window
+/// survive the removal of the window above it.
+///
+/// Only parameters that actually carry automation produce an operation, so an
+/// unkeyframed matte's Add and Remove batches are byte-identical to before.
+fn matte_window_keyframe_shift_operations(
+    clip: ClipId,
+    effect: &Effect,
+    to: usize,
+    from: Option<usize>,
+) -> Vec<Operation> {
+    let Some(destination) = kinewright_core::matte_window_parameter_names(to) else {
+        return Vec::new();
+    };
+    let source = from.and_then(kinewright_core::matte_window_parameter_names);
+    let mut operations = Vec::new();
+    for (control, name) in destination.iter().enumerate() {
+        match source.and_then(|names| effect.keyframes.get(names[control])) {
+            Some(curve) => operations.push(Operation::SetEffectKeyframes {
+                clip,
+                effect: effect.id,
+                name: (*name).to_owned(),
+                curve: curve.clone(),
+            }),
+            // Nothing to move: the destination must not keep its own curve, or
+            // the freshly written statics would be overridden by the automation
+            // of a window that no longer exists there.
+            None if effect.keyframes.contains_key(*name) => {
+                operations.push(clear_keyframes_operation(clip, effect.id, name));
+            }
+            None => {}
+        }
+    }
+    operations
+}
+
+/// Add one geometric window (CC5 §6).
+///
+/// The new window is the descriptor neutral — a centred rect covering the
+/// middle half of the frame — so only what the slot does not already store is
+/// written; a fresh node therefore grows by exactly the count, and a slot left
+/// behind by an earlier removal is reset instead of resurfacing. `matte_enabled`
+/// is written first when the master switch is off, because a window on a
+/// disabled matte would draw an outline over a node that ignores it. The count
+/// is written last, so no intermediate document names a window whose parameters
+/// have not landed yet.
+#[must_use]
+pub(crate) fn matte_add_window_operations(clip: ClipId, effect: &Effect) -> Vec<Operation> {
+    let params = MatteParams::from_effect(effect);
+    let index = params.window_count;
+    if index >= MATTE_WINDOW_LIMIT {
+        return Vec::new();
+    }
+    let Some(names) = kinewright_core::matte_window_parameter_names(index) else {
+        return Vec::new();
+    };
+    let mut operations = Vec::with_capacity(names.len() + 2);
+    if !params.is_enabled() {
+        operations.push(effect_param_operation(
+            clip,
+            effect.id,
+            MATTE_ENABLED_PARAMETER,
+            1,
+        ));
+    }
+    let stored = params.windows[index];
+    let fresh = MatteWindowParams::NEUTRAL;
+    for ((name, value), previous) in names
+        .iter()
+        .zip(matte_window_values(&fresh))
+        .zip(matte_window_values(&stored))
+    {
+        if value != previous {
+            operations.push(effect_param_operation(clip, effect.id, name, value));
+        }
+    }
+    // A recycled slot may still carry the automation of the window that used to
+    // live in it, which would animate the "fresh" window off its neutral on the
+    // very first frame (CC5 §5.1).
+    operations.extend(matte_window_keyframe_shift_operations(
+        clip, effect, index, None,
+    ));
+    operations.push(effect_param_operation(
+        clip,
+        effect.id,
+        MATTE_WINDOW_COUNT_PARAMETER,
+        i64::try_from(index + 1).unwrap_or(0),
+    ));
+    operations
+}
+
+/// Remove window `index` (CC5 §6).
+///
+/// Later windows shift down first and the count is decremented last, so every
+/// intermediate document is a legal project: the count never names a slot whose
+/// values have not been written yet, and the windows keep their order.
+#[must_use]
+pub(crate) fn matte_remove_window_operations(
+    clip: ClipId,
+    effect: &Effect,
+    index: usize,
+) -> Vec<Operation> {
+    let params = MatteParams::from_effect(effect);
+    if index >= params.window_count {
+        return Vec::new();
+    }
+    let mut operations = Vec::new();
+    let vacated = params.window_count - 1;
+    for slot in index..vacated {
+        operations.extend(matte_window_edit_operations(
+            clip,
+            effect.id,
+            slot,
+            &params.windows[slot + 1],
+            &params.windows[slot],
+        ));
+        // The automation moves with the values it belongs to (CC5 §5.1).
+        operations.extend(matte_window_keyframe_shift_operations(
+            clip,
+            effect,
+            slot,
+            Some(slot + 1),
+        ));
+    }
+    // The slot the shift emptied keeps its stale statics — `Add window` resets
+    // those — but it must not keep automation, or the next Add would resurrect
+    // the removed window's motion under a neutral-looking card.
+    operations.extend(matte_window_keyframe_shift_operations(
+        clip, effect, vacated, None,
+    ));
+    operations.push(effect_param_operation(
+        clip,
+        effect.id,
+        MATTE_WINDOW_COUNT_PARAMETER,
+        i64::try_from(vacated).unwrap_or(0),
+    ));
+    operations
+}
+
+/// Write the whole qualifier leg from one resolved value (CC5 §2.2).
+#[must_use]
+pub(crate) fn matte_qualifier_operations(
+    clip: ClipId,
+    effect: EffectId,
+    qualifier: &MatteQualifierParams,
+) -> Vec<Operation> {
+    let values = [
+        qualifier.enabled,
+        qualifier.hue_center_cd,
+        qualifier.hue_width_cd,
+        qualifier.hue_softness_cd,
+        qualifier.sat_low_bp,
+        qualifier.sat_high_bp,
+        qualifier.sat_softness_bp,
+        qualifier.luma_low_bp,
+        qualifier.luma_high_bp,
+        qualifier.luma_softness_bp,
+    ];
+    MATTE_QUALIFIER_PARAMETERS
+        .iter()
+        .zip(values)
+        .map(|(name, value)| effect_param_operation(clip, effect, name, value))
+        .collect()
+}
+
+/// The parameters one overlay gesture owns, and nothing else (CC5 §6).
+///
+/// A move writes exactly two parameters, which is why the overlay uses the
+/// multi-operation live push; a rotate writes one; a resize writes the axes its
+/// handle drives.
+#[must_use]
+pub(crate) fn matte_window_drag_operations(
+    clip: ClipId,
+    effect: EffectId,
+    index: usize,
+    hit: MatteHit,
+    values: &MatteWindowParams,
+) -> Vec<Operation> {
+    let Some(names) = kinewright_core::matte_window_parameter_names(index) else {
+        return Vec::new();
+    };
+    let mut operations = Vec::with_capacity(2);
+    let mut write = |slot: usize, value: i64| {
+        operations.push(effect_param_operation(clip, effect, names[slot], value));
+    };
+    match hit {
+        MatteHit::Move => {
+            write(1, values.center_x_bp);
+            write(2, values.center_y_bp);
+        }
+        MatteHit::Resize(handle) => {
+            if handle.drives_width() {
+                write(3, values.half_width_bp);
+            }
+            if handle.drives_height() {
+                write(4, values.half_height_bp);
+            }
+        }
+        MatteHit::Rotate => write(5, values.rotation_cd),
+    }
+    operations
+}
+
+/// The CC5 §6 matte section, collapsed by default so a CC4 project's inspector
+/// is unchanged.
+///
+/// The section reports its own expansion through [`InspectorEdits`]; the viewer
+/// reads that report on the following frame to decide whether it takes pointer
+/// input at all (CC5 §6, §12).
+fn matte_section(ui: &mut egui::Ui, clip: &Clip, effect: &Effect, pending: &mut InspectorEdits) {
+    let params = MatteParams::from_effect(effect);
+    let id = matte_section_id(clip.id, effect.id);
+    // `CollapsingState` rather than `CollapsingHeader` so the open state has an
+    // id the rest of the app — and a test without a window — can name, and so
+    // the report is the stored state rather than an animation frame.
+    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+        .show_header(ui, |ui| {
+            ui.label(egui::RichText::new("Matte (this correction)").strong());
+            ui.colored_label(color::TEXT_MUTED, "Secondary");
+        })
+        .body(|ui| {
+            matte_section_body(ui, clip, effect, &params, pending);
+        });
+    if matte_section_is_open(ui, id) {
+        pending.record_matte_expanded(MatteTarget::new(clip.id, effect.id));
+    }
+}
+
+/// The persistent id of one node's matte section.
+///
+/// Derived from the node's own identity alone, not from the `Ui` it happens to
+/// be nested in: a clip id and an effect id already name exactly one node, and
+/// an id that also depended on the surrounding groups would silently collapse
+/// everybody's open sections the next time a card's layout changed. It also
+/// means the section's open state can be named from outside the card — by the
+/// rest of the app, and by a test without a window.
+fn matte_section_id(clip: ClipId, effect: EffectId) -> egui::Id {
+    egui::Id::new(("matte-section", clip.0, effect.0))
+}
+
+/// Whether the section is expanded, read after the header so a click this
+/// frame is already reflected.
+fn matte_section_is_open(ui: &egui::Ui, id: egui::Id) -> bool {
+    egui::collapsing_header::CollapsingState::load(ui.ctx(), id)
+        .is_some_and(|state| state.is_open())
+}
+
+#[allow(clippy::too_many_lines)]
+fn matte_section_body(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    effect: &Effect,
+    params: &MatteParams,
+    pending: &mut InspectorEdits,
+) {
+    ui.colored_label(
+        color::TEXT_MUTED,
+        "Gates this correction only. The layer Mask (layer alpha) is a compositing operation and \
+         is not a secondary (CC5 §1).",
+    );
+    let mut enabled = params.is_enabled();
+    if ui
+        .checkbox(&mut enabled, "Enable matte")
+        .on_hover_text(MATTE_HOLD_ONLY_NOTE)
+        .changed()
+    {
+        pending.push(effect_param_operation(
+            clip.id,
+            effect.id,
+            MATTE_ENABLED_PARAMETER,
+            i64::from(enabled),
+        ));
+    }
+
+    let degenerate = params.degenerate_bands();
+    if !degenerate.is_empty() {
+        ui.colored_label(
+            color::STATUS_WARNING,
+            format!(
+                "matte_band_inverted_by_automation: {} resolves with its low edge above its high \
+                 edge, so that band evaluates to 0 (CC5 §2.6).",
+                degenerate.join(", ")
+            ),
+        );
+    }
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(format!(
+            "Windows {}/{MATTE_WINDOW_LIMIT}",
+            params.window_count
+        ));
+        if ui
+            .add_enabled(
+                params.window_count < MATTE_WINDOW_LIMIT,
+                egui::Button::new("Add window"),
+            )
+            .on_hover_text("Add a centred rect window and enable the matte.")
+            .clicked()
+        {
+            pending.extend(matte_add_window_operations(clip.id, effect));
+        }
+        ui.colored_label(color::TEXT_MUTED, "Combine");
+        for (token, label) in [(0_i64, "Union"), (1, "Intersection")] {
+            if ui
+                .selectable_label(params.combine_token == token, label)
+                .on_hover_text(MATTE_HOLD_ONLY_NOTE)
+                .clicked()
+                && params.combine_token != token
+            {
+                pending.push(effect_param_operation(
+                    clip.id,
+                    effect.id,
+                    MATTE_COMBINE_PARAMETER,
+                    token,
+                ));
+            }
+        }
+        ui.add_enabled(
+            matte_track_button_enabled(),
+            egui::Button::new(MATTE_TRACK_BUTTON_LABEL),
+        )
+        .on_disabled_hover_text(MATTE_TRACK_BUTTON_TOOLTIP);
+    });
+
+    for index in 0..params.window_count {
+        matte_window_row(
+            ui,
+            clip,
+            effect,
+            index,
+            params.window_count,
+            &params.windows[index],
+            pending,
+        );
+    }
+    if params.window_count == 0 {
+        ui.colored_label(
+            color::TEXT_MUTED,
+            "No windows: the geometric leg selects the whole frame.",
+        );
+    }
+
+    matte_qualifier_rows(ui, clip, effect, params, pending);
+
+    let mut invert = params.is_inverted();
+    if ui
+        .checkbox(&mut invert, "Invert matte")
+        .on_hover_text(MATTE_HOLD_ONLY_NOTE)
+        .changed()
+    {
+        pending.push(effect_param_operation(
+            clip.id,
+            effect.id,
+            MATTE_INVERT_PARAMETER,
+            i64::from(invert),
+        ));
+    }
+
+    let mut percent = mix_percent(params.mix_bp, MATTE_MIX_BASIS_POINTS_MAX);
+    ui.horizontal(|ui| {
+        let slider = ui.add(mix_slider(
+            &mut percent,
+            MATTE_MIX_BASIS_POINTS_MAX,
+            "Matte mix",
+        ));
+        if slider.drag_started() {
+            pending.begin_gesture();
+        }
+        if slider.changed() {
+            let operation = effect_param_operation(
+                clip.id,
+                effect.id,
+                MATTE_MIX_PARAMETER,
+                percent.saturating_mul(100),
+            );
+            if is_live_drag(&slider) {
+                pending.push_live(operation, matte_mix_coalesce_key(clip.id, effect.id));
+            } else {
+                pending.push(operation);
+            }
+        }
+        // The slider is whole percent, as the look mix is (CC4 §7), so the
+        // stored value is shown beside it: an agent may author any basis point
+        // and a 6050 that reads as "60 %" would look like a rounding bug.
+        ui.monospace(format!("{} bp", params.mix_bp));
+        ui.colored_label(
+            color::TEXT_MUTED,
+            "Scales the coverage: 0 % makes the node inactive while the matte is enabled.",
+        );
+    });
+
+    let matte_names: Vec<&'static str> = kinewright_core::matte_parameter_names().to_vec();
+    color_node_keyframe_rows(ui, clip.id, effect, &matte_names, pending);
+    ui.colored_label(color::TEXT_MUTED, MATTE_KEYFRAME_NOTE);
+}
+
+/// Whether the tracking control is interactive. It never is in CC5 (§6).
+#[must_use]
+pub(crate) const fn matte_track_button_enabled() -> bool {
+    false
+}
+
+/// One window's row: shape, geometry, feather, invert, select, remove.
+#[allow(clippy::too_many_lines)]
+fn matte_window_row(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    effect: &Effect,
+    index: usize,
+    window_count: usize,
+    window: &MatteWindowParams,
+    pending: &mut InspectorEdits,
+) {
+    let Some(names) = kinewright_core::matte_window_parameter_names(index) else {
+        return;
+    };
+    ui.group(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("W{index}"));
+            for (token, label) in [(1_i64, "Rect"), (2, "Ellipse")] {
+                if ui
+                    .selectable_label(window.shape_token == token, label)
+                    .on_hover_text(MATTE_HOLD_ONLY_NOTE)
+                    .clicked()
+                    && window.shape_token != token
+                {
+                    pending.push(effect_param_operation(clip.id, effect.id, names[0], token));
+                }
+            }
+            if ui
+                .small_button("Select in viewer")
+                .on_hover_text("Draw this window's handles on the Program viewer.")
+                .clicked()
+            {
+                pending.record_matte_window_selection(index, window_count);
+            }
+            if ui.small_button("Remove").clicked() {
+                pending.extend(matte_remove_window_operations(clip.id, effect, index));
+            }
+        });
+        let move_key = matte_window_move_coalesce_key(clip.id, effect.id, index);
+        let resize_key = matte_window_resize_coalesce_key(clip.id, effect.id, index);
+        let rotate_key = matte_window_rotate_coalesce_key(clip.id, effect.id, index);
+        ui.horizontal_wrapped(|ui| {
+            matte_integer_control(
+                ui,
+                clip.id,
+                effect,
+                names[1],
+                "Centre X",
+                window.center_x_bp,
+                &move_key,
+                pending,
+            );
+            matte_integer_control(
+                ui,
+                clip.id,
+                effect,
+                names[2],
+                "Centre Y",
+                window.center_y_bp,
+                &move_key,
+                pending,
+            );
+        });
+        ui.horizontal_wrapped(|ui| {
+            matte_integer_control(
+                ui,
+                clip.id,
+                effect,
+                names[3],
+                "Half width",
+                window.half_width_bp,
+                &resize_key,
+                pending,
+            );
+            matte_integer_control(
+                ui,
+                clip.id,
+                effect,
+                names[4],
+                "Half height",
+                window.half_height_bp,
+                &resize_key,
+                pending,
+            );
+        });
+        ui.horizontal_wrapped(|ui| {
+            matte_integer_control(
+                ui,
+                clip.id,
+                effect,
+                names[5],
+                "Rotation (cd)",
+                window.rotation_cd,
+                &rotate_key,
+                pending,
+            );
+            matte_integer_control(
+                ui,
+                clip.id,
+                effect,
+                names[6],
+                "Feather",
+                window.feather_bp,
+                &matte_parameter_coalesce_key(clip.id, effect.id, names[6]),
+                pending,
+            );
+            let mut invert = window.is_inverted();
+            if ui
+                .checkbox(&mut invert, "Invert")
+                .on_hover_text(MATTE_HOLD_ONLY_NOTE)
+                .changed()
+            {
+                pending.push(effect_param_operation(
+                    clip.id,
+                    effect.id,
+                    names[7],
+                    i64::from(invert),
+                ));
+            }
+        });
+    });
+}
+
+/// The inclusive bounds one matte control is stored under (CC5 §2.2).
+///
+/// Read from the node's own `EFFECT_DESCRIPTORS` entry rather than transcribed
+/// at the call site: the descriptor is what `SetEffectParam` validates against,
+/// so a slider built from anything else can offer a value core will reject — or
+/// refuse one core would accept. An unregistered name yields an inert control
+/// rather than an invented range; the section only draws registered names, and
+/// a test pins that.
+fn matte_parameter_range(effect: &Effect, name: &str, value: i64) -> std::ops::RangeInclusive<i64> {
+    let Some(parameter) = kinewright_core::effect_descriptor(&effect.name)
+        .and_then(|descriptor| descriptor.parameter(name))
+    else {
+        // A release build keeps the inert control; the test lane fails loudly,
+        // so a control retargeted at a name the node does not register is
+        // caught here rather than shipping as a `DragValue` that cannot move.
+        debug_assert!(
+            !is_matte_capable_color_node(&effect.name),
+            "unregistered matte control {name} on {}",
+            effect.name
+        );
+        return value..=value;
+    };
+    parameter.min..=parameter.max
+}
+
+/// One bounded integer matte control, live-coalesced under `coalesce_key`.
+#[allow(clippy::too_many_arguments)]
+fn matte_integer_control(
+    ui: &mut egui::Ui,
+    clip: ClipId,
+    effect: &Effect,
+    name: &str,
+    label: &str,
+    value: i64,
+    coalesce_key: &str,
+    pending: &mut InspectorEdits,
+) {
+    let mut edited = value;
+    ui.label(label);
+    let response =
+        ui.add(egui::DragValue::new(&mut edited).range(matte_parameter_range(effect, name, value)));
+    if response.drag_started() {
+        pending.begin_gesture();
+    }
+    if response.changed() && edited != value {
+        let operation = effect_param_operation(clip, effect.id, name, edited);
+        if is_live_drag(&response) {
+            pending.push_live(operation, coalesce_key.to_owned());
+        } else {
+            pending.push(operation);
+        }
+    }
+}
+
+/// The HSL qualifier controls (CC5 §2.4).
+fn matte_qualifier_rows(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    effect: &Effect,
+    params: &MatteParams,
+    pending: &mut InspectorEdits,
+) {
+    let qualifier = params.qualifier;
+    ui.horizontal_wrapped(|ui| {
+        let mut enabled = qualifier.is_enabled();
+        if ui
+            .checkbox(&mut enabled, "Qualifier (HSL)")
+            .on_hover_text(
+                "Judged on the value entering this node, in the grade709 encoding (CC5 §2.4).",
+            )
+            .changed()
+        {
+            pending.push(effect_param_operation(
+                clip.id,
+                effect.id,
+                MATTE_QUALIFIER_PARAMETERS[0],
+                i64::from(enabled),
+            ));
+        }
+        if ui
+            .small_button("Reset qualifier")
+            .on_hover_text("Return every qualifier control to its neutral.")
+            .clicked()
+        {
+            pending.extend(matte_qualifier_operations(
+                clip.id,
+                effect.id,
+                &MatteQualifierParams::NEUTRAL,
+            ));
+        }
+        if qualifier.hue_leg_disabled() {
+            ui.colored_label(
+                color::TEXT_MUTED,
+                "Hue leg disabled at 180°: achromatic pixels are included.",
+            );
+        }
+    });
+    let values = [
+        qualifier.hue_center_cd,
+        qualifier.hue_width_cd,
+        qualifier.hue_softness_cd,
+        qualifier.sat_low_bp,
+        qualifier.sat_high_bp,
+        qualifier.sat_softness_bp,
+        qualifier.luma_low_bp,
+        qualifier.luma_high_bp,
+        qualifier.luma_softness_bp,
+    ];
+    // No transcribed bounds here: `matte_integer_control` reads each one from
+    // the node's descriptor, which is what core validates the write against.
+    for (index, ((name, label), value)) in MATTE_QUALIFIER_PARAMETERS
+        .iter()
+        .skip(1)
+        .zip(MATTE_QUALIFIER_LABELS)
+        .zip(values)
+        .enumerate()
+    {
+        if index % 3 == 0 {
+            ui.label(
+                egui::RichText::new(["Hue", "Saturation", "Luma"][index / 3])
+                    .size(type_size::CAPTION)
+                    .strong(),
+            );
+        }
+        ui.horizontal(|ui| {
+            matte_integer_control(
+                ui,
+                clip.id,
+                effect,
+                name,
+                label,
+                value,
+                &matte_parameter_coalesce_key(clip.id, effect.id, name),
+                pending,
+            );
+        });
+    }
 }
 
 /// Stable per-wheel coalesce key for one live trackball or master drag.
@@ -2219,8 +3164,10 @@ fn color_wheels_section(
             .parameters
             .iter()
             .map(|parameter| parameter.name)
+            .filter(|name| !is_matte_parameter(name))
             .collect();
         color_node_keyframe_rows(ui, clip.id, effect, &names, pending);
+        matte_section(ui, clip, effect, pending);
     });
 }
 
@@ -2371,6 +3318,7 @@ fn color_curves_section(
         );
 
         color_curve_keyframe_rows(ui, clip.id, effect, pending);
+        matte_section(ui, clip, effect, pending);
     });
 }
 
@@ -2931,6 +3879,13 @@ fn should_render_effect_parameter(
     descriptor: &kinewright_core::EffectDescriptor,
     parameter_name: &str,
 ) -> bool {
+    // CC5 §6: the matte section owns all 47 matte integers on all four
+    // matte-capable kinds. 47 raw sliders is not a workflow, and the two
+    // parameters a window move writes must land as one gesture rather than as
+    // two unrelated sliders.
+    if is_matte_parameter(parameter_name) {
+        return false;
+    }
     // CC3 §7: the wheels and curves nodes own dedicated cards. Their 13 and 133
     // integers must never reach the generic slider loop, and `AddEffect` must
     // insert them with no parameters at all, because an omitted parameter
@@ -3324,7 +4279,21 @@ mod tests {
             panic!("primary correction must emit InsertEffect");
         };
         assert_eq!(index, 0);
-        assert_eq!(effect.parameters.len(), descriptor.parameters.len());
+        // CC5 §8: the matte parameters are omitted entirely, which is what
+        // makes a node inserted after CC5 render bit-identically to a CC4 one —
+        // an omitted parameter resolves to its neutral and an all-neutral matte
+        // is inactive.
+        assert_eq!(
+            effect.parameters.len(),
+            descriptor.parameters.len() - kinewright_core::MATTE_PARAMETER_COUNT
+        );
+        assert!(
+            effect
+                .parameters
+                .keys()
+                .all(|name| !is_matte_parameter(name)),
+            "an inserted node stores no matte parameter"
+        );
         assert!(effect.parameters.iter().all(|(name, value)| value
             == &ParamValue::Integer(descriptor.parameter(name).unwrap().neutral)));
 
@@ -3344,11 +4313,24 @@ mod tests {
             )]),
         };
         let reset = color_node_reset_operations(clip.id, &reset_effect, descriptor);
-        assert_eq!(reset.len(), descriptor.parameters.len() + 1);
+        // Every non-matte parameter, plus the one keyframe clear. The 47 matte
+        // parameters this node never stored already resolve to their neutrals
+        // (CC5 §2.2), so the reset leaves them unstored instead of writing them.
+        let non_matte = descriptor
+            .parameters
+            .iter()
+            .filter(|parameter| !is_matte_parameter(parameter.name))
+            .count();
+        assert_eq!(reset.len(), non_matte + 1);
         let reset_values = reset
             .iter()
             .filter(|operation| matches!(operation, Operation::SetEffectParam { .. }));
-        for (operation, parameter) in reset_values.zip(descriptor.parameters) {
+        for (operation, parameter) in reset_values.zip(
+            descriptor
+                .parameters
+                .iter()
+                .filter(|parameter| !is_matte_parameter(parameter.name)),
+        ) {
             assert_eq!(
                 operation,
                 &Operation::SetEffectParam {
@@ -3763,7 +4745,13 @@ mod tests {
         }
 
         let clip = media_clip(ClipId(10), AssetId(1), None);
-        for (name, parameter_count) in [("color_wheels", 13), ("color_curves", 133)] {
+        // CC5 §2.2 grew both descriptors by the 47 matte parameters. The counts
+        // are written as the CC3 control count plus that constant so the
+        // arithmetic, not a transcribed literal, is what this asserts.
+        for (name, parameter_count) in [
+            ("color_wheels", 13 + kinewright_core::MATTE_PARAMETER_COUNT),
+            ("color_curves", 133 + kinewright_core::MATTE_PARAMETER_COUNT),
+        ] {
             let descriptor = kinewright_core::effect_descriptor(name).expect("CC3 descriptor");
             assert_eq!(descriptor.parameters.len(), parameter_count);
             let Operation::InsertEffect { effect, .. } = add_effect_operation(&clip, &descriptor)
@@ -3786,8 +4774,14 @@ mod tests {
     /// its neutral plus a `ClearEffectKeyframes` for each automated one, in one
     /// batch and therefore one undo entry. `bypass` is an ordinary parameter and
     /// resets to `0` with everything else.
+    ///
+    /// CC5 §5 widens it: a matte-capable node's reset resets its matte too. The
+    /// matte parameters this node never stored already resolve to their
+    /// neutrals (CC5 §2.2), so the batch is the 13 CC3 controls and no matte
+    /// write at all — resetting a CC4-era node must not grow its JSON by 47
+    /// entries.
     #[test]
-    fn a_wheels_reset_writes_thirteen_neutrals_and_clears_automation() {
+    fn a_wheels_reset_writes_every_neutral_and_clears_automation() {
         let descriptor = kinewright_core::effect_descriptor("color_wheels").expect("descriptor");
         let effect = keyframed_effect("color_wheels", "gain_red_thousandths", 1_800);
         let reset = color_node_reset_operations(ClipId(3), &effect, &descriptor);
@@ -3796,9 +4790,21 @@ mod tests {
             .iter()
             .filter(|operation| matches!(operation, Operation::SetEffectParam { .. }))
             .collect();
-        assert_eq!(sets.len(), 13);
+        assert_eq!(sets.len(), 13, "the 13 CC3 controls, and nothing else");
         assert_eq!(reset.len(), 14);
-        for (operation, parameter) in sets.iter().zip(descriptor.parameters) {
+        assert!(
+            !sets.iter().any(|operation| matches!(
+                operation,
+                Operation::SetEffectParam { name, .. } if is_matte_parameter(name)
+            )),
+            "a node with no stored matte needs no matte write"
+        );
+        for (operation, parameter) in sets.iter().zip(
+            descriptor
+                .parameters
+                .iter()
+                .filter(|parameter| !is_matte_parameter(parameter.name)),
+        ) {
             assert_eq!(
                 **operation,
                 Operation::SetEffectParam {
@@ -4116,12 +5122,32 @@ mod tests {
                 "the {label} node reset must clear bypass"
             );
             for parameter in descriptor.parameters {
+                // A matte parameter this node never stored already *resolves*
+                // to its neutral, and the reset deliberately leaves it unstored
+                // rather than adding 47 entries to a CC4-era node (CC5 §2.2);
+                // what must hold either way is the resolved value.
                 assert_eq!(
-                    effect.parameters.get(parameter.name),
-                    Some(&ParamValue::Integer(parameter.neutral)),
-                    "{} must end at its neutral after the {label} node reset",
+                    effect
+                        .integer_parameter_at(parameter.name, TimeCode::ZERO)
+                        .unwrap_or(parameter.neutral),
+                    parameter.neutral,
+                    "{} must resolve to its neutral after the {label} node reset",
                     parameter.name,
                 );
+                if is_matte_parameter(parameter.name) {
+                    assert!(
+                        !effect.parameters.contains_key(parameter.name),
+                        "{} was never stored, so the reset must not store it",
+                        parameter.name,
+                    );
+                } else {
+                    assert_eq!(
+                        effect.parameters.get(parameter.name),
+                        Some(&ParamValue::Integer(parameter.neutral)),
+                        "{} must end at its neutral after the {label} node reset",
+                        parameter.name,
+                    );
+                }
             }
         }
     }
@@ -4698,9 +5724,9 @@ mod tests {
                 6_500
             )]
         );
-        assert_eq!(mix_percent(6_500), 65);
-        assert_eq!(mix_percent(10_000), 100);
-        assert_eq!(mix_percent(0), 0);
+        assert_eq!(mix_percent(6_500, LUT_MIX_BASIS_POINTS_MAX), 65);
+        assert_eq!(mix_percent(10_000, LUT_MIX_BASIS_POINTS_MAX), 100);
+        assert_eq!(mix_percent(0, LUT_MIX_BASIS_POINTS_MAX), 0);
     }
 
     #[test]
@@ -5442,5 +6468,1129 @@ mod tests {
         assert_eq!(input_encoding_label(0), "display709");
         assert_eq!(input_encoding_label(1), "linear");
         assert_eq!(input_encoding_label(2), "grade709");
+    }
+
+    // -----------------------------------------------------------------------
+    // CC5 §6 matte section
+    // -----------------------------------------------------------------------
+
+    /// The four matte-capable kinds (CC5 §2.1). `technical_lut` is not one.
+    const MATTE_CAPABLE_KINDS: [&str; 4] = [
+        "primary_correction",
+        "color_wheels",
+        "color_curves",
+        "creative_look",
+    ];
+
+    /// A one-clip document carrying exactly one matte-capable node with
+    /// effect id 1 and nothing stored on it.
+    ///
+    /// `creative_look` is the exception: it must be bound to a registered LUT
+    /// asset or `validate_document` rejects it (CC4 §2), so it gets one — the
+    /// binding is the only stored parameter, and it is not a matte parameter.
+    fn matte_document(name: &str) -> Document {
+        let effect = if name == "creative_look" {
+            lut_effect(1, name, 4, None)
+        } else {
+            colour_effect(1, name)
+        };
+        let document = look_document(
+            vec![effect],
+            vec![BuiltinLook::Warm.to_lut_asset(LutAssetId(4))],
+        );
+        document
+            .validate()
+            .expect("a bare matte-capable node is legal");
+        document
+    }
+
+    fn stored_matte(document: &Document) -> MatteParams {
+        MatteParams::from_effect(&document.tracks[0].clips[0].effects[0])
+    }
+
+    fn apply(document: &mut Document, operations: &[Operation], what: &str) {
+        kinewright_core::apply_batch(document, operations)
+            .unwrap_or_else(|error| panic!("core rejected {what}: {error}"));
+        document
+            .validate()
+            .unwrap_or_else(|error| panic!("{what} left an invalid document: {error}"));
+    }
+
+    /// CC5 §2.2: every matte control is bounded by *its own* descriptor entry,
+    /// so one control's range can never be applied to another's.
+    ///
+    /// The expected bounds are hand-transcribed from the §2.2 tables rather
+    /// than read back from the descriptor, and they deliberately disagree with
+    /// each other: a single literal range applied across the section — the
+    /// shape the transcribed bounds used to have — cannot satisfy all of them.
+    #[test]
+    fn every_matte_control_is_bounded_by_its_own_descriptor_entry() {
+        // (parameter, min, max), CC5 §2.2.
+        let expected: [(&str, i64, i64); 8] = [
+            ("matte_window_count", 0, 4),
+            ("matte_mix_basis_points", 0, 10_000),
+            ("matte_hue_center_centidegrees", 0, 35_999),
+            ("matte_hue_width_centidegrees", 0, 18_000),
+            ("matte_saturation_low_basis_points", 0, 10_000),
+            ("matte_window0_center_x_basis_points", -10_000, 20_000),
+            ("matte_window0_half_width_basis_points", 1, 10_000),
+            ("matte_window3_rotation_centidegrees", -18_000, 18_000),
+        ];
+        for kind in MATTE_CAPABLE_KINDS {
+            let effect = colour_effect(1, kind);
+            for (parameter, min, max) in expected {
+                assert_eq!(
+                    matte_parameter_range(&effect, parameter, 0),
+                    min..=max,
+                    "{kind}.{parameter} must be bounded by its descriptor"
+                );
+            }
+        }
+
+        // A name the node does not register yields an inert control rather than
+        // an invented range that would offer a value core rejects. A
+        // matte-*capable* node asked for an unregistered name is a retargeted
+        // control, and `matte_parameter_range` now trips a `debug_assert` for
+        // that case, so it is pinned by its own `#[should_panic]` test below
+        // rather than here.
+        assert_eq!(
+            matte_parameter_range(&colour_effect(1, "technical_lut"), "matte_invert", 7),
+            7..=7,
+            "a node with no matte registers none of its names"
+        );
+    }
+
+    /// A control pointed at a name its own node does not register would draw as
+    /// a `DragValue` that cannot move — silently, in release. The test lane
+    /// fails loudly instead, so a rename or a typo is caught here.
+    #[test]
+    #[should_panic(expected = "unregistered matte control")]
+    #[cfg(debug_assertions)]
+    fn a_matte_control_on_an_unregistered_name_fails_loudly_in_the_test_lane() {
+        let _ = matte_parameter_range(
+            &colour_effect(1, "color_wheels"),
+            "matte_window0_feather_bp",
+            42,
+        );
+    }
+
+    /// The slider's range and the value it shows come from the same bound. A
+    /// hard-coded `0..=100` beside a `mix_percent(bp, MAX)` conversion reads as
+    /// correct only while both contracts happen to stop at 10000 bp: raise one
+    /// and the widget would clamp away the value the card just resolved.
+    #[test]
+    fn a_mix_slider_offers_exactly_the_percent_its_own_bound_allows() {
+        assert_eq!(mix_percent_range(LUT_MIX_BASIS_POINTS_MAX), 0..=100);
+        assert_eq!(mix_percent_range(MATTE_MIX_BASIS_POINTS_MAX), 0..=100);
+        // The range reaches whatever the conversion can produce, at any bound.
+        for max in [0_i64, 5_000, 10_000, 12_345, 20_000] {
+            assert_eq!(*mix_percent_range(max).end(), mix_percent(max, max));
+        }
+
+        // And the widget itself: at a 20000 bp max, 150 % is a legal stored
+        // value and the slider has to keep it — while still clamping at its own
+        // bound.
+        let ctx = egui::Context::default();
+        let mut inside = 150;
+        let mut beyond = 250;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.add(mix_slider(&mut inside, 20_000, "Mix"));
+            ui.add(mix_slider(&mut beyond, 20_000, "Mix"));
+        });
+        assert_eq!(
+            inside, 150,
+            "the range comes from the parameter's own max, not from 100 %"
+        );
+        assert_eq!(beyond, 200, "and it still clamps at that max");
+    }
+
+    /// CC5 §2.2 and CC4 §7 are separate mix contracts. `mix_percent` takes the
+    /// bound of the control it is showing, so the two can never clamp each
+    /// other, and the matte slider is handed the matte descriptor's bound.
+    #[test]
+    fn the_matte_mix_and_the_look_mix_are_bounded_separately() {
+        // The bound is a parameter, not a constant baked into the conversion.
+        assert_eq!(mix_percent(12_000, 10_000), 100, "clamped at its own max");
+        assert_eq!(mix_percent(12_000, 20_000), 120, "not at somebody else's");
+        assert_eq!(mix_percent(-500, 10_000), 0);
+
+        // And the constant the matte card passes is the matte descriptor's own
+        // bound, on every kind that carries a matte.
+        for kind in MATTE_CAPABLE_KINDS {
+            let descriptor = kinewright_core::effect_descriptor(kind).expect("descriptor");
+            assert_eq!(
+                descriptor
+                    .parameter(MATTE_MIX_PARAMETER)
+                    .expect("the matte mix control")
+                    .max,
+                MATTE_MIX_BASIS_POINTS_MAX,
+                "{kind}: the matte slider's bound must be the matte contract's"
+            );
+        }
+    }
+
+    /// CC5 §6: the 47 matte integers never reach the generic slider loop, on
+    /// any of the four kinds that carry them.
+    #[test]
+    fn the_generic_loop_hides_every_matte_parameter() {
+        for name in MATTE_CAPABLE_KINDS {
+            let descriptor = kinewright_core::effect_descriptor(name).expect("CC5 descriptor");
+            let mut hidden = 0;
+            for parameter in descriptor.parameters {
+                if is_matte_parameter(parameter.name) {
+                    assert!(
+                        !should_render_effect_parameter(&descriptor, parameter.name),
+                        "{name}.{} must be owned by the matte section",
+                        parameter.name
+                    );
+                    hidden += 1;
+                }
+            }
+            assert_eq!(
+                hidden,
+                kinewright_core::MATTE_PARAMETER_COUNT,
+                "{name} must carry all 47 matte parameters"
+            );
+        }
+        // The node's own controls are untouched by the matte rule.
+        let primary = kinewright_core::effect_descriptor("primary_correction").expect("descriptor");
+        assert!(should_render_effect_parameter(
+            &primary,
+            "exposure_milli_stops"
+        ));
+        // `technical_lut` carries no matte parameter to hide.
+        let technical = kinewright_core::effect_descriptor("technical_lut").expect("descriptor");
+        assert!(
+            !technical
+                .parameters
+                .iter()
+                .any(|parameter| is_matte_parameter(parameter.name)),
+            "a technical input transform carries no matte (CC5 §2.1)"
+        );
+    }
+
+    /// CC5 §5: resetting a matte-capable node resets its matte too — every
+    /// parameter it stores off-neutral returned to its neutral, plus a keyframe
+    /// clear for each that carries automation — and core accepts the batch.
+    #[test]
+    fn a_matte_capable_reset_neutralizes_the_whole_matte_and_clears_it() {
+        for name in MATTE_CAPABLE_KINDS {
+            let descriptor = kinewright_core::effect_descriptor(name).expect("descriptor");
+            let mut document = matte_document(name);
+            let mut effect = document.tracks[0].clips[0].effects[0].clone();
+            effect.keyframes.insert(
+                "matte_window0_center_x_basis_points".to_owned(),
+                AutomationCurve {
+                    keyframes: vec![Keyframe {
+                        at: TimeCode::ZERO,
+                        value: 8_000,
+                        interpolation: KeyframeInterpolation::Linear,
+                    }],
+                },
+            );
+            effect
+                .parameters
+                .insert("matte_enabled".to_owned(), ParamValue::Integer(1));
+            effect
+                .parameters
+                .insert("matte_window_count".to_owned(), ParamValue::Integer(2));
+            effect.parameters.insert(
+                "matte_mix_basis_points".to_owned(),
+                ParamValue::Integer(3_000),
+            );
+            document.tracks[0].clips[0].effects[0] = effect.clone();
+            document
+                .validate()
+                .expect("a stored, keyframed matte is a legal project");
+            let reset = color_node_reset_operations(ClipId(10), &effect, &descriptor);
+
+            // Every matte parameter the node actually *stores* off-neutral is
+            // returned to its neutral; the ones it never stored already resolve
+            // to neutral, so writing them would only add entries (CC5 §2.2).
+            for stored in [
+                "matte_enabled",
+                "matte_window_count",
+                "matte_mix_basis_points",
+            ] {
+                let neutral = descriptor
+                    .parameter(stored)
+                    .expect("a matte control on a matte-capable node")
+                    .neutral;
+                assert!(
+                    reset.contains(&Operation::SetEffectParam {
+                        clip: ClipId(10),
+                        effect: effect.id,
+                        name: stored.to_owned(),
+                        value: ParamValue::Integer(neutral),
+                    }),
+                    "{name}.{stored} must be reset to its neutral"
+                );
+            }
+            for untouched in descriptor.parameters {
+                if !is_matte_parameter(untouched.name)
+                    || effect.parameters.contains_key(untouched.name)
+                {
+                    continue;
+                }
+                assert!(
+                    !reset.iter().any(|operation| matches!(
+                        operation,
+                        Operation::SetEffectParam { name, .. } if name == untouched.name
+                    )),
+                    "{name}.{} already resolves to its neutral: resetting must not \
+                     store it",
+                    untouched.name
+                );
+            }
+            assert!(
+                reset.contains(&Operation::ClearEffectKeyframes {
+                    clip: ClipId(10),
+                    effect: effect.id,
+                    name: "matte_window0_center_x_basis_points".to_owned(),
+                }),
+                "{name} must clear the matte's automation with it, whatever its \
+                 static value resolves to"
+            );
+
+            // And the reset really is a reset: applying it leaves an all-neutral
+            // matte, which is the property the removed "47 sets" count stood in
+            // for.
+            apply(&mut document, &reset, "the matte reset");
+            let matte = stored_matte(&document);
+            assert!(!matte.is_enabled());
+            assert_eq!(matte.window_count, 0);
+            assert_eq!(matte.mix_bp, kinewright_core::MATTE_MIX_BASIS_POINTS_MAX);
+        }
+    }
+
+    /// CC5 §2.2: an omitted matte parameter already resolves to its neutral, so
+    /// resetting a node that never carried a matte must not write 47 entries
+    /// into a CC4-era project's JSON. The bound the reviewer cared about is the
+    /// stored size, so that is what this measures.
+    #[test]
+    fn resetting_a_matteless_node_stores_no_matte_entries() {
+        for name in MATTE_CAPABLE_KINDS {
+            let descriptor = kinewright_core::effect_descriptor(name).expect("descriptor");
+            let mut document = matte_document(name);
+            let effect = document.tracks[0].clips[0].effects[0].clone();
+            assert!(
+                effect.parameters.keys().all(|key| !is_matte_parameter(key)),
+                "the fixture node starts with no matte parameter stored"
+            );
+
+            let reset = color_node_reset_operations(ClipId(10), &effect, &descriptor);
+            assert!(
+                !reset.iter().any(|operation| matches!(
+                    operation,
+                    Operation::SetEffectParam { name, .. } if is_matte_parameter(name)
+                )),
+                "{name}: a node with no stored matte needs no matte writes"
+            );
+            apply(&mut document, &reset, "resetting a matteless node");
+            let stored = &document.tracks[0].clips[0].effects[0].parameters;
+            assert!(
+                stored.keys().all(|key| !is_matte_parameter(key)),
+                "{name}: the reset grew the stored node by {:?}",
+                stored
+                    .keys()
+                    .filter(|key| is_matte_parameter(key))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// CC5 §6 and §5.1: a slot rewrite moves the automation with the values.
+    /// Without that, the shifted window renders the removed window's curve —
+    /// and a keyframed parameter resolves from its curve, so the shifted
+    /// statics would never be seen at all.
+    #[test]
+    fn removing_a_window_moves_the_keyframe_tracks_down_with_the_values() {
+        let mut document = matte_document("color_wheels");
+
+        // Two windows, each with its own keyframed centre.
+        for step in 0..2 {
+            let effect = document.tracks[0].clips[0].effects[0].clone();
+            let add = matte_add_window_operations(ClipId(10), &effect);
+            apply(&mut document, &add, "Add window");
+            let _ = step;
+        }
+        assert_eq!(stored_matte(&document).window_count, 2);
+
+        let curve = |value: i64| AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode::ZERO,
+                value,
+                interpolation: KeyframeInterpolation::Linear,
+            }],
+        };
+        apply(
+            &mut document,
+            &[
+                Operation::SetEffectKeyframes {
+                    clip: ClipId(10),
+                    effect: EffectId(1),
+                    name: "matte_window0_center_x_basis_points".to_owned(),
+                    curve: curve(1_000),
+                },
+                Operation::SetEffectKeyframes {
+                    clip: ClipId(10),
+                    effect: EffectId(1),
+                    name: "matte_window1_center_x_basis_points".to_owned(),
+                    curve: curve(9_000),
+                },
+            ],
+            "two keyframed centres",
+        );
+
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        let removal = matte_remove_window_operations(ClipId(10), &effect, 0);
+        apply(&mut document, &removal, "Remove window 0");
+
+        let effect = &document.tracks[0].clips[0].effects[0];
+        assert_eq!(
+            effect
+                .keyframes
+                .get("matte_window0_center_x_basis_points")
+                .map(|curve| curve.keyframes[0].value),
+            Some(9_000),
+            "window 1's curve moved down into window 0"
+        );
+        assert!(
+            !effect
+                .keyframes
+                .contains_key("matte_window1_center_x_basis_points"),
+            "the vacated slot keeps no automation"
+        );
+        assert_eq!(
+            effect.integer_parameter_at("matte_window0_center_x_basis_points", TimeCode::ZERO),
+            Some(9_000),
+            "and the window renders the curve it was given, not the removed one's"
+        );
+    }
+
+    /// CC5 §5.1: a window's `shape_token` and `invert` are `Hold`-keyframable
+    /// too, and they travel with the values on a removal exactly as the
+    /// geometry does. They are the easiest pair to leave behind — the shift
+    /// writes eight statics and only the six continuous controls have obvious
+    /// curves — and a stranded `Hold` token would resolve the *removed*
+    /// window's shape under the shifted window's card.
+    #[test]
+    fn removing_a_window_moves_the_hold_only_token_curves_too() {
+        let mut document = matte_document("color_wheels");
+        for _ in 0..2 {
+            let effect = document.tracks[0].clips[0].effects[0].clone();
+            let add = matte_add_window_operations(ClipId(10), &effect);
+            apply(&mut document, &add, "Add window");
+        }
+        assert_eq!(stored_matte(&document).window_count, 2);
+
+        let hold = |value: i64| AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode::ZERO,
+                value,
+                interpolation: KeyframeInterpolation::Hold,
+            }],
+        };
+        let curve = |name: &str, value: i64| Operation::SetEffectKeyframes {
+            clip: ClipId(10),
+            effect: EffectId(1),
+            name: name.to_owned(),
+            curve: hold(value),
+        };
+        apply(
+            &mut document,
+            &[
+                // W0 is a held rect, uninverted; W1 a held ellipse, inverted.
+                curve("matte_window0_shape_token", 1),
+                curve("matte_window0_invert", 0),
+                curve("matte_window1_shape_token", 2),
+                curve("matte_window1_invert", 1),
+            ],
+            "held tokens on both windows",
+        );
+
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        apply(
+            &mut document,
+            &matte_remove_window_operations(ClipId(10), &effect, 0),
+            "Remove window 0",
+        );
+
+        let effect = &document.tracks[0].clips[0].effects[0];
+        for (name, expected) in [
+            ("matte_window0_shape_token", 2),
+            ("matte_window0_invert", 1),
+        ] {
+            let moved = effect.keyframes.get(name).expect("the curve moved down");
+            assert_eq!(
+                moved.keyframes[0].value, expected,
+                "{name} must carry W1's held value"
+            );
+            assert_eq!(
+                moved.keyframes[0].interpolation,
+                KeyframeInterpolation::Hold,
+                "{name} stays Hold-only, which is what core accepts"
+            );
+        }
+        for name in ["matte_window1_shape_token", "matte_window1_invert"] {
+            assert!(
+                !effect.keyframes.contains_key(name),
+                "{name}: the vacated slot keeps no automation"
+            );
+        }
+
+        // And it is what renders: the shifted window resolves as the inverted
+        // ellipse it was, not as W0's rect.
+        let resolved = MatteParams::from_effect(&effect.evaluated_at(TimeCode::ZERO)).windows[0];
+        assert!(
+            resolved.is_ellipse() && resolved.is_inverted(),
+            "the shifted window resolves W1's held tokens: {resolved:?}"
+        );
+    }
+
+    /// A recycled slot must not resurrect the removed window's motion under a
+    /// card that reads as neutral (CC5 §5.1).
+    #[test]
+    fn an_added_window_carries_no_inherited_automation() {
+        let mut document = matte_document("color_wheels");
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        apply(
+            &mut document,
+            &matte_add_window_operations(ClipId(10), &effect),
+            "Add window",
+        );
+        apply(
+            &mut document,
+            &[Operation::SetEffectKeyframes {
+                clip: ClipId(10),
+                effect: EffectId(1),
+                name: "matte_window0_feather_basis_points".to_owned(),
+                curve: AutomationCurve {
+                    keyframes: vec![Keyframe {
+                        at: TimeCode::ZERO,
+                        value: 4_000,
+                        interpolation: KeyframeInterpolation::Linear,
+                    }],
+                },
+            }],
+            "a keyframed feather",
+        );
+
+        // Remove it, then add a window back into the slot it vacated.
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        apply(
+            &mut document,
+            &matte_remove_window_operations(ClipId(10), &effect, 0),
+            "Remove window 0",
+        );
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        let add = matte_add_window_operations(ClipId(10), &effect);
+        apply(&mut document, &add, "Add window into the recycled slot");
+
+        let effect = &document.tracks[0].clips[0].effects[0];
+        assert!(
+            !effect
+                .keyframes
+                .contains_key("matte_window0_feather_basis_points"),
+            "a fresh window is at its neutral, not on the last window's curve"
+        );
+        assert_eq!(
+            MatteParams::from_effect(&effect.evaluated_at(TimeCode::ZERO)).windows[0],
+            MatteWindowParams::NEUTRAL,
+            "and it resolves to the descriptor neutral at every frame"
+        );
+    }
+
+    /// An unkeyframed matte's Add and Remove batches are untouched by the
+    /// automation handling: no `SetEffectKeyframes`, no `ClearEffectKeyframes`.
+    #[test]
+    fn window_batches_stay_keyframe_free_when_the_matte_is() {
+        let mut document = matte_document("color_curves");
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        let add = matte_add_window_operations(ClipId(10), &effect);
+        assert!(
+            add.iter()
+                .all(|operation| matches!(operation, Operation::SetEffectParam { .. }))
+        );
+        apply(&mut document, &add, "Add window");
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        assert!(
+            matte_remove_window_operations(ClipId(10), &effect, 0)
+                .iter()
+                .all(|operation| matches!(operation, Operation::SetEffectParam { .. })),
+        );
+    }
+
+    /// Adding and removing windows keeps every intermediate document valid, and
+    /// a removal shifts the later windows down rather than leaving a hole
+    /// (CC5 §6).
+    #[test]
+    fn window_add_and_remove_batches_are_accepted_in_order_by_core() {
+        let mut document = matte_document("color_wheels");
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        let first = matte_add_window_operations(ClipId(10), &effect);
+        assert!(
+            first.contains(&effect_param_operation(
+                ClipId(10),
+                EffectId(1),
+                "matte_enabled",
+                1
+            )),
+            "the first window enables the matte"
+        );
+        apply(&mut document, &first, "the first Add window");
+        assert_eq!(stored_matte(&document).window_count, 1);
+        assert!(stored_matte(&document).is_enabled());
+
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        let second = matte_add_window_operations(ClipId(10), &effect);
+        assert!(
+            !second.contains(&effect_param_operation(
+                ClipId(10),
+                EffectId(1),
+                "matte_enabled",
+                1
+            )),
+            "an already-enabled matte is not re-enabled"
+        );
+        apply(&mut document, &second, "the second Add window");
+        assert_eq!(stored_matte(&document).window_count, 2);
+
+        // Give the second window an identity so the shift is observable.
+        apply(
+            &mut document,
+            &[
+                effect_param_operation(
+                    ClipId(10),
+                    EffectId(1),
+                    "matte_window1_center_x_basis_points",
+                    8_000,
+                ),
+                effect_param_operation(ClipId(10), EffectId(1), "matte_window1_shape_token", 2),
+            ],
+            "the second window's own values",
+        );
+
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        let removal = matte_remove_window_operations(ClipId(10), &effect, 0);
+        assert_eq!(
+            removal.last(),
+            Some(&effect_param_operation(
+                ClipId(10),
+                EffectId(1),
+                "matte_window_count",
+                1
+            )),
+            "the count is decremented last so no document names an unwritten window"
+        );
+        apply(&mut document, &removal, "Remove window 0");
+        let matte = stored_matte(&document);
+        assert_eq!(matte.window_count, 1);
+        assert_eq!(
+            (matte.windows[0].center_x_bp, matte.windows[0].shape_token),
+            (8_000, 2),
+            "the second window shifts down to index 0"
+        );
+
+        // Removing the last window empties the list; removing from an empty
+        // list is a no-op rather than an operation core would reject.
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        let removal = matte_remove_window_operations(ClipId(10), &effect, 0);
+        apply(&mut document, &removal, "Remove the last window");
+        assert_eq!(stored_matte(&document).window_count, 0);
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        assert!(matte_remove_window_operations(ClipId(10), &effect, 0).is_empty());
+
+        // A fourth window is the limit; a fifth Add is refused by the helper,
+        // not by core.
+        for index in 0..MATTE_WINDOW_LIMIT {
+            let effect = document.tracks[0].clips[0].effects[0].clone();
+            let batch = matte_add_window_operations(ClipId(10), &effect);
+            assert!(!batch.is_empty(), "window {index} must be addable");
+            apply(&mut document, &batch, "an Add window up to the limit");
+        }
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        assert!(
+            matte_add_window_operations(ClipId(10), &effect).is_empty(),
+            "a fifth window is not offered"
+        );
+        assert_eq!(stored_matte(&document).window_count, MATTE_WINDOW_LIMIT);
+    }
+
+    /// An added window resets a slot an earlier removal left behind, so a new
+    /// window is never the ghost of a deleted one.
+    #[test]
+    fn an_added_window_never_inherits_a_removed_window_s_values() {
+        let mut document = matte_document("primary_correction");
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        apply(
+            &mut document,
+            &matte_add_window_operations(ClipId(10), &effect),
+            "Add window",
+        );
+        apply(
+            &mut document,
+            &[
+                effect_param_operation(
+                    ClipId(10),
+                    EffectId(1),
+                    "matte_window0_center_x_basis_points",
+                    -4_000,
+                ),
+                effect_param_operation(
+                    ClipId(10),
+                    EffectId(1),
+                    "matte_window0_feather_basis_points",
+                    6_000,
+                ),
+            ],
+            "a hand-placed window",
+        );
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        apply(
+            &mut document,
+            &matte_remove_window_operations(ClipId(10), &effect, 0),
+            "Remove window 0",
+        );
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        apply(
+            &mut document,
+            &matte_add_window_operations(ClipId(10), &effect),
+            "Add window again",
+        );
+        let window = stored_matte(&document).windows[0];
+        assert_eq!(
+            window,
+            MatteWindowParams::NEUTRAL,
+            "the re-added window is the descriptor neutral, not the removed one"
+        );
+    }
+
+    /// The qualifier writer covers the whole leg and core accepts it.
+    #[test]
+    fn the_qualifier_writer_covers_every_qualifier_parameter() {
+        for name in MATTE_QUALIFIER_PARAMETERS {
+            assert!(
+                is_matte_parameter(name),
+                "{name} must be a real CC5 matte parameter"
+            );
+        }
+        let mut document = matte_document("color_curves");
+        let tuned = MatteQualifierParams {
+            enabled: 1,
+            hue_center_cd: 3_000,
+            hue_width_cd: 1_500,
+            hue_softness_cd: 1_000,
+            sat_low_bp: 2_000,
+            sat_high_bp: 9_000,
+            sat_softness_bp: 1_000,
+            luma_low_bp: 1_000,
+            luma_high_bp: 8_000,
+            luma_softness_bp: 500,
+        };
+        let operations = matte_qualifier_operations(ClipId(10), EffectId(1), &tuned);
+        assert_eq!(operations.len(), MATTE_QUALIFIER_PARAMETERS.len());
+        apply(&mut document, &operations, "a tuned qualifier");
+        assert_eq!(stored_matte(&document).qualifier, tuned);
+
+        let effect = document.tracks[0].clips[0].effects[0].clone();
+        let reset =
+            matte_qualifier_operations(ClipId(10), effect.id, &MatteQualifierParams::NEUTRAL);
+        apply(&mut document, &reset, "Reset qualifier");
+        assert_eq!(
+            stored_matte(&document).qualifier,
+            MatteQualifierParams::NEUTRAL
+        );
+    }
+
+    /// CC5 §6's coalesce keys, verbatim, and the parameters each gesture owns.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn overlay_gestures_use_the_contract_keys_and_write_only_their_own_parameters() {
+        assert_eq!(
+            matte_window_move_coalesce_key(ClipId(3), EffectId(8), 2),
+            "matte_window_move:3:8:2"
+        );
+        assert_eq!(
+            matte_window_resize_coalesce_key(ClipId(3), EffectId(8), 2),
+            "matte_window_resize:3:8:2"
+        );
+        assert_eq!(
+            matte_window_rotate_coalesce_key(ClipId(3), EffectId(8), 2),
+            "matte_window_rotate:3:8:2"
+        );
+        assert_eq!(
+            matte_mix_coalesce_key(ClipId(3), EffectId(8)),
+            "matte_mix:3:8"
+        );
+        assert_eq!(
+            matte_gesture_coalesce_key(MatteHit::Move, ClipId(3), EffectId(8), 0),
+            "matte_window_move:3:8:0"
+        );
+        assert_eq!(
+            matte_gesture_coalesce_key(
+                MatteHit::Resize(crate::matte_overlay_ui::MatteHandle::TopLeft),
+                ClipId(3),
+                EffectId(8),
+                1
+            ),
+            "matte_window_resize:3:8:1"
+        );
+        assert_eq!(
+            matte_gesture_coalesce_key(MatteHit::Rotate, ClipId(3), EffectId(8), 3),
+            "matte_window_rotate:3:8:3"
+        );
+        assert_ne!(
+            matte_window_move_coalesce_key(ClipId(3), EffectId(8), 0),
+            matte_window_move_coalesce_key(ClipId(3), EffectId(8), 1),
+            "two windows of one node must never merge into one undo entry"
+        );
+
+        let window = MatteWindowParams {
+            center_x_bp: 6_000,
+            center_y_bp: 4_000,
+            half_width_bp: 1_000,
+            half_height_bp: 900,
+            rotation_cd: 1_234,
+            ..MatteWindowParams::NEUTRAL
+        };
+        let moved =
+            matte_window_drag_operations(ClipId(3), EffectId(8), 0, MatteHit::Move, &window);
+        assert_eq!(
+            moved,
+            vec![
+                effect_param_operation(
+                    ClipId(3),
+                    EffectId(8),
+                    "matte_window0_center_x_basis_points",
+                    6_000
+                ),
+                effect_param_operation(
+                    ClipId(3),
+                    EffectId(8),
+                    "matte_window0_center_y_basis_points",
+                    4_000
+                ),
+            ],
+            "a move writes exactly two parameters (CC5 §6)"
+        );
+        assert_eq!(
+            matte_window_drag_operations(
+                ClipId(3),
+                EffectId(8),
+                0,
+                MatteHit::Resize(crate::matte_overlay_ui::MatteHandle::Right),
+                &window
+            ),
+            vec![effect_param_operation(
+                ClipId(3),
+                EffectId(8),
+                "matte_window0_half_width_basis_points",
+                1_000
+            )],
+            "an edge handle writes one axis"
+        );
+        assert_eq!(
+            matte_window_drag_operations(
+                ClipId(3),
+                EffectId(8),
+                0,
+                MatteHit::Resize(crate::matte_overlay_ui::MatteHandle::BottomRight),
+                &window
+            )
+            .len(),
+            2,
+            "a corner handle writes both axes"
+        );
+        assert_eq!(
+            matte_window_drag_operations(ClipId(3), EffectId(8), 0, MatteHit::Rotate, &window),
+            vec![effect_param_operation(
+                ClipId(3),
+                EffectId(8),
+                "matte_window0_rotation_centidegrees",
+                1_234
+            )]
+        );
+    }
+
+    /// One gesture is one undo entry: the release frame stays inside it, and a
+    /// discrete edit in the same frame drops the key.
+    #[test]
+    fn a_matte_gesture_is_one_undo_entry_including_its_release_frame() {
+        let window = MatteWindowParams::NEUTRAL;
+        let key = matte_window_move_coalesce_key(ClipId(3), EffectId(8), 0);
+        let mut edits = InspectorEdits::default();
+        edits.begin_gesture();
+        for centre in [5_100, 5_200, 5_300] {
+            let moved = MatteWindowParams {
+                center_x_bp: centre,
+                ..window
+            };
+            edits.extend_live(
+                matte_window_drag_operations(ClipId(3), EffectId(8), 0, MatteHit::Move, &moved),
+                key.clone(),
+            );
+        }
+        assert_eq!(edits.operations().len(), 6, "two parameters per frame");
+        assert_eq!(
+            edits.coalesce_key(),
+            Some(key.as_str()),
+            "the release frame must not open a second undo entry"
+        );
+        assert!(edits.gesture_started);
+
+        // A mix drag rides its own key, so a matte move and a mix drag never
+        // merge.
+        let mut mix = InspectorEdits::default();
+        mix.push_live(
+            effect_param_operation(ClipId(3), EffectId(8), "matte_mix_basis_points", 6_000),
+            matte_mix_coalesce_key(ClipId(3), EffectId(8)),
+        );
+        assert_eq!(mix.coalesce_key(), Some("matte_mix:3:8"));
+
+        // A discrete edit in the same frame is not part of the gesture.
+        mix.push(effect_param_operation(
+            ClipId(3),
+            EffectId(8),
+            "matte_invert",
+            1,
+        ));
+        assert_eq!(mix.coalesce_key(), None);
+    }
+
+    /// CC5 §6: the tracking control exists so the workflow is discoverable, and
+    /// is disabled so it cannot pretend to work.
+    #[test]
+    fn the_track_window_control_is_present_but_disabled() {
+        assert!(
+            !matte_track_button_enabled(),
+            "CC5 has no agent-tool call path from the app"
+        );
+        assert_eq!(MATTE_TRACK_BUTTON_LABEL, "Track window…");
+        assert!(
+            MATTE_TRACK_BUTTON_TOOLTIP.contains("agent-driven")
+                && MATTE_TRACK_BUTTON_TOOLTIP.contains("track_matte_window")
+                && MATTE_TRACK_BUTTON_TOOLTIP.contains("committed"),
+            "the tooltip must say tracking is agent-driven and that committed keyframes appear here"
+        );
+    }
+
+    /// The window writer and the parameter table agree on order, so a shift
+    /// cannot silently write a centre into a half-extent.
+    #[test]
+    fn the_window_writer_matches_the_descriptor_order() {
+        let window = MatteWindowParams {
+            shape_token: 2,
+            center_x_bp: 1,
+            center_y_bp: 2,
+            half_width_bp: 3,
+            half_height_bp: 4,
+            rotation_cd: 5,
+            feather_bp: 6,
+            invert: 1,
+        };
+        let names = kinewright_core::matte_window_parameter_names(1).expect("window 1");
+        // Every one of the eight differs from the neutral the slot holds, so
+        // the whole batch is written and the order is observable.
+        let operations = matte_window_edit_operations(
+            ClipId(10),
+            EffectId(1),
+            1,
+            &window,
+            &MatteWindowParams::NEUTRAL,
+        );
+        assert_eq!(operations.len(), names.len());
+        for (operation, (name, value)) in operations
+            .iter()
+            .zip(names.iter().zip(matte_window_values(&window)))
+        {
+            assert_eq!(
+                operation,
+                &effect_param_operation(ClipId(10), EffectId(1), name, value)
+            );
+        }
+        for (name, suffix) in names.iter().zip([
+            "_shape_token",
+            "_center_x_basis_points",
+            "_center_y_basis_points",
+            "_half_width_basis_points",
+            "_half_height_basis_points",
+            "_rotation_centidegrees",
+            "_feather_basis_points",
+            "_invert",
+        ]) {
+            assert!(name.ends_with(suffix), "{name} must end with {suffix}");
+        }
+        assert!(
+            matte_window_edit_operations(
+                ClipId(10),
+                EffectId(1),
+                MATTE_WINDOW_LIMIT,
+                &window,
+                &MatteWindowParams::NEUTRAL,
+            )
+            .is_empty()
+        );
+
+        // A parameter already at the value being written is not restated: a
+        // slot rewrite that agrees with what is stored writes nothing, and one
+        // that differs in a single control writes exactly that control.
+        assert!(
+            matte_window_edit_operations(ClipId(10), EffectId(1), 1, &window, &window).is_empty(),
+            "an unchanged slot is not rewritten"
+        );
+        let moved = MatteWindowParams {
+            center_x_bp: window.center_x_bp + 100,
+            ..window
+        };
+        assert_eq!(
+            matte_window_edit_operations(ClipId(10), EffectId(1), 1, &moved, &window),
+            [effect_param_operation(
+                ClipId(10),
+                EffectId(1),
+                names[1],
+                moved.center_x_bp
+            )],
+            "only the control that moved is written"
+        );
+    }
+
+    /// CC5 §6: the section is collapsed by default, so a CC4 project's
+    /// inspector is unchanged and the viewer keeps today's behaviour; an
+    /// expanded section reports itself, which is the only thing that gives the
+    /// viewer pointer input.
+    #[test]
+    fn the_matte_section_is_collapsed_by_default_and_reports_its_expansion() {
+        let ctx = egui::Context::default();
+        let clip = look_clip(vec![colour_effect(1, "color_wheels")]);
+        let effect = clip.effects[0].clone();
+        let mut header_id = None;
+
+        let mut edits = InspectorEdits::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            header_id = Some(matte_section_id(clip.id, effect.id));
+            matte_section(ui, &clip, &effect, &mut edits);
+        });
+        assert_eq!(
+            edits.matte_expanded(),
+            None,
+            "a collapsed section leaves the viewer alone"
+        );
+        assert_eq!(edits.matte_selected_window(), None);
+        assert!(
+            edits.operations().is_empty(),
+            "drawing the card writes nothing to the document"
+        );
+
+        let header_id = header_id.expect("the section drew a header");
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            &ctx, header_id, false,
+        );
+        state.set_open(true);
+        state.store(&ctx);
+
+        // The header animates open, so the report lands within a few frames.
+        let mut reported = None;
+        for _ in 0..20 {
+            let mut edits = InspectorEdits::default();
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                matte_section(ui, &clip, &effect, &mut edits);
+            });
+            if let Some(target) = edits.matte_expanded() {
+                assert!(
+                    edits.operations().is_empty(),
+                    "an expanded section still writes nothing on its own"
+                );
+                reported = Some(target);
+                break;
+            }
+        }
+        assert_eq!(
+            reported,
+            Some(MatteTarget::new(clip.id, effect.id)),
+            "an expanded section names the node it belongs to"
+        );
+    }
+
+    /// Draw one colour node's card exactly as `color_stage_section` dispatches
+    /// it, with its matte section — if it has one — forced open, and report
+    /// what the card told the viewer.
+    ///
+    /// The section is opened by storing the `CollapsingState` under the id the
+    /// card will build, then re-running until the header's open animation has
+    /// settled, which is how `the_matte_section_is_collapsed_by_default...`
+    /// already drives it.
+    fn matte_expansion_reported_by_card(name: &str) -> Option<MatteTarget> {
+        let ctx = egui::Context::default();
+        // The cards ask for the app's own font families, so the theme has to be
+        // installed before one can be laid out.
+        crate::theme::install(&ctx);
+        let effect = colour_effect(1, name);
+        let clip = look_clip(vec![effect.clone()]);
+        let kind = ColorNodeKind::from_effect_name(name).expect("a registered colour node");
+        let document = look_document(vec![effect.clone()], Vec::new());
+        let availability = BTreeMap::new();
+
+        let draw = |ui: &mut egui::Ui, edits: &mut InspectorEdits| {
+            let looks = LookInspectorContext {
+                document: &document,
+                availability: &availability,
+                store_unavailable: None,
+            };
+            match kind {
+                ColorNodeKind::Primary => primary_correction_section(ui, &clip, &effect, edits),
+                ColorNodeKind::Wheels => color_wheels_section(ui, &clip, &effect, 0, edits),
+                ColorNodeKind::Curves => color_curves_section(ui, &clip, &effect, 0, edits),
+                ColorNodeKind::TechnicalLut | ColorNodeKind::CreativeLook => {
+                    lut_node_section(ui, &clip, &effect, kind, 0, &looks, edits);
+                }
+            }
+        };
+
+        // The section's id names the node, not the layout, so it can be forced
+        // open from here without the card's cooperation. A card that draws no
+        // matte section simply never reads it.
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            &ctx,
+            matte_section_id(clip.id, effect.id),
+            false,
+        );
+        state.set_open(true);
+        state.store(&ctx);
+
+        // The header animates open, so the report lands within a few frames.
+        for _ in 0..20 {
+            let mut edits = InspectorEdits::default();
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| draw(ui, &mut edits));
+            if let Some(target) = edits.matte_expanded() {
+                return Some(target);
+            }
+        }
+        None
+    }
+
+    /// Every matte-capable card draws the section, and `technical_lut` does
+    /// not: a partially applied source normalization is not a meaningful state
+    /// (CC5 §2.1).
+    ///
+    /// Driven through the real cards rather than asserted against the core
+    /// predicate: what matters is that the four kinds actually *render* a
+    /// section the viewer can act on, and that the fifth renders none however
+    /// hard the open state is forced.
+    #[test]
+    fn only_the_matte_capable_cards_render_a_section() {
+        for name in MATTE_CAPABLE_KINDS {
+            assert_eq!(
+                matte_expansion_reported_by_card(name),
+                Some(MatteTarget::new(ClipId(10), EffectId(1))),
+                "{name}'s card must draw a matte section and report its expansion"
+            );
+        }
+        assert_eq!(
+            matte_expansion_reported_by_card("technical_lut"),
+            None,
+            "a technical input transform has no matte section to expand, so \
+             forcing the id open reports nothing and the viewer stays inert"
+        );
     }
 }
