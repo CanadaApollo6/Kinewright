@@ -19,7 +19,11 @@ use crate::{
     export_ui::{ExportDialog, ExportJob},
     icons::Icon,
     media_workflow::media_asset_requires_refresh,
-    project::{ProjectSession, index_after_close, project_name, session_index_by_id},
+    project::{
+        ProjectSaveError, ProjectSaveReport, ProjectSession, derive_lut_store,
+        focus_publishes_lut_library, index_after_close, project_name, session_index_by_id,
+        write_project_document,
+    },
     theme::{self, color, size, space},
     timeline_ui::is_internal_marker,
     transcript_ui::TranscriptScope,
@@ -50,6 +54,16 @@ pub(crate) struct KinewrightApp {
     pub(crate) playback: Arc<dyn Playback>,
     pub(crate) analysis: Arc<dyn Analysis>,
     pub(crate) exporter: Arc<dyn Export>,
+    /// The engine as itself, so the verified LUT library can be published
+    /// (CC4 §2.4).
+    ///
+    /// `set_lut_library` is an inherent method on the concrete engine rather
+    /// than a `Playback` trait method, because `LutLibrary` holds verified
+    /// media-crate sample data that Core — which is I/O-free — cannot name.
+    /// Publishing once covers preview, proofs, and export: the engine both
+    /// sends the library to the playback worker and stores it where the proof
+    /// and export entry points read it.
+    pub(crate) lut_publisher: Arc<FfmpegMediaEngine>,
     pub(crate) frames: crossbeam_channel::Receiver<(TimeCode, kinewright_core::FrameTexture)>,
     pub(crate) media_events: crossbeam_channel::Receiver<MediaEvent>,
     pub(crate) visual_cache: crate::visual_cache::VisualCache,
@@ -81,6 +95,18 @@ pub(crate) struct KinewrightApp {
     pub(crate) relink_probe_tx: mpsc::Sender<crate::media_workflow::RelinkProbeResponse>,
     pub(crate) relink_probe_rx: mpsc::Receiver<crate::media_workflow::RelinkProbeResponse>,
     pub(crate) relink_probe_pending: usize,
+    pub(crate) lut_import_tx: mpsc::Sender<crate::media_workflow::LutImportResponse>,
+    pub(crate) lut_import_rx: mpsc::Receiver<crate::media_workflow::LutImportResponse>,
+    pub(crate) lut_restore_tx: mpsc::Sender<crate::media_workflow::LutRestoreResponse>,
+    pub(crate) lut_restore_rx: mpsc::Receiver<crate::media_workflow::LutRestoreResponse>,
+    /// Outstanding look import/restore workers, so the frame loop keeps
+    /// repainting until every typed result has landed.
+    pub(crate) lut_worker_pending: usize,
+    /// The LUT asset id the last submitted import batch allocated, held until
+    /// the document records it so a second import finishing in the same frame
+    /// cannot be built against the same pre-import document (CC4 §7).
+    pub(crate) lut_import_reservation: Option<crate::media_workflow::LutImportReservation>,
+    pub(crate) look_browser: crate::look_browser_ui::LookBrowserState,
     pub(crate) media_status_tx: mpsc::Sender<crate::media_workflow::MediaStatusResponse>,
     pub(crate) media_status_rx: mpsc::Receiver<crate::media_workflow::MediaStatusResponse>,
     pub(crate) cache_clear_tx: mpsc::Sender<crate::media_workflow::CacheClearResponse>,
@@ -125,6 +151,12 @@ pub(crate) struct KinewrightApp {
     /// same control opens its own undo entry instead of merging into the
     /// previous gesture's entry.
     edit_gesture: u64,
+    /// The live press-and-hold A/B comparison, mirrored out of the look card
+    /// so a card that stops rendering mid-hold cannot leave `bypass = 1` in
+    /// the document (CC4 §7).
+    pub(crate) look_ab_hold: Option<crate::inspector_ui::MirroredAbHold>,
+    /// Whether the held card reported itself during the previous frame.
+    pub(crate) look_ab_hold_seen: bool,
 }
 
 impl KinewrightApp {
@@ -160,11 +192,14 @@ impl KinewrightApp {
         let visual_cache = crate::visual_cache::VisualCache::new(media.visual_asset_results());
         let (probe_tx, probe_rx) = mpsc::channel();
         let (relink_probe_tx, relink_probe_rx) = mpsc::channel();
+        let (lut_import_tx, lut_import_rx) = mpsc::channel();
+        let (lut_restore_tx, lut_restore_rx) = mpsc::channel();
         let (media_status_tx, media_status_rx) = mpsc::channel();
         let (cache_clear_tx, cache_clear_rx) = mpsc::channel();
         let playback: Arc<dyn Playback> = media.clone();
         let analysis: Arc<dyn Analysis> = media.clone();
-        let exporter: Arc<dyn Export> = media;
+        let exporter: Arc<dyn Export> = media.clone();
+        let lut_publisher = media;
         let mut project = ProjectSession::create(
             1,
             name,
@@ -204,6 +239,7 @@ impl KinewrightApp {
             playback,
             analysis,
             exporter,
+            lut_publisher,
             frames,
             media_events,
             visual_cache,
@@ -233,6 +269,13 @@ impl KinewrightApp {
             relink_probe_tx,
             relink_probe_rx,
             relink_probe_pending: 0,
+            lut_import_tx,
+            lut_import_rx,
+            lut_restore_tx,
+            lut_restore_rx,
+            lut_worker_pending: 0,
+            lut_import_reservation: None,
+            look_browser: crate::look_browser_ui::LookBrowserState::default(),
             media_status_tx,
             media_status_rx,
             cache_clear_tx,
@@ -287,7 +330,13 @@ impl KinewrightApp {
             recording: None,
             record_dialog: crate::recording::RecordDialog::default(),
             edit_gesture: 0,
+            look_ab_hold: None,
+            look_ab_hold_seen: false,
         };
+        // The startup session is focused from construction, so `focus_project`
+        // early-returns for it and would never publish: a project opened with
+        // LUT nodes would render against an empty library (CC4 §2.4).
+        app.publish_focused_lut_library();
         app.playback
             .set_document(Arc::clone(&app.focused().document));
         app.playback.request_frame(TimeCode::ZERO);
@@ -338,6 +387,27 @@ impl KinewrightApp {
         &mut self.projects[self.focused_project]
     }
 
+    /// Retire the held import id for one session after a rejection.
+    fn release_lut_import_reservation(&mut self, project_index: usize) {
+        let session_id = self.projects[project_index].id;
+        if self
+            .lut_import_reservation
+            .is_some_and(|reservation| reservation.session_id == session_id)
+        {
+            self.lut_import_reservation = None;
+        }
+    }
+
+    /// Hand the focused project's verified library to the engine (CC4 §2.4).
+    ///
+    /// Every path that makes a different project — or a different set of
+    /// bytes — the one the compositor renders goes through here, so there is
+    /// one publication rule rather than one per call site.
+    pub(crate) fn publish_focused_lut_library(&self) {
+        self.lut_publisher
+            .set_lut_library(Arc::clone(&self.focused().lut_library));
+    }
+
     fn create_project_session(
         &mut self,
         name: String,
@@ -365,7 +435,12 @@ impl KinewrightApp {
     }
 
     fn focus_project_with_rebind(&mut self, index: usize, force_rebind: bool) {
-        if index >= self.projects.len() || (!force_rebind && index == self.focused_project) {
+        if !focus_publishes_lut_library(
+            index,
+            self.projects.len(),
+            self.focused_project,
+            force_rebind,
+        ) {
             return;
         }
         self.playback.pause();
@@ -376,9 +451,67 @@ impl KinewrightApp {
         self.focused_project = index;
         let document = Arc::clone(&self.focused().document);
         let position = self.focused().position;
+        // Publication is content-addressed and every render binds its own
+        // document's assets, so this republish is not a correctness
+        // requirement; it promotes the focused project's lattices in the
+        // engine's bounded published table before the first frame (CC4 §2.4).
+        self.publish_focused_lut_library();
         self.playback.set_document(document);
         self.playback.seek(position);
         self.playback.request_frame(position);
+    }
+
+    /// Write the focused project to an explicit path with no dialog (CC4 §2.2,
+    /// §10.3.11).
+    ///
+    /// Serializes, writes, derives the new store root, copies every referenced
+    /// store file across when the root moved, collects one
+    /// `lut_store_copy_failed` entry per asset it could not place, and only
+    /// then adopts the new identity and checkpoints recovery. Rebuilding and
+    /// republishing the library is part of the write because a moved store
+    /// root changes where every imported look resolves from.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed serialize or write failure. A store-root refusal is
+    /// not fatal: the project is saved and its imported looks report `missing`
+    /// until the root is usable.
+    pub(crate) fn write_project(
+        &mut self,
+        path: &Path,
+    ) -> Result<ProjectSaveReport, ProjectSaveError> {
+        let document = Arc::clone(&self.focused().document);
+        let previous_store = self.focused().lut_store.clone();
+        let report = write_project_document(&document, path, previous_store.as_ref())?;
+        let name = project_name(Some(path), &self.focused().name);
+        let (store, store_error) = match derive_lut_store(Some(path)) {
+            Ok(store) => (store, None),
+            Err(reason) => (None, Some(reason)),
+        };
+        let session = self.focused_mut();
+        session.name = name;
+        session.project_path = Some(path.to_path_buf());
+        session.set_lut_store(store, store_error);
+        session.saved_document = Some(Arc::clone(&session.document));
+        let library = session.rebuild_lut_library();
+        // The agent servers derive their own store root from the path, so a
+        // Save As has to republish it before any tool can import (CC4 §8).
+        session.publish_project_path_to_agents();
+        let core = session.core.clone();
+        session
+            .recovery
+            .checkpoint(&core, session.project_path.as_deref());
+        self.lut_publisher.set_lut_library(library);
+        if let Some(reason) = &report.lut_store_error {
+            self.record_error(
+                "Look",
+                format!(
+                    "Saved {}, but its LUT store root is unusable: {reason}",
+                    path.display()
+                ),
+            );
+        }
+        Ok(report)
     }
 
     pub(crate) fn save_project(&mut self, save_as: bool) -> bool {
@@ -399,22 +532,20 @@ impl KinewrightApp {
         if path.extension().is_none() {
             path.set_extension("kinewright");
         }
-        let document = Arc::clone(&self.focused().document);
-        let result = serde_json::to_string_pretty(&*document)
-            .map_err(|error| error.to_string())
-            .and_then(|json| fs::write(&path, json).map_err(|error| error.to_string()));
-        match result {
-            Ok(()) => {
-                let name = project_name(Some(&path), &self.focused().name);
-                let session = self.focused_mut();
-                session.name = name;
-                session.project_path = Some(path.clone());
-                session.saved_document = Some(Arc::clone(&session.document));
-                let core = session.core.clone();
-                session
-                    .recovery
-                    .checkpoint(&core, session.project_path.as_deref());
-                self.status = format!("Saved {}", path.display());
+        match self.write_project(&path) {
+            Ok(report) => {
+                self.status = format!("Saved {}", report.path.display());
+                if let Some(summary) = report.copy_failure_summary() {
+                    // A project with an unavailable asset is still saved; the
+                    // asset is simply `missing` at the new root (CC4 §2.2).
+                    self.record_error(
+                        "Look",
+                        format!(
+                            "Saved {} but could not copy every look into the new store — {summary}",
+                            report.path.display()
+                        ),
+                    );
+                }
                 true
             }
             Err(error) => {
@@ -486,8 +617,41 @@ impl KinewrightApp {
             };
         session.saved_document = Some(Arc::clone(&session.document));
         let assets = session.document.media_pool.clone();
+        // `ProjectSession::create` already derived the store and built the
+        // library from the loaded document; surface the refusal it recorded
+        // rather than letting every look silently report `missing`.
+        let store_refusal = session.lut_store_error.clone();
+        let unavailable =
+            crate::project::unavailable_lut_assets(&session.document, &session.lut_availability);
+        let lut_titles: Vec<String> = unavailable
+            .iter()
+            .filter_map(|id| session.document.lut_asset(*id))
+            .map(|asset| format!("{} ({})", asset.title, asset.id))
+            .collect();
         self.projects.push(session);
         self.focus_project(self.projects.len() - 1);
+        // `focus_project` publishes too; publishing is idempotent, and doing
+        // it here as well keeps "open publishes the library" true without
+        // depending on the focus path's early-return conditions.
+        self.publish_focused_lut_library();
+        if let Some(reason) = store_refusal {
+            self.record_error(
+                "Look",
+                format!(
+                    "The LUT store beside {} is unusable: {reason}",
+                    path.display()
+                ),
+            );
+        }
+        if !lut_titles.is_empty() {
+            self.error_log.push(
+                "Look",
+                format!(
+                    "LUT assets need restore or replacement after open: {}",
+                    lut_titles.join(", ")
+                ),
+            );
+        }
         self.queue_media_status_checks_for_project(self.focused_project);
         for asset in assets {
             self.request_asset_analysis(asset);
@@ -770,6 +934,10 @@ impl KinewrightApp {
         self.poll_export(ctx);
         self.poll_recording(ctx);
         self.poll_media_workflow(ctx);
+        self.recover_stranded_ab_hold(ctx);
+        if self.poll_lut_workers() {
+            ctx.request_repaint();
+        }
         for (asset, error) in self.visual_cache.poll(ctx) {
             self.error_log.push(
                 "Media",
@@ -781,6 +949,7 @@ impl KinewrightApp {
         }
         if self.media_statuses.has_pending()
             || self.relink_probe_pending > 0
+            || self.lut_worker_pending > 0
             || self.media_cache_clear_pending.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(50));
@@ -883,6 +1052,18 @@ impl KinewrightApp {
                     }
                     self.projects[project_index].document = Arc::clone(&doc);
                     self.projects[project_index].revision = revision;
+                    // Every path that changes the asset table — `AddLutAsset`,
+                    // `RemoveLutAsset`, undo, redo, journal replay — rebuilds
+                    // and republishes the verified library (CC4 §2.4).
+                    // Publication merges lattices by content hash and every
+                    // render resolves its own document's assets, so a
+                    // background project's import must be published too:
+                    // otherwise its queued export or branch proof could not
+                    // find the bytes until the project was focused.
+                    if previous_document.lut_assets != doc.lut_assets {
+                        let library = self.projects[project_index].rebuild_lut_library();
+                        self.lut_publisher.set_lut_library(library);
+                    }
                     self.projects[project_index].transcript_selection = None;
                     if self.projects[project_index]
                         .selected_clip
@@ -971,6 +1152,7 @@ impl KinewrightApp {
                 Event::OpRejected { error, .. } => {
                     let name = &self.projects[project_index].name;
                     self.record_error("Operations", format!("Edit rejected in {name}: {error}"));
+                    self.release_lut_import_reservation(project_index);
                 }
                 Event::BatchRejected { error, .. } => {
                     let name = &self.projects[project_index].name;
@@ -978,6 +1160,9 @@ impl KinewrightApp {
                         "Operations",
                         format!("Edit plan rejected in {name}: {error}"),
                     );
+                    // A rejected batch never registers its asset, so holding
+                    // the id would stall every later import forever.
+                    self.release_lut_import_reservation(project_index);
                 }
                 Event::RevisionConflict { expected, actual } => {
                     let name = &self.projects[project_index].name;
@@ -1087,6 +1272,60 @@ impl KinewrightApp {
             }
         });
     }
+
+    /// The CC4 §7 `Look` menu: import a `.cube` and browse the catalogue.
+    ///
+    /// Both entries need a saved project, because an imported look is bytes
+    /// the project owns and an unsaved project has nowhere to own them
+    /// (CC4 §2.2). A look applies to a clip, so both entries also need a
+    /// selected media clip; without one, `Import LUT…` still registers the
+    /// asset so the operator can bind it afterwards.
+    fn look_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Look", |ui| {
+            let unavailable = self.focused().lut_store_unavailable_reason();
+            let selected_clip = self.selected_media_clip();
+            let import = ui
+                .add_enabled(unavailable.is_none(), egui::Button::new("Import LUT…"))
+                .on_hover_text(unavailable.clone().unwrap_or_else(|| {
+                    "Import a .cube into this project's store and apply it to the selected clip"
+                        .to_owned()
+                }));
+            if import.clicked() {
+                ui.close();
+                if let Some(path) = crate::media_workflow::choose_lut_file() {
+                    self.start_lut_import(
+                        path,
+                        crate::media_workflow::LutImportIntent::Apply {
+                            clip: selected_clip,
+                            stage: kinewright_core::ColorStage::Look,
+                        },
+                    );
+                }
+                return;
+            }
+            let browse = ui
+                .add_enabled(selected_clip.is_some(), egui::Button::new("Browse looks…"))
+                .on_hover_text("Select a media clip to apply a look to it");
+            if browse.clicked() {
+                ui.close();
+                if let Some(clip) = selected_clip {
+                    self.look_browser.open_for(clip, None);
+                }
+            }
+        });
+    }
+
+    /// The focused project's selected clip, when it is a media clip a look can
+    /// be applied to.
+    pub(crate) fn selected_media_clip(&self) -> Option<kinewright_core::ClipId> {
+        let session = self.focused();
+        session.selected_clip.filter(|clip| {
+            session
+                .document
+                .clip(*clip)
+                .is_some_and(|clip| matches!(clip.content, kinewright_core::ClipContent::Media))
+        })
+    }
 }
 
 impl eframe::App for KinewrightApp {
@@ -1124,6 +1363,7 @@ impl eframe::App for KinewrightApp {
         self.show_record_dialog(ui.ctx());
         self.show_settings_dialog(ui.ctx());
         self.show_media_cache_dialog(ui.ctx());
+        self.look_browser(ui.ctx());
         self.show_legacy_relink_confirmation(ui.ctx());
         self.show_help(ui.ctx());
         self.show_error_log(ui.ctx());
@@ -1154,6 +1394,7 @@ impl KinewrightApp {
                     ui.label(theme::wordmark("KINEWRIGHT", color::TEXT_SECONDARY));
                     ui.separator();
                     self.file_menu(ui);
+                    self.look_menu(ui);
                     if ui
                         .add_enabled(
                             self.export_job.is_none(),
@@ -1400,6 +1641,30 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
         Operation::MoveMarker { marker, to } => format!("Moved marker {marker} to frame {to}"),
         Operation::AddEffect { clip, effect } => {
             format!("Added {} effect {} to clip {clip}", effect.name, effect.id)
+        }
+        Operation::InsertEffect {
+            clip,
+            index,
+            effect,
+        } => format!(
+            "Inserted {} effect {} at position {index} on clip {clip}",
+            effect.name, effect.id
+        ),
+        Operation::ConvertLegacyLook {
+            clip,
+            effect,
+            lut_asset,
+            mix_basis_points,
+        } => format!(
+            "Converted legacy look {effect} on clip {clip} to a managed look on LUT asset \
+             {lut_asset} at {}% mix",
+            mix_basis_points / 100
+        ),
+        Operation::AddLutAsset { asset } => {
+            format!("Registered LUT asset {} ({})", asset.id, asset.title)
+        }
+        Operation::RemoveLutAsset { lut_asset } => {
+            format!("Removed LUT asset {lut_asset}")
         }
         Operation::RemoveEffect { clip, effect } => {
             format!("Removed effect {effect} from clip {clip}")

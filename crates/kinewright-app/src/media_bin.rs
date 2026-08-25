@@ -55,6 +55,19 @@ impl KinewrightApp {
                 .collect()
         });
         for path in dropped {
+            // A dropped `.cube` routes through the same look-import path as
+            // the file picker rather than the media probe (CC4 §7).
+            if crate::media_workflow::is_cube_lut_path(&path) {
+                let clip = self.selected_media_clip();
+                self.start_lut_import(
+                    path,
+                    crate::media_workflow::LutImportIntent::Apply {
+                        clip,
+                        stage: kinewright_core::ColorStage::Look,
+                    },
+                );
+                continue;
+            }
             self.import_media_path(path);
         }
     }
@@ -545,6 +558,7 @@ mod tests {
             markers: Vec::new(),
             fps,
             resolution: (1_920, 1_080),
+            lut_assets: Vec::new(),
             duration: TimeCode::ZERO,
         };
         assert_eq!(

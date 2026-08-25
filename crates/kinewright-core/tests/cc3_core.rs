@@ -236,9 +236,17 @@ fn curve_parameter_name_helper_lists_every_parameter_one_curve_owns() {
 /// CC3 §3.1 and §9: the new nodes are managed, never compatibility stages.
 #[test]
 fn the_new_nodes_are_managed_colour_nodes_and_never_compatibility_stages() {
+    // CC4 §3.1 grew this list from three to five and reordered it into stage
+    // order; the three CC3 correction kinds keep their relative order.
     assert_eq!(
         MANAGED_COLOR_NODE_NAMES,
-        ["primary_correction", "color_wheels", "color_curves"]
+        [
+            "technical_lut",
+            "primary_correction",
+            "color_wheels",
+            "color_curves",
+            "creative_look"
+        ]
     );
     for name in MANAGED_COLOR_NODE_NAMES {
         assert!(is_managed_color_node(name));

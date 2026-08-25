@@ -91,7 +91,7 @@ const SPEC_RELATIVE_TOLERANCE: f64 = 1.0e-5;
 const SPEC_ABSOLUTE_FLOOR: f64 = 1.0e-7;
 
 /// The CC3 §10.2 raster: 24 linear levels crossed with 8 channel patterns.
-const CC3_RASTER_LEVELS: [f32; 24] = [
+pub(crate) const CC3_RASTER_LEVELS: [f32; 24] = [
     -0.50,
     -0.25,
     -0.10,
@@ -119,7 +119,7 @@ const CC3_RASTER_LEVELS: [f32; 24] = [
 ];
 
 /// The eight §10.2 channel patterns, in raster order.
-const CC3_PATTERNS: [&str; 8] = [
+pub(crate) const CC3_PATTERNS: [&str; 8] = [
     "neutral", "red", "green", "blue", "cyan", "magenta", "yellow", "skewed",
 ];
 
@@ -128,8 +128,8 @@ const CC3_PATTERNS: [&str; 8] = [
 /// Wide blocks keep the production linear sampler on texel interiors, exactly
 /// as the CC1 chart fixture does; a one-pixel-per-sample raster would measure
 /// interpolated seams instead of the node math.
-const CC3_RASTER_BLOCK_WIDTH: u32 = 8;
-const CC3_RASTER_HEIGHT: u32 = 2;
+pub(crate) const CC3_RASTER_BLOCK_WIDTH: u32 = 8;
+pub(crate) const CC3_RASTER_HEIGHT: u32 = 2;
 
 /// The §10.2 sample count: 24 levels × 8 patterns.
 const CC3_RASTER_SAMPLES: usize = CC3_RASTER_LEVELS.len() * CC3_PATTERNS.len();
@@ -175,7 +175,7 @@ fn pattern_sample(pattern: usize, level: f32) -> [f32; 3] {
 }
 
 /// The CC3 §10.2 parity raster: 192 RGB samples.
-fn cc3_parity_raster() -> Vec<[f32; 3]> {
+pub(crate) fn cc3_parity_raster() -> Vec<[f32; 3]> {
     let mut samples = Vec::with_capacity(CC3_RASTER_SAMPLES);
     for level in CC3_RASTER_LEVELS {
         for pattern in 0..CC3_PATTERNS.len() {
@@ -187,7 +187,7 @@ fn cc3_parity_raster() -> Vec<[f32; 3]> {
 }
 
 /// The §10.2 raster as a wide-bar working frame.
-fn cc3_raster_frame() -> (u32, u32, WorkingFrame) {
+pub(crate) fn cc3_raster_frame() -> (u32, u32, WorkingFrame) {
     let samples = cc3_parity_raster();
     let width = CC3_RASTER_BLOCK_WIDTH * samples.len() as u32;
     let height = CC3_RASTER_HEIGHT;
@@ -294,7 +294,7 @@ fn with_parameter(effect: &Effect, name: &str, value: i64) -> Effect {
 
 /// A representative non-neutral wheels node used by the ordering, parity, and
 /// proof fixtures.
-fn representative_wheels(id: u64) -> Effect {
+pub(crate) fn representative_wheels(id: u64) -> Effect {
     wheels_effect(
         id,
         &[
@@ -312,7 +312,7 @@ fn representative_wheels(id: u64) -> Effect {
 
 /// A representative non-neutral curves node: an S-curve on master, a lifted
 /// red, and an over-range-aware blue.
-fn representative_curves(id: u64) -> Effect {
+pub(crate) fn representative_curves(id: u64) -> Effect {
     curves_effect(
         id,
         &[
@@ -329,7 +329,7 @@ fn representative_curves(id: u64) -> Effect {
     )
 }
 
-fn primary_effect(id: u64) -> Effect {
+pub(crate) fn primary_effect(id: u64) -> Effect {
     color_node_effect(
         id,
         "primary_correction",
@@ -435,7 +435,7 @@ fn gpu_monitor(
 /// The CC1 helper takes a `PrimaryCorrection` for its failure message and so
 /// cannot describe a wheels or curves case; the gate itself is CC1's
 /// [`MIN_CHANGED_LINEAR_BASIS_POINTS`], reused rather than restated.
-fn assert_case_is_not_vacuous(expected: &[f32], baseline: &[f32], label: &str) {
+pub(crate) fn assert_case_is_not_vacuous(expected: &[f32], baseline: &[f32], label: &str) {
     assert_eq!(expected.len(), baseline.len());
     let compared = u64::try_from(expected.len() / 4 * 3).unwrap_or(0);
     let changed = expected
@@ -539,7 +539,7 @@ fn emit_cc3_evidence(
     write_evidence_artefact(fixture, &payload);
 }
 
-fn json_hash(value: &Value) -> String {
+pub(crate) fn json_hash(value: &Value) -> String {
     output_hash(
         serde_json::to_string(value)
             .expect("CC3 evidence must serialize")
@@ -884,7 +884,7 @@ fn cc3_parity_raster_asserts_its_own_documented_coverage() {
     );
 }
 
-fn bits_of(values: &[f32]) -> Vec<u32> {
+pub(crate) fn bits_of(values: &[f32]) -> Vec<u32> {
     values.iter().map(|value| value.to_bits()).collect()
 }
 
@@ -1159,7 +1159,7 @@ fn cc3_grade709_is_a_bijection_and_matches_the_documented_anchors() {
 // ---------------------------------------------------------------------------
 
 /// A neutral BT.709 ramp of `2^depth_bits` codes, decoded to scene-linear.
-fn neutral_ramp(depth_bits: u32) -> (u32, u32, WorkingFrame) {
+pub(crate) fn neutral_ramp(depth_bits: u32) -> (u32, u32, WorkingFrame) {
     let levels = 1_u32 << depth_bits;
     let maximum = (levels - 1) as f32;
     let rgb = (0..levels)
@@ -1172,7 +1172,7 @@ fn neutral_ramp(depth_bits: u32) -> (u32, u32, WorkingFrame) {
 }
 
 /// Adjacent RGB pairs that descend left to right after monitor encoding.
-fn descending_pairs(monitor: &[u8], width: u32, height: u32) -> usize {
+pub(crate) fn descending_pairs(monitor: &[u8], width: u32, height: u32) -> usize {
     let pixels = monitor.as_chunks::<4>().0;
     assert_eq!(pixels.len(), (width * height) as usize);
     let mut descending = 0;

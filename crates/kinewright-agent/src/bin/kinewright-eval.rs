@@ -2638,6 +2638,7 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
         },
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
+        lut_assets: Vec::new(),
         tracks: vec![
             Track {
                 id: TrackId(1),
@@ -3019,6 +3020,7 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
         catalog: MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
+        lut_assets: Vec::new(),
         tracks: vec![
             Track {
                 id: TrackId(truth.video_track_id),
@@ -3599,6 +3601,7 @@ fn empty_timeline_document(assets: Vec<MediaAsset>) -> Document {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
+        lut_assets: Vec::new(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -3656,6 +3659,7 @@ fn timeline_document(
         media_pool: assets,
         markers: Vec::new(),
         color_context: kinewright_core::ColorContext::default(),
+        lut_assets: Vec::new(),
         fps,
         resolution: (320, 180),
         duration: timeline_start,

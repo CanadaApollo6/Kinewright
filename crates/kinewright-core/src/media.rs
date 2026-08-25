@@ -10,8 +10,8 @@ use crossbeam_channel::{Receiver, Sender};
 use thiserror::Error;
 
 use crate::{
-    AssetId, ClipId, ColorDescription, Document, MediaAsset, MediaSourceFingerprint, Rational,
-    TimeCode, TrackId,
+    AssetId, ClipId, ColorDescription, Document, EffectId, LutAsset, LutAssetId, MediaAsset,
+    MediaSourceFingerprint, Rational, TimeCode, TrackId,
 };
 
 /// The runtime truth about whether an imported source can currently be read.
@@ -123,6 +123,190 @@ impl ExportMediaPreflightReport {
             self.issues.len()
         )
     }
+}
+
+/// The runtime truth about whether a project-owned LUT asset can currently be
+/// read from the store (CC4 §2.3).
+///
+/// Availability is runtime state, never project state: it depends on the
+/// current machine and is never serialized into a document. Core has no
+/// filesystem or project-directory concept, so it never computes these values
+/// — the media layer observes them against the derived store root and passes
+/// them in.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LutAvailabilityKind {
+    /// The store file exists, is a regular file, and hashes to `sha256`.
+    Verified,
+    /// The store file is absent or is not a regular file.
+    Missing,
+    /// A file exists but its bytes hash to something else.
+    Changed,
+    /// The path exists but bytes or metadata cannot be read.
+    Unreadable,
+}
+
+/// A typed, machine-readable LUT availability observation (CC4 §2.3).
+///
+/// M41's `online_unverified` has no CC4 equivalent: a LUT asset can only be
+/// created with a hash, so there is no legacy unverified state.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct LutAvailabilityStatus {
+    pub kind: LutAvailabilityKind,
+    /// The hash actually observed, present when a file was read and hashed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub observed_sha256: Option<String>,
+    /// The backend reason, preserved verbatim for recovery surfaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub reason: Option<String>,
+    /// The expected store path, so a human can be told where to look.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub path: Option<PathBuf>,
+}
+
+/// One live LUT-availability failure that blocks proof and export (CC4 §2.3).
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct ExportLutPreflightIssue {
+    pub lut_asset: LutAssetId,
+    pub title: String,
+    /// The hash the project records, which is the identity being looked for.
+    pub sha256: String,
+    pub kind: LutAvailabilityKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub path: Option<PathBuf>,
+    /// Every node that could evaluate this asset on some frame, in document
+    /// order. An asset referenced only by nodes that can never evaluate does
+    /// not appear in the report at all.
+    pub referenced_by: Vec<(ClipId, EffectId)>,
+}
+
+/// Live LUT-identity result over the assets referenced by possibly-active
+/// nodes in one immutable export document (CC4 §2.3).
+///
+/// The mirror of [`ExportMediaPreflightReport`] for looks. A `missing`,
+/// `changed`, or `unreadable` asset referenced by a node that could evaluate
+/// blocks managed proof and export; an asset referenced only by bypassed or
+/// `mix = 0` nodes does not block, because those nodes are never evaluated.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct ExportLutPreflightReport {
+    /// Asset ids checked, in `Document::lut_assets` order. Assets no
+    /// possibly-active node references are intentionally absent.
+    pub checked_lut_assets: Vec<LutAssetId>,
+    /// Every status other than `verified`, retained with its typed backend
+    /// reason for UI and agent recovery surfaces.
+    pub issues: Vec<ExportLutPreflightIssue>,
+}
+
+impl ExportLutPreflightReport {
+    /// Return whether every look a frame could need hashed to its recorded
+    /// identity at preflight time.
+    #[must_use]
+    pub const fn export_ready(&self) -> bool {
+        self.issues.is_empty()
+    }
+
+    /// Produce a concise human-readable summary while preserving the full
+    /// typed report for callers that need individual recovery actions.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        if self.issues.is_empty() {
+            return format!(
+                "{} referenced LUT asset(s) are present and hash-verified",
+                self.checked_lut_assets.len()
+            );
+        }
+        let details = self
+            .issues
+            .iter()
+            .map(|issue| {
+                let reason = issue
+                    .reason
+                    .as_deref()
+                    .unwrap_or("no backend reason was provided");
+                format!("{} ({:?}): {reason}", issue.title, issue.kind)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "Export blocked: {} LUT asset(s) need restore or replacement: {details}",
+            self.issues.len()
+        )
+    }
+}
+
+/// Recheck every LUT asset a frame could need immediately before a proof or an
+/// export is accepted (CC4 §2.3).
+///
+/// The observation comes from the caller's store-backed probe rather than the
+/// persisted document, for the same reason M41's media preflight does: the
+/// bytes are machine-local and can change while a project is open. Core
+/// supplies only the document-side half — which assets are referenced by nodes
+/// that could evaluate — because it has no filesystem concept.
+///
+/// Assets referenced only by nodes that can never evaluate (bypassed on every
+/// frame, `mix = 0` on every frame, or unbound) are skipped entirely, so a
+/// look an operator has switched off cannot block a delivery.
+#[must_use]
+pub fn export_lut_preflight_with(
+    document: &Document,
+    availability_for: &dyn Fn(&LutAsset) -> LutAvailabilityStatus,
+) -> ExportLutPreflightReport {
+    let mut checked_lut_assets = Vec::new();
+    let mut issues = Vec::new();
+    for asset in &document.lut_assets {
+        let referenced_by = possibly_active_lut_references(document, asset.id);
+        if referenced_by.is_empty() {
+            continue;
+        }
+        checked_lut_assets.push(asset.id);
+        let availability = availability_for(asset);
+        if availability.kind == LutAvailabilityKind::Verified {
+            continue;
+        }
+        issues.push(ExportLutPreflightIssue {
+            lut_asset: asset.id,
+            title: asset.title.clone(),
+            sha256: asset.sha256.clone(),
+            kind: availability.kind,
+            reason: availability.reason,
+            path: availability.path,
+            referenced_by,
+        });
+    }
+    ExportLutPreflightReport {
+        checked_lut_assets,
+        issues,
+    }
+}
+
+/// Every node that references one asset and could evaluate on some frame.
+fn possibly_active_lut_references(document: &Document, id: LutAssetId) -> Vec<(ClipId, EffectId)> {
+    let referencing = document.lut_asset_references(id);
+    document
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .flat_map(|clip| clip.effects.iter().map(move |effect| (clip.id, effect)))
+        .filter(|(clip, effect)| {
+            referencing.contains(&(*clip, effect.id)) && crate::lut_node_may_be_active(effect)
+        })
+        .map(|(clip, effect)| (clip, effect.id))
+        .collect()
 }
 
 /// Fixed cache families exposed by the media runtime. The generated-proxy

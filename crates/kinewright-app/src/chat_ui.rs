@@ -21,7 +21,7 @@ use serde::Serialize;
 use crate::{
     app::KinewrightApp,
     icons::Icon,
-    project::{ProjectSession, index_after_close},
+    project::{ProjectPathHandle, ProjectSession, index_after_close},
     theme::{self, color, radius, size, space, type_size},
 };
 
@@ -236,15 +236,24 @@ impl AgentThread {
         playback: &Arc<dyn Playback>,
         analysis: &Arc<dyn Analysis>,
         exporter: &Arc<dyn Export>,
+        project_path: &ProjectPathHandle,
     ) -> Result<Self, String> {
         let name = name.into();
         let branch = TimelineBranch::new(name.clone(), base_revision, Arc::clone(base_document))
             .map_err(|error| error.to_string())?;
-        let mcp_server = match McpServer::start_isolated_with_exporter(
+        // The branch server derives its own `<stem>.kinewright-assets` root
+        // from this handle, and a server started without it reports
+        // `project_not_saved` from `import_lut_asset` and `unknown_no_store`
+        // from every availability surface — on a project that is saved, whose
+        // live server resolves the same looks fine. Sharing the session's one
+        // handle makes a store-blind branch server unrepresentable, and makes
+        // one Save As visible to every thread at once (CC4 §2.2, §8).
+        let mcp_server = match McpServer::start_isolated_with_exporter_and_project_path(
             branch.core(),
             Arc::clone(playback),
             Arc::clone(analysis),
             Arc::clone(exporter),
+            Arc::clone(project_path),
         ) {
             Ok(server) => Some(server),
             Err(error) => {
@@ -281,6 +290,7 @@ impl AgentThread {
         playback: Arc<dyn Playback>,
         analysis: Arc<dyn Analysis>,
         exporter: Arc<dyn Export>,
+        project_path: &ProjectPathHandle,
     ) -> Result<(), String> {
         if let Some(confirmations) = &self.confirmations {
             confirmations.reject_all("the agent branch was replaced");
@@ -289,9 +299,14 @@ impl AgentThread {
         self.selected_operations.clear();
         let branch = TimelineBranch::new(self.name.clone(), base_revision, base_document)
             .map_err(|error| error.to_string())?;
-        let server =
-            McpServer::start_isolated_with_exporter(branch.core(), playback, analysis, exporter)
-                .map_err(|error| error.to_string())?;
+        let server = McpServer::start_isolated_with_exporter_and_project_path(
+            branch.core(),
+            playback,
+            analysis,
+            exporter,
+            Arc::clone(project_path),
+        )
+        .map_err(|error| error.to_string())?;
         self.confirmations = Some(server.confirmations());
         self.mcp_server = Some(server);
         self.branch = branch;
@@ -523,12 +538,14 @@ impl KinewrightApp {
         revision: TimelineRevision,
         document: Arc<Document>,
     ) -> bool {
+        let project_path = Arc::clone(&self.projects[project_index].agent_project_path);
         let result = self.projects[project_index].threads[thread_index].replace_branch(
             revision,
             document,
             Arc::clone(&self.playback),
             Arc::clone(&self.analysis),
             Arc::clone(&self.exporter),
+            &project_path,
         );
         if let Err(error) = result {
             self.record_error("Agent branch", error);
@@ -908,6 +925,7 @@ impl KinewrightApp {
             .saturating_add(1);
         let base_revision = self.projects[project_index].revision;
         let base_document = Arc::clone(&self.projects[project_index].document);
+        let project_path = Arc::clone(&self.projects[project_index].agent_project_path);
         let thread = AgentThread::new(
             format!("Thread {next_number}"),
             harness,
@@ -917,6 +935,7 @@ impl KinewrightApp {
             &self.playback,
             &self.analysis,
             &self.exporter,
+            &project_path,
         );
         let Ok(thread) = thread else {
             self.record_error("Agent branch", "Could not create an isolated agent branch");

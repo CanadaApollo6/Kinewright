@@ -2164,6 +2164,7 @@ mod tests {
             markers: Vec::new(),
             fps,
             resolution: (1_920, 1_080),
+            lut_assets: Vec::new(),
             duration: TimeCode(30),
         }
     }

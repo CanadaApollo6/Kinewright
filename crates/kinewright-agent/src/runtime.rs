@@ -153,6 +153,8 @@ pub fn search_capabilities(
 const CAPABILITY_KIND_OVERRIDES: &[(&str, CapabilityKind)] = &[
     ("analyze_color_shot", CapabilityKind::Inspector),
     ("render_color_proof", CapabilityKind::Inspector),
+    // CC4 §8: `list_look_assets` is read-only LUT-asset evidence.
+    ("list_look_assets", CapabilityKind::Inspector),
 ];
 
 fn capability_kind(name: &str, operation_names: &BTreeSet<String>) -> CapabilityKind {
@@ -274,6 +276,17 @@ impl PreparedPlanStore {
         {
             return Err(PreparePlanError::UnsupportedOperation(
                 "RelinkAsset is only available through relink_media, which probes and hashes the replacement path before applying it".to_owned(),
+            ));
+        }
+        // CC4 §8: a prepared plan has no way to write the project LUT store, so
+        // a plan-supplied record could name bytes that do not exist. Only
+        // `import_lut_asset` can create a `LutAsset`.
+        if operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::AddLutAsset { .. }))
+        {
+            return Err(PreparePlanError::UnsupportedOperation(
+                "AddLutAsset is only available through import_lut_asset, which parses, hashes, and stores the .cube bytes before registering the record".to_owned(),
             ));
         }
         let mut candidate = document.clone();

@@ -6707,6 +6707,7 @@ mod tests {
             resolution: (320, 180),
             duration: TimeCode(60),
             color_context: kinewright_core::ColorContext::default(),
+            lut_assets: Vec::new(),
         }
     }
 

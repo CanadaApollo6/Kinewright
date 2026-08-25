@@ -3,13 +3,14 @@ use std::{borrow::Cow, fmt::Write, sync::Arc};
 use kinewright_core::{
     COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN, COLOR_CURVE_MAX_POINTS,
     COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS, ColorCurveChannel, EFFECT_DESCRIPTORS,
-    Operation, TITLE_PARAMETER_DESCRIPTORS, TRANSITION_DESCRIPTORS, TimelineRevision,
+    EffectParameterDescriptor, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER, Operation,
+    TITLE_PARAMETER_DESCRIPTORS, TRANSITION_DESCRIPTORS, TimelineRevision, is_lut_color_node,
 };
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 66] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 71] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -21,6 +22,11 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 66] = [
     "plan_primary_correction",
     "plan_color_wheels",
     "plan_color_curves",
+    "plan_technical_lut",
+    "plan_creative_look",
+    "list_look_assets",
+    "import_lut_asset",
+    "convert_legacy_look",
     "render_color_proof",
     "get_media_status",
     "get_cache_status",
@@ -78,6 +84,25 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 66] = [
     "import_media",
 ];
 
+/// Operation variants deliberately absent from the generated mutator tools.
+///
+/// Each one is owned by exactly one hand-written capability that does work the
+/// generated single-operation tool cannot express:
+///
+/// - `relink_media` for `RelinkAsset`: the replacement must be probed and
+///   hashed by the filesystem-owning media layer first;
+/// - `import_lut_asset` for `AddLutAsset`: the `.cube` bytes must be parsed,
+///   hashed, and written into the project store first (CC4 §8);
+/// - `convert_legacy_look` for `ConvertLegacyLook`: a legacy look whose asset
+///   is not registered yet needs the `[AddLutAsset, ConvertLegacyLook]` batch
+///   of CC4 §9, and `AddLutAsset` is refused on every plan path by design, so
+///   the generated single-operation tool could only ever describe the half of
+///   the conversion that happens to already be submittable. The raw
+///   `ConvertLegacyLook` operation stays legal in `prepare_edit_plan` for a
+///   node whose asset is already registered; nothing new is blocked.
+pub const UNGENERATED_OPERATION_VARIANTS: [&str; 3] =
+    ["RelinkAsset", "AddLutAsset", "ConvertLegacyLook"];
+
 #[derive(Debug, Clone)]
 pub struct OperationToolDefinition {
     pub variant: String,
@@ -124,18 +149,25 @@ pub fn operation_tools() -> Result<Vec<OperationToolDefinition>, SchemaError> {
 
     variants
         .iter()
-        // Relinking is intentionally omitted from generated mutator tools.
+        // Relinking and LUT-asset registration are intentionally omitted from
+        // generated mutator tools.
+        //
         // A raw Operation::RelinkAsset cannot prove that the replacement path
-        // was probed and hashed by the filesystem-owning media layer. The
-        // explicit `relink_media` capability performs that preflight before
-        // entering Core; keeping the enum variant in the core schema preserves
-        // journal/serde compatibility without exposing an unsafe shortcut.
+        // was probed and hashed by the filesystem-owning media layer, and a
+        // raw Operation::AddLutAsset cannot prove that the recorded sha256
+        // names bytes that actually exist in the project LUT store (CC4 §8).
+        // The explicit `relink_media` and `import_lut_asset` capabilities
+        // perform that filesystem work before entering Core; keeping the enum
+        // variants in the core schema preserves journal/serde compatibility
+        // without exposing an unsafe shortcut. `ConvertLegacyLook` joins them
+        // because the CC4 §9 conversion is a batch whose first half is
+        // `AddLutAsset`; see UNGENERATED_OPERATION_VARIANTS.
         .filter(|variant_schema| {
             variant_schema
                 .get("properties")
                 .and_then(Value::as_object)
                 .and_then(|properties| properties.keys().next())
-                .is_none_or(|variant| variant != "RelinkAsset")
+                .is_none_or(|variant| !UNGENERATED_OPERATION_VARIANTS.contains(&variant.as_str()))
         })
         .map(|variant_schema| operation_tool(variant_schema, definitions.as_ref()))
         .collect()
@@ -233,10 +265,21 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::RemoveMarker { .. } => "remove_marker",
         Operation::MoveMarker { .. } => "move_marker",
         Operation::AddEffect { .. } => "add_effect",
+        Operation::InsertEffect { .. } => "insert_effect",
         Operation::RemoveEffect { .. } => "remove_effect",
         Operation::SetEffectParam { .. } => "set_effect_param",
         Operation::SetEffectKeyframes { .. } => "set_effect_keyframes",
         Operation::ClearEffectKeyframes { .. } => "clear_effect_keyframes",
+        // Owned by the hand-written `convert_legacy_look` capability, which
+        // registers the asset and converts in one batch (CC4 §9). The name is
+        // stable for journal and plan diagnostics.
+        Operation::ConvertLegacyLook { .. } => "convert_legacy_look",
+        // This name remains stable for journal/plan diagnostics, but the
+        // generated operation tool is deliberately not emitted (see above):
+        // only `import_lut_asset` can create a `LutAsset` record, because only
+        // it can write the hashed bytes into the project store (CC4 §8).
+        Operation::AddLutAsset { .. } => "add_lut_asset",
+        Operation::RemoveLutAsset { .. } => "remove_lut_asset",
         Operation::SetTitleParam { .. } => "set_title_param",
         Operation::SetClipAudio { .. } => "set_clip_audio",
         Operation::AddTransition { .. } => "add_transition",
@@ -316,7 +359,11 @@ fn operation_tool(
     );
     if matches!(
         variant.as_str(),
-        "AddEffect" | "SetEffectParam" | "SetEffectKeyframes" | "ClearEffectKeyframes"
+        "AddEffect"
+            | "InsertEffect"
+            | "SetEffectParam"
+            | "SetEffectKeyframes"
+            | "ClearEffectKeyframes"
     ) {
         write!(description, " {}", effect_documentation())
             .expect("writing effect documentation to a String cannot fail");
@@ -338,6 +385,15 @@ fn operation_tool(
     match variant.as_str() {
         "RelinkAsset" => description.push_str(
             " This operation is intentionally not exposed as a generated tool; use relink_media so the media layer probes and hashes the replacement before Core applies it.",
+        ),
+        "AddLutAsset" => description.push_str(
+            " This operation is intentionally not exposed as a generated tool; use import_lut_asset so the media layer parses, hashes, and stores the .cube bytes before Core registers the record.",
+        ),
+        "InsertEffect" => description.push_str(
+            " The positional sibling of AddEffect: index may equal the current effect count, which appends. Managed colour nodes must stay in non-decreasing stage order (technical_lut, then primary_correction/color_wheels/color_curves, then creative_look); a violating index is rejected, never reordered. Prefer plan_technical_lut or plan_creative_look, which compute a legal index for you.",
+        ),
+        "RemoveLutAsset" => description.push_str(
+            " Removes one project LUT asset record. It is rejected while any effect still references the id, including a bypassed node and a Hold keyframe value, and it never deletes the content-addressed store file.",
         ),
         "SetAssetColorDescription" => description.push_str(
             " Source colour overrides must provide the complete typed colour description, nonzero confidence, and user_override provenance. The operation is revision-gated and undoable.",
@@ -427,6 +483,12 @@ fn effect_documentation() -> String {
         // is read from the Core descriptor, so the summary cannot drift.
         if effect.name == COLOR_CURVES_EFFECT_NAME {
             documentation.push_str(&color_curves_pattern_documentation());
+        } else if is_lut_color_node(effect.name) {
+            // CC4 §8/M36: `lut_asset_id` spans 0..=2^53-1. Printing that range
+            // on every AddEffect/SetEffectParam description is pure noise — the
+            // only usable ids come from the project, so the description names
+            // the tool that lists them instead.
+            documentation.push_str(&lut_node_pattern_documentation(effect.parameters));
         } else {
             for (parameter_index, parameter) in effect.parameters.iter().enumerate() {
                 if parameter_index != 0 {
@@ -463,6 +525,36 @@ fn effect_documentation() -> String {
 /// The canonical CC3 curves effect name, kept local so the compact-description
 /// special case is greppable from the schema module.
 const COLOR_CURVES_EFFECT_NAME: &str = "color_curves";
+
+/// A compact description of the four CC4 LUT-node controls (CC4 §8, M36).
+///
+/// Every bound is read from the Core descriptor so the summary cannot drift;
+/// only `lut_asset_id`'s `0..=9007199254740991` range is replaced, because
+/// enumerating it teaches an agent nothing it can act on.
+fn lut_node_pattern_documentation(parameters: &[EffectParameterDescriptor]) -> String {
+    let mut documentation = String::new();
+    for (index, parameter) in parameters.iter().enumerate() {
+        if index != 0 {
+            documentation.push_str(", ");
+        }
+        if parameter.name == LUT_ASSET_ID_PARAMETER {
+            documentation.push_str(
+                "lut_asset_id (project LUT asset id; see list_look_assets, neutral 0 = unbound)",
+            );
+            continue;
+        }
+        write!(
+            documentation,
+            "{}={}..={}, neutral {}",
+            parameter.name, parameter.min, parameter.max, parameter.neutral
+        )
+        .expect("writing effect documentation to a String cannot fail");
+        if parameter.name == LUT_INPUT_ENCODING_PARAMETER {
+            documentation.push_str(" (0 display709, 1 linear, 2 grade709)");
+        }
+    }
+    documentation
+}
 
 /// A compact pattern description of the 133 `color_curves` parameters.
 ///
@@ -562,10 +654,12 @@ mod tests {
                 "remove_marker",
                 "move_marker",
                 "add_effect",
+                "insert_effect",
                 "remove_effect",
                 "set_effect_param",
                 "set_effect_keyframes",
                 "clear_effect_keyframes",
+                "remove_lut_asset",
                 "set_title_param",
                 "set_clip_audio",
                 "add_transition",

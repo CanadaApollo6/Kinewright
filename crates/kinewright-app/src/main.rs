@@ -11,6 +11,7 @@ mod export_ui;
 mod icons;
 mod inspector_ui;
 mod keys;
+mod look_browser_ui;
 mod media_bin;
 mod media_workflow;
 mod preview_ui;

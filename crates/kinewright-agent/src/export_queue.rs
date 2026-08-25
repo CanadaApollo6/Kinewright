@@ -4,7 +4,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     thread,
@@ -13,10 +13,12 @@ use std::{
 use crossbeam_channel::{Receiver, Sender};
 use kinewright_core::{
     Analysis, AssetId, DeliveryConformanceReport, DeliveryProfile, Document, Export,
-    ExportCancellation, ExportMediaPreflightIssue, ExportMediaPreflightReport, ExportProgress,
-    MediaAvailabilityKind, MediaError, MediaSourceFingerprint, delivery_conformance,
-    document_for_delivery_profile, export_media_preflight,
+    ExportCancellation, ExportLutPreflightReport, ExportMediaPreflightIssue,
+    ExportMediaPreflightReport, ExportProgress, MediaAvailabilityKind, MediaError,
+    MediaSourceFingerprint, delivery_conformance, document_for_delivery_profile,
+    export_lut_preflight_with, export_media_preflight, lut_node_may_be_active,
 };
+use kinewright_media::LutStore;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -118,6 +120,26 @@ pub enum ExportQueueError {
     Conformance(Box<DeliveryConformanceReport>),
     #[error("live source identity preflight rejected the export")]
     MediaPreflight(Box<ExportMediaPreflightReport>),
+    /// A look a rendered frame could need is `missing`, `changed`, or
+    /// `unreadable` in the project LUT store (CC4 §2.3).
+    #[error("live LUT identity preflight rejected the export")]
+    LutPreflight(Box<ExportLutPreflightReport>),
+    /// The delivery document carries a LUT node that could evaluate, but the
+    /// project has never been saved, so there is no store root to verify
+    /// against (CC4 §2.2).
+    #[error(
+        "the project has no saved path, so its LUT store root cannot be derived; save the project before exporting a look"
+    )]
+    LutStoreNotSaved,
+    /// The delivery document carries a LUT node that could evaluate and the
+    /// project *is* saved, but the store root derived from its path is refused
+    /// (CC4 §2.2).
+    ///
+    /// Distinct from [`Self::LutStoreNotSaved`] because the recovery is the
+    /// opposite: there is nothing to save, and the typed refusal names what
+    /// occupies the root instead.
+    #[error("the project LUT store root cannot be used, so a look cannot be verified: {reason}")]
+    LutStoreRootInvalid { reason: String },
     #[error("the export job id space is exhausted")]
     IdExhausted,
     #[error("export queue capacity must be greater than zero")]
@@ -142,6 +164,9 @@ pub struct ExportQueue {
 }
 
 struct QueueState {
+    /// The saved project file path, shared with the MCP server. The CC4 LUT
+    /// store root is derived from it on every use and never persisted.
+    lut_project_path: Arc<RwLock<Option<PathBuf>>>,
     exporter: Arc<dyn Export>,
     analysis: Arc<dyn Analysis>,
     jobs: Mutex<BTreeMap<ExportJobId, StoredJob>>,
@@ -224,6 +249,65 @@ fn preflight_with_source_identities(
     )
 }
 
+/// Recheck every look a rendered frame could need against the project LUT
+/// store, immediately before the export is admitted (CC4 §2.3).
+///
+/// Core supplies only the document-side half — which assets are referenced by
+/// nodes that could evaluate on some frame — because it has no filesystem
+/// concept. The store root is derived from the saved project path here and
+/// injected, exactly as M41 injects media availability.
+///
+/// A document with no possibly-active LUT node needs no store at all, so an
+/// unsaved project only blocks when a look would actually be rendered.
+fn lut_preflight(
+    document: &Document,
+    lut_project_path: &RwLock<Option<PathBuf>>,
+) -> Result<ExportLutPreflightReport, ExportQueueError> {
+    let needs_store = document
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .flat_map(|clip| &clip.effects)
+        .any(lut_node_may_be_active);
+    let project_path = lut_project_path.read().ok().and_then(|slot| slot.clone());
+    let Some(project_path) = project_path else {
+        if needs_store {
+            return Err(ExportQueueError::LutStoreNotSaved);
+        }
+        return Ok(ExportLutPreflightReport {
+            checked_lut_assets: Vec::new(),
+            issues: Vec::new(),
+        });
+    };
+    let store = match LutStore::for_project(&project_path) {
+        Ok(store) => store,
+        Err(error) => {
+            if needs_store {
+                // A path *is* published, so this is never `project_not_saved`:
+                // the store's own typed refusal is the only honest reason
+                // (CC4 §2.2). `MediaError` has no LUT variant, so the store
+                // encodes its code behind `Backend`'s own label; the label is
+                // dropped here so the typed `<code>: <detail>` survives intact.
+                let rendered = error.to_string();
+                return Err(ExportQueueError::LutStoreRootInvalid {
+                    reason: rendered
+                        .strip_prefix("media backend error: ")
+                        .unwrap_or(rendered.as_str())
+                        .to_owned(),
+                });
+            }
+            return Ok(ExportLutPreflightReport {
+                checked_lut_assets: Vec::new(),
+                issues: Vec::new(),
+            });
+        }
+    };
+    Ok(export_lut_preflight_with(
+        document,
+        &store.availability_resolver(),
+    ))
+}
+
 /// Return a description of the first source whose live identity no longer
 /// matches the identity the job was admitted under, or `None` when every
 /// source still matches.
@@ -292,6 +376,25 @@ impl ExportQueue {
         Self::with_capacity(exporter, analysis, DEFAULT_EXPORT_QUEUE_CAPACITY)
     }
 
+    /// Start a queue that resolves CC4 LUT availability against the project
+    /// path published by the owning session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the worker thread cannot be started.
+    pub fn with_lut_project_path(
+        exporter: Arc<dyn Export>,
+        analysis: Arc<dyn Analysis>,
+        lut_project_path: Arc<RwLock<Option<PathBuf>>>,
+    ) -> Result<Self, ExportQueueError> {
+        Self::configured(
+            exporter,
+            analysis,
+            DEFAULT_EXPORT_QUEUE_CAPACITY,
+            lut_project_path,
+        )
+    }
+
     /// Start a serial export queue with an explicit maximum pending count.
     ///
     /// # Errors
@@ -303,11 +406,28 @@ impl ExportQueue {
         analysis: Arc<dyn Analysis>,
         capacity: usize,
     ) -> Result<Self, ExportQueueError> {
+        Self::configured(exporter, analysis, capacity, Arc::new(RwLock::new(None)))
+    }
+
+    /// Start a serial export queue with an explicit capacity and LUT project
+    /// path handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a zero capacity or if the worker thread cannot be
+    /// started.
+    pub fn configured(
+        exporter: Arc<dyn Export>,
+        analysis: Arc<dyn Analysis>,
+        capacity: usize,
+        lut_project_path: Arc<RwLock<Option<PathBuf>>>,
+    ) -> Result<Self, ExportQueueError> {
         if capacity == 0 {
             return Err(ExportQueueError::InvalidCapacity);
         }
         let (work_tx, work_rx) = crossbeam_channel::bounded(capacity);
         let state = Arc::new(QueueState {
+            lut_project_path,
             exporter,
             analysis,
             jobs: Mutex::new(BTreeMap::new()),
@@ -381,6 +501,13 @@ impl ExportQueue {
             preflight_with_source_identities(&delivery_document, self.state.analysis.as_ref());
         if !media_preflight.export_ready() {
             return Err(ExportQueueError::MediaPreflight(Box::new(media_preflight)));
+        }
+        // CC4 §2.3: a look whose bytes are missing, changed, or unreadable
+        // blocks delivery before the encode, rather than failing at render
+        // time or silently dropping the node.
+        let lut_preflight = lut_preflight(&delivery_document, &self.state.lut_project_path)?;
+        if !lut_preflight.export_ready() {
+            return Err(ExportQueueError::LutPreflight(Box::new(lut_preflight)));
         }
         let output_key = output_path_key(&output_path);
         let cancellation = ExportCancellation::default();
@@ -493,6 +620,17 @@ fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
     if !media_preflight.export_ready() {
         mark_failed(state, work.id, media_preflight.summary());
         return;
+    }
+    match lut_preflight(&work.document, &state.lut_project_path) {
+        Ok(report) if !report.export_ready() => {
+            mark_failed(state, work.id, report.summary());
+            return;
+        }
+        Err(error) => {
+            mark_failed(state, work.id, error.to_string());
+            return;
+        }
+        Ok(_) => {}
     }
     if let Err(error) = validate_worker_output(&work.output_path, work.overwrite) {
         mark_failed(state, work.id, error.to_string());
@@ -1719,6 +1857,184 @@ mod tests {
 
         assert_eq!(
             wait_for_terminal(&queue, job.id).state,
+            ExportJobState::Completed
+        );
+        cleanup_directory(&directory);
+    }
+
+    // -----------------------------------------------------------------------
+    // CC4 §2.3 — the export LUT preflight
+    // -----------------------------------------------------------------------
+
+    /// A document whose one clip carries a `creative_look` bound to an
+    /// imported asset whose bytes are the pinned `warm` bake.
+    fn look_document() -> Document {
+        let mut document = renderable_document(10);
+        document.lut_assets = vec![kinewright_core::LutAsset {
+            id: kinewright_core::LutAssetId(1),
+            sha256: kinewright_media::BuiltinLook::Warm
+                .pinned_sha256()
+                .to_owned(),
+            title: "Warm".to_owned(),
+            kind: kinewright_core::LutAssetKind::Cube3d,
+            size: 17,
+            byte_len: kinewright_media::BuiltinLook::Warm.byte_len(),
+            domain_min_millionths: [-1_000_000; 3],
+            domain_max_millionths: [2_000_000; 3],
+            source: kinewright_core::LutAssetSource::Imported {
+                source_path: "/looks/warm.cube".to_owned(),
+            },
+        }];
+        document.tracks[0].clips[0].effects = vec![kinewright_core::Effect {
+            id: kinewright_core::EffectId(1),
+            name: "creative_look".to_owned(),
+            parameters: BTreeMap::from([(
+                "lut_asset_id".to_owned(),
+                kinewright_core::ParamValue::Integer(1),
+            )]),
+            keyframes: BTreeMap::new(),
+        }];
+        document
+    }
+
+    fn lut_queue(project_path: Option<PathBuf>) -> ExportQueue {
+        ExportQueue::configured(
+            Arc::new(RecordingExporter::new(Duration::ZERO)),
+            fail_closed_analysis(),
+            DEFAULT_EXPORT_QUEUE_CAPACITY,
+            Arc::new(RwLock::new(project_path)),
+        )
+        .unwrap()
+    }
+
+    /// CC4 §2.3: a look a rendered frame could need blocks the export before
+    /// the encode, naming the asset, its recorded hash, and the nodes that
+    /// would have evaluated it.
+    #[test]
+    fn cc4_export_blocks_when_a_referenced_look_is_missing_from_the_store() {
+        let directory = test_directory("cc4-lut-missing");
+        let project = directory.join("edit.kinewright");
+        let queue = lut_queue(Some(project));
+        let error = queue
+            .enqueue(&look_document(), request(directory.join("out.mp4"), false))
+            .expect_err("a missing look must block delivery");
+        let ExportQueueError::LutPreflight(report) = error else {
+            panic!("expected a LUT preflight rejection, got {error}");
+        };
+        assert!(!report.export_ready());
+        assert_eq!(
+            report.checked_lut_assets,
+            vec![kinewright_core::LutAssetId(1)]
+        );
+        assert_eq!(report.issues.len(), 1);
+        assert_eq!(report.issues[0].title, "Warm");
+        assert_eq!(
+            report.issues[0].sha256,
+            kinewright_media::BuiltinLook::Warm.pinned_sha256()
+        );
+        assert_eq!(
+            report.issues[0].kind,
+            kinewright_core::LutAvailabilityKind::Missing
+        );
+        assert_eq!(
+            report.issues[0].referenced_by,
+            vec![(kinewright_core::ClipId(1), kinewright_core::EffectId(1))]
+        );
+        cleanup_directory(&directory);
+    }
+
+    /// CC4 §2.3: the same document passes once the hashed bytes are present in
+    /// the project store.
+    #[test]
+    fn cc4_export_passes_when_the_referenced_look_is_hash_verified() {
+        let directory = test_directory("cc4-lut-verified");
+        let project = directory.join("edit.kinewright");
+        let luts = directory.join("edit.kinewright-assets").join("luts");
+        fs::create_dir_all(&luts).unwrap();
+        let warm = kinewright_media::BuiltinLook::Warm;
+        fs::write(
+            luts.join(format!("{}.cube", warm.pinned_sha256())),
+            warm.canonical_text(),
+        )
+        .unwrap();
+
+        let queue = lut_queue(Some(project));
+        let record = queue
+            .enqueue(&look_document(), request(directory.join("out.mp4"), false))
+            .expect("a verified look must not block delivery");
+        assert_eq!(
+            wait_for_terminal(&queue, record.id).state,
+            ExportJobState::Completed
+        );
+        cleanup_directory(&directory);
+    }
+
+    /// CC4 §2.2: with no saved project there is no store root at all, so a
+    /// timeline carrying a look blocks with `project_not_saved` rather than
+    /// exporting a frame whose look cannot be verified.
+    #[test]
+    fn cc4_export_blocks_a_look_when_the_project_has_never_been_saved() {
+        let directory = test_directory("cc4-lut-unsaved");
+        let queue = lut_queue(None);
+        let error = queue
+            .enqueue(&look_document(), request(directory.join("out.mp4"), false))
+            .expect_err("an unsaved project cannot verify a look");
+        assert!(
+            matches!(error, ExportQueueError::LutStoreNotSaved),
+            "expected the unsaved-project rejection, got {error:?}"
+        );
+
+        // A timeline with no possibly-active LUT node needs no store at all,
+        // so an unsaved project still exports normally.
+        let record = queue
+            .enqueue(
+                &renderable_document(10),
+                request(directory.join("plain.mp4"), false),
+            )
+            .expect("a look-free timeline needs no LUT store");
+        assert_eq!(
+            wait_for_terminal(&queue, record.id).state,
+            ExportJobState::Completed
+        );
+        cleanup_directory(&directory);
+    }
+
+    /// CC4 §2.2: a project that *is* saved but whose derived store root is
+    /// refused is a different rejection from one that was never saved. It
+    /// carries the store's own typed refusal, because "save the project" is a
+    /// recovery that can never clear it.
+    #[test]
+    fn cc4_export_separates_a_refused_store_root_from_an_unsaved_project() {
+        let directory = test_directory("cc4-lut-refused-root");
+        let project = directory.join("edit.kinewright");
+        // A regular file occupies exactly where the store directory belongs.
+        fs::write(directory.join("edit.kinewright-assets"), b"not a directory").unwrap();
+
+        let queue = lut_queue(Some(project));
+        let error = queue
+            .enqueue(&look_document(), request(directory.join("out.mp4"), false))
+            .expect_err("a refused store root cannot verify a look");
+        let ExportQueueError::LutStoreRootInvalid { reason } = &error else {
+            panic!("expected the refused-root rejection, got {error:?}");
+        };
+        assert!(
+            reason.starts_with("lut_store_root_invalid: "),
+            "the typed code survives the MediaError label: {reason}"
+        );
+        assert!(
+            !error.to_string().contains("save the project"),
+            "a saved project must never be told to save itself: {error}"
+        );
+
+        // A look-free timeline still needs no store, refused root or not.
+        let record = queue
+            .enqueue(
+                &renderable_document(10),
+                request(directory.join("plain.mp4"), false),
+            )
+            .expect("a look-free timeline needs no LUT store");
+        assert_eq!(
+            wait_for_terminal(&queue, record.id).state,
             ExportJobState::Completed
         );
         cleanup_directory(&directory);

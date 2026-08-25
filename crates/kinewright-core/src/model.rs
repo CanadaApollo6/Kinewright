@@ -48,6 +48,7 @@ id_type!(BinId);
 id_type!(StringOutId);
 id_type!(SyncGroupId);
 id_type!(AudioBusId);
+id_type!(LutAssetId);
 
 /// Number of presentation-token choices available to project markers.
 ///
@@ -502,6 +503,202 @@ impl MediaCatalog {
     }
 }
 
+/// Largest LUT asset id a project may allocate: `2^53 - 1`, so the id survives
+/// every JSON consumer — including the agent's — without precision loss
+/// (CC4 §2.1).
+pub const LUT_ASSET_ID_MAX: u64 = 9_007_199_254_740_991;
+
+/// Fewest lattice samples per edge a 3D LUT asset may declare (CC4 §2.1).
+pub const LUT_SIZE_MIN: u32 = 2;
+
+/// Most lattice samples per edge a 3D LUT asset may declare (CC4 §2.1).
+///
+/// 65 is the most common vendor export grid and `65 - 1` is a power of two,
+/// which is what makes the CC4 §3.5 exactness claim hold.
+pub const LUT_SIZE_MAX: u32 = 65;
+
+/// The interchange form of one project-owned LUT asset (CC4 §2.1).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+pub enum LutAssetKind {
+    /// A 3D `.cube` lattice, the only kind CC4 evaluates.
+    #[serde(rename = "cube_3d")]
+    Cube3d,
+    /// A 1D shaper. Reserved so a future shaper needs no schema migration;
+    /// rejected on import and by [`validate_lut_asset`] in CC4 (CC4 §1).
+    #[serde(rename = "cube_1d")]
+    Cube1d,
+}
+
+impl LutAssetKind {
+    /// Stable serialized/manifest token for the kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cube3d => "cube_3d",
+            Self::Cube1d => "cube_1d",
+        }
+    }
+}
+
+/// Where a LUT asset's hashed bytes came from (CC4 §2.1).
+///
+/// `source_path` is informational only: it is never opened by the renderer and
+/// never resolved relative to anything. The store file name is the content
+/// hash, so no user-supplied string ever reaches a path component.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LutAssetSource {
+    /// Imported from a file the operator chose.
+    Imported { source_path: String },
+    /// Generated in the binary from a pinned bake (CC4 §2.6).
+    Builtin { name: String },
+}
+
+/// One project-owned, content-hashed LUT asset record (CC4 §2.1).
+///
+/// **The hashed bytes are the authority, not the record.** `size` and the
+/// domain mirrors exist so a human or agent can read a project without
+/// touching the store; a renderer must use the values parsed from the verified
+/// bytes and must report `lut_asset_metadata_mismatch` when they disagree.
+///
+/// Availability (`verified` / `missing` / `changed` / `unreadable`) is runtime
+/// state and is deliberately absent here: it is never serialized (CC4 §2.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LutAsset {
+    /// Stable project-local identity, allocated as `max(existing) + 1`.
+    pub id: LutAssetId,
+    /// The content identity of the LUT file bytes: 64 lowercase hex chars.
+    pub sha256: String,
+    /// The `.cube` `TITLE` when present, otherwise the file stem.
+    /// Informational; never an identity.
+    pub title: String,
+    /// The interchange form. CC4 accepts [`LutAssetKind::Cube3d`] only.
+    pub kind: LutAssetKind,
+    /// Lattice edge length `S`, in [`LUT_SIZE_MIN`]`..=`[`LUT_SIZE_MAX`].
+    pub size: u32,
+    /// Diagnostic and cheap preflight, never proof by itself (M41's rule).
+    pub byte_len: u64,
+    /// Informational mirror of `DOMAIN_MIN`, rounded half away from zero.
+    pub domain_min_millionths: [i64; 3],
+    /// Informational mirror of `DOMAIN_MAX`, rounded half away from zero.
+    pub domain_max_millionths: [i64; 3],
+    /// Provenance.
+    pub source: LutAssetSource,
+}
+
+/// Per-channel field names used by [`validate_lut_asset`]'s domain rejections.
+const LUT_DOMAIN_FIELDS: [&str; 3] = [
+    "domain_r_millionths",
+    "domain_g_millionths",
+    "domain_b_millionths",
+];
+
+/// Whether a string is exactly 64 lowercase hexadecimal characters.
+///
+/// The same spelling M41 requires of [`MediaSourceFingerprint::content_sha256`].
+fn is_canonical_sha256(hash: &str) -> bool {
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Validate one [`LutAsset`] record against the CC4 §2.1 table.
+///
+/// This is the single source of truth for `AddLutAsset` and for the document
+/// invariant, so a record can never enter a project through one path that the
+/// other would reject.
+///
+/// # Errors
+///
+/// Returns [`OpError::InvalidLutAssetHash`] for a malformed content hash and
+/// [`OpError::InvalidLutAssetMetadata`] naming `field`, `observed`, and
+/// `allowed` for every other rejection.
+pub fn validate_lut_asset(asset: &LutAsset) -> Result<(), OpError> {
+    if asset.id.0 == 0 || asset.id.0 > LUT_ASSET_ID_MAX {
+        return Err(OpError::InvalidLutAssetMetadata {
+            field: "id",
+            observed: asset.id.0.to_string(),
+            allowed: "1..=9007199254740991",
+        });
+    }
+    if !is_canonical_sha256(&asset.sha256) {
+        return Err(OpError::InvalidLutAssetHash {
+            lut_asset: asset.id,
+            observed: asset.sha256.clone(),
+            allowed: "exactly 64 lowercase hexadecimal characters",
+        });
+    }
+    if asset.title.is_empty() {
+        return Err(OpError::InvalidLutAssetMetadata {
+            field: "title",
+            observed: String::new(),
+            allowed: "a non-empty title",
+        });
+    }
+    if !matches!(asset.kind, LutAssetKind::Cube3d) {
+        return Err(OpError::InvalidLutAssetMetadata {
+            field: "kind",
+            observed: asset.kind.as_str().to_owned(),
+            allowed: "cube_3d",
+        });
+    }
+    if asset.size < LUT_SIZE_MIN || asset.size > LUT_SIZE_MAX {
+        return Err(OpError::InvalidLutAssetMetadata {
+            field: "size",
+            observed: asset.size.to_string(),
+            allowed: "2..=65",
+        });
+    }
+    if asset.byte_len == 0 {
+        return Err(OpError::InvalidLutAssetMetadata {
+            field: "byte_len",
+            observed: "0".to_owned(),
+            allowed: "a positive byte length",
+        });
+    }
+    let domains = asset
+        .domain_min_millionths
+        .into_iter()
+        .zip(asset.domain_max_millionths)
+        .zip(LUT_DOMAIN_FIELDS);
+    for ((min, max), field) in domains {
+        if min >= max {
+            return Err(OpError::InvalidLutAssetMetadata {
+                field,
+                observed: format!("{min}..{max}"),
+                allowed: "domain_min_millionths < domain_max_millionths",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Whether one effect is a CC4 LUT node bound to `id`, statically or through
+/// any value in its `Hold` keyframe curve.
+fn effect_references_lut_asset(effect: &Effect, id: LutAssetId) -> bool {
+    if !crate::is_lut_color_node(&effect.name) {
+        return false;
+    }
+    let referenced = |value: i64| u64::try_from(value).is_ok_and(|value| value == id.0);
+    let static_reference = matches!(
+        effect.parameters.get(crate::LUT_ASSET_ID_PARAMETER),
+        Some(ParamValue::Integer(value)) if referenced(*value)
+    );
+    static_reference
+        || effect
+            .keyframes
+            .get(crate::LUT_ASSET_ID_PARAMETER)
+            .is_some_and(|curve| {
+                curve
+                    .keyframes
+                    .iter()
+                    .any(|keyframe| referenced(keyframe.value))
+            })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Document {
     /// Video and audio tracks, ordered z-bottom to top.
@@ -526,6 +723,14 @@ pub struct Document {
     #[serde(default)]
     #[schemars(default)]
     pub color_context: ColorContext,
+    /// Project-owned, content-hashed LUT asset records (CC4 §2.1).
+    ///
+    /// Absent in every pre-CC4 project, so those projects load byte-unchanged
+    /// and re-save without the field until a look is added. The samples
+    /// themselves never enter the document: only the 64-character digest does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub lut_assets: Vec<LutAsset>,
     pub fps: Rational,
     pub resolution: (u32, u32),
     pub duration: TimeCode,
@@ -540,6 +745,7 @@ impl Default for Document {
             catalog: MediaCatalog::default(),
             audio_mix: AudioMix::default(),
             color_context: ColorContext::default(),
+            lut_assets: Vec::new(),
             fps: Rational::default(),
             resolution: (1_920, 1_080),
             duration: TimeCode::ZERO,
@@ -582,6 +788,54 @@ impl Document {
             .iter()
             .flat_map(|track| &track.clips)
             .find(|clip| clip.id == id)
+    }
+
+    /// Look up one project-owned LUT asset record.
+    #[must_use]
+    pub fn lut_asset(&self, id: LutAssetId) -> Option<&LutAsset> {
+        self.lut_assets.iter().find(|asset| asset.id == id)
+    }
+
+    /// Allocate the next LUT asset id as `max(existing) + 1` (CC4 §2.1).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OpError::LutAssetIdExhausted`] when the highest existing id
+    /// already occupies [`LUT_ASSET_ID_MAX`].
+    pub fn next_lut_asset_id(&self) -> Result<LutAssetId, OpError> {
+        let highest = self
+            .lut_assets
+            .iter()
+            .map(|asset| asset.id.0)
+            .max()
+            .unwrap_or(0);
+        let next = highest.saturating_add(1);
+        if next > LUT_ASSET_ID_MAX {
+            return Err(OpError::LutAssetIdExhausted);
+        }
+        Ok(LutAssetId(next))
+    }
+
+    /// Every `(clip, effect)` pair whose LUT node references one asset, in
+    /// document order (CC4 §2.7, §6).
+    ///
+    /// A reference counts whether the node is active, bypassed, or neutral,
+    /// and whether the id is the node's stored static value or any value
+    /// appearing in its `Hold` keyframe curve. `RemoveLutAsset` and
+    /// availability reporting both read this, so a look can never be removed
+    /// out from under a frame that still resolves to it.
+    #[must_use]
+    pub fn lut_asset_references(&self, id: LutAssetId) -> Vec<(ClipId, EffectId)> {
+        self.tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .flat_map(|clip| {
+                clip.effects
+                    .iter()
+                    .filter(move |effect| effect_references_lut_asset(effect, id))
+                    .map(move |effect| (clip.id, effect.id))
+            })
+            .collect()
     }
 
     #[must_use]

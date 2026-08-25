@@ -3,9 +3,11 @@
   "contract_token": "cc3_curves_and_wheels",
   "manifest_version": 1,
   "nodes": [
+    "technical_lut",
     "primary_correction",
     "color_wheels",
-    "color_curves"
+    "color_curves",
+    "creative_look"
   ],
   "working_encoding": {
     "name": "grade709",

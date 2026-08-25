@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -12,12 +13,12 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use kinewright_core::{
     Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, BeatStatus, Document, Export,
-    ExportCancellation, ExportSettings, FrameTexture, MediaAsset, MediaAvailabilityKind,
-    MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus,
-    MediaCacheInventory, MediaError, MediaEvent, MonitorProof, Playback, PlaybackState,
-    ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat,
-    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus,
-    VisualAssetResult,
+    ExportCancellation, ExportSettings, FrameTexture, LutAvailabilityKind, LutAvailabilityStatus,
+    MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult,
+    MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory, MediaError, MediaEvent,
+    MonitorProof, Playback, PlaybackState, ProgressSink, Rational, RgbaImage, SceneStatus,
+    SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan,
+    TimelineTranscriptWord, TranscriptStatus, VisualAssetResult, export_lut_preflight_with,
 };
 
 use crate::{
@@ -29,6 +30,8 @@ use crate::{
     derived::{DerivedAnalysisConfig, DerivedAnalysisService},
     derived_cache::CacheStats,
     loudness::measure_loudness,
+    lut::CubeLut,
+    lut_store::LutLibrary,
     render::{DecodeStrategy, FrameRenderer, PREVIEW_MAX_WIDTH, RenderScale},
     sha256::source_fingerprint,
     transcript::{TranscriptService, default_data_dir},
@@ -85,8 +88,122 @@ impl SharedClock {
     }
 }
 
+/// How many verified lattices the engine's published table retains (CC4 2.4).
+///
+/// The table is content-addressed and shared by every open project, so it must
+/// be bounded: nothing else would ever drop an entry belonging to a project
+/// that has been closed. 512 entries is far more than any realistic set of
+/// simultaneously open projects needs — the four built-ins never occupy a slot
+/// at all — and eviction is never a correctness question, because a project
+/// republishes its whole library whenever it is focused, saved, or edits its
+/// asset table.
+///
+/// The retained bytes are already bounded by the process parse cache: an entry
+/// here is an `Arc` clone of a lattice that cache owns, so the table adds a
+/// hash key and a pointer per entry, not a second copy of the samples.
+const PUBLISHED_LATTICE_LIMIT: usize = 512;
+
+/// Every verified LUT lattice any open project has published, keyed by the
+/// SHA-256 of its bytes (CC4 2.4).
+///
+/// This replaces a single published `LutLibrary`. A library is keyed by
+/// `LutAssetId`, and ids restart at 1 in every project, so one library slot
+/// meant whichever project published last answered every other project's
+/// look requests: project A's export could resolve project B's lattice while
+/// B held focus. The content hash cannot alias that way, so publication became
+/// a *merge* into this table and every document-taking render path rebuilds a
+/// document-local library from its own `Document.lut_assets`.
+#[derive(Debug, Default)]
+struct PublishedLattices {
+    by_sha256: HashMap<String, Arc<CubeLut>>,
+    /// Publication order, most recent first. This is what bounds `by_sha256`,
+    /// and it is publication recency rather than lookup recency: the focused
+    /// project republishes its whole library on every focus switch, save, and
+    /// asset-table edit, so the looks actually in use keep returning to the
+    /// front without a write lock on the render path.
+    recent: VecDeque<String>,
+}
+
+impl PublishedLattices {
+    /// Record one verified lattice, promoting it to most recently published.
+    fn publish(&mut self, sha256: &str, lut: &Arc<CubeLut>) {
+        if self
+            .by_sha256
+            .insert(sha256.to_owned(), Arc::clone(lut))
+            .is_some()
+            && let Some(index) = self.recent.iter().position(|key| key == sha256)
+        {
+            self.recent.remove(index);
+        }
+        self.recent.push_front(sha256.to_owned());
+        while self.recent.len() > PUBLISHED_LATTICE_LIMIT {
+            if let Some(evicted) = self.recent.pop_back() {
+                self.by_sha256.remove(&evicted);
+            }
+        }
+    }
+
+    /// Merge every entry of one document's verified library into the table.
+    fn merge(&mut self, library: &LutLibrary) {
+        for (_, sha256, lut) in library.entries() {
+            self.publish(sha256, lut);
+        }
+    }
+}
+
+/// Bind one document's LUT assets to already-published lattices (CC4 2.4).
+///
+/// Every render path that takes a `Document` goes through here, so a look is
+/// resolved by the content hash the *document being rendered* records rather
+/// than by an id some other project happens to share.
+///
+/// # Errors
+///
+/// Returns `missing_lut_asset:` naming each id and recorded hash when a node
+/// that could evaluate on some frame references an asset the table does not
+/// hold. Assets no evaluable node references, and nodes that are bypassed or
+/// `mix = 0` on every frame, never block: CC4 2.3 blocks on the looks a frame
+/// could actually need, not on the whole asset table.
+fn bind_document_luts(
+    document: &Document,
+    published: &HashMap<String, Arc<CubeLut>>,
+) -> Result<Arc<LutLibrary>, MediaError> {
+    let (library, unbound) = LutLibrary::from_document_assets(&document.lut_assets, published);
+    if unbound.is_empty() {
+        return Ok(Arc::new(library));
+    }
+    let report = export_lut_preflight_with(document, &|asset| LutAvailabilityStatus {
+        kind: if unbound.contains(&asset.id) {
+            LutAvailabilityKind::Missing
+        } else {
+            LutAvailabilityKind::Verified
+        },
+        observed_sha256: None,
+        reason: None,
+        path: None,
+    });
+    if report.issues.is_empty() {
+        return Ok(Arc::new(library));
+    }
+    let details = report
+        .issues
+        .iter()
+        .map(|issue| format!("{} ({})", issue.lut_asset, issue.sha256))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(MediaError::Backend(format!(
+        "missing_lut_asset: no published lattice matches LUT asset(s) {details}; restore or \
+         re-import the asset and let the project republish its library before rendering"
+    )))
+}
+
 enum Control {
     SetDocument(Arc<Document>),
+    /// CC4 2.4: the engine's content-addressed lattice table gained entries,
+    /// so the playback worker rebinds its document-local library. The library
+    /// itself never crosses this channel: it is rebuilt from the worker's own
+    /// document, which is the only document the worker may resolve looks for.
+    LutLatticesPublished,
     Play(TimeCode),
     Pause,
     Thumbnail {
@@ -114,6 +231,13 @@ pub struct FfmpegMediaEngine {
     data_dir: PathBuf,
     gpu: GpuContext,
     export_document: Arc<RwLock<Arc<Document>>>,
+    /// Every verified lattice any open project has published, by content hash.
+    ///
+    /// Shared with the playback worker, so the worker, a proof, and an export
+    /// all resolve looks out of the same table — and each of them binds it to
+    /// *its own* document's assets, so no project can be served another
+    /// project's look (CC4 2.4).
+    lut_lattices: Arc<RwLock<PublishedLattices>>,
     transcripts: TranscriptService,
     visual_assets: VisualAssetService,
     derived_analysis: DerivedAnalysisService,
@@ -193,6 +317,8 @@ impl FfmpegMediaEngine {
         let requested = Arc::new(RequestedPositions::default());
         let worker_requested = Arc::clone(&requested);
         let worker_gpu = gpu.clone();
+        let lut_lattices = Arc::new(RwLock::new(PublishedLattices::default()));
+        let worker_lut_lattices = Arc::clone(&lut_lattices);
         thread::Builder::new()
             .name("kinewright-media".to_owned())
             .spawn(move || {
@@ -208,6 +334,7 @@ impl FfmpegMediaEngine {
                     worker_meter,
                     worker_requested,
                     worker_gpu,
+                    worker_lut_lattices,
                 )
                 .run();
             })
@@ -226,6 +353,7 @@ impl FfmpegMediaEngine {
             data_dir: data_dir_for_self,
             gpu,
             export_document: Arc::new(RwLock::new(Arc::new(Document::default()))),
+            lut_lattices,
             transcripts: TranscriptService::new(data_dir)?,
             visual_assets,
             derived_analysis,
@@ -285,6 +413,61 @@ impl FfmpegMediaEngine {
         }
         self.transcripts.register(&asset.path, transcript);
         Ok(())
+    }
+
+    /// Publish one project's verified CC4 lattices for preview, proof, and
+    /// export.
+    ///
+    /// This is the media-side counterpart of `Playback::set_document`: the
+    /// layer that owns a project's LUT store builds the library from that
+    /// project's `Document.lut_assets` and publishes it here, and the renderer
+    /// never opens a LUT file itself. It is an inherent method rather than a
+    /// `Playback` trait method because `LutLibrary` holds verified media-crate
+    /// sample data that Core, which is I/O-free, cannot name.
+    ///
+    /// Publication **merges by content hash** rather than replacing a single
+    /// slot. One engine serves every open project, and `LutAssetId`s restart
+    /// at 1 in each of them, so a single slot meant a proof or a queued export
+    /// belonging to project A could resolve `LutAssetId(1)` to whatever
+    /// project B had published while B held focus. Merging into a
+    /// content-addressed table removes the shared name: each render binds the
+    /// table to the hashes its *own* document records
+    /// ([`LutLibrary::from_document_assets`]).
+    ///
+    /// A merge therefore never invalidates another project's looks, and
+    /// publishing the same library twice is idempotent. The table is bounded
+    /// at [`PUBLISHED_LATTICE_LIMIT`] entries in publication order; an evicted
+    /// lattice is republished by the project that owns it, and until it is, an
+    /// active node referencing it fails the render with `missing_lut_asset`
+    /// rather than rendering without the look.
+    ///
+    /// Built-in looks need no publication at all: they are generated in this
+    /// binary and resolve straight from the pinned bake table.
+    // The `Arc` is taken by value rather than by reference because this is the
+    // application's publication seam and the caller hands over a clone it has
+    // no further use for; narrowing it to `&Arc` would only move the clone to
+    // every call site.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn set_lut_library(&self, library: Arc<LutLibrary>) {
+        if let Ok(mut published) = self.lut_lattices.write() {
+            published.merge(&library);
+        }
+        let _ = self.control_tx.send(Control::LutLatticesPublished);
+    }
+
+    /// Bind one document's LUT assets to the published table, for a
+    /// caller-thread renderer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `missing_lut_asset:` when a node that could evaluate references
+    /// an asset no project has published, and a backend error when the table
+    /// lock is poisoned.
+    fn document_lut_library(&self, document: &Document) -> Result<Arc<LutLibrary>, MediaError> {
+        let published = self.lut_lattices.read().map_err(|_| {
+            MediaError::Backend("the published LUT lattice table lock was poisoned".to_owned())
+        })?;
+        bind_document_luts(document, &published.by_sha256)
     }
 
     fn preview_cache_command(&self, clear: bool) -> Result<CacheStats, MediaError> {
@@ -572,6 +755,10 @@ impl Analysis for FfmpegMediaEngine {
         // proxy cache, alter transport state, or let one branch's asset ids
         // collide with another branch.
         let mut renderer = FrameRenderer::new(self.gpu.clone());
+        // CC4 2.4: bound to THIS document's asset hashes, not to whatever
+        // library was published most recently, so a branch server's proof
+        // cannot resolve the focused project's looks.
+        renderer.set_lut_library(self.document_lut_library(&document)?);
         let resolution = document.resolution;
         // Bind the scale once so the render and the claim it produces cannot
         // drift apart.
@@ -791,7 +978,15 @@ impl Export for FfmpegMediaEngine {
             .read()
             .map_err(|_| MediaError::Backend("export document lock was poisoned".to_owned()))?
             .clone();
-        crate::export::export_document(&document, out, &settings, &progress, self.gpu.clone())
+        let library = self.document_lut_library(&document)?;
+        crate::export::export_document_with_luts(
+            &document,
+            out,
+            &settings,
+            &progress,
+            self.gpu.clone(),
+            library,
+        )
     }
 
     fn export_document(
@@ -801,7 +996,18 @@ impl Export for FfmpegMediaEngine {
         settings: ExportSettings,
         progress: ProgressSink,
     ) -> Result<(), MediaError> {
-        crate::export::export_document(&document, out, &settings, &progress, self.gpu.clone())
+        // CC4 2.4: an export queue outlives focus, so the library is bound to
+        // the immutable document being encoded rather than to whichever
+        // project published last.
+        let library = self.document_lut_library(&document)?;
+        crate::export::export_document_with_luts(
+            &document,
+            out,
+            &settings,
+            &progress,
+            self.gpu.clone(),
+            library,
+        )
     }
 }
 
@@ -818,6 +1024,14 @@ struct Worker {
     handled_seek_sequence: u64,
     document: Arc<Document>,
     renderer: FrameRenderer,
+    /// The engine's content-addressed lattice table, shared with the
+    /// caller-thread proof and export paths (CC4 2.4).
+    lut_lattices: Arc<RwLock<PublishedLattices>>,
+    /// The document-local library bound from [`Worker::document`]. Rebuilt
+    /// whenever the document changes or the table gains entries, never
+    /// received ready-made, so the worker cannot resolve a look belonging to a
+    /// project it is not previewing.
+    lut_library: Arc<LutLibrary>,
     audio: Option<AudioRuntime>,
     playing: bool,
     last_position: Option<TimeCode>,
@@ -838,6 +1052,7 @@ impl Worker {
         meter: Arc<MeterState>,
         requested: Arc<RequestedPositions>,
         gpu: GpuContext,
+        lut_lattices: Arc<RwLock<PublishedLattices>>,
     ) -> Self {
         Self {
             control_rx: channels.control_rx,
@@ -852,6 +1067,8 @@ impl Worker {
             handled_seek_sequence: 0,
             document: Arc::new(Document::default()),
             renderer: FrameRenderer::new(gpu),
+            lut_lattices,
+            lut_library: Arc::new(LutLibrary::default()),
             audio: None,
             playing: false,
             last_position: None,
@@ -876,6 +1093,7 @@ impl Worker {
     fn handle_control(&mut self, control: Control) {
         match control {
             Control::SetDocument(doc) => self.set_document(&doc),
+            Control::LutLatticesPublished => self.rebind_lut_library(),
             Control::Play(from) => self.start_playback(from),
             Control::Pause => self.pause(),
             Control::Thumbnail {
@@ -885,16 +1103,23 @@ impl Worker {
                 reply,
             } => {
                 let scale = RenderScale::Proxy { max_width };
-                let document = document.as_deref().unwrap_or(&self.document);
-                let resolution = scale.output_resolution(document.resolution);
+                // A thumbnail may be requested for a document the worker is
+                // not previewing - a branch, a media-bin entry - so its looks
+                // are bound from that document's own asset hashes and the
+                // preview binding is restored afterwards (CC4 2.4).
+                let requested = document.unwrap_or_else(|| Arc::clone(&self.document));
+                self.renderer
+                    .set_lut_library(self.bound_lut_library(&requested));
+                let resolution = scale.output_resolution(requested.resolution);
                 let result = self
                     .renderer
-                    .render(document, at, resolution, scale, DecodeStrategy::Seek)
+                    .render(&requested, at, resolution, scale, DecodeStrategy::Seek)
                     .map(|frame| RgbaImage {
                         width: frame.width,
                         height: frame.height,
                         pixels: (*frame.rgba).clone(),
                     });
+                self.renderer.set_lut_library(Arc::clone(&self.lut_library));
                 let _ = reply.send(result);
             }
             Control::PreviewCacheStats { reply } => {
@@ -906,9 +1131,38 @@ impl Worker {
         }
     }
 
+    /// Bind one document's LUT assets to the published table.
+    ///
+    /// The preview path reports a missing look through the render itself -
+    /// the compositor fails with `missing_lut_asset` naming the node - so an
+    /// unbound asset is simply absent here rather than an error the worker has
+    /// nowhere to send.
+    fn bound_lut_library(&self, document: &Document) -> Arc<LutLibrary> {
+        let Ok(published) = self.lut_lattices.read() else {
+            return Arc::new(LutLibrary::default());
+        };
+        let (library, _unbound) =
+            LutLibrary::from_document_assets(&document.lut_assets, &published.by_sha256);
+        Arc::new(library)
+    }
+
+    /// Rebuild the preview library from the worker's own document.
+    ///
+    /// Rebinding hands the compositor the same `Arc<CubeLut>` values the table
+    /// holds, so an unchanged look keeps its atlas-cache identity and steady
+    /// playback does not re-upload the atlas.
+    fn rebind_lut_library(&mut self) {
+        let document = Arc::clone(&self.document);
+        self.lut_library = self.bound_lut_library(&document);
+        self.renderer.set_lut_library(Arc::clone(&self.lut_library));
+    }
+
     fn set_document(&mut self, doc: &Document) {
         self.pause();
         self.document = Arc::new(doc.clone());
+        // CC4 2.4: the incoming document may belong to a different project, so
+        // its looks are rebound before the first frame is presented.
+        self.rebind_lut_library();
         self.renderer.clear();
         self.clock.set_fps(doc.fps);
         self.clock.set_frame(TimeCode::ZERO);
@@ -1069,10 +1323,18 @@ fn send_latest<T: Send>(sender: &Sender<T>, drop_receiver: &Receiver<T>, value: 
 mod tests {
     use std::fs;
 
-    use kinewright_core::{MediaKind, MediaSourceFingerprint};
+    use kinewright_core::{
+        Clip, ClipContent, ClipId, Effect, EffectId, LutAsset, LutAssetId, LutAssetKind,
+        LutAssetSource, MediaKind, MediaSourceFingerprint, ParamValue, Title, Track, TrackId,
+        TrackKind,
+    };
 
     use super::*;
-    use crate::{sha256::source_fingerprint, test_support::TempDirectory};
+    use crate::{
+        lut::parse_cube_lut,
+        sha256::{sha256_bytes, source_fingerprint},
+        test_support::TempDirectory,
+    };
 
     fn asset(path: PathBuf, fingerprint: MediaSourceFingerprint) -> MediaAsset {
         MediaAsset {
@@ -1086,6 +1348,287 @@ mod tests {
             source_fingerprint: fingerprint,
             color_description: kinewright_core::ColorDescription::default(),
         }
+    }
+
+    /// An `S = 2` `.cube` document whose green channel is scaled, so two of
+    /// them are different *looks* rather than two spellings of one.
+    fn scaled_cube_text(green: f32) -> String {
+        use std::fmt::Write as _;
+        let mut text = String::from("LUT_3D_SIZE 2\n");
+        for blue in [0.0_f32, 1.0] {
+            for g in [0.0_f32, 1.0] {
+                for red in [0.0_f32, 1.0] {
+                    let _ = writeln!(text, "{red:.6} {:.6} {blue:.6}", g * green);
+                }
+            }
+        }
+        text
+    }
+
+    /// The parsed lattice and the record a project would hold for it, under an
+    /// id the caller chooses. Nothing here touches a store: the point is that
+    /// binding happens on the hash, so the bytes only ever need to be hashed.
+    fn published_pair(green: f32, id: u64) -> (String, Arc<CubeLut>, LutAsset) {
+        let text = scaled_cube_text(green);
+        let sha256 = sha256_bytes(text.as_bytes());
+        let lut = Arc::new(parse_cube_lut(&text).expect("the fixture lattice parses"));
+        let (domain_min_millionths, domain_max_millionths) = lut.domain_millionths();
+        let asset = LutAsset {
+            id: LutAssetId(id),
+            sha256: sha256.clone(),
+            title: format!("Green {green}"),
+            kind: LutAssetKind::Cube3d,
+            size: lut.size,
+            byte_len: text.len() as u64,
+            domain_min_millionths,
+            domain_max_millionths,
+            source: LutAssetSource::Imported {
+                source_path: format!("/fixtures/green-{green}.cube"),
+            },
+        };
+        (sha256, lut, asset)
+    }
+
+    /// A one-clip title timeline carrying one active `creative_look` bound to
+    /// `asset`, plus that asset in the project table.
+    fn look_document(asset: LutAsset) -> Document {
+        let mut look = Effect {
+            id: EffectId(1),
+            name: "creative_look".to_owned(),
+            parameters: std::collections::BTreeMap::new(),
+            keyframes: std::collections::BTreeMap::new(),
+        };
+        look.parameters.insert(
+            "lut_asset_id".to_owned(),
+            ParamValue::Integer(i64::try_from(asset.id.0).unwrap()),
+        );
+        Document {
+            resolution: (64, 36),
+            duration: TimeCode(4),
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![Clip {
+                    id: ClipId(1),
+                    asset: AssetId::default(),
+                    source_range: TimeCode(0)..TimeCode(4),
+                    content: ClipContent::Title(Title {
+                        text: "CC4".to_owned(),
+                        ..Title::default()
+                    }),
+                    timeline_start: TimeCode::ZERO,
+                    effects: vec![look],
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                }],
+            }],
+            lut_assets: vec![asset],
+            ..Document::default()
+        }
+    }
+
+    #[test]
+    fn two_projects_sharing_one_asset_id_bind_to_their_own_lattices() {
+        // CC4 2.4.  `LutAssetId(1)` names a different look in every project,
+        // and one engine serves them all.  Publication merges by content hash
+        // and each document rebinds from its own records, so publishing B
+        // after A cannot make A's node resolve to B's lattice - which is
+        // exactly what a single published-library slot did.
+        let (alpha_sha, alpha_lut, alpha_asset) = published_pair(0.25, 1);
+        let (beta_sha, beta_lut, beta_asset) = published_pair(0.75, 1);
+        assert_eq!(alpha_asset.id, beta_asset.id, "the ids collide on purpose");
+        assert_ne!(alpha_sha, beta_sha, "the looks are genuinely different");
+
+        let mut table = PublishedLattices::default();
+        table.publish(&alpha_sha, &alpha_lut);
+        table.publish(&beta_sha, &beta_lut);
+
+        let alpha_document = look_document(alpha_asset);
+        let beta_document = look_document(beta_asset);
+
+        let alpha_library = bind_document_luts(&alpha_document, &table.by_sha256)
+            .expect("project A's look is published");
+        let beta_library = bind_document_luts(&beta_document, &table.by_sha256)
+            .expect("project B's look is published");
+
+        let bound_alpha = alpha_library.get(LutAssetId(1)).expect("A binds its look");
+        let bound_beta = beta_library.get(LutAssetId(1)).expect("B binds its look");
+        assert!(Arc::ptr_eq(bound_alpha, &alpha_lut));
+        assert!(Arc::ptr_eq(bound_beta, &beta_lut));
+        assert_ne!(
+            bound_alpha.rgba, bound_beta.rgba,
+            "the two projects must not resolve to the same samples"
+        );
+
+        // Order of publication is irrelevant, which is what makes focus
+        // switching unable to alias: republishing A last changes nothing
+        // about B.
+        table.publish(&alpha_sha, &alpha_lut);
+        let beta_again = bind_document_luts(&beta_document, &table.by_sha256)
+            .expect("republishing A leaves B bound");
+        assert!(Arc::ptr_eq(
+            beta_again.get(LutAssetId(1)).expect("B still binds"),
+            &beta_lut
+        ));
+    }
+
+    #[test]
+    fn an_unpublished_look_blocks_the_render_with_a_typed_failure() {
+        // CC4 2.3: a look a frame could need and the engine cannot resolve
+        // fails the render, naming the id and the hash that was looked for.
+        let (sha256, _lut, asset) = published_pair(0.5, 1);
+        let document = look_document(asset);
+
+        let error =
+            bind_document_luts(&document, &HashMap::new()).expect_err("nothing was ever published");
+        let MediaError::Backend(message) = error else {
+            panic!("LUT failures cross as MediaError::Backend");
+        };
+        assert!(
+            message.starts_with("missing_lut_asset: "),
+            "message should lead with the code: {message}"
+        );
+        assert!(
+            message.contains(&sha256),
+            "message should name the hash: {message}"
+        );
+        assert!(
+            message.contains('1'),
+            "message should name the id: {message}"
+        );
+    }
+
+    #[test]
+    fn an_asset_no_evaluable_node_needs_never_blocks() {
+        // CC4 2.3 blocks on the looks a frame could actually need.  An asset
+        // in the project table that no node references is not one of them, so
+        // an unpublished spare must not fail an otherwise deliverable export.
+        let (_sha, lut, bound) = published_pair(0.25, 1);
+        let (_spare_sha, _spare_lut, spare) = published_pair(0.75, 2);
+        let mut document = look_document(bound.clone());
+        document.lut_assets.push(spare);
+
+        let mut table = PublishedLattices::default();
+        table.publish(&bound.sha256, &lut);
+
+        let library = bind_document_luts(&document, &table.by_sha256)
+            .expect("an unreferenced spare does not block");
+        assert!(library.get(LutAssetId(1)).is_some());
+        assert!(
+            library.get(LutAssetId(2)).is_none(),
+            "the spare is still withheld, it simply blocks nothing"
+        );
+    }
+
+    #[test]
+    fn a_hand_edited_record_is_withheld_even_when_its_lattice_is_published() {
+        // The table is keyed by hash, so a second project can publish the very
+        // bytes a first project misdescribes.  The record still loses: the
+        // bytes are the authority (CC4 2.1).
+        let (sha256, lut, mut asset) = published_pair(0.5, 1);
+        asset.size = lut.size + 1;
+        let document = look_document(asset);
+
+        let mut table = PublishedLattices::default();
+        table.publish(&sha256, &lut);
+
+        let error = bind_document_luts(&document, &table.by_sha256)
+            .expect_err("a record that disagrees with the bytes resolves to nothing");
+        let MediaError::Backend(message) = error else {
+            panic!("LUT failures cross as MediaError::Backend");
+        };
+        assert!(
+            message.starts_with("missing_lut_asset: "),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn the_published_table_is_bounded_in_publication_order() {
+        // The table outlives the projects that filled it - nothing else would
+        // ever drop an entry for a closed project - so it is bounded, most
+        // recently published first.
+        let mut table = PublishedLattices::default();
+        // A green scale no later fixture rounds onto, so the first entry is
+        // genuinely evicted rather than accidentally republished.
+        let first = published_pair(0.000_5, 1);
+        table.publish(&first.0, &first.1);
+
+        let mut later = Vec::new();
+        for index in 0..PUBLISHED_LATTICE_LIMIT {
+            #[allow(clippy::cast_precision_loss)]
+            let entry = published_pair(0.001 * (index as f32 + 1.0), 1);
+            assert_ne!(entry.0, first.0, "fixture hashes must stay distinct");
+            table.publish(&entry.0, &entry.1);
+            later.push(entry);
+        }
+        assert_eq!(table.by_sha256.len(), PUBLISHED_LATTICE_LIMIT);
+        assert_eq!(table.recent.len(), PUBLISHED_LATTICE_LIMIT);
+        assert!(
+            !table.by_sha256.contains_key(&first.0),
+            "the oldest publication is the one evicted"
+        );
+        assert!(
+            table.by_sha256.contains_key(&later[later.len() - 1].0),
+            "the newest publication survives"
+        );
+
+        // Republishing is idempotent and promotes rather than duplicating.
+        let head = &later[later.len() - 1];
+        table.publish(&head.0, &head.1);
+        assert_eq!(table.by_sha256.len(), PUBLISHED_LATTICE_LIMIT);
+        assert_eq!(table.recent.len(), PUBLISHED_LATTICE_LIMIT);
+        assert_eq!(
+            table.recent.front().map(String::as_str),
+            Some(head.0.as_str())
+        );
+    }
+
+    #[test]
+    fn a_built_in_look_resolves_without_ever_being_published() {
+        // Built-ins are generated in this binary, so they come from the pinned
+        // bake table and need no publication at all - and a recorded hash this
+        // build does not bake is withheld rather than silently re-baked.
+        let look = crate::builtin_looks::BuiltinLook::Warm;
+        let baked = look.cached_bake();
+        let (domain_min_millionths, domain_max_millionths) = baked.domain_millionths();
+        let asset = LutAsset {
+            id: LutAssetId(1),
+            sha256: look.sha256().to_owned(),
+            title: "Warm".to_owned(),
+            kind: LutAssetKind::Cube3d,
+            size: baked.size,
+            byte_len: 0,
+            domain_min_millionths,
+            domain_max_millionths,
+            source: LutAssetSource::Builtin {
+                name: look.name().to_owned(),
+            },
+        };
+        let document = look_document(asset.clone());
+        let library = bind_document_luts(&document, &HashMap::new())
+            .expect("a built-in needs no publication");
+        assert!(Arc::ptr_eq(
+            library.get(LutAssetId(1)).expect("the built-in binds"),
+            &baked
+        ));
+
+        let mut stale = asset;
+        stale.sha256 = "0".repeat(64);
+        let error = bind_document_luts(&look_document(stale), &HashMap::new())
+            .expect_err("a hash this build does not bake is withheld");
+        let MediaError::Backend(message) = error else {
+            panic!("LUT failures cross as MediaError::Backend");
+        };
+        assert!(
+            message.starts_with("missing_lut_asset: "),
+            "unexpected message: {message}"
+        );
     }
 
     #[test]

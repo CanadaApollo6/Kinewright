@@ -8,10 +8,13 @@ use std::{
 use eframe::egui;
 use kinewright_core::{
     CaptionCue, DeliveryAspect, DeliveryConformanceReport, DeliveryProfile, DeliveryVariant,
-    DeliveryVariantError, Document, ExportCancellation, ExportMediaPreflightReport, ExportProgress,
-    ExportSettings, MediaError, Operation, QaIssue, QaSeverity, Rational, TimeCode,
-    delivery_conformance, document_for_delivery_variant, export_media_preflight, srt, vtt,
+    DeliveryVariantError, Document, ExportCancellation, ExportLutPreflightReport,
+    ExportMediaPreflightReport, ExportProgress, ExportSettings, LutAsset, LutAssetSource,
+    LutAvailabilityKind, LutAvailabilityStatus, MediaError, Operation, QaIssue, QaSeverity,
+    Rational, TimeCode, delivery_conformance, document_for_delivery_variant,
+    export_lut_preflight_with, export_media_preflight, srt, vtt,
 };
+use kinewright_media::{BuiltinLook, LutStore, LutStoreError, LutStoreErrorCode};
 
 use crate::{
     app::KinewrightApp,
@@ -183,11 +186,12 @@ fn export_conformance(
     .map(|report| ExportConformance::from_report(&report))
 }
 
-/// Re-check both fail-closed gates on the worker, against the exact documents
+/// Re-check every fail-closed gate on the worker, against the exact documents
 /// and sources the encoder is about to read.
 fn run_export_after_preflight(
     conformance: &ExportConformance,
     media: &ExportMediaPreflightReport,
+    looks: &ExportLutPreflightReport,
     export: impl FnOnce() -> Result<(), MediaError>,
 ) -> Result<(), MediaError> {
     if !conformance.export_ready() {
@@ -196,7 +200,126 @@ fn run_export_after_preflight(
     if !media.export_ready() {
         return Err(MediaError::Backend(media.summary()));
     }
+    if !looks.export_ready() {
+        return Err(MediaError::Backend(looks.summary()));
+    }
     export()
+}
+
+/// The message a project with LUT nodes but no store root reports (CC4 §2.2).
+pub(crate) const EXPORT_PROJECT_NOT_SAVED: &str = concat!(
+    "project_not_saved: this timeline applies looks, but the project has never been saved, ",
+    "so its <stem>.kinewright-assets store does not exist. Save the project, then export."
+);
+
+/// The recovery a refused store root reports at the export gate (CC4 §2.2).
+///
+/// A refused root is never `project_not_saved`: the project *was* saved, so
+/// telling the operator to save it again is a loop that cannot terminate. The
+/// only thing that clears the refusal is moving the project or clearing
+/// whatever occupies the derived root.
+pub(crate) const EXPORT_LUT_STORE_ROOT_RECOVERY: &str = concat!(
+    "Move the project to a directory where its <stem>.kinewright-assets store can be created, ",
+    "or remove the file or symlink occupying that path, then export."
+);
+
+/// Frame a session's typed store refusal as the export gate's blocking reason.
+#[must_use]
+pub(crate) fn export_store_refusal_reason(store_error: &str) -> String {
+    format!("{store_error}; {EXPORT_LUT_STORE_ROOT_RECOVERY}")
+}
+
+/// Run the CC4 §2.3 LUT preflight against the store that owns the bytes.
+///
+/// Mirrors `export_media_preflight`: Core supplies the document half — which
+/// assets a frame could actually need — and the store injects the observation,
+/// because availability is machine-local runtime state and can change while a
+/// project is open. A project with no store resolves every imported asset as
+/// `missing`, which is exactly the blocking behaviour `project_not_saved`
+/// describes.
+///
+/// `store_error` is the session's typed `lut_store_root_invalid` refusal, and
+/// it is what separates the two ways `store` can be `None`. A project that has
+/// never been saved has no root to check and is told to save; a project whose
+/// derived root this process refuses to use was already saved, so it is told
+/// what the root refused with and how to clear it (CC4 §2.2).
+#[must_use]
+pub(crate) fn export_lut_preflight(
+    document: &Document,
+    store: Option<&LutStore>,
+    store_error: Option<&str>,
+) -> ExportLutPreflightReport {
+    if let Some(store) = store {
+        return export_lut_preflight_with(document, &store.availability_resolver());
+    }
+    let imported_reason = store_error.map_or_else(
+        || EXPORT_PROJECT_NOT_SAVED.to_owned(),
+        export_store_refusal_reason,
+    );
+    export_lut_preflight_with(document, &|asset: &LutAsset| {
+        storeless_availability(asset, &imported_reason)
+    })
+}
+
+/// Availability for a project that has no usable store root.
+///
+/// A built-in is generated in the binary and is never written to a store, so
+/// it stays `verified` here — a project that has only ever applied a built-in
+/// look exports fine before its first save. Only an imported asset, whose
+/// bytes the project claims to own, reports `imported_reason`.
+fn storeless_availability(asset: &LutAsset, imported_reason: &str) -> LutAvailabilityStatus {
+    if let LutAssetSource::Builtin { name } = &asset.source {
+        // A built-in never lives in a store, so whether the project has been
+        // saved cannot decide its availability: only this binary's bake can.
+        // A recorded hash that matches no bake is `changed`, naming both
+        // hashes, exactly as the store-backed resolver reports it — calling it
+        // `missing` with a `project_not_saved` reason would send the operator
+        // to save a project that would still not export (CC4 §2.3).
+        return match BuiltinLook::from_name(name) {
+            Some(builtin) if builtin.sha256() == asset.sha256 => LutAvailabilityStatus {
+                kind: LutAvailabilityKind::Verified,
+                observed_sha256: Some(asset.sha256.clone()),
+                reason: None,
+                path: None,
+            },
+            Some(builtin) => LutAvailabilityStatus {
+                kind: LutAvailabilityKind::Changed,
+                observed_sha256: Some(builtin.sha256().to_owned()),
+                reason: Some(
+                    LutStoreError {
+                        code: LutStoreErrorCode::ChangedLutAsset,
+                        detail: format!(
+                            "this build's {name} bake differs from the recorded content"
+                        ),
+                        observed: Some(builtin.sha256().to_owned()),
+                        allowed: Some(asset.sha256.clone()),
+                    }
+                    .to_string(),
+                ),
+                path: None,
+            },
+            None => LutAvailabilityStatus {
+                kind: LutAvailabilityKind::Missing,
+                observed_sha256: None,
+                reason: Some(
+                    LutStoreError {
+                        code: LutStoreErrorCode::UnknownBuiltinLook,
+                        detail: "this build has no bake for the recorded built-in look".to_owned(),
+                        observed: Some(name.clone()),
+                        allowed: None,
+                    }
+                    .to_string(),
+                ),
+                path: None,
+            },
+        };
+    }
+    LutAvailabilityStatus {
+        kind: LutAvailabilityKind::Missing,
+        observed_sha256: None,
+        reason: Some(imported_reason.to_owned()),
+        path: None,
+    }
 }
 
 impl KinewrightApp {
@@ -273,6 +396,19 @@ impl KinewrightApp {
         let media_preflight = export_media_preflight(&document, self.analysis.as_ref());
         if !media_preflight.export_ready() {
             self.record_error("Export", media_preflight.summary());
+            return None;
+        }
+        // Every look a frame could need is rehashed here, alongside the media
+        // preflight, so a missing or changed LUT blocks the export with the
+        // asset id, title, hash, expected store path, and recovery action
+        // rather than failing at render time (CC4 §2.3).
+        let lut_preflight = export_lut_preflight(
+            &document,
+            self.focused().lut_store.as_ref(),
+            self.focused().lut_store_error.as_deref(),
+        );
+        if !lut_preflight.export_ready() {
+            self.record_error("Export", lut_preflight.summary());
             return None;
         }
         Some(document)
@@ -380,6 +516,8 @@ impl KinewrightApp {
         let (result_tx, result_rx) = mpsc::channel();
         let media = Arc::clone(&self.exporter);
         let worker_analysis = Arc::clone(&self.analysis);
+        let worker_store = self.focused().lut_store.clone();
+        let worker_store_error = self.focused().lut_store_error.clone();
         let worker_document = document;
         let worker_output = output.clone();
         let spawn = thread::Builder::new()
@@ -387,6 +525,11 @@ impl KinewrightApp {
             .spawn(move || {
                 let media_preflight =
                     export_media_preflight(&worker_document, worker_analysis.as_ref());
+                let lut_preflight = export_lut_preflight(
+                    &worker_document,
+                    worker_store.as_ref(),
+                    worker_store_error.as_deref(),
+                );
                 // The delivery document is already materialized, so the worker
                 // re-checks it as a master: no reframe is applied twice and the
                 // colour contract is measured on the exact rendered document.
@@ -397,6 +540,7 @@ impl KinewrightApp {
                             run_export_after_preflight(
                                 &ExportConformance::from_report(&report),
                                 &media_preflight,
+                                &lut_preflight,
                                 || {
                                     media.export_document(
                                         worker_document,
@@ -834,13 +978,25 @@ impl KinewrightApp {
 mod tests {
     use std::cell::Cell;
 
+    use std::collections::BTreeMap;
+
     use kinewright_core::{
         AssetId, Clip, ClipContent, ClipId, ColorContext, ColorDescription, ColorPrimaries,
-        ColorProvenance, ColorTransfer, ExportMediaPreflightIssue, MediaAsset,
-        MediaAvailabilityKind, MediaAvailabilityStatus, MediaKind, Track, TrackId, TrackKind,
+        ColorProvenance, ColorTransfer, Effect, EffectId, ExportMediaPreflightIssue,
+        LUT_ASSET_ID_PARAMETER, LutAssetId, MediaAsset, MediaAvailabilityKind,
+        MediaAvailabilityStatus, MediaKind, ParamValue, Track, TrackId, TrackKind,
     };
+    use kinewright_media::test_support::TempDirectory;
 
     use super::*;
+
+    /// A LUT preflight with nothing to block on.
+    fn ready_lut_preflight() -> ExportLutPreflightReport {
+        ExportLutPreflightReport {
+            checked_lut_assets: Vec::new(),
+            issues: Vec::new(),
+        }
+    }
 
     fn ready_conformance() -> ExportConformance {
         ExportConformance::default()
@@ -927,6 +1083,7 @@ mod tests {
                 checked_assets: vec![AssetId(1)],
                 issues: Vec::new(),
             },
+            &ready_lut_preflight(),
             || {
                 export_called.set(true);
                 Ok(())
@@ -1091,10 +1248,15 @@ mod tests {
             }],
         };
 
-        let result = run_export_after_preflight(&ready_conformance(), &blocked, || {
-            export_called.set(true);
-            Ok(())
-        });
+        let result = run_export_after_preflight(
+            &ready_conformance(),
+            &blocked,
+            &ready_lut_preflight(),
+            || {
+                export_called.set(true);
+                Ok(())
+            },
+        );
 
         assert!(!export_called.get());
         assert!(matches!(
@@ -1102,5 +1264,280 @@ mod tests {
             Err(MediaError::Backend(message))
                 if message.contains("changed-source") && message.contains("Changed")
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // CC4 §2.3 LUT export gate
+    // -----------------------------------------------------------------------
+
+    const SAMPLE_CUBE: &str = "TITLE \"Gate look\"\n\
+         LUT_3D_SIZE 2\n\
+         DOMAIN_MIN 0.000000 0.000000 0.000000\n\
+         DOMAIN_MAX 1.000000 1.000000 1.000000\n\
+         0.000000 0.000000 0.000000\n\
+         0.500000 0.000000 0.000000\n\
+         0.000000 0.500000 0.000000\n\
+         0.500000 0.500000 0.000000\n\
+         0.000000 0.000000 0.500000\n\
+         0.500000 0.000000 0.500000\n\
+         0.000000 0.500000 0.500000\n\
+         1.000000 1.000000 1.000000\n";
+
+    /// A one-clip document whose clip carries a `creative_look` bound to the
+    /// supplied asset.
+    fn look_gate_document(asset: kinewright_core::LutAsset) -> Document {
+        let mut document = Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![Clip {
+                    id: ClipId(1),
+                    asset: AssetId(1),
+                    timeline_start: TimeCode::ZERO,
+                    source_range: TimeCode::ZERO..TimeCode(24),
+                    content: ClipContent::Media,
+                    effects: vec![Effect {
+                        id: EffectId(1),
+                        name: "creative_look".to_owned(),
+                        parameters: BTreeMap::from([(
+                            LUT_ASSET_ID_PARAMETER.to_owned(),
+                            ParamValue::Integer(1),
+                        )]),
+                        keyframes: BTreeMap::new(),
+                    }],
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                }],
+            }],
+            media_pool: vec![MediaAsset {
+                id: AssetId(1),
+                path: PathBuf::from("shot.mov"),
+                name: "Shot".to_owned(),
+                duration: TimeCode(24),
+                fps: Rational::new(24, 1).expect("valid fps"),
+                kind: MediaKind::Video,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+                color_description: ColorDescription::default(),
+            }],
+            fps: Rational::new(24, 1).expect("valid fps"),
+            resolution: (1920, 1080),
+            lut_assets: vec![asset],
+            duration: TimeCode(24),
+            ..Document::default()
+        };
+        document.color_context = ColorContext::default();
+        document.validate().expect("the gate fixture is valid");
+        document
+    }
+
+    #[test]
+    fn the_export_gate_blocks_on_a_missing_store_file_and_names_the_recovery() {
+        let temporary = TempDirectory::new("cc4-export-gate");
+        let project = temporary.path("edit.kinewright");
+        let store = LutStore::for_project(&project).expect("store root");
+        let source = temporary.path("look.cube");
+        std::fs::write(&source, SAMPLE_CUBE).expect("fixture .cube writes");
+        let import = store.import_lut_asset(&source).expect("import");
+        let sha256 = import.sha256.clone();
+        let document = look_gate_document(import.into_lut_asset(LutAssetId(1)));
+
+        // A present, correctly hashed store file passes the gate.
+        let ready = export_lut_preflight(&document, Some(&store), None);
+        assert!(ready.export_ready(), "{}", ready.summary());
+        assert_eq!(ready.checked_lut_assets, vec![LutAssetId(1)]);
+
+        // Removing the bytes the project claims to own blocks the export with
+        // the asset id, title, hash, and expected store path.
+        std::fs::remove_file(store.luts_dir().join(format!("{sha256}.cube")))
+            .expect("the store file is removable");
+        let blocked = export_lut_preflight(&document, Some(&store), None);
+        assert!(!blocked.export_ready());
+        assert_eq!(blocked.issues.len(), 1);
+        assert_eq!(blocked.issues[0].lut_asset, LutAssetId(1));
+        assert_eq!(blocked.issues[0].sha256, sha256);
+        assert_eq!(blocked.issues[0].kind, LutAvailabilityKind::Missing);
+        assert_eq!(
+            blocked.issues[0].path.as_deref(),
+            Some(store.luts_dir().join(format!("{sha256}.cube")).as_path())
+        );
+        assert_eq!(
+            blocked.issues[0].referenced_by,
+            vec![(ClipId(1), EffectId(1))]
+        );
+
+        // And the worker gate refuses to reach the encoder.
+        let export_called = Cell::new(false);
+        let result = run_export_after_preflight(
+            &ready_conformance(),
+            &ExportMediaPreflightReport {
+                checked_assets: Vec::new(),
+                issues: Vec::new(),
+            },
+            &blocked,
+            || {
+                export_called.set(true);
+                Ok(())
+            },
+        );
+        assert!(!export_called.get());
+        assert!(matches!(
+            result,
+            Err(MediaError::Backend(message))
+                if message.contains("Export blocked") && message.contains("Gate look")
+        ));
+    }
+
+    #[test]
+    fn a_project_with_looks_and_no_store_reports_project_not_saved() {
+        let temporary = TempDirectory::new("cc4-export-unsaved");
+        let store = LutStore::for_project(&temporary.path("edit.kinewright")).expect("store root");
+        let source = temporary.path("look.cube");
+        std::fs::write(&source, SAMPLE_CUBE).expect("fixture .cube writes");
+        let import = store.import_lut_asset(&source).expect("import");
+        let document = look_gate_document(import.into_lut_asset(LutAssetId(1)));
+
+        let report = export_lut_preflight(&document, None, None);
+
+        assert!(!report.export_ready());
+        assert_eq!(report.issues.len(), 1);
+        assert!(
+            report.issues[0]
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("project_not_saved")),
+            "{:?}",
+            report.issues[0].reason
+        );
+    }
+
+    /// CC4 §2.2: a *saved* project whose derived store root this process
+    /// refuses to use is not `project_not_saved`. The export gate reports the
+    /// typed `lut_store_root_invalid` refusal and the recovery that can
+    /// actually clear it — telling the operator to save a project they already
+    /// saved is a loop that cannot terminate.
+    #[test]
+    fn a_refused_store_root_blocks_the_export_gate_with_its_reason_not_the_save_recovery() {
+        let temporary = TempDirectory::new("cc4-export-refused-root");
+        let project = temporary.path("edit.kinewright");
+        let store = LutStore::for_project(&temporary.path("staging.kinewright"))
+            .expect("the staging root is usable");
+        let source = temporary.path("look.cube");
+        std::fs::write(&source, SAMPLE_CUBE).expect("fixture .cube writes");
+        let import = store.import_lut_asset(&source).expect("import");
+        let document = look_gate_document(import.into_lut_asset(LutAssetId(1)));
+
+        // A regular file occupies exactly where the store directory belongs,
+        // so the project is saved but its root is refused.
+        std::fs::write(temporary.path("edit.kinewright-assets"), b"not a directory")
+            .expect("the blocking file writes");
+        let refusal = crate::project::derive_lut_store(Some(&project))
+            .expect_err("a file is not a store root");
+        assert!(refusal.contains("lut_store_root_invalid: "), "{refusal}");
+
+        let report = export_lut_preflight(&document, None, Some(&refusal));
+
+        assert!(!report.export_ready());
+        assert_eq!(report.issues.len(), 1);
+        let reason = report.issues[0]
+            .reason
+            .as_deref()
+            .expect("a blocked asset explains itself");
+        assert!(reason.contains("lut_store_root_invalid: "), "{reason}");
+        assert!(reason.contains(EXPORT_LUT_STORE_ROOT_RECOVERY), "{reason}");
+        assert!(
+            !reason.contains("project_not_saved"),
+            "a saved project must never be told to save itself: {reason}"
+        );
+        assert!(
+            !report.summary().contains("project_not_saved"),
+            "{}",
+            report.summary()
+        );
+    }
+
+    /// CC4 §2.3: a built-in never lives in a store, so whether the project has
+    /// been saved cannot decide its availability. A recorded hash that matches
+    /// no bake in this binary is `changed`, naming both hashes — reporting it
+    /// as `missing` with `project_not_saved` would send the operator off to
+    /// save a project that would still refuse to export.
+    #[test]
+    fn an_unsaved_projects_built_in_is_typed_by_its_bake_not_by_the_save_state() {
+        let verified = BuiltinLook::Warm.to_lut_asset(LutAssetId(1));
+        let status = storeless_availability(&verified, EXPORT_PROJECT_NOT_SAVED);
+        assert_eq!(status.kind, LutAvailabilityKind::Verified);
+        assert_eq!(
+            status.observed_sha256.as_deref(),
+            Some(BuiltinLook::Warm.sha256())
+        );
+        assert!(status.reason.is_none());
+
+        let mut stale = verified.clone();
+        stale.sha256 = "0".repeat(64);
+        let status = storeless_availability(&stale, EXPORT_PROJECT_NOT_SAVED);
+        assert_eq!(status.kind, LutAvailabilityKind::Changed);
+        assert_eq!(
+            status.observed_sha256.as_deref(),
+            Some(BuiltinLook::Warm.sha256()),
+            "the observation is this build's bake"
+        );
+        let reason = status.reason.expect("a changed built-in explains itself");
+        assert!(reason.starts_with("changed_lut_asset: "), "{reason}");
+        assert!(reason.contains(BuiltinLook::Warm.sha256()), "{reason}");
+        assert!(reason.contains(&stale.sha256), "{reason}");
+        assert!(
+            !reason.contains("project_not_saved"),
+            "a built-in never depends on the store: {reason}"
+        );
+
+        // A name this build has no bake for stays `missing`, with its own
+        // typed reason rather than the save recovery.
+        let mut unknown = verified;
+        unknown.source = LutAssetSource::Builtin {
+            name: "sepia".to_owned(),
+        };
+        let status = storeless_availability(&unknown, EXPORT_PROJECT_NOT_SAVED);
+        assert_eq!(status.kind, LutAvailabilityKind::Missing);
+        let reason = status.reason.expect("an unknown built-in explains itself");
+        assert!(reason.starts_with("unknown_builtin_look: "), "{reason}");
+        assert!(reason.contains("sepia"), "{reason}");
+
+        // An imported asset is the one shape that still reports the save
+        // recovery, because its bytes really do need a store.
+        let mut imported = BuiltinLook::Warm.to_lut_asset(LutAssetId(2));
+        imported.source = LutAssetSource::Imported {
+            source_path: "/looks/fixture.cube".to_owned(),
+        };
+        let status = storeless_availability(&imported, EXPORT_PROJECT_NOT_SAVED);
+        assert_eq!(status.kind, LutAvailabilityKind::Missing);
+        assert_eq!(status.reason.as_deref(), Some(EXPORT_PROJECT_NOT_SAVED));
+    }
+
+    #[test]
+    fn a_bypassed_look_never_blocks_a_delivery() {
+        let temporary = TempDirectory::new("cc4-export-bypassed");
+        let project = temporary.path("edit.kinewright");
+        let store = LutStore::for_project(&project).expect("store root");
+        let source = temporary.path("look.cube");
+        std::fs::write(&source, SAMPLE_CUBE).expect("fixture .cube writes");
+        let import = store.import_lut_asset(&source).expect("import");
+        let sha256 = import.sha256.clone();
+        let mut document = look_gate_document(import.into_lut_asset(LutAssetId(1)));
+        document.tracks[0].clips[0].effects[0]
+            .parameters
+            .insert("bypass".to_owned(), ParamValue::Integer(1));
+        std::fs::remove_file(store.luts_dir().join(format!("{sha256}.cube")))
+            .expect("the store file is removable");
+
+        // A look the operator switched off is never evaluated, so its absent
+        // bytes cannot block a delivery (CC4 §2.3).
+        let report = export_lut_preflight(&document, Some(&store), None);
+        assert!(report.export_ready(), "{}", report.summary());
+        assert!(report.checked_lut_assets.is_empty());
     }
 }

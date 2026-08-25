@@ -8,13 +8,17 @@
 //! to a backend here.
 
 use std::fmt;
+use std::sync::Arc;
 
 use kinewright_core::{
     COLOR_CURVE_MIN_POINTS, COLOR_NODE_LIMIT_PER_LAYER, ColorBitDepth, ColorCurveChannel,
     ColorDescription, ColorMatrix, ColorNodeKind, ColorPrimaries, ColorRange, ColorTransfer,
-    ColorWheelsParams, ColorWhitePoint, CurvePoints, Effect, ParamValue, ResolvedCurves,
-    active_color_nodes, effect_descriptor, managed_color_node_count,
+    ColorWheelsParams, ColorWhitePoint, CurvePoints, Effect, LutAssetId, LutNodeParams, ParamValue,
+    ResolvedCurves, active_color_nodes, effect_descriptor, managed_color_node_count,
 };
+
+use crate::lut::CubeLut;
+use crate::lut_store::LutLibrary;
 
 pub use kinewright_core::{
     ColorSourceError, ColorSourceProfile, ColorSourceProfileAssumption, classify_source,
@@ -119,6 +123,14 @@ pub enum ColorPipelineError {
         /// The inclusive per-layer limit.
         limit: usize,
     },
+    /// An active LUT node references an asset the verified library does not
+    /// hold: `missing`, `changed`, `unreadable`, or unbound (CC4 §2.3, §4.4).
+    /// The reference never silently renders a look-free frame.
+    MissingLutAsset(LutAssetId),
+    /// A LUT node's `input_encoding_token` is outside CC4 §3.4's three
+    /// encodings.  Unreachable through the edit path, which clamps the stored
+    /// integer to the descriptor bounds.
+    UnsupportedInputEncoding(i64),
 }
 
 impl fmt::Display for ColorPipelineError {
@@ -197,6 +209,15 @@ impl fmt::Display for ColorPipelineError {
             Self::TooManyColorNodes { count, limit } => write!(
                 formatter,
                 "too_many_color_nodes: {count} managed colour nodes exceed the per-layer limit of {limit}"
+            ),
+            Self::MissingLutAsset(id) => write!(
+                formatter,
+                "missing_lut_asset: no verified LUT asset {} is available for an active LUT node",
+                id.0
+            ),
+            Self::UnsupportedInputEncoding(token) => write!(
+                formatter,
+                "unsupported_input_encoding: observed {token}, allowed 0 display709, 1 linear, 2 grade709"
             ),
         }
     }
@@ -337,6 +358,37 @@ pub fn encode_bt709(linear: f32) -> f32 {
         4.5 * linear
     } else {
         1.099 * linear.powf(0.45) - 0.099
+    }
+}
+
+/// Decode a `display709` grading value back to scene-linear light (CC4 §3.4).
+///
+/// The **exact sign-preserving inverse of [`encode_bt709`]**, with CC1's
+/// rounded broadcast constants:
+///
+/// ```text
+/// decode_display709(e) = sgn(e) * |e| / 4.5                       if |e| <  0.081
+///                      = sgn(e) * ((|e| + 0.099) / 1.099)^(1/0.45) otherwise
+/// ```
+///
+/// `sgn(0) = 0`, and [`f32::signum`] is deliberately not used because it
+/// returns `±1` at zero and would break `decode_display709(0) = 0`, the
+/// identity the CC4 §10.3.2 bit-exact gate needs.
+///
+/// This is a **node-internal grading parameterization**.  It must not replace
+/// [`decode_bt709`], which stays the CC1 *source* decode: `decode_bt709` takes
+/// its linear branch unconditionally for a negative argument, so it is not the
+/// inverse of `encode_bt709` below `-0.018`.  Neither this function nor
+/// `encode_bt709` may be used here as a monitoring or delivery transform; the
+/// monitor transform still happens once, after compositing.
+#[must_use]
+pub fn decode_display709(e: f32) -> f32 {
+    let sign = grade709_sign(e);
+    let magnitude = e.abs();
+    if magnitude < 0.081 {
+        sign * magnitude / 4.5
+    } else {
+        sign * ((magnitude + 0.099) / 1.099).powf(1.0 / 0.45)
     }
 }
 
@@ -1203,29 +1255,439 @@ impl ColorCurves {
 }
 
 // ---------------------------------------------------------------------------
+// CC4 §3.4--§3.5: LUT nodes.
+//
+// This evaluator is written from the CC4 §3.5 contract text alone.  It shares
+// no code with `compositor.rs` or `compositor.wgsl`, because the CC3/CC4
+// parity fixtures must compare two independent implementations of the written
+// contract rather than one implementation with itself (CC4 §4.4).
+// ---------------------------------------------------------------------------
+
+/// The encoding a LUT node's lattice is authored in (CC4 §3.4).
+///
+/// The token is the stored `input_encoding_token` value; `display709` is the
+/// default for both node kinds because published `.cube` looks are authored
+/// against display-coded Rec.709 values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LutInputEncoding {
+    /// Token `0`: [`encode_bt709`] / [`decode_display709`].
+    Display709 = 0,
+    /// Token `1`: the identity in both directions.
+    Linear = 1,
+    /// Token `2`: [`grade709_encode`] / [`grade709_decode`].
+    Grade709 = 2,
+}
+
+impl LutInputEncoding {
+    /// Every encoding, in token order.
+    pub const ALL: [Self; 3] = [Self::Display709, Self::Linear, Self::Grade709];
+
+    /// Classify a stored `input_encoding_token`.
+    ///
+    /// Returns `None` outside `0..=2`; CC4 §3.4 restricts LUT nodes to exactly
+    /// these three encodings, and a log source cannot reach the node stack at
+    /// all because CC1 rejects a log transfer at the decode boundary.
+    #[must_use]
+    pub const fn from_token(token: i64) -> Option<Self> {
+        match token {
+            0 => Some(Self::Display709),
+            1 => Some(Self::Linear),
+            2 => Some(Self::Grade709),
+            _ => None,
+        }
+    }
+
+    /// The stored token for this encoding.
+    #[must_use]
+    pub const fn token(self) -> i64 {
+        match self {
+            Self::Display709 => 0,
+            Self::Linear => 1,
+            Self::Grade709 => 2,
+        }
+    }
+
+    /// The stable manifest/inspector token for this encoding.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Display709 => "display709",
+            Self::Linear => "linear",
+            Self::Grade709 => "grade709",
+        }
+    }
+
+    /// `ENC`: scene-linear working value to the lattice's authored encoding.
+    #[must_use]
+    pub fn encode(self, x: f32) -> f32 {
+        match self {
+            Self::Display709 => encode_bt709(x),
+            Self::Linear => x,
+            Self::Grade709 => grade709_encode(x),
+        }
+    }
+
+    /// `DEC`: the exact inverse of [`LutInputEncoding::encode`].
+    #[must_use]
+    pub fn decode(self, e: f32) -> f32 {
+        match self {
+            Self::Display709 => decode_display709(e),
+            Self::Linear => e,
+            Self::Grade709 => grade709_decode(e),
+        }
+    }
+}
+
+/// A verified 3D lattice evaluated with CC4 §3.5 tetrahedral interpolation.
+///
+/// The lattice edge and the domain always come from the **verified bytes**,
+/// never from the document record (CC4 §2.1), so this type is built from a
+/// parsed [`CubeLut`] and carries no independent metadata of its own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lut3d {
+    size: u32,
+    domain_min: [f32; 3],
+    domain_max: [f32; 3],
+    samples: Arc<CubeLut>,
+}
+
+impl Lut3d {
+    /// Wrap an already-shared parsed lattice without copying its samples.
+    #[must_use]
+    pub fn from_shared(samples: Arc<CubeLut>) -> Self {
+        Self {
+            size: samples.size,
+            domain_min: samples.domain_min,
+            domain_max: samples.domain_max,
+            samples,
+        }
+    }
+
+    /// Wrap a parsed lattice, cloning its samples into a fresh allocation.
+    #[must_use]
+    pub fn from_cube(cube: &CubeLut) -> Self {
+        Self::from_shared(Arc::new(cube.clone()))
+    }
+
+    /// The lattice edge length `S`, from the verified bytes.
+    #[must_use]
+    pub const fn size(&self) -> u32 {
+        self.size
+    }
+
+    /// `DOMAIN_MIN` per channel, from the verified bytes.
+    #[must_use]
+    pub const fn domain_min(&self) -> [f32; 3] {
+        self.domain_min
+    }
+
+    /// `DOMAIN_MAX` per channel, from the verified bytes.
+    #[must_use]
+    pub const fn domain_max(&self) -> [f32; 3] {
+        self.domain_max
+    }
+
+    /// The parsed lattice this evaluator reads.
+    #[must_use]
+    pub fn samples(&self) -> &Arc<CubeLut> {
+        &self.samples
+    }
+
+    /// `V(i_r, i_g, i_b)`: one lattice point, red-fastest IRIDAS order
+    /// (CC4 §3.5).
+    ///
+    /// Indices past the lattice edge are clamped rather than wrapped or
+    /// panicking; §3.5's `i = min(floor(s), S - 2)` already keeps every
+    /// interpolation index in range, so the clamp is defensive only.
+    #[must_use]
+    pub fn lattice(&self, i_r: u32, i_g: u32, i_b: u32) -> [f32; 3] {
+        let last = self.size.saturating_sub(1);
+        let (i_r, i_g, i_b) = (i_r.min(last), i_g.min(last), i_b.min(last));
+        let size = self.size as usize;
+        let index = ((i_b as usize * size) + i_g as usize) * size + i_r as usize;
+        self.samples.sample(index).unwrap_or([0.0; 3])
+    }
+
+    /// Evaluate the lattice at an encoded triple (CC4 §3.5).
+    ///
+    /// The coordinate is clamped to the lattice domain, interpolated
+    /// tetrahedrally with the contract's exact branch structure, and the
+    /// out-of-domain excursion is then **added back** in the encoded domain:
+    /// `z = y + (e - u)`.  A pure clamp would collapse every over-range
+    /// highlight onto one lattice value, destroying the information CC1 §2.2
+    /// invariant 5 exists to preserve.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+    #[allow(clippy::cast_possible_truncation, clippy::many_single_char_names)]
+    pub fn lookup(&self, e: [f32; 3]) -> [f32; 3] {
+        let last_index = self.size.saturating_sub(2);
+        let span = f32::from(u16::try_from(self.size.saturating_sub(1)).unwrap_or(u16::MAX));
+
+        let mut u = [0.0_f32; 3];
+        let mut i = [0_u32; 3];
+        let mut f = [0.0_f32; 3];
+        for channel in 0..3 {
+            let minimum = self.domain_min[channel];
+            let maximum = self.domain_max[channel];
+            let clamped = e[channel].clamp(minimum, maximum);
+            let t = (clamped - minimum) / (maximum - minimum);
+            let s = t * span;
+            let index = (s.floor() as u32).min(last_index);
+            u[channel] = clamped;
+            i[channel] = index;
+            f[channel] = s - f32::from(u16::try_from(index).unwrap_or(u16::MAX));
+        }
+
+        let (f_r, f_g, f_b) = (f[0], f[1], f[2]);
+        let corner =
+            |d_r: u32, d_g: u32, d_b: u32| self.lattice(i[0] + d_r, i[1] + d_g, i[2] + d_b);
+        let c000 = corner(0, 0, 0);
+
+        // CC4 §3.5, transcribed verbatim so tie handling is identical on the
+        // CPU reference and the shader.  The conditions are strict `>`.
+        let y = if f_r > f_g {
+            if f_g > f_b {
+                let (c100, c110, c111) = (corner(1, 0, 0), corner(1, 1, 0), corner(1, 1, 1));
+                tetra(c000, f_r, c100, c000, f_g, c110, c100, f_b, c111, c110)
+            } else if f_r > f_b {
+                let (c100, c101, c111) = (corner(1, 0, 0), corner(1, 0, 1), corner(1, 1, 1));
+                tetra(c000, f_r, c100, c000, f_g, c111, c101, f_b, c101, c100)
+            } else {
+                let (c001, c101, c111) = (corner(0, 0, 1), corner(1, 0, 1), corner(1, 1, 1));
+                tetra(c000, f_r, c101, c001, f_g, c111, c101, f_b, c001, c000)
+            }
+        } else if f_b > f_g {
+            let (c001, c011, c111) = (corner(0, 0, 1), corner(0, 1, 1), corner(1, 1, 1));
+            tetra(c000, f_r, c111, c011, f_g, c011, c001, f_b, c001, c000)
+        } else if f_b > f_r {
+            let (c010, c011, c111) = (corner(0, 1, 0), corner(0, 1, 1), corner(1, 1, 1));
+            tetra(c000, f_r, c111, c011, f_g, c010, c000, f_b, c011, c010)
+        } else {
+            let (c010, c110, c111) = (corner(0, 1, 0), corner(1, 1, 0), corner(1, 1, 1));
+            tetra(c000, f_r, c110, c010, f_g, c010, c000, f_b, c111, c110)
+        };
+
+        [
+            y[0] + (e[0] - u[0]),
+            y[1] + (e[1] - u[1]),
+            y[2] + (e[2] - u[2]),
+        ]
+    }
+}
+
+/// `base + f_r*(a1 - a0) + f_g*(b1 - b0) + f_b*(d1 - d0)`, the shared shape of
+/// all six CC4 §3.5 tetrahedral formulas.
+///
+/// Keeping one term order for every branch is what makes a tie well defined to
+/// the last bit: the six formulas agree analytically on the shared faces, and
+/// the fixed association removes the f32 rounding difference that would
+/// otherwise let two implementations disagree by a ULP at a tie.
+#[allow(clippy::too_many_arguments)]
+fn tetra(
+    base: [f32; 3],
+    f_r: f32,
+    a1: [f32; 3],
+    a0: [f32; 3],
+    f_g: f32,
+    b1: [f32; 3],
+    b0: [f32; 3],
+    f_b: f32,
+    d1: [f32; 3],
+    d0: [f32; 3],
+) -> [f32; 3] {
+    let mut out = [0.0_f32; 3];
+    for channel in 0..3 {
+        out[channel] = base[channel]
+            + f_r * (a1[channel] - a0[channel])
+            + f_g * (b1[channel] - b0[channel])
+            + f_b * (d1[channel] - d0[channel]);
+    }
+    out
+}
+
+/// One resolved `technical_lut` or `creative_look` node (CC4 §3.5).
+///
+/// The two kinds are mathematically identical; they differ only in stage,
+/// role, mix bounds, and UI placement, so one type serves both.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LutNode {
+    lut: Arc<Lut3d>,
+    encoding: LutInputEncoding,
+    mix: f32,
+}
+
+impl LutNode {
+    /// Resolve a keyframe-evaluated LUT node against the verified library.
+    ///
+    /// The caller must have resolved keyframes already
+    /// (`Effect::evaluated_at`), and must have skipped inactive nodes
+    /// (CC4 §3.6): this constructor deliberately builds a node for whatever
+    /// parameters it is handed so that an unbound reference is a typed error
+    /// rather than a silently look-free frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ColorPipelineError::MissingLutAsset`] when the library holds
+    /// no verified lattice for the referenced id — a `missing`, `changed`,
+    /// `unreadable`, or unbound asset — and
+    /// [`ColorPipelineError::UnsupportedInputEncoding`] for a token outside
+    /// CC4 §3.4's three encodings.
+    pub fn from_params(
+        params: &LutNodeParams,
+        library: &LutLibrary,
+    ) -> Result<Self, ColorPipelineError> {
+        let encoding = LutInputEncoding::from_token(params.input_encoding_token).ok_or(
+            ColorPipelineError::UnsupportedInputEncoding(params.input_encoding_token),
+        )?;
+        let samples = library
+            .get(params.lut_asset_id)
+            .ok_or(ColorPipelineError::MissingLutAsset(params.lut_asset_id))?;
+        Ok(Self {
+            lut: Arc::new(Lut3d::from_shared(Arc::clone(samples))),
+            encoding,
+            mix: params.mix(),
+        })
+    }
+
+    /// Build a node directly from a lattice, for the reference and fixtures.
+    #[must_use]
+    pub fn new(lut: Arc<Lut3d>, encoding: LutInputEncoding, mix: f32) -> Self {
+        Self { lut, encoding, mix }
+    }
+
+    /// The lattice this node evaluates.
+    #[must_use]
+    pub fn lut(&self) -> &Arc<Lut3d> {
+        &self.lut
+    }
+
+    /// The encoding the lattice is authored in.
+    #[must_use]
+    pub const fn encoding(&self) -> LutInputEncoding {
+        self.encoding
+    }
+
+    /// The linear-light blend factor in `0.0..=1.0`.
+    #[must_use]
+    pub const fn mix(&self) -> f32 {
+        self.mix
+    }
+
+    /// Apply the node to one scene-linear working triple (CC4 §3.5).
+    ///
+    /// `e = ENC(x)`, `z = lookup(e)`, `x' = DEC(z)`, and the mix happens in
+    /// **linear light**: `out = x + (x' - x) * mix`.  Mixing in the encoded
+    /// domain would need a fourth normative transfer decision and is undefined
+    /// when the encoding is `linear`.
+    #[must_use]
+    pub fn apply(&self, x: [f32; 3]) -> [f32; 3] {
+        let e = [
+            self.encoding.encode(x[0]),
+            self.encoding.encode(x[1]),
+            self.encoding.encode(x[2]),
+        ];
+        let z = self.lut.lookup(e);
+        let looked = [
+            self.encoding.decode(z[0]),
+            self.encoding.decode(z[1]),
+            self.encoding.decode(z[2]),
+        ];
+        [
+            x[0] + (looked[0] - x[0]) * self.mix,
+            x[1] + (looked[1] - x[1]) * self.mix,
+            x[2] + (looked[2] - x[2]) * self.mix,
+        ]
+    }
+}
+
+/// The CC4 §10.3.3 counter-implementation: eight-vertex trilinear
+/// interpolation of the same lattice.
+///
+/// This is **test-only on purpose**.  CC4 §3.5 makes tetrahedral the normative
+/// interpolation; shipping a trilinear entry point would invite a caller to
+/// pick the wrong one.  The fixture uses it to prove the production evaluator
+/// is not secretly trilinear.
+#[cfg(test)]
+impl Lut3d {
+    #[must_use]
+    #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+    #[allow(clippy::cast_possible_truncation, clippy::many_single_char_names)]
+    pub fn trilinear_lookup(&self, e: [f32; 3]) -> [f32; 3] {
+        let last_index = self.size.saturating_sub(2);
+        let span = f32::from(u16::try_from(self.size.saturating_sub(1)).unwrap_or(u16::MAX));
+        let mut u = [0.0_f32; 3];
+        let mut i = [0_u32; 3];
+        let mut f = [0.0_f32; 3];
+        for channel in 0..3 {
+            let minimum = self.domain_min[channel];
+            let maximum = self.domain_max[channel];
+            let clamped = e[channel].clamp(minimum, maximum);
+            let s = (clamped - minimum) / (maximum - minimum) * span;
+            let index = (s.floor() as u32).min(last_index);
+            u[channel] = clamped;
+            i[channel] = index;
+            f[channel] = s - f32::from(u16::try_from(index).unwrap_or(u16::MAX));
+        }
+        let mut y = [0.0_f32; 3];
+        for d_b in 0..2_u32 {
+            for d_g in 0..2_u32 {
+                for d_r in 0..2_u32 {
+                    let weight = [(d_r, f[0]), (d_g, f[1]), (d_b, f[2])]
+                        .into_iter()
+                        .map(
+                            |(delta, fraction)| {
+                                if delta == 1 { fraction } else { 1.0 - fraction }
+                            },
+                        )
+                        .product::<f32>();
+                    let corner = self.lattice(i[0] + d_r, i[1] + d_g, i[2] + d_b);
+                    for channel in 0..3 {
+                        y[channel] += weight * corner[channel];
+                    }
+                }
+            }
+        }
+        [
+            y[0] + (e[0] - u[0]),
+            y[1] + (e[1] - u[1]),
+            y[2] + (e[2] - u[2]),
+        ]
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CC3 §3.1: the ordered node stack.
 // ---------------------------------------------------------------------------
 
 /// One resolved node of the CC1/CC3 ordered colour-correction stack (§3.1).
 ///
-/// `primary_correction`, `color_wheels`, and `color_curves` form **one**
-/// ordered stack executed in `clip.effects` vector order.  There is no fixed
-/// inter-kind precedence, and the reference must not flatten, reorder, or
-/// merge nodes.
+/// `technical_lut`, `primary_correction`, `color_wheels`, `color_curves`, and
+/// `creative_look` form **one** ordered stack executed in `clip.effects`
+/// vector order.  Within a stage there is no fixed inter-kind precedence, and
+/// the reference must not flatten, reorder, or merge nodes.
 ///
-/// The curve variant is much larger than the other two because it owns four
+/// The curve variant is much larger than the others because it owns four
 /// solved point lists.  Boxing it is deliberately not done: a layer holds at
 /// most sixteen nodes, the stack is resolved once per frame rather than per
 /// pixel, and an indirection would sit inside the per-pixel dispatch.
+///
+/// CC4 adds the two LUT kinds at either end of the stage order.  The variant
+/// order here is [`kinewright_core::MANAGED_COLOR_NODE_NAMES`] stage order,
+/// which is a readability choice only: the executed order is always the
+/// `clip.effects` vector order.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum ColorNode {
+    /// The CC4 technical input transform (stage 0).
+    TechnicalLut(LutNode),
     /// The CC1 managed SDR primary correction.
     Primary(PrimaryCorrection),
     /// The CC3 ASC CDL slope/offset/power wheels.
     Wheels(ColorWheels),
     /// The CC3 master/red/green/blue curves.
     Curves(ColorCurves),
+    /// The CC4 creative look (stage 2).
+    CreativeLook(LutNode),
 }
 
 impl ColorNode {
@@ -1233,39 +1695,83 @@ impl ColorNode {
     #[must_use]
     pub const fn kind(&self) -> ColorNodeKind {
         match self {
+            Self::TechnicalLut(_) => ColorNodeKind::TechnicalLut,
             Self::Primary(_) => ColorNodeKind::Primary,
             Self::Wheels(_) => ColorNodeKind::Wheels,
             Self::Curves(_) => ColorNodeKind::Curves,
+            Self::CreativeLook(_) => ColorNodeKind::CreativeLook,
+        }
+    }
+
+    /// The resolved LUT node, for the two LUT kinds.
+    #[must_use]
+    pub const fn lut_node(&self) -> Option<&LutNode> {
+        match self {
+            Self::TechnicalLut(node) | Self::CreativeLook(node) => Some(node),
+            Self::Primary(_) | Self::Wheels(_) | Self::Curves(_) => None,
         }
     }
 }
 
 fn apply_color_node(node: &ColorNode, linear_rgb: [f32; 3]) -> [f32; 3] {
     match node {
+        ColorNode::TechnicalLut(lut) | ColorNode::CreativeLook(lut) => lut.apply(linear_rgb),
         ColorNode::Primary(correction) => correction.apply(linear_rgb),
         ColorNode::Wheels(wheels) => wheels.apply(linear_rgb),
         ColorNode::Curves(curves) => curves.apply(linear_rgb),
     }
 }
 
-/// Resolve the ordered colour-node stack of one *keyframe-evaluated* effect
-/// list (CC3 §3.1, §3.3).
+/// The pre-CC4 spelling of [`resolve_color_nodes_with`], kept so no caller has
+/// to change at once — but resolved against an **empty** library.
 ///
-/// Keyframes must already have been resolved by the caller
-/// (`Effect::evaluated_at`).  Nodes that Core reports inactive — bypassed or
-/// neutral — are dropped entirely rather than evaluated as an approximate
-/// identity, which is what makes the CC3 §10.3 identity gate bit-identical.
-/// `primary_correction` has no bypass control and no neutral short-circuit, so
-/// it is always included, exactly as CC1 specifies.  Effects that are not
-/// managed colour nodes are ignored.
+/// CC4 §4.4 requires exactly this: the old symbol survives, and a LUT node it
+/// cannot resolve fails with `missing_lut_asset` rather than silently
+/// rendering a look-free frame.  Any caller that can carry a LUT node must
+/// move to [`resolve_color_nodes_with`].
 ///
 /// # Errors
 ///
 /// Returns [`ColorPipelineError::TooManyColorNodes`] when the layer carries
 /// more than [`COLOR_NODE_LIMIT_PER_LAYER`] managed nodes — CC3 §3.1 requires a
-/// typed error, never a silent truncation — and any
-/// [`PrimaryCorrection::from_effect`] error for a malformed primary node.
+/// typed error, never a silent truncation — any
+/// [`PrimaryCorrection::from_effect`] error for a malformed primary node, and
+/// [`ColorPipelineError::MissingLutAsset`] for **every** active LUT node,
+/// because this wrapper resolves against an empty library.
 pub fn resolve_color_nodes(effects: &[Effect]) -> Result<Vec<ColorNode>, ColorPipelineError> {
+    resolve_color_nodes_with(effects, &LutLibrary::default())
+}
+
+/// Resolve the ordered colour-node stack of one *keyframe-evaluated* effect
+/// list against a verified LUT library (CC3 §3.1, §3.3; CC4 §3.6, §4.4).
+///
+/// Keyframes must already have been resolved by the caller
+/// (`Effect::evaluated_at`).  Nodes that Core reports inactive — bypassed,
+/// neutral, or (for a LUT node) unbound — are dropped entirely rather than
+/// evaluated as an approximate identity, which is what makes the CC3 §10.3 and
+/// CC4 §10.3.2 identity gates bit-identical.  `primary_correction` has no
+/// bypass control and no neutral short-circuit, so it is always included,
+/// exactly as CC1 specifies.  Effects that are not managed colour nodes are
+/// ignored.
+///
+/// The vector order is the execution order: this function never sorts by
+/// stage, because the inspector, the proof manifest, and `clip.effects` must
+/// agree about what runs when (CC4 §3.2).  A stage-order violation is rejected
+/// by Core at the edit boundary, not repaired here.
+///
+/// # Errors
+///
+/// Returns [`ColorPipelineError::TooManyColorNodes`] when the layer carries
+/// more than [`COLOR_NODE_LIMIT_PER_LAYER`] managed nodes, any
+/// [`PrimaryCorrection::from_effect`] error for a malformed primary node,
+/// [`ColorPipelineError::MissingLutAsset`] when an active LUT node references
+/// an asset the library did not verify, and
+/// [`ColorPipelineError::UnsupportedInputEncoding`] for an out-of-range
+/// encoding token.
+pub fn resolve_color_nodes_with(
+    effects: &[Effect],
+    library: &LutLibrary,
+) -> Result<Vec<ColorNode>, ColorPipelineError> {
     let count = managed_color_node_count(effects);
     if count > COLOR_NODE_LIMIT_PER_LAYER {
         return Err(ColorPipelineError::TooManyColorNodes {
@@ -1277,6 +1783,10 @@ pub fn resolve_color_nodes(effects: &[Effect]) -> Result<Vec<ColorNode>, ColorPi
     for (index, kind) in active_color_nodes(effects) {
         let effect = &effects[index];
         nodes.push(match kind {
+            ColorNodeKind::TechnicalLut => ColorNode::TechnicalLut(LutNode::from_params(
+                &LutNodeParams::from_effect(effect),
+                library,
+            )?),
             ColorNodeKind::Primary => ColorNode::Primary(PrimaryCorrection::from_effect(effect)?),
             ColorNodeKind::Wheels => ColorNode::Wheels(ColorWheels::from_params(
                 &ColorWheelsParams::from_effect(effect),
@@ -1284,6 +1794,10 @@ pub fn resolve_color_nodes(effects: &[Effect]) -> Result<Vec<ColorNode>, ColorPi
             ColorNodeKind::Curves => ColorNode::Curves(ColorCurves::from_resolved(
                 &ResolvedCurves::from_effect(effect),
             )),
+            ColorNodeKind::CreativeLook => ColorNode::CreativeLook(LutNode::from_params(
+                &LutNodeParams::from_effect(effect),
+                library,
+            )?),
         });
     }
     Ok(nodes)
@@ -2601,6 +3115,822 @@ mod tests {
         assert_eq!(
             bits(apply_primary_corrections(sample, &[first, second]).expect("valid controls")),
             bits(apply_color_nodes(&nodes, sample))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CC4 §10.3.2--§10.3.6: LUT nodes.
+    //
+    // Every expected value below is transcribed from the CC4 contract text or
+    // derived by hand from the §3.5 equations. No expectation is obtained by
+    // calling `Lut3d::lookup`, `LutNode::apply`, or `apply_color_nodes`
+    // (CC4 §10.1.1).
+    // -----------------------------------------------------------------------
+
+    /// The eight CC3 §10.2 channel patterns, verbatim.
+    fn cc4_pattern_sample(pattern: usize, level: f32) -> [f32; 3] {
+        match pattern {
+            0 => [level, level, level],
+            1 => [level, 0.0, 0.0],
+            2 => [0.0, level, 0.0],
+            3 => [0.0, 0.0, level],
+            4 => [0.0, level, level],
+            5 => [level, 0.0, level],
+            6 => [level, level, 0.0],
+            7 => [level, level / 2.0, level / 4.0],
+            other => panic!("CC3 raster has eight patterns; asked for {other}"),
+        }
+    }
+
+    /// The CC3 §10.2 raster CC4 §10.2 reuses verbatim: 24 levels x 8 patterns.
+    fn cc4_raster() -> Vec<[f32; 3]> {
+        let mut samples = Vec::with_capacity(192);
+        for level in CC3_RASTER_LEVELS {
+            for pattern in 0..8 {
+                samples.push(cc4_pattern_sample(pattern, level));
+            }
+        }
+        assert_eq!(samples.len(), 192);
+        samples
+    }
+
+    /// A lattice built red-fastest from a closure over the integer indices.
+    fn cube_from(
+        size: u32,
+        domain_min: [f32; 3],
+        domain_max: [f32; 3],
+        value: impl Fn(u32, u32, u32) -> [f32; 3],
+    ) -> CubeLut {
+        let mut rgba = Vec::with_capacity((size as usize).pow(3) * 4);
+        for blue in 0..size {
+            for green in 0..size {
+                for red in 0..size {
+                    let sample = value(red, green, blue);
+                    rgba.extend_from_slice(&[sample[0], sample[1], sample[2], 1.0]);
+                }
+            }
+        }
+        CubeLut {
+            size,
+            domain_min,
+            domain_max,
+            rgba,
+            title: None,
+        }
+    }
+
+    /// CC4 §10.3.3 LUT B: `S = 2`, domain `[0, 1]`, the seven half-unit
+    /// corners plus a white corner at `(1, 1, 1)`.
+    fn lut_b() -> Lut3d {
+        Lut3d::from_cube(&cube_from(2, [0.0; 3], [1.0; 3], |red, green, blue| {
+            if (red, green, blue) == (1, 1, 1) {
+                [1.0, 1.0, 1.0]
+            } else {
+                [red, green, blue].map(|index| 0.5 * f32::from(u8::try_from(index).unwrap()))
+            }
+        }))
+    }
+
+    /// CC4 §10.3.3 LUT C/D lattice: separable, `f = (0, 0.25, 1.0)`.
+    fn lut_cd(domain_min: [f32; 3], domain_max: [f32; 3]) -> Lut3d {
+        const F: [f32; 3] = [0.0, 0.25, 1.0];
+        Lut3d::from_cube(&cube_from(3, domain_min, domain_max, |red, green, blue| {
+            [F[red as usize], F[green as usize], F[blue as usize]]
+        }))
+    }
+
+    /// An identity lattice at edge `size` over `[0, 1]`.
+    fn identity_lut(size: u32) -> Lut3d {
+        let last = f32::from(u16::try_from(size - 1).expect("edge fits"));
+        Lut3d::from_cube(&cube_from(size, [0.0; 3], [1.0; 3], |red, green, blue| {
+            [red, green, blue]
+                .map(|index| f32::from(u16::try_from(index).expect("index fits")) / last)
+        }))
+    }
+
+    fn lut_node(lut: Lut3d, encoding: LutInputEncoding, mix: f32) -> LutNode {
+        LutNode::new(Arc::new(lut), encoding, mix)
+    }
+
+    fn lut_effect(id: u64, name: &str, asset: u64, extra: &[(&str, i64)]) -> Effect {
+        let mut parameters = vec![("lut_asset_id".to_owned(), i64::try_from(asset).unwrap())];
+        for (name, value) in extra {
+            parameters.push(((*name).to_owned(), *value));
+        }
+        color_node_effect(id, name, parameters)
+    }
+
+    /// A library holding the two built-in bakes CC4 §2.6 pins, admitted
+    /// through the production `LutLibrary::build` path with no store.
+    fn builtin_library() -> LutLibrary {
+        let assets = [
+            crate::builtin_looks::BuiltinLook::Warm.to_lut_asset(LutAssetId(1)),
+            crate::builtin_looks::BuiltinLook::Cool.to_lut_asset(LutAssetId(2)),
+        ];
+        let (library, statuses) = LutLibrary::build(&assets, None);
+        for (id, status) in statuses {
+            assert_eq!(
+                status.kind,
+                kinewright_core::LutAvailabilityKind::Verified,
+                "built-in asset {id:?} must verify from the pinned bake"
+            );
+        }
+        assert_eq!(library.len(), 2);
+        library
+    }
+
+    // --- §3.4 -------------------------------------------------------------
+
+    #[test]
+    fn decode_display709_is_the_exact_inverse_of_encode_bt709() {
+        // CC4 §3.4: `decode_display709(encode_bt709(x)) = x` for every finite
+        // `x` in exact arithmetic, including the negatives and the over-range
+        // levels CC3 §10.2 carries and where `decode_bt709` cannot.
+        let mut worst = 0.0_f64;
+        for level in CC3_RASTER_LEVELS {
+            for x in [level, -level] {
+                let round_trip = decode_display709(encode_bt709(x));
+                let tolerance = 1e-6_f32 * 1.0_f32.max(x.abs());
+                assert!(
+                    (round_trip - x).abs() <= tolerance,
+                    "decode_display709(encode_bt709({x})) = {round_trip}"
+                );
+                worst = worst.max(f64::from((round_trip - x).abs()));
+            }
+        }
+        // Recorded, not gated: the measured f32 `powf` round-trip floor.
+        assert!(worst < 1e-6, "observed worst round-trip deviation {worst}");
+
+        // `sgn(0) = 0`, so zero is exact rather than merely close, and the
+        // sign is preserved rather than taken from `f32::signum`.
+        assert_eq!(decode_display709(0.0).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(
+            decode_display709(encode_bt709(0.0)).to_bits(),
+            0.0_f32.to_bits()
+        );
+        assert_eq!(
+            decode_display709(-0.45).to_bits(),
+            (-decode_display709(0.45)).to_bits()
+        );
+
+        // This is exactly why CC4 needs its own decode: CC1's source decode
+        // takes the linear branch unconditionally for a negative argument.
+        assert!((decode_bt709(encode_bt709(-0.25)) + 0.25).abs() > 0.1);
+        assert!((decode_display709(-0.5) - decode_bt709(-0.5)).abs() > 0.1);
+        // ... and it is untouched: `decode_bt709(-0.5) = -0.5 / 4.5`.
+        assert_close(decode_bt709(-0.5), -0.5 / 4.5, 1e-7);
+    }
+
+    #[test]
+    fn decode_display709_crosses_the_0_018_seam_consistently() {
+        // CC1's encode branches at linear 0.018; CC4's decode branches at the
+        // encoded 0.081. `0.018` itself takes the *power* branch of the
+        // encode (the test is `linear < 0.018`), so its encoded value must
+        // land at or above 0.081 and decode through the power branch.
+        let encoded = encode_bt709(0.018);
+        assert!(
+            encoded >= 0.081,
+            "encode_bt709(0.018) = {encoded} must take the power branch"
+        );
+        assert_close(decode_display709(encoded), 0.018, 1e-6);
+
+        // The f32 immediately below 0.018 takes the linear branch and must
+        // encode strictly below 0.081, so no encoded value can fall into the
+        // gap and be decoded through the wrong branch.
+        let below = f32::from_bits(0.018_f32.to_bits() - 1);
+        let encoded_below = encode_bt709(below);
+        assert!(
+            encoded_below < 0.081,
+            "encode_bt709({below}) = {encoded_below} must take the linear branch"
+        );
+        assert_close(decode_display709(encoded_below), below, 1e-9);
+        assert!(encoded_below < encoded, "the encode stays increasing");
+    }
+
+    #[test]
+    fn lut_input_encodings_map_tokens_and_round_trip() {
+        assert_eq!(
+            LutInputEncoding::from_token(0),
+            Some(LutInputEncoding::Display709)
+        );
+        assert_eq!(
+            LutInputEncoding::from_token(1),
+            Some(LutInputEncoding::Linear)
+        );
+        assert_eq!(
+            LutInputEncoding::from_token(2),
+            Some(LutInputEncoding::Grade709)
+        );
+        assert_eq!(LutInputEncoding::from_token(3), None);
+        assert_eq!(LutInputEncoding::from_token(-1), None);
+        for encoding in LutInputEncoding::ALL {
+            assert_eq!(
+                LutInputEncoding::from_token(encoding.token()),
+                Some(encoding)
+            );
+        }
+        assert_eq!(LutInputEncoding::Display709.as_str(), "display709");
+        assert_eq!(LutInputEncoding::Linear.as_str(), "linear");
+        assert_eq!(LutInputEncoding::Grade709.as_str(), "grade709");
+
+        // `linear` is the identity in both directions, bit for bit.
+        for value in [-2.5_f32, 0.0, 0.18, 4.0] {
+            assert_eq!(
+                LutInputEncoding::Linear.encode(value).to_bits(),
+                value.to_bits()
+            );
+            assert_eq!(
+                LutInputEncoding::Linear.decode(value).to_bits(),
+                value.to_bits()
+            );
+        }
+        assert_eq!(
+            LutInputEncoding::Display709.encode(0.18).to_bits(),
+            encode_bt709(0.18).to_bits()
+        );
+        assert_eq!(
+            LutInputEncoding::Display709.decode(0.5).to_bits(),
+            decode_display709(0.5).to_bits()
+        );
+        assert_eq!(
+            LutInputEncoding::Grade709.encode(0.18).to_bits(),
+            grade709_encode(0.18).to_bits()
+        );
+        assert_eq!(
+            LutInputEncoding::Grade709.decode(0.5).to_bits(),
+            grade709_decode(0.5).to_bits()
+        );
+    }
+
+    // --- §10.3.3 interpolation anchors ------------------------------------
+
+    #[test]
+    fn lut_b_reproduces_the_three_tetrahedral_anchors() {
+        let lut = lut_b();
+        // Row 1, branch `f_r > f_g > f_b`:
+        //   c000 + 0.75*(c100-c000) + 0.50*(c110-c100) + 0.25*(c111-c110)
+        // = 0.75*(.5,0,0) + 0.5*(0,.5,0) + 0.25*(.5,.5,1)
+        // = (0.500000, 0.375000, 0.250000)
+        assert_eq!(
+            bits(lut.lookup([0.75, 0.50, 0.25])),
+            bits([0.500_000, 0.375_000, 0.250_000])
+        );
+        // Row 2, `f_r <= f_g` then `f_b > f_g`:
+        //   c000 + 0.25*(c111-c011) + 0.50*(c011-c001) + 0.75*(c001-c000)
+        // = 0.25*(1,.5,.5) + 0.5*(0,.5,0) + 0.75*(0,0,.5)
+        // = (0.250000, 0.375000, 0.500000)
+        assert_eq!(
+            bits(lut.lookup([0.25, 0.50, 0.75])),
+            bits([0.250_000, 0.375_000, 0.500_000])
+        );
+        // Row 3, the three-way tie falling to the final `else`:
+        //   c000 + 0.5*(c110-c010) + 0.5*(c010-c000) + 0.5*(c111-c110)
+        // = 0.5*(.5,0,0) + 0.5*(0,.5,0) + 0.5*(.5,.5,1)
+        // = (0.500000, 0.500000, 0.500000)
+        assert_eq!(
+            bits(lut.lookup([0.50, 0.50, 0.50])),
+            bits([0.500_000, 0.500_000, 0.500_000])
+        );
+    }
+
+    #[test]
+    fn the_first_anchor_differs_from_trilinear_interpolation() {
+        // CC4 §10.3.3: trilinear interpolation of the same lattice at the same
+        // point is (0.421875, 0.296875, 0.171875) -- proving the production
+        // evaluator is actually tetrahedral rather than a renamed trilinear.
+        let lut = lut_b();
+        assert_eq!(
+            bits(lut.trilinear_lookup([0.75, 0.50, 0.25])),
+            bits([0.421_875, 0.296_875, 0.171_875])
+        );
+        assert_ne!(
+            bits(lut.lookup([0.75, 0.50, 0.25])),
+            bits(lut.trilinear_lookup([0.75, 0.50, 0.25]))
+        );
+        // The two agree on a lattice point, as both must.
+        assert_eq!(
+            bits(lut.lookup([1.0, 1.0, 1.0])),
+            bits(lut.trilinear_lookup([1.0, 1.0, 1.0]))
+        );
+    }
+
+    #[test]
+    fn the_tie_case_agrees_through_all_six_branch_formulas() {
+        // CC4 §3.5 states the six formulas agree analytically on the shared
+        // faces, so a tie is well defined. At `f = (0.5, 0.5, 0.5)` every
+        // branch condition is false, so this transcribes all six directly
+        // from the contract and asserts they agree with each other and with
+        // the production evaluator.
+        let lut = lut_b();
+        let corner = |r: u32, g: u32, b: u32| lut.lattice(r, g, b);
+        let (c000, c001, c010, c011) = (
+            corner(0, 0, 0),
+            corner(0, 0, 1),
+            corner(0, 1, 0),
+            corner(0, 1, 1),
+        );
+        let (c100, c101, c110, c111) = (
+            corner(1, 0, 0),
+            corner(1, 0, 1),
+            corner(1, 1, 0),
+            corner(1, 1, 1),
+        );
+        let (f_r, f_g, f_b) = (0.5_f32, 0.5_f32, 0.5_f32);
+        let combine =
+            |a1: [f32; 3], a0: [f32; 3], b1: [f32; 3], b0: [f32; 3], d1: [f32; 3], d0: [f32; 3]| {
+                let mut out = [0.0_f32; 3];
+                for channel in 0..3 {
+                    out[channel] = c000[channel]
+                        + f_r * (a1[channel] - a0[channel])
+                        + f_g * (b1[channel] - b0[channel])
+                        + f_b * (d1[channel] - d0[channel]);
+                }
+                out
+            };
+        let branches = [
+            combine(c100, c000, c110, c100, c111, c110),
+            combine(c100, c000, c111, c101, c101, c100),
+            combine(c101, c001, c111, c101, c001, c000),
+            combine(c111, c011, c011, c001, c001, c000),
+            combine(c111, c011, c010, c000, c011, c010),
+            combine(c110, c010, c010, c000, c111, c110),
+        ];
+        for (index, branch) in branches.iter().enumerate() {
+            assert_eq!(
+                bits(*branch),
+                bits([0.5, 0.5, 0.5]),
+                "branch {index} must agree at the tie"
+            );
+        }
+        assert_eq!(bits(lut.lookup([0.5, 0.5, 0.5])), bits(branches[5]));
+    }
+
+    #[test]
+    fn lut_c_reproduces_the_separable_anchor() {
+        // CC4 §10.3.3 LUT C, `S = 3`, domain [0, 1], f = (0, 0.25, 1.0).
+        // s = (1.5, 0.5, 1.0); i = (1, 0, 1); f = (0.5, 0.5, 0.0) -> the tie
+        // falls to the final `else`, giving (0.625, 0.125, 0.25).
+        let lut = lut_cd([0.0; 3], [1.0; 3]);
+        assert_eq!(
+            bits(lut.lookup([0.75, 0.25, 0.50])),
+            bits([0.625_000, 0.125_000, 0.250_000])
+        );
+    }
+
+    #[test]
+    fn lut_d_reproduces_the_domain_mapping_anchor() {
+        // CC4 §10.3.3 LUT D: the LUT C lattice over DOMAIN [-0.5, 1.5].
+        // t = (u + 0.5) / 2 = (0.5, 0.25, 0.75); s = (1.0, 0.5, 1.5);
+        // i = (1, 0, 1); f = (0.0, 0.5, 0.5) -> the `f_b > f_r` branch.
+        let lut = lut_cd([-0.5; 3], [1.5; 3]);
+        assert_eq!(
+            bits(lut.lookup([0.50, 0.00, 1.00])),
+            bits([0.250_000, 0.125_000, 0.625_000])
+        );
+    }
+
+    // --- §10.3.4 out of domain --------------------------------------------
+
+    #[test]
+    fn out_of_domain_excursions_are_restored_additively_not_clamped() {
+        let lut = lut_cd([-0.5; 3], [1.5; 3]);
+
+        // e = (2, 2, 2) clamps to (1.5, 1.5, 1.5), whose lookup is (1, 1, 1);
+        // the 0.5 excursion above dmax is added back on top of the boundary
+        // value, so the node output is (1.5, 1.5, 1.5).
+        assert_eq!(bits(lut.lookup([2.0; 3])), bits([1.5, 1.5, 1.5]));
+        // e = (-1, -1, -1) clamps to (-0.5, -0.5, -0.5), lookup (0, 0, 0),
+        // output (-0.5, -0.5, -0.5).
+        assert_eq!(bits(lut.lookup([-1.0; 3])), bits([-0.5, -0.5, -0.5]));
+
+        // A pure-clamp implementation would return the boundary lookups
+        // (1, 1, 1) and (0, 0, 0). Asserting the difference is what stops the
+        // additive rule regressing silently.
+        let clamp_only_high = lut.lookup([1.5; 3]);
+        let clamp_only_low = lut.lookup([-0.5; 3]);
+        assert_eq!(bits(clamp_only_high), bits([1.0, 1.0, 1.0]));
+        assert_eq!(bits(clamp_only_low), bits([0.0, 0.0, 0.0]));
+        assert_ne!(bits(lut.lookup([2.0; 3])), bits(clamp_only_high));
+        assert_ne!(bits(lut.lookup([-1.0; 3])), bits(clamp_only_low));
+
+        // Ordering above the domain boundary survives, which is the whole
+        // point: a pure clamp would collapse both to (1, 1, 1).
+        assert!(lut.lookup([2.5; 3])[0] > lut.lookup([2.0; 3])[0]);
+    }
+
+    // --- §10.3.5 mix -------------------------------------------------------
+
+    #[test]
+    fn mix_blends_in_linear_light_at_both_endpoints_and_the_midpoint() {
+        // CC4 §10.3.5 with LUT B, `input_encoding = linear`,
+        // x = (0.75, 0.50, 0.25), look(x) = (0.5, 0.375, 0.25).
+        let sample = [0.75_f32, 0.50, 0.25];
+        let neutral = lut_node(lut_b(), LutInputEncoding::Linear, 0.0);
+        assert_eq!(bits(neutral.apply(sample)), bits(sample));
+
+        let half = lut_node(lut_b(), LutInputEncoding::Linear, 0.5);
+        assert_eq!(
+            bits(half.apply(sample)),
+            bits([0.625_000, 0.437_500, 0.250_000])
+        );
+
+        let full = lut_node(lut_b(), LutInputEncoding::Linear, 1.0);
+        assert_eq!(
+            bits(full.apply(sample)),
+            bits([0.500_000, 0.375_000, 0.250_000])
+        );
+
+        // The basis-point ladder Core resolves must reach exactly those
+        // factors: 0, 5000, and 10000.
+        for (basis_points, expected) in [(0_i64, 0.0_f32), (5_000, 0.5), (10_000, 1.0)] {
+            let params = LutNodeParams {
+                lut_asset_id: LutAssetId(1),
+                mix_basis_points: basis_points,
+                input_encoding_token: 0,
+                bypass_token: 0,
+            };
+            assert_eq!(params.mix().to_bits(), expected.to_bits());
+        }
+    }
+
+    // --- §10.3.2 identity --------------------------------------------------
+
+    #[test]
+    fn identity_lattices_are_bit_exact_in_linear_at_dyadic_sizes() {
+        // CC4 §3.5: with `input_encoding = linear`, domain [0, 1], and
+        // `S - 1` a power of two, every lattice coordinate, fraction, and
+        // interpolation weight is an exact binary fraction.
+        for size in [2_u32, 17, 33, 65] {
+            let node = lut_node(identity_lut(size), LutInputEncoding::Linear, 1.0);
+            for sample in cc4_raster() {
+                if sample.iter().any(|value| *value < 0.0 || *value > 1.0) {
+                    continue;
+                }
+                assert_eq!(
+                    bits(node.apply(sample)),
+                    bits(sample),
+                    "S = {size} must be bit-exact at {sample:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_non_dyadic_identity_lattice_is_not_bit_exact() {
+        // The counter-check for the claim above: `S = 64` gives `S - 1 = 63`,
+        // so `1/63` is not a binary fraction and the reproduction is only
+        // close, not exact. This is why CC4 §3.5 names {2, 17, 33, 65}
+        // explicitly rather than "any size".
+        let node = lut_node(identity_lut(64), LutInputEncoding::Linear, 1.0);
+        let mut differing = 0_usize;
+        let mut worst = 0.0_f32;
+        for sample in cc4_raster() {
+            if sample.iter().any(|value| *value < 0.0 || *value > 1.0) {
+                continue;
+            }
+            let observed = node.apply(sample);
+            if bits(observed) != bits(sample) {
+                differing += 1;
+            }
+            for channel in 0..3 {
+                worst = worst.max((observed[channel] - sample[channel]).abs());
+            }
+        }
+        assert!(
+            differing > 0,
+            "S = 64 must not be bit-exact; the dyadic claim would be vacuous"
+        );
+        assert!(
+            worst <= 1.5e-3,
+            "S = 64 stays inside the linear gate: {worst}"
+        );
+    }
+
+    #[test]
+    fn identity_lattices_are_tolerance_exact_in_display709_and_grade709() {
+        // CC4 §3.5: for `display709` / `grade709` the f32 `pow` round trip is
+        // not bit-exact even though the pair is an exact analytic bijection,
+        // so the gate is the CC1 §6.2 linear maximum, never bit equality.
+        const LINEAR_MAX: f32 = 1.5e-3;
+        for encoding in [LutInputEncoding::Display709, LutInputEncoding::Grade709] {
+            let mut worst = 0.0_f32;
+            let mut bit_exact = true;
+            for size in [2_u32, 17, 33, 65] {
+                let node = lut_node(identity_lut(size), encoding, 1.0);
+                for sample in cc4_raster() {
+                    if sample.iter().any(|value| *value < 0.0 || *value > 1.0) {
+                        continue;
+                    }
+                    let observed = node.apply(sample);
+                    if bits(observed) != bits(sample) {
+                        bit_exact = false;
+                    }
+                    for channel in 0..3 {
+                        worst = worst.max((observed[channel] - sample[channel]).abs());
+                    }
+                }
+            }
+            assert!(
+                worst <= LINEAR_MAX,
+                "{} identity deviation {worst} exceeds {LINEAR_MAX}",
+                encoding.as_str()
+            );
+            assert!(
+                !bit_exact,
+                "{} is not claimed bit-exact; if it were, the separate gate would be dead code",
+                encoding.as_str()
+            );
+        }
+    }
+
+    // --- §10.3.10 built-in bakes -------------------------------------------
+
+    #[test]
+    fn builtin_bakes_reproduce_their_closed_form_on_the_raster() {
+        // CC4 §2.6/§10.3.10: all five formulas are affine in `e`, and
+        // tetrahedral interpolation reproduces an affine function exactly on
+        // every simplex, so the node output must match the closed form to
+        // within 2e-6 in display code. The expectation is computed in f64
+        // from `BuiltinLook::formula`, which is the contract's closed form,
+        // not the code under test.
+        const DISPLAY_CODE_MAX: f64 = 2e-6;
+        for look in crate::builtin_looks::BuiltinLook::ALL {
+            let node = LutNode::new(
+                Arc::new(Lut3d::from_shared(look.cached_bake())),
+                LutInputEncoding::Display709,
+                1.0,
+            );
+            let mut worst = 0.0_f64;
+            let mut outside_unit = 0_usize;
+            for sample in cc4_raster() {
+                let encoded = sample.map(encode_bt709);
+                if encoded.iter().any(|value| *value < 0.0 || *value > 1.0) {
+                    outside_unit += 1;
+                }
+                let expected = look.formula(encoded.map(f64::from));
+                let observed = node.apply(sample).map(encode_bt709);
+                for channel in 0..3 {
+                    let difference = (f64::from(observed[channel]) - expected[channel]).abs();
+                    assert!(
+                        difference <= DISPLAY_CODE_MAX,
+                        "{} channel {channel} at {sample:?}: display code {} vs {}",
+                        look.name(),
+                        observed[channel],
+                        expected[channel]
+                    );
+                    worst = worst.max(difference);
+                }
+            }
+            assert!(worst.is_finite(), "{}", look.name());
+            // CC4 §10.2: the raster is non-vacuous for the out-of-domain rule.
+            assert!(
+                outside_unit >= 40,
+                "only {outside_unit} raster samples encode outside [0, 1]"
+            );
+        }
+    }
+
+    // --- §3.6 inactive nodes and §4.4 resolution ---------------------------
+
+    #[test]
+    fn lut_node_resolution_reports_a_missing_asset_and_a_bad_encoding() {
+        let library = builtin_library();
+        let bound = LutNodeParams {
+            lut_asset_id: LutAssetId(1),
+            mix_basis_points: 10_000,
+            input_encoding_token: 0,
+            bypass_token: 0,
+        };
+        let node = LutNode::from_params(&bound, &library).expect("asset 1 is verified");
+        assert_eq!(node.encoding(), LutInputEncoding::Display709);
+        assert_eq!(node.mix().to_bits(), 1.0_f32.to_bits());
+        assert_eq!(node.lut().size(), 17);
+        assert_eq!(bits(node.lut().domain_min()), bits([-1.0; 3]));
+        assert_eq!(bits(node.lut().domain_max()), bits([2.0; 3]));
+
+        let dangling = LutNodeParams {
+            lut_asset_id: LutAssetId(9),
+            ..bound
+        };
+        let error = LutNode::from_params(&dangling, &library).expect_err("asset 9 is absent");
+        assert_eq!(error, ColorPipelineError::MissingLutAsset(LutAssetId(9)));
+        assert!(error.to_string().starts_with("missing_lut_asset: "));
+
+        let unbound = LutNodeParams {
+            lut_asset_id: LutAssetId(0),
+            ..bound
+        };
+        assert_eq!(
+            LutNode::from_params(&unbound, &library).expect_err("id 0 is unbound"),
+            ColorPipelineError::MissingLutAsset(LutAssetId(0))
+        );
+
+        let bad_encoding = LutNodeParams {
+            input_encoding_token: 3,
+            ..bound
+        };
+        let error =
+            LutNode::from_params(&bad_encoding, &library).expect_err("token 3 is not an encoding");
+        assert_eq!(error, ColorPipelineError::UnsupportedInputEncoding(3));
+        assert!(error.to_string().contains("observed 3"));
+        assert!(error.to_string().contains("allowed 0 display709"));
+    }
+
+    #[test]
+    fn inactive_lut_nodes_are_skipped_bit_identically() {
+        // CC4 §3.6: bypass, `mix = 0`, and an unbound reference are each the
+        // exact identity, tested on the stored integers, so each is losslessly
+        // identical to removing the node.
+        let library = builtin_library();
+        let sample = [0.18_f32, -0.05, 2.5];
+        let wheels = wheels_effect_with_id(9, &[("gain_master_thousandths", 1_200)]);
+        let baseline = resolve_color_nodes_with(std::slice::from_ref(&wheels), &library)
+            .expect("wheels alone");
+        let expected = apply_color_nodes(&baseline, sample);
+        assert_eq!(baseline.len(), 1);
+
+        // The same asset with an active node really does change the frame, so
+        // the identity claims below are not vacuous.
+        let active = lut_effect(1, "creative_look", 1, &[]);
+        let with_look =
+            resolve_color_nodes_with(&[wheels.clone(), active], &library).expect("look resolves");
+        assert_eq!(with_look.len(), 2);
+        assert_eq!(with_look[1].kind(), ColorNodeKind::CreativeLook);
+        assert_ne!(bits(apply_color_nodes(&with_look, sample)), bits(expected));
+
+        for (label, effect) in [
+            (
+                "bypassed",
+                lut_effect(1, "creative_look", 1, &[("bypass", 1)]),
+            ),
+            (
+                "neutral",
+                lut_effect(1, "creative_look", 1, &[("mix_basis_points", 0)]),
+            ),
+            ("unbound", lut_effect(1, "creative_look", 0, &[])),
+        ] {
+            let params = LutNodeParams::from_effect(&effect);
+            assert!(!params.is_active(), "{label} must resolve inactive");
+            let nodes = resolve_color_nodes_with(&[wheels.clone(), effect], &library)
+                .expect("an inactive LUT node never needs its asset");
+            assert_eq!(nodes.len(), 1, "{label} must be dropped entirely");
+            assert_eq!(
+                bits(apply_color_nodes(&nodes, sample)),
+                bits(expected),
+                "{label} must be bit-identical to the node removed"
+            );
+        }
+
+        // The unbound reason is the CC4 §3.6 token, constructed below the
+        // operation layer because §3.3 makes it unreachable through Core.
+        let unbound = LutNodeParams {
+            lut_asset_id: LutAssetId(0),
+            mix_basis_points: 10_000,
+            input_encoding_token: 0,
+            bypass_token: 0,
+        };
+        assert_eq!(
+            unbound.inactive_reason(),
+            Some(kinewright_core::ColorNodeInactiveReason::Unbound)
+        );
+    }
+
+    #[test]
+    fn the_legacy_resolver_fails_closed_on_an_active_lut_node() {
+        // CC4 §4.4: the old symbol is kept as a wrapper over an *empty*
+        // library, so no caller silently renders a look-free frame.
+        let technical = lut_effect(1, "technical_lut", 1, &[]);
+        assert_eq!(
+            resolve_color_nodes(std::slice::from_ref(&technical)),
+            Err(ColorPipelineError::MissingLutAsset(LutAssetId(1)))
+        );
+        let creative = lut_effect(2, "creative_look", 4, &[]);
+        assert_eq!(
+            resolve_color_nodes(std::slice::from_ref(&creative)),
+            Err(ColorPipelineError::MissingLutAsset(LutAssetId(4)))
+        );
+
+        // An inactive LUT node needs no asset, so the wrapper still resolves.
+        let bypassed = lut_effect(3, "creative_look", 1, &[("bypass", 1)]);
+        assert_eq!(
+            resolve_color_nodes(&[bypassed])
+                .expect("a bypassed node needs no asset")
+                .len(),
+            0
+        );
+        // And the CC3 stack keeps working through the wrapper unchanged.
+        let wheels = wheels_effect_with_id(4, &[("gain_master_thousandths", 1_200)]);
+        assert_eq!(
+            resolve_color_nodes(&[wheels]).expect("wheels alone").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_stage_order_of_the_five_kind_stack_is_the_execution_order() {
+        // CC4 §10.3.6: the CPU reference evaluates the vector order, so the
+        // stage-ordered stack and the reversed one differ. The reversed stack
+        // cannot be stored -- Core rejects it with ColorStageOrderViolation --
+        // so it is asserted directly against the reference here.
+        let library = builtin_library();
+        let ordered = vec![
+            lut_effect(1, "technical_lut", 1, &[]),
+            primary_effect(BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                ParamValue::Integer(500),
+            )])),
+            wheels_effect_with_id(3, &[("gain_master_thousandths", 1_200)]),
+            curve_effect(
+                ColorCurveChannel::Master,
+                &[(0, 0), (5_000, 6_000), (10_000, 10_000)],
+                0,
+            ),
+            lut_effect(5, "creative_look", 2, &[]),
+        ];
+        let stack = resolve_color_nodes_with(&ordered, &library).expect("stage-ordered stack");
+        assert_eq!(
+            stack.iter().map(ColorNode::kind).collect::<Vec<_>>(),
+            vec![
+                ColorNodeKind::TechnicalLut,
+                ColorNodeKind::Primary,
+                ColorNodeKind::Wheels,
+                ColorNodeKind::Curves,
+                ColorNodeKind::CreativeLook,
+            ]
+        );
+
+        let sample = [0.18_f32, 0.35, 0.62];
+        let forward = apply_color_nodes(&stack, sample);
+
+        let mut reversed = ordered.clone();
+        reversed.reverse();
+        let reversed_stack =
+            resolve_color_nodes_with(&reversed, &library).expect("reversed stack resolves");
+        assert_eq!(reversed_stack[0].kind(), ColorNodeKind::CreativeLook);
+        assert_eq!(reversed_stack[4].kind(), ColorNodeKind::TechnicalLut);
+        let backward = apply_color_nodes(&reversed_stack, sample);
+
+        assert_ne!(bits(forward), bits(backward));
+        let separation = (0..3)
+            .map(|channel| (forward[channel] - backward[channel]).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            separation > 1e-3,
+            "vector order must matter visibly: forward {forward:?} backward {backward:?}"
+        );
+
+        // The two-node §10.3.6 case, recorded with its values.
+        let two = vec![
+            lut_effect(1, "technical_lut", 1, &[]),
+            lut_effect(2, "creative_look", 2, &[]),
+        ];
+        let mut two_reversed = two.clone();
+        two_reversed.reverse();
+        let technical_first =
+            apply_color_nodes(&resolve_color_nodes_with(&two, &library).unwrap(), sample);
+        let look_first = apply_color_nodes(
+            &resolve_color_nodes_with(&two_reversed, &library).unwrap(),
+            sample,
+        );
+        assert_ne!(bits(technical_first), bits(look_first));
+        println!(
+            "CC4_STAGE_ORDER sample={sample:?} technical_first={technical_first:?} look_first={look_first:?}"
+        );
+    }
+
+    #[test]
+    fn color_node_kinds_cover_every_managed_name() {
+        // The resolved-node dispatch must stay total as Core grows the stack.
+        assert_eq!(
+            kinewright_core::MANAGED_COLOR_NODE_NAMES,
+            [
+                "technical_lut",
+                "primary_correction",
+                "color_wheels",
+                "color_curves",
+                "creative_look"
+            ]
+        );
+        let library = builtin_library();
+        let node = LutNode::from_params(
+            &LutNodeParams::from_effect(&lut_effect(1, "technical_lut", 1, &[])),
+            &library,
+        )
+        .expect("technical node");
+        assert_eq!(
+            ColorNode::TechnicalLut(node.clone()).kind(),
+            ColorNodeKind::TechnicalLut
+        );
+        assert_eq!(
+            ColorNode::CreativeLook(node.clone()).kind(),
+            ColorNodeKind::CreativeLook
+        );
+        assert!(ColorNode::TechnicalLut(node.clone()).lut_node().is_some());
+        assert!(ColorNode::CreativeLook(node).lut_node().is_some());
+        assert!(
+            ColorNode::Primary(PrimaryCorrection::default())
+                .lut_node()
+                .is_none()
         );
     }
 }

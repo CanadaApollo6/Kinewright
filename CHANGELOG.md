@@ -9,6 +9,39 @@ All notable changes to Kinewright are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Added
+- CC4 look management: LUT looks become project-owned, content-hashed assets.
+  `Document.lut_assets` records id/sha256/title/size/domain/provenance; bytes
+  live in a project-relative `<stem>.kinewright-assets/luts/<sha256>.cube`
+  store derived from the project path and never stored, so copying the project
+  file plus that directory reproduces every look bit-identically. Availability
+  (`verified`/`missing`/`changed`/`unreadable`) is runtime state injected into
+  Core (`export_lut_preflight_with`), with hash-checked restore and explicit
+  replace as the recovery paths, symlinked store roots refused, and a 16 MiB
+  import cap. Two new managed colour nodes, `technical_lut` (input stage) and
+  `creative_look` (look stage), carry an integer asset reference, mix, input
+  encoding (`display709`/`linear`/`grade709`, with a new exact
+  `decode_display709`), and bypass; Core rejects any vector order that
+  contradicts technical → correction → creative. Evaluation is normative
+  tetrahedral interpolation with a fixed branch structure, an additive
+  out-of-domain rule that keeps over-range values recoverable, and a
+  linear-light mix; the CPU reference and the GPU atlas shader implement it
+  independently. The four legacy built-in looks are deterministic, hash-pinned
+  generated assets baked over [-1, 2]; legacy `look_lut`/`cube_lut` stay
+  compatibility stages with an explicit `ConvertLegacyLook`. The compositor
+  binds one `Rgba32Float` 3D LUT atlas (up to four managed slots plus the
+  legacy slot) with `textureLoad` only and raises the required 3D texture
+  dimension to 512. The app gains `Look → Import LUT…`, `.cube` drop, a look
+  browser, a mix slider with coalesced undo, press-and-hold A/B, stage
+  headings with correct insertion, missing/changed banners with Locate/Replace,
+  Convert to managed look, and a dialog-free `write_project` that copies the
+  store on Save As; the export dialog and queue run the LUT preflight. The
+  agent gains `list_look_assets`, confirmation-gated `import_lut_asset`
+  (the only path that can create a LUT record; `AddLutAsset` is blocked from
+  plans and generated tools), `plan_technical_lut`/`plan_creative_look` with a
+  computed stage-legal `insert_index`, look-aware `render_color_proof`, and
+  LUT fields on every `color_nodes` manifest. Exit evidence lives in
+  `cc4_fixtures.rs`, `cc4_core.rs`, the app relocatability fixture, and
+  `docs/CC4-LOOK-MANAGEMENT.md`.
 - Pixel-exact compositor sampling: a layer whose source raster matches the
   output raster with no scale, offset, or reframe is now point-sampled instead
   of bilinear-filtered. The first Mesa lavapipe run of the CC3 parity suite

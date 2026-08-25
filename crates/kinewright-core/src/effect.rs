@@ -1,4 +1,4 @@
-use crate::{Effect, ParamValue};
+use crate::{Effect, EffectId, LutAssetId, ParamValue};
 
 /// A compositor control populated by an effect parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +137,97 @@ pub const COLOR_CURVES_PARAMETER_COUNT: usize = 4 * COLOR_CURVE_PARAMETER_COUNT 
 /// The most managed colour nodes one layer may carry (CC3 §3.1). Exceeding it
 /// is a typed error, never a silent truncation.
 pub const COLOR_NODE_LIMIT_PER_LAYER: usize = 16;
+
+/// The most LUT nodes one layer may carry, counting `technical_lut` and
+/// `creative_look` together (CC4 §3.1).
+///
+/// Tighter than [`COLOR_NODE_LIMIT_PER_LAYER`] because each LUT node needs a
+/// texture atlas slot. Exceeding it is a typed error, never a silent drop.
+pub const LUT_NODE_LIMIT_PER_LAYER: usize = 4;
+
+/// The asset-reference control shared by both CC4 LUT node kinds (CC4 §3.3).
+///
+/// An ordinary `ParamValue::Integer` whose value is a `LutAssetId`. `0` means
+/// *unbound*, which makes the node inactive; a valid document never stores it.
+pub const LUT_ASSET_ID_PARAMETER: &str = "lut_asset_id";
+
+/// The strength control shared by both CC4 LUT node kinds (CC4 §5).
+pub const LUT_MIX_PARAMETER: &str = "mix_basis_points";
+
+/// The input-encoding control shared by both CC4 LUT node kinds (CC4 §3.4).
+pub const LUT_INPUT_ENCODING_PARAMETER: &str = "input_encoding_token";
+
+/// Full look strength in basis points, and the pinned `technical_lut` value.
+pub const LUT_MIX_BASIS_POINTS_MAX: i64 = 10_000;
+
+/// The highest `input_encoding_token`: `0` display709, `1` linear, `2`
+/// grade709 (CC4 §3.4).
+pub const LUT_INPUT_ENCODING_TOKEN_MAX: i64 = 2;
+
+/// [`crate::LUT_ASSET_ID_MAX`] as the descriptor's inclusive integer maximum.
+///
+/// The two constants are asserted equal by the CC4 descriptor fixture, so the
+/// `u64` model bound and the `i64` descriptor bound cannot drift apart.
+const LUT_ASSET_ID_DESCRIPTOR_MAX: i64 = 9_007_199_254_740_991;
+
+/// Position of `lut_asset_id` in both LUT parameter tables.
+const LUT_ASSET_ID_INDEX: usize = 0;
+/// Position of `mix_basis_points` in both LUT parameter tables.
+const LUT_MIX_INDEX: usize = 1;
+/// Position of `input_encoding_token` in both LUT parameter tables.
+const LUT_INPUT_ENCODING_INDEX: usize = 2;
+/// Position of `bypass` in both LUT parameter tables.
+const LUT_BYPASS_INDEX: usize = 3;
+
+const LUT_ASSET_ID_DESCRIPTOR: EffectParameterDescriptor = EffectParameterDescriptor {
+    name: LUT_ASSET_ID_PARAMETER,
+    min: 0,
+    max: LUT_ASSET_ID_DESCRIPTOR_MAX,
+    neutral: 0,
+    uniform: EffectUniform::ColorNode,
+};
+
+const LUT_INPUT_ENCODING_DESCRIPTOR: EffectParameterDescriptor = EffectParameterDescriptor {
+    name: LUT_INPUT_ENCODING_PARAMETER,
+    min: 0,
+    max: LUT_INPUT_ENCODING_TOKEN_MAX,
+    neutral: 0,
+    uniform: EffectUniform::ColorNode,
+};
+
+/// The four `technical_lut` controls, in CC4 §5.1 table order.
+///
+/// `mix_basis_points` is pinned by its bounds rather than by a special case: a
+/// partially applied technical normalization is not a meaningful state.
+const TECHNICAL_LUT_PARAMETERS: [EffectParameterDescriptor; 4] = [
+    LUT_ASSET_ID_DESCRIPTOR,
+    EffectParameterDescriptor {
+        name: LUT_MIX_PARAMETER,
+        min: LUT_MIX_BASIS_POINTS_MAX,
+        max: LUT_MIX_BASIS_POINTS_MAX,
+        neutral: LUT_MIX_BASIS_POINTS_MAX,
+        uniform: EffectUniform::ColorNode,
+    },
+    LUT_INPUT_ENCODING_DESCRIPTOR,
+    COLOR_NODE_BYPASS_DESCRIPTOR,
+];
+
+/// The four `creative_look` controls, in CC4 §5.2 table order.
+///
+/// The neutral of `mix_basis_points` is full strength, not zero: a look node
+/// created with only `lut_asset_id` set must show the look.
+const CREATIVE_LOOK_PARAMETERS: [EffectParameterDescriptor; 4] = [
+    LUT_ASSET_ID_DESCRIPTOR,
+    EffectParameterDescriptor {
+        name: LUT_MIX_PARAMETER,
+        min: 0,
+        max: LUT_MIX_BASIS_POINTS_MAX,
+        neutral: LUT_MIX_BASIS_POINTS_MAX,
+        uniform: EffectUniform::ColorNode,
+    },
+    LUT_INPUT_ENCODING_DESCRIPTOR,
+    COLOR_NODE_BYPASS_DESCRIPTOR,
+];
 
 /// The canonical per-node bypass control shared by both CC3 nodes (CC3 §5).
 ///
@@ -717,6 +808,14 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
         parameters: &COLOR_CURVES_PARAMETERS,
     },
     EffectDescriptor {
+        name: "technical_lut",
+        parameters: &TECHNICAL_LUT_PARAMETERS,
+    },
+    EffectDescriptor {
+        name: "creative_look",
+        parameters: &CREATIVE_LOOK_PARAMETERS,
+    },
+    EffectDescriptor {
         name: "look_lut",
         parameters: &[
             EffectParameterDescriptor {
@@ -967,12 +1066,24 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
     },
 ];
 
-/// The managed colour-correction node kinds, in the order CC3 §3.1 lists them.
+/// The managed colour node kinds, in CC4 §3.2 stage order.
 ///
-/// These three effect names form one ordered node stack executed in
-/// `clip.effects` vector order. There is no fixed inter-kind precedence.
-pub const MANAGED_COLOR_NODE_NAMES: [&str; 3] =
-    ["primary_correction", "color_wheels", "color_curves"];
+/// These five effect names form one ordered node stack executed in
+/// `clip.effects` vector order. Within a stage there is no fixed inter-kind
+/// precedence (CC3 §3.1); *across* stages the vector order must be
+/// non-decreasing in stage rank, which [`color_stage_order_violation`]
+/// enforces.
+///
+/// CC4 grew this list from the three CC3 correction kinds to five by adding
+/// `technical_lut` at the front and `creative_look` at the back, so the array
+/// order is the stage order rather than the historical CC3 order.
+pub const MANAGED_COLOR_NODE_NAMES: [&str; 5] = [
+    "technical_lut",
+    "primary_correction",
+    "color_wheels",
+    "color_curves",
+    "creative_look",
+];
 
 /// Whether an effect name is a managed colour-correction node (CC3 §3.1).
 ///
@@ -986,25 +1097,37 @@ pub fn is_managed_color_node(name: &str) -> bool {
 /// One kind of managed colour node in the ordered CC1/CC3 stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ColorNodeKind {
+    /// The CC4 technical input transform: a LUT that normalizes the source.
+    TechnicalLut,
     /// The CC1 managed SDR primary correction.
     Primary,
     /// The CC3 ASC CDL slope/offset/power wheels.
     Wheels,
     /// The CC3 master/red/green/blue curves.
     Curves,
+    /// The CC4 creative look: a LUT applied after every correction.
+    CreativeLook,
 }
 
 impl ColorNodeKind {
-    /// Every node kind, in `MANAGED_COLOR_NODE_NAMES` order.
-    pub const ALL: [Self; 3] = [Self::Primary, Self::Wheels, Self::Curves];
+    /// Every node kind, in [`MANAGED_COLOR_NODE_NAMES`] (stage) order.
+    pub const ALL: [Self; 5] = [
+        Self::TechnicalLut,
+        Self::Primary,
+        Self::Wheels,
+        Self::Curves,
+        Self::CreativeLook,
+    ];
 
     /// The canonical effect name for this node kind.
     #[must_use]
     pub const fn effect_name(self) -> &'static str {
         match self {
+            Self::TechnicalLut => "technical_lut",
             Self::Primary => "primary_correction",
             Self::Wheels => "color_wheels",
             Self::Curves => "color_curves",
+            Self::CreativeLook => "creative_look",
         }
     }
 
@@ -1012,23 +1135,107 @@ impl ColorNodeKind {
     #[must_use]
     pub fn from_effect_name(name: &str) -> Option<Self> {
         match name {
+            "technical_lut" => Some(Self::TechnicalLut),
             "primary_correction" => Some(Self::Primary),
             "color_wheels" => Some(Self::Wheels),
             "color_curves" => Some(Self::Curves),
+            "creative_look" => Some(Self::CreativeLook),
             _ => None,
         }
     }
 
     /// The node-kind tag written into the ordered grade storage buffer
-    /// (CC3 §3.2): `1` primary, `2` wheels, `3` curves.
+    /// (CC3 §3.2, CC4 §4.2): `1` primary, `2` wheels, `3` curves,
+    /// `4` technical LUT, `5` creative look.
     #[must_use]
     pub const fn storage_buffer_tag(self) -> u32 {
         match self {
             Self::Primary => 1,
             Self::Wheels => 2,
             Self::Curves => 3,
+            Self::TechnicalLut => 4,
+            Self::CreativeLook => 5,
         }
     }
+
+    /// The ordering stage this kind occupies (CC4 §3.1, §3.2).
+    #[must_use]
+    pub const fn stage(self) -> ColorStage {
+        match self {
+            Self::TechnicalLut => ColorStage::Input,
+            Self::Primary | Self::Wheels | Self::Curves => ColorStage::Correction,
+            Self::CreativeLook => ColorStage::Look,
+        }
+    }
+
+    /// The stable manifest/inspector role token for this kind (CC4 §3.1):
+    /// `technical`, `correction`, or `creative`.
+    #[must_use]
+    pub const fn role(self) -> &'static str {
+        match self {
+            Self::TechnicalLut => "technical",
+            Self::Primary | Self::Wheels | Self::Curves => "correction",
+            Self::CreativeLook => "creative",
+        }
+    }
+
+    /// Whether this kind evaluates a project LUT asset.
+    #[must_use]
+    pub const fn is_lut(self) -> bool {
+        matches!(self, Self::TechnicalLut | Self::CreativeLook)
+    }
+
+    /// The descriptor parameter table for a LUT node kind (CC4 §5).
+    const fn lut_parameters(self) -> Option<&'static [EffectParameterDescriptor; 4]> {
+        match self {
+            Self::TechnicalLut => Some(&TECHNICAL_LUT_PARAMETERS),
+            Self::CreativeLook => Some(&CREATIVE_LOOK_PARAMETERS),
+            Self::Primary | Self::Wheels | Self::Curves => None,
+        }
+    }
+}
+
+/// Where one managed colour node sits in the CC4 §3.2 stage order.
+///
+/// The subsequence of managed nodes in `clip.effects` must have non-decreasing
+/// stage rank. A vector order that contradicts it is *rejected*, never
+/// silently reordered, so the stored order stays the execution order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum ColorStage {
+    /// Input transforms: `technical_lut`.
+    Input = 0,
+    /// Corrections: `primary_correction`, `color_wheels`, `color_curves`.
+    Correction = 1,
+    /// Creative looks: `creative_look`.
+    Look = 2,
+}
+
+impl ColorStage {
+    /// Every stage, in ascending rank order.
+    pub const ALL: [Self; 3] = [Self::Input, Self::Correction, Self::Look];
+
+    /// The stage rank compared by the CC4 §3.2 ordering rule.
+    #[must_use]
+    pub const fn rank(self) -> u8 {
+        self as u8
+    }
+
+    /// Stable manifest/inspector token: `input`, `correction`, or `look`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Correction => "correction",
+            Self::Look => "look",
+        }
+    }
+}
+
+/// Whether an effect name is one of the two CC4 LUT node kinds.
+#[must_use]
+pub fn is_lut_color_node(name: &str) -> bool {
+    ColorNodeKind::from_effect_name(name).is_some_and(ColorNodeKind::is_lut)
 }
 
 /// Why a managed colour node is the exact identity for a rendered frame.
@@ -1040,8 +1247,14 @@ pub enum ColorNodeInactiveReason {
     /// The evaluated `bypass` control is `>= 1`.
     Bypassed,
     /// Every stored control equals its descriptor neutral, or every curve is
-    /// structurally identity.
+    /// structurally identity, or a LUT node's evaluated mix is zero.
     Neutral,
+    /// A LUT node's evaluated `lut_asset_id` is `0` (CC4 §3.6).
+    ///
+    /// Unreachable in a valid document: `validate_document` requires every
+    /// referenced id to exist. The state exists so a resolved node can never
+    /// index a missing asset.
+    Unbound,
 }
 
 impl ColorNodeInactiveReason {
@@ -1051,6 +1264,7 @@ impl ColorNodeInactiveReason {
         match self {
             Self::Bypassed => "bypassed",
             Self::Neutral => "neutral",
+            Self::Unbound => "unbound",
         }
     }
 }
@@ -1392,6 +1606,9 @@ pub fn color_node_inactive_reason(effect: &Effect) -> Option<ColorNodeInactiveRe
         ColorNodeKind::Primary => None,
         ColorNodeKind::Wheels => ColorWheelsParams::from_effect(effect).inactive_reason(),
         ColorNodeKind::Curves => ResolvedCurves::from_effect(effect).inactive_reason(),
+        ColorNodeKind::TechnicalLut | ColorNodeKind::CreativeLook => {
+            LutNodeParams::from_effect(effect).inactive_reason()
+        }
     }
 }
 
@@ -1427,6 +1644,222 @@ pub fn managed_color_node_count(effects: &[Effect]) -> usize {
         .iter()
         .filter(|effect| is_managed_color_node(&effect.name))
         .count()
+}
+
+/// How many LUT nodes one effect stack carries (CC4 §3.1).
+///
+/// Counts `technical_lut` and `creative_look` together, active or not: a
+/// bypassed LUT node keeps its place in `clip.effects` and still counts
+/// against [`LUT_NODE_LIMIT_PER_LAYER`].
+#[must_use]
+pub fn lut_node_count(effects: &[Effect]) -> usize {
+    effects
+        .iter()
+        .filter(|effect| is_lut_color_node(&effect.name))
+        .count()
+}
+
+/// Every `technical_lut` / `creative_look` control resolved to its stored
+/// integer (CC4 §5).
+///
+/// Callers pass a *keyframe-evaluated* effect ([`Effect::evaluated_at`]); this
+/// type performs no automation evaluation of its own. Omitted parameters
+/// resolve to their descriptor neutrals and out-of-range values are clamped
+/// defensively, so a rendered frame can never fail — neither case is reachable
+/// through the edit path, which rejects both atomically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LutNodeParams {
+    /// The referenced project asset. [`LutAssetId`]`(0)` is *unbound*, which
+    /// makes the node inactive.
+    pub lut_asset_id: LutAssetId,
+    /// Look strength in basis points, `0..=10000`. Always `10000` on a
+    /// `technical_lut`, whose descriptor pins it.
+    pub mix_basis_points: i64,
+    /// `0` display709, `1` linear, `2` grade709 (CC4 §3.4).
+    pub input_encoding_token: i64,
+    /// The stored `bypass` token, `0` or `1`.
+    pub bypass_token: i64,
+}
+
+impl LutNodeParams {
+    /// Resolve a keyframe-evaluated LUT node.
+    ///
+    /// The bounds come from the node's own descriptor table, so a
+    /// `technical_lut` always resolves full strength while a `creative_look`
+    /// keeps its authored mix. An effect that is not a LUT node resolves
+    /// against the `creative_look` table and is reported unbound.
+    #[must_use]
+    pub fn from_effect(effect: &Effect) -> Self {
+        let parameters = ColorNodeKind::from_effect_name(&effect.name)
+            .and_then(ColorNodeKind::lut_parameters)
+            .unwrap_or(&CREATIVE_LOOK_PARAMETERS);
+        let resolve = |index: usize| {
+            let descriptor = parameters[index];
+            stored_integer(effect, descriptor.name, descriptor.neutral)
+                .clamp(descriptor.min, descriptor.max)
+        };
+        let asset_id = resolve(LUT_ASSET_ID_INDEX);
+        Self {
+            lut_asset_id: LutAssetId(u64::try_from(asset_id).unwrap_or_default()),
+            mix_basis_points: resolve(LUT_MIX_INDEX),
+            input_encoding_token: resolve(LUT_INPUT_ENCODING_INDEX),
+            bypass_token: resolve(LUT_BYPASS_INDEX),
+        }
+    }
+
+    /// Whether the evaluated `bypass` control is `>= 1`.
+    #[must_use]
+    pub const fn bypass(&self) -> bool {
+        self.bypass_token >= 1
+    }
+
+    /// Whether the node references no asset (CC4 §3.3).
+    #[must_use]
+    pub const fn is_unbound(&self) -> bool {
+        self.lut_asset_id.0 == 0
+    }
+
+    /// Why this node is the identity for the evaluated frame, if it is
+    /// (CC4 §3.6).
+    ///
+    /// Tested on the stored integers, never on floats, so bypass, `mix = 0`,
+    /// and an unbound reference are losslessly identical to removing the node.
+    #[must_use]
+    pub const fn inactive_reason(&self) -> Option<ColorNodeInactiveReason> {
+        if self.bypass() {
+            Some(ColorNodeInactiveReason::Bypassed)
+        } else if self.mix_basis_points == 0 {
+            Some(ColorNodeInactiveReason::Neutral)
+        } else if self.is_unbound() {
+            Some(ColorNodeInactiveReason::Unbound)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the renderer must evaluate this node.
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        self.inactive_reason().is_none()
+    }
+
+    /// The evaluated mix as a linear-light blend factor in `0.0..=1.0`.
+    ///
+    /// `0..=10000` is exactly representable in `f32`, so the conversion is
+    /// exact and the endpoints are precisely `0.0` and `1.0`.
+    #[must_use]
+    pub fn mix(&self) -> f32 {
+        let clamped = self.mix_basis_points.clamp(0, LUT_MIX_BASIS_POINTS_MAX);
+        f32::from(u16::try_from(clamped).unwrap_or_default()) / 10_000.0
+    }
+}
+
+/// Whether a LUT node could be evaluated on *any* frame of its clip
+/// (CC4 §3.6, §6).
+///
+/// [`LutNodeParams::is_active`] answers the question for one already-resolved
+/// frame. Export preflight and availability reporting ask a different
+/// question: a node whose `bypass` or `mix_basis_points` is keyframed is the
+/// identity on some frames and a real look on others, so an asset it
+/// references still has to be there.
+///
+/// The answer is deliberately conservative — it over-approximates activity by
+/// testing each control's candidate values independently, including the static
+/// fallback even when the control is automated. A node is reported inactive
+/// only when *no* stored value of `bypass`, `mix_basis_points`, or
+/// `lut_asset_id` could make it evaluate, which is exactly the case where
+/// removing the node is provably lossless.
+#[must_use]
+pub fn lut_node_may_be_active(effect: &Effect) -> bool {
+    let Some(parameters) =
+        ColorNodeKind::from_effect_name(&effect.name).and_then(ColorNodeKind::lut_parameters)
+    else {
+        return false;
+    };
+    let candidates = |index: usize| {
+        let descriptor = parameters[index];
+        let mut values = vec![stored_integer(effect, descriptor.name, descriptor.neutral)];
+        if let Some(curve) = effect.keyframes.get(descriptor.name) {
+            values.extend(curve.keyframes.iter().map(|keyframe| keyframe.value));
+        }
+        values
+            .into_iter()
+            .map(|value| value.clamp(descriptor.min, descriptor.max))
+            .collect::<Vec<_>>()
+    };
+    candidates(LUT_BYPASS_INDEX)
+        .iter()
+        .any(|bypass| *bypass < 1)
+        && candidates(LUT_MIX_INDEX).iter().any(|mix| *mix != 0)
+        && candidates(LUT_ASSET_ID_INDEX)
+            .iter()
+            .any(|lut_asset_id| *lut_asset_id != 0)
+}
+
+/// The first place a managed colour node appears before an earlier stage
+/// (CC4 §3.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColorStageOrderViolation {
+    /// Position of the offending node in the caller's effect slice.
+    pub index: usize,
+    /// The offending node.
+    pub effect: EffectId,
+    /// The offending node's kind.
+    pub kind: ColorNodeKind,
+    /// The offending node's stage.
+    pub color_stage: ColorStage,
+    /// Position of the managed node immediately before it.
+    pub previous_index: usize,
+    /// The managed node immediately before it.
+    pub previous_effect: EffectId,
+    /// That node's kind.
+    pub previous_kind: ColorNodeKind,
+    /// That node's stage, whose rank is greater than `color_stage`'s.
+    pub previous_color_stage: ColorStage,
+}
+
+/// The first CC4 §3.2 stage-order violation in one effect stack, if any.
+///
+/// Only the managed colour nodes form the constrained subsequence; crops,
+/// masks, keys, reframes, and the legacy LUT stages are unconstrained and keep
+/// their positions. A `None` result means the stack's managed subsequence has
+/// non-decreasing stage rank, which every pre-CC4 project satisfies trivially
+/// because all of its nodes are corrections.
+#[must_use]
+pub fn color_stage_order_violation(effects: &[Effect]) -> Option<ColorStageOrderViolation> {
+    color_stage_order_violation_over(effects.iter().enumerate().filter_map(|(index, effect)| {
+        classify_color_node(effect).map(|kind| (index, effect.id, kind))
+    }))
+}
+
+/// The CC4 §3.2 scan over an already-classified managed-node subsequence.
+///
+/// The edit path uses this to test the vector an insertion or conversion
+/// *would* produce without cloning any effect, so both the operation
+/// precondition and the document invariant are the same rule.
+pub(crate) fn color_stage_order_violation_over<I>(nodes: I) -> Option<ColorStageOrderViolation>
+where
+    I: IntoIterator<Item = (usize, EffectId, ColorNodeKind)>,
+{
+    let mut previous: Option<(usize, EffectId, ColorNodeKind)> = None;
+    for (index, effect, kind) in nodes {
+        if let Some((previous_index, previous_effect, previous_kind)) = previous
+            && kind.stage().rank() < previous_kind.stage().rank()
+        {
+            return Some(ColorStageOrderViolation {
+                index,
+                effect,
+                kind,
+                color_stage: kind.stage(),
+                previous_index,
+                previous_effect,
+                previous_kind,
+                previous_color_stage: previous_kind.stage(),
+            });
+        }
+        previous = Some((index, effect, kind));
+    }
+    None
 }
 
 /// The first violation of the strictly-increasing `x` rule (CC3 §2.3).

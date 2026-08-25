@@ -96,6 +96,8 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (M36 baseline) | 7 | 5,305 B | 3,171 B | 982 B |
 | Internal capability registry (2026-08-24, after CC1-CC3) | 113 | 1,007,001 B | not re-split | not re-split |
 | Served MCP runtime (2026-08-24) | 7 | 5,660 B | not re-split | not re-split |
+| Internal capability registry (2026-08-25, after CC4) | 120 | 1,222,241 B | not re-split | not re-split |
+| Served MCP runtime (2026-08-25) | 7 | 5,660 B | not re-split | not re-split |
 
 That is a 99.1% reduction in initially advertised serialized tool metadata at
 the M36 baseline and 99.4% at the 2026-08-24 measurement. The registry grew

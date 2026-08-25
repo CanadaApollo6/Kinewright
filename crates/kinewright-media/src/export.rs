@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use ffmpeg_next as ffmpeg;
@@ -16,6 +17,7 @@ use crate::{
     clock::frame_to_samples,
     compositor::GpuContext,
     decode::backend,
+    lut_store::LutLibrary,
     render::FrameRenderer,
     timeline::timeline_audio_segments,
 };
@@ -23,6 +25,12 @@ use crate::{
 const AUDIO_RATE: u32 = 48_000;
 const AUDIO_CHANNELS: u16 = 2;
 
+/// Export with no LUT library.
+///
+/// Test-only: the production `Export` impl always publishes the engine's
+/// library, so this arity exists for the CC1 fixtures and the media matrix,
+/// whose documents predate LUT nodes.
+#[cfg(test)]
 pub(crate) fn export_document(
     document: &Document,
     out: &Path,
@@ -30,12 +38,42 @@ pub(crate) fn export_document(
     progress: &ProgressSink,
     gpu: GpuContext,
 ) -> Result<(), MediaError> {
+    export_document_with_luts(
+        document,
+        out,
+        settings,
+        progress,
+        gpu,
+        Arc::new(LutLibrary::default()),
+    )
+}
+
+/// Export with the verified CC4 LUT library (CC4 2.4).
+///
+/// `library` must have been bound to **this** `document`'s asset hashes, which
+/// is what the engine's `Export` impl does immediately before calling here: an
+/// export queue outlives focus, and `LutAssetId`s restart at 1 in every
+/// project, so a library carried over from whichever project published last
+/// would deliver another project's look.
+///
+/// The export path is the same production renderer as preview, so a clip
+/// carrying an active `technical_lut` / `creative_look` node whose asset is not
+/// in the library fails with `missing_lut_asset` and produces no file, rather
+/// than delivering a frame without the look.
+pub(crate) fn export_document_with_luts(
+    document: &Document,
+    out: &Path,
+    settings: &ExportSettings,
+    progress: &ProgressSink,
+    gpu: GpuContext,
+    library: Arc<LutLibrary>,
+) -> Result<(), MediaError> {
     validate_settings(document, out, settings)?;
     let temporary = temporary_output(out);
     if temporary.exists() {
         fs::remove_file(&temporary).map_err(backend)?;
     }
-    let result = export_to_temporary(document, &temporary, settings, progress, gpu);
+    let result = export_to_temporary(document, &temporary, settings, progress, gpu, library);
     if let Err(error) = result {
         let _ = fs::remove_file(&temporary);
         return Err(error);
@@ -51,6 +89,7 @@ fn export_to_temporary(
     settings: &ExportSettings,
     progress: &ProgressSink,
     gpu: GpuContext,
+    library: Arc<LutLibrary>,
 ) -> Result<(), MediaError> {
     check_cancelled(settings)?;
     let total_frames = map_frames_with_rounding(
@@ -178,6 +217,7 @@ fn export_to_temporary(
         .time_base();
 
     let mut renderer = FrameRenderer::new(gpu);
+    renderer.set_lut_library(library);
     let mut delivery_filter = delivery_filter_graph(settings.resolution)?;
     for output_frame in 0..total_frames {
         check_cancelled(settings)?;

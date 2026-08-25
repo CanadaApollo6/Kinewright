@@ -1,0 +1,486 @@
+{
+  "contract": "CC4 look management",
+  "contract_token": "cc4_look_management",
+  "manifest_version": 1,
+  "nodes": [
+    "technical_lut",
+    "primary_correction",
+    "color_wheels",
+    "color_curves",
+    "creative_look"
+  ],
+  "stages": [
+    {
+      "kind": "technical_lut",
+      "role": "technical",
+      "stage": "input",
+      "rank": 0,
+      "storage_buffer_tag": 4
+    },
+    {
+      "kind": "primary_correction",
+      "role": "correction",
+      "stage": "correction",
+      "rank": 1,
+      "storage_buffer_tag": 1
+    },
+    {
+      "kind": "color_wheels",
+      "role": "correction",
+      "stage": "correction",
+      "rank": 1,
+      "storage_buffer_tag": 2
+    },
+    {
+      "kind": "color_curves",
+      "role": "correction",
+      "stage": "correction",
+      "rank": 1,
+      "storage_buffer_tag": 3
+    },
+    {
+      "kind": "creative_look",
+      "role": "creative",
+      "stage": "look",
+      "rank": 2,
+      "storage_buffer_tag": 5
+    }
+  ],
+  "lut_node_controls": {
+    "technical_lut": [
+      {
+        "name": "lut_asset_id",
+        "min": 0,
+        "max": 9007199254740991,
+        "neutral": 0
+      },
+      {
+        "name": "mix_basis_points",
+        "min": 10000,
+        "max": 10000,
+        "neutral": 10000
+      },
+      {
+        "name": "input_encoding_token",
+        "min": 0,
+        "max": 2,
+        "neutral": 0
+      },
+      {
+        "name": "bypass",
+        "min": 0,
+        "max": 1,
+        "neutral": 0
+      }
+    ],
+    "creative_look": [
+      {
+        "name": "lut_asset_id",
+        "min": 0,
+        "max": 9007199254740991,
+        "neutral": 0
+      },
+      {
+        "name": "mix_basis_points",
+        "min": 0,
+        "max": 10000,
+        "neutral": 10000
+      },
+      {
+        "name": "input_encoding_token",
+        "min": 0,
+        "max": 2,
+        "neutral": 0
+      },
+      {
+        "name": "bypass",
+        "min": 0,
+        "max": 1,
+        "neutral": 0
+      }
+    ]
+  },
+  "input_encodings": [
+    {
+      "token": 0,
+      "name": "display709",
+      "encode": "encode_bt709",
+      "decode": "decode_display709"
+    },
+    {
+      "token": 1,
+      "name": "linear",
+      "encode": "identity",
+      "decode": "identity"
+    },
+    {
+      "token": 2,
+      "name": "grade709",
+      "encode": "grade709_encode",
+      "decode": "grade709_decode"
+    }
+  ],
+  "asset_model": {
+    "lut_size_min": 2,
+    "lut_size_max": 65,
+    "lut_asset_id_max": 9007199254740991,
+    "lut_max_file_bytes": 16777216,
+    "store_suffix": "kinewright-assets",
+    "store_luts_directory": "luts",
+    "lut_node_limit_per_layer": 4,
+    "color_node_limit_per_layer": 16
+  },
+  "builtin_looks": [
+    {
+      "name": "identity",
+      "title": "Identity",
+      "preset_token": 0,
+      "size": 2,
+      "domain_min": 0.0,
+      "domain_max": 1.0,
+      "sha256": "b17322738cb6529fd17b1b14998358fcd9d43f3a37699397625cd634d9b3e38b"
+    },
+    {
+      "name": "warm",
+      "title": "Warm",
+      "preset_token": 1,
+      "size": 17,
+      "domain_min": -1.0,
+      "domain_max": 2.0,
+      "sha256": "d4f7821f9cd58556be4264574a6f6dd5fdd32a18c34197e6a3773f979105e0d1"
+    },
+    {
+      "name": "cool",
+      "title": "Cool",
+      "preset_token": 2,
+      "size": 17,
+      "domain_min": -1.0,
+      "domain_max": 2.0,
+      "sha256": "e3f80aa611c97bcedc428be4862cd4aadb94cdf66a3c6f0d7aac87d365ffee73"
+    },
+    {
+      "name": "monochrome",
+      "title": "Monochrome",
+      "preset_token": 3,
+      "size": 17,
+      "domain_min": -1.0,
+      "domain_max": 2.0,
+      "sha256": "549d9311993e5adfcbdb49ff0ef67cd39f6f724b338012be9e8e54d0b734b268"
+    },
+    {
+      "name": "bleach_bypass",
+      "title": "Bleach bypass",
+      "preset_token": 4,
+      "size": 17,
+      "domain_min": -1.0,
+      "domain_max": 2.0,
+      "sha256": "5dc52536b14f0fbbedfcd3465ee656372c7d0456d81fe3f33d8e1163ff256a0e"
+    }
+  ],
+  "atlas": {
+    "compositor_lut_slots_per_layer": 4,
+    "compositor_legacy_lut_slot": 4,
+    "compositor_lut_atlas_slots": 5,
+    "compositor_required_texture_dimension_3d": 512,
+    "compositor_required_storage_buffer_binding_size": 16384,
+    "compositor_required_storage_buffers_per_shader_stage": 1,
+    "grade_abi_version": 2,
+    "worst_case_atlas_depth": 325,
+    "mixed_size_atlas_extent": [
+      65,
+      65,
+      117
+    ],
+    "format": "Rgba32Float",
+    "fetch": "textureLoad only; hardware filtering is forbidden"
+  },
+  "raster": {
+    "source": "CC3 \u00a710.2, reused verbatim",
+    "rgb_samples": 192,
+    "block_width_pixels": 8,
+    "levels": [
+      -0.5,
+      -0.25,
+      -0.1,
+      -0.02,
+      -0.005,
+      0.0,
+      0.002,
+      0.005,
+      0.018053969,
+      0.03,
+      0.06,
+      0.1,
+      0.18,
+      0.25,
+      0.35,
+      0.5,
+      0.65,
+      0.8,
+      0.9,
+      1.0,
+      1.2,
+      1.5,
+      2.5,
+      4.0
+    ],
+    "patterns": [
+      "neutral",
+      "red",
+      "green",
+      "blue",
+      "cyan",
+      "magenta",
+      "yellow",
+      "skewed"
+    ],
+    "minimum_samples_outside_unit_display": 40,
+    "measured_samples_outside_unit_display": 72
+  },
+  "tolerances": {
+    "monitor_cpu_gpu_max_code": 2.0,
+    "monitor_cpu_gpu_p99_code": 1.0,
+    "monitor_cpu_gpu_mean_code": 0.5,
+    "linear_cpu_gpu_max": 0.0015,
+    "linear_cpu_gpu_p99": 0.00075,
+    "linear_cpu_gpu_mean": 0.00025,
+    "linear_over_range_p99": 0.0009765625,
+    "linear_over_range_mean": 0.0009765625,
+    "linear_gate_in_gamut": 1.0,
+    "linear_gate_domain": 2.0,
+    "builtin_display_code_tolerance": 2e-06,
+    "minimum_changed_linear_basis_points": 500.0
+  },
+  "required_evidence": [
+    "cc4_parsing",
+    "cc4_input_encodings",
+    "cc4_identity_bit_exact",
+    "cc4_identity_encodings",
+    "cc4_inactive_nodes",
+    "cc4_interpolation_anchors",
+    "cc4_out_of_domain",
+    "cc4_mix",
+    "cc4_node_ordering",
+    "cc4_gpu_cpu_parity",
+    "cc4_slots_and_limits",
+    "cc4_legacy_coexistence",
+    "cc4_builtin_bakes",
+    "cc4_relocatable_store",
+    "cc4_recovery_rejections",
+    "cc4_serialization_history",
+    "cc4_typed_rejections"
+  ],
+  "required_fixtures": [
+    {
+      "item": 1,
+      "name": "parsing",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc4_cube_parsing_accepts_and_rejects_exactly_what_the_contract_lists"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 2,
+      "name": "identity",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item, plus the CC4 \u00a710.1 rule 2 numeric anchor for every input_encoding_token",
+          "tests": [
+            "cc4_input_encoding_tokens_are_hand_derived_and_dispatched",
+            "cc4_identity_lattices_are_bit_exact_in_linear_on_cpu_and_gpu",
+            "cc4_identity_round_trips_display709_and_grade709_within_the_linear_gate",
+            "cc4_inactive_lut_nodes_are_bit_identical_to_the_stack_without_them"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 3,
+      "name": "interpolation anchors",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc4_interpolation_anchors_match_the_hand_derived_values"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 4,
+      "name": "out of domain",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc4_out_of_domain_restores_the_excursion_and_stays_monotone"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 5,
+      "name": "mix",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc4_mix_endpoints_and_midpoint_match_the_hand_derived_values"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 6,
+      "name": "ordering",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc4_stage_order_is_the_execution_order_and_a_violation_is_rejected"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 7,
+      "name": "cpu/gpu parity",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc4_parity_raster_exercises_the_out_of_domain_rule",
+            "cc4_gpu_compositor_matches_the_cpu_reference_on_software_fallback",
+            "cc4_gpu_compositor_matches_the_cpu_reference_on_hardware"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 8,
+      "name": "slots and limits",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc4_lut_slots_limits_and_abi_constants_hold"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 9,
+      "name": "legacy coexistence",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc4_legacy_cube_lut_runs_last_beside_a_managed_look"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 10,
+      "name": "built-in bake determinism",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 11,
+      "name": "relocatable project proof",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "store derivation, relocation, missing/restore/copy_to, and the published-library render hash",
+          "tests": [
+            "cc4_relocating_the_store_reproduces_the_render_bit_identically"
+          ]
+        },
+        {
+          "owner": "kinewright-app",
+          "scope": "save, open, Save As, and the dialog-free write_project the fixture drives",
+          "tests": [
+            "crates/kinewright-app: the CC4 relocatability fixture over write_project"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 12,
+      "name": "recovery rejections",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the whole item",
+          "tests": [
+            "cc4_recovery_rejections_are_typed_and_leave_the_store_untouched"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 13,
+      "name": "serialization and history",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "scope": "the actor round trip plus the media-owned lut_asset_metadata_mismatch",
+          "tests": [
+            "cc4_serialization_and_history_preserve_assets_and_nodes",
+            "cc4_illegal_lut_edits_are_rejected_atomically_with_field_observed_and_allowed"
+          ]
+        },
+        {
+          "owner": "kinewright-core",
+          "scope": "the operation-layer rejection matrix",
+          "tests": [
+            "crates/kinewright-core/tests/cc4_core.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 14,
+      "name": "agent plan-not-apply and authorization",
+      "owners": [
+        {
+          "owner": "kinewright-agent",
+          "scope": "the whole item",
+          "tests": [
+            "crates/kinewright-agent: plan_technical_lut, plan_creative_look, import_lut_asset confirmation, apply_edit_plan/prepare_edit_plan rejection, render_color_proof look comparison"
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest_self_test": {
+    "rule": "CC4 \u00a710.1.4: every declared tolerance and constant is asserted equal to the code the fixtures gate with",
+    "test": "cc4_manifest_declares_every_required_fixture_and_constant"
+  },
+  "gpu_contexts": {
+    "software": "required: lavapipe/llvmpipe adapter with exact backend+adapter provenance; this is the default CC4 lane",
+    "software_unavailable_opt_in": "optional: set KINEWRIGHT_CC1_ALLOW_HARDWARE_GPU=1 to run the default lane on the physical adapter when no lavapipe/llvmpipe adapter exists; evidence then records software_fallback=false, gpu_claim=true, lane=hardware_optin",
+    "hardware": "required on a physical-GPU lane: run cc4_gpu_compositor_matches_the_cpu_reference_on_hardware --ignored --nocapture"
+  }
+}

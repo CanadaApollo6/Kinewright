@@ -943,6 +943,7 @@ mod tests {
         Document {
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
+            lut_assets: Vec::new(),
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,

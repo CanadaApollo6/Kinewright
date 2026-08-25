@@ -7,7 +7,7 @@
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     thread,
     time::{Duration, Instant},
@@ -15,11 +15,12 @@ use std::{
 
 use eframe::egui;
 use kinewright_core::{
-    AssetId, ClipContent, Command, MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus,
-    MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus, MediaError,
-    MediaSourceFingerprint, Operation, RelinkCandidate, ThreePointMode, TimeCode, TimelineRevision,
-    TrackId,
+    AssetId, ClipContent, ClipId, ColorStage, Command, Document, EffectId, LutAsset, LutAssetId,
+    MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult,
+    MediaCacheFamily, MediaCacheFamilyStatus, MediaError, MediaSourceFingerprint, Operation,
+    RelinkCandidate, ThreePointMode, TimeCode, TimelineRevision, TrackId,
 };
+use kinewright_media::{LutAssetImport, LutStore};
 
 use crate::{
     app::KinewrightApp,
@@ -1564,11 +1565,520 @@ impl KinewrightApp {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CC4 §7 look import, restore, and conversion
+// ---------------------------------------------------------------------------
+
+/// One finished `.cube` import, delivered from the worker thread.
+///
+/// Parsing, hashing, and the store write are the same worker-thread shape M41
+/// established for the relink probe: a 65³ `.cube` is about 7.5 MB of text and
+/// hashing it on the UI thread would stutter (CC4 §13).
+#[derive(Debug)]
+pub(crate) struct LutImportResponse {
+    pub(crate) session_id: u64,
+    pub(crate) path: PathBuf,
+    /// What the caller wanted the imported bytes for, carried through the
+    /// worker so a conversion cannot be mistaken for a plain import.
+    pub(crate) intent: LutImportIntent,
+    /// The store the worker actually wrote into, captured when the import
+    /// started. A Save As that completes mid-import moves the session's root,
+    /// so the handler has to compare and re-place the bytes (CC4 §2.2).
+    pub(crate) store: LutStore,
+    pub(crate) result: Result<LutAssetImport, MediaError>,
+}
+
+/// One finished `Locate file…` restore, delivered from the worker thread.
+#[derive(Debug)]
+pub(crate) struct LutRestoreResponse {
+    pub(crate) session_id: u64,
+    pub(crate) title: String,
+    pub(crate) candidate: PathBuf,
+    pub(crate) result: Result<PathBuf, MediaError>,
+}
+
+/// Why an import was started, which decides the batch its success submits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LutImportIntent {
+    /// Register the asset and, when a video clip is selected, bind a new node
+    /// of `stage` to it at the computed index.
+    Apply {
+        clip: Option<ClipId>,
+        stage: ColorStage,
+    },
+    /// Retarget one existing LUT node onto the imported asset (`Replace…`).
+    Retarget { clip: ClipId, effect: EffectId },
+    /// Import the external `.cube` a legacy `cube_lut` names, then convert
+    /// that node in the same undoable batch (CC4 §9).
+    ConvertLegacy { clip: ClipId, effect: EffectId },
+}
+
+/// The `rfd` picker every look import goes through, matching `choose_media`
+/// and `choose_relink_for_asset` (CC4 §7).
+pub(crate) fn choose_lut_file() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("Cube LUT", &["cube"])
+        .pick_file()
+}
+
+/// Whether a dropped path is a `.cube`, so the window drop target can route it
+/// to the look import instead of the media probe (CC4 §7).
+pub(crate) fn is_cube_lut_path(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cube"))
+}
+
+/// The human message for a project that cannot own LUT bytes yet (CC4 §2.2).
+pub(crate) const PROJECT_NOT_SAVED_MESSAGE: &str = "project_not_saved: save the project first so its looks have a \
+     <stem>.kinewright-assets store to live in.";
+
+/// Turn one successful import into the operations it submits (CC4 §7).
+///
+/// `AddLutAsset` always leads; a selected video clip additionally gets one
+/// `InsertEffect` bound to the new asset at the first index that satisfies the
+/// stage order, so a human can never author a `ColorStageOrderViolation`.
+/// Emitted as one batch, so the import is one undo step.
+pub(crate) fn lut_import_operations(
+    document: &Document,
+    import: LutAssetImport,
+    intent: &LutImportIntent,
+) -> Result<LutImportBatch, String> {
+    let id = document
+        .next_lut_asset_id()
+        .map_err(|error| error.to_string())?;
+    let asset = import.into_lut_asset(id);
+    let mut batch = LutImportBatch {
+        operations: vec![Operation::AddLutAsset {
+            asset: asset.clone(),
+        }],
+        target_lost: None,
+        asset,
+    };
+    match intent {
+        LutImportIntent::Apply { clip: None, .. } => {}
+        LutImportIntent::Apply {
+            clip: Some(clip),
+            stage,
+        } => match document.clip(*clip) {
+            Some(target) => batch
+                .operations
+                .push(crate::inspector_ui::insert_lut_node_operation(
+                    target, *stage, id,
+                )),
+            None => batch.target_lost = Some(format!("clip {clip} no longer exists")),
+        },
+        LutImportIntent::Retarget { clip, effect } => {
+            if lut_node_exists(document, *clip, *effect) {
+                batch
+                    .operations
+                    .push(crate::inspector_ui::lut_asset_param_operation(
+                        *clip, *effect, id,
+                    ));
+            } else {
+                batch.target_lost =
+                    Some(format!("effect {effect} on clip {clip} no longer exists"));
+            }
+        }
+        LutImportIntent::ConvertLegacy { clip, effect } => {
+            match document.clip(*clip).and_then(|target| {
+                target
+                    .effects
+                    .iter()
+                    .find(|node| node.id == *effect)
+                    .map(|legacy| (target, legacy))
+            }) {
+                // Reuses the inspector's rule so a legacy stage that sits
+                // before a managed correction is moved rather than rejected
+                // (CC4 §3.2, §9).
+                Some((target, legacy)) => {
+                    batch
+                        .operations
+                        .extend(crate::inspector_ui::legacy_conversion_operations(
+                            target, legacy, id,
+                        ));
+                }
+                None => {
+                    batch.target_lost =
+                        Some(format!("effect {effect} on clip {clip} no longer exists"));
+                }
+            }
+        }
+    }
+    Ok(batch)
+}
+
+/// What one successful import submits, and whether the node it was meant for
+/// survived the round trip.
+///
+/// The bytes are already in the content-addressed store by the time the worker
+/// answers, so a target that vanished mid-import degrades to registering the
+/// asset alone rather than throwing the import away: the operator keeps the
+/// look and binds it from the browser. The lost target is reported, never
+/// silently substituted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LutImportBatch {
+    pub(crate) operations: Vec<Operation>,
+    pub(crate) target_lost: Option<String>,
+    /// The record `AddLutAsset` registers, kept out of the operation list so
+    /// the handler can reserve its id and place its bytes without pattern
+    /// matching the batch back apart.
+    pub(crate) asset: LutAsset,
+}
+
+/// The asset id one submitted import batch allocated, held until the document
+/// records it (CC4 §7).
+///
+/// Two `.cube` files dropped together finish in the same frame. The batch is
+/// built against the document the response lands on, and the second response
+/// would otherwise be built against the same pre-import document as the first:
+/// the same `next_lut_asset_id`, the same `next_effect_id`, and Core rejects
+/// the second batch with `DuplicateLutAsset`, losing the import silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LutImportReservation {
+    pub(crate) session_id: u64,
+    pub(crate) asset: LutAssetId,
+}
+
+/// Whether the next queued import response may be built this frame.
+///
+/// `None` for the document means the reserved session is gone, which retires
+/// the reservation: there is nothing left for the batch to collide with.
+#[must_use]
+pub(crate) fn lut_import_is_ready(
+    reservation: Option<LutImportReservation>,
+    document: Option<&Document>,
+) -> bool {
+    let Some(reservation) = reservation else {
+        return true;
+    };
+    document.is_none_or(|document| document.lut_asset(reservation.asset).is_some())
+}
+
+/// Place freshly imported bytes in the store the session owns *now* (CC4 §2.2).
+///
+/// The worker captured its store when the import started; a Save As that
+/// completed while it ran moved the root, so the bytes landed beside the old
+/// project file and the new one would report the asset `missing`. Copying is
+/// content-addressed and idempotent, and it is a no-op when the roots match.
+///
+/// # Errors
+///
+/// Returns the typed copy failure, so the import is refused loudly instead of
+/// registering a record whose bytes are not where the project says they are.
+pub(crate) fn realign_import_store(
+    worker: &LutStore,
+    current: &LutStore,
+    asset: &LutAsset,
+) -> Result<(), String> {
+    if worker.root() == current.root() {
+        return Ok(());
+    }
+    worker
+        .copy_to(current, std::slice::from_ref(asset))
+        .into_iter()
+        .find_map(|(_, result)| result.err())
+        .map_or(Ok(()), |error| Err(error.to_string()))
+}
+
+/// Why a finished import must be dropped instead of registered, or `None` when
+/// its bytes are where the project now claims to own them (CC4 §2.2).
+///
+/// The `current` store being `None` is not "nothing to realign": it means a
+/// Save As landed on a root this process refuses to use while the worker ran,
+/// so the bytes are beside the *old* project file and the new root cannot
+/// receive them. Registering the record anyway would publish an unreachable
+/// asset under an "Imported look" status, which is exactly the silent
+/// mis-report CC4 §2.3 exists to prevent.
+#[must_use]
+pub(crate) fn import_realignment_failure(
+    title: &str,
+    worker: &LutStore,
+    current: Option<&LutStore>,
+    store_unavailable: Option<&str>,
+    asset: &LutAsset,
+) -> Option<String> {
+    let Some(current) = current else {
+        return Some(format!(
+            "Imported {title} into {}, but the project's look store is unavailable, so the bytes \
+             could not be placed where the project owns them and the look was not registered: {}",
+            worker.root().display(),
+            store_unavailable.unwrap_or(PROJECT_NOT_SAVED_MESSAGE),
+        ));
+    };
+    realign_import_store(worker, current, asset)
+        .err()
+        .map(|reason| {
+            format!(
+                "Imported {title} into {}, but the project was saved elsewhere while it \
+                 imported and the bytes could not be moved to {}: {reason}",
+                worker.root().display(),
+                current.root().display()
+            )
+        })
+}
+
+/// Whether one effect is still on one clip.
+fn lut_node_exists(document: &Document, clip: ClipId, effect: EffectId) -> bool {
+    document
+        .clip(clip)
+        .is_some_and(|clip| clip.effects.iter().any(|node| node.id == effect))
+}
+
+/// The typed human message for one import or restore failure (CC4 §2.5, §7).
+///
+/// The store and parser errors already carry `code`, the offending 1-based
+/// line, the observed fragment, and what was allowed; this only frames them
+/// with the file they came from so the recovery action stays visible.
+pub(crate) fn lut_failure_message(path: &Path, error: &MediaError) -> String {
+    format!("{}: {error}", path.display())
+}
+
+impl KinewrightApp {
+    /// `Replace…` on a missing or changed asset: import a different LUT and
+    /// retarget the node that referenced the old one (CC4 §2.3).
+    pub(crate) fn choose_lut_replacement(&mut self, clip: ClipId, effect: EffectId) {
+        let Some(path) = choose_lut_file() else {
+            return;
+        };
+        self.start_lut_import(path, LutImportIntent::Retarget { clip, effect });
+    }
+
+    /// Import the external `.cube` a legacy `cube_lut` names so the conversion
+    /// batch has a registered asset to bind to (CC4 §9).
+    pub(crate) fn start_legacy_cube_conversion(
+        &mut self,
+        clip: ClipId,
+        effect: EffectId,
+        path: PathBuf,
+    ) {
+        self.start_lut_import(path, LutImportIntent::ConvertLegacy { clip, effect });
+    }
+
+    /// Parse, hash, and store one `.cube` on a named worker thread (CC4 §7).
+    pub(crate) fn start_lut_import(&mut self, path: PathBuf, intent: LutImportIntent) {
+        let Some(store) = self.focused().lut_store.clone() else {
+            // A refused root reports why it was refused; only a project that
+            // has never been saved reports the save recovery (CC4 §2.2).
+            self.record_error(
+                "Look",
+                self.focused()
+                    .lut_store_unavailable_reason()
+                    .unwrap_or_else(|| PROJECT_NOT_SAVED_MESSAGE.to_owned()),
+            );
+            return;
+        };
+        let session_id = self.focused().id;
+        let result_tx = self.lut_import_tx.clone();
+        self.lut_worker_pending = self.lut_worker_pending.saturating_add(1);
+        self.status = format!("Importing look {}…", path.display());
+        let spawn = thread::Builder::new()
+            .name("kinewright-lut-import".to_owned())
+            .spawn(move || {
+                let result = store.import_lut_asset(&path);
+                let _ = result_tx.send(LutImportResponse {
+                    session_id,
+                    path,
+                    intent,
+                    store,
+                    result,
+                });
+            });
+        if let Err(error) = spawn {
+            self.lut_worker_pending = self.lut_worker_pending.saturating_sub(1);
+            self.record_error("Look", format!("Could not start the look import: {error}"));
+        }
+    }
+
+    /// `Locate file…`: pick a candidate and hash-check it into the store.
+    pub(crate) fn choose_lut_restore(&mut self, lut_asset: LutAssetId) {
+        let Some(asset) = self.focused().document.lut_asset(lut_asset).cloned() else {
+            self.record_error("Look", format!("LUT asset {lut_asset} no longer exists"));
+            return;
+        };
+        let Some(candidate) = choose_lut_file() else {
+            return;
+        };
+        self.start_lut_restore(&asset, candidate);
+    }
+
+    /// Restore one asset's bytes from a candidate file (CC4 §2.3).
+    ///
+    /// A media repair action, not a Core operation: content addressing means
+    /// the document stores no locator to change, so a restore changes no
+    /// document state, does not dirty the project, and needs no revision gate.
+    pub(crate) fn start_lut_restore(&mut self, asset: &LutAsset, candidate: PathBuf) {
+        let Some(store) = self.focused().lut_store.clone() else {
+            self.record_error(
+                "Look",
+                self.focused()
+                    .lut_store_unavailable_reason()
+                    .unwrap_or_else(|| PROJECT_NOT_SAVED_MESSAGE.to_owned()),
+            );
+            return;
+        };
+        let session_id = self.focused().id;
+        let title = asset.title.clone();
+        let asset = asset.clone();
+        let result_tx = self.lut_restore_tx.clone();
+        self.lut_worker_pending = self.lut_worker_pending.saturating_add(1);
+        self.status = format!("Locating look {title}…");
+        let spawn = thread::Builder::new()
+            .name("kinewright-lut-restore".to_owned())
+            .spawn(move || {
+                let result = store.restore(&asset, &candidate);
+                let _ = result_tx.send(LutRestoreResponse {
+                    session_id,
+                    title,
+                    candidate,
+                    result,
+                });
+            });
+        if let Err(error) = spawn {
+            self.lut_worker_pending = self.lut_worker_pending.saturating_sub(1);
+            self.record_error("Look", format!("Could not start the look restore: {error}"));
+        }
+    }
+
+    fn handle_lut_import_response(&mut self, response: LutImportResponse) {
+        self.lut_worker_pending = self.lut_worker_pending.saturating_sub(1);
+        let Some(project_index) = session_index_by_id(response.session_id, &self.projects) else {
+            return;
+        };
+        let import = match response.result {
+            Ok(import) => import,
+            Err(error) => {
+                self.record_error("Look", lut_failure_message(&response.path, &error));
+                return;
+            }
+        };
+        let title = import.title.clone();
+        // Built against the *current* document, not the revision the picker
+        // was opened at: an import creates a new record, so its id and its
+        // insert index must come from the document the batch will land on.
+        // Core still validates the batch atomically, so a concurrent change
+        // that invalidates it is rejected rather than silently applied.
+        let batch = match lut_import_operations(
+            &self.projects[project_index].document,
+            import,
+            &response.intent,
+        ) {
+            Ok(batch) => batch,
+            Err(error) => {
+                self.record_error("Look", error);
+                return;
+            }
+        };
+        // A Save As that completed while the worker ran moved this session's
+        // store root, so the bytes are beside the *old* project file. Place
+        // them where the project now claims to own them before the document
+        // records a record that resolves against the new root (CC4 §2.2).
+        //
+        // A store that is `None` is the same failure, not an exemption: the
+        // Save As landed on a refused root, so there is nowhere to put the
+        // bytes and the batch is dropped with the store's own reason rather
+        // than registering an unreachable asset as an imported look.
+        let store_unavailable = self.projects[project_index].lut_store_unavailable_reason();
+        let realignment = import_realignment_failure(
+            &title,
+            &response.store,
+            self.projects[project_index].lut_store.as_ref(),
+            store_unavailable.as_deref(),
+            &batch.asset,
+        );
+        if let Some(message) = realignment {
+            self.record_error("Look", message);
+            return;
+        }
+        if self.projects[project_index]
+            .core
+            .send(Command::DoBatch(batch.operations))
+            .is_err()
+        {
+            self.record_error("Look", "Core actor stopped while registering the look");
+            return;
+        }
+        // Hold the allocated id until the document records it, so a second
+        // response finishing in the same frame cannot be built against the
+        // same pre-import document (CC4 §7).
+        self.lut_import_reservation = Some(LutImportReservation {
+            session_id: response.session_id,
+            asset: batch.asset.id,
+        });
+        if let Some(lost) = batch.target_lost {
+            self.record_error(
+                "Look",
+                format!(
+                    "Imported {title}, but {lost}, so it was registered without being applied. \
+                     Apply it from the look browser."
+                ),
+            );
+        }
+        self.status = format!("Imported look {title}");
+    }
+
+    fn handle_lut_restore_response(&mut self, response: LutRestoreResponse) {
+        self.lut_worker_pending = self.lut_worker_pending.saturating_sub(1);
+        let Some(project_index) = session_index_by_id(response.session_id, &self.projects) else {
+            return;
+        };
+        match response.result {
+            Ok(_) => {
+                // The bytes changed under a document that did not, so the
+                // library has to be rebuilt explicitly: nothing else observes
+                // a restore.
+                let library = self.projects[project_index].rebuild_lut_library();
+                if project_index == self.focused_project {
+                    self.lut_publisher.set_lut_library(library);
+                }
+                self.status = format!("Restored look {}", response.title);
+            }
+            Err(error) => self.record_error(
+                "Look",
+                format!(
+                    "Could not restore {}: {}",
+                    response.title,
+                    lut_failure_message(&response.candidate, &error)
+                ),
+            ),
+        }
+    }
+
+    /// Drain the look worker channels once per frame.
+    ///
+    /// At most one *import* is taken per frame, and only once the previous
+    /// import's asset id has landed in the document: an import batch is built
+    /// against the document it will be applied to, so two of them built from
+    /// the same document would allocate the same `next_lut_asset_id` and the
+    /// second would be rejected `DuplicateLutAsset`. The rest stay in the
+    /// channel with `lut_worker_pending` still counting them, which keeps the
+    /// frame loop repainting until every one has landed (CC4 §7).
+    pub(crate) fn poll_lut_workers(&mut self) -> bool {
+        let mut changed = false;
+        let reserved_document = self.lut_import_reservation.and_then(|reservation| {
+            session_index_by_id(reservation.session_id, &self.projects)
+                .map(|index| Arc::clone(&self.projects[index].document))
+        });
+        if lut_import_is_ready(self.lut_import_reservation, reserved_document.as_deref()) {
+            self.lut_import_reservation = None;
+            if let Ok(response) = self.lut_import_rx.try_recv() {
+                changed = true;
+                self.handle_lut_import_response(response);
+            }
+        }
+        while let Ok(response) = self.lut_restore_rx.try_recv() {
+            changed = true;
+            self.handle_lut_restore_response(response);
+        }
+        changed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{path::PathBuf, time::Duration};
 
     use kinewright_core::{ColorDescription, MediaKind, Rational, TimeCode};
+    use kinewright_media::test_support::TempDirectory;
 
     use super::*;
 
@@ -2120,5 +2630,410 @@ mod tests {
         let proxy = cache_presentation(&family(MediaCacheFamily::GeneratedProxy, false));
         assert!(!proxy.clearable);
         assert!(proxy.persistence.contains("Unsupported"));
+    }
+
+    // -----------------------------------------------------------------------
+    // CC4 §7 look import batches
+    // -----------------------------------------------------------------------
+
+    fn sample_import() -> LutAssetImport {
+        LutAssetImport {
+            // A syntactically valid digest; the store is what proves content,
+            // and this test never touches the filesystem.
+            sha256: "a".repeat(64),
+            title: "Fixture look".to_owned(),
+            kind: kinewright_core::LutAssetKind::Cube3d,
+            size: 2,
+            byte_len: 256,
+            domain_min_millionths: [0, 0, 0],
+            domain_max_millionths: [1_000_000, 1_000_000, 1_000_000],
+            source_path: "/looks/fixture.cube".to_owned(),
+        }
+    }
+
+    fn import_document(effects: Vec<kinewright_core::Effect>) -> Document {
+        let fps = Rational::new(24, 1).expect("valid fps");
+        Document {
+            tracks: vec![kinewright_core::Track {
+                id: TrackId(1),
+                kind: kinewright_core::TrackKind::Video,
+                sync_lock: true,
+                clips: vec![kinewright_core::Clip {
+                    id: kinewright_core::ClipId(10),
+                    asset: AssetId(1),
+                    timeline_start: TimeCode::ZERO,
+                    source_range: TimeCode::ZERO..TimeCode(24),
+                    content: ClipContent::Media,
+                    effects,
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                }],
+            }],
+            media_pool: vec![MediaAsset {
+                id: AssetId(1),
+                path: PathBuf::from("shot.mov"),
+                name: "Shot".to_owned(),
+                duration: TimeCode(24),
+                fps,
+                kind: MediaKind::Video,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: MediaSourceFingerprint::unknown(),
+                color_description: ColorDescription::default(),
+            }],
+            fps,
+            resolution: (1920, 1080),
+            duration: TimeCode(24),
+            ..Document::default()
+        }
+    }
+
+    fn effect(id: u64, name: &str) -> kinewright_core::Effect {
+        kinewright_core::Effect {
+            id: EffectId(id),
+            name: name.to_owned(),
+            parameters: std::collections::BTreeMap::new(),
+            keyframes: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn only_a_cube_extension_routes_a_drop_to_the_look_import() {
+        assert!(is_cube_lut_path(Path::new("/looks/k2383.cube")));
+        // Case-insensitive, because a vendor export is often `.CUBE`.
+        assert!(is_cube_lut_path(Path::new("/looks/K2383.CUBE")));
+        assert!(!is_cube_lut_path(Path::new("/media/shot.mov")));
+        assert!(!is_cube_lut_path(Path::new("/looks/cube")));
+    }
+
+    #[test]
+    fn an_import_with_a_selected_clip_registers_and_inserts_as_one_batch() {
+        let document = import_document(vec![effect(1, "primary_correction")]);
+        let batch = lut_import_operations(
+            &document,
+            sample_import(),
+            &LutImportIntent::Apply {
+                clip: Some(ClipId(10)),
+                stage: ColorStage::Look,
+            },
+        )
+        .expect("the batch builds");
+
+        assert_eq!(batch.operations.len(), 2);
+        assert!(batch.target_lost.is_none());
+        let Operation::AddLutAsset { asset } = &batch.operations[0] else {
+            panic!("an import always leads with AddLutAsset");
+        };
+        assert_eq!(asset.id, LutAssetId(1));
+        assert_eq!(asset.title, "Fixture look");
+        assert!(matches!(
+            asset.source,
+            kinewright_core::LutAssetSource::Imported { .. }
+        ));
+        // The look lands after the correction, which is the first index that
+        // satisfies the stage order.
+        assert!(matches!(
+            batch.operations[1],
+            Operation::InsertEffect { index: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn an_import_with_no_clip_registers_the_asset_alone() {
+        let document = import_document(Vec::new());
+        let batch = lut_import_operations(
+            &document,
+            sample_import(),
+            &LutImportIntent::Apply {
+                clip: None,
+                stage: ColorStage::Look,
+            },
+        )
+        .expect("the batch builds");
+        assert_eq!(batch.operations.len(), 1);
+        assert!(matches!(batch.operations[0], Operation::AddLutAsset { .. }));
+        assert!(batch.target_lost.is_none());
+    }
+
+    #[test]
+    fn a_replace_registers_the_new_asset_and_retargets_the_node() {
+        // CC4 §2.3: a different LUT is a *different asset*. Nothing rewrites a
+        // hash in place.
+        let document = import_document(vec![effect(4, "creative_look")]);
+        let batch = lut_import_operations(
+            &document,
+            sample_import(),
+            &LutImportIntent::Retarget {
+                clip: ClipId(10),
+                effect: EffectId(4),
+            },
+        )
+        .expect("the batch builds");
+        assert_eq!(batch.operations.len(), 2);
+        assert!(matches!(batch.operations[0], Operation::AddLutAsset { .. }));
+        assert_eq!(
+            batch.operations[1],
+            Operation::SetEffectParam {
+                clip: ClipId(10),
+                effect: EffectId(4),
+                name: kinewright_core::LUT_ASSET_ID_PARAMETER.to_owned(),
+                value: kinewright_core::ParamValue::Integer(1),
+            }
+        );
+    }
+
+    #[test]
+    fn a_legacy_cube_conversion_registers_then_converts() {
+        let mut legacy = effect(4, "cube_lut");
+        legacy.parameters.insert(
+            "intensity_percent".to_owned(),
+            kinewright_core::ParamValue::Integer(40),
+        );
+        let document = import_document(vec![legacy]);
+        let batch = lut_import_operations(
+            &document,
+            sample_import(),
+            &LutImportIntent::ConvertLegacy {
+                clip: ClipId(10),
+                effect: EffectId(4),
+            },
+        )
+        .expect("the batch builds");
+        assert_eq!(batch.operations.len(), 2);
+        assert!(matches!(batch.operations[0], Operation::AddLutAsset { .. }));
+        assert_eq!(
+            batch.operations[1],
+            Operation::ConvertLegacyLook {
+                clip: ClipId(10),
+                effect: EffectId(4),
+                lut_asset: LutAssetId(1),
+                mix_basis_points: 4_000,
+            }
+        );
+    }
+
+    /// The import worker's conversion path shares the inspector's ordering
+    /// rule, so a legacy stage before a managed correction is moved rather
+    /// than rejected (CC4 §3.2, §9).
+    #[test]
+    fn a_legacy_cube_conversion_before_a_correction_reorders_it() {
+        let document =
+            import_document(vec![effect(4, "cube_lut"), effect(1, "primary_correction")]);
+        let batch = lut_import_operations(
+            &document,
+            sample_import(),
+            &LutImportIntent::ConvertLegacy {
+                clip: ClipId(10),
+                effect: EffectId(4),
+            },
+        )
+        .expect("the batch builds");
+        assert_eq!(batch.operations.len(), 3);
+        assert!(matches!(
+            batch.operations[1],
+            Operation::RemoveEffect {
+                effect: EffectId(4),
+                ..
+            }
+        ));
+        assert!(matches!(
+            batch.operations[2],
+            Operation::InsertEffect { index: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn a_target_that_vanished_mid_import_still_registers_the_bytes() {
+        // The store write already happened, so throwing the whole batch away
+        // would lose the operator's import. The asset is registered and the
+        // lost target is reported, never silently substituted.
+        let document = import_document(Vec::new());
+        for intent in [
+            LutImportIntent::Apply {
+                clip: Some(ClipId(99)),
+                stage: ColorStage::Look,
+            },
+            LutImportIntent::Retarget {
+                clip: ClipId(10),
+                effect: EffectId(99),
+            },
+            LutImportIntent::ConvertLegacy {
+                clip: ClipId(10),
+                effect: EffectId(99),
+            },
+        ] {
+            let batch = lut_import_operations(&document, sample_import(), &intent)
+                .unwrap_or_else(|error| panic!("{intent:?} did not build: {error}"));
+            assert_eq!(batch.operations.len(), 1, "{intent:?}");
+            assert!(matches!(batch.operations[0], Operation::AddLutAsset { .. }));
+            assert!(batch.target_lost.is_some(), "{intent:?}");
+        }
+    }
+
+    /// CC4 §7: two `.cube` files dropped together finish in the same frame.
+    /// Both must register, under distinct ids. Draining the channel in one
+    /// pass builds the second batch against the same pre-import document as
+    /// the first, which Core rejects — the operator's second look vanishes
+    /// with only an error-log line.
+    #[test]
+    fn two_imports_finishing_together_register_under_distinct_ids() {
+        let mut document = import_document(Vec::new());
+        let intent = LutImportIntent::Apply {
+            clip: None,
+            stage: ColorStage::Look,
+        };
+
+        // Frame 1: the first response is taken and submitted.
+        let first = lut_import_operations(&document, sample_import(), &intent).expect("builds");
+        let reservation = Some(LutImportReservation {
+            session_id: 1,
+            asset: first.asset.id,
+        });
+
+        // The batch is in flight, so the second response waits rather than
+        // being built against a document that does not record the first id.
+        assert!(!lut_import_is_ready(reservation, Some(&document)));
+        // Building it anyway is exactly the bug: a duplicate id.
+        let collided = lut_import_operations(&document, sample_import(), &intent).expect("builds");
+        assert_eq!(collided.asset.id, first.asset.id);
+
+        // Frame 2: the first batch has landed.
+        kinewright_core::apply_batch(&mut document, &first.operations).expect("first accepted");
+        assert!(lut_import_is_ready(reservation, Some(&document)));
+
+        let second = lut_import_operations(&document, sample_import(), &intent).expect("builds");
+        assert_ne!(second.asset.id, first.asset.id);
+        kinewright_core::apply_batch(&mut document, &second.operations).expect("second accepted");
+
+        assert_eq!(document.lut_assets.len(), 2);
+        assert_eq!(
+            document
+                .lut_assets
+                .iter()
+                .map(|asset| asset.id)
+                .collect::<Vec<_>>(),
+            vec![first.asset.id, second.asset.id]
+        );
+        document.validate().expect("both records are valid");
+    }
+
+    /// A reservation whose session is gone retires immediately: there is no
+    /// document left for a later batch to collide with, and holding it would
+    /// stall every import in every other project.
+    #[test]
+    fn a_reservation_for_a_closed_session_never_stalls_the_queue() {
+        let reservation = Some(LutImportReservation {
+            session_id: 7,
+            asset: LutAssetId(3),
+        });
+        assert!(lut_import_is_ready(reservation, None));
+        assert!(lut_import_is_ready(None, None));
+    }
+
+    /// CC4 §2.2: a Save As that completes while the import worker runs moves
+    /// the store root, so the bytes land beside the *old* project file. They
+    /// are placed in the root the project now claims before the record that
+    /// resolves against it is written.
+    #[test]
+    fn an_import_that_raced_a_save_as_is_placed_in_the_current_store() {
+        let origin = TempDirectory::new("cc4-import-race-origin");
+        let destination = TempDirectory::new("cc4-import-race-destination");
+        let worker = LutStore::for_project(&origin.path("edit.kinewright")).expect("origin root");
+        let current =
+            LutStore::for_project(&destination.path("edit.kinewright")).expect("new root");
+
+        let source = origin.path("look.cube");
+        std::fs::write(
+            &source,
+            "LUT_3D_SIZE 2\n             0.0 0.0 0.0\n1.0 0.0 0.0\n0.0 1.0 0.0\n1.0 1.0 0.0\n             0.0 0.0 1.0\n1.0 0.0 1.0\n0.0 1.0 1.0\n1.0 1.0 1.0\n",
+        )
+        .expect("the fixture .cube writes");
+        let import = worker
+            .import_lut_asset(&source)
+            .expect("the worker imports");
+        let asset = import.into_lut_asset(LutAssetId(1));
+
+        // Before the copy the new root resolves nothing.
+        assert_eq!(
+            current.availability(&asset).kind,
+            kinewright_core::LutAvailabilityKind::Missing
+        );
+
+        realign_import_store(&worker, &current, &asset).expect("the bytes move");
+
+        assert_eq!(
+            current.availability(&asset).kind,
+            kinewright_core::LutAvailabilityKind::Verified
+        );
+        // Idempotent, and a no-op when the root never moved.
+        realign_import_store(&worker, &current, &asset).expect("a second call is harmless");
+        realign_import_store(&worker, &worker, &asset).expect("the same root copies nothing");
+    }
+
+    /// CC4 §2.2: a Save As onto a *refused* root while the import worker runs
+    /// leaves the session with no store at all. That is a failure, not an
+    /// exemption from realignment: the bytes are still beside the old project
+    /// file, so the batch is dropped with the store's own reason instead of
+    /// registering an unreachable asset as an imported look.
+    #[test]
+    fn an_import_that_raced_a_save_as_onto_a_refused_root_is_dropped_with_the_reason() {
+        let origin = TempDirectory::new("cc4-import-race-refused");
+        let worker = LutStore::for_project(&origin.path("edit.kinewright")).expect("origin root");
+        let source = origin.path("look.cube");
+        std::fs::write(
+            &source,
+            "LUT_3D_SIZE 2\n0.0 0.0 0.0\n1.0 0.0 0.0\n0.0 1.0 0.0\n1.0 1.0 0.0\n0.0 0.0 1.0\n1.0 0.0 1.0\n0.0 1.0 1.0\n1.0 1.0 1.0\n",
+        )
+        .expect("the fixture .cube writes");
+        let asset = worker
+            .import_lut_asset(&source)
+            .expect("the worker imports")
+            .into_lut_asset(LutAssetId(1));
+
+        let refusal = "lut_store_root_invalid: the derived store root is not a directory";
+        let message = import_realignment_failure("Gate look", &worker, None, Some(refusal), &asset)
+            .expect("a session with no store cannot receive the bytes");
+        assert!(message.contains("Gate look"), "{message}");
+        assert!(message.contains(refusal), "{message}");
+        assert!(
+            message.contains("was not registered"),
+            "the operator must be told the look did not land: {message}"
+        );
+        assert!(
+            !message.contains("project_not_saved"),
+            "a refused root is not the save recovery: {message}"
+        );
+
+        // With no typed refusal the honest reason is the save recovery.
+        let unsaved = import_realignment_failure("Gate look", &worker, None, None, &asset)
+            .expect("an unsaved project cannot receive the bytes either");
+        assert!(unsaved.contains(PROJECT_NOT_SAVED_MESSAGE), "{unsaved}");
+
+        // A usable store that already owns the bytes is not a failure.
+        assert_eq!(
+            import_realignment_failure("Gate look", &worker, Some(&worker), None, &asset),
+            None
+        );
+    }
+
+    #[test]
+    fn the_project_not_saved_message_names_the_store_and_the_recovery() {
+        assert!(PROJECT_NOT_SAVED_MESSAGE.contains("project_not_saved"));
+        assert!(PROJECT_NOT_SAVED_MESSAGE.contains("save the project first"));
+        assert!(PROJECT_NOT_SAVED_MESSAGE.contains("kinewright-assets"));
+    }
+
+    #[test]
+    fn a_failure_message_carries_the_file_and_the_typed_code() {
+        let error =
+            MediaError::Backend("lut_size_out_of_range observed=66 allowed=2..=65".to_owned());
+        let message = lut_failure_message(Path::new("/looks/huge.cube"), &error);
+        assert!(message.contains("/looks/huge.cube"));
+        assert!(message.contains("lut_size_out_of_range"));
+        assert!(message.contains("observed=66"));
+        assert!(message.contains("allowed=2..=65"));
     }
 }

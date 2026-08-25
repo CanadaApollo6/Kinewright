@@ -1,16 +1,19 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use eframe::egui;
 use kinewright_core::{
     COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN, COLOR_CURVE_MAX_POINTS,
     COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS, COLOR_NODE_BYPASS_PARAMETER, Clip,
-    ClipContent, ClipId, ColorCurveChannel, ColorWheelChannel, ColorWheelControl,
-    ColorWheelControlSet, ColorWheelsParams, EFFECT_DESCRIPTORS, Effect, EffectId,
-    MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaKind, Operation, ParamValue, ResolvedCurves,
-    TITLE_COLORS, TITLE_FONT_SIZES, TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition,
-    Transition, color_node_inactive_reason, effect_compatibility_stage, is_audio_effect,
-    is_legacy_display_effect,
+    ClipContent, ClipId, ColorCurveChannel, ColorNodeKind, ColorStage, ColorWheelChannel,
+    ColorWheelControl, ColorWheelControlSet, ColorWheelsParams, Document, EFFECT_DESCRIPTORS,
+    Effect, EffectId, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER,
+    LUT_MIX_BASIS_POINTS_MAX, LUT_MIX_PARAMETER, LutAsset, LutAssetId, LutAssetSource,
+    LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams, MARKER_COLOR_TOKEN_COUNT, Marker,
+    MarkerId, MediaKind, Operation, ParamValue, ResolvedCurves, TITLE_COLORS, TITLE_FONT_SIZES,
+    TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition, Transition, color_node_inactive_reason,
+    effect_compatibility_stage, is_audio_effect, is_legacy_display_effect, is_lut_color_node,
 };
+use kinewright_media::BuiltinLook;
 
 use crate::{
     app::KinewrightApp,
@@ -37,6 +40,72 @@ pub(crate) struct InspectorEdits {
     /// identity. Without it a second drag over the same control would merge
     /// into the previous drag's undo entry.
     gesture_started: bool,
+    /// Look actions the card cannot express as operations because they need a
+    /// file dialog, a worker thread, or a window (CC4 §7). Collected here so
+    /// every card stays a pure function of the document and is testable
+    /// without an egui context.
+    look_requests: Vec<LookRequest>,
+    /// The A/B hold that is live at the end of this frame, if any.
+    ///
+    /// The app mirrors it so a card that stops rendering mid-hold — the panel
+    /// collapsed, the tab switched, the clip deselected — cannot leave
+    /// `bypass = 1` written in the document with nothing left to release it
+    /// (CC4 §7).
+    ab_hold: Option<AbHoldRecord>,
+    /// The card that released an A/B hold itself this frame, which retires the
+    /// app's mirror without a second restore.
+    ab_released: Option<(ClipId, EffectId)>,
+    /// Refusals a card produced while building a batch, for the app's error
+    /// log.
+    ///
+    /// Drawing them inline inside the click branch showed them for exactly one
+    /// frame — the frame the pointer was released — so a failed action looked
+    /// like a control that simply did nothing. They travel out with the rest
+    /// of the frame's edits instead, and land where every other failure does.
+    errors: Vec<String>,
+}
+
+/// One live A/B hold, as the card reports it (CC4 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AbHoldRecord {
+    pub(crate) clip: ClipId,
+    pub(crate) effect: EffectId,
+    /// The `bypass` value captured on the press, which the release restores.
+    pub(crate) restore: i64,
+}
+
+/// One live A/B hold as the app mirrors it, bound to the project it belongs to.
+///
+/// The session id is not decoration: a hold survives a project switch, and
+/// restoring it into whatever project happens to be focused would write a
+/// bypass into a document that never had one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MirroredAbHold {
+    pub(crate) session: u64,
+    pub(crate) record: AbHoldRecord,
+}
+
+/// One look action the inspector asks the app to perform after the frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LookRequest {
+    /// Import a `.cube` and bind a new node of this stage to it.
+    Import { clip: ClipId, stage: ColorStage },
+    /// `Locate file…`: hash-checked restore of an asset's store bytes.
+    Locate { lut_asset: LutAssetId },
+    /// `Replace…`: import a different LUT and retarget this node.
+    Replace { clip: ClipId, effect: EffectId },
+    /// Open the look browser for one clip, optionally targeting a node.
+    Browse {
+        clip: ClipId,
+        effect: Option<EffectId>,
+    },
+    /// Convert one legacy `cube_lut` whose external path must be imported
+    /// into the store before the batch can be built (CC4 §9).
+    ConvertLegacyCube {
+        clip: ClipId,
+        effect: EffectId,
+        path: std::path::PathBuf,
+    },
 }
 
 impl InspectorEdits {
@@ -81,6 +150,36 @@ impl InspectorEdits {
         self.gesture_started = true;
     }
 
+    /// Record a look action that needs the app: a dialog, a worker, a window.
+    fn push_look(&mut self, request: LookRequest) {
+        self.look_requests.push(request);
+    }
+
+    /// Mirror the A/B hold this frame's card reported.
+    fn record_ab_hold(&mut self, record: AbHoldRecord) {
+        self.ab_hold = Some(record);
+    }
+
+    /// Report that a card released its own hold, so the app's mirror retires.
+    fn record_ab_release(&mut self, clip: ClipId, effect: EffectId) {
+        self.ab_released = Some((clip, effect));
+    }
+
+    /// Record a refusal the app should surface through the error log.
+    fn push_error(&mut self, message: impl Into<String>) {
+        self.errors.push(message.into());
+    }
+
+    #[cfg(test)]
+    fn errors(&self) -> &[String] {
+        &self.errors
+    }
+
+    #[cfg(test)]
+    const fn ab_hold(&self) -> Option<AbHoldRecord> {
+        self.ab_hold
+    }
+
     #[cfg(test)]
     fn operations(&self) -> &[Operation] {
         &self.operations
@@ -90,6 +189,26 @@ impl InspectorEdits {
     fn coalesce_key(&self) -> Option<&str> {
         self.coalesce_key.as_deref()
     }
+
+    #[cfg(test)]
+    fn look_requests(&self) -> &[LookRequest] {
+        &self.look_requests
+    }
+}
+
+/// Stable coalesce key for one live look mix drag (CC4 §7).
+fn look_mix_coalesce_key(clip: ClipId, effect: EffectId) -> String {
+    format!("look:{}:{}:mix", clip.0, effect.0)
+}
+
+/// Stable coalesce key for one press-and-hold A/B comparison (CC4 §7).
+///
+/// The hold runs through the same coalesced gesture path as a slider drag, so
+/// the whole comparison — the bypass on press and the restore on release — is
+/// one undo entry and is the real, provably lossless bypass rather than a
+/// preview shortcut.
+fn look_ab_coalesce_key(clip: ClipId, effect: EffectId) -> String {
+    format!("look:{}:{}:ab", clip.0, effect.0)
 }
 
 /// Stable per-parameter coalesce key for one live primary-correction drag.
@@ -105,6 +224,453 @@ fn speed_coalesce_key(clip: ClipId) -> String {
 /// Stable coalesce key for one live audio-gain drag.
 fn audio_gain_coalesce_key(clip: ClipId) -> String {
     format!("audio_gain:{}", clip.0)
+}
+
+// ---------------------------------------------------------------------------
+// CC4 §7 look node operations
+// ---------------------------------------------------------------------------
+
+/// The first index in `effects` at which a node of `stage` satisfies the CC4
+/// §3.2 stage-ordering rule.
+///
+/// The managed-node subsequence must have non-decreasing stage rank, so the
+/// legal window for a new node opens just after the last managed node of an
+/// equal-or-lower rank and closes at the first managed node of a higher rank.
+/// This returns the start of that window, which is the same index the CC4 §8
+/// planners emit, so an insert from a stage heading can never be rejected for
+/// ordering. Non-colour effects are unconstrained and are stepped over without
+/// moving the index.
+#[must_use]
+pub(crate) fn color_stage_insert_index(effects: &[Effect], stage: ColorStage) -> usize {
+    let mut index = 0;
+    for (position, effect) in effects.iter().enumerate() {
+        let Some(kind) = ColorNodeKind::from_effect_name(&effect.name) else {
+            continue;
+        };
+        if kind.stage().rank() <= stage.rank() {
+            index = position + 1;
+        }
+    }
+    index
+}
+
+/// The effect id a new node on this clip takes: one past the highest in use.
+fn next_effect_id(clip: &Clip) -> EffectId {
+    EffectId(
+        clip.effects
+            .iter()
+            .map(|effect| effect.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1),
+    )
+}
+
+/// The `technical_lut` / `creative_look` node kind that occupies one stage.
+const fn lut_kind_for_stage(stage: ColorStage) -> ColorNodeKind {
+    match stage {
+        ColorStage::Input => ColorNodeKind::TechnicalLut,
+        // A correction stage has no LUT kind; the inspector never offers one,
+        // and treating it as a creative look keeps this total rather than
+        // panicking on an unreachable branch.
+        ColorStage::Correction | ColorStage::Look => ColorNodeKind::CreativeLook,
+    }
+}
+
+/// One `InsertEffect` that binds a new LUT node of `stage` to `asset` at the
+/// first legal index (CC4 §2.7, §7).
+///
+/// Only the values the operator touched are written: `lut_asset_id` and, for a
+/// creative look, nothing else, because CC4 §5 makes `mix_basis_points` neutral
+/// at full strength so a look created with only a binding shows the look.
+#[must_use]
+pub(crate) fn insert_lut_node_operation(
+    clip: &Clip,
+    stage: ColorStage,
+    asset: LutAssetId,
+) -> Operation {
+    Operation::InsertEffect {
+        clip: clip.id,
+        index: color_stage_insert_index(&clip.effects, stage),
+        effect: Effect {
+            id: next_effect_id(clip),
+            name: lut_kind_for_stage(stage).effect_name().to_owned(),
+            parameters: BTreeMap::from([(
+                LUT_ASSET_ID_PARAMETER.to_owned(),
+                ParamValue::Integer(lut_asset_parameter_value(asset)),
+            )]),
+            keyframes: BTreeMap::new(),
+        },
+    }
+}
+
+/// One `SetEffectParam` that retargets an existing LUT node onto `asset`.
+#[must_use]
+pub(crate) fn lut_asset_param_operation(
+    clip: ClipId,
+    effect: EffectId,
+    asset: LutAssetId,
+) -> Operation {
+    effect_param_operation(
+        clip,
+        effect,
+        LUT_ASSET_ID_PARAMETER,
+        lut_asset_parameter_value(asset),
+    )
+}
+
+/// `LutAssetId` as the integer a `ParamValue::Integer` carries.
+///
+/// Ids are bounded by `2^53 - 1`, so the saturation is unreachable; it exists
+/// so a hand-built id can never wrap into a different asset.
+fn lut_asset_parameter_value(asset: LutAssetId) -> i64 {
+    i64::try_from(asset.0).unwrap_or(i64::MAX)
+}
+
+/// One `ConvertLegacyLook` for a legacy node already bound to `asset`.
+///
+/// `intensity_percent` maps to `mix_basis_points = percent * 100` (CC4 §9).
+#[must_use]
+pub(crate) fn convert_legacy_look_operation(
+    clip: ClipId,
+    legacy: &Effect,
+    asset: LutAssetId,
+) -> Operation {
+    Operation::ConvertLegacyLook {
+        clip,
+        effect: legacy.id,
+        lut_asset: asset,
+        mix_basis_points: legacy_mix_basis_points(legacy),
+    }
+}
+
+/// Whether converting the legacy node `legacy` into a managed creative look
+/// *in place* keeps the CC4 §3.2 stage order.
+///
+/// `ConvertLegacyLook` rewrites the node where it stands, and a creative look
+/// carries the highest stage rank, so the conversion is legal exactly when no
+/// managed node of a lower rank — every correction, and the technical input
+/// transform — sits after it. A legacy `look_lut` authored before a
+/// `primary_correction` is the case this catches (CC4 §9).
+#[must_use]
+pub(crate) fn legacy_conversion_keeps_stage_order(effects: &[Effect], legacy: EffectId) -> bool {
+    let Some(position) = effects.iter().position(|effect| effect.id == legacy) else {
+        return false;
+    };
+    let converted = ColorStage::Look.rank();
+    effects
+        .iter()
+        .enumerate()
+        .skip(position + 1)
+        .filter_map(|(_, effect)| ColorNodeKind::from_effect_name(&effect.name))
+        .all(|kind| kind.stage().rank() >= converted)
+}
+
+/// The managed creative look one legacy node converts into, with the effect
+/// id preserved so the conversion stays the *same* node to undo (CC4 §9).
+///
+/// Mirrors what `ConvertLegacyLook` writes in Core: the binding, the converted
+/// mix, and nothing else.
+fn converted_look_effect(legacy: &Effect, asset: LutAssetId) -> Effect {
+    Effect {
+        id: legacy.id,
+        name: ColorNodeKind::CreativeLook.effect_name().to_owned(),
+        parameters: BTreeMap::from([
+            (
+                LUT_ASSET_ID_PARAMETER.to_owned(),
+                ParamValue::Integer(lut_asset_parameter_value(asset)),
+            ),
+            (
+                LUT_MIX_PARAMETER.to_owned(),
+                ParamValue::Integer(legacy_mix_basis_points(legacy)),
+            ),
+        ]),
+        keyframes: BTreeMap::new(),
+    }
+}
+
+/// The operations that turn one legacy look node into a managed creative look
+/// (CC4 §9).
+///
+/// One `ConvertLegacyLook` when the node already stands somewhere a creative
+/// look may stand. When it does not — a `look_lut` authored before a
+/// `primary_correction` — the same conversion is expressed as
+/// `[RemoveEffect, InsertEffect]` at the first legal Look index, which is the
+/// only way to convert it at all: `ConvertLegacyLook` cannot move a node, and
+/// converting in place would be rejected with `ColorStageOrderViolation`.
+/// The effect id is preserved either way, so the operator's node keeps its
+/// identity and the batch is one undo entry.
+#[must_use]
+pub(crate) fn legacy_conversion_operations(
+    clip: &Clip,
+    legacy: &Effect,
+    asset: LutAssetId,
+) -> Vec<Operation> {
+    if legacy_conversion_keeps_stage_order(&clip.effects, legacy.id) {
+        return vec![convert_legacy_look_operation(clip.id, legacy, asset)];
+    }
+    let remaining: Vec<Effect> = clip
+        .effects
+        .iter()
+        .filter(|effect| effect.id != legacy.id)
+        .cloned()
+        .collect();
+    vec![
+        Operation::RemoveEffect {
+            clip: clip.id,
+            effect: legacy.id,
+        },
+        Operation::InsertEffect {
+            clip: clip.id,
+            index: color_stage_insert_index(&remaining, ColorStage::Look),
+            effect: converted_look_effect(legacy, asset),
+        },
+    ]
+}
+
+/// The legacy `intensity_percent` as CC4 basis points, clamped to the managed
+/// node's bounds so a hand-edited project cannot produce a rejected batch.
+fn legacy_mix_basis_points(legacy: &Effect) -> i64 {
+    stored_integer(legacy, "intensity_percent", 100)
+        .saturating_mul(100)
+        .clamp(0, LUT_MIX_BASIS_POINTS_MAX)
+}
+
+/// One effect parameter's stored integer, or `neutral` when it is absent or
+/// is not an integer.
+fn stored_integer(effect: &Effect, name: &str, neutral: i64) -> i64 {
+    effect
+        .parameters
+        .get(name)
+        .and_then(|value| match value {
+            ParamValue::Integer(value) => Some(*value),
+            ParamValue::Boolean(_) | ParamValue::Text(_) => None,
+        })
+        .unwrap_or(neutral)
+}
+
+/// One effect parameter's stored text, when it carries one.
+fn stored_text<'a>(effect: &'a Effect, name: &str) -> Option<&'a str> {
+    match effect.parameters.get(name) {
+        Some(ParamValue::Text(value)) => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+/// The `[AddLutAsset, ConvertLegacyLook]` batch that turns one legacy
+/// `look_lut` into a managed creative look (CC4 §9).
+///
+/// The preset token resolves to the built-in generated asset of CC4 §2.6, and
+/// the batch registers it only when the project does not already carry it —
+/// the store is content-addressed, so importing the same look twice is one
+/// record. `AddLutAsset` is always visible in the batch when it is needed,
+/// because `ConvertLegacyLook` rejects an unregistered asset by design.
+///
+/// # Errors
+///
+/// Returns the human reason when the effect is not a `look_lut`, when its
+/// `preset_token` names no built-in, or when the id space is exhausted.
+pub(crate) fn convert_builtin_look_operations(
+    document: &Document,
+    clip: ClipId,
+    legacy: &Effect,
+) -> Result<Vec<Operation>, String> {
+    if legacy.name != "look_lut" {
+        return Err(format!(
+            "{} is not a built-in legacy look; only look_lut converts from a preset token",
+            legacy.name
+        ));
+    }
+    let target = document
+        .clip(clip)
+        .ok_or_else(|| format!("clip {clip} no longer exists"))?;
+    let token = stored_integer(legacy, "preset_token", 0);
+    let builtin = BuiltinLook::from_preset_token(token)
+        .ok_or_else(|| format!("preset_token {token} names no built-in look (allowed 0..=4)"))?;
+    let mut operations = Vec::with_capacity(3);
+    let asset = ensure_builtin_registered(document, builtin, &mut operations)?;
+    operations.extend(legacy_conversion_operations(target, legacy, asset));
+    Ok(operations)
+}
+
+/// Resolve one built-in to a registered asset id, emitting the `AddLutAsset`
+/// that registers it when the project does not carry it yet (CC4 §2.6).
+///
+/// `AddLutAsset` is always visible in the batch when it is needed, because
+/// `ConvertLegacyLook` and `validate_document` both reject an unregistered
+/// asset by design.
+fn ensure_builtin_registered(
+    document: &Document,
+    builtin: BuiltinLook,
+    operations: &mut Vec<Operation>,
+) -> Result<LutAssetId, String> {
+    if let Some(existing) = registered_builtin(document, builtin) {
+        return Ok(existing);
+    }
+    let id = document
+        .next_lut_asset_id()
+        .map_err(|error| error.to_string())?;
+    operations.push(Operation::AddLutAsset {
+        asset: builtin.to_lut_asset(id),
+    });
+    Ok(id)
+}
+
+/// The project's existing record for one built-in, matched on the pinned hash
+/// as well as the name so a changed bake registers as a distinct asset rather
+/// than silently re-rendering an older project (CC4 §2.3).
+pub(crate) fn registered_builtin(document: &Document, builtin: BuiltinLook) -> Option<LutAssetId> {
+    document
+        .lut_assets
+        .iter()
+        .find(|asset| {
+            matches!(&asset.source, LutAssetSource::Builtin { name } if name == builtin.name())
+                && asset.sha256 == builtin.sha256()
+        })
+        .map(|asset| asset.id)
+}
+
+/// The `[AddLutAsset?, InsertEffect]` batch that stacks one more creative look
+/// bound to `builtin` on a clip (CC4 §7 look browser).
+///
+/// # Errors
+///
+/// Returns the human reason when the LUT asset id space is exhausted.
+pub(crate) fn builtin_look_operations(
+    document: &Document,
+    clip: &Clip,
+    builtin: BuiltinLook,
+    stage: ColorStage,
+) -> Result<Vec<Operation>, String> {
+    let mut operations = Vec::with_capacity(2);
+    let asset = ensure_builtin_registered(document, builtin, &mut operations)?;
+    operations.push(insert_lut_node_operation(clip, stage, asset));
+    Ok(operations)
+}
+
+/// Retarget one existing LUT node onto a built-in, registering the asset first
+/// when the project does not carry it (CC4 §7 look browser).
+///
+/// # Errors
+///
+/// Returns the human reason when the LUT asset id space is exhausted.
+pub(crate) fn builtin_retarget_operations(
+    document: &Document,
+    clip: ClipId,
+    effect: EffectId,
+    builtin: BuiltinLook,
+) -> Result<Vec<Operation>, String> {
+    let mut operations = Vec::with_capacity(2);
+    let asset = ensure_builtin_registered(document, builtin, &mut operations)?;
+    operations.push(lut_asset_param_operation(clip, effect, asset));
+    Ok(operations)
+}
+
+/// One press-and-hold A/B step, as a pure transition (CC4 §7).
+///
+/// The stored value to restore is captured on the press, not read back on the
+/// release: the hold writes `bypass = 1` through the coalesced path, so by the
+/// time the pointer comes up the live document already says `1` and reading it
+/// then would make the comparison sticky.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct AbHoldState {
+    pub(crate) held: bool,
+    pub(crate) restore: i64,
+}
+
+/// What one frame of the A/B control produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AbHoldStep {
+    pub(crate) state: AbHoldState,
+    pub(crate) operation: Option<Operation>,
+    pub(crate) gesture_started: bool,
+}
+
+/// The context-wide id one look card's A/B hold state lives under.
+///
+/// Derived from the clip and effect rather than from the parent `Ui`, so the
+/// frame loop can retire a stranded hold's state without the card that wrote
+/// it ever rendering again (CC4 §7).
+#[must_use]
+pub(crate) fn ab_hold_id(clip: ClipId, effect: EffectId) -> egui::Id {
+    egui::Id::new(("look-ab-hold", clip.0, effect.0))
+}
+
+/// Whether the press-and-hold A/B comparison is offered on one node (CC4 §7).
+///
+/// A keyframed `bypass` is evaluated per frame from its curve, so a hold would
+/// write a static value the curve immediately overrides: the comparison would
+/// change nothing visible while still filing an undo entry. The control is
+/// disabled and badged instead, with "clear the keyframes first" as the
+/// recovery.
+#[must_use]
+pub(crate) fn ab_hold_is_available(effect: &Effect) -> bool {
+    !parameter_is_keyframed(effect, COLOR_NODE_BYPASS_PARAMETER)
+}
+
+/// Whether a mirrored A/B hold has to be restored by the frame loop rather
+/// than by its card (CC4 §7).
+///
+/// Either the card did not render — the panel was collapsed, the material tab
+/// switched, the clip deselected — so no release transition can ever be
+/// observed, or the pointer is already up and the card missed the release.
+/// Both leave `bypass = 1` in the document, which is a silent grade change.
+#[must_use]
+pub(crate) const fn ab_hold_needs_recovery(rendered_last_frame: bool, pointer_down: bool) -> bool {
+    !rendered_last_frame || !pointer_down
+}
+
+/// The operation that returns one stranded A/B hold's node to its captured
+/// value.
+#[must_use]
+pub(crate) fn ab_hold_restore_operation(record: AbHoldRecord) -> Operation {
+    effect_param_operation(
+        record.clip,
+        record.effect,
+        COLOR_NODE_BYPASS_PARAMETER,
+        record.restore,
+    )
+}
+
+/// Advance the A/B hold by one frame.
+#[must_use]
+pub(crate) fn ab_hold_step(
+    clip: ClipId,
+    effect: EffectId,
+    previous: AbHoldState,
+    pressed: bool,
+    stored_bypass: i64,
+) -> AbHoldStep {
+    match (previous.held, pressed) {
+        (false, true) => AbHoldStep {
+            state: AbHoldState {
+                held: true,
+                restore: stored_bypass,
+            },
+            operation: Some(effect_param_operation(
+                clip,
+                effect,
+                COLOR_NODE_BYPASS_PARAMETER,
+                1,
+            )),
+            gesture_started: true,
+        },
+        (true, false) => AbHoldStep {
+            state: AbHoldState::default(),
+            operation: Some(effect_param_operation(
+                clip,
+                effect,
+                COLOR_NODE_BYPASS_PARAMETER,
+                previous.restore,
+            )),
+            gesture_started: false,
+        },
+        _ => AbHoldStep {
+            state: previous,
+            operation: None,
+            gesture_started: false,
+        },
+    }
 }
 
 /// Whether a control change belongs to a drag gesture that is still one undo
@@ -125,20 +691,127 @@ pub(crate) fn is_live_drag(slider: &egui::Response) -> bool {
 impl KinewrightApp {
     /// Route one inspector frame's edits to the core actor.
     fn submit_inspector_edits(&mut self, edits: InspectorEdits) {
+        // Mirror the A/B hold before the operations go out: the frame loop
+        // needs a record even for the frame the hold opens, because that is
+        // the frame after which the card may stop rendering (CC4 §7).
+        if let Some(record) = edits.ab_hold {
+            self.look_ab_hold = Some(MirroredAbHold {
+                session: self.focused().id,
+                record,
+            });
+            self.look_ab_hold_seen = true;
+        } else if let Some((clip, effect)) = edits.ab_released
+            && self
+                .look_ab_hold
+                .is_some_and(|held| held.record.clip == clip && held.record.effect == effect)
+        {
+            self.look_ab_hold = None;
+        }
+        // Refusals go out before the operations so a card that both refused
+        // one action and produced another still reports the refusal.
+        for message in edits.errors {
+            self.record_error("Look", message);
+        }
         if edits.gesture_started {
             // Open the new gesture even when this frame produced no operation:
             // a mouse-down without movement still ends the previous gesture.
             self.begin_edit_gesture();
         }
-        if edits.operations.is_empty() {
+        if !edits.operations.is_empty() {
+            match edits.coalesce_key {
+                Some(key) => {
+                    let gesture = self.edit_gesture();
+                    self.send_operations_coalesced(edits.operations, format!("{key}#{gesture}"));
+                }
+                None => self.send_operations(edits.operations),
+            }
+        }
+        // Look actions run after the edits so a dialog can never block the
+        // frame that produced them (CC4 §7).
+        for request in edits.look_requests {
+            self.handle_look_request(request);
+        }
+    }
+
+    /// Restore a stranded A/B hold (CC4 §7).
+    ///
+    /// The hold writes a real `bypass = 1`, so a card that stops rendering
+    /// while the pointer is down — a collapsed panel, a switched material tab,
+    /// a deselected clip — would otherwise leave the look silently bypassed
+    /// with no control left to release it. The restore goes out under the same
+    /// coalesce key and the same gesture identity as the press, so the whole
+    /// comparison is still exactly one undo entry.
+    pub(crate) fn recover_stranded_ab_hold(&mut self, ctx: &egui::Context) {
+        let Some(held) = self.look_ab_hold else {
+            return;
+        };
+        let pointer_down = ctx.input(|input| input.pointer.primary_down());
+        if !ab_hold_needs_recovery(self.look_ab_hold_seen, pointer_down) {
+            // Consumed: the card has to report the hold again this frame.
+            self.look_ab_hold_seen = false;
             return;
         }
-        match edits.coalesce_key {
-            Some(key) => {
-                let gesture = self.edit_gesture();
-                self.send_operations_coalesced(edits.operations, format!("{key}#{gesture}"));
+        let record = held.record;
+        self.look_ab_hold = None;
+        self.look_ab_hold_seen = false;
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                ab_hold_id(record.clip, record.effect),
+                AbHoldState::default(),
+            );
+        });
+        // The hold belongs to one project, which may no longer be the focused
+        // one — or may be closed. A node the operator deleted while holding
+        // has no bypass left to restore, so the restore is dropped rather than
+        // sent to be rejected.
+        let Some(index) = crate::project::session_index_by_id(held.session, &self.projects) else {
+            return;
+        };
+        if !self.projects[index]
+            .document
+            .clip(record.clip)
+            .is_some_and(|clip| clip.effects.iter().any(|node| node.id == record.effect))
+        {
+            return;
+        }
+        let gesture = self.edit_gesture();
+        let coalesce_key = format!(
+            "{}#{gesture}",
+            look_ab_coalesce_key(record.clip, record.effect)
+        );
+        if self.projects[index]
+            .core
+            .send(kinewright_core::Command::DoBatchCoalesced {
+                operations: vec![ab_hold_restore_operation(record)],
+                coalesce_key,
+            })
+            .is_err()
+        {
+            self.record_error("Look", "Core actor stopped while releasing the A/B hold");
+        }
+    }
+
+    /// Perform one look action the inspector or the browser asked for.
+    fn handle_look_request(&mut self, request: LookRequest) {
+        match request {
+            LookRequest::Import { clip, stage } => {
+                let Some(path) = crate::media_workflow::choose_lut_file() else {
+                    return;
+                };
+                self.start_lut_import(
+                    path,
+                    crate::media_workflow::LutImportIntent::Apply {
+                        clip: Some(clip),
+                        stage,
+                    },
+                );
             }
-            None => self.send_operations(edits.operations),
+            LookRequest::Locate { lut_asset } => self.choose_lut_restore(lut_asset),
+            LookRequest::Replace { clip, effect } => self.choose_lut_replacement(clip, effect),
+            LookRequest::Browse { clip, effect } => self.look_browser.open_for(clip, effect),
+            LookRequest::ConvertLegacyCube { clip, effect, path } => {
+                self.start_legacy_cube_conversion(clip, effect, path);
+            }
         }
     }
 
@@ -359,8 +1032,18 @@ impl KinewrightApp {
             }
         }
 
-        effects_section(ui, clip, &mut pending);
-        transition_section(ui, &self.focused().document, clip, &mut pending);
+        let document = Arc::clone(&self.focused().document);
+        // Cloned rather than borrowed: the availability map has one entry per
+        // LUT asset, and cloning it keeps `self` free for the dispatch that
+        // follows the frame.
+        let availability = self.focused().lut_availability.clone();
+        let looks = LookInspectorContext {
+            document: &document,
+            availability: &availability,
+            store_unavailable: self.focused().lut_store_unavailable_reason(),
+        };
+        effects_section(ui, clip, &looks, &mut pending);
+        transition_section(ui, &document, clip, &mut pending);
         self.submit_inspector_edits(pending);
     }
 
@@ -393,8 +1076,18 @@ impl KinewrightApp {
             &frame_readout(duration, self.focused().document.fps),
         );
         let mut pending = InspectorEdits::default();
-        effects_section(ui, clip, &mut pending);
-        transition_section(ui, &self.focused().document, clip, &mut pending);
+        let document = Arc::clone(&self.focused().document);
+        // Cloned rather than borrowed: the availability map has one entry per
+        // LUT asset, and cloning it keeps `self` free for the dispatch that
+        // follows the frame.
+        let availability = self.focused().lut_availability.clone();
+        let looks = LookInspectorContext {
+            document: &document,
+            availability: &availability,
+            store_unavailable: self.focused().lut_store_unavailable_reason(),
+        };
+        effects_section(ui, clip, &looks, &mut pending);
+        transition_section(ui, &document, clip, &mut pending);
         self.submit_inspector_edits(pending);
     }
 
@@ -609,24 +1302,77 @@ impl KinewrightApp {
     }
 }
 
-fn effects_section(ui: &mut egui::Ui, clip: &Clip, pending: &mut InspectorEdits) {
+/// Everything a look card needs that lives outside the document (CC4 §7).
+///
+/// Availability is runtime state, never project state, so it is injected here
+/// exactly as M41 injects media availability rather than being read back out
+/// of the `Document`.
+pub(crate) struct LookInspectorContext<'a> {
+    pub(crate) document: &'a Document,
+    pub(crate) availability: &'a BTreeMap<LutAssetId, LutAvailabilityStatus>,
+    /// Why this project cannot own LUT bytes, or `None` when it can.
+    ///
+    /// Two different refusals reach the same disabled controls: a project that
+    /// was never saved (`project_not_saved`) and a saved project whose derived
+    /// store root is a symlink or a non-directory (`lut_store_root_invalid`).
+    /// Carrying the reason rather than a bool keeps the second one from being
+    /// reported as the first, which would send the operator round a "save the
+    /// project first" loop on a project they just saved (CC4 §2.2).
+    pub(crate) store_unavailable: Option<String>,
+}
+
+impl LookInspectorContext<'_> {
+    /// Whether imports, restores, and conversions are available.
+    fn has_store(&self) -> bool {
+        self.store_unavailable.is_none()
+    }
+
+    /// The disabled-control reason, for a tooltip or an inline label.
+    fn store_reason(&self) -> &str {
+        self.store_unavailable.as_deref().unwrap_or_default()
+    }
+}
+
+/// The inspector heading for one colour stage (CC4 §7).
+const fn stage_heading(stage: ColorStage) -> &'static str {
+    match stage {
+        ColorStage::Input => "Input transform",
+        ColorStage::Correction => "Correction",
+        ColorStage::Look => "Creative look",
+    }
+}
+
+/// What each stage is for, so the ordering rule is visible rather than
+/// discovered through a rejection.
+const fn stage_hint(stage: ColorStage) -> &'static str {
+    match stage {
+        ColorStage::Input => "Normalizes the source. Runs before every correction.",
+        ColorStage::Correction => "Exposure, balance, wheels, and curves.",
+        ColorStage::Look => "Runs after every correction.",
+    }
+}
+
+fn effects_section(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    looks: &LookInspectorContext<'_>,
+    pending: &mut InspectorEdits,
+) {
+    ui.add_space(space::TWO);
+    ui.strong("Colour");
+    // The three stage headings render the managed nodes in `clip.effects`
+    // order within each stage, which is also the execution order: the document
+    // invariant forbids a vector order that contradicts the stage order, so
+    // the inspector, the manifest, and the renderer cannot disagree (CC4 §3.2).
+    for stage in ColorStage::ALL {
+        color_stage_section(ui, clip, stage, looks, pending);
+    }
+
     ui.add_space(space::TWO);
     ui.strong("Effects");
-    for (stage_index, effect) in clip.effects.iter().enumerate() {
-        match effect.name.as_str() {
-            "primary_correction" => {
-                primary_correction_section(ui, clip, effect, pending);
-                continue;
-            }
-            "color_wheels" => {
-                color_wheels_section(ui, clip, effect, stage_index, pending);
-                continue;
-            }
-            "color_curves" => {
-                color_curves_section(ui, clip, effect, stage_index, pending);
-                continue;
-            }
-            _ => {}
+    for effect in &clip.effects {
+        if ColorNodeKind::from_effect_name(&effect.name).is_some() {
+            continue;
         }
         ui.group(|ui| {
             ui.horizontal(|ui| {
@@ -673,6 +1419,7 @@ fn effects_section(ui: &mut egui::Ui, clip: &Clip, pending: &mut InspectorEdits)
             }
             if let Some(stage) = effect_compatibility_stage(&effect.name) {
                 ui.colored_label(color::STATUS_WARNING, stage.inspector_warning());
+                legacy_look_conversion_row(ui, clip, effect, looks, pending);
             }
         });
     }
@@ -689,9 +1436,574 @@ fn effects_section(ui: &mut egui::Ui, clip: &Clip, pending: &mut InspectorEdits)
                 continue;
             }
             if ui.button(effect_display_name(descriptor.name)).clicked() {
-                pending.push(add_effect_operation(clip, descriptor));
+                // A LUT node cannot be added with descriptor neutrals: an
+                // unbound `lut_asset_id` is rejected by design (CC4 §3.3), so
+                // the menu routes it into the import that binds it.
+                if let Some(kind) =
+                    ColorNodeKind::from_effect_name(descriptor.name).filter(|kind| kind.is_lut())
+                {
+                    pending.push_look(LookRequest::Import {
+                        clip: clip.id,
+                        stage: kind.stage(),
+                    });
+                } else {
+                    pending.push(add_effect_operation(clip, descriptor));
+                }
                 ui.close();
             }
+        }
+    });
+}
+
+/// One colour stage's heading, insert controls, and nodes (CC4 §7).
+fn color_stage_section(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    stage: ColorStage,
+    looks: &LookInspectorContext<'_>,
+    pending: &mut InspectorEdits,
+) {
+    ui.add_space(space::TWO);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new(stage_heading(stage)).font(theme::semibold(type_size::BODY)));
+        ui.colored_label(color::TEXT_MUTED, stage_hint(stage));
+        stage_insert_controls(ui, clip, stage, looks, pending);
+    });
+    let mut rendered = 0usize;
+    for (stage_index, effect) in clip.effects.iter().enumerate() {
+        let Some(kind) = ColorNodeKind::from_effect_name(&effect.name) else {
+            continue;
+        };
+        if kind.stage() != stage {
+            continue;
+        }
+        rendered += 1;
+        match kind {
+            ColorNodeKind::Primary => primary_correction_section(ui, clip, effect, pending),
+            ColorNodeKind::Wheels => color_wheels_section(ui, clip, effect, stage_index, pending),
+            ColorNodeKind::Curves => color_curves_section(ui, clip, effect, stage_index, pending),
+            ColorNodeKind::TechnicalLut | ColorNodeKind::CreativeLook => {
+                lut_node_section(ui, clip, effect, kind, stage_index, looks, pending);
+            }
+        }
+    }
+    if rendered == 0 {
+        ui.colored_label(color::TEXT_MUTED, "No nodes in this stage.");
+    }
+}
+
+/// The per-stage insert controls, each computing the `InsertEffect` index that
+/// satisfies the stage order so a human can never author a violation.
+fn stage_insert_controls(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    stage: ColorStage,
+    looks: &LookInspectorContext<'_>,
+    pending: &mut InspectorEdits,
+) {
+    let index = color_stage_insert_index(&clip.effects, stage);
+    match stage {
+        ColorStage::Input => {
+            if lut_insert_button(ui, "+ Technical LUT…", index, looks).clicked() {
+                pending.push_look(LookRequest::Import {
+                    clip: clip.id,
+                    stage,
+                });
+            }
+        }
+        ColorStage::Look => {
+            if lut_insert_button(ui, "+ Import look…", index, looks).clicked() {
+                pending.push_look(LookRequest::Import {
+                    clip: clip.id,
+                    stage,
+                });
+            }
+            if ui
+                .small_button("Browse looks…")
+                .on_hover_text("Built-in looks and this project's imported LUT assets")
+                .clicked()
+            {
+                pending.push_look(LookRequest::Browse {
+                    clip: clip.id,
+                    effect: None,
+                });
+            }
+        }
+        ColorStage::Correction => {
+            ui.menu_button("+ Correction", |ui| {
+                for descriptor in EFFECT_DESCRIPTORS {
+                    let is_correction = ColorNodeKind::from_effect_name(descriptor.name)
+                        .is_some_and(|kind| kind.stage() == ColorStage::Correction);
+                    if !is_correction
+                        || clip
+                            .effects
+                            .iter()
+                            .any(|effect| effect.name == descriptor.name)
+                    {
+                        continue;
+                    }
+                    if ui.button(effect_display_name(descriptor.name)).clicked() {
+                        pending.push(add_effect_operation(clip, descriptor));
+                        ui.close();
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// A stage's import button, disabled with the `project_not_saved` reason when
+/// the project cannot own LUT bytes yet (CC4 §2.2).
+fn lut_insert_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    index: usize,
+    looks: &LookInspectorContext<'_>,
+) -> egui::Response {
+    let button = ui.add_enabled(looks.has_store(), egui::Button::new(label).small());
+    if looks.has_store() {
+        button.on_hover_text(format!(
+            "Inserts at position {index} in this clip's effect stack"
+        ))
+    } else {
+        button.on_hover_text(looks.store_reason().to_owned())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CC4 §7 look card
+// ---------------------------------------------------------------------------
+
+/// One availability state rendered as the media card's warning treatment.
+fn availability_chip(kind: Option<LutAvailabilityKind>) -> (&'static str, egui::Color32) {
+    match kind {
+        Some(LutAvailabilityKind::Verified) => ("verified", color::STATUS_SUCCESS),
+        Some(LutAvailabilityKind::Missing) => ("missing", color::STATUS_DANGER),
+        Some(LutAvailabilityKind::Changed) => ("changed", color::STATUS_DANGER),
+        Some(LutAvailabilityKind::Unreadable) => ("unreadable", color::STATUS_DANGER),
+        None => ("unchecked", color::STATUS_WARNING),
+    }
+}
+
+/// One asset's provenance, as the browser and the manifest report it.
+fn provenance_label(asset: &LutAsset) -> String {
+    match &asset.source {
+        LutAssetSource::Builtin { name } => format!("built-in · {name}"),
+        LutAssetSource::Imported { source_path } => std::path::Path::new(source_path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map_or_else(|| source_path.clone(), std::borrow::ToOwned::to_owned),
+    }
+}
+
+/// The CC4 §7 `technical_lut` / `creative_look` card.
+///
+/// Title, provenance, and availability; the mix slider on a creative look
+/// only; a bypass toggle; the press-and-hold A/B; a reset that excludes the
+/// binding; the keyframe rows; and the recovery banner for an asset whose
+/// bytes are not where the project says they are.
+#[allow(clippy::too_many_lines)]
+fn lut_node_section(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    effect: &Effect,
+    kind: ColorNodeKind,
+    stage_index: usize,
+    looks: &LookInspectorContext<'_>,
+    pending: &mut InspectorEdits,
+) {
+    let Some(descriptor) = kinewright_core::effect_descriptor(kind.effect_name()) else {
+        return;
+    };
+    let params = LutNodeParams::from_effect(effect);
+    let asset = looks.document.lut_asset(params.lut_asset_id);
+    let availability = asset.map(|asset| looks.availability.get(&asset.id));
+    ui.group(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new(effect_display_name(kind.effect_name()))
+                    .font(theme::semibold(type_size::BODY)),
+            );
+            ui.colored_label(
+                color::TEXT_MUTED,
+                format!("Stage {stage_index} · {}", kind.role()),
+            );
+            let mut bypass = params.bypass();
+            if ui
+                .checkbox(&mut bypass, "Bypass")
+                .on_hover_text(
+                    "A bypassed node keeps its position and every value and renders as the exact \
+                     identity (CC4 §3.6).",
+                )
+                .changed()
+            {
+                pending.push(effect_param_operation(
+                    clip.id,
+                    effect.id,
+                    COLOR_NODE_BYPASS_PARAMETER,
+                    i64::from(bypass),
+                ));
+            }
+            if ui
+                .small_button("Reset look controls")
+                .on_hover_text(
+                    "Return the mix, encoding, and bypass to their neutrals. The binding is kept: \
+                     unbinding a node is rejected (CC4 §6).",
+                )
+                .clicked()
+            {
+                pending.extend(color_node_reset_operations(clip.id, effect, &descriptor));
+            }
+            if ui.small_button("Remove").clicked() {
+                pending.push(Operation::RemoveEffect {
+                    clip: clip.id,
+                    effect: effect.id,
+                });
+            }
+        });
+
+        match asset {
+            Some(asset) => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new(&asset.title).strong());
+                    ui.colored_label(
+                        color::TEXT_MUTED,
+                        format!("{}³ · {}", asset.size, provenance_label(asset)),
+                    );
+                    let (chip_text, chip_color) =
+                        availability_chip(availability.flatten().map(|status| status.kind));
+                    ui.colored_label(chip_color, chip_text);
+                    if ui
+                        .small_button("Change…")
+                        .on_hover_text("Pick another look for this node")
+                        .clicked()
+                    {
+                        pending.push_look(LookRequest::Browse {
+                            clip: clip.id,
+                            effect: Some(effect.id),
+                        });
+                    }
+                });
+                ui.monospace(
+                    egui::RichText::new(&asset.sha256[..16.min(asset.sha256.len())])
+                        .size(type_size::CAPTION)
+                        .color(color::TEXT_MUTED),
+                );
+                lut_recovery_banner(
+                    ui,
+                    clip,
+                    effect,
+                    asset,
+                    availability.flatten(),
+                    looks,
+                    pending,
+                );
+            }
+            None => {
+                ui.colored_label(
+                    color::STATUS_DANGER,
+                    format!(
+                        "This node references LUT asset {}, which this project does not record.",
+                        params.lut_asset_id
+                    ),
+                );
+            }
+        }
+
+        if kind == ColorNodeKind::CreativeLook {
+            look_mix_row(ui, clip, effect, params, pending);
+            look_ab_row(ui, clip, effect, params, pending);
+        } else {
+            ui.colored_label(
+                color::TEXT_MUTED,
+                "Mix is pinned at full strength: a partially applied technical normalization is \
+                 not a meaningful state (CC4 §5.1).",
+            );
+        }
+        ui.colored_label(
+            color::TEXT_MUTED,
+            format!(
+                "Input encoding: {}",
+                input_encoding_label(params.input_encoding_token)
+            ),
+        );
+        if let Some(reason) = color_node_inactive_reason(effect) {
+            ui.colored_label(
+                color::TEXT_MUTED,
+                format!("Inactive for this frame: {}", reason.as_str()),
+            );
+        }
+        let names: Vec<&'static str> = descriptor
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name)
+            .collect();
+        color_node_keyframe_rows(ui, clip.id, effect, &names, pending);
+    });
+}
+
+/// The `0..=100 %` mix slider, writing `mix_basis_points = percent * 100`.
+///
+/// A drag emits one operation per frame under the node's mix key so the
+/// preview stays live; `is_live_drag` keeps the release frame inside the
+/// gesture, so the whole drag is exactly one undo entry (CC4 §7).
+fn look_mix_row(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    effect: &Effect,
+    params: LutNodeParams,
+    pending: &mut InspectorEdits,
+) {
+    let mut percent = mix_percent(params.mix_basis_points);
+    ui.horizontal(|ui| {
+        let slider = ui.add(
+            egui::Slider::new(&mut percent, 0..=100)
+                .text("Mix")
+                .integer()
+                .suffix(" %"),
+        );
+        if slider.drag_started() {
+            pending.begin_gesture();
+        }
+        if slider.changed() {
+            let operation = effect_param_operation(
+                clip.id,
+                effect.id,
+                LUT_MIX_PARAMETER,
+                percent.saturating_mul(100),
+            );
+            if is_live_drag(&slider) {
+                pending.push_live(operation, look_mix_coalesce_key(clip.id, effect.id));
+            } else {
+                pending.push(operation);
+            }
+        }
+        ui.monospace(format!("{} bp", params.mix_basis_points));
+    });
+}
+
+/// `mix_basis_points` as the slider's whole percent.
+fn mix_percent(basis_points: i64) -> i64 {
+    basis_points.clamp(0, LUT_MIX_BASIS_POINTS_MAX) / 100
+}
+
+/// The press-and-hold A/B control (CC4 §7).
+///
+/// The hold writes the real `bypass = 1` through the coalesced gesture path
+/// and restores the captured value on release, so the comparison is provably
+/// lossless rather than a preview shortcut.
+fn look_ab_row(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    effect: &Effect,
+    params: LutNodeParams,
+    pending: &mut InspectorEdits,
+) {
+    // `LutNodeParams::from_effect` reads the *static* `bypass`. A keyframed
+    // `bypass` is evaluated per frame from the curve, so a hold would write a
+    // static `1` the curve immediately overrides: the comparison would do
+    // nothing visible while still filing an undo entry. CC4 §7 wants the
+    // keyframed state badged, not silently mis-served.
+    let keyframed = !ab_hold_is_available(effect);
+    let id = ab_hold_id(clip.id, effect.id);
+    let previous: AbHoldState = ui.data(|data| data.get_temp(id)).unwrap_or_default();
+    let response = ui.add_enabled(!keyframed, egui::Button::new("A / B (hold)").small());
+    let response = if keyframed {
+        response.on_disabled_hover_text(
+            "bypass is keyframed on this node, so a hold would write a static value the curve \
+             overrides. Clear the bypass keyframes first.",
+        )
+    } else {
+        response.on_hover_text(
+            "Hold to bypass this look and release to restore it. One hold is one undo entry.",
+        )
+    };
+    let step = ab_hold_step(
+        clip.id,
+        effect.id,
+        previous,
+        !keyframed && response.is_pointer_button_down_on(),
+        params.bypass_token,
+    );
+    ui.data_mut(|data| data.insert_temp(id, step.state));
+    if step.gesture_started {
+        pending.begin_gesture();
+    }
+    if let Some(operation) = step.operation {
+        pending.push_live(operation, look_ab_coalesce_key(clip.id, effect.id));
+    }
+    if step.state.held {
+        pending.record_ab_hold(AbHoldRecord {
+            clip: clip.id,
+            effect: effect.id,
+            restore: step.state.restore,
+        });
+        ui.colored_label(color::STATUS_WARNING, "Bypassed while held");
+    } else if previous.held {
+        // The card released the hold itself, so the app's mirror retires
+        // without a second restore.
+        pending.record_ab_release(clip.id, effect.id);
+    }
+    if keyframed {
+        ui.colored_label(color::STATUS_WARNING, "KEYFRAMED");
+    }
+}
+
+/// The `display709` / `linear` / `grade709` token as its contract name.
+const fn input_encoding_label(token: i64) -> &'static str {
+    match token {
+        1 => "linear",
+        2 => "grade709",
+        _ => "display709",
+    }
+}
+
+/// The inline banner a `missing` or `changed` asset shows on every node that
+/// references it, with its two typed recovery actions (CC4 §2.3, §7).
+fn lut_recovery_banner(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    effect: &Effect,
+    asset: &LutAsset,
+    availability: Option<&LutAvailabilityStatus>,
+    looks: &LookInspectorContext<'_>,
+    pending: &mut InspectorEdits,
+) {
+    let Some(status) = availability else {
+        return;
+    };
+    if status.kind == LutAvailabilityKind::Verified {
+        return;
+    }
+    ui.colored_label(
+        color::STATUS_DANGER,
+        format!(
+            "{} is {:?}. Export and proof are blocked until it is restored or replaced.",
+            asset.title, status.kind
+        ),
+    );
+    if let Some(path) = &status.path {
+        ui.colored_label(color::TEXT_MUTED, format!("Expected at {}", path.display()));
+    }
+    if let Some(reason) = &status.reason {
+        ui.colored_label(color::TEXT_MUTED, reason);
+    }
+    ui.horizontal_wrapped(|ui| {
+        let locate = ui.add_enabled(looks.has_store(), egui::Button::new("Locate file…").small());
+        if locate
+            .on_hover_text(
+                "Point at the original file. Its bytes are hashed and accepted only on an exact \
+                 match, so a restore can never substitute a different look.",
+            )
+            .clicked()
+        {
+            pending.push_look(LookRequest::Locate {
+                lut_asset: asset.id,
+            });
+        }
+        let replace = ui.add_enabled(looks.has_store(), egui::Button::new("Replace…").small());
+        if replace
+            .on_hover_text(
+                "Import a different LUT and retarget this node. A different LUT is a different \
+                 asset: no operation ever rewrites a hash in place.",
+            )
+            .clicked()
+        {
+            pending.push_look(LookRequest::Replace {
+                clip: clip.id,
+                effect: effect.id,
+            });
+        }
+        if let Some(reason) = &looks.store_unavailable {
+            ui.colored_label(color::TEXT_MUTED, reason);
+        }
+    });
+}
+
+/// Route one **Convert to managed look** click (CC4 §7, §9).
+///
+/// A `look_lut` resolves its `preset_token` to a built-in generated asset and
+/// converts in one visible batch. A `cube_lut` names an external file the
+/// import worker has to place in the store first.
+///
+/// Every refusal goes to the app's error log. Drawing it inside the click
+/// branch showed it for exactly one frame — the frame the pointer came up — so
+/// a conversion that could not be built was indistinguishable from a button
+/// that did nothing.
+fn request_legacy_conversion(
+    document: &Document,
+    clip: ClipId,
+    effect: &Effect,
+    pending: &mut InspectorEdits,
+) {
+    if effect.name == "look_lut" {
+        match convert_builtin_look_operations(document, clip, effect) {
+            Ok(operations) => pending.extend(operations),
+            Err(reason) => pending.push_error(reason),
+        }
+        return;
+    }
+    let Some(path) = stored_text(effect, "path") else {
+        pending.push_error(format!(
+            "legacy {} node {} stores no path, so there is no .cube to import and convert",
+            effect.name, effect.id
+        ));
+        return;
+    };
+    pending.push_look(LookRequest::ConvertLegacyCube {
+        clip,
+        effect: effect.id,
+        path: std::path::PathBuf::from(path),
+    });
+}
+
+/// The **Convert to managed look** control on a legacy `look_lut` / `cube_lut`
+/// (CC4 §7, §9).
+///
+/// A `look_lut` resolves its `preset_token` to a built-in generated asset and
+/// converts in one visible `[AddLutAsset, ConvertLegacyLook]` batch. A
+/// `cube_lut` names an external file, which has to be imported into the store
+/// first, so it routes through the import worker and converts on the response.
+fn legacy_look_conversion_row(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    effect: &Effect,
+    looks: &LookInspectorContext<'_>,
+    pending: &mut InspectorEdits,
+) {
+    if !matches!(effect.name.as_str(), "look_lut" | "cube_lut") {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        let convert = ui.add_enabled(
+            looks.has_store(),
+            egui::Button::new("Convert to managed look").small(),
+        );
+        // A legacy stage authored before a managed correction cannot become a
+        // creative look where it stands, so the batch moves it to the first
+        // legal Look position instead of being rejected (CC4 §3.2, §9).
+        let reorders = !legacy_conversion_keeps_stage_order(&clip.effects, effect.id);
+        let hover = if reorders {
+            "Replaces this legacy stage with a managed creative look. It sits before a managed \
+             correction, and a creative look runs after every correction, so the conversion also \
+             moves it to the end of the colour stack. The result is not bit-identical: the legacy \
+             path clamped to [0, 1] in display space and mixed in the encoded domain (CC4 §9). \
+             Undoable."
+        } else {
+            "Replaces this legacy stage with a managed creative look at the same position. \
+             The result is not bit-identical: the legacy path clamped to [0, 1] in display \
+             space and mixed in the encoded domain (CC4 §9). Undoable."
+        };
+        if convert.on_hover_text(hover).clicked() {
+            request_legacy_conversion(looks.document, clip.id, effect, pending);
+        }
+        if let Some(reason) = &looks.store_unavailable {
+            ui.colored_label(color::TEXT_MUTED, reason);
+        } else if reorders {
+            ui.colored_label(
+                color::TEXT_MUTED,
+                "Converting moves this stage after the managed corrections.",
+            );
         }
     });
 }
@@ -835,6 +2147,14 @@ fn color_node_reset_operations(
         return operations;
     }
     for parameter in descriptor.parameters {
+        // CC4 §6: resetting a LUT node would unbind it (`lut_asset_id -> 0`),
+        // which `validate_document` rejects, so the batch excludes that
+        // parameter entirely — both its `SetEffectParam` and its
+        // `ClearEffectKeyframes`, so a `Hold`-automated binding survives a
+        // reset. The inspector labels this "Reset look controls".
+        if parameter.name == LUT_ASSET_ID_PARAMETER && is_lut_color_node(descriptor.name) {
+            continue;
+        }
         operations.push(effect_param_operation(
             clip,
             effect.id,
@@ -1586,14 +2906,22 @@ fn effect_display_name(name: &str) -> &str {
         "primary_correction" => "Primary correction",
         "color_wheels" => "Colour wheels",
         "color_curves" => "Colour curves",
+        "technical_lut" => "Technical LUT",
+        "creative_look" => "Creative look",
         _ => name,
     }
 }
 
+/// Whether the `+ Effect` menu offers one effect for new insertion.
+///
+/// CC4 §7 adds `look_lut` to the exclusions: the managed `technical_lut` and
+/// `creative_look` kinds now cover every look, so a new project never grows a
+/// legacy stage. The legacy nodes already in a project stay visible, keep
+/// rendering, and offer **Convert to managed look**.
 fn is_effect_insertable(name: &str) -> bool {
     !is_audio_effect(name)
         && !is_legacy_display_effect(name)
-        && !matches!(name, "color_grade" | "cube_lut")
+        && !matches!(name, "color_grade" | "cube_lut" | "look_lut")
 }
 
 /// Keep internal, high-precision reframe storage out of the generic inspector
@@ -1609,6 +2937,17 @@ fn should_render_effect_parameter(
     // resolves to its neutral (CC3 §2.4).
     if matches!(descriptor.name, "color_wheels" | "color_curves") {
         return false;
+    }
+    // CC4 §7: the LUT nodes own dedicated cards. `lut_asset_id` is set by the
+    // browser and the import, `input_encoding_token` by the encoding picker,
+    // and `mix_basis_points` is pinned on a `technical_lut` (min = max), so a
+    // generic slider over any of them would be either wrong or inert.
+    if is_lut_color_node(descriptor.name) {
+        return !matches!(
+            (descriptor.name, parameter_name),
+            (_, LUT_ASSET_ID_PARAMETER | LUT_INPUT_ENCODING_PARAMETER)
+                | ("technical_lut", LUT_MIX_PARAMETER)
+        );
     }
     let Some(legacy_name) = (match (descriptor.name, parameter_name) {
         ("reframe", "focus_x_basis_points") => Some("focus_x_percent"),
@@ -1763,6 +3102,13 @@ fn effect_param_operation(clip: ClipId, effect: EffectId, name: &str, value: i64
     }
 }
 
+/// The operation that places one new effect on a clip.
+///
+/// A managed colour node is *inserted* at the first index its stage allows
+/// rather than appended: appending a correction onto
+/// `[primary_correction, creative_look]` puts it after the look, which Core
+/// rejects with `ColorStageOrderViolation` (CC4 §3.2, §7). Every other effect
+/// is unconstrained and still appends.
 fn add_effect_operation(clip: &Clip, descriptor: &kinewright_core::EffectDescriptor) -> Operation {
     let id = clip
         .effects
@@ -1782,13 +3128,21 @@ fn add_effect_operation(clip: &Clip, descriptor: &kinewright_core::EffectDescrip
             )
         })
         .collect::<BTreeMap<_, _>>();
-    Operation::AddEffect {
-        clip: clip.id,
-        effect: Effect {
-            id: EffectId(id),
-            name: descriptor.name.to_owned(),
-            parameters,
-            keyframes: BTreeMap::new(),
+    let effect = Effect {
+        id: EffectId(id),
+        name: descriptor.name.to_owned(),
+        parameters,
+        keyframes: BTreeMap::new(),
+    };
+    match ColorNodeKind::from_effect_name(descriptor.name) {
+        Some(kind) => Operation::InsertEffect {
+            clip: clip.id,
+            index: color_stage_insert_index(&clip.effects, kind.stage()),
+            effect,
+        },
+        None => Operation::AddEffect {
+            clip: clip.id,
+            effect,
         },
     }
 }
@@ -1963,9 +3317,13 @@ mod tests {
             speed_percent: 100,
         };
 
-        let Operation::AddEffect { effect, .. } = add_effect_operation(&clip, descriptor) else {
-            panic!("primary correction must emit AddEffect");
+        // A managed colour node is inserted at its stage's first legal index,
+        // never appended (CC4 §3.2).
+        let Operation::InsertEffect { effect, index, .. } = add_effect_operation(&clip, descriptor)
+        else {
+            panic!("primary correction must emit InsertEffect");
         };
+        assert_eq!(index, 0);
         assert_eq!(effect.parameters.len(), descriptor.parameters.len());
         assert!(effect.parameters.iter().all(|(name, value)| value
             == &ParamValue::Integer(descriptor.parameter(name).unwrap().neutral)));
@@ -2181,7 +3539,10 @@ mod tests {
             assert!(is_legacy_display_effect(name));
         }
         assert!(is_effect_insertable("primary_correction"));
-        assert!(is_effect_insertable("look_lut"));
+        // CC4 §7 moved `look_lut` into the exclusions: the managed kinds cover
+        // it, so a new project never grows a legacy stage. An existing one
+        // stays visible and offers "Convert to managed look".
+        assert!(!is_effect_insertable("look_lut"));
         assert!(!is_effect_insertable("color_grade"));
         assert!(!is_effect_insertable("cube_lut"));
         for name in ["look_lut", "cube_lut"] {
@@ -2405,9 +3766,9 @@ mod tests {
         for (name, parameter_count) in [("color_wheels", 13), ("color_curves", 133)] {
             let descriptor = kinewright_core::effect_descriptor(name).expect("CC3 descriptor");
             assert_eq!(descriptor.parameters.len(), parameter_count);
-            let Operation::AddEffect { effect, .. } = add_effect_operation(&clip, &descriptor)
+            let Operation::InsertEffect { effect, .. } = add_effect_operation(&clip, &descriptor)
             else {
-                panic!("{name} must emit AddEffect");
+                panic!("{name} must emit InsertEffect");
             };
             assert_eq!(effect.name, name);
             assert!(
@@ -3186,5 +4547,900 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // CC4 §7 look workflow
+    // -----------------------------------------------------------------------
+
+    fn colour_effect(id: u64, name: &str) -> Effect {
+        Effect {
+            id: EffectId(id),
+            name: name.to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        }
+    }
+
+    fn lut_effect(id: u64, name: &str, asset: u64, mix: Option<i64>) -> Effect {
+        let mut parameters = BTreeMap::from([(
+            LUT_ASSET_ID_PARAMETER.to_owned(),
+            ParamValue::Integer(i64::try_from(asset).expect("fixture id")),
+        )]);
+        if let Some(mix) = mix {
+            parameters.insert(LUT_MIX_PARAMETER.to_owned(), ParamValue::Integer(mix));
+        }
+        Effect {
+            id: EffectId(id),
+            name: name.to_owned(),
+            parameters,
+            keyframes: BTreeMap::new(),
+        }
+    }
+
+    fn look_clip(effects: Vec<Effect>) -> Clip {
+        let mut clip = media_clip(ClipId(10), AssetId(1), None);
+        clip.effects = effects;
+        clip
+    }
+
+    /// A document carrying one clip and one registered built-in asset.
+    fn look_document(effects: Vec<Effect>, assets: Vec<LutAsset>) -> Document {
+        let mut document = curves_document();
+        document.tracks[0].clips[0].effects = effects;
+        document.lut_assets = assets;
+        document
+    }
+
+    #[test]
+    fn the_insert_index_puts_a_technical_lut_before_every_correction() {
+        // Interleaved non-colour effects are unconstrained and are stepped
+        // over without moving the index.
+        let effects = vec![
+            colour_effect(1, "crop"),
+            colour_effect(2, "primary_correction"),
+            colour_effect(3, "mask"),
+            colour_effect(4, "color_curves"),
+            lut_effect(5, "creative_look", 1, None),
+            colour_effect(6, "reframe"),
+        ];
+        assert_eq!(color_stage_insert_index(&effects, ColorStage::Input), 0);
+        // A creative look lands after the last managed node, which is the
+        // existing look at index 4.
+        assert_eq!(color_stage_insert_index(&effects, ColorStage::Look), 5);
+        // A correction lands after the last correction, before the look.
+        assert_eq!(
+            color_stage_insert_index(&effects, ColorStage::Correction),
+            4
+        );
+    }
+
+    #[test]
+    fn the_insert_index_appends_a_second_technical_lut_after_the_first() {
+        let effects = vec![
+            lut_effect(1, "technical_lut", 1, None),
+            colour_effect(2, "crop"),
+            colour_effect(3, "primary_correction"),
+        ];
+        assert_eq!(color_stage_insert_index(&effects, ColorStage::Input), 1);
+        assert_eq!(color_stage_insert_index(&effects, ColorStage::Look), 3);
+    }
+
+    #[test]
+    fn an_empty_stack_inserts_every_stage_at_the_front() {
+        assert_eq!(color_stage_insert_index(&[], ColorStage::Input), 0);
+        assert_eq!(color_stage_insert_index(&[], ColorStage::Look), 0);
+    }
+
+    #[test]
+    fn every_computed_insert_index_is_accepted_by_core() {
+        // The whole point of the computed index: no ordinary path can produce
+        // a `ColorStageOrderViolation`.
+        let mut document = look_document(
+            vec![
+                colour_effect(1, "crop"),
+                colour_effect(2, "primary_correction"),
+                colour_effect(3, "color_curves"),
+            ],
+            vec![BuiltinLook::Warm.to_lut_asset(LutAssetId(1))],
+        );
+        for stage in [ColorStage::Look, ColorStage::Input] {
+            let clip = document.clip(ClipId(10)).expect("fixture clip").clone();
+            let operation = insert_lut_node_operation(&clip, stage, LutAssetId(1));
+            kinewright_core::apply_batch(&mut document, std::slice::from_ref(&operation))
+                .unwrap_or_else(|error| panic!("{stage:?} insert rejected: {error}"));
+        }
+        let effects = &document.clip(ClipId(10)).expect("clip").effects;
+        assert_eq!(effects[0].name, "technical_lut");
+        assert_eq!(effects.last().expect("look").name, "creative_look");
+        document.validate().expect("the stage order holds");
+    }
+
+    #[test]
+    fn an_inserted_look_writes_only_the_binding() {
+        let clip = look_clip(vec![colour_effect(1, "primary_correction")]);
+        let Operation::InsertEffect {
+            clip: target,
+            index,
+            effect,
+        } = insert_lut_node_operation(&clip, ColorStage::Look, LutAssetId(7))
+        else {
+            panic!("insert_lut_node_operation must emit InsertEffect");
+        };
+        assert_eq!(target, ClipId(10));
+        assert_eq!(index, 1);
+        assert_eq!(effect.id, EffectId(2));
+        assert_eq!(effect.name, "creative_look");
+        // CC3 §2.4's convention: only the values the operator touched. The
+        // neutral mix of a creative look is full strength, so a node created
+        // with only a binding shows the look.
+        assert_eq!(
+            effect.parameters,
+            BTreeMap::from([(LUT_ASSET_ID_PARAMETER.to_owned(), ParamValue::Integer(7))])
+        );
+        assert!(effect.keyframes.is_empty());
+    }
+
+    #[test]
+    fn the_mix_slider_writes_percent_times_one_hundred_under_its_own_key() {
+        let mut pending = InspectorEdits::default();
+        pending.push_live(
+            effect_param_operation(ClipId(10), EffectId(2), LUT_MIX_PARAMETER, 65 * 100),
+            look_mix_coalesce_key(ClipId(10), EffectId(2)),
+        );
+        assert_eq!(pending.coalesce_key(), Some("look:10:2:mix"));
+        assert_eq!(
+            pending.operations(),
+            [effect_param_operation(
+                ClipId(10),
+                EffectId(2),
+                LUT_MIX_PARAMETER,
+                6_500
+            )]
+        );
+        assert_eq!(mix_percent(6_500), 65);
+        assert_eq!(mix_percent(10_000), 100);
+        assert_eq!(mix_percent(0), 0);
+    }
+
+    #[test]
+    fn the_release_frame_of_a_mix_drag_stays_in_the_gesture() {
+        // egui reports the release frame as `changed() && !dragged()`, so the
+        // gate that decides whether a frame coalesces has to accept it.
+        let mut pending = InspectorEdits::default();
+        for value in [10, 40, 55] {
+            pending.push_live(
+                effect_param_operation(ClipId(10), EffectId(2), LUT_MIX_PARAMETER, value * 100),
+                look_mix_coalesce_key(ClipId(10), EffectId(2)),
+            );
+        }
+        assert_eq!(pending.operations().len(), 3);
+        assert_eq!(pending.coalesce_key(), Some("look:10:2:mix"));
+    }
+
+    #[test]
+    fn a_mix_drag_and_a_discrete_edit_in_one_frame_stop_coalescing() {
+        let mut pending = InspectorEdits::default();
+        pending.push_live(
+            effect_param_operation(ClipId(10), EffectId(2), LUT_MIX_PARAMETER, 5_000),
+            look_mix_coalesce_key(ClipId(10), EffectId(2)),
+        );
+        pending.push(effect_param_operation(
+            ClipId(10),
+            EffectId(2),
+            COLOR_NODE_BYPASS_PARAMETER,
+            1,
+        ));
+        assert_eq!(pending.coalesce_key(), None);
+    }
+
+    #[test]
+    fn the_ab_hold_emits_bypass_one_then_zero_through_the_coalesced_path() {
+        let mut pending = InspectorEdits::default();
+        let mut state = AbHoldState::default();
+
+        // Press: capture the stored value and write the real bypass.
+        let press = ab_hold_step(ClipId(10), EffectId(2), state, true, 0);
+        assert!(press.gesture_started);
+        state = press.state;
+        assert_eq!(
+            state,
+            AbHoldState {
+                held: true,
+                restore: 0
+            }
+        );
+        let press_operation = press.operation.expect("a press writes bypass = 1");
+        assert_eq!(
+            press_operation,
+            effect_param_operation(ClipId(10), EffectId(2), COLOR_NODE_BYPASS_PARAMETER, 1)
+        );
+        pending.begin_gesture();
+        pending.push_live(
+            press_operation,
+            look_ab_coalesce_key(ClipId(10), EffectId(2)),
+        );
+
+        // Held frames emit nothing at all, so a hold is not one entry per frame.
+        let held = ab_hold_step(ClipId(10), EffectId(2), state, true, 1);
+        assert!(held.operation.is_none());
+        assert!(!held.gesture_started);
+        state = held.state;
+
+        // Release: restore the value captured on the press, not the live `1`.
+        let release = ab_hold_step(ClipId(10), EffectId(2), state, false, 1);
+        let release_operation = release.operation.expect("a release restores bypass");
+        assert_eq!(
+            release_operation,
+            effect_param_operation(ClipId(10), EffectId(2), COLOR_NODE_BYPASS_PARAMETER, 0)
+        );
+        assert_eq!(release.state, AbHoldState::default());
+        pending.push_live(
+            release_operation,
+            look_ab_coalesce_key(ClipId(10), EffectId(2)),
+        );
+
+        // One hold is one undo entry.
+        assert_eq!(pending.coalesce_key(), Some("look:10:2:ab"));
+        assert_eq!(pending.operations().len(), 2);
+    }
+
+    #[test]
+    fn an_ab_hold_over_an_already_bypassed_node_restores_the_bypass() {
+        let press = ab_hold_step(ClipId(10), EffectId(2), AbHoldState::default(), true, 1);
+        let release = ab_hold_step(ClipId(10), EffectId(2), press.state, false, 1);
+        assert_eq!(
+            release.operation.expect("release"),
+            effect_param_operation(ClipId(10), EffectId(2), COLOR_NODE_BYPASS_PARAMETER, 1)
+        );
+    }
+
+    #[test]
+    fn a_look_reset_excludes_the_binding_and_its_keyframe_clear() {
+        let descriptor =
+            kinewright_core::effect_descriptor("creative_look").expect("the CC4 descriptor exists");
+        let mut effect = lut_effect(2, "creative_look", 9, Some(4_000));
+        // Both the binding and the mix carry automation, so the reset has a
+        // `ClearEffectKeyframes` to omit and one to keep.
+        effect.keyframes.insert(
+            LUT_ASSET_ID_PARAMETER.to_owned(),
+            AutomationCurve {
+                keyframes: vec![Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 9,
+                    interpolation: KeyframeInterpolation::Hold,
+                }],
+            },
+        );
+        effect.keyframes.insert(
+            LUT_MIX_PARAMETER.to_owned(),
+            AutomationCurve {
+                keyframes: vec![Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 4_000,
+                    interpolation: KeyframeInterpolation::Hold,
+                }],
+            },
+        );
+
+        let operations = color_node_reset_operations(ClipId(10), &effect, &descriptor);
+
+        assert!(
+            !operations.iter().any(|operation| matches!(
+                operation,
+                Operation::SetEffectParam { name, .. } | Operation::ClearEffectKeyframes { name, .. }
+                    if name == LUT_ASSET_ID_PARAMETER
+            )),
+            "resetting the binding would unbind the node, which Core rejects (CC4 §6): {operations:?}"
+        );
+        assert!(operations.contains(&effect_param_operation(
+            ClipId(10),
+            EffectId(2),
+            LUT_MIX_PARAMETER,
+            LUT_MIX_BASIS_POINTS_MAX
+        )));
+        assert!(operations.contains(&clear_keyframes_operation(
+            ClipId(10),
+            EffectId(2),
+            LUT_MIX_PARAMETER
+        )));
+        assert!(operations.contains(&effect_param_operation(
+            ClipId(10),
+            EffectId(2),
+            COLOR_NODE_BYPASS_PARAMETER,
+            0
+        )));
+    }
+
+    #[test]
+    fn a_look_reset_is_accepted_by_core_and_keeps_the_binding() {
+        let mut document = look_document(
+            vec![lut_effect(2, "creative_look", 1, Some(2_500))],
+            vec![BuiltinLook::Warm.to_lut_asset(LutAssetId(1))],
+        );
+        let descriptor = kinewright_core::effect_descriptor("creative_look").expect("descriptor");
+        let effect = document.clip(ClipId(10)).expect("clip").effects[0].clone();
+        for operation in color_node_reset_operations(ClipId(10), &effect, &descriptor) {
+            kinewright_core::apply_batch(&mut document, std::slice::from_ref(&operation))
+                .unwrap_or_else(|error| panic!("reset rejected: {error}"));
+        }
+        let reset = &document.clip(ClipId(10)).expect("clip").effects[0];
+        assert_eq!(
+            LutNodeParams::from_effect(reset).lut_asset_id,
+            LutAssetId(1)
+        );
+        assert_eq!(
+            LutNodeParams::from_effect(reset).mix_basis_points,
+            LUT_MIX_BASIS_POINTS_MAX
+        );
+        document.validate().expect("the reset document is valid");
+    }
+
+    #[test]
+    fn a_technical_lut_reset_also_keeps_its_binding() {
+        let descriptor = kinewright_core::effect_descriptor("technical_lut").expect("descriptor");
+        let effect = lut_effect(3, "technical_lut", 4, None);
+        let operations = color_node_reset_operations(ClipId(10), &effect, &descriptor);
+        assert!(!operations.iter().any(|operation| matches!(
+            operation,
+            Operation::SetEffectParam { name, .. } if name == LUT_ASSET_ID_PARAMETER
+        )));
+        // The pinned mix resets to its own neutral, which is full strength.
+        assert!(operations.contains(&effect_param_operation(
+            ClipId(10),
+            EffectId(3),
+            LUT_MIX_PARAMETER,
+            LUT_MIX_BASIS_POINTS_MAX
+        )));
+    }
+
+    #[test]
+    fn every_preset_token_converts_to_its_built_in_with_the_mapped_intensity() {
+        for token in 0..=4 {
+            let mut legacy = colour_effect(3, "look_lut");
+            legacy
+                .parameters
+                .insert("preset_token".to_owned(), ParamValue::Integer(token));
+            legacy
+                .parameters
+                .insert("intensity_percent".to_owned(), ParamValue::Integer(60));
+            let document = look_document(vec![legacy.clone()], Vec::new());
+
+            let operations = convert_builtin_look_operations(&document, ClipId(10), &legacy)
+                .unwrap_or_else(|error| panic!("token {token} did not convert: {error}"));
+
+            // CC4 §9: the visible batch is exactly `[AddLutAsset, ConvertLegacyLook]`.
+            assert_eq!(operations.len(), 2, "token {token}: {operations:?}");
+            let expected =
+                BuiltinLook::from_preset_token(token).expect("token 0..=4 is a built-in");
+            let Operation::AddLutAsset { asset } = &operations[0] else {
+                panic!("token {token}: the batch must lead with AddLutAsset");
+            };
+            assert_eq!(asset.id, LutAssetId(1));
+            assert_eq!(asset.sha256, expected.sha256());
+            assert_eq!(asset.title, expected.title());
+            assert_eq!(
+                asset.source,
+                LutAssetSource::Builtin {
+                    name: expected.name().to_owned()
+                }
+            );
+            assert_eq!(
+                operations[1],
+                Operation::ConvertLegacyLook {
+                    clip: ClipId(10),
+                    effect: EffectId(3),
+                    lut_asset: LutAssetId(1),
+                    // intensity_percent 60 -> 6000 basis points.
+                    mix_basis_points: 6_000,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn converting_a_registered_built_in_emits_only_the_conversion() {
+        let mut legacy = colour_effect(3, "look_lut");
+        legacy
+            .parameters
+            .insert("preset_token".to_owned(), ParamValue::Integer(1));
+        let document = look_document(
+            vec![legacy.clone()],
+            vec![BuiltinLook::Warm.to_lut_asset(LutAssetId(4))],
+        );
+        let operations =
+            convert_builtin_look_operations(&document, ClipId(10), &legacy).expect("converts");
+        assert_eq!(
+            operations,
+            vec![Operation::ConvertLegacyLook {
+                clip: ClipId(10),
+                effect: EffectId(3),
+                lut_asset: LutAssetId(4),
+                // An omitted intensity_percent resolves to its neutral, 100 %.
+                mix_basis_points: 10_000,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_conversion_batch_is_accepted_by_core_in_order() {
+        let mut legacy = colour_effect(3, "look_lut");
+        legacy
+            .parameters
+            .insert("preset_token".to_owned(), ParamValue::Integer(2));
+        legacy
+            .parameters
+            .insert("intensity_percent".to_owned(), ParamValue::Integer(75));
+        let mut document = look_document(
+            vec![colour_effect(1, "primary_correction"), legacy.clone()],
+            Vec::new(),
+        );
+        for operation in convert_builtin_look_operations(&document, ClipId(10), &legacy)
+            .expect("the batch builds")
+        {
+            kinewright_core::apply_batch(&mut document, std::slice::from_ref(&operation))
+                .unwrap_or_else(|error| panic!("conversion rejected: {error}"));
+        }
+        let effects = &document.clip(ClipId(10)).expect("clip").effects;
+        // The managed node replaces the legacy stage at its exact position.
+        assert_eq!(effects.len(), 2);
+        assert_eq!(effects[1].name, "creative_look");
+        assert_eq!(effects[1].id, EffectId(3));
+        let params = LutNodeParams::from_effect(&effects[1]);
+        assert_eq!(params.lut_asset_id, LutAssetId(1));
+        assert_eq!(params.mix_basis_points, 7_500);
+        document
+            .validate()
+            .expect("the converted document is valid");
+    }
+
+    /// CC4 §3.2, §7: the stage headings' insert controls emit an
+    /// `InsertEffect` at the first index the stage allows. Appending a
+    /// correction onto a stack that already carries a creative look would be
+    /// rejected with `ColorStageOrderViolation`, which is a dead end for the
+    /// operator: the node they asked for simply never appears.
+    #[test]
+    fn adding_a_correction_under_an_existing_look_inserts_before_it() {
+        let mut document = look_document(
+            vec![
+                colour_effect(1, "primary_correction"),
+                lut_effect(2, "creative_look", 1, None),
+            ],
+            vec![BuiltinLook::Warm.to_lut_asset(LutAssetId(1))],
+        );
+        let clip = document.clip(ClipId(10)).expect("fixture clip").clone();
+        let descriptor = kinewright_core::effect_descriptor("color_curves").expect("CC3 curves");
+
+        let operation = add_effect_operation(&clip, &descriptor);
+
+        let Operation::InsertEffect {
+            clip: target,
+            index,
+            effect,
+        } = operation.clone()
+        else {
+            panic!("a managed correction must insert, never append: {operation:?}");
+        };
+        assert_eq!(target, ClipId(10));
+        assert_eq!(index, 1, "the curves node belongs before the creative look");
+        assert_eq!(effect.name, "color_curves");
+        assert_eq!(effect.id, EffectId(3));
+
+        // The same operation the `+ Correction` menu emits, accepted by Core.
+        kinewright_core::apply_batch(&mut document, std::slice::from_ref(&operation))
+            .expect("Core accepts the computed correction index");
+        let names: Vec<&str> = document
+            .clip(ClipId(10))
+            .expect("clip")
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["primary_correction", "color_curves", "creative_look"]
+        );
+        document.validate().expect("the stage order holds");
+    }
+
+    /// The same clip, appended instead of inserted: the rejection this fix
+    /// removes, pinned so the insert cannot quietly regress to an append.
+    #[test]
+    fn appending_the_same_correction_is_rejected_by_core() {
+        let mut document = look_document(
+            vec![
+                colour_effect(1, "primary_correction"),
+                lut_effect(2, "creative_look", 1, None),
+            ],
+            vec![BuiltinLook::Warm.to_lut_asset(LutAssetId(1))],
+        );
+        let appended = Operation::AddEffect {
+            clip: ClipId(10),
+            effect: colour_effect(3, "color_curves"),
+        };
+        let error = kinewright_core::apply_batch(&mut document, std::slice::from_ref(&appended))
+            .expect_err("appending a correction after a look violates the stage order");
+        assert!(
+            error.to_string().contains("non-decreasing stage rank"),
+            "{error}"
+        );
+    }
+
+    /// Every insertable effect the two menus offer, applied to a stack that
+    /// already carries a look: none of them may be rejected.
+    #[test]
+    fn every_menu_insert_is_accepted_over_an_existing_creative_look() {
+        for name in ["primary_correction", "color_wheels", "color_curves"] {
+            let mut document = look_document(
+                vec![lut_effect(1, "creative_look", 1, None)],
+                vec![BuiltinLook::Warm.to_lut_asset(LutAssetId(1))],
+            );
+            let clip = document.clip(ClipId(10)).expect("clip").clone();
+            let descriptor = kinewright_core::effect_descriptor(name).expect("descriptor");
+            let operation = add_effect_operation(&clip, &descriptor);
+            kinewright_core::apply_batch(&mut document, std::slice::from_ref(&operation))
+                .unwrap_or_else(|error| panic!("{name} rejected: {error}"));
+            assert_eq!(
+                document.clip(ClipId(10)).expect("clip").effects[0].name,
+                name
+            );
+            document.validate().expect("the stage order holds");
+        }
+    }
+
+    /// CC4 §3.2, §9: a legacy `look_lut` authored *before* a managed
+    /// correction cannot become a creative look where it stands, so the
+    /// conversion moves it instead of being rejected with no explanation.
+    #[test]
+    fn converting_a_legacy_look_that_precedes_a_correction_reorders_it() {
+        let mut legacy = colour_effect(3, "look_lut");
+        legacy
+            .parameters
+            .insert("preset_token".to_owned(), ParamValue::Integer(2));
+        legacy
+            .parameters
+            .insert("intensity_percent".to_owned(), ParamValue::Integer(75));
+        let mut document = look_document(
+            vec![legacy.clone(), colour_effect(1, "primary_correction")],
+            Vec::new(),
+        );
+        assert!(!legacy_conversion_keeps_stage_order(
+            &document.clip(ClipId(10)).expect("clip").effects,
+            EffectId(3)
+        ));
+
+        let operations =
+            convert_builtin_look_operations(&document, ClipId(10), &legacy).expect("batch builds");
+        // `[AddLutAsset, RemoveEffect, InsertEffect]`, applied atomically.
+        assert_eq!(operations.len(), 3);
+        assert!(matches!(operations[0], Operation::AddLutAsset { .. }));
+        assert!(matches!(
+            operations[1],
+            Operation::RemoveEffect {
+                effect: EffectId(3),
+                ..
+            }
+        ));
+        let Operation::InsertEffect { index, effect, .. } = &operations[2] else {
+            panic!("the reordering conversion must insert the managed look");
+        };
+        assert_eq!(*index, 1, "after the correction it used to precede");
+        // The node keeps its identity across the move.
+        assert_eq!(effect.id, EffectId(3));
+
+        kinewright_core::apply_batch(&mut document, &operations)
+            .expect("Core accepts the reordering conversion");
+        let effects = &document.clip(ClipId(10)).expect("clip").effects;
+        assert_eq!(effects.len(), 2);
+        assert_eq!(effects[0].name, "primary_correction");
+        assert_eq!(effects[1].name, "creative_look");
+        assert_eq!(effects[1].id, EffectId(3));
+        let params = LutNodeParams::from_effect(&effects[1]);
+        assert_eq!(params.lut_asset_id, LutAssetId(1));
+        assert_eq!(params.mix_basis_points, 7_500);
+        document
+            .validate()
+            .expect("the converted document is valid");
+    }
+
+    /// The other position converts in place, as a single `ConvertLegacyLook`.
+    #[test]
+    fn converting_a_legacy_look_that_follows_a_correction_stays_in_place() {
+        let mut legacy = colour_effect(3, "look_lut");
+        legacy
+            .parameters
+            .insert("preset_token".to_owned(), ParamValue::Integer(2));
+        let document = look_document(
+            vec![colour_effect(1, "primary_correction"), legacy.clone()],
+            Vec::new(),
+        );
+        assert!(legacy_conversion_keeps_stage_order(
+            &document.clip(ClipId(10)).expect("clip").effects,
+            EffectId(3)
+        ));
+        let operations =
+            convert_builtin_look_operations(&document, ClipId(10), &legacy).expect("batch builds");
+        assert_eq!(operations.len(), 2);
+        assert!(matches!(
+            operations[1],
+            Operation::ConvertLegacyLook {
+                effect: EffectId(3),
+                ..
+            }
+        ));
+    }
+
+    /// CC4 §7: a hold that loses its card — the panel collapsed, the material
+    /// tab switched, the clip deselected — must still be released, or the
+    /// document keeps `bypass = 1` with no control left to clear it.
+    #[test]
+    fn a_hold_whose_card_stops_rendering_is_restored_by_the_frame_loop() {
+        let press = ab_hold_step(ClipId(10), EffectId(2), AbHoldState::default(), true, 0);
+        let record = AbHoldRecord {
+            clip: ClipId(10),
+            effect: EffectId(2),
+            restore: press.state.restore,
+        };
+
+        // Rendering with the pointer still down is the ordinary held frame.
+        assert!(!ab_hold_needs_recovery(true, true));
+        // Either half failing strands the hold.
+        assert!(ab_hold_needs_recovery(false, true));
+        assert!(ab_hold_needs_recovery(true, false));
+        assert!(ab_hold_needs_recovery(false, false));
+
+        // The recovery writes exactly what the card's release would have.
+        let release = ab_hold_step(ClipId(10), EffectId(2), press.state, false, 1);
+        assert_eq!(
+            ab_hold_restore_operation(record),
+            release.operation.expect("a release restores bypass")
+        );
+
+        // The card mirrors the hold out to the app on the frame it opens, so
+        // the record exists before the card can stop rendering.
+        let mut pending = InspectorEdits::default();
+        pending.record_ab_hold(record);
+        assert_eq!(pending.ab_hold(), Some(record));
+
+        // The mirror is bound to the project that owns it: a hold that
+        // survives a project switch must not be restored into whatever
+        // document happens to be focused.
+        let mirrored = MirroredAbHold { session: 3, record };
+        assert_ne!(mirrored, MirroredAbHold { session: 4, record });
+
+        // The hold state is addressable without the card that wrote it.
+        assert_eq!(
+            ab_hold_id(ClipId(10), EffectId(2)),
+            ab_hold_id(ClipId(10), EffectId(2))
+        );
+        assert_ne!(
+            ab_hold_id(ClipId(10), EffectId(2)),
+            ab_hold_id(ClipId(10), EffectId(3))
+        );
+    }
+
+    /// CC4 §7: `LutNodeParams::from_effect` reads the *static* `bypass`, so a
+    /// node whose `bypass` is keyframed would have the hold write a value its
+    /// curve overrides — an undo entry for no visible change.
+    #[test]
+    fn the_ab_control_is_withheld_from_a_node_whose_bypass_is_keyframed() {
+        let plain = lut_effect(2, "creative_look", 1, None);
+        assert!(ab_hold_is_available(&plain));
+
+        let mut keyframed = plain.clone();
+        keyframed.keyframes.insert(
+            COLOR_NODE_BYPASS_PARAMETER.to_owned(),
+            AutomationCurve {
+                keyframes: vec![Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 1,
+                    interpolation: KeyframeInterpolation::Hold,
+                }],
+            },
+        );
+        assert!(!ab_hold_is_available(&keyframed));
+        // The badge the card shows comes from the same predicate the keyframe
+        // rows use, so the two can never disagree.
+        assert!(parameter_is_keyframed(
+            &keyframed,
+            COLOR_NODE_BYPASS_PARAMETER
+        ));
+        // A withheld control never presses, so no operation is produced.
+        let step = ab_hold_step(ClipId(10), EffectId(2), AbHoldState::default(), false, 0);
+        assert!(step.operation.is_none());
+        assert!(!step.state.held);
+    }
+
+    #[test]
+    fn a_non_legacy_effect_and_an_out_of_range_token_are_refused() {
+        let document = look_document(Vec::new(), Vec::new());
+        let not_legacy = colour_effect(3, "primary_correction");
+        assert!(
+            convert_builtin_look_operations(&document, ClipId(10), &not_legacy)
+                .expect_err("only look_lut converts from a token")
+                .contains("primary_correction")
+        );
+        let mut bad_token = colour_effect(3, "look_lut");
+        bad_token
+            .parameters
+            .insert("preset_token".to_owned(), ParamValue::Integer(9));
+        let error = convert_builtin_look_operations(&document, ClipId(10), &bad_token)
+            .expect_err("token 9 names no built-in");
+        assert!(error.contains('9') && error.contains("0..=4"), "{error}");
+    }
+
+    /// CC4 §9: a conversion the card cannot build is reported through the
+    /// app's error log, not as a `colored_label` drawn for the single frame
+    /// the pointer came up on.
+    #[test]
+    fn a_refused_legacy_conversion_leaves_the_frame_as_an_error_not_a_one_frame_label() {
+        let document = look_document(Vec::new(), Vec::new());
+        let mut bad_token = colour_effect(3, "look_lut");
+        bad_token
+            .parameters
+            .insert("preset_token".to_owned(), ParamValue::Integer(9));
+
+        let mut pending = InspectorEdits::default();
+        request_legacy_conversion(&document, ClipId(10), &bad_token, &mut pending);
+        assert!(
+            pending.operations().is_empty(),
+            "a refused conversion produces no operation"
+        );
+        assert!(pending.look_requests().is_empty());
+        assert_eq!(pending.errors().len(), 1);
+        assert!(
+            pending.errors()[0].contains('9') && pending.errors()[0].contains("0..=4"),
+            "{:?}",
+            pending.errors()
+        );
+
+        // A legacy `cube_lut` with no stored path has no file to import, which
+        // used to be a silently dead button.
+        let mut pending = InspectorEdits::default();
+        request_legacy_conversion(
+            &document,
+            ClipId(10),
+            &colour_effect(4, "cube_lut"),
+            &mut pending,
+        );
+        assert!(pending.look_requests().is_empty());
+        assert_eq!(pending.errors().len(), 1);
+        assert!(
+            pending.errors()[0].contains("no path"),
+            "{:?}",
+            pending.errors()
+        );
+
+        // The path that works still routes to the import worker, with nothing
+        // in the error log.
+        let mut cube = colour_effect(4, "cube_lut");
+        cube.parameters.insert(
+            "path".to_owned(),
+            ParamValue::Text("/looks/legacy.cube".to_owned()),
+        );
+        let mut pending = InspectorEdits::default();
+        request_legacy_conversion(&document, ClipId(10), &cube, &mut pending);
+        assert!(pending.errors().is_empty());
+        assert_eq!(
+            pending.look_requests(),
+            [LookRequest::ConvertLegacyCube {
+                clip: ClipId(10),
+                effect: EffectId(4),
+                path: std::path::PathBuf::from("/looks/legacy.cube"),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_look_request_is_collected_without_disturbing_a_live_gesture() {
+        // The card records dialogs and workers separately from operations, so
+        // a request in the same frame as a drag neither breaks the drag's
+        // coalescing nor turns into an edit of its own.
+        let mut pending = InspectorEdits::default();
+        pending.push_live(
+            effect_param_operation(ClipId(10), EffectId(2), LUT_MIX_PARAMETER, 3_000),
+            look_mix_coalesce_key(ClipId(10), EffectId(2)),
+        );
+        pending.push_look(LookRequest::Locate {
+            lut_asset: LutAssetId(1),
+        });
+        pending.push_look(LookRequest::Import {
+            clip: ClipId(10),
+            stage: ColorStage::Look,
+        });
+        assert_eq!(pending.coalesce_key(), Some("look:10:2:mix"));
+        assert_eq!(pending.operations().len(), 1);
+        assert_eq!(
+            pending.look_requests(),
+            [
+                LookRequest::Locate {
+                    lut_asset: LutAssetId(1)
+                },
+                LookRequest::Import {
+                    clip: ClipId(10),
+                    stage: ColorStage::Look
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_effect_menu_excludes_legacy_looks_and_offers_the_managed_kinds() {
+        // CC4 §7: `look_lut` joins `color_grade` and `cube_lut` in the
+        // exclusions because the managed kinds now cover it.
+        assert!(!is_effect_insertable("look_lut"));
+        assert!(!is_effect_insertable("cube_lut"));
+        assert!(!is_effect_insertable("color_grade"));
+        assert!(is_effect_insertable("technical_lut"));
+        assert!(is_effect_insertable("creative_look"));
+        assert!(is_effect_insertable("primary_correction"));
+        assert!(is_effect_insertable("crop"));
+    }
+
+    #[test]
+    fn the_generic_loop_hides_the_binding_the_encoding_and_the_pinned_mix() {
+        let creative =
+            kinewright_core::effect_descriptor("creative_look").expect("the descriptor exists");
+        let technical =
+            kinewright_core::effect_descriptor("technical_lut").expect("the descriptor exists");
+        for descriptor in [&creative, &technical] {
+            assert!(!should_render_effect_parameter(
+                descriptor,
+                LUT_ASSET_ID_PARAMETER
+            ));
+            assert!(!should_render_effect_parameter(
+                descriptor,
+                LUT_INPUT_ENCODING_PARAMETER
+            ));
+        }
+        // The mix is pinned on a technical LUT (min = max = 10000), so a
+        // slider over it would be inert; it stays visible on a creative look,
+        // which is where the dedicated control writes it.
+        assert!(!should_render_effect_parameter(
+            &technical,
+            LUT_MIX_PARAMETER
+        ));
+        assert!(should_render_effect_parameter(&creative, LUT_MIX_PARAMETER));
+    }
+
+    #[test]
+    fn a_retarget_is_one_set_effect_param_on_the_binding() {
+        assert_eq!(
+            lut_asset_param_operation(ClipId(10), EffectId(2), LutAssetId(5)),
+            Operation::SetEffectParam {
+                clip: ClipId(10),
+                effect: EffectId(2),
+                name: LUT_ASSET_ID_PARAMETER.to_owned(),
+                value: ParamValue::Integer(5),
+            }
+        );
+    }
+
+    #[test]
+    fn the_availability_chip_names_every_state() {
+        assert_eq!(
+            availability_chip(Some(LutAvailabilityKind::Verified)).0,
+            "verified"
+        );
+        assert_eq!(
+            availability_chip(Some(LutAvailabilityKind::Missing)).0,
+            "missing"
+        );
+        assert_eq!(
+            availability_chip(Some(LutAvailabilityKind::Changed)).0,
+            "changed"
+        );
+        assert_eq!(
+            availability_chip(Some(LutAvailabilityKind::Unreadable)).0,
+            "unreadable"
+        );
+        assert_eq!(availability_chip(None).0, "unchecked");
+    }
+
+    #[test]
+    fn the_encoding_readout_uses_the_contract_names() {
+        assert_eq!(input_encoding_label(0), "display709");
+        assert_eq!(input_encoding_label(1), "linear");
+        assert_eq!(input_encoding_label(2), "grade709");
     }
 }

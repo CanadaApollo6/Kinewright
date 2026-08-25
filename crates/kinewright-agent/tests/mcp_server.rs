@@ -701,6 +701,491 @@ async fn cc3_color_wheels_plan_and_commit_create_the_ordered_node() {
     server.shutdown();
 }
 
+/// CC4 §8, §10.3.14: the look planner is evidence-only over the live
+/// transport, binds to the analyzed revision, and lands the ordered node
+/// through the ordinary prepare/commit path.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn cc4_creative_look_plan_and_commit_create_the_ordered_node() {
+    let generated = managed_color_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    // A built-in generated look is `verified` from the binary's own bake, so
+    // the store never has to be touched to prove the agent surface (CC4 §2.6).
+    let warm = kinewright_media::BuiltinLook::Warm;
+    let mut document = single_clip_document(asset);
+    document.lut_assets = vec![warm.to_lut_asset(kinewright_core::LutAssetId(1))];
+    document.tracks[0].clips[0].effects = vec![Effect {
+        id: EffectId(1),
+        name: "primary_correction".to_owned(),
+        parameters: [("exposure_milli_stops".to_owned(), ParamValue::Integer(250))]
+            .into_iter()
+            .collect(),
+        keyframes: std::collections::BTreeMap::default(),
+    }];
+    document.validate().expect("the seeded CC4 stack is valid");
+
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    server.set_project_path(Some(std::env::temp_dir().join(format!(
+        "kinewright-cc4-live-{}.kinewright",
+        std::process::id()
+    ))));
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let listed = invoke_capability(&client, "list_look_assets", json!({})).await;
+    assert_eq!(listed.is_error, Some(false));
+    let listed = listed.structured_content.as_ref().unwrap().clone();
+    let revision = listed["timeline_revision"].as_u64().unwrap();
+    assert_eq!(revision, 0);
+    assert_eq!(listed["store_root_known"], true);
+    assert_eq!(listed["assets"][0]["lut_asset_id"], 1);
+    assert_eq!(listed["assets"][0]["sha256"], warm.pinned_sha256());
+    assert_eq!(listed["assets"][0]["provenance"]["kind"], "builtin");
+    assert_eq!(listed["assets"][0]["availability"]["kind"], "verified");
+    assert_eq!(listed["assets"][0]["referenced_by"], json!([]));
+
+    // A stale revision fails closed before anything is prepared.
+    let stale = invoke_capability(
+        &client,
+        "plan_creative_look",
+        json!({"expected_revision": revision + 9, "clip_id": 1, "lut_asset_id": 1}),
+    )
+    .await;
+    assert_eq!(stale.is_error, Some(true));
+
+    let plan = invoke_capability(
+        &client,
+        "plan_creative_look",
+        json!({
+            "expected_revision": revision,
+            "clip_id": 1,
+            "lut_asset_id": 1,
+            "mix_basis_points": 6_500
+        }),
+    )
+    .await;
+    assert_eq!(plan.is_error, Some(false));
+    let plan = plan
+        .structured_content
+        .as_ref()
+        .expect("plan_creative_look must publish exact operations")
+        .clone();
+    assert_eq!(plan["applied"], false);
+    assert_eq!(plan["evidence_only"], true);
+    assert_eq!(plan["kind"], "creative_look");
+    assert_eq!(plan["role"], "creative");
+    assert_eq!(plan["color_stage"], "look");
+    assert_eq!(plan["created_new_node"], true);
+    // The clip already carries one correction node, so the look goes after it.
+    assert_eq!(plan["insert_index"], 1);
+    assert_eq!(plan["existing_color_node_count"], 1);
+    assert_eq!(plan["lut_asset"]["title"], warm.title());
+    assert_eq!(plan["lut_asset"]["sha256"], warm.pinned_sha256());
+    assert_eq!(plan["lut_asset"]["availability"]["kind"], "verified");
+    let target_effect_id = plan["target_effect_id"].as_u64().unwrap();
+    assert_eq!(
+        query_document(&core).tracks[0].clips[0].effects.len(),
+        1,
+        "planning must not apply anything"
+    );
+
+    let prepared = prepare_plan(&client, revision, plan["operations"].clone()).await;
+    assert_eq!(prepared.is_error, Some(false));
+    let committed = client
+        .call_tool(commit_request(revision, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false));
+
+    let after = query_document(&core);
+    let effects = &after.tracks[0].clips[0].effects;
+    assert_eq!(effects.len(), 2);
+    assert_eq!(effects[0].name, "primary_correction");
+    assert_eq!(effects[1].name, "creative_look");
+    assert_eq!(effects[1].id.0, target_effect_id);
+    assert_eq!(
+        effects[1].parameters["lut_asset_id"],
+        ParamValue::Integer(1)
+    );
+    assert_eq!(
+        effects[1].parameters["mix_basis_points"],
+        ParamValue::Integer(6_500)
+    );
+
+    let context = invoke_capability(&client, "get_color_context", json!({})).await;
+    let context = context.structured_content.as_ref().unwrap();
+    assert_eq!(context["timeline_revision"].as_u64().unwrap(), revision + 1);
+    let nodes = context["clips"][0]["color_nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[1]["kind"], "creative_look");
+    assert_eq!(nodes[1]["stage_index"], 1);
+    assert_eq!(nodes[1]["lut_asset_id"], 1);
+    assert_eq!(nodes[1]["lut_sha256"], warm.pinned_sha256());
+    assert_eq!(nodes[1]["lut_availability"]["kind"], "verified");
+    assert_eq!(nodes[1]["input_encoding"], "display709");
+    assert_eq!(nodes[1]["mix_basis_points"], 6_500);
+    assert_eq!(nodes[1]["active"], true);
+
+    // The asset now reports the node that references it.
+    let listed = invoke_capability(&client, "list_look_assets", json!({})).await;
+    let listed = listed.structured_content.as_ref().unwrap();
+    assert_eq!(
+        listed["assets"][0]["referenced_by"],
+        json!([{"clip_id": 1, "effect_id": target_effect_id}])
+    );
+
+    // `AddLutAsset` is unreachable through the plan path over the wire, and
+    // the refusal names the one capability that can register a record.
+    let refused = prepare_plan(
+        &client,
+        revision + 1,
+        json!([{"add_lut_asset": {"asset": warm.to_lut_asset(kinewright_core::LutAssetId(2))}}]),
+    )
+    .await;
+    assert_eq!(refused.is_error, Some(true));
+    assert_eq!(
+        refused.content[0].as_text().unwrap().text,
+        "edit plan contains an unsupported operation: AddLutAsset is only available through import_lut_asset, which parses, hashes, and stores the .cube bytes before registering the record"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// CC4 §8, §9: `convert_legacy_look` is the submittable form of the
+/// `legacy_look_conversions` evidence, over the live transport.
+///
+/// The published batch opens with `AddLutAsset` whenever the built-in is not
+/// registered yet, and `AddLutAsset` is refused on every plan path by design,
+/// so before this capability existed the `ready` status named a batch no agent
+/// could send.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn cc4_convert_legacy_look_submits_the_batch_the_evidence_publishes() {
+    let generated = managed_color_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let mut document = single_clip_document(asset);
+    let legacy_look = |id: u64, intensity: i64| Effect {
+        id: EffectId(id),
+        name: "look_lut".to_owned(),
+        parameters: [
+            ("preset_token".to_owned(), ParamValue::Integer(2)),
+            (
+                "intensity_percent".to_owned(),
+                ParamValue::Integer(intensity),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        keyframes: std::collections::BTreeMap::default(),
+    };
+    document.tracks[0].clips[0].effects = vec![legacy_look(1, 75), legacy_look(2, 100)];
+    document
+        .validate()
+        .expect("the seeded legacy stack is valid");
+
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let context = invoke_capability(&client, "get_color_context", json!({})).await;
+    let context = context.structured_content.as_ref().unwrap().clone();
+    let revision = context["timeline_revision"].as_u64().unwrap();
+    let conversion = &context["legacy_look_conversions"][0];
+    assert_eq!(conversion["status"], "ready");
+    assert_eq!(conversion["builtin_name"], "cool");
+    assert_eq!(conversion["mix_basis_points"], 7_500);
+    assert_eq!(conversion["operations"].as_array().unwrap().len(), 2);
+    assert!(
+        conversion["recovery_action"]
+            .as_str()
+            .unwrap()
+            .contains("convert_legacy_look"),
+        "{conversion}"
+    );
+
+    // The published batch is still refused on the plan path, which is exactly
+    // why the capability exists.
+    let refused = prepare_plan(&client, revision, conversion["operations"].clone()).await;
+    assert_eq!(refused.is_error, Some(true));
+    assert!(
+        refused.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("import_lut_asset")
+    );
+
+    // A stale revision fails closed, structurally.
+    let stale = invoke_capability(
+        &client,
+        "convert_legacy_look",
+        json!({"expected_revision": revision + 9, "clip_id": 1, "effect_id": 1}),
+    )
+    .await;
+    assert_eq!(stale.is_error, Some(true));
+    assert_eq!(
+        stale.structured_content.as_ref().unwrap()["code"],
+        "revision_conflict"
+    );
+    assert!(query_document(&core).lut_assets.is_empty());
+
+    let converted = invoke_capability(
+        &client,
+        "convert_legacy_look",
+        json!({"expected_revision": revision, "clip_id": 1, "effect_id": 1}),
+    )
+    .await;
+    assert_eq!(converted.is_error, Some(false), "{:?}", converted.content);
+    let converted = converted.structured_content.as_ref().unwrap();
+    assert_eq!(converted["applied"], true);
+    assert_eq!(converted["bit_identical_to_legacy"], false);
+    assert_eq!(converted["conversion"]["source"], "builtin");
+    assert_eq!(converted["conversion"]["reused_existing_asset"], false);
+    assert_eq!(converted["timeline_revision"], revision + 1);
+    assert_eq!(converted["lut_asset"]["availability"]["kind"], "verified");
+
+    let after = query_document(&core);
+    assert_eq!(after.lut_assets.len(), 1);
+    assert_eq!(
+        after.lut_assets[0].sha256,
+        kinewright_media::BuiltinLook::Cool.pinned_sha256()
+    );
+    let effects = &after.tracks[0].clips[0].effects;
+    assert_eq!(effects.len(), 2);
+    assert_eq!(effects[0].name, "creative_look");
+    assert_eq!(effects[0].id, EffectId(1));
+    assert_eq!(
+        effects[0].parameters["mix_basis_points"],
+        ParamValue::Integer(7_500)
+    );
+
+    // Nothing new is blocked: with the asset registered, the second node's
+    // batch is a lone `ConvertLegacyLook`, which the ordinary plan path still
+    // accepts. Only `AddLutAsset` was ever refused there.
+    let plain = prepare_plan(
+        &client,
+        revision + 1,
+        json!([{"convert_legacy_look": {
+            "clip": 1,
+            "effect": 2,
+            "lut_asset": 1,
+            "mix_basis_points": 10_000
+        }}]),
+    )
+    .await;
+    assert_eq!(plain.is_error, Some(false), "{:?}", plain.content);
+    let committed = client
+        .call_tool(commit_request(revision + 1, &plain))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false));
+
+    // Nothing is left to convert, and the tool refuses a managed node.
+    let context = invoke_capability(&client, "get_color_context", json!({})).await;
+    let context = context.structured_content.as_ref().unwrap();
+    assert_eq!(
+        context["legacy_look_conversions"],
+        json!([]),
+        "the legacy stages are gone"
+    );
+    let again = invoke_capability(
+        &client,
+        "convert_legacy_look",
+        json!({"expected_revision": revision + 2, "clip_id": 1, "effect_id": 1}),
+    )
+    .await;
+    assert_eq!(again.is_error, Some(true));
+    assert_eq!(
+        again.structured_content.as_ref().unwrap()["code"],
+        "not_a_legacy_look"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// CC4 §2.2, §8: a branch server started with the project session's
+/// saved-project-path handle can resolve an imported asset's availability.
+///
+/// A branch started with a fresh `None` handle is store-blind on a saved
+/// project: every imported asset reports `unknown_no_store`.
+#[tokio::test(flavor = "multi_thread")]
+async fn cc4_branch_server_with_the_project_path_handle_resolves_imported_availability() {
+    let directory =
+        std::env::temp_dir().join(format!("kinewright-cc4-branch-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let project = directory.join("branch.kinewright");
+    let source = directory.join("warm.cube");
+    std::fs::write(
+        &source,
+        kinewright_media::BuiltinLook::Warm.canonical_text(),
+    )
+    .unwrap();
+    let store = kinewright_media::LutStore::for_project(&project).unwrap();
+    let imported = store.import_lut_asset(&source).unwrap();
+
+    let generated = managed_color_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let mut document = single_clip_document(asset);
+    document.lut_assets = vec![imported.into_lut_asset(kinewright_core::LutAssetId(1))];
+    document.validate().expect("the imported record is valid");
+
+    // The regression: a branch server with its own `None` handle cannot see
+    // the store even though the project is saved.
+    let blind_core = Core::spawn(document.clone()).unwrap();
+    let blind = McpServer::start_isolated(blind_core, media.clone(), media.clone()).unwrap();
+    let blind_client =
+        ().serve(StreamableHttpClientTransport::from_uri(blind.endpoint()))
+            .await
+            .unwrap();
+    let listed = invoke_capability(&blind_client, "list_look_assets", json!({})).await;
+    let listed = listed.structured_content.as_ref().unwrap();
+    assert_eq!(listed["store_root_known"], false);
+    assert_eq!(
+        listed["assets"][0]["availability"]["kind"],
+        "unknown_no_store"
+    );
+    blind_client.cancel().await.unwrap();
+    blind.shutdown();
+
+    // Sharing the session's handle resolves it.
+    let handle = Arc::new(std::sync::RwLock::new(Some(project.clone())));
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start_isolated_with_project_path(
+        core,
+        media.clone(),
+        media,
+        Arc::clone(&handle),
+    )
+    .unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    let listed = invoke_capability(&client, "list_look_assets", json!({})).await;
+    let listed = listed.structured_content.as_ref().unwrap();
+    assert_eq!(listed["store_root_known"], true);
+    assert_eq!(listed["assets"][0]["availability"]["kind"], "verified");
+    assert_eq!(
+        listed["assets"][0]["recovery_action"],
+        json!(null),
+        "a verified asset needs no recovery"
+    );
+
+    // The handle is shared, so a later Save As reaches the branch with no
+    // republishing.
+    *handle.write().unwrap() = None;
+    let listed = invoke_capability(&client, "list_look_assets", json!({})).await;
+    assert_eq!(
+        listed.structured_content.as_ref().unwrap()["store_root_known"],
+        false
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// CC4 §8: a LUT node is proofed by the real managed renderer, which refuses
+/// with a typed `missing_lut_asset` when the asset's bytes are not published
+/// rather than rendering a look-free frame.
+///
+/// The asset is deliberately *imported*: a built-in is baked in this binary and
+/// resolves from the document alone, so only an imported asset — whose bytes
+/// live in the project store the application publishes — can still be
+/// unresolvable here. The agent server never publishes them, so this is the
+/// honest failure an agent sees, and it is a render-stage refusal rather than a
+/// pre-render short circuit.
+#[tokio::test(flavor = "multi_thread")]
+async fn cc4_render_color_proof_reports_the_unpublished_lut_asset_from_the_real_renderer() {
+    let generated = managed_color_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let warm = kinewright_media::BuiltinLook::Warm;
+    // Valid, self-consistent metadata from a real bake, recorded as an
+    // imported asset so its bytes have to come from a store nobody published.
+    let mut unpublished = warm.to_lut_asset(kinewright_core::LutAssetId(1));
+    unpublished.title = "Unpublished look".to_owned();
+    unpublished.source = kinewright_core::LutAssetSource::Imported {
+        source_path: "/looks/unpublished.cube".to_owned(),
+    };
+    let mut document = single_clip_document(asset);
+    document.lut_assets = vec![unpublished];
+    document.tracks[0].clips[0].effects = vec![Effect {
+        id: EffectId(1),
+        name: "creative_look".to_owned(),
+        parameters: [("lut_asset_id".to_owned(), ParamValue::Integer(1))]
+            .into_iter()
+            .collect(),
+        keyframes: std::collections::BTreeMap::default(),
+    }];
+    document
+        .validate()
+        .expect("the CC4 stack is a valid document");
+
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core, media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let refused = invoke_capability(
+        &client,
+        "render_color_proof",
+        json!({
+            "expected_revision": 0,
+            "clip_id": 1,
+            "timecode": 5,
+            "effect_id": 1,
+            "look_comparison": "after"
+        }),
+    )
+    .await;
+    assert_eq!(refused.is_error, Some(true));
+    let structured = refused.structured_content.as_ref().unwrap();
+    // CC4 §2.3, §8: the refusal is typed and names the asset, not a prose
+    // `render_failed` message an agent would have to parse.
+    assert_eq!(structured["code"], "missing_lut_asset");
+    let details = &structured["details"];
+    assert_eq!(details["field"], "lut_asset_id");
+    assert_eq!(details["observed"], 1);
+    assert_eq!(details["lut_asset_id"], 1);
+    assert_eq!(details["effect_id"], 1);
+    assert_eq!(details["lut_title"], "Unpublished look");
+    assert_eq!(details["lut_sha256"], warm.pinned_sha256());
+    assert!(
+        details["allowed"].is_string(),
+        "the refusal names what would have been accepted: {details}"
+    );
+    assert!(
+        details["recovery_action"]
+            .as_str()
+            .is_some_and(|action| action.contains("list_look_assets")),
+        "{details}"
+    );
+    // The BEFORE cell removes the node, so only the AFTER render needs the
+    // asset. That ordering is the document's, never the adapter's.
+    assert_eq!(details["stage"], "after");
+    assert!(
+        details["availability"].is_object(),
+        "the live availability travels with the refusal: {details}"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cc2_scope_tools_are_read_only_over_the_live_endpoint() {
     let generated = managed_color_media();
@@ -830,6 +1315,7 @@ fn edit_plan_document() -> Document {
         resolution: (320, 180),
         duration: TimeCode(60),
         color_context: kinewright_core::ColorContext::default(),
+        lut_assets: Vec::new(),
     }
 }
 

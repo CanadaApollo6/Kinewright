@@ -224,6 +224,7 @@ mod tests {
             catalog: crate::MediaCatalog::default(),
             audio_mix: crate::AudioMix::default(),
             color_context: crate::ColorContext::default(),
+            lut_assets: Vec::new(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Audio,

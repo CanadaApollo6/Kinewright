@@ -5,7 +5,7 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     thread,
@@ -20,9 +20,9 @@ use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use kinewright_core::{
     Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AudioBus, AudioBusId,
     AudioLoudness, AutomationCurve, BeatMontageCadenceContract, BeatMontageSelect, BeatStatus,
-    CaptionCue, CaptionMotion, CaptionPreset, Clip, ClipContent, ClipId, ColorSourceError, Command,
-    Core, DeliveryAspect, DeliveryProfile, DeliveryVariant, Document, Effect, EffectId, Event,
-    Export, ExportCancellation, Keyframe, KeyframeInterpolation,
+    CaptionCue, CaptionMotion, CaptionPreset, Clip, ClipContent, ClipId, ColorNodeKind,
+    ColorSourceError, Command, Core, DeliveryAspect, DeliveryProfile, DeliveryVariant, Document,
+    Effect, EffectId, Event, Export, ExportCancellation, Keyframe, KeyframeInterpolation, LutAsset,
     MUSIC_STRUCTURE_DEFAULT_METER_BEATS, MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId,
     MediaAsset, MediaAvailabilityKind, MediaCacheFamily, MediaCacheInventory, MediaKind, Operation,
     ParamValue, Playback, Query, QueryResult, ReframeFocusBounds, RelinkCandidate, SceneStatus,
@@ -62,12 +62,14 @@ use crate::{
     },
     color_status::{
         CC1_STAGE_NAMES, ColorContextArgs, ColorCurvesPlanArgs, ColorNodePlan, ColorNodePlanError,
-        ColorProofError, ColorWheelsPlanArgs, PrimaryCorrectionPlanArgs, PrimaryPlanError,
+        ColorProofError, ColorWheelsPlanArgs, LegacyLookConversion, LookAssetContext,
+        LookComparison, LutNodePlanArgs, PrimaryCorrectionPlanArgs, PrimaryPlanError,
         RenderColorProofArgs, active_layer_source_classification,
         color_context_value_with_assumptions, color_context_value_with_options,
         color_curves_request_summary, color_node_manifest, color_wheels_parameter_summary,
-        effect_chain_manifest, legacy_stage_warnings, plan_color_curves, plan_color_wheels,
-        plan_primary_correction, primary_parameter_summary, raw_only_conflict,
+        effect_chain_manifest, legacy_look_conversion, legacy_stage_warnings, look_assets_value,
+        lut_node_parameter_summary, plan_color_curves, plan_color_wheels, plan_creative_look,
+        plan_primary_correction, plan_technical_lut, primary_parameter_summary, raw_only_conflict,
     },
     export_queue::{ExportJobId, ExportQueue, ExportQueueError, QueueExportRequest},
     pacing::{DialoguePacingGap, dialogue_pacing_gaps},
@@ -265,6 +267,15 @@ pub enum McpServerError {
 pub struct McpServer {
     endpoint: String,
     confirmations: ConfirmationBroker,
+    /// The saved project file path this session owns, or `None` for a project
+    /// that has never been saved (CC4 §2.2).
+    ///
+    /// The LUT store root is `<dir>/<stem>.kinewright-assets` and is
+    /// **derived from this path at runtime and never stored**, so publishing
+    /// the project path is what lets `import_lut_asset`, `list_look_assets`,
+    /// the `color_nodes` manifests, and the export preflight resolve a look's
+    /// bytes. Shared with the export queue so both see the same project.
+    project_path: Arc<RwLock<Option<PathBuf>>>,
     tool_surface_metrics: ToolSurfaceMetrics,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
@@ -302,6 +313,7 @@ impl McpServer {
             Some(exporter),
             ConfirmationBroker::default(),
             true,
+            Arc::new(RwLock::new(None)),
         )
     }
 
@@ -316,6 +328,43 @@ impl McpServer {
         playback: Arc<dyn Playback>,
         analysis: Arc<dyn Analysis>,
     ) -> Result<Self, McpServerError> {
+        Self::start_isolated_with_project_path(
+            core,
+            playback,
+            analysis,
+            Arc::new(RwLock::new(None)),
+        )
+    }
+
+    /// Start a branch-scoped MCP server that shares the project session's
+    /// saved-project-path handle (CC4 §2.2, §8).
+    ///
+    /// A branch server derives its own LUT store root from this handle, so a
+    /// branch created with a fresh `None` handle is store-blind: every CC4
+    /// availability surface reports `unknown_no_store` for imported assets and
+    /// `import_lut_asset` reports `project_not_saved`, even on a saved
+    /// project. Callers that own a project session should pass
+    /// [`McpServer::project_path_handle`] from the live server (or the same
+    /// `Arc` the session publishes into with
+    /// [`McpServer::set_project_path`]), so a later Save As reaches every
+    /// branch without republishing.
+    ///
+    /// In the application this is `chat_ui.rs`'s `AgentThread::new` and
+    /// `AgentThread::replace_branch`, which start every branch server with the
+    /// session's own `agent_project_path` handle.
+    /// `ProjectSession::publish_project_path_to_agents` then writes that one
+    /// shared handle, so a Save As reaches every branch at once and no branch
+    /// is ever store-blind, not even for the frame it was created in.
+    ///
+    /// # Errors
+    ///
+    /// Returns an MCP server error when the listener or server thread cannot start.
+    pub fn start_isolated_with_project_path(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        project_path: Arc<RwLock<Option<PathBuf>>>,
+    ) -> Result<Self, McpServerError> {
         Self::start_configured(
             core,
             playback,
@@ -323,6 +372,7 @@ impl McpServer {
             None,
             ConfirmationBroker::default(),
             false,
+            project_path,
         )
     }
 
@@ -337,6 +387,31 @@ impl McpServer {
         analysis: Arc<dyn Analysis>,
         exporter: Arc<dyn Export>,
     ) -> Result<Self, McpServerError> {
+        Self::start_isolated_with_exporter_and_project_path(
+            core,
+            playback,
+            analysis,
+            exporter,
+            Arc::new(RwLock::new(None)),
+        )
+    }
+
+    /// Start a branch-scoped MCP server with branch-snapshot exports that
+    /// shares the project session's saved-project-path handle.
+    ///
+    /// See [`McpServer::start_isolated_with_project_path`] for why a branch
+    /// server needs the handle at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns an MCP server error when the listener, export worker, or server thread cannot start.
+    pub fn start_isolated_with_exporter_and_project_path(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        exporter: Arc<dyn Export>,
+        project_path: Arc<RwLock<Option<PathBuf>>>,
+    ) -> Result<Self, McpServerError> {
         Self::start_configured(
             core,
             playback,
@@ -344,6 +419,7 @@ impl McpServer {
             Some(exporter),
             ConfirmationBroker::default(),
             false,
+            project_path,
         )
     }
 
@@ -353,7 +429,15 @@ impl McpServer {
         analysis: Arc<dyn Analysis>,
         confirmations: ConfirmationBroker,
     ) -> Result<Self, McpServerError> {
-        Self::start_configured(core, playback, analysis, None, confirmations, true)
+        Self::start_configured(
+            core,
+            playback,
+            analysis,
+            None,
+            confirmations,
+            true,
+            Arc::new(RwLock::new(None)),
+        )
     }
 
     fn start_configured(
@@ -363,6 +447,7 @@ impl McpServer {
         exporter: Option<Arc<dyn Export>>,
         confirmations: ConfirmationBroker,
         publish_to_playback: bool,
+        project_path: Arc<RwLock<Option<PathBuf>>>,
     ) -> Result<Self, McpServerError> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .map_err(McpServerError::Bind)?;
@@ -373,7 +458,13 @@ impl McpServer {
         let endpoint = format!("http://{address}/mcp");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let export_queue = exporter
-            .map(|exporter| ExportQueue::new(exporter, Arc::clone(&analysis)))
+            .map(|exporter| {
+                ExportQueue::with_lut_project_path(
+                    exporter,
+                    Arc::clone(&analysis),
+                    Arc::clone(&project_path),
+                )
+            })
             .transpose()?;
         let tool_surface_metrics = ToolSurfaceMetrics::measure(&KinewrightMcp::served_tools()?);
         let handler = KinewrightMcp::configured(
@@ -383,6 +474,7 @@ impl McpServer {
             export_queue,
             confirmations.clone(),
             publish_to_playback,
+            Arc::clone(&project_path),
         );
         let server_thread = thread::Builder::new()
             .name("kinewright-mcp".to_owned())
@@ -391,6 +483,7 @@ impl McpServer {
         Ok(Self {
             endpoint,
             confirmations,
+            project_path,
             tool_surface_metrics,
             shutdown: Some(shutdown),
             thread: Some(server_thread),
@@ -405,6 +498,26 @@ impl McpServer {
     #[must_use]
     pub fn confirmations(&self) -> ConfirmationBroker {
         self.confirmations.clone()
+    }
+
+    /// The shared saved-project-path handle backing the CC4 LUT store.
+    ///
+    /// The owner of the project session publishes the saved project file path
+    /// here; the store root is derived from it as
+    /// `<dir>/<stem>.kinewright-assets` on every use and never persisted
+    /// (CC4 §2.2). Until a path is published, `import_lut_asset` reports
+    /// `project_not_saved` and every availability surface reports
+    /// `unknown_no_store` rather than inventing a status.
+    #[must_use]
+    pub fn project_path_handle(&self) -> Arc<RwLock<Option<PathBuf>>> {
+        Arc::clone(&self.project_path)
+    }
+
+    /// Publish (or clear) the saved project file path for this session.
+    pub fn set_project_path(&self, path: Option<PathBuf>) {
+        if let Ok(mut slot) = self.project_path.write() {
+            *slot = path;
+        }
     }
 
     #[must_use]
@@ -467,6 +580,8 @@ struct KinewrightMcp {
     confirmations: ConfirmationBroker,
     publish_to_playback: bool,
     prepared_plans: Arc<Mutex<PreparedPlanStore>>,
+    /// See [`McpServer::project_path_handle`].
+    project_path: Arc<RwLock<Option<PathBuf>>>,
 }
 
 impl KinewrightMcp {
@@ -477,7 +592,15 @@ impl KinewrightMcp {
         analysis: Arc<dyn Analysis>,
         confirmations: ConfirmationBroker,
     ) -> Self {
-        Self::configured(core, playback, analysis, None, confirmations, true)
+        Self::configured(
+            core,
+            playback,
+            analysis,
+            None,
+            confirmations,
+            true,
+            Arc::new(RwLock::new(None)),
+        )
     }
 
     fn configured(
@@ -487,6 +610,7 @@ impl KinewrightMcp {
         export_queue: Option<ExportQueue>,
         confirmations: ConfirmationBroker,
         publish_to_playback: bool,
+        project_path: Arc<RwLock<Option<PathBuf>>>,
     ) -> Self {
         Self {
             core,
@@ -496,6 +620,7 @@ impl KinewrightMcp {
             confirmations,
             publish_to_playback,
             prepared_plans: Arc::new(Mutex::new(PreparedPlanStore::default())),
+            project_path,
         }
     }
 
@@ -685,6 +810,31 @@ impl KinewrightMcp {
                 self.color_node_plan("plan_color_curves", |document, revision| {
                     plan_color_curves(document, revision, &args)
                 })
+            }
+            "plan_technical_lut" => {
+                let args: LutNodePlanArgs = decode_args("plan_technical_lut", arguments)?;
+                let (_, document) = self.snapshot()?;
+                let looks = self.look_context(&document);
+                self.color_node_plan("plan_technical_lut", |document, revision| {
+                    plan_technical_lut(document, revision, &args, &looks)
+                })
+            }
+            "plan_creative_look" => {
+                let args: LutNodePlanArgs = decode_args("plan_creative_look", arguments)?;
+                let (_, document) = self.snapshot()?;
+                let looks = self.look_context(&document);
+                self.color_node_plan("plan_creative_look", |document, revision| {
+                    plan_creative_look(document, revision, &args, &looks)
+                })
+            }
+            "list_look_assets" => self.list_look_assets(),
+            "import_lut_asset" => {
+                let args: ImportLutAssetArgs = decode_args("import_lut_asset", arguments)?;
+                self.import_lut_asset(&args)
+            }
+            "convert_legacy_look" => {
+                let args: ConvertLegacyLookArgs = decode_args("convert_legacy_look", arguments)?;
+                self.convert_legacy_look(&args)
             }
             "render_color_proof" => {
                 let args: RenderColorProofArgs = decode_args("render_color_proof", arguments)?;
@@ -906,6 +1056,11 @@ impl KinewrightMcp {
             }
             "relink_asset" => Ok(error_text(
                 "relink_asset is not exposed as a generated operation; use relink_media so the replacement is probed and hashed first",
+            )),
+            // CC4 §8: only `import_lut_asset` can create a `LutAsset`, because
+            // only it can write the hashed bytes into the project store.
+            "add_lut_asset" => Ok(error_text(
+                "add_lut_asset is not exposed as a generated operation; use import_lut_asset so the .cube bytes are parsed, hashed, and stored first",
             )),
             tool_name => {
                 let revisioned = decode_operation(tool_name, arguments)
@@ -1213,6 +1368,16 @@ impl KinewrightMcp {
                 "RelinkAsset cannot be submitted through apply_edit_plan; use relink_media so the replacement is probed and hashed first",
             ));
         }
+        // CC4 §8: the plan path has no way to write the project LUT store, so
+        // a plan-supplied record could reference bytes that do not exist.
+        if operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::AddLutAsset { .. }))
+        {
+            return Ok(error_text(
+                "AddLutAsset cannot be submitted through apply_edit_plan; use import_lut_asset so the .cube bytes are parsed, hashed, and stored first",
+            ));
+        }
         if let Some(description) = plan_confirmation_description(&before, operations)
             && let Err(reason) = self.confirmations.confirm("apply_edit_plan", description)
         {
@@ -1514,16 +1679,25 @@ impl KinewrightMcp {
             ));
         }
         let (revision, document) = self.snapshot()?;
+        let looks = self.look_context(&document);
         let value = if args.raw_only {
             // `raw_only_conflict` above already refused `raw_only` combined with
             // an explicit assumption, so there is no assumption left to forward.
-            color_context_value_with_options(revision, &document, None, &args.asset_ids, true)
+            color_context_value_with_options(
+                revision,
+                &document,
+                None,
+                &args.asset_ids,
+                true,
+                &looks,
+            )
         } else {
             color_context_value_with_assumptions(
                 revision,
                 &document,
                 args.profile_assumption,
                 &args.asset_ids,
+                &looks,
             )
         };
         Ok(success_structured(
@@ -1602,10 +1776,522 @@ impl KinewrightMcp {
         ))
     }
 
-    /// Render one evidence-only CC3 colour-node proposal (CC3 §8).
+    /// The saved project file path published to this session, if any.
+    fn project_path(&self) -> Option<PathBuf> {
+        self.project_path.read().ok().and_then(|slot| slot.clone())
+    }
+
+    /// Derive the CC4 LUT store from the published project path.
     ///
-    /// Both CC3 planners share this response shape so an agent that learned
-    /// `plan_color_wheels` can read a `plan_color_curves` result unchanged.
+    /// `None` means the project has never been saved, which is a distinct
+    /// state from a store that exists but cannot be used: the outer `Option`
+    /// answers "is there a project path", the inner `Result` answers "is its
+    /// derived root usable" (CC4 §2.2).
+    fn lut_store(&self) -> Option<Result<kinewright_media::LutStore, kinewright_core::MediaError>> {
+        self.project_path()
+            .map(|path| kinewright_media::LutStore::for_project(&path))
+    }
+
+    /// Snapshot the document's LUT assets together with their live
+    /// availability, resolved through the store when one is known.
+    fn look_context(&self, document: &Document) -> LookAssetContext {
+        match self.lut_store() {
+            Some(Ok(store)) => {
+                let resolver = store.availability_resolver();
+                LookAssetContext::new(
+                    document,
+                    Some(store.root().to_path_buf()),
+                    Some(&resolver as &dyn Fn(&_) -> _),
+                )
+            }
+            // No store root, or a root this process refuses to read: every
+            // availability surface reports `unknown_no_store` rather than
+            // inventing a status.
+            Some(Err(_)) | None => LookAssetContext::document_only(document),
+        }
+    }
+
+    /// CC4 §8 `list_look_assets`: the built-in catalogue plus every project
+    /// asset with its identity, provenance, availability, and references.
+    fn list_look_assets(&self) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let looks = self.look_context(&document);
+        let value = look_assets_value(revision, &document, &looks);
+        Ok(success_structured(
+            format!(
+                "timeline_revision={} builtin_looks={} project_lut_assets={} store_root={}",
+                revision,
+                kinewright_media::BuiltinLook::ALL.len(),
+                document.lut_assets.len(),
+                looks.store_root().map_or_else(
+                    || "none (project not saved)".to_owned(),
+                    |root| root.display().to_string()
+                ),
+            ),
+            value,
+        ))
+    }
+
+    /// CC4 §8 `import_lut_asset`: the only path that can create a `LutAsset`.
+    ///
+    /// The confirmation is requested **before the first byte is read**, so a
+    /// refused import leaves no store file and no document change (CC4 §13).
+    #[allow(clippy::too_many_lines)]
+    fn import_lut_asset(&self, args: &ImportLutAssetArgs) -> Result<CallToolResult, McpError> {
+        let (actual_revision, document) = self.snapshot()?;
+        if args.expected_revision != actual_revision {
+            // CC4 §8: every rejection this tool can return is structured, so a
+            // conflict is a machine-readable `revision_conflict`, not prose the
+            // caller has to pattern-match on.
+            return Ok(lut_revision_conflict(
+                "import_lut_asset",
+                args.expected_revision,
+                actual_revision,
+            ));
+        }
+        let Some(store) = self.lut_store() else {
+            return Ok(lut_import_error(
+                "project_not_saved",
+                "the project has never been saved, so it has no LUT store root",
+                &serde_json::json!({
+                    "field": "project_path",
+                    "observed": serde_json::Value::Null,
+                    "allowed": "a saved project file path such as <dir>/<stem>.kinewright",
+                    "recovery_action": "Save the project first; the store root is <dir>/<stem>.kinewright-assets and is derived from the project path at runtime.",
+                }),
+            ));
+        };
+        let store = match store {
+            Ok(store) => store,
+            Err(error) => {
+                return Ok(lut_store_error_result("import_lut_asset", &error));
+            }
+        };
+        // Ask before touching the filesystem. `symlink_metadata` on the source
+        // is cheap and is the honest size to quote; a source we cannot even
+        // stat is refused before a confirmation is spent on it.
+        let observed_bytes = std::fs::symlink_metadata(&args.path)
+            .ok()
+            .filter(std::fs::Metadata::is_file)
+            .map(|metadata| metadata.len());
+        let description = format!(
+            "The agent wants to import the LUT file {} ({}) into this project's LUT store at {}. The bytes are copied under the project directory and registered as an undoable AddLutAsset operation.",
+            args.path.display(),
+            observed_bytes.map_or_else(
+                || "size unknown".to_owned(),
+                |bytes| format!("{bytes} byte(s)")
+            ),
+            store.luts_dir().display(),
+        );
+        if let Err(reason) = self.confirmations.confirm("import_lut_asset", description) {
+            return Ok(lut_import_error(
+                "import_refused",
+                &format!("refused destructive tool import_lut_asset: {reason}"),
+                &serde_json::json!({
+                    "field": "confirmation",
+                    "observed": reason,
+                    "allowed": "an approved confirmation",
+                    "recovery_action": "Ask the operator to approve the import, then resend at the current timeline_revision.",
+                    "reason": reason,
+                    "store_file_written": false,
+                    "document_changed": false,
+                }),
+            ));
+        }
+        let import = match store.import_lut_asset(&args.path) {
+            Ok(import) => import,
+            Err(error) => return Ok(lut_store_error_result("import_lut_asset", &error)),
+        };
+        // CC4 §2.1/§2.3: assets are content-addressed, so a second import of
+        // the same bytes is the *same* asset. Allocating a second record would
+        // give one look two ids, make `referenced_by` lie, and leave
+        // `RemoveLutAsset` unable to clean either one up. The store write above
+        // is idempotent by the same hash, so re-importing still repairs a
+        // missing store file before this returns.
+        if let Some(existing) = document
+            .lut_assets
+            .iter()
+            .find(|asset| asset.sha256 == import.sha256)
+        {
+            let looks = self.look_context(&document);
+            return Ok(success_structured(
+                format!(
+                    "LUT asset {} \"{}\" already records sha256={}; reused the existing record instead of registering a second one",
+                    existing.id, existing.title, existing.sha256
+                ),
+                serde_json::json!({
+                    "timeline_revision": actual_revision.0,
+                    "lut_asset": looks.asset_summary(existing),
+                    "reused_existing_asset": true,
+                    "applied": false,
+                    "next": "Bind the asset with plan_technical_lut or plan_creative_look, then submit the returned operations through prepare_edit_plan.",
+                }),
+            ));
+        }
+        let lut_asset_id = match document.next_lut_asset_id() {
+            Ok(id) => id,
+            Err(error) => {
+                return Ok(lut_import_error(
+                    "lut_asset_id_exhausted",
+                    &error.to_string(),
+                    &serde_json::json!({
+                        "field": "lut_asset_id",
+                        "observed": "exhausted",
+                        "allowed": format!("1..={}", kinewright_core::LUT_ASSET_ID_MAX),
+                        "recovery_action": "Remove unused LUT asset records before importing another look.",
+                    }),
+                ));
+            }
+        };
+        let store_path = store.path_for(&import.sha256).ok();
+        let mut asset = import.into_lut_asset(lut_asset_id);
+        if let Some(title) = args.title.as_ref().map(|title| title.trim())
+            && !title.is_empty()
+        {
+            title.clone_into(&mut asset.title);
+        }
+        let summary = serde_json::json!({
+            "lut_asset_id": asset.id.0,
+            "title": asset.title,
+            "sha256": asset.sha256,
+            "kind": asset.kind.as_str(),
+            "size": asset.size,
+            "byte_len": asset.byte_len,
+            "domain_min_millionths": asset.domain_min_millionths,
+            "domain_max_millionths": asset.domain_max_millionths,
+            "store_path": store_path,
+            "store_root": store.root(),
+        });
+        let result = self.apply_operation(
+            "import_lut_asset",
+            args.expected_revision,
+            Operation::AddLutAsset { asset },
+        );
+        if result.is_error == Some(true) {
+            return Ok(result);
+        }
+        Ok(success_structured(
+            format!(
+                "imported LUT asset {} \"{}\" sha256={} into {}",
+                summary["lut_asset_id"],
+                summary["title"].as_str().unwrap_or_default(),
+                summary["sha256"].as_str().unwrap_or_default(),
+                store.luts_dir().display(),
+            ),
+            serde_json::json!({
+                "timeline_revision": args.expected_revision.0,
+                "lut_asset": summary,
+                "reused_existing_asset": false,
+                "applied": true,
+                "next": "Bind the asset with plan_technical_lut or plan_creative_look, then submit the returned operations through prepare_edit_plan.",
+            }),
+        ))
+    }
+
+    /// Apply one batch under a revision gate, for the CC4 tools whose batch
+    /// contains an `AddLutAsset` the plan path refuses by design.
+    ///
+    /// This is `apply_edit_plan` without the `AddLutAsset` guard: the guard
+    /// exists because a *plan-supplied* record could name bytes that do not
+    /// exist, and the record here was built by the store from bytes it just
+    /// hashed, or from this binary's own bake.
+    fn apply_lut_batch(
+        &self,
+        tool: &str,
+        expected_revision: TimelineRevision,
+        operations: &[Operation],
+    ) -> Result<Result<TimelineRevision, CallToolResult>, McpError> {
+        let event = self
+            .core
+            .request(Command::DoBatchIfRevision {
+                expected: expected_revision,
+                operations: operations.to_vec(),
+            })
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        Ok(match event {
+            Event::DocumentChanged { doc, revision, .. } => {
+                if self.publish_to_playback {
+                    self.playback.set_document(doc);
+                }
+                Ok(revision)
+            }
+            Event::BatchRejected { error, .. } => Err(lut_tool_error(
+                tool,
+                "core_rejected",
+                &error.to_string(),
+                &serde_json::json!({
+                    "field": "operations",
+                    "observed": error.to_string(),
+                    "allowed": "a batch Core validates against the current document",
+                    "recovery_action": "Call get_color_context for the current node stack and asset table, then resend at the current timeline_revision.",
+                }),
+            )),
+            Event::RevisionConflict { expected, actual } => {
+                Err(lut_revision_conflict(tool, expected, actual))
+            }
+            _ => Err(lut_tool_error(
+                tool,
+                "core_rejected",
+                "Core returned the wrong batch result",
+                &serde_json::json!({
+                    "field": "operations",
+                    "observed": "an unexpected Core event",
+                    "allowed": "a document change, a rejection, or a revision conflict",
+                    "recovery_action": "Call get_timeline_state and retry.",
+                }),
+            )),
+        })
+    }
+
+    /// CC4 §9 `convert_legacy_look`: the only agent path from a legacy
+    /// compatibility stage to a managed `creative_look`.
+    ///
+    /// `get_color_context.legacy_look_conversions` publishes the exact batch
+    /// each legacy node needs, but for a `look_lut` whose built-in is not
+    /// registered yet that batch opens with `AddLutAsset`, which is refused on
+    /// every plan path by design (CC4 §8) — so the evidence was unsubmittable.
+    /// This tool performs the batch server-side under the same revision gate:
+    ///
+    /// - `look_lut`: resolve `preset_token` to a built-in, reuse an already
+    ///   registered record with the same content hash or register the bake,
+    ///   then convert. No filesystem access at all.
+    /// - `cube_lut`: import the node's external `path` into the project store
+    ///   through the same confirmation path as `import_lut_asset` — the
+    ///   operator is asked **before the first byte is read** — then convert.
+    ///
+    /// The conversion is deliberately not bit-identical to the legacy stage
+    /// (CC4 §9.3), which is why it is an explicit, confirmed, undoable action
+    /// and never happens on load.
+    #[allow(clippy::too_many_lines)]
+    fn convert_legacy_look(
+        &self,
+        args: &ConvertLegacyLookArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let (actual_revision, document) = self.snapshot()?;
+        if args.expected_revision != actual_revision {
+            return Ok(lut_revision_conflict(
+                "convert_legacy_look",
+                args.expected_revision,
+                actual_revision,
+            ));
+        }
+        let conversion = match legacy_look_conversion(&document, args.clip_id, args.effect_id) {
+            Ok(conversion) => conversion,
+            Err(error) => {
+                return Ok(lut_tool_error(
+                    "convert_legacy_look",
+                    error.code(),
+                    &error.to_string(),
+                    &serde_json::json!({
+                        "field": error.field(),
+                        "observed": error.observed(),
+                        "allowed": error.allowed(),
+                        "recovery_action": error.recovery_action(),
+                        "clip_id": args.clip_id.0,
+                        "effect_id": args.effect_id.0,
+                    }),
+                ));
+            }
+        };
+        let (operations, summary) = match conversion {
+            LegacyLookConversion::Builtin {
+                operations,
+                builtin_name,
+                lut_asset,
+                mix_basis_points,
+                reused_existing_asset,
+            } => {
+                let summary = serde_json::json!({
+                    "source": "builtin",
+                    "builtin_name": builtin_name,
+                    "lut_asset_id": lut_asset.0,
+                    "mix_basis_points": mix_basis_points,
+                    "reused_existing_asset": reused_existing_asset,
+                    "store_file_written": false,
+                });
+                (operations, summary)
+            }
+            LegacyLookConversion::NeedsImport {
+                path,
+                mix_basis_points,
+            } => match self.import_legacy_look_path(&document, &path) {
+                Err(refusal) => return Ok(refusal),
+                Ok((asset, register, reused_existing_asset, store_root)) => {
+                    let lut_asset = asset.id;
+                    let mut operations = Vec::new();
+                    if let Some(asset) = register {
+                        operations.push(Operation::AddLutAsset { asset });
+                    }
+                    operations.push(Operation::ConvertLegacyLook {
+                        clip: args.clip_id,
+                        effect: args.effect_id,
+                        lut_asset,
+                        mix_basis_points,
+                    });
+                    let summary = serde_json::json!({
+                        "source": "imported",
+                        "source_path": path,
+                        "lut_asset_id": lut_asset.0,
+                        "title": asset.title,
+                        "sha256": asset.sha256,
+                        "kind": asset.kind.as_str(),
+                        "size": asset.size,
+                        "byte_len": asset.byte_len,
+                        "mix_basis_points": mix_basis_points,
+                        "reused_existing_asset": reused_existing_asset,
+                        "store_file_written": true,
+                        "store_root": store_root,
+                    });
+                    (operations, summary)
+                }
+            },
+        };
+        let applied_operations = serde_json::to_value(&operations)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        let revision = match self.apply_lut_batch(
+            "convert_legacy_look",
+            args.expected_revision,
+            &operations,
+        )? {
+            Ok(revision) => revision,
+            Err(rejection) => return Ok(rejection),
+        };
+        let (_, converted) = self.snapshot()?;
+        let looks = self.look_context(&converted);
+        let lut_asset_id = summary["lut_asset_id"]
+            .as_u64()
+            .map(kinewright_core::LutAssetId);
+        Ok(success_structured(
+            format!(
+                "converted legacy {} on clip {} effect {} into a managed creative_look at revision {revision}",
+                summary["source"].as_str().unwrap_or_default(),
+                args.clip_id,
+                args.effect_id,
+            ),
+            serde_json::json!({
+                "timeline_revision": revision.0,
+                "clip_id": args.clip_id.0,
+                "effect_id": args.effect_id.0,
+                "conversion": summary,
+                "lut_asset": lut_asset_id
+                    .and_then(|id| looks.asset(id).map(|asset| looks.asset_summary(asset))),
+                "operations": applied_operations,
+                "applied": true,
+                "bit_identical_to_legacy": false,
+                "next": "Render render_color_proof with this clip's new creative_look effect_id to see the deliberate difference from the legacy stage (CC4 §9.3); undo restores the legacy node.",
+            }),
+        ))
+    }
+
+    /// Import one legacy `cube_lut`'s external path into the project store,
+    /// behind the same confirmation `import_lut_asset` uses.
+    ///
+    /// Returns the record to reference, the record to register (`None` when an
+    /// existing asset already carries these bytes), whether it was reused, and
+    /// the store root. The outer `Err` is a ready-to-return refusal.
+    #[allow(clippy::type_complexity)]
+    fn import_legacy_look_path(
+        &self,
+        document: &Document,
+        path: &str,
+    ) -> Result<(LutAsset, Option<LutAsset>, bool, PathBuf), CallToolResult> {
+        let source = PathBuf::from(path);
+        let Some(store) = self.lut_store() else {
+            return Err(lut_tool_error(
+                "convert_legacy_look",
+                "project_not_saved",
+                "the project has never been saved, so it has no LUT store root to import this legacy .cube into",
+                &serde_json::json!({
+                    "field": "project_path",
+                    "observed": serde_json::Value::Null,
+                    "allowed": "a saved project file path such as <dir>/<stem>.kinewright",
+                    "recovery_action": "Save the project first; the store root is <dir>/<stem>.kinewright-assets and is derived from the project path at runtime.",
+                    "source_path": path,
+                }),
+            ));
+        };
+        let store = match store {
+            Ok(store) => store,
+            Err(error) => {
+                return Err(lut_store_error_result("convert_legacy_look", &error));
+            }
+        };
+        // Ask before touching the filesystem, exactly as `import_lut_asset`
+        // does: a refused conversion must leave no store file behind.
+        let observed_bytes = std::fs::symlink_metadata(&source)
+            .ok()
+            .filter(std::fs::Metadata::is_file)
+            .map(|metadata| metadata.len());
+        let description = format!(
+            "The agent wants to convert a legacy cube_lut node into a managed creative_look. That imports the LUT file {} ({}) into this project's LUT store at {}. The bytes are copied under the project directory and registered as an undoable AddLutAsset operation.",
+            source.display(),
+            observed_bytes.map_or_else(
+                || "size unknown".to_owned(),
+                |bytes| format!("{bytes} byte(s)")
+            ),
+            store.luts_dir().display(),
+        );
+        if let Err(reason) = self
+            .confirmations
+            .confirm("convert_legacy_look", description)
+        {
+            return Err(lut_tool_error(
+                "convert_legacy_look",
+                "import_refused",
+                &format!("refused destructive tool convert_legacy_look: {reason}"),
+                &serde_json::json!({
+                    "field": "confirmation",
+                    "observed": reason,
+                    "allowed": "an approved confirmation",
+                    "recovery_action": "Ask the operator to approve the import, then resend at the current timeline_revision.",
+                    "reason": reason,
+                    "store_file_written": false,
+                    "document_changed": false,
+                    "source_path": path,
+                }),
+            ));
+        }
+        let import = match store.import_lut_asset(&source) {
+            Ok(import) => import,
+            Err(error) => return Err(lut_store_error_result("convert_legacy_look", &error)),
+        };
+        // Content addressing again: the same bytes are the same asset.
+        if let Some(existing) = document
+            .lut_assets
+            .iter()
+            .find(|asset| asset.sha256 == import.sha256)
+        {
+            return Ok((existing.clone(), None, true, store.root().to_path_buf()));
+        }
+        let lut_asset_id = match document.next_lut_asset_id() {
+            Ok(id) => id,
+            Err(error) => {
+                return Err(lut_tool_error(
+                    "convert_legacy_look",
+                    "lut_asset_id_exhausted",
+                    &error.to_string(),
+                    &serde_json::json!({
+                        "field": "lut_asset_id",
+                        "observed": "exhausted",
+                        "allowed": format!("1..={}", kinewright_core::LUT_ASSET_ID_MAX),
+                        "recovery_action": "Remove unused LUT asset records before converting another look.",
+                    }),
+                ));
+            }
+        };
+        let asset = import.into_lut_asset(lut_asset_id);
+        Ok((
+            asset.clone(),
+            Some(asset),
+            false,
+            store.root().to_path_buf(),
+        ))
+    }
+
+    /// Render one evidence-only managed colour-node proposal (CC3 §8, CC4 §8).
+    ///
+    /// Every node planner shares this response shape so an agent that learned
+    /// `plan_color_wheels` can read a `plan_creative_look` result unchanged.
     fn color_node_plan<Plan>(&self, tool: &str, plan: Plan) -> Result<CallToolResult, McpError>
     where
         Plan: FnOnce(&Document, TimelineRevision) -> Result<ColorNodePlan, ColorNodePlanError>,
@@ -1667,6 +2353,14 @@ impl KinewrightMcp {
             "resolved_parameters": plan.resolved_parameters,
             "requested_curves": plan.requested_curves,
             "resolved_curves": plan.resolved_curves,
+            // CC4 §8: the LUT planners publish the exact index their
+            // InsertEffect uses, so an ordering rejection is unreachable
+            // through the ordinary path, plus the bound asset's identity.
+            "insert_index": plan.insert_index,
+            "lut_asset": plan.lut_asset,
+            "lut_node_limit_per_layer": kinewright_core::LUT_NODE_LIMIT_PER_LAYER,
+            "role": plan.kind.role(),
+            "color_stage": plan.kind.stage().as_str(),
             "operations": operations,
             "next": "Review these exact operations; submit them through prepare_edit_plan at the same revision if the edit is requested.",
         });
@@ -1684,6 +2378,65 @@ impl KinewrightMcp {
     #[allow(clippy::too_many_lines)]
     fn render_color_proof(&self, args: &RenderColorProofArgs) -> Result<CallToolResult, McpError> {
         let (actual_revision, document) = self.snapshot()?;
+        let looks = self.look_context(&document);
+        // CC4 §8: `effect_id` proofs the *stored* node, so a proposed-primary
+        // parameter set alongside it would describe a different edit.
+        if let Some(effect) = args.effect_id
+            && !args.parameters.is_empty()
+        {
+            return Ok(color_proof_error_result(
+                ColorProofError::LookProofParametersConflict { effect },
+            ));
+        }
+        if args.look_comparison.is_some() && args.effect_id.is_none() {
+            return Ok(color_proof_error_result(
+                ColorProofError::LookComparisonRequiresEffectId,
+            ));
+        }
+        // Resolve the stored node before any render work: an unrenderable
+        // request must cost nothing.
+        let stored_node = match args.effect_id {
+            None => None,
+            Some(effect_id) => {
+                let Some(stored) = document
+                    .clip(args.clip_id)
+                    .and_then(|clip| clip.effects.iter().find(|effect| effect.id == effect_id))
+                else {
+                    return Ok(color_proof_error_result(
+                        ColorProofError::ProofEffectNotFound {
+                            clip: args.clip_id,
+                            effect: effect_id,
+                        },
+                    ));
+                };
+                let Some(kind) = kinewright_core::classify_color_node(stored) else {
+                    return Ok(color_proof_error_result(
+                        ColorProofError::ProofEffectNotAColorNode {
+                            effect: effect_id,
+                            name: stored.name.clone(),
+                        },
+                    ));
+                };
+                // LUT nodes render through the `LutLibrary` the application
+                // publishes on the media engine (`FfmpegMediaEngine::
+                // set_lut_library`), which the proof renderer reads. An active
+                // LUT node whose asset is not published fails the render with a
+                // typed `missing_lut_asset:` error rather than a look-free frame.
+                // CC3 §5: a CC1 primary carries no bypass control, so the
+                // bypass variant is not a state this node can be put into.
+                if matches!(args.look_comparison, Some(LookComparison::Bypass))
+                    && kind == ColorNodeKind::Primary
+                {
+                    return Ok(color_proof_error_result(
+                        ColorProofError::LookBypassUnsupported {
+                            effect: effect_id,
+                            kind: kind.effect_name(),
+                        },
+                    ));
+                }
+                Some((effect_id, kind))
+            }
+        };
         let plan_args = PrimaryCorrectionPlanArgs::from(args);
         let plan = match plan_primary_correction(&document, actual_revision, &plan_args) {
             Ok(plan) => plan,
@@ -1691,6 +2444,7 @@ impl KinewrightMcp {
                 return Ok(color_proof_error_result(ColorProofError::from(error)));
             }
         };
+        let look_comparison = args.look_comparison.unwrap_or(LookComparison::After);
         if !document.color_context.is_managed_sdr_compatible() {
             return Ok(color_proof_error_result(
                 ColorProofError::PipelineIncompatible {
@@ -1825,7 +2579,7 @@ impl KinewrightMcp {
                     "content": "title",
                     "title": title_layer.title,
                     "effects": proof_effect_manifest(&title_layer.effects),
-                    "color_nodes": proof_color_node_manifest(&title_layer.effects),
+                    "color_nodes": proof_color_node_manifest(&title_layer.effects, &looks),
                     "transition": {
                         "alpha": title_layer.transition.alpha,
                         "fade_mix": title_layer.transition.fade_mix,
@@ -1925,7 +2679,7 @@ impl KinewrightMcp {
                 // serialized vector order and resolved primary values so the
                 // production layer can be reproduced from the manifest.
                 "effects": proof_effect_manifest(&video_layer.effects),
-                "color_nodes": proof_color_node_manifest(&video_layer.effects),
+                "color_nodes": proof_color_node_manifest(&video_layer.effects, &looks),
                 "transition": {
                     "alpha": video_layer.transition.alpha,
                     "fade_mix": video_layer.transition.fade_mix,
@@ -1963,38 +2717,90 @@ impl KinewrightMcp {
             }));
         }
 
-        let mut candidate = (*document).clone();
+        // CC4 §8: the BEFORE cell of a stored-node proof is the same composite
+        // with the node removed, so `bypass` can be asserted byte-identical to
+        // `before` rather than merely assumed (CC4 §3.6).
+        let scratch_document = |operations: &[Operation]| -> Result<Arc<Document>, String> {
+            if operations.is_empty() {
+                return Ok(Arc::clone(&document));
+            }
+            let mut candidate = (*document).clone();
+            apply_batch(&mut candidate, operations).map_err(|error| error.to_string())?;
+            Ok(Arc::new(candidate))
+        };
+        let (before_operations, after_operations) = match stored_node {
+            None => (Vec::new(), plan.operations.clone()),
+            Some((effect_id, _)) => {
+                let remove = vec![Operation::RemoveEffect {
+                    clip: args.clip_id,
+                    effect: effect_id,
+                }];
+                let after = match look_comparison {
+                    LookComparison::Before => remove.clone(),
+                    LookComparison::After => Vec::new(),
+                    LookComparison::Bypass => vec![Operation::SetEffectParam {
+                        clip: args.clip_id,
+                        effect: effect_id,
+                        name: kinewright_core::COLOR_NODE_BYPASS_PARAMETER.to_owned(),
+                        value: ParamValue::Integer(1),
+                    }],
+                };
+                (remove, after)
+            }
+        };
         // A request that changes nothing produces no operations at all. Core
         // rejects an empty batch, and an identical BEFORE/AFTER is the honest
         // proof of a no-op request.
-        if !plan.operations.is_empty()
-            && let Err(error) = apply_batch(&mut candidate, &plan.operations)
-        {
-            return Ok(color_proof_error_result(ColorProofError::RenderFailed {
-                stage: "candidate_document",
-                message: error.to_string(),
-            }));
-        }
+        let before_document = match scratch_document(&before_operations) {
+            Ok(document) => document,
+            Err(message) => {
+                return Ok(color_proof_error_result(ColorProofError::RenderFailed {
+                    stage: "before_document",
+                    message,
+                }));
+            }
+        };
+        let after_document = match scratch_document(&after_operations) {
+            Ok(document) => document,
+            Err(message) => {
+                return Ok(color_proof_error_result(ColorProofError::RenderFailed {
+                    stage: "candidate_document",
+                    message,
+                }));
+            }
+        };
         let before = match self
             .analysis
-            .monitor_proof_for_document(Arc::clone(&document), args.timecode)
+            .monitor_proof_for_document(Arc::clone(&before_document), args.timecode)
         {
             Ok(proof) => proof,
             Err(error) => {
-                return Ok(color_proof_error_result(ColorProofError::from_media_error(
-                    "before", error,
-                )));
+                // CC4 §2.3: an unpublished LUT asset is a typed refusal
+                // naming the asset, not a prose render failure.
+                return Ok(color_proof_error_result(
+                    ColorProofError::from_proof_render_error(
+                        "before",
+                        error,
+                        &looks,
+                        stored_node.map(|(effect, _)| effect),
+                    ),
+                ));
             }
         };
         let after = match self
             .analysis
-            .monitor_proof_for_document(Arc::new(candidate), args.timecode)
+            .monitor_proof_for_document(Arc::clone(&after_document), args.timecode)
         {
             Ok(proof) => proof,
             Err(error) => {
-                return Ok(color_proof_error_result(ColorProofError::from_media_error(
-                    "after", error,
-                )));
+                return Ok(color_proof_error_result(
+                    ColorProofError::from_proof_render_error(
+                        "after",
+                        error,
+                        &looks,
+                        stored_node.map(|(effect, _)| effect),
+                    ),
+                ));
             }
         };
         if !before.metadata.full_resolution || !after.metadata.full_resolution {
@@ -2030,6 +2836,33 @@ impl KinewrightMcp {
                 ),
             }));
         }
+        // CC4 §8: the manifest *asserts* that the bypass variant is the
+        // byte-identical twin of the node-removed variant. A difference means
+        // a bypassed node still contributed something, so the proof is refused
+        // with both hashes and both rasters rather than published with a
+        // `bypass_matches_absent: false` footnote nobody has to read.
+        let bypass_matches_absent = match (look_comparison, stored_node) {
+            (LookComparison::Bypass, Some((effect_id, _))) => {
+                let absent = kinewright_media::sha256_bytes(&before.image.pixels);
+                let bypassed = kinewright_media::sha256_bytes(&after.image.pixels);
+                if absent != bypassed
+                    || before.image.width != after.image.width
+                    || before.image.height != after.image.height
+                {
+                    return Ok(color_proof_error_result(
+                        ColorProofError::BypassNotLossless {
+                            effect: effect_id,
+                            absent_rgba8_pixels_sha256: absent,
+                            bypass_rgba8_pixels_sha256: bypassed,
+                            absent_raster: (before.image.width, before.image.height),
+                            bypass_raster: (after.image.width, after.image.height),
+                        },
+                    ));
+                }
+                Some(true)
+            }
+            _ => None,
+        };
         let objective = match color_proof_objective(&before.image, &after.image) {
             Ok(objective) => objective,
             Err(message) => {
@@ -2190,6 +3023,19 @@ impl KinewrightMcp {
                 "requested_parameters": plan.requested_parameters,
                 "resolved_parameters": plan.resolved_parameters,
             },
+            // CC4 §8: which variant the AFTER cell actually rendered, and the
+            // exact scratch operations each cell was rendered from.
+            "look_comparison": stored_node.map(|(effect_id, kind)| serde_json::json!({
+                "effect_id": effect_id.0,
+                "kind": kind.effect_name(),
+                "role": kind.role(),
+                "color_stage": kind.stage().as_str(),
+                "variant": look_comparison.as_str(),
+                "before_variant": "absent",
+                "bypass_matches_absent": bypass_matches_absent,
+                "before_operations": before_operations,
+                "after_operations": after_operations,
+            })),
             "operations": operations,
             "evidence_only": true,
             "applied": false,
@@ -2526,7 +3372,7 @@ impl KinewrightMcp {
             },
         ) {
             Ok(record) => record,
-            Err(error) => return Ok(error_text(error.to_string())),
+            Err(error) => return Ok(export_queue_error_result(error)),
         };
         let structured = serde_json::json!({
             "timeline_revision": actual_revision.0,
@@ -6832,6 +7678,35 @@ struct RelinkMediaArgs {
     allow_unverified_source: bool,
 }
 
+/// Arguments for CC4 §8 `import_lut_asset`, the only mutating media action
+/// CC4 adds.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ImportLutAssetArgs {
+    /// Exact revision returned by `get_timeline_state` or `list_look_assets`.
+    expected_revision: TimelineRevision,
+    /// Path to a 3D `.cube` file on the user's machine. The media layer
+    /// parses, hashes, and copies it into the project store before Core sees
+    /// the record; the path itself is never opened by the renderer.
+    path: PathBuf,
+    /// Optional display title. Defaults to the file's `TITLE` keyword, or its
+    /// file stem when the file declares none.
+    #[serde(default)]
+    title: Option<String>,
+}
+
+/// Arguments for CC4 §9 `convert_legacy_look`, the only agent path from a
+/// legacy compatibility stage to a managed `creative_look`.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ConvertLegacyLookArgs {
+    /// Exact revision returned by `get_timeline_state` or `get_color_context`.
+    expected_revision: TimelineRevision,
+    /// Clip carrying the legacy `look_lut` or `cube_lut`.
+    clip_id: ClipId,
+    /// The legacy effect id to convert in place. `get_color_context`'s
+    /// `legacy_look_conversions` lists every convertible node.
+    effect_id: EffectId,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ClearMediaCacheArgs {
     /// One owned cache family. Generated proxies are represented but unsupported in M41.
@@ -7472,7 +8347,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_color_context",
-            "Return the project working, monitoring, and delivery colour descriptions, source metadata, managed-profile status, ordered CC1 stages, the per-clip ordered managed colour-node stack (primary_correction, color_wheels, color_curves) with bypass and resolved values, and legacy-stage warnings at the exact timeline revision. The default status matches the executed application D65 profile assumption; use raw_only for unassumed classifier evidence. Metadata remains unchanged. Use render_color_proof for an isolated mapped BEFORE/AFTER frame.",
+            "Return the project working, monitoring, and delivery colour descriptions, source metadata, managed-profile status, ordered CC1 stages, and legacy-stage warnings at the exact timeline revision. Each clip carries its ordered managed colour-node stack across all five node kinds - technical_lut, primary_correction, color_wheels, color_curves, creative_look - with role, color_stage, stage_index, bypass, active, inactive_reason, and resolved values; LUT nodes add lut_asset_id, lut_title, lut_sha256, lut_size, lut_kind, lut_provenance, lut_availability, lut_store_path, mix_basis_points, input_encoding, and may_be_active. legacy_look_conversions lists every legacy look_lut/cube_lut with status ready, needs_import, or unconvertible, the exact operations, and a recovery_action naming convert_legacy_look. The default status matches the executed application D65 profile assumption; use raw_only for unassumed classifier evidence. Metadata remains unchanged. Use render_color_proof for an isolated mapped BEFORE/AFTER frame.",
             schema_object::<ColorContextArgs>(),
         )
         .with_annotations(read_only()),
@@ -7504,8 +8379,56 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "plan_technical_lut",
+            format!(
+                "Validate a CC4 technical_lut (input transform) request against the current revision, visual clip type, Core descriptor, and the project LUT asset table, then return one unapplied InsertEffect at a computed insert_index, or SetEffectParam operations when the clip already carries a technical_lut. The index is the first position satisfying the CC4 stage order (technical, then correction, then creative), so an ordering rejection is unreachable. Evidence-only: nothing is applied. Controls: {}.",
+                lut_node_parameter_summary(ColorNodeKind::TechnicalLut)
+            ),
+            schema_object::<LutNodePlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "plan_creative_look",
+            format!(
+                "Validate a CC4 creative_look request against the current revision, visual clip type, Core descriptor, and the project LUT asset table, then return one unapplied InsertEffect at a computed insert_index, or SetEffectParam operations when the clip already carries a creative_look (append=true stacks another). The index is the first position satisfying the CC4 stage order, so an ordering rejection is unreachable. Evidence-only: nothing is applied. Controls: {}.",
+                lut_node_parameter_summary(ColorNodeKind::CreativeLook)
+            ),
+            schema_object::<LutNodePlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "list_look_assets",
+            "Return the timeline revision, the built-in generated look catalogue (name, title, size, pinned sha256), and every project LUT asset with its id, title, sha256, kind, size, byte length, provenance, live availability, expected store path, and the clip/effect ids referencing it. Compact: no samples. Availability is runtime state and is never persisted; it reports unknown_no_store until the project is saved.",
+            schema_object::<EmptyArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "import_lut_asset",
+            "Parse, hash, and copy one 3D .cube file into this project's LUT store, then register it with one undoable AddLutAsset operation at the expected revision. This is the only path that can create a LUT asset record. It asks for confirmation before reading or writing any byte, so a refusal leaves no store file and no document change. Requires a saved project; otherwise it returns project_not_saved.",
+            schema_object::<ImportLutAssetArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(true)
+                .open_world(true),
+        ),
+        Tool::new(
+            "convert_legacy_look",
+            "Replace one legacy look_lut or cube_lut with an equivalent managed creative_look at its exact vector position, at the expected revision, as one journaled and undoable batch. A look_lut resolves its preset_token to the built-in generated asset (0 identity, 1 warm, 2 cool, 3 monochrome, 4 bleach_bypass) and registers it, reusing an already registered record with the same content hash; a cube_lut's external path is imported into the project LUT store first, which asks for confirmation before reading or writing any byte and needs a saved project. This is the only path that can submit the [AddLutAsset, ConvertLegacyLook] batch: AddLutAsset is refused on every plan path. The result is deliberately not bit-identical to the legacy stage, which clamped to [0, 1] in display space and mixed intensity in the encoded domain, so conversion is never automatic. Call get_color_context first: legacy_look_conversions lists every convertible node with its status and recovery_action.",
+            schema_object::<ConvertLegacyLookArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(false)
+                .open_world(true),
+        ),
+        Tool::new(
             "render_color_proof",
-            "Render an isolated managed-compositor CC1 BEFORE/AFTER proof at one exact project frame. The revision-bound integer primary correction is evidence-only: the live document is never mutated, and the response includes the mapped PNG cells, exact unapplied operations, resolved parameters, source/profile metadata, and objective deltas.",
+            "Render an isolated managed-compositor CC1 BEFORE/AFTER proof at one exact project frame. The revision-bound integer primary correction is evidence-only: the live document is never mutated, and the response includes the mapped PNG cells, exact unapplied operations, resolved parameters, source/profile metadata, and objective deltas. Send effect_id (with no parameters) to proof a stored managed colour node instead: the BEFORE cell is the same composite with that node removed, and look_comparison selects before, after, or bypass for the AFTER cell.",
             schema_object::<RenderColorProofArgs>(),
         )
         .with_annotations(read_only()),
@@ -8396,6 +9319,225 @@ fn error_structured(text: impl Into<String>, value: serde_json::Value) -> CallTo
     result
 }
 
+/// One typed CC4 LUT rejection in the CC1/CC2 `field`/`observed`/`allowed`/
+/// `recovery_action` shape.
+fn lut_tool_error(
+    tool: &str,
+    code: &str,
+    message: &str,
+    details: &serde_json::Value,
+) -> CallToolResult {
+    error_structured(
+        format!("{tool} rejected: {message}"),
+        serde_json::json!({
+            "code": code,
+            "message": message,
+            "details": details,
+            "applied": false,
+        }),
+    )
+}
+
+/// [`lut_tool_error`] bound to `import_lut_asset`.
+fn lut_import_error(code: &str, message: &str, details: &serde_json::Value) -> CallToolResult {
+    lut_tool_error("import_lut_asset", code, message, details)
+}
+
+/// A revision conflict on a CC4 LUT tool, in the same structured shape as
+/// every other rejection those tools return (CC4 §8).
+fn lut_revision_conflict(
+    tool: &str,
+    expected: TimelineRevision,
+    actual: TimelineRevision,
+) -> CallToolResult {
+    lut_tool_error(
+        tool,
+        "revision_conflict",
+        &format!("timeline revision conflict: expected {expected}, actual {actual}"),
+        &serde_json::json!({
+            "field": "expected_revision",
+            "observed": expected.0,
+            "allowed": actual.0,
+            "recovery_action": "Call get_timeline_state, then resend at the current timeline_revision.",
+            "expected_revision": expected.0,
+            "actual_revision": actual.0,
+        }),
+    )
+}
+
+/// The trailing keys the two media LUT formatters append, in emission order.
+///
+/// `LutStoreError` renders `"<code>: <detail>; observed=<v>; allowed=<v>"` and
+/// `LutParseError` renders `"<code>: observed=<v>; allowed=<v>; line=<n>"` (the
+/// parser also tolerates the older space-separated spelling), so
+/// a field is recognised only at a field boundary and only when followed by
+/// `=` or a space.
+const LUT_ERROR_FIELD_KEYS: [&str; 3] = ["observed", "allowed", "line"];
+
+/// The byte offset of `key` where it actually starts a field, or `None`.
+///
+/// A field starts at the beginning of the rendered remainder or immediately
+/// after a `"; "` delimiter, and is always followed by `=` or a space. Bare
+/// substring matching is wrong on both counts: `"line"` occurs inside a path
+/// component such as `baseline`, and a value may itself contain `"; "`.
+///
+/// `allow_start_anchor` is what keeps a *value* from terminating itself. The
+/// rendered remainder really can begin with a key — `LutParseError` leads with
+/// `observed` — so offset 0 is a field boundary there. Inside an already
+/// extracted value it is not: `observed=allowed=x` and
+/// `observed line 1 2 3 4` both begin with another key's name, and anchoring
+/// at 0 would cut them to the empty string.
+fn lut_error_field_start(text: &str, key: &str, allow_start_anchor: bool) -> Option<usize> {
+    let followed_by_value = |rest: &str| matches!(rest.as_bytes().first(), Some(b'=' | b' '));
+    if allow_start_anchor
+        && let Some(rest) = text.strip_prefix(key)
+        && followed_by_value(rest)
+    {
+        return Some(0);
+    }
+    let mut search = 0;
+    while let Some(offset) = text[search..].find("; ") {
+        let start = search + offset + "; ".len();
+        if let Some(rest) = text[start..].strip_prefix(key)
+            && followed_by_value(rest)
+        {
+            return Some(start);
+        }
+        search = start;
+    }
+    None
+}
+
+/// The value of one anchored `; <key>=<value>` or `; <key> <value>` field
+/// inside a rendered media LUT failure.
+///
+/// The value runs to the next *anchored* key, never to the first `"; "`, so a
+/// filesystem path containing `"; "` survives intact.
+fn lut_error_field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let start = lut_error_field_start(text, key, true)?;
+    let rest = &text[start + key.len()..];
+    let value = rest.strip_prefix('=').or_else(|| rest.strip_prefix(' '))?;
+    let end = LUT_ERROR_FIELD_KEYS
+        .iter()
+        .filter(|other| **other != key)
+        // A value's own first byte is not a field boundary: only a `"; "`
+        // delimiter inside it introduces the next field.
+        .filter_map(|other| lut_error_field_start(value, other, false))
+        // Back up over the `"; "` that introduced the next field.
+        .map(|index| index.saturating_sub("; ".len()))
+        .min()
+        .unwrap_or(value.len());
+    Some(&value[..end])
+}
+
+/// The leading detail sentence, cut at the first anchored trailing field.
+fn lut_error_detail(remainder: &str) -> &str {
+    let cut = LUT_ERROR_FIELD_KEYS
+        .iter()
+        .filter_map(|key| lut_error_field_start(remainder, key, true))
+        .map(|index| index.saturating_sub("; ".len()))
+        .min()
+        .unwrap_or(remainder.len());
+    // A parse failure leads with `observed`, so it has no detail sentence of
+    // its own; quoting the whole remainder beats an empty message.
+    if cut == 0 {
+        return remainder;
+    }
+    remainder[..cut].trim_end_matches([';', ' '])
+}
+
+/// Turn one export-queue refusal into the structured result the agent reads.
+///
+/// Lifted out of `queue_export` so each CC4 rejection keeps its full typed
+/// payload without the tool body growing past what one screen can hold.
+fn export_queue_error_result(error: ExportQueueError) -> CallToolResult {
+    match error {
+        // CC4 §2.3: a blocked look is a typed, recoverable status naming
+        // the asset, its recorded hash, the expected store path, and the
+        // nodes that would have evaluated it — never a render-time failure.
+        ExportQueueError::LutPreflight(report) => error_structured(
+            report.summary(),
+            serde_json::json!({
+                "code": "lut_preflight_blocked",
+                "message": report.summary(),
+                "details": {
+                    "field": "lut_assets",
+                    "observed": report.issues,
+                    "allowed": "every look a rendered frame could need hashes to its recorded sha256",
+                    "recovery_action": "Call list_look_assets, then restore the store file or import a replacement and retarget the node before exporting.",
+                    "checked_lut_assets": report.checked_lut_assets,
+                },
+                "applied": false,
+            }),
+        ),
+        // CC4 §2.2: "there is no project path" and "the path is published but
+        // its derived root is refused" are different failures with opposite
+        // recoveries. Collapsing them would tell an operator who already saved
+        // the project to save it again, which is a loop that cannot terminate.
+        error @ ExportQueueError::LutStoreNotSaved => error_structured(
+            format!("export blocked: {error}"),
+            serde_json::json!({
+                "code": "project_not_saved",
+                "message": "this timeline carries a LUT node that could evaluate, but the project has no saved path, so its LUT store root cannot be derived (CC4 §2.2)",
+                "details": {
+                    "field": "project_path",
+                    "observed": "project_not_saved",
+                    "allowed": "a saved project file path such as <dir>/<stem>.kinewright",
+                    "recovery_action": "Save the project first; the LUT store root is <dir>/<stem>.kinewright-assets and is derived from that path.",
+                },
+                "applied": false,
+            }),
+        ),
+        ExportQueueError::LutStoreRootInvalid { reason } => error_structured(
+            format!("export blocked: {reason}"),
+            serde_json::json!({
+                "code": "lut_store_root_invalid",
+                "message": "this timeline carries a LUT node that could evaluate, and the project is saved, but the store root derived from its path is refused (CC4 §2.2)",
+                "details": {
+                    "field": "lut_store_root",
+                    "observed": reason,
+                    "allowed": "a writable <dir>/<stem>.kinewright-assets directory that is not a symbolic link",
+                    "recovery_action": "Move the project to a directory where its <stem>.kinewright-assets store can be created, or remove the file or symlink occupying that path; the project is already saved, so saving it again cannot help.",
+                },
+                "applied": false,
+            }),
+        ),
+        error => error_text(error.to_string()),
+    }
+}
+
+/// Surface a media-layer LUT store or parser failure with its stable code.
+///
+/// `MediaError` has no LUT variant, so both the store and the `.cube` parser
+/// encode their code as a `"<code>: "` prefix behind `MediaError::Backend`'s
+/// own label, and the typed `LutStoreError`/`LutParseError` are not
+/// recoverable from the `MediaError` the store's public API returns. The parts
+/// are split back out here with anchored keys so an agent reads the same typed
+/// `field`/`observed`/`allowed`/`recovery_action` shape every other CC1-CC4
+/// rejection uses.
+fn lut_store_error_result(tool: &str, error: &kinewright_core::MediaError) -> CallToolResult {
+    let rendered = error.to_string();
+    let payload = rendered
+        .strip_prefix("media backend error: ")
+        .unwrap_or(rendered.as_str());
+    let (code, remainder) = payload
+        .split_once(": ")
+        .unwrap_or(("lut_import_failed", payload));
+    lut_tool_error(
+        tool,
+        code,
+        lut_error_detail(remainder),
+        &serde_json::json!({
+            "field": "path",
+            "observed": lut_error_field(remainder, "observed"),
+            "allowed": lut_error_field(remainder, "allowed"),
+            "line": lut_error_field(remainder, "line"),
+            "recovery_action": "Choose a 3D .cube file this build can parse, or repair the project LUT store root, then resend at the current timeline_revision.",
+            "message": rendered,
+        }),
+    )
+}
+
 /// Ordered production effect manifest for one resolved visual layer.
 ///
 /// `visual_layers_at` evaluates clip-local automation before handing effects
@@ -8411,8 +9553,11 @@ fn proof_effect_manifest(effects: &[Effect]) -> Vec<serde_json::Value> {
 /// intentionally derived from the same frame-evaluated effects, never from the
 /// raw clip vector, so bypass, activity, and resolved curve points describe the
 /// frame that was actually rendered.
-fn proof_color_node_manifest(effects: &[Effect]) -> Vec<serde_json::Value> {
-    color_node_manifest(effects)
+fn proof_color_node_manifest(
+    effects: &[Effect],
+    looks: &LookAssetContext,
+) -> Vec<serde_json::Value> {
+    color_node_manifest(effects, looks)
 }
 
 /// The complete internal capability registry, for crate-level contract tests.
@@ -10021,6 +11166,10 @@ mod tests {
         candidate_primary_exposure_milli_stops: Option<i64>,
         render_error: Option<String>,
         proof_error: Option<MediaError>,
+        /// Render a *different* frame whenever a node in the document carries
+        /// `bypass = 1`, so a bypass path that is not actually lossless can be
+        /// exercised (CC4 §8).
+        bypass_leaks_pixel: Option<u8>,
     }
 
     impl Playback for NoopMedia {
@@ -10220,6 +11369,26 @@ mod tests {
             if candidate && let Some(image) = self.candidate_thumbnail_frames.get(&t) {
                 return Ok(image.clone());
             }
+            if let Some(pixel) = self.bypass_leaks_pixel
+                && document
+                    .tracks
+                    .iter()
+                    .flat_map(|track| track.clips.iter())
+                    .any(|clip| {
+                        clip.effects.iter().any(|effect| {
+                            effect
+                                .parameters
+                                .get(kinewright_core::COLOR_NODE_BYPASS_PARAMETER)
+                                == Some(&ParamValue::Integer(1))
+                        })
+                    })
+            {
+                return Ok(RgbaImage {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![pixel; 16],
+                });
+            }
             if let Some(image) = self.thumbnail_frames.get(&t) {
                 return Ok(image.clone());
             }
@@ -10332,6 +11501,7 @@ mod tests {
             resolution: (320, 180),
             duration: TimeCode(60),
             color_context: kinewright_core::ColorContext::default(),
+            lut_assets: Vec::new(),
         };
         let media = Arc::new(NoopMedia::default());
         (Core::spawn(document).unwrap(), media.clone(), media)
@@ -10941,6 +12111,7 @@ mod tests {
             None,
             ConfirmationBroker::default(),
             false,
+            Arc::new(RwLock::new(None)),
         );
         let proof = service.frame_at(TimeCode(1)).unwrap();
         assert_eq!(proof.is_error, Some(false));
@@ -12163,6 +13334,8 @@ mod tests {
         document.validate().unwrap();
 
         let proof_args = || RenderColorProofArgs {
+            effect_id: None,
+            look_comparison: None,
             expected_revision: TimelineRevision(0),
             clip_id: ClipId(1),
             timecode: TimeCode(12),
@@ -12363,6 +13536,8 @@ mod tests {
         );
         let result = service
             .render_color_proof(&RenderColorProofArgs {
+                effect_id: None,
+                look_comparison: None,
                 expected_revision: TimelineRevision(0),
                 clip_id: ClipId(1),
                 timecode: TimeCode(12),
@@ -12760,7 +13935,6 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn cc3_planners_are_read_only_internal_planner_capabilities() {
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 66);
         let registry = KinewrightMcp::capability_tools().unwrap();
         let served = KinewrightMcp::served_tools().unwrap();
         let catalog = capabilities(&registry);
@@ -13221,6 +14395,8 @@ mod tests {
         );
         let freeze_result = freeze_service
             .render_color_proof(&RenderColorProofArgs {
+                effect_id: None,
+                look_comparison: None,
                 expected_revision: TimelineRevision(0),
                 clip_id: ClipId(1),
                 timecode: TimeCode(12),
@@ -13281,6 +14457,8 @@ mod tests {
             );
             let result = unavailable
                 .render_color_proof(&RenderColorProofArgs {
+                    effect_id: None,
+                    look_comparison: None,
                     expected_revision: TimelineRevision(0),
                     clip_id: ClipId(1),
                     timecode: TimeCode(12),
@@ -13303,6 +14481,8 @@ mod tests {
         );
         let result = incompatible
             .render_color_proof(&RenderColorProofArgs {
+                effect_id: None,
+                look_comparison: None,
                 expected_revision: TimelineRevision(0),
                 clip_id: ClipId(1),
                 timecode: TimeCode(12),
@@ -13328,6 +14508,8 @@ mod tests {
         );
         let result = failed
             .render_color_proof(&RenderColorProofArgs {
+                effect_id: None,
+                look_comparison: None,
                 expected_revision: TimelineRevision(0),
                 clip_id: ClipId(1),
                 timecode: TimeCode(12),
@@ -13359,6 +14541,8 @@ mod tests {
         );
         let result = unsupported
             .render_color_proof(&RenderColorProofArgs {
+                effect_id: None,
+                look_comparison: None,
                 expected_revision: TimelineRevision(0),
                 clip_id: ClipId(1),
                 timecode: TimeCode(12),
@@ -13519,6 +14703,8 @@ mod tests {
         );
         let result = service
             .render_color_proof(&RenderColorProofArgs {
+                effect_id: None,
+                look_comparison: None,
                 expected_revision: TimelineRevision(0),
                 clip_id: ClipId(1),
                 timecode: TimeCode(12),
@@ -14385,6 +15571,7 @@ mod tests {
             None,
             ConfirmationBroker::default(),
             true,
+            Arc::new(RwLock::new(None)),
         );
         let prepared = service
             .call_blocking(
@@ -14460,6 +15647,7 @@ mod tests {
             None,
             ConfirmationBroker::default(),
             true,
+            Arc::new(RwLock::new(None)),
         );
         let opened = service
             .call_blocking(
@@ -16033,5 +17221,1153 @@ mod tests {
             };
             assert_eq!(document.tracks.is_empty(), approve);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // CC4 §10.3.14 — import authorization, plan rejection, and proof honesty
+    // -----------------------------------------------------------------------
+
+    fn cc4_project_directory(label: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let path = std::env::temp_dir().join(format!(
+            "kinewright-cc4-{}-{label}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    /// A real, parseable `.cube` source: the pinned built-in bake, which round
+    /// trips through the production parser by construction (CC4 §2.6).
+    fn cc4_write_source_cube(directory: &Path) -> PathBuf {
+        let path = directory.join("warm.cube");
+        std::fs::write(&path, kinewright_media::BuiltinLook::Warm.canonical_text()).unwrap();
+        path
+    }
+
+    fn cc4_service_with_project(
+        broker: ConfirmationBroker,
+        project_path: Option<PathBuf>,
+    ) -> KinewrightMcp {
+        let (core, playback, analysis) = fixture();
+        KinewrightMcp::configured(
+            core,
+            playback,
+            analysis,
+            None,
+            broker,
+            true,
+            Arc::new(RwLock::new(project_path)),
+        )
+    }
+
+    fn cc4_import_request(path: &Path) -> CallToolRequestParams {
+        CallToolRequestParams::new("import_lut_asset").with_arguments(serde_json::Map::from_iter([
+            ("expected_revision".to_owned(), serde_json::json!(0)),
+            ("path".to_owned(), serde_json::json!(path)),
+        ]))
+    }
+
+    fn cc4_document_of(service: &KinewrightMcp) -> Arc<Document> {
+        let Event::QueryResult(QueryResult::Document(document)) = service
+            .core
+            .request(Command::Query(Query::Document))
+            .unwrap()
+        else {
+            panic!("expected a document query result");
+        };
+        document
+    }
+
+    /// CC4 §8, §13: the confirmation is requested before the first byte is
+    /// read, so a refused import leaves no store file and no document change.
+    #[test]
+    fn cc4_refused_import_writes_no_store_file_and_changes_no_document() {
+        let directory = cc4_project_directory("import-refused");
+        let source = cc4_write_source_cube(&directory);
+        let project = directory.join("edit.kinewright");
+        let store_root = directory.join("edit.kinewright-assets");
+        let broker = ConfirmationBroker::with_timeout(Duration::from_secs(2));
+        let service = cc4_service_with_project(broker.clone(), Some(project));
+
+        let result = invoke_in_background(service.clone(), cc4_import_request(&source));
+        let request = wait_for_request(&broker);
+        assert_eq!(request.tool_name, "import_lut_asset");
+        assert!(
+            request.description.contains("edit.kinewright-assets"),
+            "the operator is told exactly where the bytes would be written: {}",
+            request.description
+        );
+        assert!(broker.reject(request.id, "rejected by user"));
+
+        let result = result
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "import_refused");
+        assert_eq!(structured["details"]["store_file_written"], false);
+        assert_eq!(structured["details"]["document_changed"], false);
+
+        assert!(
+            !store_root.exists(),
+            "a refused import must not create the project LUT store"
+        );
+        let document = cc4_document_of(&service);
+        assert!(document.lut_assets.is_empty());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// CC4 §2.4: an approved import parses, hashes, stores, and registers the
+    /// asset as one undoable `AddLutAsset`.
+    #[test]
+    fn cc4_approved_import_registers_the_hashed_asset() {
+        let directory = cc4_project_directory("import-approved");
+        let source = cc4_write_source_cube(&directory);
+        let project = directory.join("edit.kinewright");
+        let broker = ConfirmationBroker::with_timeout(Duration::from_secs(2));
+        let service = cc4_service_with_project(broker.clone(), Some(project));
+
+        let result = invoke_in_background(service.clone(), cc4_import_request(&source));
+        let request = wait_for_request(&broker);
+        assert!(broker.approve(request.id));
+        let result = result
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.is_error, Some(false), "{:?}", result.content);
+
+        let expected_sha = kinewright_media::BuiltinLook::Warm.pinned_sha256();
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["lut_asset"]["lut_asset_id"], 1);
+        assert_eq!(structured["lut_asset"]["sha256"], expected_sha);
+        assert_eq!(structured["lut_asset"]["kind"], "cube_3d");
+        assert_eq!(structured["applied"], true);
+
+        let stored = directory
+            .join("edit.kinewright-assets")
+            .join("luts")
+            .join(format!("{expected_sha}.cube"));
+        assert!(
+            stored.is_file(),
+            "the hashed bytes land in the project store"
+        );
+
+        let document = cc4_document_of(&service);
+        assert_eq!(document.lut_assets.len(), 1);
+        assert_eq!(document.lut_assets[0].sha256, expected_sha);
+
+        // The asset is immediately visible to the read-only look surface with
+        // a verified availability, because the store root is now known.
+        let listed = service.list_look_assets().unwrap();
+        let listed = listed.structured_content.unwrap();
+        assert_eq!(listed["store_root_known"], true);
+        assert_eq!(listed["assets"][0]["availability"]["kind"], "verified");
+        assert_eq!(listed["assets"][0]["referenced_by"], serde_json::json!([]));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// CC4 §2.2: a project that has never been saved has no store root, and
+    /// the refusal is typed rather than an invented temporary location.
+    #[test]
+    fn cc4_import_requires_a_saved_project() {
+        let directory = cc4_project_directory("import-unsaved");
+        let source = cc4_write_source_cube(&directory);
+        let broker = ConfirmationBroker::with_timeout(Duration::from_millis(50));
+        let service = cc4_service_with_project(broker, None);
+
+        let result = service.call_blocking(cc4_import_request(&source)).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "project_not_saved");
+        assert_eq!(structured["details"]["field"], "project_path");
+        assert!(
+            structured["details"]["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("Save the project")
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A service whose clip 1 carries exactly `effects`.
+    fn cc4_legacy_service(
+        effects: Vec<Effect>,
+        broker: ConfirmationBroker,
+        project_path: Option<PathBuf>,
+    ) -> KinewrightMcp {
+        let (seed_core, _, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed)) =
+            seed_core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut document = (*seed).clone();
+        document.tracks[0].clips[0].effects = effects;
+        document
+            .validate()
+            .expect("the seeded legacy stack is valid");
+        let media = Arc::new(NoopMedia::default());
+        KinewrightMcp::configured(
+            Core::spawn(document).unwrap(),
+            media.clone(),
+            media,
+            None,
+            broker,
+            true,
+            Arc::new(RwLock::new(project_path)),
+        )
+    }
+
+    fn cc4_look_lut(id: u64, preset_token: i64, intensity_percent: i64) -> Effect {
+        Effect {
+            id: EffectId(id),
+            name: "look_lut".to_owned(),
+            parameters: BTreeMap::from([
+                ("preset_token".to_owned(), ParamValue::Integer(preset_token)),
+                (
+                    "intensity_percent".to_owned(),
+                    ParamValue::Integer(intensity_percent),
+                ),
+            ]),
+            keyframes: BTreeMap::new(),
+        }
+    }
+
+    fn cc4_convert_request(revision: u64, clip: u64, effect: u64) -> CallToolRequestParams {
+        CallToolRequestParams::new("convert_legacy_look").with_arguments(
+            serde_json::Map::from_iter([
+                ("expected_revision".to_owned(), serde_json::json!(revision)),
+                ("clip_id".to_owned(), serde_json::json!(clip)),
+                ("effect_id".to_owned(), serde_json::json!(effect)),
+            ]),
+        )
+    }
+
+    /// CC4 §8, §9: the published `[AddLutAsset, ConvertLegacyLook]` batch is
+    /// only `ready` because one tool can submit it. The built-in is registered
+    /// exactly once; a second conversion of the same look reuses that record
+    /// rather than allocating a duplicate id for identical bytes.
+    #[test]
+    fn cc4_convert_legacy_look_registers_the_builtin_once_and_reuses_the_record() {
+        let service = cc4_legacy_service(
+            vec![cc4_look_lut(5, 1, 50), cc4_look_lut(6, 1, 100)],
+            ConfirmationBroker::default(),
+            None,
+        );
+
+        // The evidence surface names the tool that can actually submit it.
+        let context = service
+            .call_blocking(CallToolRequestParams::new("get_color_context"))
+            .unwrap();
+        let context = context.structured_content.unwrap();
+        let conversions = context["legacy_look_conversions"].as_array().unwrap();
+        assert_eq!(conversions.len(), 2);
+        assert_eq!(conversions[0]["status"], "ready");
+        assert_eq!(conversions[0]["builtin_name"], "warm");
+        assert_eq!(conversions[0]["mix_basis_points"], 5_000);
+        assert!(
+            conversions[0]["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("convert_legacy_look"),
+            "{}",
+            conversions[0]
+        );
+
+        let first = service.call_blocking(cc4_convert_request(0, 1, 5)).unwrap();
+        assert_eq!(first.is_error, Some(false), "{:?}", first.content);
+        let first = first.structured_content.unwrap();
+        assert_eq!(first["applied"], true);
+        assert_eq!(first["bit_identical_to_legacy"], false);
+        assert_eq!(first["conversion"]["source"], "builtin");
+        assert_eq!(first["conversion"]["reused_existing_asset"], false);
+        assert_eq!(first["conversion"]["store_file_written"], false);
+        assert_eq!(first["conversion"]["mix_basis_points"], 5_000);
+        assert_eq!(first["operations"].as_array().unwrap().len(), 2);
+        // A built-in needs no store, so its availability is still verified.
+        assert_eq!(first["lut_asset"]["availability"]["kind"], "verified");
+        assert_eq!(
+            first["lut_asset"]["recovery_action"],
+            serde_json::Value::Null
+        );
+
+        let document = cc4_document_of(&service);
+        assert_eq!(document.lut_assets.len(), 1);
+        assert_eq!(
+            document.lut_assets[0].sha256,
+            kinewright_media::BuiltinLook::Warm.pinned_sha256()
+        );
+        let effects = &document.tracks[0].clips[0].effects;
+        assert_eq!(effects[0].name, "creative_look");
+        assert_eq!(effects[0].id, EffectId(5));
+        assert_eq!(
+            effects[0].parameters["mix_basis_points"],
+            ParamValue::Integer(5_000)
+        );
+        assert_eq!(effects[1].name, "look_lut");
+
+        let second = service.call_blocking(cc4_convert_request(1, 1, 6)).unwrap();
+        assert_eq!(second.is_error, Some(false), "{:?}", second.content);
+        let second = second.structured_content.unwrap();
+        assert_eq!(second["conversion"]["reused_existing_asset"], true);
+        assert_eq!(second["conversion"]["lut_asset_id"], 1);
+        assert_eq!(
+            second["operations"].as_array().unwrap().len(),
+            1,
+            "the registered record is reused, so no second AddLutAsset is emitted"
+        );
+
+        let document = cc4_document_of(&service);
+        assert_eq!(
+            document.lut_assets.len(),
+            1,
+            "identical bytes are one content-addressed asset"
+        );
+        assert!(
+            document.tracks[0].clips[0]
+                .effects
+                .iter()
+                .all(|effect| effect.name == "creative_look")
+        );
+    }
+
+    /// CC4 §8: the conversion is revision-gated and fails closed.
+    #[test]
+    fn cc4_convert_legacy_look_fails_closed_on_a_stale_revision() {
+        let service = cc4_legacy_service(
+            vec![cc4_look_lut(5, 2, 100)],
+            ConfirmationBroker::default(),
+            None,
+        );
+        let stale = service.call_blocking(cc4_convert_request(9, 1, 5)).unwrap();
+        assert_eq!(stale.is_error, Some(true));
+        let stale = stale.structured_content.unwrap();
+        assert_eq!(stale["code"], "revision_conflict");
+        assert_eq!(stale["details"]["field"], "expected_revision");
+        assert_eq!(stale["details"]["observed"], 9);
+        assert_eq!(stale["details"]["allowed"], 0);
+        assert_eq!(stale["applied"], false);
+
+        let document = cc4_document_of(&service);
+        assert!(document.lut_assets.is_empty());
+        assert_eq!(document.tracks[0].clips[0].effects[0].name, "look_lut");
+    }
+
+    /// CC4 §8, §13: a `cube_lut` conversion imports through the same
+    /// confirmation path as `import_lut_asset`, so a refusal leaves no store
+    /// file and no document change.
+    #[test]
+    fn cc4_refused_legacy_cube_conversion_writes_nothing() {
+        let directory = cc4_project_directory("convert-refused");
+        let source = cc4_write_source_cube(&directory);
+        let project = directory.join("edit.kinewright");
+        let store_root = directory.join("edit.kinewright-assets");
+        let broker = ConfirmationBroker::with_timeout(Duration::from_secs(2));
+        let service = cc4_legacy_service(
+            vec![Effect {
+                id: EffectId(5),
+                name: "cube_lut".to_owned(),
+                parameters: BTreeMap::from([(
+                    "path".to_owned(),
+                    ParamValue::Text(source.display().to_string()),
+                )]),
+                keyframes: BTreeMap::new(),
+            }],
+            broker.clone(),
+            Some(project),
+        );
+
+        let result = invoke_in_background(service.clone(), cc4_convert_request(0, 1, 5));
+        let request = wait_for_request(&broker);
+        assert_eq!(request.tool_name, "convert_legacy_look");
+        assert!(
+            request.description.contains("edit.kinewright-assets"),
+            "the operator is told exactly where the bytes would be written: {}",
+            request.description
+        );
+        assert!(broker.reject(request.id, "rejected by user"));
+
+        let result = result
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "import_refused");
+        assert_eq!(structured["details"]["store_file_written"], false);
+        assert_eq!(structured["details"]["document_changed"], false);
+
+        assert!(
+            !store_root.exists(),
+            "a refused conversion must not create the project LUT store"
+        );
+        let document = cc4_document_of(&service);
+        assert!(document.lut_assets.is_empty());
+        assert_eq!(document.tracks[0].clips[0].effects[0].name, "cube_lut");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// CC4 §8: an approved `cube_lut` conversion imports the bytes and
+    /// converts in one batch.
+    #[test]
+    fn cc4_approved_legacy_cube_conversion_imports_and_converts() {
+        let directory = cc4_project_directory("convert-approved");
+        let source = cc4_write_source_cube(&directory);
+        let project = directory.join("edit.kinewright");
+        let broker = ConfirmationBroker::with_timeout(Duration::from_secs(2));
+        let service = cc4_legacy_service(
+            vec![Effect {
+                id: EffectId(5),
+                name: "cube_lut".to_owned(),
+                parameters: BTreeMap::from([
+                    (
+                        "path".to_owned(),
+                        ParamValue::Text(source.display().to_string()),
+                    ),
+                    ("intensity_percent".to_owned(), ParamValue::Integer(40)),
+                ]),
+                keyframes: BTreeMap::new(),
+            }],
+            broker.clone(),
+            Some(project),
+        );
+
+        let result = invoke_in_background(service.clone(), cc4_convert_request(0, 1, 5));
+        let request = wait_for_request(&broker);
+        assert!(broker.approve(request.id));
+        let result = result
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.is_error, Some(false), "{:?}", result.content);
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["conversion"]["source"], "imported");
+        assert_eq!(structured["conversion"]["store_file_written"], true);
+        assert_eq!(structured["conversion"]["mix_basis_points"], 4_000);
+        assert_eq!(structured["lut_asset"]["availability"]["kind"], "verified");
+
+        let expected_sha = kinewright_media::BuiltinLook::Warm.pinned_sha256();
+        assert!(
+            directory
+                .join("edit.kinewright-assets")
+                .join("luts")
+                .join(format!("{expected_sha}.cube"))
+                .is_file()
+        );
+        let document = cc4_document_of(&service);
+        assert_eq!(document.lut_assets.len(), 1);
+        assert_eq!(document.tracks[0].clips[0].effects[0].name, "creative_look");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// CC4 §8: a node that cannot be converted carries the full typed
+    /// rejection shape, not a bare message.
+    ///
+    /// The document-level `unconvertible` statuses (`invalid_preset_token`,
+    /// `missing_external_lut_path`) are only reachable from a hand-edited
+    /// project - Core rejects both at `validate` - so they are covered as a
+    /// unit on `legacy_look_conversions_value` in `color_status`.
+    #[test]
+    fn cc4_unconvertible_legacy_look_reports_field_observed_and_allowed() {
+        let service = cc4_legacy_service(
+            vec![Effect {
+                id: EffectId(6),
+                name: "primary_correction".to_owned(),
+                parameters: BTreeMap::from([(
+                    "exposure_milli_stops".to_owned(),
+                    ParamValue::Integer(100),
+                )]),
+                keyframes: BTreeMap::new(),
+            }],
+            ConfirmationBroker::default(),
+            None,
+        );
+
+        // A managed node is not a legacy look, and says so with its own shape.
+        let refused = service.call_blocking(cc4_convert_request(0, 1, 6)).unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        let refused = refused.structured_content.unwrap();
+        assert_eq!(refused["code"], "not_a_legacy_look");
+        assert_eq!(refused["details"]["field"], "effect_id");
+        assert_eq!(refused["details"]["observed"], "primary_correction");
+        assert_eq!(
+            refused["details"]["allowed"],
+            serde_json::json!(["look_lut", "cube_lut"])
+        );
+        assert!(refused["details"]["recovery_action"].is_string());
+    }
+
+    /// CC4 §2.1: importing the same bytes twice is the same asset, so the
+    /// second import reuses the record instead of allocating a second id.
+    #[test]
+    fn cc4_import_lut_asset_reuses_a_record_with_the_same_content_hash() {
+        let directory = cc4_project_directory("import-dedup");
+        let source = cc4_write_source_cube(&directory);
+        let copy = directory.join("warm-copy.cube");
+        std::fs::copy(&source, &copy).unwrap();
+        let project = directory.join("edit.kinewright");
+        let broker = ConfirmationBroker::with_timeout(Duration::from_secs(2));
+        let service = cc4_service_with_project(broker.clone(), Some(project));
+
+        let first = invoke_in_background(service.clone(), cc4_import_request(&source));
+        assert!(broker.approve(wait_for_request(&broker).id));
+        let first = first.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        assert_eq!(first.is_error, Some(false));
+        assert_eq!(
+            first.structured_content.unwrap()["reused_existing_asset"],
+            false
+        );
+
+        // A different path, the same bytes: still one asset.
+        let request = CallToolRequestParams::new("import_lut_asset").with_arguments(
+            serde_json::Map::from_iter([
+                ("expected_revision".to_owned(), serde_json::json!(1)),
+                ("path".to_owned(), serde_json::json!(copy)),
+            ]),
+        );
+        let second = invoke_in_background(service.clone(), request);
+        assert!(broker.approve(wait_for_request(&broker).id));
+        let second = second
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.is_error, Some(false), "{:?}", second.content);
+        let second = second.structured_content.unwrap();
+        assert_eq!(second["reused_existing_asset"], true);
+        assert_eq!(second["applied"], false);
+        assert_eq!(second["lut_asset"]["lut_asset_id"], 1);
+
+        let document = cc4_document_of(&service);
+        assert_eq!(document.lut_assets.len(), 1);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// CC4 §8: every `import_lut_asset` rejection is structured, including the
+    /// revision conflict.
+    #[test]
+    fn cc4_import_lut_asset_revision_conflict_is_structured() {
+        let directory = cc4_project_directory("import-conflict");
+        let source = cc4_write_source_cube(&directory);
+        let project = directory.join("edit.kinewright");
+        let broker = ConfirmationBroker::with_timeout(Duration::from_millis(50));
+        let service = cc4_service_with_project(broker, Some(project));
+
+        let request = CallToolRequestParams::new("import_lut_asset").with_arguments(
+            serde_json::Map::from_iter([
+                ("expected_revision".to_owned(), serde_json::json!(7)),
+                ("path".to_owned(), serde_json::json!(source)),
+            ]),
+        );
+        let result = service.call_blocking(request).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "revision_conflict");
+        assert_eq!(structured["details"]["field"], "expected_revision");
+        assert_eq!(structured["details"]["observed"], 7);
+        assert_eq!(structured["details"]["allowed"], 0);
+        assert!(
+            structured["details"]["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("get_timeline_state")
+        );
+        assert!(
+            !directory.join("edit.kinewright-assets").exists(),
+            "a conflict is detected before the store is touched"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// CC4 §2.3: a built-in is `verified` from this binary's own bake, so an
+    /// unsaved project reports it honestly instead of `unknown_no_store`.
+    /// Only an *imported* asset needs a store to resolve.
+    #[test]
+    fn cc4_builtin_availability_needs_no_store_root() {
+        let (seed_core, _, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed)) =
+            seed_core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut document = (*seed).clone();
+        let mut stale =
+            kinewright_media::BuiltinLook::Cool.to_lut_asset(kinewright_core::LutAssetId(2));
+        stale.sha256 = "0".repeat(64);
+        document.lut_assets = vec![
+            kinewright_media::BuiltinLook::Warm.to_lut_asset(kinewright_core::LutAssetId(1)),
+            stale,
+            LutAsset {
+                id: kinewright_core::LutAssetId(3),
+                sha256: "a".repeat(64),
+                title: "Imported".to_owned(),
+                kind: kinewright_core::LutAssetKind::Cube3d,
+                size: 2,
+                byte_len: 64,
+                domain_min_millionths: [0; 3],
+                domain_max_millionths: [1_000_000; 3],
+                source: kinewright_core::LutAssetSource::Imported {
+                    source_path: "vendor.cube".to_owned(),
+                },
+            },
+        ];
+        document
+            .validate()
+            .expect("the seeded asset table is valid");
+        let media = Arc::new(NoopMedia::default());
+        let service = KinewrightMcp::configured(
+            Core::spawn(document).unwrap(),
+            media.clone(),
+            media,
+            None,
+            ConfirmationBroker::default(),
+            true,
+            Arc::new(RwLock::new(None)),
+        );
+
+        let listed = service.list_look_assets().unwrap();
+        let listed = listed.structured_content.unwrap();
+        assert_eq!(listed["store_root_known"], false);
+        assert_eq!(listed["assets"][0]["availability"]["kind"], "verified");
+        assert_eq!(
+            listed["assets"][0]["recovery_action"],
+            serde_json::Value::Null
+        );
+        assert_eq!(listed["assets"][1]["availability"]["kind"], "changed");
+        assert!(
+            listed["assets"][1]["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("sha256")
+        );
+        assert_eq!(
+            listed["assets"][2]["availability"]["kind"], "unknown_no_store",
+            "only imported bytes need a store to resolve"
+        );
+        assert!(
+            listed["assets"][2]["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("Save the project")
+        );
+    }
+
+    /// CC4 §8: the manifest asserts bypass identity, so a bypass variant that
+    /// is not the byte-identical twin of the node-removed variant refuses the
+    /// proof instead of publishing `bypass_matches_absent: false`.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn cc4_bypass_that_is_not_lossless_refuses_the_proof() {
+        let (seed_core, _, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed)) =
+            seed_core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut document = (*seed).clone();
+        document.media_pool[0].color_description = ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: ColorMatrix::Bt709,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: ColorProvenance::StreamMetadata,
+        };
+        document.lut_assets =
+            vec![kinewright_media::BuiltinLook::Warm.to_lut_asset(kinewright_core::LutAssetId(1))];
+        document.tracks[0].clips[0].effects = vec![Effect {
+            id: EffectId(9),
+            name: "creative_look".to_owned(),
+            parameters: BTreeMap::from([("lut_asset_id".to_owned(), ParamValue::Integer(1))]),
+            keyframes: BTreeMap::new(),
+        }];
+        document
+            .validate()
+            .expect("the CC4 stack is a valid document");
+        let media = Arc::new(NoopMedia {
+            bypass_leaks_pixel: Some(0x7f),
+            ..NoopMedia::default()
+        });
+        let service = KinewrightMcp::new(
+            Core::spawn(document).unwrap(),
+            media.clone(),
+            media,
+            ConfirmationBroker::default(),
+        );
+
+        let refused = service
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(1),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+                effect_id: Some(EffectId(9)),
+                look_comparison: Some(LookComparison::Bypass),
+            })
+            .unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        let structured = refused.structured_content.unwrap();
+        assert_eq!(structured["code"], "bypass_not_lossless");
+        assert_eq!(structured["details"]["field"], "look_comparison");
+        assert_eq!(structured["details"]["effect_id"], 9);
+        let observed = &structured["details"]["observed"];
+        assert_ne!(
+            observed["absent_rgba8_pixels_sha256"],
+            observed["bypass_rgba8_pixels_sha256"]
+        );
+        assert_eq!(observed["absent_raster"]["width"], 320);
+        assert_eq!(observed["bypass_raster"]["height"], 180);
+        assert!(structured["details"]["recovery_action"].is_string());
+
+        // The same node compares cleanly when the two variants agree.
+        let clean_media = Arc::new(NoopMedia::default());
+        let (seed_core, _, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed)) =
+            seed_core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut clean = (*seed).clone();
+        clean.media_pool[0].color_description = document_color_description_for_managed_proof();
+        clean.lut_assets =
+            vec![kinewright_media::BuiltinLook::Warm.to_lut_asset(kinewright_core::LutAssetId(1))];
+        clean.tracks[0].clips[0].effects = vec![Effect {
+            id: EffectId(9),
+            name: "creative_look".to_owned(),
+            parameters: BTreeMap::from([("lut_asset_id".to_owned(), ParamValue::Integer(1))]),
+            keyframes: BTreeMap::new(),
+        }];
+        clean.validate().unwrap();
+        let clean_service = KinewrightMcp::new(
+            Core::spawn(clean).unwrap(),
+            clean_media.clone(),
+            clean_media,
+            ConfirmationBroker::default(),
+        );
+        let proof = clean_service
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(1),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+                effect_id: Some(EffectId(9)),
+                look_comparison: Some(LookComparison::Bypass),
+            })
+            .unwrap();
+        assert_eq!(proof.is_error, Some(false), "{:?}", proof.content);
+        assert_eq!(
+            proof.structured_content.unwrap()["look_comparison"]["bypass_matches_absent"],
+            true
+        );
+    }
+
+    fn document_color_description_for_managed_proof() -> ColorDescription {
+        ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: ColorMatrix::Bt709,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: ColorProvenance::StreamMetadata,
+        }
+    }
+
+    /// CC4 §8: the media LUT failure text is parsed with anchored field keys.
+    ///
+    /// A bare substring search matched `line` inside a path component such as
+    /// `baseline`, and splitting on the first `"; "` truncated any value that
+    /// contained one - both of which a real filesystem path can produce.
+    #[test]
+    fn lut_error_fields_are_anchored_and_survive_semicolons_in_values() {
+        let store = kinewright_core::MediaError::Backend(
+            "lut_store_root_invalid: the derived store root is not a directory; observed=/home/e/baseline; takes/edit.kinewright-assets; allowed=a writable directory".to_owned(),
+        );
+        let result = lut_store_error_result("import_lut_asset", &store);
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "lut_store_root_invalid");
+        assert_eq!(
+            structured["message"],
+            "the derived store root is not a directory"
+        );
+        assert_eq!(
+            structured["details"]["observed"], "/home/e/baseline; takes/edit.kinewright-assets",
+            "the value runs to the next anchored key, not to the first \"; \""
+        );
+        assert_eq!(structured["details"]["allowed"], "a writable directory");
+        assert_eq!(
+            structured["details"]["line"],
+            serde_json::Value::Null,
+            "`baseline` is not a `line` field"
+        );
+
+        // The parser's own shape, which leads with `observed` and ends with a
+        // 1-based line number.
+        let parse = kinewright_core::MediaError::Backend(
+            "invalid_lut_sample: observed 1.0 2.0; allowed three floats in 0..=1; line 42"
+                .to_owned(),
+        );
+        let structured = lut_store_error_result("import_lut_asset", &parse)
+            .structured_content
+            .unwrap();
+        assert_eq!(structured["code"], "invalid_lut_sample");
+        assert_eq!(structured["details"]["observed"], "1.0 2.0");
+        assert_eq!(structured["details"]["allowed"], "three floats in 0..=1");
+        assert_eq!(structured["details"]["line"], "42");
+    }
+
+    /// CC4 §8: a *value* that begins with another field's key is still a
+    /// value.
+    ///
+    /// The anchor at offset 0 exists for the rendered remainder, which really
+    /// can lead with a key. Applying it while scanning inside an extracted
+    /// value made `observed=allowed=x` and `observed line 1 2 3 4` terminate
+    /// immediately and report the empty string.
+    #[test]
+    fn a_lut_error_value_that_begins_with_another_key_is_not_truncated() {
+        // The `.cube` sample the parser rejected literally begins with the
+        // word `line`, and the trailing `line` field still has to be found.
+        let parse = kinewright_core::MediaError::Backend(
+            "invalid_lut_sample: observed line 1 2 3 4; allowed three floats in 0..=1; line 12"
+                .to_owned(),
+        );
+        let structured = lut_store_error_result("import_lut_asset", &parse)
+            .structured_content
+            .unwrap();
+        assert_eq!(structured["details"]["observed"], "line 1 2 3 4");
+        assert_eq!(structured["details"]["allowed"], "three floats in 0..=1");
+        assert_eq!(structured["details"]["line"], "12");
+
+        // The unified `; <key>=<value>` shape, with a value that begins with
+        // the next key's name.
+        let store = kinewright_core::MediaError::Backend(
+            "lut_store_root_invalid: the derived store root is a symbolic link; observed=allowed=x; allowed=a writable directory; line=3"
+                .to_owned(),
+        );
+        let structured = lut_store_error_result("import_lut_asset", &store)
+            .structured_content
+            .unwrap();
+        assert_eq!(
+            structured["message"],
+            "the derived store root is a symbolic link"
+        );
+        assert_eq!(structured["details"]["observed"], "allowed=x");
+        assert_eq!(structured["details"]["allowed"], "a writable directory");
+        assert_eq!(structured["details"]["line"], "3");
+    }
+
+    /// The anchor rules in isolation, so the two callers cannot drift apart.
+    #[test]
+    fn lut_error_field_anchors_only_at_a_field_boundary() {
+        assert_eq!(
+            lut_error_field_start("observed=x", "observed", true),
+            Some(0)
+        );
+        assert_eq!(lut_error_field_start("observed=x", "observed", false), None);
+        assert_eq!(
+            lut_error_field_start("a; observed=x", "observed", false),
+            Some(3)
+        );
+        // `baseline` is not a `line` field, at either anchor.
+        assert_eq!(lut_error_field_start("baseline=x", "line", true), None);
+        assert_eq!(lut_error_field_start("a; baseline=x", "line", false), None);
+        // A leading detail sentence survives a value that starts with a key.
+        assert_eq!(
+            lut_error_detail("observed line 1 2 3 4; allowed three; line 12"),
+            "observed line 1 2 3 4; allowed three; line 12",
+            "a remainder that leads with a key has no detail sentence of its own"
+        );
+    }
+
+    /// CC4 §8: `AddLutAsset` is blocked in all four places, exactly as
+    /// `RelinkAsset` is, because only `import_lut_asset` can write the store.
+    #[test]
+    fn cc4_add_lut_asset_is_never_reachable_through_a_plan_or_generated_tool() {
+        assert!(
+            !operation_tools()
+                .unwrap()
+                .iter()
+                .any(|definition| definition.tool.name == "add_lut_asset"),
+            "the generated add_lut_asset operation tool must not exist"
+        );
+        assert!(crate::schema::UNGENERATED_OPERATION_VARIANTS.contains(&"AddLutAsset"));
+
+        let (core, playback, analysis) = fixture();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let asset =
+            kinewright_media::BuiltinLook::Warm.to_lut_asset(kinewright_core::LutAssetId(1));
+        let operations = vec![Operation::AddLutAsset {
+            asset: asset.clone(),
+        }];
+
+        let applied = service
+            .apply_edit_plan(TimelineRevision(0), &operations)
+            .unwrap();
+        assert_eq!(applied.is_error, Some(true));
+        assert!(
+            applied.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("import_lut_asset")
+        );
+
+        let (revision, document) = service.snapshot().unwrap();
+        let prepared = PreparedPlanStore::default()
+            .prepare_operations(revision, revision, &document, operations);
+        let error = prepared.expect_err("a prepared plan cannot register a LUT asset");
+        assert!(error.to_string().contains("import_lut_asset"), "{error}");
+
+        // The dispatcher refuses the name outright rather than reporting an
+        // unknown tool, so the recovery path is stated.
+        let dispatched = service
+            .call_blocking(CallToolRequestParams::new("add_lut_asset").with_arguments(
+                serde_json::Map::from_iter([(
+                    "expected_revision".to_owned(),
+                    serde_json::json!(0),
+                )]),
+            ))
+            .unwrap();
+        assert_eq!(dispatched.is_error, Some(true));
+        assert!(
+            dispatched.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("import_lut_asset")
+        );
+        assert!(document.lut_assets.is_empty());
+    }
+
+    /// CC4 §8 / M36: the two LUT descriptors never enumerate the `2^53` asset
+    /// id range, and both planner tools stay well under a kilobyte.
+    #[test]
+    fn cc4_lut_tool_descriptors_stay_compact() {
+        for kind in [ColorNodeKind::TechnicalLut, ColorNodeKind::CreativeLook] {
+            let summary = lut_node_parameter_summary(kind);
+            assert!(
+                summary.len() < 1_024,
+                "{} summary is {} bytes",
+                kind.effect_name(),
+                summary.len()
+            );
+            assert!(summary.contains("see list_look_assets"));
+            assert!(!summary.contains("9007199254740991"));
+            assert!(summary.contains("0 display709, 1 linear, 2 grade709"));
+        }
+        let registry = KinewrightMcp::capability_tools().unwrap();
+        for name in ["plan_technical_lut", "plan_creative_look"] {
+            let tool = registry
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} must be an internal capability"));
+            let description = tool.description.as_deref().unwrap_or_default();
+            assert!(
+                description.len() < 1_024,
+                "{name} description is {} bytes",
+                description.len()
+            );
+            assert!(!description.contains("9007199254740991"));
+            assert_eq!(
+                tool.annotations.as_ref().unwrap().read_only_hint,
+                Some(true)
+            );
+        }
+        // The generated effect documentation shares the compact form, so the
+        // range never reaches an AddEffect/SetEffectParam schema either.
+        let add_effect = operation_tools()
+            .unwrap()
+            .into_iter()
+            .find(|definition| definition.tool.name == "add_effect")
+            .unwrap();
+        let description = add_effect.tool.description.as_deref().unwrap_or_default();
+        assert!(description.contains("lut_asset_id (project LUT asset id; see list_look_assets"));
+        assert!(!description.contains("9007199254740991"));
+    }
+
+    /// CC4 §8, §9: the CC4 tools join the internal registry as read-only
+    /// planners/inspectors plus two confirmed destructive actions, and none of
+    /// them reaches the seven-tool served surface.
+    #[test]
+    fn cc4_agent_surface_registers_the_look_capabilities() {
+        let registry = KinewrightMcp::capability_tools().unwrap();
+        let served = KinewrightMcp::served_tools().unwrap();
+        let catalog = capabilities(&registry);
+        for (name, kind) in [
+            ("plan_technical_lut", CapabilityKind::Planner),
+            ("plan_creative_look", CapabilityKind::Planner),
+            ("list_look_assets", CapabilityKind::Inspector),
+            ("import_lut_asset", CapabilityKind::Action),
+            // CC4 §9: the hand-written conversion capability replaces the
+            // generated `ConvertLegacyLook` tool, whose published batch was
+            // unsubmittable whenever it opened with `AddLutAsset`.
+            ("convert_legacy_look", CapabilityKind::Action),
+        ] {
+            assert!(
+                registry.iter().any(|tool| tool.name == name),
+                "{name} must be an internal capability"
+            );
+            assert!(
+                !served.iter().any(|tool| tool.name == name),
+                "{name} must stay off the served surface"
+            );
+            let descriptor = catalog
+                .iter()
+                .find(|descriptor| descriptor.name == name)
+                .unwrap_or_else(|| panic!("{name} must appear in the capability directory"));
+            assert_eq!(descriptor.kind, kind);
+        }
+        for name in ["import_lut_asset", "convert_legacy_look"] {
+            let action = registry.iter().find(|tool| tool.name == name).unwrap();
+            let annotations = action.annotations.as_ref().unwrap();
+            assert_eq!(annotations.read_only_hint, Some(false), "{name}");
+            assert_eq!(annotations.destructive_hint, Some(true), "{name}");
+        }
+        assert_eq!(
+            registry
+                .iter()
+                .filter(|tool| tool.name == "convert_legacy_look")
+                .count(),
+            1,
+            "the hand-written capability must replace the generated operation tool, not duplicate its name"
+        );
+        assert!(
+            crate::runtime::is_invocable_capability("convert_legacy_look"),
+            "conversion must be reachable through the compact dispatcher"
+        );
+    }
+
+    /// CC4 §8: `render_color_proof` refuses the argument combinations it
+    /// cannot answer honestly, and a LUT node is *not* one of them: it is
+    /// carried all the way to the renderer, which fails on its own terms when
+    /// it has no lattice.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn cc4_render_color_proof_validates_look_arguments_and_renders_lut_nodes() {
+        let (core, playback, analysis) = fixture();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+
+        let conflict = service
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(1),
+                profile_assumption: None,
+                parameters: BTreeMap::from([("exposure_milli_stops".to_owned(), 100)]),
+                effect_id: Some(EffectId(1)),
+                look_comparison: None,
+            })
+            .unwrap();
+        assert_eq!(conflict.is_error, Some(true));
+        assert_eq!(
+            conflict.structured_content.unwrap()["code"],
+            "look_proof_parameters_conflict"
+        );
+
+        let orphan = service
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(1),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+                effect_id: None,
+                look_comparison: Some(LookComparison::Bypass),
+            })
+            .unwrap();
+        assert_eq!(orphan.is_error, Some(true));
+        assert_eq!(
+            orphan.structured_content.unwrap()["code"],
+            "look_comparison_requires_effect_id"
+        );
+
+        // CC3 §5: a CC1 primary has no bypass control, so the bypass variant
+        // is refused rather than synthesized with an invalid SetEffectParam.
+        let (_, seeded) = service.snapshot().unwrap();
+        let mut with_primary = (*seeded).clone();
+        with_primary.tracks[0].clips[0].effects = vec![Effect {
+            id: EffectId(4),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                ParamValue::Integer(250),
+            )]),
+            keyframes: BTreeMap::new(),
+        }];
+        with_primary.validate().unwrap();
+        let primary_service = KinewrightMcp::new(
+            Core::spawn(with_primary).unwrap(),
+            Arc::new(NoopMedia::default()),
+            Arc::new(NoopMedia::default()),
+            ConfirmationBroker::default(),
+        );
+        let unsupported = primary_service
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(1),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+                effect_id: Some(EffectId(4)),
+                look_comparison: Some(LookComparison::Bypass),
+            })
+            .unwrap();
+        assert_eq!(unsupported.is_error, Some(true));
+        let structured = unsupported.structured_content.unwrap();
+        assert_eq!(structured["code"], "bypass_unsupported_for_node");
+        assert_eq!(
+            structured["details"]["allowed"],
+            serde_json::json!(["before", "after"])
+        );
+
+        // A LUT node reaches the renderer like any other managed node.
+        let (_, document) = service.snapshot().unwrap();
+        let mut with_look = (*document).clone();
+        with_look.lut_assets =
+            vec![kinewright_media::BuiltinLook::Warm.to_lut_asset(kinewright_core::LutAssetId(1))];
+        with_look.tracks[0].clips[0].effects = vec![Effect {
+            id: EffectId(9),
+            name: "creative_look".to_owned(),
+            parameters: BTreeMap::from([("lut_asset_id".to_owned(), ParamValue::Integer(1))]),
+            keyframes: BTreeMap::new(),
+        }];
+        with_look
+            .validate()
+            .expect("the CC4 stack is a valid document");
+        let look_service = KinewrightMcp::new(
+            Core::spawn(with_look).unwrap(),
+            Arc::new(NoopMedia::default()),
+            Arc::new(NoopMedia::default()),
+            ConfirmationBroker::default(),
+        );
+        let refused = look_service
+            .render_color_proof(&RenderColorProofArgs {
+                expected_revision: TimelineRevision(0),
+                clip_id: ClipId(1),
+                timecode: TimeCode(1),
+                profile_assumption: None,
+                parameters: BTreeMap::new(),
+                effect_id: Some(EffectId(9)),
+                look_comparison: Some(LookComparison::Bypass),
+            })
+            .unwrap();
+        // The LUT node is no longer refused up front. The proof proceeds to
+        // the renderer, and the `NoopMedia` double has no decoder, so the
+        // failure is the render-stage error that double produces - named
+        // exactly, not asserted by exclusion.
+        assert_eq!(refused.is_error, Some(true));
+        let structured = refused.structured_content.unwrap();
+        assert_eq!(
+            structured["code"], "needs_color_override",
+            "the fixture's default source description is what stops this proof, \
+             not the LUT node: {structured}"
+        );
     }
 }

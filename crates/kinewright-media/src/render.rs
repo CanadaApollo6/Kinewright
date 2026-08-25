@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     path::Path,
+    sync::Arc,
 };
 
 use kinewright_core::{
@@ -17,6 +18,7 @@ use crate::{
     decode::VideoDecoder,
     derived_cache::CacheStats,
     frame::WorkingFrame,
+    lut_store::LutLibrary,
     timeline::TransitionRenderParams,
     visual_layers_at,
 };
@@ -157,6 +159,20 @@ pub(crate) struct FrameRenderer {
     title_cache: HashMap<TitleCacheKey, WorkingFrame>,
     title_order: VecDeque<TitleCacheKey>,
     cache_budget: usize,
+    /// CC4 2.4: the verified lattices every `technical_lut` / `creative_look`
+    /// node resolves against. Bound by the caller to the asset hashes of the
+    /// document it is about to render; the renderer never opens a LUT file for
+    /// a managed node.
+    ///
+    /// The library is **document-local**. A `FrameRenderer` that is handed
+    /// documents from more than one project - the playback worker, the
+    /// thumbnail path - must rebind before each of them, because a
+    /// `LutAssetId` means nothing outside the document that allocated it.
+    ///
+    /// An empty library is the honest default for a renderer nobody has bound:
+    /// a document with an active LUT node then fails the render with
+    /// `missing_lut_asset` instead of quietly dropping the look.
+    lut_library: Arc<LutLibrary>,
 }
 
 impl FrameRenderer {
@@ -169,7 +185,22 @@ impl FrameRenderer {
             title_cache: HashMap::new(),
             title_order: VecDeque::new(),
             cache_budget: FRAME_CACHE_BYTE_BUDGET,
+            lut_library: Arc::new(LutLibrary::default()),
         }
+    }
+
+    /// Bind the verified LUT library this renderer resolves LUT nodes against
+    /// (CC4 2.4).
+    ///
+    /// The compositor's atlas cache keys on the identity of the verified
+    /// lattices themselves and retains a strong `Arc` to each one, so a
+    /// rebuilt library whose assets parsed into fresh allocations misses the
+    /// cache and re-uploads: a restored or replaced asset can never be served
+    /// from a stale atlas. An unchanged library that hands back the same
+    /// lattices still hits, which is what keeps steady-state playback from
+    /// re-uploading the atlas every frame.
+    pub(crate) fn set_lut_library(&mut self, library: Arc<LutLibrary>) {
+        self.lut_library = library;
     }
 
     pub(crate) fn clear(&mut self) -> CacheStats {
@@ -243,8 +274,12 @@ impl FrameRenderer {
                 transition: *transition,
             })
             .collect::<Vec<_>>();
-        self.compositor
-            .render_monitor(resolution, &layers, &document.color_context.monitoring)
+        self.compositor.render_monitor_with_luts(
+            resolution,
+            &layers,
+            &document.color_context.monitoring,
+            Some(&self.lut_library),
+        )
     }
 
     /// Composite one project frame for the document's delivery target.
@@ -275,8 +310,12 @@ impl FrameRenderer {
                 transition: *transition,
             })
             .collect::<Vec<_>>();
-        self.compositor
-            .render_delivery(resolution, &layers, &document.color_context.delivery)
+        self.compositor.render_delivery_with_luts(
+            resolution,
+            &layers,
+            &document.color_context.delivery,
+            Some(&self.lut_library),
+        )
     }
 
     /// Decode and stage every visual layer for one project frame, in
@@ -632,15 +671,21 @@ fn prefetch_frames(frame_bytes: usize) -> i64 {
 mod tests {
     use std::sync::Arc;
 
+    use std::collections::BTreeMap;
+
     use half::f16;
-    use kinewright_core::{Analysis, ColorPipelineState, ColorTransfer};
+    use kinewright_core::{
+        Analysis, AssetId, Clip, ClipContent, ColorPipelineState, ColorTransfer, EffectId,
+        LutAssetId, ParamValue, Track, TrackId, TrackKind,
+    };
 
     use super::*;
     use crate::{
         decode::probe_path,
         gpu_test_support::fixture_gpu_or_skip,
         initialize_ffmpeg,
-        test_support::{GeneratedMedia, single_clip_document},
+        lut_store::LutStore,
+        test_support::{GeneratedMedia, TempDirectory, single_clip_document},
     };
 
     fn test_renderer() -> Option<FrameRenderer> {
@@ -658,6 +703,225 @@ mod tests {
 
     fn title_key(id: u64) -> TitleCacheKey {
         (ClipId(id), (1, 1), Title::default())
+    }
+
+    /// A one-clip title timeline, so the LUT plumbing can be exercised without
+    /// a decoder in the path.
+    fn title_document(effects: Vec<Effect>) -> Document {
+        Document {
+            resolution: (320, 180),
+            duration: TimeCode(4),
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![Clip {
+                    id: ClipId(1),
+                    asset: AssetId::default(),
+                    source_range: TimeCode(0)..TimeCode(4),
+                    content: ClipContent::Title(Title {
+                        text: "CC4".to_owned(),
+                        ..Title::default()
+                    }),
+                    timeline_start: TimeCode::ZERO,
+                    effects,
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                }],
+            }],
+            ..Document::default()
+        }
+    }
+
+    #[test]
+    fn a_published_lut_library_reaches_the_compositor_through_the_frame_renderer() {
+        // CC4 2.4: the renderer resolves LUT nodes against a library the
+        // owning layer publishes; it never opens a LUT file for a managed
+        // node.  Until one is published, an active LUT node BLOCKS the render
+        // instead of quietly producing a look-free frame.
+        let Some(mut renderer) = test_renderer() else {
+            return;
+        };
+        let mut look = Effect {
+            id: EffectId(1),
+            name: "creative_look".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        };
+        look.parameters
+            .insert("lut_asset_id".to_owned(), ParamValue::Integer(1));
+        let document = title_document(vec![look]);
+
+        let error = renderer
+            .render(
+                &document,
+                TimeCode::ZERO,
+                document.resolution,
+                RenderScale::FullResolution,
+                DecodeStrategy::Seek,
+            )
+            .expect_err("an unpublished library blocks an active LUT node");
+        let MediaError::Backend(message) = error else {
+            panic!("expected a backend error");
+        };
+        assert!(
+            message.starts_with("missing_lut_asset:"),
+            "unexpected message: {message}"
+        );
+
+        let directory = TempDirectory::new("cc4-renderer-library");
+        let store = LutStore::for_project(&directory.path("project.kinewright"))
+            .expect("a temporary project derives a store root");
+        let source = directory.path("identity.cube");
+        std::fs::write(
+            &source,
+            "LUT_3D_SIZE 2
+             0.000000 0.000000 0.000000
+1.000000 0.000000 0.000000
+             0.000000 1.000000 0.000000
+1.000000 1.000000 0.000000
+             0.000000 0.000000 1.000000
+1.000000 0.000000 1.000000
+             0.000000 1.000000 1.000000
+1.000000 1.000000 1.000000
+",
+        )
+        .expect("the fixture LUT is written");
+        let asset = store
+            .import_lut_asset(&source)
+            .expect("the fixture LUT imports")
+            .into_lut_asset(LutAssetId(1));
+        let (library, _) = LutLibrary::build(&[asset], Some(&store));
+        assert_eq!(library.len(), 1);
+        renderer.set_lut_library(Arc::new(library));
+
+        let frame = renderer
+            .render(
+                &document,
+                TimeCode::ZERO,
+                document.resolution,
+                RenderScale::FullResolution,
+                DecodeStrategy::Seek,
+            )
+            .expect("a published library resolves the node");
+        assert_eq!((frame.width, frame.height), document.resolution);
+
+        // The delivery path takes the same library, so export cannot render a
+        // look the preview refused.
+        renderer
+            .render_delivery(
+                &document,
+                TimeCode::ZERO,
+                document.resolution,
+                RenderScale::FullResolution,
+                DecodeStrategy::Seek,
+            )
+            .expect("the delivery path resolves the node too");
+    }
+
+    /// A hand-written `S = 2` `.cube` whose corner samples are chosen by
+    /// `map`, so two fixtures are different *looks* rather than two spellings
+    /// of one lattice.
+    fn corner_cube(map: impl Fn([f32; 3]) -> [f32; 3]) -> String {
+        use std::fmt::Write as _;
+        let mut text = String::from("LUT_3D_SIZE 2\n");
+        for blue in [0.0_f32, 1.0] {
+            for green in [0.0_f32, 1.0] {
+                for red in [0.0_f32, 1.0] {
+                    let [r, g, b] = map([red, green, blue]);
+                    let _ = writeln!(text, "{r:.6} {g:.6} {b:.6}");
+                }
+            }
+        }
+        text
+    }
+
+    #[test]
+    fn two_documents_sharing_one_asset_id_render_to_their_own_lattices() {
+        // CC4 2.4.  `LutAssetId(1)` names a different look in every project,
+        // so a shared render path must resolve looks by content hash and bind
+        // the result per document.  Both looks are published into one table;
+        // each document then renders through the library IT binds, and the two
+        // frames must not agree.
+        let Some(mut renderer) = test_renderer() else {
+            return;
+        };
+        let directory = TempDirectory::new("cc4-per-document-library");
+        let store = LutStore::for_project(&directory.path("project.kinewright"))
+            .expect("a temporary project derives a store root");
+
+        let import = |name: &str, text: &str| {
+            let source = directory.path(name);
+            std::fs::write(&source, text).expect("the fixture LUT is written");
+            store
+                .import_lut_asset(&source)
+                .expect("the fixture LUT imports")
+                // Both projects allocated id 1 for their own look, which is
+                // the collision the content hash has to survive.
+                .into_lut_asset(LutAssetId(1))
+        };
+        let identity = import("identity.cube", &corner_cube(|rgb| rgb));
+        let inverted = import(
+            "inverted.cube",
+            &corner_cube(|[r, g, b]| [1.0 - r, 1.0 - g, 1.0 - b]),
+        );
+        assert_eq!(identity.id, inverted.id, "the ids collide on purpose");
+        assert_ne!(identity.sha256, inverted.sha256, "the looks differ");
+
+        // Publication is what the engine's `set_lut_library` does: merge each
+        // project's verified library into one content-addressed table.
+        let mut published = std::collections::HashMap::new();
+        for asset in [&identity, &inverted] {
+            let (library, _) = LutLibrary::build(std::slice::from_ref(asset), Some(&store));
+            for (_, sha256, lut) in library.entries() {
+                published.insert(sha256.to_owned(), Arc::clone(lut));
+            }
+        }
+        assert_eq!(published.len(), 2);
+
+        let mut look = Effect {
+            id: EffectId(1),
+            name: "creative_look".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        };
+        look.parameters
+            .insert("lut_asset_id".to_owned(), ParamValue::Integer(1));
+
+        let mut render_with = |asset: &kinewright_core::LutAsset| {
+            let mut document = title_document(vec![look.clone()]);
+            document.lut_assets = vec![asset.clone()];
+            let (library, unbound) =
+                LutLibrary::from_document_assets(&document.lut_assets, &published);
+            assert!(unbound.is_empty(), "both looks were published");
+            renderer.set_lut_library(Arc::new(library));
+            renderer
+                .render(
+                    &document,
+                    TimeCode::ZERO,
+                    document.resolution,
+                    RenderScale::FullResolution,
+                    DecodeStrategy::Seek,
+                )
+                .expect("the document-local library resolves its own node")
+        };
+
+        let first = render_with(&identity);
+        let second = render_with(&inverted);
+        assert_eq!((first.width, first.height), (second.width, second.height));
+        assert_ne!(
+            *first.rgba, *second.rgba,
+            "two documents that both call their look asset 1 must not render the same frame"
+        );
+
+        // Re-binding the first document after the second has rendered gives
+        // the first frame back, so nothing about render order aliases either.
+        let again = render_with(&identity);
+        assert_eq!(*again.rgba, *first.rgba);
     }
 
     #[test]

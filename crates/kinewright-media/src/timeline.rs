@@ -466,6 +466,7 @@ mod tests {
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
+            lut_assets: Vec::new(),
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,

@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::{
     AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, COLOR_CONFIDENCE_MAX_BASIS_POINTS,
     CaptionPreset, Clip, ClipContent, ClipId, ColorContext, ColorDescription, ColorProvenance,
-    Document, Effect, EffectId, FreezeFrame, KeyframeInterpolation, LinkId,
+    Document, Effect, EffectId, FreezeFrame, KeyframeInterpolation, LinkId, LutAsset, LutAssetId,
     MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin, MediaSourceFingerprint,
     ParamValue, RelinkCandidate, StringOut, StringOutId, SyncGroup, SyncGroupId, ThreePointMode,
     TimeCode, TimeMappingError, Title, TitleParameterKind, TitlePosition, Track, TrackId,
@@ -226,6 +226,19 @@ pub enum Operation {
         clip: ClipId,
         effect: Effect,
     },
+    /// Insert one effect at an explicit position in `clip.effects` (CC4 §2.7).
+    ///
+    /// The positional sibling of [`Operation::AddEffect`], which appends. A
+    /// stage-ordered colour stack must be able to place a `technical_lut`
+    /// before an existing correction node without deleting it, so the index is
+    /// part of the operation rather than a follow-up reorder. Validation is
+    /// identical to `AddEffect`'s plus a bounds check: `index` may equal the
+    /// current length, which appends.
+    InsertEffect {
+        clip: ClipId,
+        index: usize,
+        effect: Effect,
+    },
     RemoveEffect {
         clip: ClipId,
         effect: EffectId,
@@ -247,6 +260,41 @@ pub enum Operation {
         clip: ClipId,
         effect: EffectId,
         name: String,
+    },
+    /// Replace one legacy `look_lut` / `cube_lut` at its exact vector position
+    /// with an equivalent managed `creative_look` node (CC4 §9).
+    ///
+    /// The only path from legacy to managed, and deliberately explicit: the
+    /// converted node is *not* bit-identical to the legacy stage, because the
+    /// legacy path clamped to `[0, 1]` in display space, mixed intensity in
+    /// the encoded domain, and decoded with the non-invertible `decode_bt709`.
+    /// The caller resolves a preset token or an external `.cube` path to a
+    /// registered asset beforehand, so the visible batch is
+    /// `[AddLutAsset, ConvertLegacyLook]`.
+    ConvertLegacyLook {
+        clip: ClipId,
+        effect: EffectId,
+        /// The already-registered asset the managed node binds to.
+        lut_asset: LutAssetId,
+        /// Look strength in basis points, `0..=10000`. A legacy
+        /// `intensity_percent` converts as `percent * 100`.
+        mix_basis_points: i64,
+    },
+    /// Register one project-owned LUT asset record (CC4 §2.7).
+    ///
+    /// Metadata only: no LUT sample byte ever enters the document, the
+    /// journal, a branch, or a recovery record. The media layer parses,
+    /// hashes, and stores the file first and passes the verified record here.
+    AddLutAsset {
+        asset: LutAsset,
+    },
+    /// Remove one project-owned LUT asset record (CC4 §2.7).
+    ///
+    /// Rejected while any effect on any clip references it — including a
+    /// bypassed node and a `Hold` keyframe value. It never cascades, and it
+    /// never deletes the content-addressed store file.
+    RemoveLutAsset {
+        lut_asset: LutAssetId,
     },
     SetTitleParam {
         clip: ClipId,
@@ -314,7 +362,7 @@ impl Operation {
 
     /// Canonicalize compatibility aliases before history or journal capture.
     pub(crate) fn canonicalize_legacy_effect_names(&mut self) {
-        if let Self::AddEffect { effect, .. } = self {
+        if let Self::AddEffect { effect, .. } | Self::InsertEffect { effect, .. } = self {
             effect.canonicalize_legacy_name();
         }
     }
@@ -677,6 +725,68 @@ pub enum OpError {
         limit: usize,
         actual: usize,
     },
+    #[error("clip {clip} would carry {actual} LUT nodes, exceeding the limit of {limit}")]
+    TooManyLutNodes {
+        clip: ClipId,
+        limit: usize,
+        actual: usize,
+    },
+    #[error("LUT asset {0} already exists")]
+    DuplicateLutAsset(LutAssetId),
+    #[error("LUT asset {lut_asset} SHA-256 {observed:?} must be {allowed}")]
+    InvalidLutAssetHash {
+        lut_asset: LutAssetId,
+        observed: String,
+        allowed: &'static str,
+    },
+    #[error("LUT asset {field} is {observed:?}, outside the allowed {allowed}")]
+    InvalidLutAssetMetadata {
+        field: &'static str,
+        observed: String,
+        allowed: &'static str,
+    },
+    #[error("LUT asset {lut_asset} is still referenced by effect {effect} on clip {clip}")]
+    LutAssetInUse {
+        lut_asset: LutAssetId,
+        clip: ClipId,
+        effect: EffectId,
+    },
+    #[error(
+        "effect {effect} on clip {clip} references LUT asset {lut_asset}, which does not exist"
+    )]
+    MissingLutAsset {
+        clip: ClipId,
+        effect: EffectId,
+        lut_asset: LutAssetId,
+    },
+    #[error("LUT asset id space is exhausted")]
+    LutAssetIdExhausted,
+    #[error("LUT asset {0} does not exist")]
+    UnknownLutAsset(LutAssetId),
+    #[error("effect index {index} is outside clip {clip}'s effect vector of length {len}")]
+    EffectIndexOutOfRange {
+        clip: ClipId,
+        index: usize,
+        len: usize,
+    },
+    #[error("effect {effect} on clip {clip} is {name:?}, not a legacy look_lut or cube_lut")]
+    NotALegacyLook {
+        clip: ClipId,
+        effect: EffectId,
+        name: String,
+    },
+    #[error(
+        "colour node {effect} ({kind:?}, stage {color_stage_rank}) on clip {clip} is placed after node {previous_effect} ({previous_kind:?}, stage {previous_color_stage_rank}); managed nodes must have non-decreasing stage rank"
+    )]
+    ColorStageOrderViolation {
+        clip: ClipId,
+        effect: EffectId,
+        kind: String,
+        color_stage_rank: u8,
+        previous_effect: EffectId,
+        previous_kind: String,
+        previous_color_stage_rank: u8,
+    },
     #[error("effect {effect:?} parameter {name:?} has an invalid automation curve: {reason}")]
     InvalidEffectAutomation {
         effect: String,
@@ -883,6 +993,19 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
         Operation::AddMarker { marker } => add_marker(doc, marker.clone()),
         Operation::RemoveMarker { marker } => remove_marker(doc, *marker),
         Operation::MoveMarker { marker, to } => move_marker(doc, *marker, *to),
+        Operation::InsertEffect {
+            clip,
+            index,
+            effect,
+        } => insert_effect(doc, *clip, Some(*index), effect.clone()),
+        Operation::ConvertLegacyLook {
+            clip,
+            effect,
+            lut_asset,
+            mix_basis_points,
+        } => convert_legacy_look(doc, *clip, *effect, *lut_asset, *mix_basis_points),
+        Operation::AddLutAsset { asset } => add_lut_asset(doc, asset.clone()),
+        Operation::RemoveLutAsset { lut_asset } => remove_lut_asset(doc, *lut_asset),
         Operation::AddEffect { clip, effect } => {
             let mut effect = effect.clone();
             effect.canonicalize_legacy_name();
@@ -2332,6 +2455,20 @@ fn set_marker_param(
 }
 
 fn add_effect(doc: &mut Document, clip_id: ClipId, effect: Effect) -> Result<(), OpError> {
+    insert_effect(doc, clip_id, None, effect)
+}
+
+/// Place one effect on a clip, appending when `index` is `None` (CC4 §2.7).
+///
+/// `AddEffect` and `InsertEffect` share every check so a stack that one path
+/// accepts can never be one the other rejects; the only difference is where
+/// the effect lands and the additional bounds error.
+fn insert_effect(
+    doc: &mut Document,
+    clip_id: ClipId,
+    index: Option<usize>,
+    effect: Effect,
+) -> Result<(), OpError> {
     validate_effect(&effect)?;
     if is_audio_effect(&effect.name) {
         return Err(OpError::AudioEffectOnClip {
@@ -2343,13 +2480,29 @@ fn add_effect(doc: &mut Document, clip_id: ClipId, effect: Effect) -> Result<(),
     let (track_index, clip_index) = find_clip(doc, clip_id)?;
     let clip_duration = doc.clip_duration(&doc.tracks[track_index].clips[clip_index])?;
     validate_effect_automation(clip_id, clip_duration, &effect)?;
-    let clip = &mut doc.tracks[track_index].clips[clip_index];
+    // CC4 §3.3: a LUT node must resolve to a registered asset before it can be
+    // stored, so `lut_assets` and the node stack can never disagree.
+    validate_lut_node_references(doc, clip_id, &effect)?;
+    let clip = &doc.tracks[track_index].clips[clip_index];
     if clip.effects.iter().any(|existing| existing.id == effect.id) {
         return Err(OpError::DuplicateEffect {
             clip: clip_id,
             effect: effect.id,
         });
     }
+    let position = match index {
+        None => clip.effects.len(),
+        Some(index) => {
+            if index > clip.effects.len() {
+                return Err(OpError::EffectIndexOutOfRange {
+                    clip: clip_id,
+                    index,
+                    len: clip.effects.len(),
+                });
+            }
+            index
+        }
+    };
     // CC3 §3.1: a layer carries at most sixteen managed colour nodes. A
     // bypassed node keeps its slot, so the count is of stored nodes rather
     // than of active ones, and the seventeenth is a typed error instead of a
@@ -2364,7 +2517,236 @@ fn add_effect(doc: &mut Document, clip_id: ClipId, effect: Effect) -> Result<(),
             });
         }
     }
-    clip.effects.push(effect);
+    // CC4 §3.1: LUT nodes carry a tighter limit than the managed stack,
+    // because each one needs a texture atlas slot.
+    if crate::is_lut_color_node(&effect.name) {
+        let existing = crate::lut_node_count(&clip.effects);
+        if existing >= crate::LUT_NODE_LIMIT_PER_LAYER {
+            return Err(OpError::TooManyLutNodes {
+                clip: clip_id,
+                limit: crate::LUT_NODE_LIMIT_PER_LAYER,
+                actual: existing + 1,
+            });
+        }
+    }
+    // CC4 §3.2: a vector order that contradicts the stage order is rejected,
+    // never silently reordered, so the stored order stays the execution order.
+    if let Some(violation) = crate::effect::color_stage_order_violation_over(
+        prospective_color_nodes(&clip.effects, position, Some(&effect)),
+    ) {
+        return Err(stage_order_error(clip_id, &violation));
+    }
+    doc.tracks[track_index].clips[clip_index]
+        .effects
+        .insert(position, effect);
+    Ok(())
+}
+
+/// The managed-node subsequence a clip would carry once `replacement` is
+/// placed at `position`.
+///
+/// `replacement` is `Some` for an insertion and for a conversion that swaps
+/// one effect for another; the existing effect at `position` is displaced by
+/// an insertion, which the caller expresses by passing the untouched slice.
+fn prospective_color_nodes<'a>(
+    effects: &'a [Effect],
+    position: usize,
+    replacement: Option<&'a Effect>,
+) -> Vec<(usize, EffectId, crate::ColorNodeKind)> {
+    let mut nodes = Vec::new();
+    let mut push = |index: usize, effect: &Effect| {
+        if let Some(kind) = crate::ColorNodeKind::from_effect_name(&effect.name) {
+            nodes.push((index, effect.id, kind));
+        }
+    };
+    for (index, effect) in effects.iter().enumerate() {
+        if index == position
+            && let Some(replacement) = replacement
+        {
+            push(position, replacement);
+        }
+        push(if index < position { index } else { index + 1 }, effect);
+    }
+    if position == effects.len()
+        && let Some(replacement) = replacement
+    {
+        push(position, replacement);
+    }
+    nodes
+}
+
+/// Convert a CC4 §3.2 violation into the typed rejection, which names both
+/// nodes and both stages so a hand-written plan is diagnosable.
+fn stage_order_error(clip: ClipId, violation: &crate::ColorStageOrderViolation) -> OpError {
+    OpError::ColorStageOrderViolation {
+        clip,
+        effect: violation.effect,
+        kind: violation.kind.effect_name().to_owned(),
+        color_stage_rank: violation.color_stage.rank(),
+        previous_effect: violation.previous_effect,
+        previous_kind: violation.previous_kind.effect_name().to_owned(),
+        previous_color_stage_rank: violation.previous_color_stage.rank(),
+    }
+}
+
+/// Reject a LUT node whose stored or `Hold`-keyframed `lut_asset_id` does not
+/// name a registered asset (CC4 §2.7, §3.3).
+///
+/// `0` is rejected with the rest: it is the unbound sentinel that keeps a
+/// resolved node from indexing a missing asset, and a valid document never
+/// stores it. An omitted `lut_asset_id` resolves to `0` and is rejected here,
+/// which is why a LUT node's reset batch must exclude the parameter.
+fn validate_lut_node_references(
+    doc: &Document,
+    clip: ClipId,
+    effect: &Effect,
+) -> Result<(), OpError> {
+    if !crate::is_lut_color_node(&effect.name) {
+        return Ok(());
+    }
+    let referenced = |value: i64| -> Result<(), OpError> {
+        let lut_asset = LutAssetId(u64::try_from(value).unwrap_or_default());
+        if lut_asset.0 == 0 || doc.lut_asset(lut_asset).is_none() {
+            return Err(OpError::MissingLutAsset {
+                clip,
+                effect: effect.id,
+                lut_asset,
+            });
+        }
+        Ok(())
+    };
+    let stored = crate::LutNodeParams::from_effect(effect);
+    referenced(i64::try_from(stored.lut_asset_id.0).unwrap_or_default())?;
+    if let Some(curve) = effect.keyframes.get(crate::LUT_ASSET_ID_PARAMETER) {
+        for keyframe in &curve.keyframes {
+            referenced(keyframe.value)?;
+        }
+    }
+    Ok(())
+}
+
+fn add_lut_asset(doc: &mut Document, asset: LutAsset) -> Result<(), OpError> {
+    crate::validate_lut_asset(&asset)?;
+    if doc
+        .lut_assets
+        .iter()
+        .any(|existing| existing.id == asset.id)
+    {
+        return Err(OpError::DuplicateLutAsset(asset.id));
+    }
+    doc.lut_assets.push(asset);
+    Ok(())
+}
+
+fn remove_lut_asset(doc: &mut Document, lut_asset: LutAssetId) -> Result<(), OpError> {
+    // CC4 §2.7: removal never cascades. A bypassed node and a `Hold` keyframe
+    // value both count as references, because both still resolve to the asset
+    // on some frame or after one undo.
+    if let Some(&(clip, effect)) = doc.lut_asset_references(lut_asset).first() {
+        return Err(OpError::LutAssetInUse {
+            lut_asset,
+            clip,
+            effect,
+        });
+    }
+    let index = doc
+        .lut_assets
+        .iter()
+        .position(|asset| asset.id == lut_asset)
+        .ok_or(OpError::UnknownLutAsset(lut_asset))?;
+    doc.lut_assets.remove(index);
+    Ok(())
+}
+
+/// Replace one legacy LUT stage with a managed `creative_look` (CC4 §9).
+fn convert_legacy_look(
+    doc: &mut Document,
+    clip_id: ClipId,
+    effect_id: EffectId,
+    lut_asset: LutAssetId,
+    mix_basis_points: i64,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let clip = &doc.tracks[track_index].clips[clip_index];
+    let position = clip
+        .effects
+        .iter()
+        .position(|effect| effect.id == effect_id)
+        .ok_or(OpError::MissingEffect {
+            clip: clip_id,
+            effect: effect_id,
+        })?;
+    let legacy = &clip.effects[position];
+    if !crate::POST_PRIMARY_LUT_EFFECT_NAMES.contains(&legacy.name.as_str()) {
+        return Err(OpError::NotALegacyLook {
+            clip: clip_id,
+            effect: effect_id,
+            name: legacy.name.clone(),
+        });
+    }
+    if doc.lut_asset(lut_asset).is_none() {
+        return Err(OpError::MissingLutAsset {
+            clip: clip_id,
+            effect: effect_id,
+            lut_asset,
+        });
+    }
+    let converted = Effect {
+        id: effect_id,
+        name: crate::ColorNodeKind::CreativeLook.effect_name().to_owned(),
+        parameters: BTreeMap::from([
+            (
+                crate::LUT_ASSET_ID_PARAMETER.to_owned(),
+                ParamValue::Integer(i64::try_from(lut_asset.0).unwrap_or(i64::MAX)),
+            ),
+            (
+                crate::LUT_MIX_PARAMETER.to_owned(),
+                ParamValue::Integer(mix_basis_points),
+            ),
+        ]),
+        keyframes: BTreeMap::new(),
+    };
+    validate_effect(&converted)?;
+    // The legacy stage is not a managed node, so the conversion adds one
+    // managed node and one LUT node to the clip's budgets.
+    let managed = crate::managed_color_node_count(&clip.effects);
+    if managed >= crate::COLOR_NODE_LIMIT_PER_LAYER {
+        return Err(OpError::TooManyColorNodes {
+            clip: clip_id,
+            limit: crate::COLOR_NODE_LIMIT_PER_LAYER,
+            actual: managed + 1,
+        });
+    }
+    let luts = crate::lut_node_count(&clip.effects);
+    if luts >= crate::LUT_NODE_LIMIT_PER_LAYER {
+        return Err(OpError::TooManyLutNodes {
+            clip: clip_id,
+            limit: crate::LUT_NODE_LIMIT_PER_LAYER,
+            actual: luts + 1,
+        });
+    }
+    let mut prospective: Vec<(usize, EffectId, crate::ColorNodeKind)> = clip
+        .effects
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != position)
+        .filter_map(|(index, effect)| {
+            crate::ColorNodeKind::from_effect_name(&effect.name)
+                .map(|kind| (index, effect.id, kind))
+        })
+        .collect();
+    let insert_at = prospective
+        .iter()
+        .position(|(index, _, _)| *index > position)
+        .unwrap_or(prospective.len());
+    prospective.insert(
+        insert_at,
+        (position, effect_id, crate::ColorNodeKind::CreativeLook),
+    );
+    if let Some(violation) = crate::effect::color_stage_order_violation_over(prospective) {
+        return Err(stage_order_error(clip_id, &violation));
+    }
+    doc.tracks[track_index].clips[clip_index].effects[position] = converted;
     Ok(())
 }
 
@@ -2391,14 +2773,16 @@ fn set_effect_param(
     value: ParamValue,
 ) -> Result<(), OpError> {
     let (track_index, clip_index) = find_clip(doc, clip_id)?;
-    let effect = doc.tracks[track_index].clips[clip_index]
+    let clip = &doc.tracks[track_index].clips[clip_index];
+    let effect_index = clip
         .effects
-        .iter_mut()
-        .find(|effect| effect.id == effect_id)
+        .iter()
+        .position(|effect| effect.id == effect_id)
         .ok_or(OpError::MissingEffect {
             clip: clip_id,
             effect: effect_id,
         })?;
+    let effect = &clip.effects[effect_index];
     validate_effect_parameter(&effect.name, name, &value)?;
     // CC3 §2.3: strict `x` ordering is checked against the parameter map the
     // change would produce, so a rejected edit leaves the document untouched.
@@ -2409,7 +2793,26 @@ fn set_effect_param(
             .insert(name.to_owned(), value.clone());
         validate_color_curve_points(&prospective)?;
     }
-    effect.parameters.insert(name.to_owned(), value);
+    // CC4 §6: a `SetEffectParam` that would unbind a node, or retarget it at
+    // an asset the project does not own, is rejected rather than producing a
+    // document that only `validate_document` would catch. This is why a LUT
+    // node's reset batch must exclude `lut_asset_id`.
+    if crate::is_lut_color_node(&effect.name) && name == crate::LUT_ASSET_ID_PARAMETER {
+        let lut_asset = match value {
+            ParamValue::Integer(stored) => LutAssetId(u64::try_from(stored).unwrap_or_default()),
+            ParamValue::Boolean(_) | ParamValue::Text(_) => LutAssetId(0),
+        };
+        if lut_asset.0 == 0 || doc.lut_asset(lut_asset).is_none() {
+            return Err(OpError::MissingLutAsset {
+                clip: clip_id,
+                effect: effect_id,
+                lut_asset,
+            });
+        }
+    }
+    doc.tracks[track_index].clips[clip_index].effects[effect_index]
+        .parameters
+        .insert(name.to_owned(), value);
     Ok(())
 }
 
@@ -2834,7 +3237,7 @@ fn validate_curve(
     // discontinuously, so only `Hold` keyframes are legal. Any other
     // interpolation would resolve intermediate point counts that no author
     // ever authored.
-    if is_curve_point_count_parameter(effect_name, name) {
+    if is_hold_only_parameter(effect_name, name) {
         for keyframe in &curve.keyframes {
             if keyframe.interpolation != KeyframeInterpolation::Hold {
                 return Err(OpError::NonHoldKeyframeParameter {
@@ -2862,6 +3265,20 @@ fn validate_curve(
         debug_assert!((descriptor.min..=descriptor.max).contains(&keyframe.value));
     }
     Ok(())
+}
+
+/// Whether one effect parameter accepts `Hold` keyframes only.
+///
+/// CC3 §6 policy 1 covers `{curve}_point_count`, which switches a whole curve
+/// discontinuously. CC4 §6 adds a LUT node's `lut_asset_id` and
+/// `input_encoding_token`: interpolating between two asset ids or two transfer
+/// functions is meaningless, so the same typed rejection applies.
+fn is_hold_only_parameter(effect_name: &str, name: &str) -> bool {
+    if is_curve_point_count_parameter(effect_name, name) {
+        return true;
+    }
+    crate::is_lut_color_node(effect_name)
+        && (name == crate::LUT_ASSET_ID_PARAMETER || name == crate::LUT_INPUT_ENCODING_PARAMETER)
 }
 
 /// Whether `name` is the `{curve}_point_count` control of a `color_curves`
@@ -3208,6 +3625,17 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
         validate_asset(asset)?;
     }
 
+    // CC4 §2.7: `lut_assets` ids are unique, and every record satisfies the
+    // §2.1 table. Both are checked here so a hand-edited project cannot load
+    // with a record `AddLutAsset` would have rejected.
+    let mut lut_asset_ids = HashSet::new();
+    for asset in &doc.lut_assets {
+        if !lut_asset_ids.insert(asset.id) {
+            return Err(OpError::DuplicateLutAsset(asset.id));
+        }
+        crate::validate_lut_asset(asset)?;
+    }
+
     validate_catalog(doc)?;
 
     let mut track_ids = HashSet::new();
@@ -3280,6 +3708,12 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                     });
                 }
                 validate_effect(effect)?;
+                // CC4 §2.7: every `lut_asset_id` a node references, static or
+                // `Hold`-keyframed, must name a registered asset. A dangling
+                // reference can only arrive by hand and must not load
+                // silently, because a resolved node would then index an asset
+                // the project does not own.
+                validate_lut_node_references(doc, clip.id, effect)?;
                 // CC3 §2.3: the strictly-increasing-`x` rule is a document
                 // invariant, not just an operation precondition. Without it a
                 // hand-edited project that `AddEffect`/`SetEffectParam` would
@@ -3299,6 +3733,22 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                     limit: crate::COLOR_NODE_LIMIT_PER_LAYER,
                     actual: color_nodes,
                 });
+            }
+            // CC4 §3.1: the four-LUT-node atlas budget is an invariant for the
+            // same reason.
+            let lut_nodes = crate::lut_node_count(&clip.effects);
+            if lut_nodes > crate::LUT_NODE_LIMIT_PER_LAYER {
+                return Err(OpError::TooManyLutNodes {
+                    clip: clip.id,
+                    limit: crate::LUT_NODE_LIMIT_PER_LAYER,
+                    actual: lut_nodes,
+                });
+            }
+            // CC4 §3.2: the managed subsequence must have non-decreasing stage
+            // rank. Every pre-CC4 project satisfies this trivially, because
+            // all of its managed nodes are corrections at rank 1.
+            if let Some(violation) = crate::color_stage_order_violation(&clip.effects) {
+                return Err(stage_order_error(clip.id, &violation));
             }
             if let Some(transition) = &clip.transition_in {
                 validate_transition(doc, clip, transition)?;

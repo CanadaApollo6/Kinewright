@@ -11,12 +11,12 @@ use kinewright_core::{
     ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Command, Core, Document,
     EFFECT_DESCRIPTORS, Effect, EffectCompatibilityStage, EffectId, EffectUniform, Event,
     FreezeFrame, JournalCommand, Keyframe, KeyframeInterpolation, LEGACY_DISPLAY_EFFECT_NAMES,
-    LinkId, Marker, MarkerId, MediaAsset, MediaBin, MediaKind, MediaSourceFingerprint, OpError,
-    Operation, POST_PRIMARY_LUT_EFFECT_NAMES, ParamValue, Query, QueryResult, Rational,
-    RelinkCandidate, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember,
-    TRANSITION_DESCRIPTORS, ThreePointMode, TimeCode, Title, TitlePosition, Track, TrackId,
-    TrackKind, Transition, effect_compatibility_stage, effect_descriptor, is_legacy_display_effect,
-    transition_descriptor,
+    LinkId, LutAsset, LutAssetId, LutAssetKind, LutAssetSource, Marker, MarkerId, MediaAsset,
+    MediaBin, MediaKind, MediaSourceFingerprint, OpError, Operation, POST_PRIMARY_LUT_EFFECT_NAMES,
+    ParamValue, Query, QueryResult, Rational, RelinkCandidate, SourceSelect, StringOut,
+    StringOutId, SyncGroup, SyncGroupId, SyncGroupMember, TRANSITION_DESCRIPTORS, ThreePointMode,
+    TimeCode, Title, TitlePosition, Track, TrackId, TrackKind, Transition,
+    effect_compatibility_stage, effect_descriptor, is_legacy_display_effect, transition_descriptor,
 };
 use proptest::prelude::*;
 use schemars::schema_for;
@@ -71,6 +71,7 @@ fn empty_timeline(fps: Rational) -> Document {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: ColorContext::default(),
+        lut_assets: Vec::new(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -449,6 +450,28 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             clip: ClipId(1),
             speed_percent: 200,
         },
+        Operation::InsertEffect {
+            clip: ClipId(1),
+            index: 0,
+            effect: Effect {
+                id: EffectId(2),
+                name: "technical_lut".to_owned(),
+                parameters: BTreeMap::from([("lut_asset_id".to_owned(), ParamValue::Integer(1))]),
+                keyframes: BTreeMap::new(),
+            },
+        },
+        Operation::ConvertLegacyLook {
+            clip: ClipId(1),
+            effect: EffectId(1),
+            lut_asset: LutAssetId(1),
+            mix_basis_points: 6_500,
+        },
+        Operation::AddLutAsset {
+            asset: contract_lut_asset(),
+        },
+        Operation::RemoveLutAsset {
+            lut_asset: LutAssetId(1),
+        },
     ];
 
     for operation in operations {
@@ -456,6 +479,89 @@ fn document_and_every_operation_variant_round_trip_through_json() {
         let decoded: Operation = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, operation);
     }
+}
+
+/// One valid CC4 §2.1 record for wire-shape assertions.
+fn contract_lut_asset() -> LutAsset {
+    LutAsset {
+        id: LutAssetId(1),
+        sha256: "9ab1".to_owned() + &"0".repeat(60),
+        title: "Warm".to_owned(),
+        kind: LutAssetKind::Cube3d,
+        size: 17,
+        byte_len: 133_650,
+        domain_min_millionths: [-1_000_000, -1_000_000, -1_000_000],
+        domain_max_millionths: [2_000_000, 2_000_000, 2_000_000],
+        source: LutAssetSource::Builtin {
+            name: "warm".to_owned(),
+        },
+    }
+}
+
+/// CC4 §2.1 and §9.1: `lut_assets` and the four new operations are purely
+/// additive on the wire, so a pre-CC4 project and a pre-CC4 journal both stay
+/// readable and a CC4 project stays readable by a reader that knows the shape.
+#[test]
+fn cc4_lut_assets_and_operations_are_additive_on_the_wire() {
+    let mut document = document_with_one_clip();
+    assert!(document.lut_assets.is_empty());
+    assert!(
+        !serde_json::to_string(&document)
+            .unwrap()
+            .contains("lut_assets")
+    );
+
+    document.lut_assets.push(contract_lut_asset());
+    let encoded = serde_json::to_string(&document).unwrap();
+    assert!(encoded.contains("\"lut_assets\":[{\"id\":1,"));
+    assert!(encoded.contains("\"kind\":\"cube_3d\""));
+    assert!(encoded.contains("\"source\":{\"builtin\":{\"name\":\"warm\"}}"));
+    assert_eq!(
+        serde_json::from_str::<Document>(&encoded).unwrap(),
+        document,
+        "the asset list round-trips exactly"
+    );
+
+    let document_schema = serde_json::to_value(schema_for!(Document)).unwrap();
+    assert!(document_schema["properties"]["lut_assets"].is_object());
+    let asset_schema = serde_json::to_value(schema_for!(LutAsset)).unwrap();
+    for field in [
+        "id",
+        "sha256",
+        "title",
+        "kind",
+        "size",
+        "byte_len",
+        "domain_min_millionths",
+        "domain_max_millionths",
+        "source",
+    ] {
+        assert!(
+            asset_schema["properties"][field].is_object(),
+            "{field} must be published in the asset schema"
+        );
+    }
+
+    let operation_schema = serde_json::to_string(&schema_for!(Operation)).unwrap();
+    for name in [
+        "InsertEffect",
+        "ConvertLegacyLook",
+        "AddLutAsset",
+        "RemoveLutAsset",
+    ] {
+        assert!(operation_schema.contains(name), "{name} must be published");
+    }
+
+    // A journal record keeps the ordinary externally tagged operation shape.
+    let command = JournalCommand::Do(Operation::AddLutAsset {
+        asset: contract_lut_asset(),
+    });
+    let encoded = serde_json::to_string(&command).unwrap();
+    assert!(encoded.contains("\"AddLutAsset\""));
+    assert_eq!(
+        serde_json::from_str::<JournalCommand>(&encoded).unwrap(),
+        command
+    );
 }
 
 #[test]
@@ -3596,6 +3702,7 @@ fn unsorted_input_document_is_rejected() {
         media_pool: vec![media],
         markers: Vec::new(),
         color_context: ColorContext::default(),
+        lut_assets: Vec::new(),
         fps,
         resolution: (1_920, 1_080),
         duration: TimeCode(30),

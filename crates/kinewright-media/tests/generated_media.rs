@@ -415,6 +415,7 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
+        lut_assets: Vec::new(),
         tracks: vec![
             Track {
                 id: TrackId(1),
@@ -618,6 +619,7 @@ fn title_export_pixels_match_preview_after_h264_redecode() {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
+        lut_assets: Vec::new(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -708,6 +710,7 @@ fn freeze_export_pixels_match_preview_after_h264_redecode() {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
+        lut_assets: Vec::new(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -1049,6 +1052,7 @@ fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
+        lut_assets: Vec::new(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -1183,6 +1187,7 @@ fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
+        lut_assets: Vec::new(),
         tracks: vec![
             Track {
                 id: TrackId(1),
@@ -1263,6 +1268,7 @@ fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
+        lut_assets: Vec::new(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -1329,6 +1335,7 @@ fn full_timeline(asset: MediaAsset) -> Document {
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
+        lut_assets: Vec::new(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,

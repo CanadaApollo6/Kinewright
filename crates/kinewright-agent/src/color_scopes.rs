@@ -2072,6 +2072,7 @@ mod tests {
             resolution: (2, 1),
             duration: TimeCode(60),
             color_context: ColorContext::default(),
+            lut_assets: Vec::new(),
         }
     }
 

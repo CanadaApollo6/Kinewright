@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AssetId, CaptionPreset, ClipContent, ClipId, ColorBitDepth, ColorMatrix, ColorPrimaries,
     ColorProvenance, ColorRange, ColorTransfer, Document, Effect, EffectCompatibilityStage,
-    MediaKind, ParamValue, TimeCode, TitlePixelBounds, TrackId, effect_compatibility_stage,
-    title_layout,
+    LutAssetId, MediaKind, ParamValue, TimeCode, TitlePixelBounds, TrackId,
+    effect_compatibility_stage, title_layout,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -149,6 +149,25 @@ pub fn qa_document(document: &Document) -> QaReport {
                         QaSeverity::Warning,
                         stage.issue_code(),
                         message,
+                        Some(track.id),
+                        Some(clip.id),
+                        None,
+                    ));
+                }
+                // CC4 §2.3: whether the bytes are actually *there* is runtime
+                // state the media layer owns. What Core can prove from the
+                // document alone is that every node names an asset the
+                // project owns; a validated document never fails this, so the
+                // check is defence against a hand-edited file reaching a
+                // renderer that would otherwise index nothing.
+                for lut_asset in dangling_lut_asset_references(document, effect) {
+                    issues.push(issue(
+                        QaSeverity::Error,
+                        "missing_lut_asset",
+                        format!(
+                            "Clip {} effect {} references LUT asset {}, which is not registered in this project. Re-import the look or retarget the node before exporting.",
+                            clip.id, effect.id, lut_asset
+                        ),
                         Some(track.id),
                         Some(clip.id),
                         None,
@@ -455,6 +474,36 @@ const CURVE_TRUNCATION_SCAN_FRAME_LIMIT: usize = 256;
 struct CurveTruncation {
     at: TimeCode,
     curves: Vec<String>,
+}
+
+/// Every `lut_asset_id` one node references that the document does not own.
+///
+/// Both the stored static value and every `Hold` keyframe value count, exactly
+/// as they do for `RemoveLutAsset`. The unbound sentinel `0` counts too: a
+/// valid document never stores it, so seeing it means the node would render
+/// nothing while claiming to carry a look. The result is deduplicated and
+/// keeps document order so one hand-edited node reports once per distinct id.
+fn dangling_lut_asset_references(document: &Document, effect: &Effect) -> Vec<LutAssetId> {
+    if !crate::is_lut_color_node(&effect.name) {
+        return Vec::new();
+    }
+    let mut referenced = vec![crate::LutNodeParams::from_effect(effect).lut_asset_id];
+    if let Some(curve) = effect.keyframes.get(crate::LUT_ASSET_ID_PARAMETER) {
+        for keyframe in &curve.keyframes {
+            referenced.push(LutAssetId(
+                u64::try_from(keyframe.value).unwrap_or_default(),
+            ));
+        }
+    }
+    let mut dangling = Vec::new();
+    for lut_asset in referenced {
+        if (lut_asset.0 == 0 || document.lut_asset(lut_asset).is_none())
+            && !dangling.contains(&lut_asset)
+        {
+            dangling.push(lut_asset);
+        }
+    }
+    dangling
 }
 
 /// Report the first frame at which a `color_curves` node's evaluated curves

@@ -43,7 +43,11 @@ struct LayerParams {
     external_domain_max_b: f32,
     input_linear: f32,
     legacy_stage_active: f32,
-    _uniform_padding: vec2<f32>,
+    // CC4 4.1: the two words that used to be `_uniform_padding` now address
+    // the legacy `cube_lut`'s slot inside the shared depth-packed atlas, so
+    // `LayerParams` stays exactly 48 floats.
+    external_lut_z_origin: f32,
+    external_lut_size: f32,
 };
 
 // CC3 3.2: ONE read-only storage buffer carries the whole ordered managed
@@ -52,7 +56,7 @@ struct LayerParams {
 //
 //   header.x  active node count (inactive nodes are never written, CC3 3.3)
 //   header.y  word index, into `words`, where the curve payload region starts
-//   header.z  ABI version, currently 1
+//   header.z  ABI version, currently 2 (CC4 4.2 added the LUT kinds)
 //   header.w  reserved, 0
 //
 // `words` begins at byte 16, so `words[0]` is the buffer's word 4 and node
@@ -124,19 +128,25 @@ fn sample_external_lut(color: vec3<f32>) -> vec3<f32> {
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
-    let maximum = vec3<i32>(textureDimensions(lut_texture)) - vec3<i32>(1);
+    // CC4 4.1: the legacy stage now lives in slot 4 of the shared atlas, so
+    // its edge length and depth origin come from `LayerParams` instead of
+    // `textureDimensions`.  The trilinear evaluation below is unchanged.
+    let origin = i32(params.external_lut_z_origin);
+    let maximum = vec3<i32>(i32(params.external_lut_size)) - vec3<i32>(1);
     let scaled = normalized * vec3<f32>(maximum);
     let low = vec3<i32>(floor(scaled));
     let high = min(low + vec3<i32>(1), maximum);
     let fraction = fract(scaled);
-    let c000 = textureLoad(lut_texture, vec3<i32>(low.x, low.y, low.z), 0).rgb;
-    let c100 = textureLoad(lut_texture, vec3<i32>(high.x, low.y, low.z), 0).rgb;
-    let c010 = textureLoad(lut_texture, vec3<i32>(low.x, high.y, low.z), 0).rgb;
-    let c110 = textureLoad(lut_texture, vec3<i32>(high.x, high.y, low.z), 0).rgb;
-    let c001 = textureLoad(lut_texture, vec3<i32>(low.x, low.y, high.z), 0).rgb;
-    let c101 = textureLoad(lut_texture, vec3<i32>(high.x, low.y, high.z), 0).rgb;
-    let c011 = textureLoad(lut_texture, vec3<i32>(low.x, high.y, high.z), 0).rgb;
-    let c111 = textureLoad(lut_texture, vec3<i32>(high.x, high.y, high.z), 0).rgb;
+    let low_slice = origin + low.z;
+    let high_slice = origin + high.z;
+    let c000 = textureLoad(lut_texture, vec3<i32>(low.x, low.y, low_slice), 0).rgb;
+    let c100 = textureLoad(lut_texture, vec3<i32>(high.x, low.y, low_slice), 0).rgb;
+    let c010 = textureLoad(lut_texture, vec3<i32>(low.x, high.y, low_slice), 0).rgb;
+    let c110 = textureLoad(lut_texture, vec3<i32>(high.x, high.y, low_slice), 0).rgb;
+    let c001 = textureLoad(lut_texture, vec3<i32>(low.x, low.y, high_slice), 0).rgb;
+    let c101 = textureLoad(lut_texture, vec3<i32>(high.x, low.y, high_slice), 0).rgb;
+    let c011 = textureLoad(lut_texture, vec3<i32>(low.x, high.y, high_slice), 0).rgb;
+    let c111 = textureLoad(lut_texture, vec3<i32>(high.x, high.y, high_slice), 0).rgb;
     let low_z = mix(mix(c000, c100, fraction.x), mix(c010, c110, fraction.x), fraction.y);
     let high_z = mix(mix(c001, c101, fraction.x), mix(c011, c111, fraction.x), fraction.y);
     return mix(low_z, high_z, fraction.z);
@@ -156,6 +166,24 @@ fn encode_bt709(value: f32) -> f32 {
         return sign * 4.5 * magnitude;
     }
     return sign * (1.099 * pow(magnitude, 0.45) - 0.099);
+}
+
+// CC4 3.4: the exact sign-preserving inverse of `encode_bt709`, with CC1's
+// rounded constants.  It is a NODE-INTERNAL grading parameterization: CC1's
+// `decode_bt709` is a SOURCE decode that takes the linear branch for every
+// negative argument, so it is not an inverse below -0.018 and must not be
+// substituted here.  Neither function may be used as a monitoring or delivery
+// transform; that still happens once, after compositing.
+//
+// `sign` is derived with `select` rather than `sign()` so that `sgn(0) = 0`
+// falls out of the zero magnitude, exactly as `encode_bt709` already does.
+fn decode_display709(value: f32) -> f32 {
+    let sign = select(1.0, -1.0, value < 0.0);
+    let magnitude = abs(value);
+    if magnitude < 0.081 {
+        return sign * magnitude / 4.5;
+    }
+    return sign * pow((magnitude + 0.099) / 1.099, 1.0 / 0.45);
 }
 
 fn smooth_weight(start: f32, end: f32, value: f32) -> f32 {
@@ -305,6 +333,119 @@ fn apply_curves_node(payload_base: u32, rgb: vec3<f32>) -> vec3<f32> {
     );
 }
 
+// CC4 4.1/4.3: one texel of one atlas slot.  Slot `k` occupies
+// `z in [z_origin, z_origin + S)` of the shared depth-packed 3D texture at
+// binding 3, addressed `x = r`, `y = g`, `z = b`, IRIDAS red-fastest, which is
+// exactly the order the parser stores and the host uploads.
+//
+// `textureLoad` ONLY: hardware filtering is forbidden here (CC4 3.5), and the
+// sampler at binding 1 is never used for the atlas.
+fn lut_fetch(size: u32, z_origin: u32, index: vec3<u32>) -> vec3<f32> {
+    let clamped = min(index, vec3<u32>(size - 1u));
+    return textureLoad(
+        lut_texture,
+        vec3<i32>(i32(clamped.x), i32(clamped.y), i32(z_origin + clamped.z)),
+        0,
+    ).rgb;
+}
+
+// CC4 3.5: tetrahedral interpolation with the contract's EXACT branch
+// structure.  All six formulas agree analytically on the shared faces, so the
+// tie handling is well defined; the fixed structure is what removes the f32
+// association difference that would otherwise let the CPU reference and this
+// shader disagree by a ULP at a tie.  No epsilon guard is added.
+fn lut_tetrahedral(
+    size: u32,
+    z_origin: u32,
+    dmin: vec3<f32>,
+    dmax: vec3<f32>,
+    e: vec3<f32>,
+) -> vec3<f32> {
+    let u = clamp(e, dmin, dmax);
+    let t = (u - dmin) / (dmax - dmin);
+    let s = t * f32(size - 1u);
+    // `u` is clamped into the domain, so `s` is never negative and the u32
+    // conversion below is exactly the contract's `min(u32(floor(s)), S - 2)`.
+    let i = min(vec3<u32>(floor(s)), vec3<u32>(size - 2u));
+    let f = s - vec3<f32>(f32(i.x), f32(i.y), f32(i.z));
+    let c000 = lut_fetch(size, z_origin, i + vec3<u32>(0u, 0u, 0u));
+    let c100 = lut_fetch(size, z_origin, i + vec3<u32>(1u, 0u, 0u));
+    let c010 = lut_fetch(size, z_origin, i + vec3<u32>(0u, 1u, 0u));
+    let c110 = lut_fetch(size, z_origin, i + vec3<u32>(1u, 1u, 0u));
+    let c001 = lut_fetch(size, z_origin, i + vec3<u32>(0u, 0u, 1u));
+    let c101 = lut_fetch(size, z_origin, i + vec3<u32>(1u, 0u, 1u));
+    let c011 = lut_fetch(size, z_origin, i + vec3<u32>(0u, 1u, 1u));
+    let c111 = lut_fetch(size, z_origin, i + vec3<u32>(1u, 1u, 1u));
+    if f.x > f.y {
+        if f.y > f.z {
+            return c000 + f.x * (c100 - c000) + f.y * (c110 - c100) + f.z * (c111 - c110);
+        } else if f.x > f.z {
+            return c000 + f.x * (c100 - c000) + f.y * (c111 - c101) + f.z * (c101 - c100);
+        } else {
+            return c000 + f.x * (c101 - c001) + f.y * (c111 - c101) + f.z * (c001 - c000);
+        }
+    } else {
+        if f.z > f.y {
+            return c000 + f.x * (c111 - c011) + f.y * (c011 - c001) + f.z * (c001 - c000);
+        } else if f.z > f.x {
+            return c000 + f.x * (c111 - c011) + f.y * (c010 - c000) + f.z * (c011 - c010);
+        } else {
+            return c000 + f.x * (c110 - c010) + f.y * (c010 - c000) + f.z * (c111 - c110);
+        }
+    }
+}
+
+// CC4 3.5: one `technical_lut` / `creative_look` node.  `values` is the word
+// index of `v0`:
+//
+//   v0  atlas slot, 0..=3      v1  mix, 0..=1        v2  input encoding token
+//   v3..v5  domain_min rgb     v6..v8  domain_max rgb
+//   v9  lattice edge S         v10 atlas z origin    v11 reserved
+//
+//   e = ENC(x); u = clamp(e, dmin, dmax); y = tetrahedral(u);
+//   z = y + (e - u);           <- out-of-domain delta restoration
+//   x' = DEC(z); out = x + (x' - x) * mix   <- mix in LINEAR light
+//
+// The excursion is restored in the ENCODED domain and the mix happens in
+// linear light, so an over-range highlight stays recoverable and `mix = 0` and
+// `mix = 1` are the exact endpoints.  No RGB clamp survives this function.
+fn apply_lut_node(values: u32, rgb: vec3<f32>) -> vec3<f32> {
+    let mix_amount = grade_buffer.words[values + 1u];
+    let encoding = u32(round(grade_buffer.words[values + 2u]));
+    let dmin = vec3<f32>(
+        grade_buffer.words[values + 3u],
+        grade_buffer.words[values + 4u],
+        grade_buffer.words[values + 5u],
+    );
+    let dmax = vec3<f32>(
+        grade_buffer.words[values + 6u],
+        grade_buffer.words[values + 7u],
+        grade_buffer.words[values + 8u],
+    );
+    let size = u32(round(grade_buffer.words[values + 9u]));
+    let z_origin = u32(round(grade_buffer.words[values + 10u]));
+    var e = rgb;
+    if encoding == 0u {
+        e = vec3<f32>(encode_bt709(rgb.r), encode_bt709(rgb.g), encode_bt709(rgb.b));
+    } else if encoding == 2u {
+        e = vec3<f32>(grade709_encode(rgb.r), grade709_encode(rgb.g), grade709_encode(rgb.b));
+    }
+    let u = clamp(e, dmin, dmax);
+    let y = lut_tetrahedral(size, z_origin, dmin, dmax, e);
+    let z = y + (e - u);
+    var decoded = z;
+    if encoding == 0u {
+        decoded = vec3<f32>(
+            decode_display709(z.r),
+            decode_display709(z.g),
+            decode_display709(z.b),
+        );
+    } else if encoding == 2u {
+        decoded = vec3<f32>(grade709_decode(z.r), grade709_decode(z.g), grade709_decode(z.b));
+    }
+    return rgb + (decoded - rgb) * mix_amount;
+}
+
 // CC3 3.1: one ordered node stack executed in serialized `clip.effects` order.
 // The renderer must not flatten, reorder, or merge nodes, and no RGB clamp
 // occurs between them.  Inactive nodes are never written to the buffer
@@ -325,6 +466,14 @@ fn apply_color_nodes(input_rgb: vec3<f32>) -> vec3<f32> {
             corrected = apply_wheels_node(values, corrected);
         } else if kind == 3u {
             corrected = apply_curves_node(u32(round(grade_buffer.words[base + 1u])), corrected);
+        } else if kind == 4u {
+            // CC4 4.2: `technical_lut`.
+            corrected = apply_lut_node(values, corrected);
+        } else if kind == 5u {
+            // CC4 4.2: `creative_look`.  The two kinds are mathematically
+            // identical and differ only in stage, role, and mix bounds, all of
+            // which the host resolved before the record was written.
+            corrected = apply_lut_node(values, corrected);
         }
     }
     return corrected;

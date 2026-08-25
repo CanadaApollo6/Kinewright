@@ -11,9 +11,9 @@ use half::f16;
 use kinewright_core::{
     COLOR_NODE_LIMIT_PER_LAYER, ColorContext, ColorCurveChannel, ColorDescription, ColorNodeKind,
     ColorWheelChannel, ColorWheelsParams, CurvePoints, Effect, EffectParameterDescriptor,
-    EffectUniform, FrameTexture, MediaError, MonitorProofMetadata, MonitorProofRenderKind,
-    ParamValue, ResolvedCurves, classify_color_node, color_node_inactive_reason, effect_descriptor,
-    managed_color_node_count,
+    EffectUniform, FrameTexture, LutNodeParams, MediaError, MonitorProofMetadata,
+    MonitorProofRenderKind, ParamValue, ResolvedCurves, classify_color_node,
+    color_node_inactive_reason, effect_descriptor, managed_color_node_count,
 };
 
 use crate::{
@@ -22,9 +22,18 @@ use crate::{
     },
     frame::WorkingFrame,
     lut::{CubeLut, parse_cube_lut},
+    lut_store::LutLibrary,
     render::RenderScale,
     timeline::TransitionRenderParams,
 };
+
+/// The compositor's WGSL source.
+///
+/// Named rather than inlined into `create_shader_module` so the ABI fixtures
+/// can assert against the very text the pipeline compiles — CC4 4.2 requires a
+/// shader branch for every `ColorNodeKind`, and a test that read a second copy
+/// could not prove that.
+const COMPOSITOR_SHADER_SOURCE: &str = include_str!("compositor.wgsl");
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const UNIFORM_FLOATS: usize = 48;
@@ -47,9 +56,59 @@ const GRADE_CURVE_SLOT_WORDS: usize = 49;
 /// A curve node owns four slots, ordered red, green, blue, master.
 const GRADE_CURVE_PAYLOAD_WORDS: usize = 4 * GRADE_CURVE_SLOT_WORDS;
 /// The storage-buffer ABI version written into `header.z`.
-const GRADE_ABI_VERSION: u32 = 1;
+///
+/// CC4 4.2 takes this `1 -> 2`: the buffer now carries node kinds whose
+/// interpretation depends on a companion texture binding (the LUT atlas), so a
+/// consumer that understands only the CC3 kinds cannot safely read it.
+const GRADE_ABI_VERSION: u32 = 2;
 /// The `grade709` range of one curve-coordinate basis point.
 const CURVE_BASIS_POINT_SCALE: f32 = 10_000.0;
+
+/// CC4 4.1: managed LUT atlas slots per layer, one per *active* LUT node.
+///
+/// Mirrors Core's `LUT_NODE_LIMIT_PER_LAYER`, which is what the edit path
+/// enforces; this constant is the GPU-side reason that limit exists, and the
+/// limit-contract test asserts the two agree.
+pub const COMPOSITOR_LUT_SLOTS_PER_LAYER: usize = 4;
+
+/// CC4 4.1: the legacy external `cube_lut` compatibility stage owns the last
+/// atlas slot, so no new binding is introduced for it.
+pub const COMPOSITOR_LEGACY_LUT_SLOT: usize = 4;
+
+/// CC4 4.1: total slots in the single depth-packed 3D atlas at binding 3.
+pub const COMPOSITOR_LUT_ATLAS_SLOTS: usize = COMPOSITOR_LUT_SLOTS_PER_LAYER + 1;
+
+/// CC4 4.1: the 3D texture dimension the compositor negotiates.
+///
+/// The worst-case atlas is `COMPOSITOR_LUT_ATLAS_SLOTS * MAX_CUBE_SIZE = 325`
+/// texels deep, which exceeds the 256 that both `downlevel_defaults` and
+/// `downlevel_webgl2_defaults` advertise.  Production negotiates
+/// `wgpu::Limits::default()` (2048), so raising the floor to 512 changes no
+/// production adapter's behaviour and makes the downlevel requirement explicit
+/// instead of latent.
+pub const COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D: u32 = 512;
+
+/// How many distinct atlases the compositor keeps hot.
+///
+/// One entry would thrash whenever two layers of the same frame carry
+/// different looks, which is the ordinary multi-layer case; a handful covers a
+/// realistic stack.
+const LUT_ATLAS_CACHE_ENTRIES: usize = 8;
+
+/// The GPU memory the atlas cache may hold in retained atlases.
+///
+/// The count bound alone says nothing about size: eight worst-case
+/// `65 x 65 x 325` atlases is about 168 MiB held purely as a reuse
+/// optimization, the same failure mode `TEXTURE_POOL_MAX_BYTES` exists for. A
+/// dropped atlas is simply rebuilt on demand, and the entry the current frame
+/// is using is kept alive by its `Arc` regardless.
+///
+/// A cached atlas also retains a strong `Arc` to each source lattice (see
+/// [`CachedLutSlot`]), so this budget bounds the retained CPU samples too: the
+/// parsed lattice of a slot is the same 16 bytes per texel as the texel it was
+/// uploaded to. Those lattices are normally already held by the published
+/// [`LutLibrary`], so the retention usually costs nothing beyond the `Arc`.
+const LUT_ATLAS_CACHE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The compositor's managed colour-node ABI uses one read-only storage buffer
 /// in the fragment stage.  Keep this requirement next to the bind-group
@@ -80,6 +139,11 @@ pub fn compositor_required_limits(mut limits: wgpu::Limits) -> wgpu::Limits {
     limits.max_storage_buffer_binding_size = limits
         .max_storage_buffer_binding_size
         .max(COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE);
+    // CC4 4.1: the depth-packed LUT atlas needs more 3D depth than the
+    // downlevel profiles advertise.
+    limits.max_texture_dimension_3d = limits
+        .max_texture_dimension_3d
+        .max(COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D);
     limits
 }
 
@@ -289,6 +353,14 @@ pub struct Compositor {
     point_sampler: wgpu::Sampler,
     pipeline: wgpu::RenderPipeline,
     lut_cache: Mutex<HashMap<PathBuf, CachedCubeLut>>,
+    /// The `S = 2` identity lattice bound in the legacy slot when no layer
+    /// effect supplies one.  Held once, not rebuilt per frame, so its `Arc`
+    /// identity is stable and the atlas cache below actually hits.
+    identity_lut: Arc<CubeLut>,
+    /// CC4 4.1's mandatory atlas cache, most recently used first. Keyed by the
+    /// ordered slot signature, so playback re-uploads only when the bound set
+    /// changes.
+    lut_atlas_cache: Mutex<Vec<Arc<LutAtlas>>>,
     /// Per-layer source textures are recycled across `render` calls. Playback
     /// composites the same raster every frame, so allocating and destroying a
     /// texture per layer per frame is pure overhead; `write_texture` still
@@ -416,7 +488,9 @@ impl TexturePool {
 struct LayerResources {
     texture: wgpu::Texture,
     pool_key: TexturePoolKey,
-    _lut_texture: wgpu::Texture,
+    /// The atlas this layer's bind group reads; held so the texture outlives
+    /// the queue submission even if the cache evicts it meanwhile.
+    _lut_atlas: Arc<LutAtlas>,
     _uniform: wgpu::Buffer,
     _grade: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -474,6 +548,11 @@ struct LayerParams {
     external_domain_max_b: f32,
     input_linear: f32,
     legacy_stage_active: f32,
+    /// CC4 4.1: the two reclaimed `_uniform_padding` words. The legacy stage
+    /// reads its slot's depth origin and edge length from here instead of
+    /// calling `textureDimensions` on a texture it no longer owns alone.
+    external_lut_z_origin: f32,
+    external_lut_size: f32,
 }
 
 impl Default for LayerParams {
@@ -523,6 +602,8 @@ impl Default for LayerParams {
             external_domain_max_b: 1.0,
             input_linear: 0.0,
             legacy_stage_active: 0.0,
+            external_lut_z_origin: 0.0,
+            external_lut_size: 2.0,
         }
     }
 }
@@ -590,7 +671,7 @@ impl Compositor {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Kinewright compositor shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("compositor.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(COMPOSITOR_SHADER_SOURCE.into()),
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Kinewright compositor pipeline"),
@@ -653,6 +734,8 @@ impl Compositor {
             point_sampler,
             pipeline,
             lut_cache: Mutex::new(HashMap::new()),
+            identity_lut: Arc::new(CubeLut::identity()),
+            lut_atlas_cache: Mutex::new(Vec::new()),
             texture_pool: Mutex::new(TexturePool::default()),
         }
     }
@@ -688,8 +771,30 @@ impl Compositor {
         layers: &[CompositorLayer<'_, F>],
         monitoring: &ColorDescription,
     ) -> Result<FrameTexture, MediaError> {
+        self.render_monitor_with_luts(resolution, layers, monitoring, None)
+    }
+
+    /// [`Self::render_monitor`] with the verified CC4 LUT library the layers'
+    /// `technical_lut` / `creative_look` nodes resolve against.
+    ///
+    /// `None` is the look-free path: a layer carrying an *active* LUT node
+    /// then fails with `missing_lut_asset` rather than silently rendering the
+    /// frame without the look (CC4 2.3).
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error for invalid dimensions, an unsupported
+    /// monitoring transfer, an unresolvable LUT node, or a GPU mapping
+    /// failure.
+    pub fn render_monitor_with_luts<F: CompositorInput>(
+        &self,
+        resolution: (u32, u32),
+        layers: &[CompositorLayer<'_, F>],
+        monitoring: &ColorDescription,
+        library: Option<&LutLibrary>,
+    ) -> Result<FrameTexture, MediaError> {
         let (width, height) = resolution;
-        let (output, resources, encoder) = self.composite(width, height, layers)?;
+        let (output, resources, encoder) = self.composite(width, height, layers, library)?;
         let readback = self.readback_for(width, height, &output, encoder, monitoring);
         self.release_layer_textures(resources);
         readback
@@ -712,8 +817,25 @@ impl Compositor {
         layers: &[CompositorLayer<'_, F>],
         delivery: &ColorDescription,
     ) -> Result<DeliveryFrame, MediaError> {
+        self.render_delivery_with_luts(resolution, layers, delivery, None)
+    }
+
+    /// [`Self::render_delivery`] with the verified CC4 LUT library. See
+    /// [`Self::render_monitor_with_luts`] for the `None` contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error for invalid dimensions, an unsupported delivery
+    /// transfer, an unresolvable LUT node, or a GPU mapping failure.
+    pub fn render_delivery_with_luts<F: CompositorInput>(
+        &self,
+        resolution: (u32, u32),
+        layers: &[CompositorLayer<'_, F>],
+        delivery: &ColorDescription,
+        library: Option<&LutLibrary>,
+    ) -> Result<DeliveryFrame, MediaError> {
         let (width, height) = resolution;
-        let (output, resources, encoder) = self.composite(width, height, layers)?;
+        let (output, resources, encoder) = self.composite(width, height, layers, library)?;
         let readback = self.readback_rgba16(width, height, &output, encoder, delivery);
         self.release_layer_textures(resources);
         readback
@@ -729,6 +851,7 @@ impl Compositor {
         width: u32,
         height: u32,
         layers: &[CompositorLayer<'_, F>],
+        library: Option<&LutLibrary>,
     ) -> Result<(wgpu::Texture, Vec<LayerResources>, wgpu::CommandEncoder), MediaError> {
         if width == 0 || height == 0 {
             return Err(MediaError::Backend(
@@ -751,7 +874,7 @@ impl Compositor {
         });
         let mut resources = Vec::with_capacity(layers.len());
         for layer in layers {
-            match self.layer_resources(layer, width, height) {
+            match self.layer_resources(layer, width, height, library) {
                 Ok(resource) => resources.push(resource),
                 Err(error) => {
                     self.release_layer_textures(resources);
@@ -884,6 +1007,7 @@ impl Compositor {
         layer: &CompositorLayer<'_, F>,
         width: u32,
         height: u32,
+        library: Option<&LutLibrary>,
     ) -> Result<LayerResources, MediaError> {
         let expected_len = usize::try_from(layer.frame.width())
             .unwrap_or_default()
@@ -920,60 +1044,30 @@ impl Compositor {
                 depth_or_array_layers: 1,
             },
         );
-        let (cube_lut, external_lut_enabled) = self.cube_lut(layer.effects)?;
-        let lut_texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Kinewright external 3D LUT"),
-            size: wgpu::Extent3d {
-                width: cube_lut.size,
-                height: cube_lut.size,
-                depth_or_array_layers: cube_lut.size,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D3,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let lut_bytes = cube_lut
-            .rgba
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect::<Vec<_>>();
-        self.gpu.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &lut_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &lut_bytes,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(cube_lut.size.saturating_mul(16)),
-                rows_per_image: Some(cube_lut.size),
-            },
-            wgpu::Extent3d {
-                width: cube_lut.size,
-                height: cube_lut.size,
-                depth_or_array_layers: cube_lut.size,
-            },
-        );
+        let binding = self.lut_binding(layer.effects, library)?;
+        let cube_lut = &binding.legacy_lut;
         let mut params = params_for(layer.effects, layer.transition);
-        params.external_lut_enabled = if external_lut_enabled { 1.0 } else { 0.0 };
+        params.external_lut_enabled = if binding.legacy_enabled { 1.0 } else { 0.0 };
         params.external_domain_min_r = cube_lut.domain_min[0];
         params.external_domain_min_g = cube_lut.domain_min[1];
         params.external_domain_min_b = cube_lut.domain_min[2];
         params.external_domain_max_r = cube_lut.domain_max[0];
         params.external_domain_max_g = cube_lut.domain_max[1];
         params.external_domain_max_b = cube_lut.domain_max[2];
+        // CC4 4.1: the legacy stage addresses its own slot of the shared
+        // atlas; `2 * 65` and `65` are both exact in f32.
+        #[allow(clippy::cast_precision_loss)]
+        {
+            params.external_lut_z_origin = binding.legacy_z_origin as f32;
+            params.external_lut_size = cube_lut.size as f32;
+        }
         params.input_linear = f32::from(F::LINEAR);
         params.legacy_stage_active = if legacy_stage_active(layer.effects) {
             1.0
         } else {
             0.0
         };
-        let grade_bytes = grade_buffer_bytes(layer.effects)?;
+        let grade_bytes = grade_buffer_bytes_with_luts(layer.effects, library)?;
         let grade = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Kinewright managed colour nodes"),
             size: u64::try_from(grade_bytes.len()).unwrap_or(u64::MAX),
@@ -994,7 +1088,6 @@ impl Compositor {
             &self.sampler
         };
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let lut_view = lut_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self
             .gpu
             .device
@@ -1016,7 +1109,7 @@ impl Compositor {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&lut_view),
+                        resource: wgpu::BindingResource::TextureView(&binding.atlas.view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -1027,10 +1120,164 @@ impl Compositor {
         Ok(LayerResources {
             texture,
             pool_key,
-            _lut_texture: lut_texture,
+            _lut_atlas: binding.atlas,
             _uniform: uniform,
             _grade: grade,
             bind_group,
+        })
+    }
+
+    /// Resolve one layer's LUT atlas (CC4 4.1), reusing a cached one whenever
+    /// the ordered slot signature is unchanged.
+    ///
+    /// The slot order is the managed nodes in `clip.effects` order followed by
+    /// the legacy `cube_lut` slot, which is why the legacy stage can never
+    /// displace a managed one and why managed `z_origin`s are computable from
+    /// the managed nodes alone. Only *bound* slots are allocated, so the
+    /// atlas depth is the sum of the sizes actually in use, never
+    /// `5 * Smax`.
+    ///
+    /// A layer that binds nothing still gets the shared `S = 2` identity as a
+    /// placeholder, so binding 3 stays valid without a "no LUT" code path and
+    /// the disabled legacy uniforms address an in-bounds slot.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `too_many_lut_nodes` / `missing_lut_asset` from
+    /// [`managed_lut_slots`], the legacy `.cube` load failure, and a poisoned
+    /// cache lock.
+    pub(crate) fn lut_binding(
+        &self,
+        effects: &[Effect],
+        library: Option<&LutLibrary>,
+    ) -> Result<LayerLutBinding, MediaError> {
+        let mut slots = managed_lut_slots(effects, library)?;
+        let legacy_z_origin = slots.iter().map(|slot| slot.lut.size).sum::<u32>();
+        let (legacy_lut, legacy_enabled) = self.cube_lut(effects)?;
+        if legacy_enabled || slots.is_empty() {
+            // `managed_lut_slots` already capped the managed slots, so the
+            // legacy lattice always lands at slot index
+            // `COMPOSITOR_LEGACY_LUT_SLOT` or earlier.
+            debug_assert!(slots.len() <= COMPOSITOR_LEGACY_LUT_SLOT);
+            slots.push(LutAtlasSlot {
+                z_origin: legacy_z_origin,
+                lut: Arc::clone(&legacy_lut),
+            });
+        }
+        let atlas = self.lut_atlas(&slots)?;
+        Ok(LayerLutBinding {
+            atlas,
+            legacy_enabled,
+            // When the legacy stage is inactive these uniforms are never read.
+            // They still point at slot 0, which every atlas has, so a stale
+            // read could not wander outside the texture.
+            legacy_z_origin: if legacy_enabled { legacy_z_origin } else { 0 },
+            legacy_lut,
+        })
+    }
+
+    /// Build or reuse the atlas for an ordered slot list.
+    fn lut_atlas(&self, slots: &[LutAtlasSlot]) -> Result<Arc<LutAtlas>, MediaError> {
+        {
+            let mut cache = self
+                .lut_atlas_cache
+                .lock()
+                .map_err(|_| MediaError::Backend("LUT atlas cache lock was poisoned".to_owned()))?;
+            if let Some(index) = cache.iter().position(|atlas| atlas.matches(slots)) {
+                let atlas = cache.remove(index);
+                cache.insert(0, Arc::clone(&atlas));
+                return Ok(atlas);
+            }
+        }
+        let atlas = Arc::new(self.build_lut_atlas(slots)?);
+        let mut cache = self
+            .lut_atlas_cache
+            .lock()
+            .map_err(|_| MediaError::Backend("LUT atlas cache lock was poisoned".to_owned()))?;
+        cache.insert(0, Arc::clone(&atlas));
+        cache.truncate(LUT_ATLAS_CACHE_ENTRIES);
+        let sizes = cache.iter().map(|entry| entry.bytes()).collect::<Vec<_>>();
+        cache.truncate(atlas_cache_kept_entries(&sizes, LUT_ATLAS_CACHE_MAX_BYTES));
+        Ok(atlas)
+    }
+
+    /// Allocate the depth-packed atlas and upload one slot at a time.
+    fn build_lut_atlas(&self, slots: &[LutAtlasSlot]) -> Result<LutAtlas, MediaError> {
+        let edge = slots.iter().map(|slot| slot.lut.size).max().unwrap_or(1);
+        let depth = slots.iter().map(|slot| slot.lut.size).sum::<u32>().max(1);
+        if slots.len() > COMPOSITOR_LUT_ATLAS_SLOTS
+            || depth > COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D
+        {
+            return Err(MediaError::Backend(format!(
+                "lut_atlas_too_large: {} slots totalling {depth} texels of depth exceed the \
+                 negotiated {COMPOSITOR_LUT_ATLAS_SLOTS} slots / \
+                 {COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D} texels",
+                slots.len()
+            )));
+        }
+        let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Kinewright 3D LUT atlas"),
+            size: wgpu::Extent3d {
+                width: edge,
+                height: edge,
+                depth_or_array_layers: depth,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            // CC4 4.1: f32 keeps the texels bit-identical to the parsed
+            // samples the CPU reference reads, so the only CPU/GPU divergence
+            // inside a LUT node is arithmetic order.
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for slot in slots {
+            let size = slot.lut.size;
+            let bytes = slot
+                .lut
+                .rgba
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>();
+            self.gpu.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: slot.z_origin,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size.saturating_mul(16)),
+                    rows_per_image: Some(size),
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: size,
+                },
+            );
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Ok(LutAtlas {
+            texture,
+            view,
+            // Retaining the sources is load-bearing, not incidental: it is
+            // what keeps `CachedLutSlot::matches` from being an ABA compare.
+            slots: slots
+                .iter()
+                .map(|slot| CachedLutSlot {
+                    lut: Arc::clone(&slot.lut),
+                    size: slot.lut.size,
+                    z_origin: slot.z_origin,
+                })
+                .collect(),
         })
     }
 
@@ -1040,7 +1287,10 @@ impl Compositor {
             .rev()
             .find(|effect| effect.name == "cube_lut")
         else {
-            return Ok((Arc::new(CubeLut::identity()), false));
+            // The shared identity lattice, not a fresh allocation: the atlas
+            // cache keys on `Arc` identity, so a new `Arc` every frame would
+            // rebuild the atlas on every frame of look-free playback.
+            return Ok((Arc::clone(&self.identity_lut), false));
         };
         let Some(ParamValue::Text(path)) = effect.parameters.get("path") else {
             return Err(MediaError::Backend(
@@ -1273,8 +1523,19 @@ impl Compositor {
         resolution: (u32, u32),
         layers: &[CompositorLayer<'_, WorkingFrame>],
     ) -> Result<Vec<f32>, MediaError> {
+        self.render_working_with_luts(resolution, layers, None)
+    }
+
+    /// [`Self::render_working`] with the verified CC4 LUT library.
+    #[cfg(test)]
+    pub(crate) fn render_working_with_luts(
+        &self,
+        resolution: (u32, u32),
+        layers: &[CompositorLayer<'_, WorkingFrame>],
+        library: Option<&LutLibrary>,
+    ) -> Result<Vec<f32>, MediaError> {
         let (width, height) = resolution;
-        let (output, resources, encoder) = self.composite(width, height, layers)?;
+        let (output, resources, encoder) = self.composite(width, height, layers, library)?;
         let mut values = Vec::with_capacity(
             usize::try_from(width)
                 .unwrap_or_default()
@@ -1339,8 +1600,8 @@ impl LayerParams {
             self.external_domain_max_b,
             self.input_linear,
             self.legacy_stage_active,
-            0.0,
-            0.0,
+            self.external_lut_z_origin,
+            self.external_lut_size,
         ];
         let mut bytes = [0_u8; UNIFORM_BYTES];
         for (index, value) in values.into_iter().enumerate() {
@@ -1349,6 +1610,209 @@ impl LayerParams {
         }
         bytes
     }
+}
+
+/// How many leading atlas-cache entries fit inside the retained-byte budget.
+///
+/// `sizes` is most-recently-used first, so this is a prefix decision: keep
+/// entries until adding one more would exceed `max_bytes`, then drop the whole
+/// tail. The head is *never* dropped — an atlas that alone exceeds the budget
+/// still stays cached, because it is the one the current frame just built and
+/// evicting it would guarantee a rebuild on the very next frame while freeing
+/// nothing that is not already alive through the caller's `Arc`.
+///
+/// Split out from the cache write so the budget is testable without a GPU:
+/// building a real [`LutAtlas`] needs a device, and the sizes that make the
+/// trim interesting are hundreds of megabytes of texture.
+fn atlas_cache_kept_entries(sizes: &[u64], max_bytes: u64) -> usize {
+    let mut retained = 0_u64;
+    for (index, bytes) in sizes.iter().enumerate() {
+        retained = retained.saturating_add(*bytes);
+        if retained > max_bytes && index > 0 {
+            return index;
+        }
+    }
+    sizes.len()
+}
+
+/// One bound slot: which lattice, where it starts in the atlas depth.
+#[derive(Clone)]
+struct LutAtlasSlot {
+    z_origin: u32,
+    lut: Arc<CubeLut>,
+}
+
+/// The retained identity of one lattice bound to a cached atlas (CC4 4.1).
+///
+/// The contract keys the atlas cache on the ordered `(sha256, size)` list of
+/// bound slots. A [`LutLibrary`] is looked up by
+/// [`kinewright_core::LutAssetId`], and the hash it retains per entry is not
+/// carried down to a bound slot, so this uses the identity of the verified
+/// lattice instead — and *retains a strong `Arc` to it*. Retention is what makes the
+/// comparison sound: a cached atlas keeps its own sources alive, so no other
+/// allocation can ever occupy those addresses while the atlas is cached, and
+/// `Arc::ptr_eq` therefore proves the very same verified samples rather than
+/// merely the same address. Comparing an unretained raw pointer would be an
+/// ABA bug: an edited LUT reparsed into a freed allocation's address would
+/// have hit a stale atlas and rendered the old look.
+///
+/// This is *stricter* than the contract's hash key, never looser: two distinct
+/// allocations of identical bytes miss the cache and rebuild.
+#[derive(Clone)]
+struct CachedLutSlot {
+    lut: Arc<CubeLut>,
+    size: u32,
+    z_origin: u32,
+}
+
+impl CachedLutSlot {
+    /// Whether this cached slot is the same lattice bound the same way.
+    fn matches(&self, slot: &LutAtlasSlot) -> bool {
+        Arc::ptr_eq(&self.lut, &slot.lut)
+            && self.size == slot.lut.size
+            && self.z_origin == slot.z_origin
+    }
+}
+
+/// CC4 4.1's single depth-packed `Rgba32Float` 3D atlas at binding 3.
+///
+/// Dimensions are `(Smax, Smax, sum of the bound slot sizes)`; a slot smaller
+/// than `Smax` simply leaves the trailing texels of its `x`/`y` rows unused.
+/// WGSL has no `texture_3d_array` and separate bindings are capped at sixteen
+/// sampled textures per stage, so depth packing is what keeps the binding
+/// count unchanged.
+pub(crate) struct LutAtlas {
+    /// The owning handle for `view`, and the source of the cache's size
+    /// accounting.
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    /// The bound slots in slot order: managed slots `0..n`, then the legacy
+    /// `cube_lut` slot. This vector *is* the cache key, and it holds a strong
+    /// `Arc` to every lattice it was built from, so a cached atlas pins its
+    /// own sources for as long as it can be served.
+    slots: Vec<CachedLutSlot>,
+}
+
+impl LutAtlas {
+    /// Whether this atlas was built from exactly this ordered slot list.
+    fn matches(&self, slots: &[LutAtlasSlot]) -> bool {
+        self.slots.len() == slots.len()
+            && self
+                .slots
+                .iter()
+                .zip(slots)
+                .all(|(cached, slot)| cached.matches(slot))
+    }
+
+    /// The `(size, z_origin)` of each bound slot, in slot order.
+    #[cfg(test)]
+    pub(crate) fn slot_layout(&self) -> Vec<(u32, u32)> {
+        self.slots
+            .iter()
+            .map(|slot| (slot.size, slot.z_origin))
+            .collect()
+    }
+
+    /// The lattices this atlas retains, in slot order.
+    #[cfg(test)]
+    pub(crate) fn retained_slots(&self) -> Vec<Arc<CubeLut>> {
+        self.slots
+            .iter()
+            .map(|slot| Arc::clone(&slot.lut))
+            .collect()
+    }
+
+    /// The allocated atlas extent, `(width, height, depth)`.
+    #[cfg(test)]
+    pub(crate) fn extent(&self) -> (u32, u32, u32) {
+        let size = self.texture.size();
+        (size.width, size.height, size.depth_or_array_layers)
+    }
+
+    /// The GPU memory this atlas occupies, for the cache's byte budget.
+    fn bytes(&self) -> u64 {
+        let size = self.texture.size();
+        u64::from(size.width)
+            .saturating_mul(u64::from(size.height))
+            .saturating_mul(u64::from(size.depth_or_array_layers))
+            .saturating_mul(16)
+    }
+}
+
+/// Everything one layer needs from the LUT atlas: the texture its bind group
+/// reads, and where the legacy stage's slot lives inside it.
+pub(crate) struct LayerLutBinding {
+    atlas: Arc<LutAtlas>,
+    legacy_enabled: bool,
+    legacy_lut: Arc<CubeLut>,
+    legacy_z_origin: u32,
+}
+
+/// How many *active* LUT nodes a layer carries (CC4 3.6: an inactive node is
+/// the exact identity, is never written, and occupies no atlas slot).
+fn active_lut_node_count(effects: &[Effect]) -> usize {
+    effects
+        .iter()
+        .filter(|effect| {
+            classify_color_node(effect).is_some_and(ColorNodeKind::is_lut)
+                && color_node_inactive_reason(effect).is_none()
+        })
+        .count()
+}
+
+/// Assign atlas slots to the layer's active LUT nodes, in record order.
+///
+/// Slot `k` is the `k`-th active LUT node in `clip.effects` order and starts at
+/// the running depth sum, so the ordered stack keeps its serialized order and
+/// the legacy slot that follows can never displace a managed one.
+///
+/// # Errors
+///
+/// * `too_many_lut_nodes:` when more than [`COMPOSITOR_LUT_SLOTS_PER_LAYER`]
+///   LUT nodes are active. Core rejects this on the edit path
+///   (`LUT_NODE_LIMIT_PER_LAYER`); this is the defensive gate.
+/// * `missing_lut_asset:` when an active node's asset is not in the verified
+///   library. CC4 2.3 forbids silently dropping the node, so the render fails.
+fn managed_lut_slots(
+    effects: &[Effect],
+    library: Option<&LutLibrary>,
+) -> Result<Vec<LutAtlasSlot>, MediaError> {
+    let active = active_lut_node_count(effects);
+    if active > COMPOSITOR_LUT_SLOTS_PER_LAYER {
+        return Err(MediaError::Backend(format!(
+            "too_many_lut_nodes: layer carries {active} active LUT nodes, \
+             at most {COMPOSITOR_LUT_SLOTS_PER_LAYER} are allowed"
+        )));
+    }
+    let mut slots: Vec<LutAtlasSlot> = Vec::with_capacity(active);
+    let mut z_origin = 0_u32;
+    for effect in effects {
+        let Some(kind) = classify_color_node(effect) else {
+            continue;
+        };
+        if !kind.is_lut() || color_node_inactive_reason(effect).is_some() {
+            continue;
+        }
+        let params = LutNodeParams::from_effect(effect);
+        let asset = params.lut_asset_id;
+        let lut = library
+            .and_then(|library| library.get(asset))
+            .ok_or_else(|| {
+                MediaError::Backend(format!(
+                    "missing_lut_asset: {} node {} references LUT asset {}, which is not in the \
+                 verified LUT library; restore or relink the asset before rendering",
+                    kind.effect_name(),
+                    effect.id.0,
+                    asset.0
+                ))
+            })?;
+        slots.push(LutAtlasSlot {
+            z_origin,
+            lut: Arc::clone(lut),
+        });
+        z_origin = z_origin.saturating_add(lut.size);
+    }
+    Ok(slots)
 }
 
 /// One managed colour node resolved to the words the shader reads.
@@ -1393,8 +1857,37 @@ struct GradeNodeRecord {
 /// [`COLOR_NODE_LIMIT_PER_LAYER`] managed nodes — Core rejects that on the
 /// edit path, so this is a defensive gate — and a backend error when a
 /// `primary_correction` node cannot be resolved.
-#[allow(clippy::cast_precision_loss)]
+///
+/// A layer with an active LUT node is rejected here, because no library was
+/// supplied and CC4 2.3 forbids rendering a look-free frame in place of a look
+/// the project asked for. Callers that can carry looks use
+/// [`grade_buffer_bytes_with_luts`].
+///
+/// Test-only: the production layer path always has a library handle, so this
+/// arity exists for the CC1/CC3 fixtures, whose stacks predate LUT nodes.
+#[cfg(test)]
 pub(crate) fn grade_buffer_bytes(effects: &[Effect]) -> Result<Vec<u8>, MediaError> {
+    grade_buffer_bytes_with_luts(effects, None)
+}
+
+/// Serialize the ordered managed colour-node stack, resolving CC4 LUT nodes
+/// against the verified library.
+///
+/// The LUT record (CC4 4.2) carries no payload: `payload_word_offset` stays
+/// `0` and the twelve value words are
+/// `[slot, mix, encoding, dmin rgb, dmax rgb, S, z_origin, 0]`. `slot` and
+/// `z_origin` are assigned by [`managed_lut_slots`], so the buffer and the
+/// atlas agree by construction.
+///
+/// # Errors
+///
+/// As [`grade_buffer_bytes`], plus `too_many_lut_nodes` and
+/// `missing_lut_asset` from [`managed_lut_slots`].
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn grade_buffer_bytes_with_luts(
+    effects: &[Effect],
+    library: Option<&LutLibrary>,
+) -> Result<Vec<u8>, MediaError> {
     let managed = managed_color_node_count(effects);
     if managed > COLOR_NODE_LIMIT_PER_LAYER {
         return Err(MediaError::Backend(format!(
@@ -1402,13 +1895,16 @@ pub(crate) fn grade_buffer_bytes(effects: &[Effect]) -> Result<Vec<u8>, MediaErr
              at most {COLOR_NODE_LIMIT_PER_LAYER} are allowed"
         )));
     }
+    let lut_slots = managed_lut_slots(effects, library)?;
+    let mut next_lut_slot = 0_usize;
     let mut records = Vec::new();
     for effect in effects {
         let Some(kind) = classify_color_node(effect) else {
             continue;
         };
-        // CC3 3.3: an inactive node is the exact identity and must not reach
-        // the GPU buffer.  Keyframes are already resolved by the caller.
+        // CC3 3.3 / CC4 3.6: an inactive node is the exact identity and must
+        // not reach the GPU buffer or occupy an atlas slot.  Keyframes are
+        // already resolved by the caller.
         if color_node_inactive_reason(effect).is_some() {
             continue;
         }
@@ -1428,6 +1924,22 @@ pub(crate) fn grade_buffer_bytes(effects: &[Effect]) -> Result<Vec<u8>, MediaErr
                 values: [0.0; GRADE_NODE_VALUE_WORDS],
                 payload: curve_payload_words(&ResolvedCurves::from_effect(effect)),
             },
+            ColorNodeKind::TechnicalLut | ColorNodeKind::CreativeLook => {
+                let slot_index = next_lut_slot;
+                next_lut_slot += 1;
+                // `managed_lut_slots` walked the same effects in the same
+                // order under the same activity test, so this index exists.
+                let slot = lut_slots.get(slot_index).ok_or_else(|| {
+                    MediaError::Backend(
+                        "LUT slot assignment disagreed with the node record order".to_owned(),
+                    )
+                })?;
+                GradeNodeRecord {
+                    kind,
+                    values: lut_node_values(&LutNodeParams::from_effect(effect), slot_index, slot),
+                    payload: Vec::new(),
+                }
+            }
         });
     }
 
@@ -1480,6 +1992,35 @@ pub(crate) fn grade_buffer_bytes(effects: &[Effect]) -> Result<Vec<u8>, MediaErr
         "grade buffer exceeded the CC3 worst case"
     );
     Ok(bytes)
+}
+
+/// CC4 4.2 LUT node values, `v0 .. v11`.
+///
+/// The domain and edge length come from the *verified bytes* the library
+/// admitted, never from the document's informational mirrors (CC4 2.1), so a
+/// hand-edited record can never change what is rendered.
+#[allow(clippy::cast_precision_loss)]
+fn lut_node_values(
+    params: &LutNodeParams,
+    slot_index: usize,
+    slot: &LutAtlasSlot,
+) -> [f32; GRADE_NODE_VALUE_WORDS] {
+    let lut = &slot.lut;
+    [
+        // `slot_index <= 3` and `z_origin <= 4 * 65`, both exact in f32.
+        slot_index as f32,
+        params.mix(),
+        params.input_encoding_token as f32,
+        lut.domain_min[0],
+        lut.domain_min[1],
+        lut.domain_min[2],
+        lut.domain_max[0],
+        lut.domain_max[1],
+        lut.domain_max[2],
+        lut.size as f32,
+        slot.z_origin as f32,
+        0.0,
+    ]
 }
 
 /// CC1 primary values, `v0 .. v9`, byte-identical to the pre-CC3 serializer.
@@ -1775,7 +2316,16 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
     params
 }
 
-// Registered values are bounded to small integers that are exactly representable as f32.
+// Every uniform-carrying parameter is bounded to a small integer that is
+// exactly representable as f32.
+//
+// CC4 3.3 adds the one exception, and it is deliberately harmless:
+// `lut_asset_id` is bounded to `2^53 - 1`, which is exact in `i64` but not in
+// `f32`. It uses `EffectUniform::ColorNode`, so `params_for`'s match arm
+// discards the value without ever materializing it into `LayerParams`; the
+// asset reference reaches the GPU through the node record's atlas slot index,
+// never as a float. The lossy cast here is therefore computed and thrown away,
+// and no rendered value depends on it.
 #[allow(clippy::cast_precision_loss)]
 fn parameter_value(effect: &Effect, descriptor: &EffectParameterDescriptor) -> f32 {
     match effect.parameters.get(descriptor.name) {
@@ -1788,10 +2338,18 @@ fn parameter_value(effect: &Effect, descriptor: &EffectParameterDescriptor) -> f
 mod tests {
     use std::collections::BTreeMap;
 
-    use kinewright_core::{EFFECT_DESCRIPTORS, EffectId, ParamValue, Title};
+    use std::fmt::Write as _;
+
+    use kinewright_core::{
+        EFFECT_DESCRIPTORS, EffectId, LUT_NODE_LIMIT_PER_LAYER, LutAssetId, LutAvailabilityKind,
+        ParamValue, Title,
+    };
 
     use super::*;
-    use crate::gpu_test_support::fixture_gpu_or_skip;
+    use crate::{
+        cc1_fixtures::LINEAR_CPU_GPU_MAX, gpu_test_support::fixture_gpu_or_skip,
+        lut::MAX_CUBE_SIZE, lut_store::LutStore, test_support::TempDirectory,
+    };
 
     fn solid(width: u32, height: u32, rgba: [u8; 4]) -> FrameTexture {
         FrameTexture {
@@ -1815,6 +2373,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_possible_truncation)]
     fn compositor_limit_contract_requires_its_fragment_storage_buffer() {
         let limits = compositor_required_limits(wgpu::Limits::downlevel_webgl2_defaults());
         assert_eq!(
@@ -1830,6 +2389,66 @@ mod tests {
             COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE
         );
         assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE, 16_384);
+
+        // CC4 4.1/10.3.8. The LUT atlas is one depth-packed 3D texture on the
+        // binding that already existed, so the storage constants above are
+        // asserted UNCHANGED and only the 3D dimension is raised.
+        assert_eq!(COMPOSITOR_LUT_SLOTS_PER_LAYER, LUT_NODE_LIMIT_PER_LAYER);
+        assert_eq!(COMPOSITOR_LEGACY_LUT_SLOT, COMPOSITOR_LUT_SLOTS_PER_LAYER);
+        assert_eq!(
+            COMPOSITOR_LUT_ATLAS_SLOTS,
+            COMPOSITOR_LUT_SLOTS_PER_LAYER + 1
+        );
+        assert_eq!(COMPOSITOR_LUT_ATLAS_SLOTS, 5);
+        let worst_case_depth = COMPOSITOR_LUT_ATLAS_SLOTS as u32 * MAX_CUBE_SIZE;
+        assert_eq!(worst_case_depth, 325);
+        assert!(worst_case_depth <= COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D);
+        assert_eq!(COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D, 512);
+        // The raise is load-bearing, not decorative: the downlevel profile the
+        // rest of this test negotiates cannot hold the worst-case atlas.
+        assert!(
+            wgpu::Limits::downlevel_webgl2_defaults().max_texture_dimension_3d < worst_case_depth
+        );
+        assert!(wgpu::Limits::downlevel_defaults().max_texture_dimension_3d < worst_case_depth);
+        assert_eq!(
+            limits.max_texture_dimension_3d,
+            COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D
+        );
+        // Production negotiates the default profile, which already clears it,
+        // so no production adapter changes behaviour.
+        assert!(
+            wgpu::Limits::default().max_texture_dimension_3d
+                >= COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D
+        );
+        // CC4 4.2: the buffer now carries kinds whose meaning depends on a
+        // companion texture binding.
+        assert_eq!(GRADE_ABI_VERSION, 2);
+    }
+
+    #[test]
+    fn every_color_node_kind_has_a_shader_branch() {
+        // CC4 4.2: `apply_color_nodes` treats an unrecognized kind as the
+        // identity, so a host that writes a kind the shader does not dispatch
+        // would silently drop the node. Assert the dispatch exists for every
+        // tag, against the very source the pipeline compiles.
+        for kind in ColorNodeKind::ALL {
+            let tag = kind.storage_buffer_tag();
+            assert!(
+                COMPOSITOR_SHADER_SOURCE.contains(&format!("kind == {tag}u")),
+                "compositor.wgsl has no dispatch for {kind:?} (storage tag {tag})"
+            );
+        }
+        // Tags 1..=5 are exactly the tags in use; nothing else is dispatched.
+        let tags = ColorNodeKind::ALL.map(ColorNodeKind::storage_buffer_tag);
+        assert_eq!(tags.len(), 5);
+        for tag in 1..=5_u32 {
+            assert!(tags.contains(&tag), "storage tag {tag} is unassigned");
+        }
+        assert!(!COMPOSITOR_SHADER_SOURCE.contains("kind == 6u"));
+        // The atlas is read with `textureLoad` only; hardware filtering is
+        // forbidden (CC4 3.5), and the sampler at binding 1 is never used
+        // for it.
+        assert!(!COMPOSITOR_SHADER_SOURCE.contains("textureSample(lut_texture"));
     }
 
     #[test]
@@ -2916,6 +3535,1010 @@ mod tests {
         let _ = fs::remove_file(path);
 
         assert_pixel_close(pixel(&output, 0, 0), [0, 0, 255, 255], 3);
+    }
+
+    // -----------------------------------------------------------------
+    // CC4 4: LUT atlas, node records, and shader evaluation.
+    // -----------------------------------------------------------------
+
+    /// A verified [`LutLibrary`] built the way production builds one: import
+    /// real `.cube` bytes into a real project store, then admit them by hash.
+    ///
+    /// The library deliberately has no constructor that takes samples
+    /// directly — CC4 2.4's whole point is that the renderer consumes
+    /// hash-verified bytes — so these fixtures go through the store. The
+    /// temporary directory is dropped with the fixture.
+    struct TestLuts {
+        _directory: TempDirectory,
+        library: LutLibrary,
+    }
+
+    impl TestLuts {
+        /// Import each `.cube` text in order, allocating ids `1 ..= n`.
+        #[allow(clippy::cast_possible_truncation)]
+        fn build(label: &str, sources: &[String]) -> Self {
+            let directory = TempDirectory::new(label);
+            let store = LutStore::for_project(&directory.path("project.kinewright"))
+                .expect("a temporary project path derives a store root");
+            let mut assets = Vec::with_capacity(sources.len());
+            for (index, text) in sources.iter().enumerate() {
+                let source = directory.path(&format!("lut-{index}.cube"));
+                fs::write(&source, text).expect("the fixture LUT is written");
+                let import = store
+                    .import_lut_asset(&source)
+                    .expect("the fixture LUT imports");
+                assets.push(import.into_lut_asset(LutAssetId(index as u64 + 1)));
+            }
+            let (library, statuses) = LutLibrary::build(&assets, Some(&store));
+            for (id, status) in &statuses {
+                assert_eq!(
+                    status.kind,
+                    LutAvailabilityKind::Verified,
+                    "fixture asset {} was not verified",
+                    id.0
+                );
+            }
+            assert_eq!(library.len(), sources.len());
+            Self {
+                _directory: directory,
+                library,
+            }
+        }
+
+        fn library(&self) -> &LutLibrary {
+            &self.library
+        }
+    }
+
+    /// Serialize a lattice as `.cube` text. `sample` receives lattice
+    /// *indices* and returns the RGB triple stored there, red-fastest.
+    fn cube_text(
+        size: u32,
+        domain: (f32, f32),
+        sample: impl Fn(u32, u32, u32) -> [f32; 3],
+    ) -> String {
+        let (minimum, maximum) = domain;
+        let mut text = format!(
+            "LUT_3D_SIZE {size}\n\
+             DOMAIN_MIN {minimum:.6} {minimum:.6} {minimum:.6}\n\
+             DOMAIN_MAX {maximum:.6} {maximum:.6} {maximum:.6}\n"
+        );
+        for blue in 0..size {
+            for green in 0..size {
+                for red in 0..size {
+                    let [r, g, b] = sample(red, green, blue);
+                    let _ = writeln!(text, "{r:.6} {g:.6} {b:.6}");
+                }
+            }
+        }
+        text
+    }
+
+    /// A lattice whose value is `map` applied to the identity coordinate, over
+    /// `[0, 1]`. Every `map` used below is affine, and tetrahedral
+    /// interpolation reproduces an affine function exactly on every simplex,
+    /// so the expected values are the closed form (CC4 3.5).
+    #[allow(clippy::cast_precision_loss)]
+    fn mapped_cube(size: u32, map: impl Fn([f32; 3]) -> [f32; 3]) -> String {
+        let last = (size - 1) as f32;
+        cube_text(size, (0.0, 1.0), |r, g, b| {
+            map([r as f32 / last, g as f32 / last, b as f32 / last])
+        })
+    }
+
+    /// An identity lattice over `[0, 1]`.
+    fn identity_cube(size: u32) -> String {
+        mapped_cube(size, |rgb| rgb)
+    }
+
+    /// CC4 10.3.3's LUT B: `S = 2`, domain `[0, 1]`, the eight pinned lattice
+    /// values. Deliberately NOT affine, so tetrahedral and trilinear disagree
+    /// at the anchor and the fixture can prove which one runs.
+    fn lut_b_cube() -> String {
+        cube_text(2, (0.0, 1.0), |r, g, b| {
+            if r == 1 && g == 1 && b == 1 {
+                [1.0, 1.0, 1.0]
+            } else {
+                [
+                    if r == 1 { 0.5 } else { 0.0 },
+                    if g == 1 { 0.5 } else { 0.0 },
+                    if b == 1 { 0.5 } else { 0.0 },
+                ]
+            }
+        })
+    }
+
+    /// CC4 10.3.3's LUT D: the separable `f = (0, 0.25, 1.0)` lattice over
+    /// `DOMAIN_MIN = -0.5`, `DOMAIN_MAX = 1.5`. The domain-mapping and
+    /// out-of-domain anchor.
+    fn lut_d_cube() -> String {
+        let f = [0.0_f32, 0.25, 1.0];
+        cube_text(3, (-0.5, 1.5), |r, g, b| {
+            [f[r as usize], f[g as usize], f[b as usize]]
+        })
+    }
+
+    /// One `technical_lut` / `creative_look` effect bound to an asset id.
+    fn lut_node(id: u64, name: &str, asset: i64, parameters: &[(&str, i64)]) -> Effect {
+        let mut effect = effect_with(id, name, parameters);
+        effect
+            .parameters
+            .insert("lut_asset_id".to_owned(), ParamValue::Integer(asset));
+        effect
+    }
+
+    /// A `creative_look` with an explicit encoding token and mix.
+    fn creative_look(id: u64, asset: i64, encoding: i64, mix: i64) -> Effect {
+        lut_node(
+            id,
+            "creative_look",
+            asset,
+            &[
+                ("input_encoding_token", encoding),
+                ("mix_basis_points", mix),
+            ],
+        )
+    }
+
+    fn render_luts(
+        compositor: &Compositor,
+        frame: &WorkingFrame,
+        effects: &[Effect],
+        luts: &TestLuts,
+    ) -> Vec<f32> {
+        compositor
+            .render_working_with_luts(
+                (frame.width, frame.height),
+                &[CompositorLayer {
+                    frame,
+                    effects,
+                    transition: TransitionRenderParams::default(),
+                }],
+                Some(luts.library()),
+            )
+            .expect("production GPU working-surface readback")
+    }
+
+    /// Every pixel of a solid readback equals `expected` within `tolerance`.
+    fn assert_solid_linear(actual: &[f32], expected: [f32; 3], tolerance: f32) {
+        assert_eq!(actual.len() % 4, 0);
+        assert!(!actual.is_empty());
+        for pixel in actual.as_chunks::<4>().0 {
+            for (channel, (observed, want)) in pixel.iter().zip(&expected).enumerate() {
+                assert!(
+                    (observed - want).abs() <= tolerance,
+                    "channel {channel}: {observed} != {want} (tolerance {tolerance})"
+                );
+            }
+        }
+    }
+
+    /// The first pixel's linear RGB.
+    fn first_rgb(values: &[f32]) -> [f32; 3] {
+        [values[0], values[1], values[2]]
+    }
+
+    #[test]
+    fn lut_nodes_lay_out_a_technical_then_creative_stack_word_for_word() {
+        // CC4 4.2: a LUT node owns no payload region, so `payload_word_offset`
+        // stays 0 and the twelve value words carry the slot, the mix, the
+        // encoding, the VERIFIED domain, the edge length, and the atlas depth
+        // origin.  Every word below is written out by hand from the contract.
+        let luts = TestLuts::build("cc4-record-layout", &[lut_b_cube(), lut_d_cube()]);
+        let stack = [
+            lut_node(1, "technical_lut", 1, &[("input_encoding_token", 1)]),
+            creative_look(2, 2, 1, 5_000),
+        ];
+        let bytes = grade_buffer_bytes_with_luts(&stack, Some(luts.library()))
+            .expect("a two-node LUT stack serializes");
+        assert_eq!(bytes.len(), GRADE_HEADER_BYTES + 2 * GRADE_NODE_BYTES);
+        assert_eq!(grade_header(&bytes, 0), 2);
+        // No payload region exists, so the offset is simply the end of the
+        // records, exactly as a payload-free CC3 stack reports it.
+        assert_eq!(
+            grade_header(&bytes, 1),
+            u32::try_from(2 * GRADE_NODE_WORDS).expect("record words fit a u32")
+        );
+        assert_eq!(grade_header(&bytes, 2), GRADE_ABI_VERSION);
+        assert_eq!(grade_header(&bytes, 3), 0);
+        let expected: [f32; 32] = [
+            // technical_lut: kind 4, no payload, not bypassed, reserved
+            4.0, 0.0, 0.0, 0.0, //
+            // slot 0, mix pinned at 1.0, linear encoding,
+            // LUT B's domain [0,1], S = 2, z_origin 0, reserved
+            0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 0.0, 0.0, //
+            // creative_look: kind 5
+            5.0, 0.0, 0.0, 0.0, //
+            // slot 1, mix 0.5, linear encoding, LUT D's domain [-0.5, 1.5],
+            // S = 3, z_origin 2 (immediately after LUT B's two slices)
+            1.0, 0.5, 1.0, -0.5, -0.5, -0.5, 1.5, 1.5, 1.5, 3.0, 2.0, 0.0,
+        ];
+        for (word, want) in expected.into_iter().enumerate() {
+            let observed = grade_word(&bytes, word);
+            assert_eq!(
+                observed.to_bits(),
+                want.to_bits(),
+                "word {word}: {observed} != {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mixed_size_lut_stack_packs_one_atlas_and_each_node_reads_its_own_slot() {
+        // CC4 10.3.8: sizes 2, 17, 33, 65 pack to a 65 x 65 x 117 atlas.  Each
+        // node's lattice is a DIFFERENT affine map, and the maps do not
+        // commute, so any slot confusion changes the composed result.
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let luts = TestLuts::build(
+            "cc4-mixed-slots",
+            &[
+                mapped_cube(2, |[r, g, b]| [r * 0.5, g * 0.5, b * 0.5]),
+                mapped_cube(17, |[r, g, b]| [r, b, g]),
+                mapped_cube(33, |[r, g, b]| [r * 4.0, g, b]),
+                mapped_cube(65, |[r, g, b]| [r, g, b * 0.5]),
+            ],
+        );
+        let stack = [
+            creative_look(1, 1, 1, 10_000),
+            creative_look(2, 2, 1, 10_000),
+            creative_look(3, 3, 1, 10_000),
+            creative_look(4, 4, 1, 10_000),
+        ];
+
+        let binding = compositor
+            .lut_binding(&stack, Some(luts.library()))
+            .expect("four bound LUT nodes fit the atlas");
+        // Depth is the sum of the BOUND slot sizes, not `5 * Smax`, and the
+        // legacy slot is not allocated because no `cube_lut` is present.
+        assert_eq!(binding.atlas.extent(), (65, 65, 2 + 17 + 33 + 65));
+        assert_eq!(binding.atlas.extent().2, 117);
+        assert_eq!(
+            binding.atlas.slot_layout(),
+            vec![(2, 0), (17, 2), (33, 19), (65, 52)]
+        );
+
+        let bytes = grade_buffer_bytes_with_luts(&stack, Some(luts.library()))
+            .expect("four LUT nodes serialize");
+        assert_eq!(grade_header(&bytes, 0), 4);
+        let expected_slots: [(f32, f32); 4] = [(2.0, 0.0), (17.0, 2.0), (33.0, 19.0), (65.0, 52.0)];
+        for (index, (size, z_origin)) in expected_slots.into_iter().enumerate() {
+            let values = index * GRADE_NODE_WORDS + GRADE_NODE_VALUE_OFFSET;
+            #[allow(clippy::cast_precision_loss)]
+            let slot = index as f32;
+            assert_eq!(grade_word(&bytes, values).to_bits(), slot.to_bits());
+            assert_eq!(grade_word(&bytes, values + 9).to_bits(), size.to_bits());
+            assert_eq!(
+                grade_word(&bytes, values + 10).to_bits(),
+                z_origin.to_bits()
+            );
+        }
+
+        // (0.25, 0.75, 0.5)
+        //   -> x0.5      (0.125, 0.375, 0.25)
+        //   -> swap g,b  (0.125, 0.25,  0.375)
+        //   -> red x4    (0.5,   0.25,  0.375)
+        //   -> blue x0.5 (0.5,   0.25,  0.1875)
+        let frame = linear_frame([0.25, 0.75, 0.5]);
+        let rendered = render_luts(&compositor, &frame, &stack, &luts);
+        assert_solid_linear(&rendered, [0.5, 0.25, 0.1875], LINEAR_CPU_GPU_MAX);
+        // A shader that read slot 0 four times would produce this instead.
+        let all_slot_zero = [0.25 * 0.0625, 0.75 * 0.0625, 0.5 * 0.0625];
+        for (observed, wrong) in first_rgb(&rendered).iter().zip(&all_slot_zero) {
+            assert!(
+                (observed - wrong).abs() > LINEAR_CPU_GPU_MAX,
+                "the stack collapsed onto a single atlas slot"
+            );
+        }
+    }
+
+    #[test]
+    fn the_lut_atlas_is_reused_until_the_slot_signature_changes() {
+        // CC4 4.1: the cache is not optional.  Playback composites the same
+        // stack every frame and must not re-upload up to 21 MiB per frame.
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let luts = TestLuts::build("cc4-atlas-cache", &[lut_b_cube(), lut_d_cube()]);
+        let stack = [creative_look(1, 1, 1, 10_000)];
+        let first = compositor
+            .lut_binding(&stack, Some(luts.library()))
+            .expect("one bound node");
+        let second = compositor
+            .lut_binding(&stack, Some(luts.library()))
+            .expect("one bound node");
+        assert!(
+            Arc::ptr_eq(&first.atlas, &second.atlas),
+            "an unchanged slot signature must reuse the uploaded atlas"
+        );
+
+        let grown = [stack[0].clone(), creative_look(2, 2, 1, 10_000)];
+        let rebuilt = compositor
+            .lut_binding(&grown, Some(luts.library()))
+            .expect("two bound nodes");
+        assert!(
+            !Arc::ptr_eq(&first.atlas, &rebuilt.atlas),
+            "a changed slot signature must rebuild the atlas"
+        );
+        assert_eq!(first.atlas.slot_layout(), vec![(2, 0)]);
+        assert_eq!(rebuilt.atlas.slot_layout(), vec![(2, 0), (3, 2)]);
+
+        // Returning to the first signature hits the cache again rather than
+        // rebuilding, so alternating layers do not thrash.
+        let again = compositor
+            .lut_binding(&stack, Some(luts.library()))
+            .expect("one bound node");
+        assert!(Arc::ptr_eq(&first.atlas, &again.atlas));
+    }
+
+    #[test]
+    fn the_atlas_cache_byte_budget_keeps_the_head_and_holds_the_bound() {
+        // CC4 4.1: the entry count says nothing about size, so the cache is
+        // trimmed by retained bytes as well. The rule has two halves and both
+        // are asserted here: the budget really bounds the tail, and the head -
+        // the atlas the frame being rendered just built - is never the entry
+        // that gets dropped.
+        //
+        // Real atlases are hundreds of megabytes and need a device to build,
+        // so the decision is exercised on the sizes directly.
+        const MIB: u64 = 1024 * 1024;
+
+        // Exactly at the budget is kept; one byte over drops the tail.
+        assert_eq!(atlas_cache_kept_entries(&[4 * MIB; 4], 16 * MIB), 4);
+        assert_eq!(atlas_cache_kept_entries(&[4 * MIB; 4], 16 * MIB - 1), 3);
+
+        // Eight worst-case `65 x 65 x 325` atlases are about 168 MiB; the
+        // 64 MiB budget keeps the three that fit and no more.
+        let worst = u64::from(65_u32) * 65 * 325 * 16;
+        let kept =
+            atlas_cache_kept_entries(&[worst; LUT_ATLAS_CACHE_ENTRIES], LUT_ATLAS_CACHE_MAX_BYTES);
+        assert_eq!(kept, 3);
+        assert!(
+            u64::try_from(kept).unwrap_or(u64::MAX) * worst <= LUT_ATLAS_CACHE_MAX_BYTES,
+            "the retained bytes must fit the budget"
+        );
+
+        // The head survives even when it alone exceeds the budget, because
+        // dropping it would guarantee a rebuild on the very next frame while
+        // freeing nothing the caller is not already holding through its `Arc`.
+        assert_eq!(atlas_cache_kept_entries(&[512 * MIB, MIB], 64 * MIB), 1);
+        assert_eq!(atlas_cache_kept_entries(&[512 * MIB], 64 * MIB), 1);
+
+        // A saturating sum cannot wrap a huge tail back under the budget.
+        assert_eq!(atlas_cache_kept_entries(&[MIB, u64::MAX, MIB], 64 * MIB), 1);
+
+        // An empty cache and a zero budget are both well defined.
+        assert_eq!(atlas_cache_kept_entries(&[], LUT_ATLAS_CACHE_MAX_BYTES), 0);
+        assert_eq!(atlas_cache_kept_entries(&[MIB, MIB], 0), 1);
+    }
+
+    #[test]
+    fn atlas_cache_retains_its_sources_so_no_recycled_address_can_serve_a_stale_look() {
+        // CC4 4.1.  The cache compares lattice identity, and it RETAINS a
+        // strong `Arc` to every bound lattice.  Retention is the whole
+        // soundness argument: comparing a bare `Arc::as_ptr` would be an ABA
+        // compare, because an edited LUT reparsed into a freed allocation's
+        // address would match the old key and render the OLD look.  Because a
+        // cached atlas pins its own sources, those addresses cannot be
+        // recycled while the atlas is servable, so a hit really does mean the
+        // very same verified samples.
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        // Built directly, not through `LutLibrary`, so the process parse cache
+        // holds no reference and every strong count below is ours.
+        let first = Arc::new(
+            parse_cube_lut(&mapped_cube(2, |[r, g, b]| [r * 0.5, g, b]))
+                .expect("the fixture lattice parses"),
+        );
+        let second = Arc::new(
+            parse_cube_lut(&mapped_cube(2, |[r, g, b]| [r, g * 0.25, b]))
+                .expect("the fixture lattice parses"),
+        );
+        assert_eq!(first.size, second.size, "same size, different samples");
+        assert_ne!(first.rgba, second.rgba);
+
+        let first_slots = [LutAtlasSlot {
+            z_origin: 0,
+            lut: Arc::clone(&first),
+        }];
+        // Ours plus the slot list's.
+        assert_eq!(Arc::strong_count(&first), 2);
+        let first_atlas = compositor
+            .lut_atlas(&first_slots)
+            .expect("the fixture atlas uploads");
+        assert_eq!(
+            Arc::strong_count(&first),
+            3,
+            "the cached atlas must hold a strong reference of its own"
+        );
+        assert!(Arc::ptr_eq(&first_atlas.retained_slots()[0], &first));
+
+        // Dropping every handle to the atlas leaves it in the cache, and the
+        // retention survives with it.
+        drop(first_atlas);
+        assert_eq!(Arc::strong_count(&first), 3);
+
+        // A different lattice of the same size misses, however the allocator
+        // happened to place it.
+        let second_slots = [LutAtlasSlot {
+            z_origin: 0,
+            lut: Arc::clone(&second),
+        }];
+        let second_atlas = compositor
+            .lut_atlas(&second_slots)
+            .expect("the fixture atlas uploads");
+        assert!(Arc::ptr_eq(&second_atlas.retained_slots()[0], &second));
+        assert_eq!(Arc::strong_count(&second), 3);
+
+        // The first is still cached and still hits, and it still yields ITS
+        // lattice rather than the one uploaded most recently.
+        let again = compositor
+            .lut_atlas(&first_slots)
+            .expect("the cached atlas is served");
+        assert!(Arc::ptr_eq(&again.retained_slots()[0], &first));
+        assert_eq!(
+            Arc::strong_count(&first),
+            3,
+            "ours, the slot list, and the one the cached atlas holds"
+        );
+
+        // No freshly parsed lattice can land on a retained address, and every
+        // one of them misses and gets an atlas built from its own samples.
+        for step in 0..32_u32 {
+            #[allow(clippy::cast_precision_loss)]
+            let scale = 1.0 / (step as f32 + 2.0);
+            let fresh = Arc::new(
+                parse_cube_lut(&mapped_cube(2, |[r, g, b]| [r * scale, g, b]))
+                    .expect("the fixture lattice parses"),
+            );
+            assert!(!Arc::ptr_eq(&fresh, &first));
+            assert!(!Arc::ptr_eq(&fresh, &second));
+            let atlas = compositor
+                .lut_atlas(&[LutAtlasSlot {
+                    z_origin: 0,
+                    lut: Arc::clone(&fresh),
+                }])
+                .expect("the fixture atlas uploads");
+            let retained = &atlas.retained_slots()[0];
+            assert!(
+                Arc::ptr_eq(retained, &fresh),
+                "a cache hit must be the very lattice that was asked for"
+            );
+            assert_eq!(retained.rgba, fresh.rgba);
+        }
+    }
+
+    #[test]
+    fn an_edited_lut_of_the_same_size_renders_its_new_samples() {
+        // The end-to-end shape of the ABA hazard: the same asset id, the same
+        // lattice size, edited samples.  The second render must show the new
+        // look, never the atlas uploaded for the first.
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let stack = [creative_look(1, 1, 1, 10_000)];
+        let frame = linear_frame([0.5, 0.5, 0.5]);
+
+        let before = TestLuts::build(
+            "cc4-atlas-edit-before",
+            &[mapped_cube(2, |[r, g, b]| [r * 0.5, g, b])],
+        );
+        let rendered_before = render_luts(&compositor, &frame, &stack, &before);
+        assert_solid_linear(&rendered_before, [0.25, 0.5, 0.5], 2e-3);
+
+        // Drop the first library so its lattice is freed and its address is a
+        // candidate for reuse by the edited parse - the exact ABA setup.
+        drop(before);
+        let after = TestLuts::build(
+            "cc4-atlas-edit-after",
+            &[mapped_cube(2, |[r, g, b]| [r, g * 0.25, b])],
+        );
+        let rendered_after = render_luts(&compositor, &frame, &stack, &after);
+        assert_solid_linear(&rendered_after, [0.5, 0.125, 0.5], 2e-3);
+    }
+
+    #[test]
+    fn lut_b_renders_every_tetrahedral_branch_and_excludes_the_trilinear_value() {
+        // CC4 3.5/10.3.3.  LUT B is `S = 2` over `[0, 1]`, so with
+        // `input_encoding = linear` the lattice fraction IS the input triple
+        // and each row below selects one of the contract's six formulas by
+        // construction.  Every expected value is an exact binary fraction
+        // written out by hand from the branch it exercises.
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let luts = TestLuts::build("cc4-lut-b-anchor", &[lut_b_cube()]);
+        let node = [creative_look(1, 1, 1, 10_000)];
+        // branch, input, expected
+        let anchors: [(&str, [f32; 3], [f32; 3]); 6] = [
+            ("f_r > f_g > f_b", [0.75, 0.5, 0.25], [0.5, 0.375, 0.25]),
+            ("f_r > f_b > f_g", [0.75, 0.25, 0.5], [0.5, 0.25, 0.375]),
+            ("f_b >= f_r > f_g", [0.5, 0.25, 0.75], [0.375, 0.25, 0.5]),
+            ("f_b > f_g >= f_r", [0.25, 0.5, 0.75], [0.25, 0.375, 0.5]),
+            ("f_g >= f_b > f_r", [0.25, 0.75, 0.5], [0.25, 0.5, 0.375]),
+            ("tie: f_r == f_g == f_b", [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+        ];
+        for (branch, input, expected) in anchors {
+            let rendered = render_luts(&compositor, &linear_frame(input), &node, &luts);
+            for (channel, (observed, want)) in
+                first_rgb(&rendered).iter().zip(&expected).enumerate()
+            {
+                assert!(
+                    (observed - want).abs() <= LINEAR_CPU_GPU_MAX,
+                    "{branch} at {input:?}, channel {channel}: {observed} != {want}"
+                );
+            }
+        }
+
+        // Trilinear interpolation of the SAME lattice at the first anchor.
+        // This is not a tolerance question: the two rules disagree by more
+        // than an order of magnitude above the gate, so the fixture proves
+        // tetrahedral is actually what runs.
+        let rendered = render_luts(&compositor, &linear_frame([0.75, 0.5, 0.25]), &node, &luts);
+        let trilinear = [0.421_875, 0.296_875, 0.171_875];
+        for (channel, (observed, wrong)) in first_rgb(&rendered).iter().zip(&trilinear).enumerate()
+        {
+            assert!(
+                (observed - wrong).abs() > LINEAR_CPU_GPU_MAX,
+                "channel {channel} matched the trilinear value {wrong}: {observed}"
+            );
+        }
+
+        // CC4 3.5 also claims the tie is WELL DEFINED: all six formulas agree
+        // analytically on the shared faces.  Transcribed here in f64,
+        // independently of the shader, over LUT B's lattice at f = (.5,.5,.5).
+        let v = |r: usize, g: usize, b: usize| -> [f64; 3] {
+            if r == 1 && g == 1 && b == 1 {
+                [1.0, 1.0, 1.0]
+            } else {
+                [
+                    if r == 1 { 0.5 } else { 0.0 },
+                    if g == 1 { 0.5 } else { 0.0 },
+                    if b == 1 { 0.5 } else { 0.0 },
+                ]
+            }
+        };
+        let (c000, c100, c010, c110) = (v(0, 0, 0), v(1, 0, 0), v(0, 1, 0), v(1, 1, 0));
+        let (c001, c101, c011, c111) = (v(0, 0, 1), v(1, 0, 1), v(0, 1, 1), v(1, 1, 1));
+        let (fr, fg, fb) = (0.5_f64, 0.5_f64, 0.5_f64);
+        let blend = |a: [f64; 3], p: [f64; 3], q: [f64; 3], r: [f64; 3]| {
+            let mut out = [0.0; 3];
+            for channel in 0..3 {
+                out[channel] = a[channel] + fr * p[channel] + fg * q[channel] + fb * r[channel];
+            }
+            out
+        };
+        let difference = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        let formulas = [
+            blend(
+                c000,
+                difference(c100, c000),
+                difference(c110, c100),
+                difference(c111, c110),
+            ),
+            blend(
+                c000,
+                difference(c100, c000),
+                difference(c111, c101),
+                difference(c101, c100),
+            ),
+            blend(
+                c000,
+                difference(c101, c001),
+                difference(c111, c101),
+                difference(c001, c000),
+            ),
+            blend(
+                c000,
+                difference(c111, c011),
+                difference(c011, c001),
+                difference(c001, c000),
+            ),
+            blend(
+                c000,
+                difference(c111, c011),
+                difference(c010, c000),
+                difference(c011, c010),
+            ),
+            blend(
+                c000,
+                difference(c110, c010),
+                difference(c010, c000),
+                difference(c111, c110),
+            ),
+        ];
+        // Exact equality is the point: every operand is an exact binary
+        // fraction, so the six formulas must agree bit-for-bit, not nearly.
+        #[allow(clippy::float_cmp)]
+        for (index, formula) in formulas.iter().enumerate() {
+            assert_eq!(*formula, [0.5, 0.5, 0.5], "tetrahedral formula {index}");
+        }
+    }
+
+    #[test]
+    fn lut_input_encodings_apply_enc_dec_and_use_the_signed_display_inverse() {
+        // CC4 3.4.  The lattice halves its input IN THE ENCODED DOMAIN, so a
+        // node that skipped `ENC`/`DEC` would return a visibly different
+        // number, and one that decoded with CC1's SOURCE decode would break on
+        // the negative sample.
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let luts = TestLuts::build(
+            "cc4-encodings",
+            &[mapped_cube(17, |[r, g, b]| [r * 0.5, g * 0.5, b * 0.5])],
+        );
+        let frame = linear_frame([0.25, 0.25, 0.25]);
+
+        // display709: e = encode_bt709(0.25) = 0.48993948, halved to
+        // 0.24496974, decoded by decode_display709 to 0.07567266.
+        let display = render_luts(
+            &compositor,
+            &frame,
+            &[creative_look(1, 1, 0, 10_000)],
+            &luts,
+        );
+        assert_solid_linear(&display, [0.075_672_66; 3], 1e-4);
+        // linear: the same lattice on the raw value gives 0.125.  The two
+        // results are 0.049 apart, more than thirty times the gate, so "the
+        // encoding is applied" is not a tolerance question.
+        let linear = render_luts(
+            &compositor,
+            &frame,
+            &[creative_look(2, 1, 1, 10_000)],
+            &luts,
+        );
+        assert_solid_linear(&linear, [0.125; 3], LINEAR_CPU_GPU_MAX);
+        assert!((first_rgb(&display)[0] - 0.125).abs() > 30.0 * LINEAR_CPU_GPU_MAX);
+        // grade709: CC3's exact analytic pair, 0.07573866.  Tokens 0 and 2
+        // agree to about 7e-5 by design — they are two roundings of the same
+        // curve — so this pins that the token-2 branch encodes at all, not
+        // which of the two near-identical curves ran.
+        let grade = render_luts(
+            &compositor,
+            &frame,
+            &[creative_look(3, 1, 2, 10_000)],
+            &luts,
+        );
+        assert_solid_linear(&grade, [0.075_738_66; 3], 1e-4);
+
+        // The sign-preserving inverse, on a sample below the domain.  With
+        // `e = -0.48993948` the clamp gives `u = 0`, the lookup gives `0`, and
+        // the whole excursion is restored: `z = -0.48993948`.  CC4's
+        // `decode_display709` returns -0.25; CC1's `decode_bt709` would take
+        // its unconditional linear branch and return -0.10887544.
+        let negative = linear_frame([-0.25, -0.25, -0.25]);
+        let rendered = render_luts(
+            &compositor,
+            &negative,
+            &[creative_look(4, 1, 0, 10_000)],
+            &luts,
+        );
+        assert_solid_linear(&rendered, [-0.25; 3], LINEAR_CPU_GPU_MAX);
+        for observed in first_rgb(&rendered) {
+            assert!(
+                (observed - (-0.108_875_44)).abs() > LINEAR_CPU_GPU_MAX,
+                "the node decoded with CC1's source decode: {observed}"
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_domain_excursions_are_restored_additively_not_clamped() {
+        // CC4 10.3.4 with LUT D.  A pure-clamp implementation would return the
+        // boundary lattice value; the additive rule keeps the excursion, which
+        // is what makes an over-range highlight recoverable.
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let luts = TestLuts::build("cc4-out-of-domain", &[lut_d_cube()]);
+        let node = [creative_look(1, 1, 1, 10_000)];
+
+        // e = (2, 2, 2) clamps to dmax (1.5), whose lookup is (1, 1, 1); the
+        // 0.5 excursion is restored on top of it.
+        let high = render_luts(&compositor, &linear_frame([2.0, 2.0, 2.0]), &node, &luts);
+        assert_solid_linear(&high, [1.5, 1.5, 1.5], LINEAR_CPU_GPU_MAX);
+        for observed in first_rgb(&high) {
+            assert!(
+                (observed - 1.0).abs() > LINEAR_CPU_GPU_MAX,
+                "a pure clamp would have returned the boundary value 1.0"
+            );
+            assert!(
+                (observed - 2.0).abs() > LINEAR_CPU_GPU_MAX,
+                "the node must not be the identity outside the domain"
+            );
+        }
+
+        // e = (-1, -1, -1) clamps to dmin (-0.5), whose lookup is (0, 0, 0).
+        let low = render_luts(&compositor, &linear_frame([-1.0, -1.0, -1.0]), &node, &luts);
+        assert_solid_linear(&low, [-0.5, -0.5, -0.5], LINEAR_CPU_GPU_MAX);
+        for observed in first_rgb(&low) {
+            assert!(
+                observed.abs() > LINEAR_CPU_GPU_MAX,
+                "a pure clamp would have returned 0.0"
+            );
+        }
+
+        // The in-domain mapping anchor, so the domain rescale itself is pinned
+        // and not only its saturating ends: CC4 10.3.3's LUT D row.
+        let inside = render_luts(&compositor, &linear_frame([0.5, 0.0, 1.0]), &node, &luts);
+        assert_solid_linear(&inside, [0.25, 0.125, 0.625], LINEAR_CPU_GPU_MAX);
+    }
+
+    #[test]
+    fn lut_mix_blends_in_linear_light_between_exact_endpoints() {
+        // CC4 10.3.5 with LUT B at `x = (0.75, 0.5, 0.25)`.
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let luts = TestLuts::build("cc4-mix", &[lut_b_cube()]);
+        let frame = linear_frame([0.75, 0.5, 0.25]);
+
+        let full = render_luts(
+            &compositor,
+            &frame,
+            &[creative_look(1, 1, 1, 10_000)],
+            &luts,
+        );
+        assert_solid_linear(&full, [0.5, 0.375, 0.25], LINEAR_CPU_GPU_MAX);
+
+        let half = render_luts(&compositor, &frame, &[creative_look(1, 1, 1, 5_000)], &luts);
+        assert_solid_linear(&half, [0.625, 0.437_5, 0.25], LINEAR_CPU_GPU_MAX);
+
+        // `mix = 0` is inactive (CC4 3.6): the node is not written at all, so
+        // it is bit-identical to removing it, not merely close to it.
+        let none = render_luts(&compositor, &frame, &[creative_look(1, 1, 1, 0)], &luts);
+        let removed = render_luts(&compositor, &frame, &[], &luts);
+        assert_eq!(none.len(), removed.len());
+        for (index, (left, right)) in none.iter().zip(&removed).enumerate() {
+            assert_eq!(left.to_bits(), right.to_bits(), "channel {index}");
+        }
+    }
+
+    #[test]
+    fn a_linear_identity_lattice_is_bit_exact_on_the_gpu() {
+        // CC4 3.5's exactness claim: with `input_encoding = linear`, domain
+        // `[0, 1]`, and `S - 1` a power of two, every lattice coordinate,
+        // fraction, and interpolation weight is an exact binary fraction, so
+        // the identity lattice reproduces the input BIT-exactly.  Asserted
+        // with `to_bits`, never with a tolerance.
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let luts = TestLuts::build("cc4-identity", &[identity_cube(17)]);
+        let node = [creative_look(1, 1, 1, 10_000)];
+        for value in [0.0_f32, 0.0625, 0.25, 0.375, 0.5, 0.75, 0.9375, 1.0] {
+            let frame = linear_frame([value, value * 0.5, 1.0 - value]);
+            let through = render_luts(&compositor, &frame, &node, &luts);
+            let baseline = render_luts(&compositor, &frame, &[], &luts);
+            assert_eq!(through.len(), baseline.len());
+            for (index, (left, right)) in through.iter().zip(&baseline).enumerate() {
+                assert_eq!(
+                    left.to_bits(),
+                    right.to_bits(),
+                    "value {value}, channel {index}: {left} != {right}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inactive_lut_nodes_are_never_written_and_take_no_atlas_slot() {
+        // CC4 3.6: bypass and `mix = 0` are LOSSLESSLY identical to removing
+        // the node, on the buffer, in the atlas, and in the rendered pixels.
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let luts = TestLuts::build("cc4-inactive", &[lut_b_cube()]);
+        let mut bypassed = creative_look(1, 1, 1, 10_000);
+        bypassed
+            .parameters
+            .insert("bypass".to_owned(), ParamValue::Integer(1));
+        let neutral = creative_look(2, 1, 1, 0);
+        let stack = [bypassed, neutral];
+
+        let bytes = grade_buffer_bytes_with_luts(&stack, Some(luts.library()))
+            .expect("inactive LUT nodes serialize");
+        assert_eq!(grade_header(&bytes, 0), 0);
+        assert_eq!(bytes.len(), GRADE_HEADER_BYTES + GRADE_NODE_BYTES);
+        assert!(bytes[GRADE_HEADER_BYTES..].iter().all(|byte| *byte == 0));
+
+        // No managed slot is allocated: the atlas is the shared `S = 2`
+        // placeholder that keeps binding 3 valid.
+        let binding = compositor
+            .lut_binding(&stack, Some(luts.library()))
+            .expect("an all-inactive stack binds the placeholder");
+        assert_eq!(binding.atlas.slot_layout(), vec![(2, 0)]);
+        assert!(!binding.legacy_enabled);
+
+        let frame = linear_frame([0.75, 0.5, 0.25]);
+        let with_nodes = render_luts(&compositor, &frame, &stack, &luts);
+        let without = render_luts(&compositor, &frame, &[], &luts);
+        assert_eq!(with_nodes.len(), without.len());
+        for (index, (left, right)) in with_nodes.iter().zip(&without).enumerate() {
+            assert_eq!(left.to_bits(), right.to_bits(), "channel {index}");
+        }
+    }
+
+    #[test]
+    fn a_fifth_active_lut_node_is_rejected() {
+        // CC4 3.1/10.3.8: the limit exists because each ACTIVE node needs an
+        // atlas slot, so an inactive fifth node is not a violation here even
+        // though Core counts it against `LUT_NODE_LIMIT_PER_LAYER` on edit.
+        let luts = TestLuts::build("cc4-slot-limit", &[lut_b_cube()]);
+        let four = (0..4)
+            .map(|index| creative_look(index + 1, 1, 1, 10_000))
+            .collect::<Vec<_>>();
+        assert!(grade_buffer_bytes_with_luts(&four, Some(luts.library())).is_ok());
+
+        let mut five = four.clone();
+        five.push(creative_look(5, 1, 1, 10_000));
+        let error = grade_buffer_bytes_with_luts(&five, Some(luts.library()))
+            .expect_err("a fifth active LUT node is rejected");
+        let MediaError::Backend(message) = error else {
+            panic!("expected a backend error");
+        };
+        assert!(
+            message.starts_with("too_many_lut_nodes:"),
+            "unexpected message: {message}"
+        );
+        assert!(message.contains('5'), "unexpected message: {message}");
+        assert!(message.contains('4'), "unexpected message: {message}");
+
+        let mut bypassed_fifth = four;
+        let mut fifth = creative_look(5, 1, 1, 10_000);
+        fifth
+            .parameters
+            .insert("bypass".to_owned(), ParamValue::Integer(1));
+        bypassed_fifth.push(fifth);
+        assert!(grade_buffer_bytes_with_luts(&bypassed_fifth, Some(luts.library())).is_ok());
+    }
+
+    #[test]
+    fn an_unresolvable_lut_asset_fails_the_render_rather_than_dropping_the_look() {
+        // CC4 2.3: a missing asset blocks with a typed error.  It must never
+        // be silently skipped, because a look-free frame is indistinguishable
+        // from a correctly graded one to everything downstream.
+        let luts = TestLuts::build("cc4-missing-asset", &[lut_b_cube()]);
+        let dangling = [creative_look(1, 99, 1, 10_000)];
+        let error = grade_buffer_bytes_with_luts(&dangling, Some(luts.library()))
+            .expect_err("a dangling asset reference is rejected");
+        let MediaError::Backend(message) = error else {
+            panic!("expected a backend error");
+        };
+        assert!(
+            message.starts_with("missing_lut_asset:"),
+            "unexpected message: {message}"
+        );
+        assert!(message.contains("creative_look"), "{message}");
+        assert!(message.contains("99"), "{message}");
+
+        // No library at all is the same failure, not a quiet identity.
+        let bound = [creative_look(1, 1, 1, 10_000)];
+        let error = grade_buffer_bytes_with_luts(&bound, None)
+            .expect_err("an unpublished library is rejected");
+        let MediaError::Backend(message) = error else {
+            panic!("expected a backend error");
+        };
+        assert!(
+            message.starts_with("missing_lut_asset:"),
+            "unexpected message: {message}"
+        );
+
+        // An INACTIVE node never resolves an asset, so a bypassed node bound
+        // to a missing asset does not block the render.
+        let mut bypassed = creative_look(1, 99, 1, 10_000);
+        bypassed
+            .parameters
+            .insert("bypass".to_owned(), ParamValue::Integer(1));
+        assert!(grade_buffer_bytes_with_luts(&[bypassed], None).is_ok());
+    }
+
+    #[test]
+    fn a_legacy_cube_lut_and_a_managed_look_coexist_with_the_legacy_stage_last() {
+        // CC4 10.3.9: the legacy branch runs after every managed node, in atlas
+        // slot 4, REGARDLESS of the two effects' relative order in
+        // `clip.effects`.
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let luts = TestLuts::build(
+            "cc4-legacy-coexist",
+            &[mapped_cube(2, |[r, g, b]| [r * 0.5, g * 0.5, b * 0.5])],
+        );
+        let directory = TempDirectory::new("cc4-legacy-swap");
+        let swap = directory.path("swap.cube");
+        fs::write(
+            &swap,
+            "LUT_3D_SIZE 2\n\
+             0 0 0\n0 0 1\n0 1 0\n0 1 1\n1 0 0\n1 0 1\n1 1 0\n1 1 1\n",
+        )
+        .expect("the legacy LUT is written");
+        let legacy = Effect {
+            id: EffectId(9),
+            name: "cube_lut".to_owned(),
+            parameters: BTreeMap::from([
+                (
+                    "path".to_owned(),
+                    ParamValue::Text(swap.to_string_lossy().into_owned()),
+                ),
+                ("intensity_percent".to_owned(), ParamValue::Integer(100)),
+            ]),
+            keyframes: BTreeMap::new(),
+        };
+        let managed = creative_look(1, 1, 1, 10_000);
+
+        let frame = linear_frame([0.25, 0.0, 0.0]);
+        let managed_first = render_luts(
+            &compositor,
+            &frame,
+            &[managed.clone(), legacy.clone()],
+            &luts,
+        );
+        let legacy_first = render_luts(
+            &compositor,
+            &frame,
+            &[legacy.clone(), managed.clone()],
+            &luts,
+        );
+        assert_eq!(managed_first.len(), legacy_first.len());
+        for (index, (left, right)) in managed_first.iter().zip(&legacy_first).enumerate() {
+            assert_eq!(
+                left.to_bits(),
+                right.to_bits(),
+                "vector order changed the result at channel {index}"
+            );
+        }
+
+        // The managed node halves the red channel in linear light, then the
+        // legacy stage swaps red and blue in display code and round-trips
+        // through BT.709.  Both stages therefore ran, in that order.
+        assert_solid_linear(&managed_first, [0.0, 0.0, 0.125], LINEAR_CPU_GPU_MAX);
+        let managed_only = render_luts(&compositor, &frame, std::slice::from_ref(&managed), &luts);
+        assert_solid_linear(&managed_only, [0.125, 0.0, 0.0], LINEAR_CPU_GPU_MAX);
+        let legacy_only = render_luts(&compositor, &frame, std::slice::from_ref(&legacy), &luts);
+        assert_solid_linear(&legacy_only, [0.0, 0.0, 0.25], LINEAR_CPU_GPU_MAX);
+
+        // Slot 4 is the legacy one in both orders: one managed slice first,
+        // then the legacy lattice.
+        for order in [
+            vec![managed.clone(), legacy.clone()],
+            vec![legacy.clone(), managed.clone()],
+        ] {
+            let binding = compositor
+                .lut_binding(&order, Some(luts.library()))
+                .expect("legacy and managed coexist");
+            assert_eq!(binding.atlas.slot_layout(), vec![(2, 0), (2, 2)]);
+            assert_eq!(binding.legacy_z_origin, 2);
+            assert!(binding.legacy_enabled);
+        }
+    }
+
+    #[test]
+    fn a_look_free_layer_binds_the_identity_placeholder() {
+        // The binding must stay valid with no LUT of any kind, and the atlas
+        // must not be rebuilt on every frame of look-free playback.
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let first = compositor
+            .lut_binding(&[], None)
+            .expect("an empty stack binds");
+        assert_eq!(first.atlas.slot_layout(), vec![(2, 0)]);
+        assert_eq!(first.atlas.extent(), (2, 2, 2));
+        assert!(!first.legacy_enabled);
+        let second = compositor
+            .lut_binding(
+                &[effect(1, "primary_correction", "exposure_milli_stops", 500)],
+                None,
+            )
+            .expect("a look-free managed stack binds");
+        assert!(
+            Arc::ptr_eq(&first.atlas, &second.atlas),
+            "look-free playback must not re-upload the placeholder every frame"
+        );
     }
 
     #[test]

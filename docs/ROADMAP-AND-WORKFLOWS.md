@@ -194,10 +194,26 @@ The first three cycle intentions are:
    with an independent CPU reference and a fixture suite in `cc3_fixtures.rs`.
    The contract is `CC3-CURVES-AND-WHEELS.md`.
 
+7. **CC4 look management — implemented 2026-08-25, pending platform smoke.**
+   LUT looks are project-owned, content-hashed assets in a project-relative
+   sidecar store (`<stem>.kinewright-assets/luts/<sha256>.cube`) with typed
+   availability and explicit restore/replace recovery; two ordered managed
+   nodes, `technical_lut` (input transform stage) and `creative_look` (look
+   stage), execute on the CC3 node stack with normative tetrahedral
+   interpolation, an additive out-of-domain rule, linear-light mix, and
+   bypass; a stage-ordering rule is enforced by Core rejection; the four
+   legacy built-in looks are deterministic, hash-pinned generated assets; the
+   GPU binds one `Rgba32Float` LUT atlas; the app gains the human `.cube`
+   import, a look browser, mix/bypass/A-B, and a dialog-free `write_project`
+   that carries the store on Save As; the agent gains `list_look_assets`,
+   confirmation-gated `import_lut_asset`, `plan_technical_lut`,
+   `plan_creative_look`, and look proofs. The contract is
+   `CC4-LOOK-MANAGEMENT.md`.
+
 Before CC3 started, a six-lane review of CC1 and CC2 (2026-08-24) fixed the
 defects recorded in `CHANGELOG.md` and hardened both fixture suites so that
 every control has an analytic expected value and no parity case is vacuous.
-The next primary colour slice is **CC4 look management**.
+The next primary colour slice is **CC5 secondaries**.
 
 Within that cadence, three workstreams remain active:
 
@@ -291,8 +307,9 @@ shot matching complete, CC3 expands the correction model with curves and wheels.
 - Make a secondary matte belong to its correction node. Alpha masking a whole layer
   is a different compositing operation.
 - Store imported LUTs as project-owned, content-hashed assets so a project remains
-  reproducible after moving machines. Today they remain external paths cached by
-  path and file metadata; project ownership is CC4 work, not current behaviour.
+  reproducible after moving machines. Since CC4 they live in the project's
+  `.kinewright-assets` sidecar store keyed by SHA-256; only the legacy
+  `cube_lut` compatibility stage still resolves an external path.
 - Use the same transform definitions on Windows and Linux. Avoid results that depend
   on undocumented FFmpeg/swscale defaults or one GPU backend.
 - Agent proposals include confidence, assumptions, before/after proofs, and scope
@@ -370,8 +387,8 @@ constructors, compositor inputs, `ExportSettings`, and FFmpeg stream/container
 metadata. Later stages cannot treat those surfaces as implicit or start before the
 required earlier exit gate passes.
 
-**Current status (2026-08-24): CC0, M41, CC1, M42, CC2, and CC3 are complete
-apart from the CC3 hands-on platform smoke gate.** CC0's exit evidence
+**Current status (2026-08-25): CC0, M41, CC1, M42, CC2, CC3, and CC4 are
+complete apart from the CC3/CC4 hands-on platform smoke gates.** CC0's exit evidence
 includes legacy project migration, known/partial/unknown and 10-bit probe fixtures,
 visible human and agent inspection, an undoable source override, delivery rejection
 outside the current contract, and an encoded file decoded again to verify its
@@ -387,7 +404,10 @@ asynchronous human reference workflow, and revision-gated two-shot matching
 proposals that expose exact operations without hidden changes. CC3 adds the
 ordered wheels and curves nodes, the `grade709` grading encoding, the widened
 GPU node-stack ABI, the wheel and curve-editor widgets, and evidence-only
-wheel/curve planners. CC4 look management is the next primary colour slice.
+wheel/curve planners. CC4 adds project-owned hashed LUT assets with a
+relocatable sidecar store, the ordered technical/creative LUT nodes, the
+built-in looks as generated assets, the human `.cube` workflow, and look
+planners. CC5 secondaries is the next primary colour slice.
 
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |
