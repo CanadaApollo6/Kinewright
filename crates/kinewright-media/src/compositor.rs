@@ -303,8 +303,12 @@ impl GpuContext {
 
 /// A composited frame encoded for the CC1 delivery target.
 ///
-/// RGBA64LE, full range, BT.709 transfer coded, quantized exactly once at 16
-/// bits so the export path's only 8-bit quantization is the YUV420P step.
+/// RGBA64LE, BT.709 transfer coded, quantized exactly once at 16 bits so the
+/// export path's only 8-bit quantization is the YUV420P step.  Nominal white
+/// is [`DELIVERY_INTERMEDIATE_WHITE`] (`65_280` = `255 << 8`), swscale's
+/// convention for 16-bit RGB input, **not** `u16::MAX`.
+///
+/// [`DELIVERY_INTERMEDIATE_WHITE`]: crate::color_pipeline::DELIVERY_INTERMEDIATE_WHITE
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryFrame {
     /// Raster width in pixels.
@@ -905,6 +909,8 @@ impl Compositor {
     /// The result is RGBA64LE: the BT.709 OETF is applied in f32 and the
     /// value is quantized exactly once, at 16 bits, so the only 8-bit
     /// quantization left in the export path is the YUV420P conversion.
+    /// Nominal white is
+    /// [`DELIVERY_INTERMEDIATE_WHITE`](crate::color_pipeline::DELIVERY_INTERMEDIATE_WHITE).
     ///
     /// # Errors
     ///
@@ -1666,6 +1672,11 @@ impl Compositor {
 
     /// Encode the composited working surface for the supplied delivery
     /// description as RGBA64LE (CC1 3, delivery branch).
+    ///
+    /// Nominal white is
+    /// [`DELIVERY_INTERMEDIATE_WHITE`](crate::color_pipeline::DELIVERY_INTERMEDIATE_WHITE),
+    /// so the export filter graph reads the intermediate on the scale
+    /// `libswscale` expects for 16-bit RGB.
     fn readback_rgba16(
         &self,
         width: u32,

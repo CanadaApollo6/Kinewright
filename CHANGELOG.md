@@ -9,6 +9,15 @@ All notable changes to Kinewright are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Fixed
+- The managed delivery path quantized the 16-bit RGBA intermediate handed to
+  the export filter graph on a `65535 = white` scale, while libswscale treats
+  16-bit RGB input on the `255 << 8 = 65280` scale (the same `P_8` CC1 §3.1
+  already documents for decode). Nominal white therefore encoded to Y′ 236 at
+  8 bits (943 at 10 bits) and mid-grey ran about 0.6 code high on every export.
+  The intermediate is now `DELIVERY_INTERMEDIATE_WHITE = 65280`; white encodes
+  to Y′ 235 exactly, the CC1 decoded-delivery fixture reference uses the same
+  scale, and a regression test pushes a white frame through the real filter
+  graph.
 - `track_mask_region` and `track_reframe_subject` wrote tracked composite-space
   centres straight into layer-space parameters (`mask.center_x/y_percent`,
   `reframe.focus_x/y_basis_points`), so a clip with a non-identity `transform`

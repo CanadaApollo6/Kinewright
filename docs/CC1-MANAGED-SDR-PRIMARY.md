@@ -184,6 +184,20 @@ tagged full-range BT.709 8-bit ramp therefore maps source codes 18 and 255 to
 `RGBA64` codes 4608 and 65280, respectively; dividing those bytes by 65535
 would make white `0.9961` and is not the CC1 normalization.
 
+**Erratum (2026-08-25, found by the CC6 probe).** The same `P_8 = 65280`
+convention governs swscale's *input* side for 16-bit RGB: when the export
+filter graph is fed `rgba64le`, libswscale treats `255 << 8 = 65280` as nominal
+white, not `65535`. The delivery quantizer had scaled the clamped encoded value
+by `65535`, so nominal white encoded to Y′ 236 (8-bit) and mid-grey ran about
+0.6 code high; the tolerance window of the filter unit test hid it. The
+delivery intermediate is now defined as `DELIVERY_INTERMEDIATE_WHITE = 65280`
+(`C_rgba64 = round(E' · 65280)`), white encodes to Y′ 235 exactly, and the
+decoded-delivery reference in the CC1 fixture is `round(255 · C / 65280)`.
+The intermediate exists only to feed the export graph; nothing else consumes
+it on the `65535` scale. Alpha in the intermediate is quantized on the same
+scale so the intermediate has exactly one scale to invert; the export graph
+discards it at `format=yuv420p`.
+
 The direct swscale range/matrix path has two additional, explicit effective
 scales. Limited BT.709 YUV-to-RGB conversion uses FFmpeg's 8-bit fixed-point
 RGB scale even when the source planes are 10 bits (or deeper), so its nominal

@@ -45,9 +45,9 @@ use serde_json::{Value, json};
 use crate::{
     Compositor, CompositorLayer, GpuContext,
     color_pipeline::{
-        PrimaryCorrection, PrimaryParameter, apply_primary_corrections, classify_source,
-        classify_source_with_assumption, decode_bt709, decode_srgb, encode_monitor_rgb8,
-        encode_monitor_rgba8, expand_native_range,
+        DELIVERY_INTERMEDIATE_WHITE, PrimaryCorrection, PrimaryParameter,
+        apply_primary_corrections, classify_source, classify_source_with_assumption, decode_bt709,
+        decode_srgb, encode_monitor_rgb8, encode_monitor_rgba8, expand_native_range,
     },
     decode::{VideoDecoder, probe_path},
     frame::WorkingFrame,
@@ -1649,6 +1649,15 @@ fn cc1_manifest_declares_every_required_evidence_fixture() {
     assert_manifest_description(&manifest["delivery"], &context.delivery, "delivery");
     assert_eq!(manifest["delivery"]["codec"], "h264");
     assert_eq!(manifest["delivery"]["pixel_format"], "yuv420p");
+    // The 16-bit intermediate that carries the compositor's single
+    // quantization into the export filter graph. `libswscale` reads 16-bit RGB
+    // on the `255 << 8` scale, so the manifest records the exact code the
+    // encoder emits for nominal white; 65_535 would encode to luma 236.
+    assert_eq!(
+        manifest["delivery"]["intermediate_white"],
+        json!(DELIVERY_INTERMEDIATE_WHITE),
+        "manifest delivery.intermediate_white does not match DELIVERY_INTERMEDIATE_WHITE"
+    );
 
     // Every declared tolerance must be the constant the fixtures actually
     // assert with, so the manifest cannot advertise a gate nothing enforces.
@@ -3803,15 +3812,24 @@ pub(crate) fn generate_delivery_source(
 /// The export path now quantizes once at 16 bits, so the decoded H.264 frame
 /// must be compared against *that* contract, not against the RGBA8 monitor
 /// raster, which uses a different (monitoring) target.
+///
+/// This is the exact inverse of the intermediate's scale: `round(255 * v /
+/// DELIVERY_INTERMEDIATE_WHITE)`.  Because the intermediate's white is `255 <<
+/// 8`, that expression equals `round(v / 256)` for every code the encoder can
+/// produce; the general form is written out with integer rounding so no float
+/// division can drift, and so a change to the constant is followed here
+/// automatically.
 fn delivery_frame_to_rgba8(frame: &crate::compositor::DeliveryFrame) -> Vec<u8> {
+    let white = u32::from(DELIVERY_INTERMEDIATE_WHITE);
     frame
         .rgba64le
         .as_chunks::<2>()
         .0
         .iter()
         .map(|bytes| {
-            let code = u16::from_le_bytes(*bytes);
-            (f64::from(code) * 255.0 / 65_535.0).round() as u8
+            let code = u32::from(u16::from_le_bytes(*bytes));
+            let rounded = (code * 255 + white / 2) / white;
+            u8::try_from(rounded.min(255)).unwrap_or(u8::MAX)
         })
         .collect()
 }

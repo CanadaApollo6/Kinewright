@@ -376,7 +376,9 @@ fn find_codec(name: &str, expected_id: ffmpeg::codec::Id) -> Result<ffmpeg::Code
 
 /// Copy the compositor's RGBA64LE delivery readback into the filter graph's
 /// input frame. Eight bytes per pixel: the delivery values are already
-/// BT.709-coded 16-bit full-range codes and must not be requantized here.
+/// BT.709-coded 16-bit intermediate codes, on the
+/// [`DELIVERY_INTERMEDIATE_WHITE`](crate::color_pipeline::DELIVERY_INTERMEDIATE_WHITE)
+/// scale swscale expects, and must not be requantized or rescaled here.
 fn copy_rgba64_to_frame(rgba: &[u8], frame: &mut ffmpeg::frame::Video) -> Result<(), MediaError> {
     copy_packed_rows(rgba, frame, DELIVERY_INTERMEDIATE_BYTES_PER_PIXEL)
 }
@@ -406,8 +408,14 @@ fn copy_packed_rows(
     Ok(())
 }
 
-/// The delivery intermediate handed to `libavfilter`. 16-bit full-range RGBA
-/// keeps the compositor's single quantization intact until YUV420P.
+/// The delivery intermediate handed to `libavfilter`. 16-bit RGBA keeps the
+/// compositor's single quantization intact until YUV420P.
+///
+/// Nominal white in this intermediate is
+/// [`DELIVERY_INTERMEDIATE_WHITE`](crate::color_pipeline::DELIVERY_INTERMEDIATE_WHITE)
+/// = `65_280` (`255 << 8`), which is `libswscale`'s convention for 16-bit RGB
+/// input; `65_535` would be read as brighter than nominal white and would encode
+/// to limited-range luma 236 instead of legal white 235.
 const DELIVERY_INTERMEDIATE_PIXEL: ffmpeg::format::Pixel = ffmpeg::format::Pixel::RGBA64LE;
 const DELIVERY_INTERMEDIATE_BYTES_PER_PIXEL: usize = 8;
 
@@ -720,8 +728,60 @@ fn replace_output(temporary: &Path, out: &Path) -> Result<(), MediaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::color_pipeline::encode_delivery_rgba16;
-    use kinewright_core::{ColorContext, DeliveryProfile, ExportCancellation};
+    use crate::color_pipeline::{DELIVERY_INTERMEDIATE_WHITE, encode_delivery_rgba16};
+    use crate::compositor::{Compositor, CompositorLayer};
+    use crate::gpu_test_support::fixture_gpu_or_skip;
+    use crate::timeline::TransitionRenderParams;
+    use kinewright_core::{ColorContext, DeliveryProfile, ExportCancellation, FrameTexture};
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    /// Every luma sample of a filtered frame, as a set of distinct codes.
+    ///
+    /// `swscale` writes with a stride, and its 8-bit output carries a
+    /// *deterministic* 8x8 ordered dither, so a flat input generally lands on
+    /// two adjacent codes. Collecting the whole plane (rather than sampling
+    /// pixel 0) is what makes "every sample is legal white" assertable.
+    fn luma_codes(frame: &ffmpeg::frame::Video) -> BTreeSet<u8> {
+        let width = usize::try_from(frame.width()).expect("filtered width");
+        let height = usize::try_from(frame.height()).expect("filtered height");
+        let stride = frame.stride(0);
+        let plane = frame.data(0);
+        (0..height)
+            .flat_map(|row| plane[row * stride..row * stride + width].iter().copied())
+            .collect()
+    }
+
+    /// The same, for one chroma plane of a 4:2:0 frame.
+    fn chroma_codes(frame: &ffmpeg::frame::Video, plane_index: usize) -> BTreeSet<u8> {
+        let width = usize::try_from(frame.width()).expect("filtered width") / 2;
+        let height = usize::try_from(frame.height()).expect("filtered height") / 2;
+        let stride = frame.stride(plane_index);
+        let plane = frame.data(plane_index);
+        (0..height)
+            .flat_map(|row| plane[row * stride..row * stride + width].iter().copied())
+            .collect()
+    }
+
+    /// Push one flat RGBA64LE code through the production delivery graph.
+    fn filter_flat_delivery_code(code: [u16; 4], resolution: (u32, u32)) -> ffmpeg::frame::Video {
+        crate::initialize_ffmpeg().expect("FFmpeg initializes");
+        let mut filter = delivery_filter_graph(resolution).expect("delivery filter graph");
+        let count = usize::try_from(resolution.0 * resolution.1).expect("raster size");
+        let pixels = std::iter::repeat_n(code, count)
+            .flatten()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mut rgba =
+            ffmpeg::frame::Video::new(DELIVERY_INTERMEDIATE_PIXEL, resolution.0, resolution.1);
+        stamp_rgba_color(&mut rgba);
+        copy_rgba64_to_frame(&pixels, &mut rgba).expect("RGBA64LE frame copy");
+        let yuv = filter
+            .run(&rgba)
+            .expect("explicit BT.709 limited conversion");
+        assert_eq!(yuv.format(), ffmpeg::format::Pixel::YUV420P);
+        yuv
+    }
 
     #[test]
     fn accepts_the_current_sdr_rec709_delivery_contract() {
@@ -836,36 +896,109 @@ mod tests {
 
     #[test]
     fn delivery_filter_converts_sixteen_bit_full_range_rgb_to_limited_yuv420p() {
-        crate::initialize_ffmpeg().expect("FFmpeg initializes");
         let resolution = (16_u32, 16_u32);
-        let mut filter = delivery_filter_graph(resolution).expect("delivery filter graph");
 
-        // Mid-gray at the compositor's single 16-bit quantization. An 8-bit
-        // intermediate could not represent this code at all.
-        let code = encode_delivery_rgba16([0.5, 0.5, 0.5, 1.0]);
-        assert_eq!(code[0], 46_236);
-        let pixels = std::iter::repeat_n(code, 16 * 16)
-            .flatten()
-            .flat_map(u16::to_le_bytes)
-            .collect::<Vec<_>>();
-
-        let mut rgba = ffmpeg::frame::Video::new(DELIVERY_INTERMEDIATE_PIXEL, 16, 16);
-        stamp_rgba_color(&mut rgba);
-        copy_rgba64_to_frame(&pixels, &mut rgba).expect("RGBA64LE frame copy");
-        let yuv = filter
-            .run(&rgba)
-            .expect("explicit BT.709 limited conversion");
-
-        assert_eq!(yuv.format(), ffmpeg::format::Pixel::YUV420P);
-        // Full-range 0.70551 -> limited luma 16 + 219 * 0.70551 = 170.5.
-        let luma = i32::from(yuv.data(0)[0]);
-        assert!(
-            (169..=172).contains(&luma),
-            "limited-range luma was {luma}, expected the 16..235 mapping of full-range mid-gray"
+        // (a) Nominal white. `libswscale` reads 16-bit RGB on the `255 << 8`
+        // scale, so the compositor's white must be DELIVERY_INTERMEDIATE_WHITE
+        // and must land on legal white 235 exactly, on every sample. 65_535
+        // would be read as *above* nominal white and quantize to 236.
+        let white = encode_delivery_rgba16([1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(white, [DELIVERY_INTERMEDIATE_WHITE; 4]);
+        let filtered_white = filter_flat_delivery_code(white, resolution);
+        assert_eq!(
+            luma_codes(&filtered_white),
+            BTreeSet::from([235]),
+            "nominal white must convert to legal white on every luma sample"
         );
-        assert!(
-            i32::from(yuv.data(1)[0]).abs_diff(128) <= 1,
-            "neutral gray must stay neutral in chroma"
+
+        // (b) Mid-gray at the compositor's single 16-bit quantization. An
+        // 8-bit intermediate could not represent this code at all.
+        // 46_056 / 65_280 = 0.705515, so limited luma is
+        // 16 + 219 * 0.705515 = 170.51 and swscale's deterministic 8x8 ordered
+        // dither splits a flat frame across exactly the two adjacent codes.
+        let gray = encode_delivery_rgba16([0.5, 0.5, 0.5, 1.0]);
+        assert_eq!(gray[0], 46_056);
+        let filtered_gray = filter_flat_delivery_code(gray, resolution);
+        assert_eq!(
+            luma_codes(&filtered_gray),
+            BTreeSet::from([170, 171]),
+            "mid-gray must land on the two codes straddling 170.51, nothing else"
+        );
+
+        // Neutral gray and neutral white are both exactly 128.0 in chroma, so
+        // the *only* reason a neighbouring code appears is swscale's
+        // deterministic ordered dither, which straddles the exact value: Cb
+        // rounds up on part of the plane, Cr rounds down. Nothing may reach
+        // 126 or 130.
+        for frame in [&filtered_white, &filtered_gray] {
+            assert_eq!(
+                chroma_codes(frame, 1),
+                BTreeSet::from([128, 129]),
+                "neutral input must stay neutral in Cb"
+            );
+            assert_eq!(
+                chroma_codes(frame, 2),
+                BTreeSet::from([127, 128]),
+                "neutral input must stay neutral in Cr"
+            );
+        }
+    }
+
+    /// Regression gate for the delivery intermediate's scale.
+    ///
+    /// A *rendered* white frame — the production compositor readback, not a
+    /// hand-built raster — must survive the real export filter graph as legal
+    /// white. When the intermediate was scaled to `65_535` every export encoded
+    /// nominal white as 236, one code above legal white, on nearly every
+    /// sample. This test fails on that scale.
+    #[test]
+    fn delivery_nominal_white_encodes_to_legal_white_through_the_export_filter() {
+        let Some(gpu) = fixture_gpu_or_skip() else {
+            return;
+        };
+        let compositor = Compositor::new(gpu);
+        let resolution = (16_u32, 16_u32);
+        let count = usize::try_from(resolution.0 * resolution.1).expect("raster size");
+        let white_source = FrameTexture {
+            width: resolution.0,
+            height: resolution.1,
+            rgba: Arc::new(std::iter::repeat_n(255_u8, count * 4).collect()),
+        };
+        let layer = CompositorLayer {
+            frame: &white_source,
+            effects: &[],
+            transition: TransitionRenderParams::default(),
+        };
+        let delivery = ColorContext::sdr_rec709().delivery;
+        let composed = compositor
+            .render_delivery(resolution, std::slice::from_ref(&layer), &delivery)
+            .expect("white delivery render");
+
+        // The readback itself must already be on the intermediate's scale.
+        let codes = composed
+            .rgba64le
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|bytes| u16::from_le_bytes(*bytes))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            codes,
+            BTreeSet::from([DELIVERY_INTERMEDIATE_WHITE]),
+            "a rendered white frame must be nominal white in every channel"
+        );
+
+        crate::initialize_ffmpeg().expect("FFmpeg initializes");
+        let mut filter = delivery_filter_graph(resolution).expect("delivery filter graph");
+        let mut rgba =
+            ffmpeg::frame::Video::new(DELIVERY_INTERMEDIATE_PIXEL, resolution.0, resolution.1);
+        stamp_rgba_color(&mut rgba);
+        copy_rgba64_to_frame(&composed.rgba64le, &mut rgba).expect("RGBA64LE frame copy");
+        let yuv = filter.run(&rgba).expect("delivery conversion");
+        assert_eq!(
+            luma_codes(&yuv),
+            BTreeSet::from([235]),
+            "every luma sample of a rendered white frame must be legal white 235"
         );
     }
 
@@ -877,6 +1010,12 @@ mod tests {
         // agreeing. Keep them pinned together.
         assert_eq!(DELIVERY_INTERMEDIATE_PIXEL, ffmpeg::format::Pixel::RGBA64LE);
         assert_eq!(DELIVERY_INTERMEDIATE_BYTES_PER_PIXEL, 8);
+        // The intermediate's nominal white is swscale's 16-bit RGB white
+        // (`255 << 8`), not `u16::MAX`: this graph feeds `scale` with
+        // `in_range=jpeg`, and swscale maps 65_535 to *above* nominal white,
+        // which encodes to limited luma 236 instead of legal white 235.
+        assert_eq!(DELIVERY_INTERMEDIATE_WHITE, 65_280);
+        assert_ne!(DELIVERY_INTERMEDIATE_WHITE, u16::MAX);
         let frame = ffmpeg::frame::Video::new(DELIVERY_INTERMEDIATE_PIXEL, 16, 16);
         assert!(frame.stride(0) >= 16 * DELIVERY_INTERMEDIATE_BYTES_PER_PIXEL);
     }

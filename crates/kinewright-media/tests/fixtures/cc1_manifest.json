@@ -33,7 +33,8 @@
     "white_point": "d65",
     "bit_depth": 8,
     "codec": "h264",
-    "pixel_format": "yuv420p"
+    "pixel_format": "yuv420p",
+    "intermediate_white": 65280
   },
   "controls": [
     "exposure_milli_stops",
