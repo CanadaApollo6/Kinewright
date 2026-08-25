@@ -381,6 +381,64 @@ on both sides of every cut in the published v2 recovery show no black, title,
 logo, slate, or baked transition tail. V3 turns that audit lesson into a lower
 confidence scene-boundary veto rather than relying on the audit alone.
 
+## Tracker coordinate space (2026-08-25)
+
+The CC5 review found that `track_mask_region` and `track_reframe_subject` wrote
+tracked *composite*-space centres straight into `mask.center_x/y_percent` and
+`reframe.focus_x/y_basis_points`. Both parameters are *layer*-space: the mask is
+evaluated at the fragment's layer uv and the reframe focus is the centre of the
+visible window in the layer texture, both before the vertex-stage `scale` /
+`offset` placement, while the tracker measures the composited thumbnail of a
+scratch document that keeps the clip's `transform`. Under a non-identity
+transform the written values were therefore wrong by exactly the transform
+(`track_matte_window` was written with the conversion from the start; the
+older tools were not).
+
+Both tools now follow CC5 §5.2 of `CC5-SECONDARIES.md`:
+
+- The search is seeded by mapping the stored layer centre forward,
+  `u_composite = scale·(u_layer − 0.5) + (offset_x, offset_y)/2 + 0.5`, and the
+  template is the stored region rescaled by the layer scale
+  (`box_percent = round(size_percent · scale)`); the `1..=75` template gate is
+  applied to that composite template at both the smallest and the largest
+  scale over the sampled frames and names the offending frame and scale when
+  it refuses. A seed centre that the transform pushes off the composite is
+  refused typed (`tracking_seed_outside_composite`) rather than clamped to the
+  raster edge — this applies to `track_matte_window` too.
+- Every observation is converted with the transform resolved at *that
+  observation's* clip-local frame (a keyframed transform is handled per frame,
+  not refused; the template itself is sized at the seed frame's scale, which
+  the response states), through `u = (pixel + 0.5)/extent` on the thumbnail, then
+  `u_layer = (u_composite − 0.5)/scale − (offset_x, offset_y)/(2·scale) + 0.5`,
+  then `round(u·100)` percent (mask) or `round(u·10000)` basis points (reframe
+  focus), clamped to the parameter's range. The reframe subject bounds that
+  feed the containment planner are built in layer space from the converted
+  centre and the *declared* subject size (floor left/top, ceil right/bottom,
+  clamped), never through the composite template, so bounds and centres share
+  one space and a keyframed scale cannot inflate the box.
+- The written values use a fraction-of-extent mapping (the shader reads
+  `value/100` and `value/10000` as fractions of the extent); the tracker's
+  internal `extent − 1` lattice is no longer written anywhere. At the identity
+  this moves a value by at most one unit.
+- Each response carries a `coordinate_space` object stating both formulas, the
+  thumbnail size, the seed centre and template, the rule, and the resolved
+  transform (`scale`, `offset_x`, `offset_y`) per sample; observations carry
+  both the composite provenance and the layer value under distinct names.
+- Layers are stretched into their quad, never letterboxed, so the affine map
+  needs no aspect term.
+
+Behaviour notes: `initial_subject_x/y_percent` on `track_reframe_subject` is
+layer space (it is forward-mapped to seed the search), matching the default it
+falls back to — the effect's stored `focus_*_basis_points` when present, else
+`focus_*_percent`, else 50, the compositor's own precedence. `track_matte_window`
+keeps CC5 §5.2's static-transform rule so a matte window is matched with one
+template of one fixed size over the tracked range. A stored mask region larger than 75 %
+on a downscaled layer is now trackable and a small region on an upscaled layer
+may now be refused, because the gate measures the template the tracker actually
+matches. Covered by in-process tests on a synthetic moving box at the identity,
+under a static `scale 50 / x 20 / y 20` transform, and under a keyframed scale,
+plus the live transport test's asserted identity values.
+
 ## Commands
 
 Prepare and verify the interview pack:

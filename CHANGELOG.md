@@ -8,6 +8,21 @@ All notable changes to Kinewright are documented here. The format follows
 
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
+### Fixed
+- `track_mask_region` and `track_reframe_subject` wrote tracked composite-space
+  centres straight into layer-space parameters (`mask.center_x/y_percent`,
+  `reframe.focus_x/y_basis_points`), so a clip with a non-identity `transform`
+  got mask and reframe automation offset by exactly its scale and offset. Both
+  tools now seed, rescale the template, and convert every observation through
+  the clip's layer transform resolved per sample frame (CC5 §5.2 map), write
+  fraction-of-extent values, convert the reframe subject bounds into the same
+  space before containment planning, and report a `coordinate_space` object;
+  identity behaviour is unchanged apart from the ≤1-unit lattice correction.
+  All three trackers (including `track_matte_window`) now refuse typed with
+  `tracking_seed_outside_composite` when the transform pushes the seed centre
+  off the composite, instead of clamping it to the raster edge and tracking
+  whatever is there.
+
 ### Added
 - CC5 secondaries: node-owned mattes on `primary_correction`, `color_wheels`,
   `color_curves`, and `creative_look` (never on `technical_lut`), expressed as

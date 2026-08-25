@@ -379,6 +379,34 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
         tracking["prepared_edit_plan"]["preview"]["operation_count"],
         2
     );
+    // CC5 §5.2: the prepared values are *layer*-space and are asserted as
+    // values, not only counted. The clip carries an opacity-0 node, so every
+    // composited thumbnail is uniform and the tracker holds its seeded centre:
+    // the 50 percent seed is pixel 32 of the 64-wide thumbnail and pixel 18 of
+    // the 36-tall one, which as fractions of the extent are
+    // round(32.5 * 100 / 64) = 51 and round(18.5 * 100 / 36) = 51. The layer
+    // transform is the identity here, so the conversion is that read alone.
+    assert_eq!(tracking["coordinate_space"]["thumbnail"]["width"], 64);
+    assert_eq!(tracking["coordinate_space"]["thumbnail"]["height"], 36);
+    assert_eq!(tracking["coordinate_space"]["samples"][0]["scale"], 1.0);
+    assert_eq!(tracking["coordinate_space"]["samples"][0]["offset_x"], 0.0);
+    assert_eq!(tracking["coordinate_space"]["box_percent"], json!([40, 40]));
+    assert_eq!(
+        tracking["curves"]["center_x_percent"]["keyframes"][0]["value"],
+        51
+    );
+    assert_eq!(
+        tracking["curves"]["center_y_percent"]["keyframes"][0]["value"],
+        51
+    );
+    assert_eq!(tracking["observations"][0]["layer_center_x_percent"], 51);
+    assert_eq!(tracking["observations"][0]["center_x_percent"], 51);
+    // The composite provenance rides alongside, on the same fraction-of-extent
+    // convention the response's `coordinate_space.pixel_to_unit` declares.
+    assert_eq!(
+        tracking["observations"][0]["composite_center_x_percent"],
+        51
+    );
 
     let requested = invoke_capability(
         &client,

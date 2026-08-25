@@ -643,7 +643,7 @@ Steps 1 → 2 → 3 are strictly ordered. Step 4 depends on 3. Step 5 depends on
 - More than four windows per matte, and mattes on `technical_lut`.
 - Matte-scoped gamut, legal-range, and skin QC (CC6).
 - Denoise, sharpen, or despill inside a matte.
-- **Pre-existing M40 gap, out of CC5 scope:** `track_mask_region` and `track_reframe_subject` write tracked *composite*-space centres straight into the mask/reframe parameters without the §5.2 composite→layer conversion, so they are wrong under a non-identity layer `scale`/`offset`. Found during the CC5 review; `track_matte_window` converts correctly. A follow-up should route both through `LayerTransform`.
+- **Pre-existing M40 gap, found during the CC5 review and since closed:** `track_mask_region` and `track_reframe_subject` used to write tracked *composite*-space centres straight into the mask/reframe parameters without the §5.2 composite→layer conversion. Both now route through `LayerTransform` with the transform resolved per sample frame (see `M40-GENERALIZATION-GAUNTLET.md`, "Tracker coordinate space"); `track_matte_window` keeps its static-transform rule from §5.2.
 
 CC5 is complete only when a colourist can draw a window or pull a qualifier on one correction node, see exactly which pixels it affects, feather and invert it, track it through a shot from an agent proposal, measure the graded result inside it with the ordinary scopes, undo any of it in one step — and prove that nothing outside the matte, and no alpha byte anywhere, moved.
 

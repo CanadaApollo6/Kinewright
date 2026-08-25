@@ -56,7 +56,10 @@ New inspectors:
   clipping, and a 64-column luma waveform.
 - `track_mask_region` follows an existing bounded mask, validates the editable
   center-X and center-Y curves, and returns an opaque `prepared_edit_plan`
-  handle plus preview for direct commit.
+  handle plus preview for direct commit. Since 2026-08-25 the written centres
+  are converted from the composited thumbnail into layer space through the
+  clip's `transform` (see `M40-GENERALIZATION-GAUNTLET.md`, "Tracker
+  coordinate space").
 
 `get_timeline_state` and `get_clip_info` render static effect values and their
 automation curves. Audio-bus routes, processors, sidechains, and automation are

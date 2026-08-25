@@ -4872,8 +4872,16 @@ fn valid_reframe_subject_provenances(document: &Document) -> Vec<ReframeSubjectP
 }
 
 // Template matching follows a supplied search box, not a segmented face edge.
-// Provenance bounds round outward and crop bounds round outward, so strict
-// containment is both deterministic and conservative.
+//
+// `track_reframe_subject` builds each provenance box in *layer* uv: the tracked
+// composite centre pulled back through the layer transform resolved at that
+// observation's own frame, bracketed by the declared `subject_width_percent` /
+// `subject_height_percent` (half extent = percent * 50 basis points), with the
+// left/top edge floored, the right/bottom edge ceiled, and both clamped to
+// 0..=10000. It is never routed through the composite template's own bounds,
+// whose size is pinned to the seed frame's scale. Provenance bounds therefore
+// round outward, and crop bounds round outward, so strict containment is both
+// deterministic and conservative.
 const SUBJECT_CONTAINMENT_TOLERANCE_BASIS_POINTS: i64 = 0;
 const SUBJECT_CONTAINMENT_ENDPOINT_WINDOW_FRAMES: i64 = 25;
 

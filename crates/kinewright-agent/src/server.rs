@@ -3844,18 +3844,68 @@ impl KinewrightMcp {
         }
         let parameter =
             |name: &str, neutral: i64| effect.integer_parameter_at(name, start).unwrap_or(neutral);
-        let center_percent = [
-            u8::try_from(parameter("center_x_percent", 50).clamp(0, 100)).unwrap_or(50),
-            u8::try_from(parameter("center_y_percent", 50).clamp(0, 100)).unwrap_or(50),
+        // CC5 §5.2: `mask_center_x/y_percent` are evaluated at the fragment's
+        // *layer* uv (`compositor.wgsl` reads `value / 100` of `input.uv`),
+        // which the vertex stage's `scale`/`offset` placement has not yet
+        // touched, while the tracker measures the *composited* thumbnail. Seed
+        // the search with the stored centre pushed forward through the layer
+        // transform resolved at the first sampled frame, and rescale the
+        // template by that same scale — exactly as `track_matte_window` does.
+        let seed_transform = resolve_layer_transform_at(effect_chain(clip), start);
+        let stored_center_percent = [
+            parameter("center_x_percent", 50).clamp(0, 100),
+            parameter("center_y_percent", 50).clamp(0, 100),
         ];
-        let box_percent = [
+        #[allow(clippy::cast_precision_loss)]
+        let seed_layer = [
+            stored_center_percent[0] as f64 / 100.0,
+            stored_center_percent[1] as f64 / 100.0,
+        ];
+        let center_percent = match composite_seed_percent(seed_transform, seed_layer) {
+            Ok(percent) => percent,
+            Err(seed) => {
+                return Ok(tracking_seed_outside_composite_result(
+                    ["center_x_percent", "center_y_percent"],
+                    args.clip_id,
+                    start,
+                    seed_transform,
+                    &seed,
+                    &[],
+                ));
+            }
+        };
+        let stored_box_percent = [
             parameter("width_percent", 100),
             parameter("height_percent", 100),
         ];
-        if box_percent.iter().any(|value| !(1..=75).contains(value)) {
-            return Ok(error_text(
-                "mask width_percent and height_percent must each be in 1..=75 for tracking; set a bounded subject region first",
-            ));
+        let box_percent = [
+            tracked_box_percent(stored_box_percent[0], seed_transform.scale),
+            tracked_box_percent(stored_box_percent[1], seed_transform.scale),
+        ];
+        // CC5 §5.2: the template is sized once, at the seed frame's scale, but
+        // it must be a legal template at *every* sampled frame. `tracked_box_percent`
+        // is monotone in the scale, so testing the smallest and the largest
+        // resolved scale tests the whole range — and the refusal names the
+        // frame and the scale that failed, not the seed's.
+        let scale_extremes = layer_scale_extremes(effect_chain(clip), &sample_frames);
+        if let Some((offending, [template_width, template_height])) = scale_extremes
+            .and_then(|extremes| offending_template_scale(stored_box_percent, extremes))
+        {
+            let mut message = "mask width_percent and height_percent must each be in 1..=75 for tracking; set a bounded subject region first".to_owned();
+            if (offending.scale - 1.0).abs() > f64::EPSILON {
+                use std::fmt::Write as _;
+                let _ = write!(
+                    message,
+                    " (the stored {}x{} percent region maps to a {}x{} percent template on the composite at layer scale {} at clip-local frame {})",
+                    stored_box_percent[0],
+                    stored_box_percent[1],
+                    template_width,
+                    template_height,
+                    offending.scale,
+                    offending.frame,
+                );
+            }
+            return Ok(error_text(message));
         }
         let search_radius = args
             .search_radius_percent
@@ -3883,19 +3933,44 @@ impl KinewrightMcp {
             Err(error) => return Ok(error_text(error)),
         };
         let observations = tracked.observations;
+        // CC5 §5.2: the transform is resolved at *each* observation's own
+        // frame, so a keyframed scale or offset is converted sample by sample
+        // rather than refused. Every written value is the composite centre
+        // measured as a fraction of the extent and pulled back into layer uv.
+        let converted = observations
+            .iter()
+            .map(|observation| {
+                let transform =
+                    resolve_layer_transform_at(effect_chain(clip), observation.local_frame);
+                let layer = tracked_centre_layer_unit(
+                    observation.center,
+                    tracked.width,
+                    tracked.height,
+                    transform,
+                );
+                (
+                    transform,
+                    [
+                        layer_unit_to_percent(layer[0]),
+                        layer_unit_to_percent(layer[1]),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>();
 
-        let curve_for = |axis: usize, extent: u32| AutomationCurve {
+        let curve_for = |axis: usize| AutomationCurve {
             keyframes: observations
                 .iter()
-                .map(|observation| Keyframe {
+                .zip(&converted)
+                .map(|(observation, (_, layer))| Keyframe {
                     at: observation.local_frame,
-                    value: i64::from(pixel_to_percent(observation.center[axis], extent)),
+                    value: layer[axis],
                     interpolation: KeyframeInterpolation::Linear,
                 })
                 .collect(),
         };
-        let x_curve = curve_for(0, tracked.width);
-        let y_curve = curve_for(1, tracked.height);
+        let x_curve = curve_for(0);
+        let y_curve = curve_for(1);
         let operations = vec![
             Operation::SetEffectKeyframes {
                 clip: args.clip_id,
@@ -3912,12 +3987,32 @@ impl KinewrightMcp {
         ];
         let observations_json = observations
             .iter()
-            .map(|observation| {
+            .zip(&converted)
+            .map(|(observation, (_, layer))| {
                 serde_json::json!({
                     "local_frame": observation.local_frame.0,
                     "project_frame": observation.project_frame.0,
-                    "center_x_percent": pixel_to_percent(observation.center[0], tracked.width),
-                    "center_y_percent": pixel_to_percent(observation.center[1], tracked.height),
+                    // The values the plan writes, in the layer uv the mask is
+                    // evaluated in.
+                    "center_x_percent": layer[0],
+                    "center_y_percent": layer[1],
+                    "layer_center_x_percent": layer[0],
+                    "layer_center_y_percent": layer[1],
+                    // Provenance: what the tracker actually measured, on the
+                    // composited thumbnail, in its own raster — read with the
+                    // *same* fraction-of-the-extent convention this response's
+                    // `coordinate_space.pixel_to_unit` publishes and the layer
+                    // values above are converted from, so applying the published
+                    // `composite_to_layer` map to these numbers reproduces
+                    // `layer_center_*_percent`. The `extent − 1` lattice would
+                    // silently disagree with the stated map.
+                    "composite_center_pixel": observation.center,
+                    "composite_center_x_percent": layer_unit_to_percent(
+                        tracker_pixel_to_composite_unit(observation.center[0], tracked.width),
+                    ),
+                    "composite_center_y_percent": layer_unit_to_percent(
+                        tracker_pixel_to_composite_unit(observation.center[1], tracked.height),
+                    ),
                     "confidence_basis_points": observation.confidence_basis_points,
                 })
             })
@@ -3939,6 +4034,31 @@ impl KinewrightMcp {
             "curves": {
                 "center_x_percent": x_curve,
                 "center_y_percent": y_curve,
+            },
+            // CC5 §5.2: the two spaces and the exact maps between them, stated
+            // rather than inferred, mirroring `track_matte_window`.
+            "coordinate_space": {
+                "measured_on": "composited thumbnail, whose uv is the output frame",
+                "written_in": "layer uv, which is where the mask is evaluated",
+                "thumbnail": {"width": tracked.width, "height": tracked.height},
+                "pixel_to_unit": "u_composite = (pixel + 0.5) / extent",
+                "composite_to_layer": "u_layer = (u_composite - 0.5) / scale - (offset_x, offset_y) / (2 * scale) + 0.5",
+                "unit_to_percent": "center_percent = round(u_layer * 100), clamped to 0..=100",
+                "seed_center_percent": center_percent,
+                "box_percent": box_percent,
+                "box_percent_rule": "the stored region rescaled by the layer scale: box_percent = round([width_percent, height_percent] * scale) (CC5 §5.2)",
+                "per_frame_transform": true,
+                "keyframed_transform": keyframed_transform_note(seed_transform.scale, scale_extremes),
+                "samples": observations
+                    .iter()
+                    .zip(&converted)
+                    .map(|(observation, (transform, _))| serde_json::json!({
+                        "local_frame": observation.local_frame.0,
+                        "scale": transform.scale,
+                        "offset_x": transform.offset_x,
+                        "offset_y": transform.offset_y,
+                    }))
+                    .collect::<Vec<_>>(),
             },
             "prepared_edit_plan": {
                 "plan_id": plan.id,
@@ -4288,7 +4408,7 @@ impl KinewrightMcp {
                         "field": unsupported.field,
                         "observed": unsupported.observed,
                         "allowed": "a layer scale and offset that resolve to one value across the whole tracked range",
-                        "recovery_action": "Clear the transform automation over the tracked range, or track a range across which the layer transform is static; the composite-to-layer conversion is a single affine map and cannot follow a moving frame (CC5 §5.2).",
+                        "recovery_action": "Clear the transform automation over the tracked range, or track a range across which the layer transform is static; the matte window is matched with one template of one fixed size, and CC5 §5.2 requires a static layer transform over the tracked range so that template — and the window it produces — is reproducible.",
                         "clip_id": args.clip_id.0,
                         "range": {"start": start.0, "end": end.0},
                     }),
@@ -4347,14 +4467,32 @@ impl KinewrightMcp {
                 }),
             ));
         }
-        let composite_centre = transform.layer_to_composite([
-            basis_points_to_unit(window.center_x_bp),
-            basis_points_to_unit(window.center_y_bp),
-        ]);
-        let center_percent = [
-            unit_to_percent(composite_centre[0]),
-            unit_to_percent(composite_centre[1]),
-        ];
+        let center_percent = match composite_seed_percent(
+            transform,
+            [
+                basis_points_to_unit(window.center_x_bp),
+                basis_points_to_unit(window.center_y_bp),
+            ],
+        ) {
+            Ok(percent) => percent,
+            Err(seed) => {
+                // The repairable input is the window's own stored centre, not
+                // the index that selected it, so the refusal names the offending
+                // parameter and keeps the index as context.
+                let index = args.window_index;
+                return Ok(tracking_seed_outside_composite_result(
+                    [
+                        &format!("matte_window{index}_center_x_basis_points"),
+                        &format!("matte_window{index}_center_y_basis_points"),
+                    ],
+                    args.clip_id,
+                    first_local,
+                    transform,
+                    &seed,
+                    &[("window_index", serde_json::json!(index))],
+                ));
+            }
+        };
 
         let tracked = match self.track_clip_region(&RegionTrackingRequest {
             document: &document,
@@ -4625,21 +4763,28 @@ impl KinewrightMcp {
                 sample_frames.len()
             )));
         }
-        let parameter = |name: &str| {
-            u8::try_from(
-                effect
-                    .integer_parameter_at(name, start)
-                    .unwrap_or(50)
-                    .clamp(0, 100),
-            )
-            .unwrap_or(50)
+        // The stored focus, in the compositor's own precedence: an explicitly
+        // stored `focus_*_basis_points` wins over `focus_*_percent`
+        // (`compositor.rs`'s `ReframeFocusXBasisPoints` arm only overwrites the
+        // percent-derived focus when the parameter is actually present), and a
+        // reframe carrying neither is centred. This tool *writes* basis points,
+        // so reading only the percent would seed a re-track of its own output
+        // at 50 percent instead of where the camera actually is.
+        let stored_focus = |basis_points: &str, percent: &str| -> u8 {
+            if let Some(value) = effect.integer_parameter_at(basis_points, start) {
+                let rounded = (value.clamp(0, 10_000) + 50) / 100;
+                return u8::try_from(rounded).unwrap_or(50);
+            }
+            effect
+                .integer_parameter_at(percent, start)
+                .map_or(50, |value| u8::try_from(value.clamp(0, 100)).unwrap_or(50))
         };
         let initial_x = args
             .initial_subject_x_percent
-            .unwrap_or_else(|| parameter("focus_x_percent"));
+            .unwrap_or_else(|| stored_focus("focus_x_basis_points", "focus_x_percent"));
         let initial_y = args
             .initial_subject_y_percent
-            .unwrap_or_else(|| parameter("focus_y_percent"));
+            .unwrap_or_else(|| stored_focus("focus_y_basis_points", "focus_y_percent"));
         if initial_x > 100 || initial_y > 100 {
             return Ok(error_text(
                 "initial_subject_x_percent and initial_subject_y_percent must be in 0..=100",
@@ -4681,16 +4826,64 @@ impl KinewrightMcp {
         if !(64..=512).contains(&max_width) {
             return Ok(error_text("max_width must be in 64..=512"));
         }
+        // CC5 §5.2: `focus_x/y_basis_points` name the centre of the visible
+        // window *inside the layer texture* — `compositor.wgsl` builds
+        // `sample_uv` from `reframe_focus_x/y` before the vertex stage places
+        // the quad — while the tracker measures the composited thumbnail. Seed
+        // the search with the initial focus pushed forward through the layer
+        // transform resolved at the first sampled frame, and rescale the
+        // subject template by that same scale, exactly as `track_matte_window`
+        // does for a window.
+        let seed_transform = resolve_layer_transform_at(effect_chain(clip), start);
+        let seed_center_percent = match composite_seed_percent(
+            seed_transform,
+            [f64::from(initial_x) / 100.0, f64::from(initial_y) / 100.0],
+        ) {
+            Ok(percent) => percent,
+            Err(seed) => {
+                return Ok(tracking_seed_outside_composite_result(
+                    ["initial_subject_x_percent", "initial_subject_y_percent"],
+                    args.clip_id,
+                    start,
+                    seed_transform,
+                    &seed,
+                    &[],
+                ));
+            }
+        };
+        let subject_box_percent = [
+            i64::from(args.subject_width_percent),
+            i64::from(args.subject_height_percent),
+        ];
+        let box_percent = [
+            tracked_box_percent(subject_box_percent[0], seed_transform.scale),
+            tracked_box_percent(subject_box_percent[1], seed_transform.scale),
+        ];
+        // CC5 §5.2: the template is sized once, at the seed frame's scale, but
+        // it must be a legal template at *every* sampled frame, so the gate is
+        // applied at the smallest and the largest resolved scale and the
+        // refusal names the frame and scale that failed rather than the seed's.
+        let scale_extremes = layer_scale_extremes(effect_chain(clip), &sample_frames);
+        if let Some((offending, [template_width, template_height])) = scale_extremes
+            .and_then(|extremes| offending_template_scale(subject_box_percent, extremes))
+        {
+            return Ok(error_text(format!(
+                "subject_width_percent and subject_height_percent must each be in 1..=75 for tracking; the {}x{} percent subject maps to a {}x{} percent template on the composite at layer scale {} at clip-local frame {}",
+                subject_box_percent[0],
+                subject_box_percent[1],
+                template_width,
+                template_height,
+                offending.scale,
+                offending.frame,
+            )));
+        }
         let tracked = match self.track_clip_region(&RegionTrackingRequest {
             document: &document,
             clip_id: args.clip_id,
             clip_timeline_start: clip.timeline_start,
             sample_frames: &sample_frames,
-            center_percent: [initial_x, initial_y],
-            box_percent: [
-                i64::from(args.subject_width_percent),
-                i64::from(args.subject_height_percent),
-            ],
+            center_percent: seed_center_percent,
+            box_percent,
             search_radius_percent: search_radius,
             max_width,
             excluded_effect: args.effect_id,
@@ -4698,20 +4891,55 @@ impl KinewrightMcp {
             Ok(tracked) => tracked,
             Err(error) => return Ok(error_text(error)),
         };
-        let subject_box_percent = [
-            i64::from(args.subject_width_percent),
-            i64::from(args.subject_height_percent),
-        ];
-        let provenance_samples = tracked
+        // CC5 §5.2: one transform per observation, resolved at that
+        // observation's own frame, so a keyframed scale or offset is converted
+        // sample by sample rather than refused.
+        let sample_transforms = tracked
             .observations
             .iter()
             .map(|observation| {
-                tracked_subject_bounds(
-                    observation,
+                resolve_layer_transform_at(effect_chain(clip), observation.local_frame)
+            })
+            .collect::<Vec<_>>();
+        // The bounds the tracker measured, on the composite, from the same
+        // rescaled template it matched with. Pure provenance: nothing plans
+        // from these, because the template is sized once at the seed frame's
+        // scale and converting it back through a *different* observation's
+        // scale would inflate the box by `seed_scale / observation_scale`.
+        let composite_samples = tracked
+            .observations
+            .iter()
+            .map(|observation| {
+                tracked_subject_bounds(observation, tracked.width, tracked.height, box_percent)
+            })
+            .collect::<Vec<_>>();
+        // Every observation's centre, converted into layer uv with the
+        // transform resolved at that observation's own frame.
+        let layer_centres = tracked
+            .observations
+            .iter()
+            .zip(&sample_transforms)
+            .map(|(observation, transform)| {
+                tracked_centre_layer_unit(
+                    observation.center,
                     tracked.width,
                     tracked.height,
-                    subject_box_percent,
+                    *transform,
                 )
+            })
+            .collect::<Vec<_>>();
+        // The reframe crop selects a sub-rectangle of the *layer* texture, so
+        // the containment constraint — and the provenance marker that records
+        // it — are stated in layer uv too. The box is the converted layer
+        // centre bracketed by the *declared* layer subject size, rounded
+        // outward and clamped to 0..=10000; it is never routed through the
+        // composite template, whose size is pinned to the seed frame's scale.
+        let provenance_samples = tracked
+            .observations
+            .iter()
+            .zip(&layer_centres)
+            .map(|(observation, centre)| {
+                layer_subject_bounds(observation.local_frame, *centre, subject_box_percent)
             })
             .collect::<Vec<_>>();
         let containment = provenance_samples
@@ -4737,19 +4965,18 @@ impl KinewrightMcp {
             Ok(constraints) => constraints,
             Err(error) => return Ok(error_text(error)),
         };
+        // CC5 §5.2: every observation is converted *before* the planner sees
+        // it — composite pixel as a fraction of the extent, then pulled back
+        // into layer uv — so the focus curve is planned, clamped, and written
+        // entirely in the space the compositor reads it in.
         let samples = tracked
             .observations
             .iter()
-            .map(|observation| SubjectCenterBasisPointSample {
+            .zip(&layer_centres)
+            .map(|(observation, layer)| SubjectCenterBasisPointSample {
                 at: observation.local_frame,
-                x_basis_points: i64::from(pixel_to_basis_points(
-                    observation.center[0],
-                    tracked.width,
-                )),
-                y_basis_points: i64::from(pixel_to_basis_points(
-                    observation.center[1],
-                    tracked.height,
-                )),
+                x_basis_points: layer_unit_to_basis_points(layer[0]),
+                y_basis_points: layer_unit_to_basis_points(layer[1]),
                 confidence_basis_points: observation.confidence_basis_points,
             })
             .collect::<Vec<_>>();
@@ -4803,7 +5030,7 @@ impl KinewrightMcp {
         let provenance = ReframeSubjectProvenance {
             clip: args.clip_id,
             effect: args.effect_id,
-            samples: provenance_samples,
+            samples: provenance_samples.clone(),
         };
         let provenance_label = encode_reframe_subject_provenance(&provenance);
         let existing_provenance_marker = document.markers.iter().find_map(|marker| {
@@ -4842,6 +5069,54 @@ impl KinewrightMcp {
                 },
             }
         };
+        // CC5 §5.2 provenance: the raw composite measurement beside the layer
+        // value that was actually planned from it, one row per sample.
+        let subject_samples = tracked
+            .observations
+            .iter()
+            .zip(&samples)
+            .zip(&sample_transforms)
+            .zip(&composite_samples)
+            .zip(&provenance_samples)
+            .map(|((((observation, sample), transform), composite), layer)| {
+                serde_json::json!({
+                    "local_frame": observation.local_frame.0,
+                    "project_frame": observation.project_frame.0,
+                    "layer_x_basis_points": sample.x_basis_points,
+                    "layer_y_basis_points": sample.y_basis_points,
+                    "composite_center_pixel": observation.center,
+                    "composite_x_basis_points": matte_track_centre_basis_points(
+                        observation.center[0],
+                        tracked.width,
+                    ),
+                    "composite_y_basis_points": matte_track_centre_basis_points(
+                        observation.center[1],
+                        tracked.height,
+                    ),
+                    "composite_bounds_basis_points": {
+                        "left": composite.left_basis_points,
+                        "right": composite.right_basis_points,
+                        "top": composite.top_basis_points,
+                        "bottom": composite.bottom_basis_points,
+                    },
+                    // The box containment was planned from and the provenance
+                    // marker records: the converted layer centre bracketed by
+                    // the declared layer subject size, rounded outward.
+                    "layer_bounds_basis_points": {
+                        "left": layer.left_basis_points,
+                        "right": layer.right_basis_points,
+                        "top": layer.top_basis_points,
+                        "bottom": layer.bottom_basis_points,
+                    },
+                    "layer_transform": {
+                        "scale": transform.scale,
+                        "offset_x": transform.offset_x,
+                        "offset_y": transform.offset_y,
+                    },
+                    "confidence_basis_points": observation.confidence_basis_points,
+                })
+            })
+            .collect::<Vec<_>>();
         let mut operations = reframe.operations;
         operations.push(provenance_operation);
         let plan = match self.prepare_operations(revision, &document, operations) {
@@ -4861,7 +5136,37 @@ impl KinewrightMcp {
                 "width_percent": args.subject_width_percent,
                 "height_percent": args.subject_height_percent,
                 "initial_center_percent": {"x": initial_x, "y": initial_y},
+                "composite_box_percent": box_percent,
+                "composite_seed_center_percent": seed_center_percent,
             },
+            // CC5 §5.2: the two spaces and the exact maps between them, stated
+            // rather than inferred, mirroring `track_matte_window`.
+            "coordinate_space": {
+                "measured_on": "composited thumbnail, whose uv is the output frame",
+                "written_in": "layer uv, which is where the reframe crop window is centred",
+                "thumbnail": {"width": tracked.width, "height": tracked.height},
+                "pixel_to_unit": "u_composite = (pixel + 0.5) / extent",
+                "composite_to_layer": "u_layer = (u_composite - 0.5) / scale - (offset_x, offset_y) / (2 * scale) + 0.5",
+                "unit_to_basis_points": "focus_basis_points = round(u_layer * 10000), clamped to 0..=10000",
+                "seed_center_percent": seed_center_percent,
+                "box_percent": box_percent,
+                "box_percent_rule": "the subject template rescaled by the layer scale: box_percent = round([subject_width_percent, subject_height_percent] * scale) (CC5 §5.2)",
+                "per_frame_transform": true,
+                "keyframed_transform": keyframed_transform_note(seed_transform.scale, scale_extremes),
+                "containment_space": "containment is planned in layer uv: each sample's box is the converted layer centre bracketed by the declared subject_width/height_percent (half extent = percent * 50 basis points), rounded outward — floor on left/top, ceil on right/bottom — and clamped to 0..=10000. The composite template bounds are provenance only and are never converted into the constraint, because that template is sized once at the seed frame's scale. The provenance marker records these layer-space bounds",
+                "samples": tracked
+                    .observations
+                    .iter()
+                    .zip(&sample_transforms)
+                    .map(|(observation, transform)| serde_json::json!({
+                        "local_frame": observation.local_frame.0,
+                        "scale": transform.scale,
+                        "offset_x": transform.offset_x,
+                        "offset_y": transform.offset_y,
+                    }))
+                    .collect::<Vec<_>>(),
+            },
+            "subject_samples": subject_samples,
             "focus_bounds_percent": {
                 "minimum_x": focus_bounds[0],
                 "maximum_x": focus_bounds[1],
@@ -8311,7 +8616,8 @@ struct TrackMaskArgs {
     /// Distance between tracked keyframes. Defaults to 5; valid range 1..=120.
     #[serde(default)]
     step_frames: Option<i64>,
-    /// Search radius around the previous center as a frame percentage. Defaults to 10.
+    /// Search radius around the previous center as a *composited-frame*
+    /// percentage, not a layer percentage. Defaults to 10.
     #[serde(default)]
     search_radius_percent: Option<u8>,
     /// Analysis render width. Defaults to 256; valid range 64..=512.
@@ -8359,8 +8665,8 @@ struct TrackMatteWindowArgs {
     /// Distance between tracked keyframes. Defaults to 5; valid range 1..=120.
     #[serde(default)]
     step_frames: Option<i64>,
-    /// Search radius around the previous center as a frame percentage.
-    /// Defaults to 10; valid range 1..=25.
+    /// Search radius around the previous center as a *composited-frame*
+    /// percentage, not a layer percentage. Defaults to 10; valid range 1..=25.
     #[serde(default)]
     search_radius_percent: Option<u8>,
     /// Analysis render width. Defaults to 256; valid range 64..=512.
@@ -8421,14 +8727,24 @@ struct TrackReframeArgs {
     clip_id: ClipId,
     /// Stable reframe effect id on the clip.
     effect_id: EffectId,
-    /// Width of the initial subject template as a frame percentage, in 1..=75.
+    /// Width of the initial subject template as a *layer* percentage, in
+    /// 1..=75. The composite template is size x layer scale, and that product
+    /// must also be in 1..=75 at every sampled frame.
     subject_width_percent: u8,
-    /// Height of the initial subject template as a frame percentage, in 1..=75.
+    /// Height of the initial subject template as a *layer* percentage, in
+    /// 1..=75. The composite template is size x layer scale, and that product
+    /// must also be in 1..=75 at every sampled frame.
     subject_height_percent: u8,
-    /// Explicit horizontal center of the subject template. Defaults to the effect focus at start.
+    /// Horizontal center of the subject template as a *layer* percentage,
+    /// forward-mapped through the clip's layer transform to seed the search on
+    /// the composite. Defaults to the stored `focus_x_basis_points`, else
+    /// `focus_x_percent`, else 50.
     #[serde(default)]
     initial_subject_x_percent: Option<u8>,
-    /// Explicit vertical center of the subject template. Defaults to the effect focus at start.
+    /// Vertical center of the subject template as a *layer* percentage,
+    /// forward-mapped through the clip's layer transform to seed the search on
+    /// the composite. Defaults to the stored `focus_y_basis_points`, else
+    /// `focus_y_percent`, else 50.
     #[serde(default)]
     initial_subject_y_percent: Option<u8>,
     /// Smallest editable horizontal focus emitted by the tracker. Defaults to zero.
@@ -8458,7 +8774,8 @@ struct TrackReframeArgs {
     /// Distance between editable focus keyframes. Defaults to 5; valid range 1..=120.
     #[serde(default)]
     step_frames: Option<i64>,
-    /// Search radius around the prior subject center as a frame percentage. Defaults to 10.
+    /// Search radius around the prior subject center as a *composited-frame*
+    /// percentage, not a layer percentage. Defaults to 10.
     #[serde(default)]
     search_radius_percent: Option<u8>,
     /// Analysis render width. Defaults to 256; valid range 64..=512.
@@ -9717,7 +10034,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "track_mask_region",
-            "Track an existing bounded mask region through one media clip using deterministic sequential template matching on isolated compositor frames. Returns confidence observations plus revision-gated SetEffectKeyframes operations for the mask center; it never silently mutates the timeline. Set mask width and height to 75 percent or less before tracking.",
+            "Track an existing bounded mask region through one media clip using deterministic sequential template matching on isolated compositor frames. Returns confidence observations plus revision-gated SetEffectKeyframes operations for the mask center; it never silently mutates the timeline. The tracking template is the stored region rescaled onto the composite, so mask width_percent x layer scale and height_percent x layer scale must each be in 1..=75 at every sampled frame.",
             schema_object::<TrackMaskArgs>(),
         )
         .with_annotations(read_only()),
@@ -10871,30 +11188,47 @@ impl LayerTransform {
         ]
     }
 
-    /// CC5 §5.2's normative composite → layer conversion, in basis points.
+    /// CC5 §5.2's normative composite → layer conversion, in normalized uv.
     ///
-    /// The exact inverse of [`Self::layer_to_composite`]:
+    /// The exact inverse of [`Self::layer_to_composite`], **unclamped**:
     ///
     /// `u_layer = (u_composite − 0.5)/scale − (offset_x, offset_y)/(2·scale) + 0.5`
-    fn composite_to_layer_basis_points(self, composite: [i64; 2]) -> [i64; 2] {
-        let convert = |value: i64, offset: f64| {
+    ///
+    /// No clamp, deliberately: a layer scaled below 1 occupies only part of the
+    /// composite, so composite coordinates outside the layer's own quad map to
+    /// layer coordinates outside `0..=1`, and every caller decides for itself
+    /// what to do with them. A degenerate `scale <= 0` collapses the quad and
+    /// has no inverse, so the composite coordinate is returned unchanged rather
+    /// than divided by zero.
+    fn composite_to_layer_unit(self, unit: [f64; 2]) -> [f64; 2] {
+        let convert = |value: f64, offset: f64| {
             if self.scale <= 0.0 {
                 return value;
             }
-            #[allow(clippy::cast_precision_loss)]
-            let unit = value as f64 / 10_000.0;
-            let layer = (unit - 0.5 - offset / 2.0) / self.scale + 0.5;
+            (value - 0.5 - offset / 2.0) / self.scale + 0.5
+        };
+        [
+            convert(unit[0], self.offset_x),
+            convert(unit[1], self.offset_y),
+        ]
+    }
+
+    /// [`Self::composite_to_layer_unit`] in basis points, clamped to CC5
+    /// §2.2's matte window centre range.
+    fn composite_to_layer_basis_points(self, composite: [i64; 2]) -> [i64; 2] {
+        #[allow(clippy::cast_precision_loss)]
+        let unit = self.composite_to_layer_unit([
+            composite[0] as f64 / 10_000.0,
+            composite[1] as f64 / 10_000.0,
+        ]);
+        unit.map(|layer| {
             #[allow(clippy::cast_possible_truncation)]
             let basis_points = (layer * 10_000.0).round() as i64;
             basis_points.clamp(
                 kinewright_core::MATTE_WINDOW_CENTER_MIN_BASIS_POINTS,
                 kinewright_core::MATTE_WINDOW_CENTER_MAX_BASIS_POINTS,
             )
-        };
-        [
-            convert(composite[0], self.offset_x),
-            convert(composite[1], self.offset_y),
-        ]
+        })
     }
 }
 
@@ -10902,6 +11236,38 @@ impl LayerTransform {
 struct LayerTransformUnsupported {
     field: &'static str,
     observed: serde_json::Value,
+}
+
+/// Resolve one layer's scale and offset at exactly one frame.
+///
+/// The accumulation is the compositor's own, restated: `params_for` multiplies
+/// every `EffectUniform::Scale` by `value / 100` and adds every
+/// `EffectUniform::OffsetX` / `OffsetY` as `value / 50`, over the whole effect
+/// chain in order, with a missing parameter taking the descriptor's neutral
+/// value. Resolving per frame is what lets CC5 §5.2's composite → layer
+/// conversion follow a *keyframed* transform: the map is affine at each
+/// instant even when it moves between instants.
+fn resolve_layer_transform_at(effects: &[Effect], frame: TimeCode) -> LayerTransform {
+    let mut transform = LayerTransform::IDENTITY;
+    for effect in effects {
+        let Some(descriptor) = kinewright_core::effect_descriptor(&effect.name) else {
+            continue;
+        };
+        for parameter in descriptor.parameters {
+            let value = effect
+                .integer_parameter_at(parameter.name, frame)
+                .unwrap_or(parameter.neutral);
+            #[allow(clippy::cast_precision_loss)]
+            let value = value as f64;
+            match parameter.uniform {
+                kinewright_core::EffectUniform::Scale => transform.scale *= value / 100.0,
+                kinewright_core::EffectUniform::OffsetX => transform.offset_x += value / 50.0,
+                kinewright_core::EffectUniform::OffsetY => transform.offset_y += value / 50.0,
+                _ => {}
+            }
+        }
+    }
+    transform
 }
 
 /// Resolve one layer's static scale and offset across every sampled frame.
@@ -10917,25 +11283,7 @@ fn resolve_static_layer_transform(
 ) -> Result<LayerTransform, LayerTransformUnsupported> {
     let mut resolved: Option<LayerTransform> = None;
     for frame in sample_frames {
-        let mut transform = LayerTransform::IDENTITY;
-        for effect in effects {
-            let Some(descriptor) = kinewright_core::effect_descriptor(&effect.name) else {
-                continue;
-            };
-            for parameter in descriptor.parameters {
-                let value = effect
-                    .integer_parameter_at(parameter.name, *frame)
-                    .unwrap_or(parameter.neutral);
-                #[allow(clippy::cast_precision_loss)]
-                let value = value as f64;
-                match parameter.uniform {
-                    kinewright_core::EffectUniform::Scale => transform.scale *= value / 100.0,
-                    kinewright_core::EffectUniform::OffsetX => transform.offset_x += value / 50.0,
-                    kinewright_core::EffectUniform::OffsetY => transform.offset_y += value / 50.0,
-                    _ => {}
-                }
-            }
-        }
+        let transform = resolve_layer_transform_at(effects, *frame);
         match resolved {
             None => resolved = Some(transform),
             Some(first) => {
@@ -10967,6 +11315,167 @@ fn effect_chain(clip: &Clip) -> &[Effect] {
     &clip.effects
 }
 
+/// One resolved layer scale and the sampled frame it was resolved at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LayerScaleAt {
+    frame: TimeCode,
+    scale: f64,
+}
+
+/// The smallest and largest layer scale resolved over `sample_frames`.
+///
+/// CC5 §5.2: the tracking template is sized *once*, at the seed frame's scale,
+/// while the composite → layer conversion is redone per frame. A keyframed
+/// scale therefore makes the *same* template legal at one end of the range and
+/// illegal at the other, so the `1..=75` template gate is applied at both
+/// extremes rather than at the seed alone. Returns `None` for an empty range.
+fn layer_scale_extremes(
+    effects: &[Effect],
+    sample_frames: &[TimeCode],
+) -> Option<(LayerScaleAt, LayerScaleAt)> {
+    let mut minimum: Option<LayerScaleAt> = None;
+    let mut maximum: Option<LayerScaleAt> = None;
+    for frame in sample_frames {
+        let resolved = LayerScaleAt {
+            frame: *frame,
+            scale: resolve_layer_transform_at(effects, *frame).scale,
+        };
+        if minimum.is_none_or(|current| resolved.scale < current.scale) {
+            minimum = Some(resolved);
+        }
+        if maximum.is_none_or(|current| resolved.scale > current.scale) {
+            maximum = Some(resolved);
+        }
+    }
+    minimum.zip(maximum)
+}
+
+/// The first resolved scale at which a stored region is an illegal template.
+///
+/// The template gate is CC5 §5.2's `1..=75` percent of the composited frame.
+/// [`tracked_box_percent`] is monotone in the scale, so a region that is legal
+/// at both the smallest and the largest resolved scale is legal at every scale
+/// between them. Returns the offending scale, the frame it was resolved at, and
+/// the template that scale produces.
+fn offending_template_scale(
+    stored_percent: [i64; 2],
+    extremes: (LayerScaleAt, LayerScaleAt),
+) -> Option<(LayerScaleAt, [i64; 2])> {
+    let (minimum, maximum) = extremes;
+    [minimum, maximum].into_iter().find_map(|resolved| {
+        let template = [
+            tracked_box_percent(stored_percent[0], resolved.scale),
+            tracked_box_percent(stored_percent[1], resolved.scale),
+        ];
+        template
+            .iter()
+            .any(|value| !(1..=75).contains(value))
+            .then_some((resolved, template))
+    })
+}
+
+/// CC5 §5.2's exact statement of what the per-frame transform does and does not
+/// cover, for the `coordinate_space` block of both region trackers.
+///
+/// The *conversion* is redone at every sampled frame; the *template* is sized
+/// once, at the seed frame's scale, and is gated against the whole resolved
+/// range. Stating the seed scale and both extremes keeps the claim falsifiable.
+fn keyframed_transform_note(
+    seed_scale: f64,
+    extremes: Option<(LayerScaleAt, LayerScaleAt)>,
+) -> String {
+    let range = extremes.map_or_else(
+        || "no sampled frames".to_owned(),
+        |(minimum, maximum)| {
+            format!(
+                "{} at clip-local frame {} to {} at clip-local frame {}",
+                minimum.scale, minimum.frame, maximum.scale, maximum.frame
+            )
+        },
+    );
+    format!(
+        "the composite-to-layer conversion is resolved at every sampled frame, so a keyframed scale or offset is converted sample by sample rather than refused; the tracking template itself is sized once, at the seed frame's scale {seed_scale}, and the 1..=75 percent template gate is applied across the resolved scale range {range}"
+    )
+}
+
+/// A seed centre whose forward map lands outside the composited frame.
+struct TrackingSeedOutsideComposite {
+    layer: [f64; 2],
+    composite: [f64; 2],
+}
+
+/// Push one layer-space seed centre forward onto the composite (CC5 §5.2).
+///
+/// The tracker searches the composited thumbnail, so a seed that maps outside
+/// `0..=1` names no pixel at all. Clamping it to the raster edge would silently
+/// track whatever happens to sit in the corner, so the caller refuses instead.
+fn composite_seed_percent(
+    transform: LayerTransform,
+    layer: [f64; 2],
+) -> Result<[u8; 2], TrackingSeedOutsideComposite> {
+    let composite = transform.layer_to_composite(layer);
+    if composite.iter().any(|unit| !(0.0..=1.0).contains(unit)) {
+        return Err(TrackingSeedOutsideComposite { layer, composite });
+    }
+    Ok([unit_to_percent(composite[0]), unit_to_percent(composite[1])])
+}
+
+/// CC5 §5.2's typed refusal for a seed that leaves the composited frame.
+///
+/// `axis_fields` names the two *caller-editable parameters* the seed came from,
+/// horizontal first. The published `field` is the one whose axis actually left
+/// `0..=1`, or both of them when both did, so an agent can repair the exact
+/// input rather than being handed a generic selector. `extra_observed` carries
+/// any caller-specific context — `track_matte_window`'s `window_index`, say —
+/// into `observed`, where it belongs now that it no longer names the field.
+fn tracking_seed_outside_composite_result(
+    axis_fields: [&str; 2],
+    clip: ClipId,
+    frame: TimeCode,
+    transform: LayerTransform,
+    seed: &TrackingSeedOutsideComposite,
+    extra_observed: &[(&str, serde_json::Value)],
+) -> CallToolResult {
+    let outside = [
+        !(0.0..=1.0).contains(&seed.composite[0]),
+        !(0.0..=1.0).contains(&seed.composite[1]),
+    ];
+    let field = match outside {
+        [true, true] => serde_json::json!([axis_fields[0], axis_fields[1]]),
+        [false, true] => serde_json::json!(axis_fields[1]),
+        // A refusal is only raised when at least one axis is outside, so the
+        // remaining arms both name the horizontal parameter.
+        _ => serde_json::json!(axis_fields[0]),
+    };
+    let mut observed = serde_json::json!({
+        "layer_center_unit": seed.layer,
+        "composite_center_unit": seed.composite,
+        "scale": transform.scale,
+        "offset_x": transform.offset_x,
+        "offset_y": transform.offset_y,
+        "clip_local_frame": frame.0,
+    });
+    if let Some(map) = observed.as_object_mut() {
+        for (name, value) in extra_observed {
+            map.insert((*name).to_owned(), value.clone());
+        }
+    }
+    matte_error_result(
+        "tracking_seed_outside_composite",
+        &format!(
+            "clip {clip}'s layer transform at clip-local frame {frame} places the tracking seed at composite ({:.4}, {:.4}), outside the composited frame",
+            seed.composite[0], seed.composite[1],
+        ),
+        &serde_json::json!({
+            "field": field,
+            "observed": observed,
+            "allowed": "a seed whose forward-mapped composite centre lies in 0..=1 on both axes",
+            "recovery_action": "Move the layer back inside the frame over the tracked range, or seed the tracker on a point that is actually visible; the tracker matches composited pixels and a seed off the raster names none (CC5 §5.2).",
+            "clip_id": clip.0,
+        }),
+    )
+}
+
 /// CC5 §5.2's tracker-pixel to matte-basis-point conversion.
 ///
 /// The tracker's own `pixel_to_basis_points` divides by `extent − 1`, because
@@ -10996,6 +11505,69 @@ fn matte_track_box_percent(half_extent_basis_points: i64, scale: f64) -> i64 {
     #[allow(clippy::cast_possible_truncation)]
     let percent = (2.0 * half * scale * 100.0).round() as i64;
     percent
+}
+
+/// CC5 §5.2's tracker pixel as a *fraction of the composited extent*.
+///
+/// The float twin of [`matte_track_centre_basis_points`]:
+/// `u_composite = (pixel + 0.5) / extent`.
+///
+/// Deliberately **not** [`pixel_to_percent`]'s `extent − 1` lattice
+/// denominator. `mask_center_x` and `focus_x_basis_points` are read by the
+/// compositor as fractions of the extent (`value / 100`, `value / 10000`), not
+/// as sample positions on a lattice, so the two conversions are different
+/// functions and must not be interchanged.
+fn tracker_pixel_to_composite_unit(pixel: u32, extent: u32) -> f64 {
+    if extent == 0 {
+        return 0.5;
+    }
+    (f64::from(pixel) + 0.5) / f64::from(extent)
+}
+
+/// One tracked composite pixel centre as a layer-space unit pair (CC5 §5.2).
+fn tracked_centre_layer_unit(
+    center: [u32; 2],
+    width: u32,
+    height: u32,
+    transform: LayerTransform,
+) -> [f64; 2] {
+    transform.composite_to_layer_unit([
+        tracker_pixel_to_composite_unit(center[0], width),
+        tracker_pixel_to_composite_unit(center[1], height),
+    ])
+}
+
+/// A unit-square coordinate as a whole-percent control value, clamped to
+/// `0..=100`.
+///
+/// Used on layer units to produce the values the plan writes, and on composite
+/// units to publish the tracker's raw reading as provenance in the same
+/// convention, so the two are directly comparable.
+fn layer_unit_to_percent(unit: f64) -> i64 {
+    #[allow(clippy::cast_possible_truncation)]
+    let percent = (unit * 100.0).round().clamp(0.0, 100.0) as i64;
+    percent
+}
+
+/// A layer-space unit as a basis-point control value, clamped to `0..=10000`.
+fn layer_unit_to_basis_points(unit: f64) -> i64 {
+    #[allow(clippy::cast_possible_truncation)]
+    let basis_points = (unit * 10_000.0).round().clamp(0.0, 10_000.0) as i64;
+    basis_points
+}
+
+/// A tracked template extent, rescaled from layer percent onto the composite.
+///
+/// The mask region and the reframe subject both state a *full* width or height
+/// percent in layer space, while the tracker matches on the composite, where
+/// the layer scale has already been applied. Mirrors
+/// [`matte_track_box_percent`], whose input is a half extent in basis points.
+fn tracked_box_percent(full_percent: i64, scale: f64) -> i64 {
+    #[allow(clippy::cast_precision_loss)]
+    let percent = full_percent as f64 * scale;
+    #[allow(clippy::cast_possible_truncation)]
+    let rounded = percent.round() as i64;
+    rounded
 }
 
 /// A `0..=10000` basis-point control as a `0.0..=1.0` fraction.
@@ -11064,6 +11636,74 @@ fn matte_error_result(code: &str, message: &str, details: &serde_json::Value) ->
     )
 }
 
+/// One tracked subject box, stated directly in layer uv (CC5 §5.2).
+///
+/// The reframe crop is a sub-rectangle of the *layer* texture, so the
+/// containment constraint — and the provenance marker that records it — must be
+/// stated in layer basis points. The box is built from the converted layer
+/// centre and the **declared** layer subject size, never by converting the
+/// composite template's own bounds: the template is sized once, at the seed
+/// frame's scale, so converting it back through a *different* observation's
+/// scale would inflate the box by `seed_scale / observation_scale`.
+///
+/// `subject_percent` is a full width/height in layer percent, so each half
+/// extent is `percent · 50` basis points. Edges round **outward** — floor on
+/// left/top, ceil on right/bottom — so the recorded box is never smaller than
+/// the measured one and `eval.rs`'s zero-tolerance containment check stays
+/// conservative. The result is clamped to `0..=10000` because the crop can only
+/// sample layer uv `0..1`.
+fn layer_subject_bounds(
+    at: TimeCode,
+    layer_centre: [f64; 2],
+    subject_percent: [i64; 2],
+) -> TrackedSubjectBounds {
+    let edge = |centre: f64, percent: i64, upper: bool| -> u16 {
+        #[allow(clippy::cast_precision_loss)]
+        let half = percent as f64 * 50.0;
+        // A basis point is the finest unit these parameters carry, so an edge
+        // that is analytically integral is snapped onto the grid before the
+        // outward rounding. Without it the last bits of the affine conversion
+        // would inflate every exact box by a whole basis point on the ceil
+        // side; 1e-6 bp is a thousand times the worst-case error at this
+        // magnitude and a millionth of the finest real unit.
+        let snap = |value: f64| {
+            let nearest = value.round();
+            if (value - nearest).abs() < 1e-6 {
+                nearest
+            } else {
+                value
+            }
+        };
+        let value = snap(centre * 10_000.0);
+        let value = if upper {
+            (value + half).ceil()
+        } else {
+            (value - half).floor()
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let clamped = value.clamp(0.0, 10_000.0) as u16;
+        clamped
+    };
+    TrackedSubjectBounds {
+        at,
+        left_basis_points: edge(layer_centre[0], subject_percent[0], false),
+        right_basis_points: edge(layer_centre[0], subject_percent[0], true),
+        top_basis_points: edge(layer_centre[1], subject_percent[1], false),
+        bottom_basis_points: edge(layer_centre[1], subject_percent[1], true),
+    }
+}
+
+/// The template's own bounds on the composited thumbnail, as **provenance**.
+///
+/// Nothing plans from these: the containment constraint is built by
+/// [`layer_subject_bounds`] from the declared layer subject size. They are
+/// published so a reader can see what the tracker actually matched.
+///
+/// The conversion is the same fraction-of-the-extent convention
+/// [`tracker_pixel_to_composite_unit`] uses everywhere else in this path — the
+/// matched pixel *covers* `[pixel, pixel + 1) / extent` — rounded outward, so
+/// this tool never mixes the lattice (`extent − 1`) convention with the
+/// fractional one.
 fn tracked_subject_bounds(
     observation: &TrackingObservation,
     width: u32,
@@ -11084,11 +11724,30 @@ fn tracked_subject_bounds(
         .min(height.saturating_sub(1));
     TrackedSubjectBounds {
         at: observation.local_frame,
-        left_basis_points: pixel_to_basis_points_floor(left, width),
-        right_basis_points: pixel_to_basis_points_ceil(right, width),
-        top_basis_points: pixel_to_basis_points_floor(top, height),
-        bottom_basis_points: pixel_to_basis_points_ceil(bottom, height),
+        left_basis_points: composite_edge_basis_points(left, width, false),
+        right_basis_points: composite_edge_basis_points(right, width, true),
+        top_basis_points: composite_edge_basis_points(top, height, false),
+        bottom_basis_points: composite_edge_basis_points(bottom, height, true),
     }
+}
+
+/// One thumbnail pixel edge as a fraction of the extent, rounded outward.
+///
+/// `upper` names the pixel's far edge, `(pixel + 1) / extent`, so a one-pixel
+/// box is one pixel wide rather than zero.
+fn composite_edge_basis_points(pixel: u32, extent: u32, upper: bool) -> u16 {
+    let extent = u64::from(extent.max(1));
+    let numerator = u64::from(pixel)
+        .saturating_add(u64::from(upper))
+        .saturating_mul(10_000);
+    let value = if upper {
+        numerator
+            .saturating_add(extent.saturating_sub(1))
+            .saturating_div(extent)
+    } else {
+        numerator.saturating_div(extent)
+    };
+    u16::try_from(value.min(10_000)).unwrap_or(10_000)
 }
 
 fn tracking_sample_frames(range: std::ops::Range<TimeCode>, step: i64) -> Vec<TimeCode> {
@@ -11143,27 +11802,6 @@ fn tracking_half_extent(extent: u32, percent: i64) -> u32 {
         .min(extent.saturating_sub(1) / 2)
 }
 
-fn pixel_to_basis_points_floor(pixel: u32, extent: u32) -> u16 {
-    let denominator = u64::from(extent.saturating_sub(1).max(1));
-    let value = u64::from(pixel)
-        .saturating_mul(10_000)
-        .checked_div(denominator)
-        .unwrap_or_default()
-        .min(10_000);
-    u16::try_from(value).unwrap_or(10_000)
-}
-
-fn pixel_to_basis_points_ceil(pixel: u32, extent: u32) -> u16 {
-    let denominator = u64::from(extent.saturating_sub(1).max(1));
-    let numerator = u64::from(pixel).saturating_mul(10_000);
-    let value = numerator
-        .saturating_add(denominator.saturating_sub(1))
-        .checked_div(denominator)
-        .unwrap_or_default()
-        .min(10_000);
-    u16::try_from(value).unwrap_or(10_000)
-}
-
 fn percent_to_pixel(percent: u8, extent: u32) -> u32 {
     u32::from(percent)
         .saturating_mul(extent.saturating_sub(1))
@@ -11171,12 +11809,30 @@ fn percent_to_pixel(percent: u8, extent: u32) -> u32 {
         / 100
 }
 
+/// The *lattice* pixel-to-percent conversion, `pixel / (extent − 1)`.
+///
+/// No production path uses it any more: `track_mask_region` published its
+/// composite provenance through it, which contradicted the
+/// `u = (pixel + 0.5) / extent` map the same response declares, so it now goes
+/// through [`tracker_pixel_to_composite_unit`] like every other CC5 §5.2 path.
+/// Kept as the reference the §9.2.11 divergence test measures the two
+/// denominators against, alongside [`pixel_to_basis_points`].
+#[cfg(test)]
 fn pixel_to_percent(pixel: u32, extent: u32) -> u8 {
     let denominator = extent.saturating_sub(1).max(1);
     let rounded = pixel.saturating_mul(100).saturating_add(denominator / 2) / denominator;
     u8::try_from(rounded.min(100)).unwrap_or(100)
 }
 
+/// The tracker's *lattice* pixel-to-basis-point conversion, `pixel / (extent −
+/// 1)`.
+///
+/// No production path uses it any more: CC5 §5.2 requires every written control
+/// to be a fraction of the extent, so `track_reframe_subject` now goes through
+/// [`tracker_pixel_to_composite_unit`] like `track_matte_window` does. It is
+/// kept as the reference the §9.2.11 divergence test measures the two
+/// denominators against.
+#[cfg(test)]
 fn pixel_to_basis_points(pixel: u32, extent: u32) -> u16 {
     let denominator = u64::from(extent.saturating_sub(1).max(1));
     let rounded = u64::from(pixel)
@@ -11962,6 +12618,161 @@ mod tracking_tests {
                 .map(|unsupported| unsupported.field),
             Some("offset_x")
         );
+    }
+
+    /// CC5 §5.2, hand-worked: a tracked composite pixel becomes a *layer*
+    /// control value through a fraction-of-extent read and the inverse of the
+    /// compositor's placement, never through the tracker's `extent − 1`
+    /// lattice.
+    ///
+    /// At `scale = 0.5` with `x_percent = y_percent = 20` the compositor
+    /// accumulates `offset = 20 / 50 = 0.4` on both axes, so the forward map is
+    /// `u_c = 0.5·(u_l − 0.5) + 0.2 + 0.5 = 0.5·u_l + 0.45` and its inverse is
+    /// `u_l = 2·u_c − 0.9`.
+    #[test]
+    fn tracked_centre_converts_to_layer_space_as_a_fraction_of_the_extent() {
+        let transform = LayerTransform {
+            scale: 0.5,
+            offset_x: 0.4,
+            offset_y: 0.4,
+        };
+
+        // Pixel 160 of 320: u_c = 160.5 / 320 = 0.5015625,
+        // u_l = 2 · 0.5015625 − 0.9 = 0.103125.
+        let layer = tracked_centre_layer_unit([160, 125], 320, 180, transform);
+        assert!(
+            (layer[0] - 0.103_125).abs() < 1e-12,
+            "x converted to {}",
+            layer[0]
+        );
+        // Pixel 125 of 180: u_c = 125.5 / 180 = 0.697222…,
+        // u_l = 2 · 0.697222… − 0.9 = 0.494444….
+        assert!(
+            (layer[1] - 0.494_444_444_444_444_4).abs() < 1e-12,
+            "y converted to {}",
+            layer[1]
+        );
+        // 10.3125 percent rounds to 10; 1031.25 bp rounds to 1031.
+        assert_eq!(layer_unit_to_percent(layer[0]), 10);
+        assert_eq!(layer_unit_to_basis_points(layer[0]), 1_031);
+        // 49.4444 percent rounds to 49; 4944.44 bp rounds to 4944.
+        assert_eq!(layer_unit_to_percent(layer[1]), 49);
+        assert_eq!(layer_unit_to_basis_points(layer[1]), 4_944);
+
+        // Pixel 224 of 320: u_c = 224.5 / 320 = 0.7015625, u_l = 0.503125.
+        let layer = tracked_centre_layer_unit([224, 125], 320, 180, transform);
+        assert_eq!(layer_unit_to_percent(layer[0]), 50);
+        assert_eq!(layer_unit_to_basis_points(layer[0]), 5_031);
+
+        // The composite value the *unconverted* code wrote is nowhere near it:
+        // round(224 · 100 / 319) = 70 percent against the layer's 50.
+        assert_eq!(pixel_to_percent(224, 320), 70);
+
+        // At the identity the conversion is the fraction-of-extent read alone,
+        // which is the deliberate ≤ 1 unit correction over the old `extent − 1`
+        // lattice: pixel 0 of 320 is 0.15625 percent of the extent, not 0.
+        let identity = tracked_centre_layer_unit([0, 0], 320, 180, LayerTransform::IDENTITY);
+        assert!((identity[0] - 0.001_562_5).abs() < 1e-12);
+        assert_eq!(layer_unit_to_percent(identity[0]), 0);
+        assert_eq!(layer_unit_to_basis_points(identity[0]), 16);
+        // The middle of the raster agrees with the lattice to the percent.
+        let middle = tracked_centre_layer_unit([160, 90], 320, 180, LayerTransform::IDENTITY);
+        assert_eq!(layer_unit_to_percent(middle[0]), 50);
+        assert_eq!(layer_unit_to_percent(middle[1]), 50);
+        assert_eq!(
+            layer_unit_to_percent(middle[0]),
+            i64::from(pixel_to_percent(160, 320))
+        );
+
+        // Both writers clamp: a layer coordinate outside the layer's own quad
+        // is a real possibility at scale < 1, and neither control accepts it.
+        assert_eq!(layer_unit_to_percent(-0.02), 0);
+        assert_eq!(layer_unit_to_percent(1.4), 100);
+        assert_eq!(layer_unit_to_basis_points(-0.02), 0);
+        assert_eq!(layer_unit_to_basis_points(1.4), 10_000);
+    }
+
+    /// CC5 §5.2: the mask and the reframe subject state a *full* extent in
+    /// layer percent, so the composite template is that extent times the scale.
+    /// Cross-checked against [`matte_track_box_percent`], whose input is a half
+    /// extent in basis points: a 50 percent region is `hw = 2500 bp`.
+    #[test]
+    fn tracked_box_percent_rescales_the_template_by_the_layer_scale() {
+        assert_eq!(tracked_box_percent(40, 1.0), 40);
+        assert_eq!(tracked_box_percent(40, 0.5), 20);
+        assert_eq!(tracked_box_percent(70, 0.5), 35);
+        // Out of the tracker's 1..=75 band in both directions.
+        assert_eq!(tracked_box_percent(50, 2.0), 100);
+        assert_eq!(tracked_box_percent(4, 0.1), 0);
+        // The same rule the matte window already uses.
+        assert_eq!(
+            tracked_box_percent(50, 0.5),
+            matte_track_box_percent(2_500, 0.5)
+        );
+    }
+
+    /// CC5 §5.2: per-frame resolution is what lets a *keyframed* transform be
+    /// converted instead of refused. The same effect that
+    /// `resolve_static_layer_transform` rejects resolves cleanly at each frame.
+    #[test]
+    fn resolve_layer_transform_at_follows_a_keyframed_scale() {
+        let mut moving = Effect {
+            id: EffectId(2),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
+            keyframes: BTreeMap::new(),
+        };
+        moving.keyframes.insert(
+            "scale_percent".to_owned(),
+            AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode(0),
+                        value: 100,
+                        interpolation: KeyframeInterpolation::Linear,
+                    },
+                    Keyframe {
+                        at: TimeCode(40),
+                        value: 50,
+                        interpolation: KeyframeInterpolation::Linear,
+                    },
+                ],
+            },
+        );
+        let effects = [moving];
+        // Linear from 100 to 50 over 40 frames: 100, 75, 50 at 0, 20, 40.
+        for (frame, expected) in [(0_i64, 1.0_f64), (20, 0.75), (40, 0.5)] {
+            let resolved = resolve_layer_transform_at(&effects, TimeCode(frame));
+            assert!(
+                (resolved.scale - expected).abs() < 1e-12,
+                "frame {frame} resolved scale {}",
+                resolved.scale
+            );
+            assert!(resolved.offset_x.abs() < f64::EPSILON);
+            assert!(resolved.offset_y.abs() < f64::EPSILON);
+        }
+        // The static resolver still refuses it, which is why the two exist.
+        assert!(
+            resolve_static_layer_transform(&effects, &[TimeCode(0), TimeCode(40)]).is_err(),
+            "a moving scale is not one affine map"
+        );
+
+        // A static chain resolves to the same values at every frame, and the
+        // offsets are the compositor's own `percent / 50`.
+        let static_chain = [Effect {
+            id: EffectId(3),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([
+                ("scale_percent".to_owned(), ParamValue::Integer(50)),
+                ("x_percent".to_owned(), ParamValue::Integer(20)),
+                ("y_percent".to_owned(), ParamValue::Integer(20)),
+            ]),
+            keyframes: BTreeMap::new(),
+        }];
+        let resolved = resolve_layer_transform_at(&static_chain, TimeCode(7));
+        assert!((resolved.scale - 0.5).abs() < f64::EPSILON);
+        assert!((resolved.offset_x - 0.4).abs() < f64::EPSILON);
+        assert!((resolved.offset_y - 0.4).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -16005,6 +16816,1228 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // CC5 §5.2, the mask and reframe halves.
+    //
+    // `track_mask_region` and `track_reframe_subject` measure the *composited*
+    // thumbnail and write controls the compositor evaluates in *layer* uv, so
+    // both need the same composite → layer conversion `track_matte_window`
+    // already does. The analysis double answers the composited thumbnail the
+    // real compositor would produce, with the subject drawn at the position the
+    // shader's forward map puts it — the double ignores the document, so the
+    // placement is stated here by hand rather than rendered.
+    // -----------------------------------------------------------------------
+
+    /// A 320 × 180 frame carrying one white box of half extent `half` pixels
+    /// centred on `centre`, over `matte_box_frame`'s dark background.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    fn transform_box_frame(centre: [i64; 2], half: i64) -> RgbaImage {
+        let (width, height) = (320_i64, 180_i64);
+        let mut pixels = vec![0_u8; (width * height * 4) as usize];
+        for pixel in pixels.as_chunks_mut::<4>().0.iter_mut() {
+            *pixel = [48, 48, 48, 255];
+        }
+        for y in (centre[1] - half).max(0)..(centre[1] + half).min(height) {
+            for x in (centre[0] - half).max(0)..(centre[0] + half).min(width) {
+                let index = ((y * width + x) * 4) as usize;
+                pixels[index..index + 4].copy_from_slice(&[235, 235, 235, 255]);
+            }
+        }
+        RgbaImage {
+            width: 320,
+            height: 180,
+            pixels,
+        }
+    }
+
+    /// A service over the fixture's 320 × 180, 30 fps, 60-frame media clip
+    /// carrying `effects`, whose analysis double answers `frames`.
+    fn transform_track_service(
+        effects: Vec<Effect>,
+        frames: BTreeMap<TimeCode, RgbaImage>,
+    ) -> (KinewrightMcp, Core) {
+        let (seed, playback, _) = fixture();
+        let Event::QueryResult(QueryResult::Document(seed_document)) =
+            seed.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut document = (*seed_document).clone();
+        document.tracks[0].clips[0].effects = effects;
+        let media = Arc::new(NoopMedia {
+            thumbnail_frames: frames,
+            ..NoopMedia::default()
+        });
+        let core = Core::spawn(document).unwrap();
+        let service =
+            KinewrightMcp::new(core.clone(), playback, media, ConfirmationBroker::default());
+        (service, core)
+    }
+
+    /// CC5 §5.2's worked transform: `scale_percent 50`, `x_percent 20`,
+    /// `y_percent 20`.
+    ///
+    /// The compositor accumulates `scale = 50 / 100 = 0.5` and
+    /// `offset = 20 / 50 = 0.4` on both axes, so the shader's placement is
+    /// `u_composite = 0.5·(u_layer − 0.5) + 0.4/2 + 0.5 = 0.5·u_layer + 0.45`
+    /// and its inverse is `u_layer = 2·u_composite − 0.9`.
+    fn half_scale_transform() -> Effect {
+        Effect {
+            id: EffectId(9),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([
+                ("scale_percent".to_owned(), ParamValue::Integer(50)),
+                ("x_percent".to_owned(), ParamValue::Integer(20)),
+                ("y_percent".to_owned(), ParamValue::Integer(20)),
+            ]),
+            keyframes: BTreeMap::new(),
+        }
+    }
+
+    /// A layer scale that ramps 100 → 50 percent, linearly, over frames 0..=40.
+    fn keyframed_scale_transform() -> Effect {
+        Effect {
+            id: EffectId(9),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
+            keyframes: BTreeMap::from([(
+                "scale_percent".to_owned(),
+                AutomationCurve {
+                    keyframes: vec![
+                        Keyframe {
+                            at: TimeCode(0),
+                            value: 100,
+                            interpolation: KeyframeInterpolation::Linear,
+                        },
+                        Keyframe {
+                            at: TimeCode(40),
+                            value: 50,
+                            interpolation: KeyframeInterpolation::Linear,
+                        },
+                    ],
+                },
+            )]),
+        }
+    }
+
+    /// A bounded mask at `center` percent with a `size` percent region.
+    fn tracking_mask_effect(center: [i64; 2], size: [i64; 2]) -> Effect {
+        Effect {
+            id: EffectId(1),
+            name: "mask".to_owned(),
+            parameters: BTreeMap::from([
+                ("shape_token".to_owned(), ParamValue::Integer(1)),
+                (
+                    "center_x_percent".to_owned(),
+                    ParamValue::Integer(center[0]),
+                ),
+                (
+                    "center_y_percent".to_owned(),
+                    ParamValue::Integer(center[1]),
+                ),
+                ("width_percent".to_owned(), ParamValue::Integer(size[0])),
+                ("height_percent".to_owned(), ParamValue::Integer(size[1])),
+            ]),
+            keyframes: BTreeMap::new(),
+        }
+    }
+
+    /// A 1:1 reframe whose focus starts at `focus` percent. The source is
+    /// 320 × 180, so a 10000 bp target crops *horizontally* to a 5625 bp
+    /// window and leaves the vertical axis whole.
+    fn tracking_reframe_effect(focus: [i64; 2]) -> Effect {
+        Effect {
+            id: EffectId(1),
+            name: "reframe".to_owned(),
+            parameters: BTreeMap::from([
+                (
+                    "target_aspect_basis_points".to_owned(),
+                    ParamValue::Integer(10_000),
+                ),
+                ("focus_x_percent".to_owned(), ParamValue::Integer(focus[0])),
+                ("focus_y_percent".to_owned(), ParamValue::Integer(focus[1])),
+            ]),
+            keyframes: BTreeMap::new(),
+        }
+    }
+
+    /// The keyframe values one prepared curve carries, in order.
+    fn curve_values(structured: &serde_json::Value, name: &str) -> Vec<i64> {
+        structured["curves"][name]["keyframes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("curve {name} must be prepared"))
+            .iter()
+            .map(|keyframe| keyframe["value"].as_i64().unwrap())
+            .collect()
+    }
+
+    /// One field of every observation, in order.
+    fn observation_values(structured: &serde_json::Value, key: &str, field: &str) -> Vec<i64> {
+        structured[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} must be published"))
+            .iter()
+            .map(|sample| sample[field].as_i64().unwrap())
+            .collect()
+    }
+
+    /// The five sample frames every test below uses: 0, 10, 20, 30, 40.
+    const TRANSFORM_TRACK_SAMPLES: [i64; 5] = [0, 10, 20, 30, 40];
+
+    fn mask_tracking_args() -> TrackMaskArgs {
+        TrackMaskArgs {
+            clip_id: ClipId(1),
+            effect_id: EffectId(1),
+            start_local_frame: Some(TimeCode(0)),
+            end_local_frame: Some(TimeCode(41)),
+            step_frames: Some(10),
+            // A 5 percent radius is a 16 pixel horizontal search, whose coarse
+            // grid lands exactly on a subject moving 8 pixels a sample, so the
+            // template match is pixel-exact rather than plateaued.
+            search_radius_percent: Some(5),
+            max_width: Some(320),
+        }
+    }
+
+    /// CC5 §5.2 (a): at the identity transform the written mask centres are the
+    /// analytic box centre, read as a *fraction of the extent*.
+    ///
+    /// The subject centre is composite pixel `x = 140 + 0.8·frame`, so the
+    /// samples land on 140, 148, 156, 164 and 172 of 320 and
+    /// `round((pixel + 0.5) · 100 / 320)` is 44, 46, 49, 51, 54 — the analytic
+    /// box centre read as a fraction of the extent. The vertical axis is static
+    /// at pixel 90 of 180: `round(90.5 · 100 / 180) = 50`.
+    #[test]
+    fn track_mask_region_writes_layer_space_centres_at_the_identity() {
+        let frames = (0..60)
+            .map(|frame| {
+                (
+                    TimeCode(frame),
+                    transform_box_frame([140 + frame * 4 / 5, 90], 5),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        // Seed on the subject: 44 percent of 320 is pixel 140 exactly. The
+        // region is deliberately small — a 6 × 11 percent region is a 21 × 21
+        // pixel template, and `track_region` subsamples a template that size
+        // every pixel, so the match is exact rather than plateaued.
+        let (service, core) =
+            transform_track_service(vec![tracking_mask_effect([44, 50], [6, 11])], frames);
+
+        let result = service.track_mask_region(&mask_tracking_args()).unwrap();
+        let structured = result.structured_content.clone().unwrap();
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "tracking refused: {structured}"
+        );
+
+        assert_eq!(
+            curve_values(&structured, "center_x_percent"),
+            vec![44, 46, 49, 51, 54]
+        );
+        assert_eq!(
+            curve_values(&structured, "center_y_percent"),
+            vec![50, 50, 50, 50, 50]
+        );
+        // The observations carry the same layer values under both names.
+        assert_eq!(
+            observation_values(&structured, "observations", "center_x_percent"),
+            observation_values(&structured, "observations", "layer_center_x_percent"),
+        );
+        // At the identity the layer and the composite readings agree to the
+        // percent, so nothing about this shot could hide a missing conversion —
+        // which is exactly why the transformed cases below exist. They agree
+        // *exactly*, on every observation and both axes, only because the
+        // composite provenance is read with the same fraction-of-the-extent
+        // convention `coordinate_space.pixel_to_unit` publishes: on the
+        // `extent − 1` lattice pixel 172 of 320 would read 54 against the same
+        // 54 here but pixel 32 of 64 would read 51 against 51 only by luck, and
+        // the identity would stop being an identity in general.
+        for axis in ["x", "y"] {
+            assert_eq!(
+                observation_values(
+                    &structured,
+                    "observations",
+                    &format!("composite_center_{axis}_percent"),
+                ),
+                observation_values(
+                    &structured,
+                    "observations",
+                    &format!("layer_center_{axis}_percent"),
+                ),
+                "at the identity the composite provenance must equal the written layer value on {axis}",
+            );
+        }
+        assert_eq!(structured["coordinate_space"]["samples"][0]["scale"], 1.0);
+        assert_eq!(
+            structured["coordinate_space"]["box_percent"],
+            json!([6, 11])
+        );
+        assert_eq!(
+            structured["coordinate_space"]["unit_to_percent"],
+            "center_percent = round(u_layer * 100), clamped to 0..=100"
+        );
+
+        // Nothing is committed.
+        let Event::QueryResult(QueryResult::Document(document)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected a document");
+        };
+        assert!(
+            document
+                .clip(ClipId(1))
+                .unwrap()
+                .effects
+                .iter()
+                .all(|effect| effect.keyframes.is_empty()),
+            "track_mask_region commits nothing"
+        );
+    }
+
+    /// CC5 §5.2 (b): under a static `scale 50 / x 20 / y 20` layer transform the
+    /// written mask centres are the *layer*-space centres, not the composite
+    /// ones the tracker measured.
+    ///
+    /// The subject sits at layer `u = 0.103125, 0.153125, 0.203125, 0.253125,
+    /// 0.303125`, which the forward map `u_c = 0.5·u_l + 0.45` puts at composite
+    /// `u = 0.5015625, 0.5265625, 0.5515625, 0.5765625, 0.6015625`, i.e. pixel
+    /// centres 160, 168, 176, 184 and 192 of 320 — where the fixture draws it.
+    /// Converting back with `u_l = 2·u_c − 0.9` gives 10, 15, 20, 25, 30
+    /// percent. The unconverted composite reading is 50, 53, 55, 58, 60
+    /// percent, so this test fails by tens of percent if the conversion is
+    /// removed.
+    #[test]
+    fn track_mask_region_converts_the_composite_centre_into_layer_space() {
+        let frames = (0..60)
+            .map(|frame| {
+                (
+                    TimeCode(frame),
+                    transform_box_frame([160 + frame * 4 / 5, 125], 5),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        // Seed on the subject through the forward map: layer 10 percent is
+        // composite 0.5·0.10 + 0.45 = 0.50, which is pixel 160 of 320. Layer 49
+        // percent is composite 0.695, which is pixel 125 of 180.
+        let (service, core) = transform_track_service(
+            vec![
+                half_scale_transform(),
+                tracking_mask_effect([10, 49], [12, 22]),
+            ],
+            frames,
+        );
+
+        let result = service.track_mask_region(&mask_tracking_args()).unwrap();
+        let structured = result.structured_content.clone().unwrap();
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "tracking refused: {structured}"
+        );
+
+        // The written, layer-space curve.
+        let written = curve_values(&structured, "center_x_percent");
+        for (index, expected) in [10_i64, 15, 20, 25, 30].iter().enumerate() {
+            assert!(
+                (written[index] - expected).abs() <= 2,
+                "sample {index}: wrote {} against the analytic layer {expected}",
+                written[index]
+            );
+        }
+        // 49.4444 percent of the layer, from composite pixel 125 of 180.
+        for value in curve_values(&structured, "center_y_percent") {
+            assert!(
+                (value - 49).abs() <= 2,
+                "vertical layer centre {value} against the analytic 49"
+            );
+        }
+        // The raw composite reading is preserved as provenance, and is nowhere
+        // near the written value: this is the whole point of the conversion.
+        let composite =
+            observation_values(&structured, "observations", "composite_center_x_percent");
+        assert_eq!(composite, vec![50, 53, 55, 58, 60]);
+        assert_eq!(
+            observation_values(&structured, "observations", "layer_center_x_percent"),
+            written
+        );
+        // The template is the stored region rescaled by the layer scale:
+        // 12 × 0.5 = 6 and 22 × 0.5 = 11 percent of the composite.
+        assert_eq!(
+            structured["coordinate_space"]["box_percent"],
+            json!([6, 11])
+        );
+        // Seeded through the forward map: layer 10/49 percent is composite
+        // 50/70 percent.
+        assert_eq!(
+            structured["coordinate_space"]["seed_center_percent"],
+            json!([50, 70])
+        );
+        let samples = structured["coordinate_space"]["samples"]
+            .as_array()
+            .unwrap();
+        assert_eq!(samples.len(), TRANSFORM_TRACK_SAMPLES.len());
+        for sample in samples {
+            assert_eq!(sample["scale"], 0.5);
+            assert_eq!(sample["offset_x"], 0.4);
+            assert_eq!(sample["offset_y"], 0.4);
+        }
+
+        // The plan is still exactly two non-destructive keyframe operations,
+        // and nothing is committed.
+        let preview = &structured["prepared_edit_plan"]["preview"];
+        assert_eq!(preview["operation_count"], 2);
+        assert_eq!(preview["destructive_operations"], json!([]));
+        assert_eq!(preview["before_clips"], preview["after_clips"]);
+        let Event::QueryResult(QueryResult::Document(document)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected a document");
+        };
+        assert!(
+            document
+                .clip(ClipId(1))
+                .unwrap()
+                .effects
+                .iter()
+                .all(|effect| effect.keyframes.is_empty()),
+            "track_mask_region commits nothing"
+        );
+    }
+
+    /// CC5 §5.2 (c): a *keyframed* layer scale is converted sample by sample
+    /// rather than refused.
+    ///
+    /// The scale ramps 100 → 50 percent over frames 0..=40, so at the samples it
+    /// is 1.0, 0.875, 0.75, 0.625, 0.5 and a subject pinned at layer `u = 0.25`
+    /// walks across the composite: `u_c = s·(0.25 − 0.5) + 0.5` is 0.25,
+    /// 0.28125, 0.3125, 0.34375, 0.375, i.e. pixel centres 80, 90, 100, 110 and
+    /// 120 of 320. Per-frame conversion recovers 25 percent at every sample; a
+    /// single static transform, or none at all, would report 25, 28, 31, 34, 38.
+    #[test]
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    fn track_mask_region_converts_a_keyframed_layer_transform_per_frame() {
+        let frames = (0..60)
+            .map(|frame| {
+                let scale = 1.0 - 0.5 * (frame as f64) / 40.0;
+                // The layer shrinks, so the subject drawn on the composite
+                // shrinks with it: half of 40 px times the scale.
+                let half = (5.0 * scale).round() as i64;
+                (
+                    TimeCode(frame),
+                    transform_box_frame([80 + frame, 90], half.max(2)),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let (service, _core) = transform_track_service(
+            vec![
+                keyframed_scale_transform(),
+                tracking_mask_effect([25, 50], [6, 11]),
+            ],
+            frames,
+        );
+
+        let result = service.track_mask_region(&mask_tracking_args()).unwrap();
+        let structured = result.structured_content.clone().unwrap();
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "tracking refused: {structured}"
+        );
+
+        for (index, value) in curve_values(&structured, "center_x_percent")
+            .into_iter()
+            .enumerate()
+        {
+            assert!(
+                (value - 25).abs() <= 2,
+                "sample {index}: wrote {value} against the analytic layer 25"
+            );
+        }
+        // The composite reading walks away from it — from about 25 percent to
+        // about 37 — which is exactly what the per-frame conversion undoes.
+        let composite =
+            observation_values(&structured, "observations", "composite_center_x_percent");
+        assert!(
+            (composite[0] - 25).abs() <= 1,
+            "the first composite reading is the seed: {composite:?}"
+        );
+        assert!(
+            composite[4] - composite[0] >= 11,
+            "the composite reading must drift as the layer shrinks: {composite:?}"
+        );
+        // One resolved transform per sample, and it moves.
+        let samples = structured["coordinate_space"]["samples"]
+            .as_array()
+            .unwrap();
+        assert_eq!(samples.len(), TRANSFORM_TRACK_SAMPLES.len());
+        assert_eq!(samples[0]["local_frame"], 0);
+        assert_eq!(samples[0]["scale"], 1.0);
+        assert_eq!(samples[4]["local_frame"], 40);
+        assert_eq!(samples[4]["scale"], 0.5);
+        assert_eq!(structured["coordinate_space"]["per_frame_transform"], true);
+    }
+
+    /// CC5 §5.2 (d): the tracking template is the stored region *rescaled by the
+    /// layer scale*, so a region that is legal in layer space can still be an
+    /// illegal template on the composite — and the refusal says so.
+    #[test]
+    fn track_mask_region_refuses_a_template_the_layer_scale_pushes_out_of_range() {
+        let frames = (0..60)
+            .map(|frame| (TimeCode(frame), transform_box_frame([160, 90], 20)))
+            .collect::<BTreeMap<_, _>>();
+        let doubled = Effect {
+            id: EffectId(9),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(200))]),
+            keyframes: BTreeMap::new(),
+        };
+        // 50 percent of the layer is a legal mask, and 50 × 2 = 100 percent of
+        // the composite is not a legal template.
+        let (service, _core) = transform_track_service(
+            vec![doubled, tracking_mask_effect([50, 50], [50, 50])],
+            frames,
+        );
+
+        let result = service.track_mask_region(&mask_tracking_args()).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let message = result
+            .content
+            .iter()
+            .find_map(|content| content.as_text().map(|text| text.text.clone()))
+            .unwrap_or_default();
+        assert!(
+            message.contains("layer scale 2"),
+            "the refusal must name the layer scale: {message}"
+        );
+        assert!(
+            message.contains("100x100 percent template"),
+            "the refusal must name the composite template: {message}"
+        );
+    }
+
+    fn reframe_tracking_args(subject: [u8; 2], initial: [u8; 2]) -> TrackReframeArgs {
+        TrackReframeArgs {
+            clip_id: ClipId(1),
+            effect_id: EffectId(1),
+            subject_width_percent: subject[0],
+            subject_height_percent: subject[1],
+            initial_subject_x_percent: Some(initial[0]),
+            initial_subject_y_percent: Some(initial[1]),
+            minimum_focus_x_percent: None,
+            maximum_focus_x_percent: None,
+            minimum_focus_y_percent: None,
+            maximum_focus_y_percent: None,
+            focus_dead_zone_percent: Some(0),
+            maximum_focus_step_percent: Some(25),
+            start_local_frame: Some(TimeCode(0)),
+            end_local_frame: Some(TimeCode(41)),
+            step_frames: Some(10),
+            search_radius_percent: Some(5),
+            max_width: Some(320),
+        }
+    }
+
+    /// CC5 §5.2 (a), reframe half: at the identity the planned focus is the
+    /// analytic subject centre, read as a fraction of the extent.
+    ///
+    /// Composite pixel centres 140, 148, 156, 164 and 172 of 320 are
+    /// `round((pixel + 0.5) · 10000 / 320)` = 4391, 4641, 4891, 5141, 5391 bp.
+    #[test]
+    fn track_reframe_subject_writes_layer_space_focus_at_the_identity() {
+        let frames = (0..60)
+            .map(|frame| {
+                (
+                    TimeCode(frame),
+                    transform_box_frame([140 + frame * 4 / 5, 90], 5),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let (service, core) =
+            transform_track_service(vec![tracking_reframe_effect([44, 50])], frames);
+
+        let result = service
+            .track_reframe_subject(&reframe_tracking_args([6, 11], [44, 50]))
+            .unwrap();
+        let structured = result.structured_content.clone().unwrap();
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "tracking refused: {structured}"
+        );
+
+        let layer = observation_values(&structured, "subject_samples", "layer_x_basis_points");
+        for (index, expected) in [4_391_i64, 4_641, 4_891, 5_141, 5_391].iter().enumerate() {
+            assert!(
+                (layer[index] - expected).abs() <= 200,
+                "sample {index}: converted {} against the analytic {expected}",
+                layer[index]
+            );
+        }
+        // At the identity the composite and the layer reading are the same
+        // number, which is why the transformed case below is the real gate.
+        assert_eq!(
+            observation_values(&structured, "subject_samples", "composite_x_basis_points"),
+            layer
+        );
+        assert_eq!(structured["coordinate_space"]["samples"][0]["scale"], 1.0);
+
+        // The planned focus follows the subject: the three-sample median lags a
+        // ramp by one inter-sample step, which is 312 bp here.
+        let focus = observation_values(&structured, "focus_keyframes", "x_basis_points");
+        for (index, expected) in layer.iter().enumerate() {
+            assert!(
+                (focus[index] - expected).abs() <= 700,
+                "sample {index}: focus {} against the subject {expected}",
+                focus[index]
+            );
+        }
+
+        let Event::QueryResult(QueryResult::Document(document)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected a document");
+        };
+        assert!(
+            document
+                .clip(ClipId(1))
+                .unwrap()
+                .effects
+                .iter()
+                .all(|effect| effect.keyframes.is_empty()),
+            "track_reframe_subject commits nothing"
+        );
+        assert!(
+            document.markers.is_empty(),
+            "the provenance marker is prepared, not committed"
+        );
+    }
+
+    /// CC5 §5.2 (b), reframe half: under `scale 50 / x 20 / y 20` the planner is
+    /// fed *layer*-space subject centres.
+    ///
+    /// The fixture draws the subject at composite pixel centres 207, 215, 223,
+    /// 231 and 239 of 320, which are composite 6484, 6734, 6984, 7234 and 7484
+    /// bp; `u_l = 2·u_c − 0.9` makes them layer 3969, 4469, 4969, 5469 and 5969
+    /// bp. Without the conversion the planner would see the composite numbers,
+    /// which are 2500 bp away.
+    #[test]
+    fn track_reframe_subject_converts_the_composite_centre_into_layer_space() {
+        let frames = (0..60)
+            .map(|frame| {
+                (
+                    TimeCode(frame),
+                    transform_box_frame([207 + frame * 4 / 5, 125], 5),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        // Layer 40 percent is composite 0.5·0.40 + 0.45 = 0.65, which seeds at
+        // pixel 207 of 320; layer 49 percent is composite 0.695, pixel 125.
+        let (service, core) = transform_track_service(
+            vec![half_scale_transform(), tracking_reframe_effect([40, 49])],
+            frames,
+        );
+
+        let result = service
+            .track_reframe_subject(&reframe_tracking_args([12, 22], [40, 49]))
+            .unwrap();
+        let structured = result.structured_content.clone().unwrap();
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "tracking refused: {structured}"
+        );
+
+        let layer = observation_values(&structured, "subject_samples", "layer_x_basis_points");
+        for (index, expected) in [3_969_i64, 4_469, 4_969, 5_469, 5_969].iter().enumerate() {
+            assert!(
+                (layer[index] - expected).abs() <= 200,
+                "sample {index}: converted {} against the analytic layer {expected}",
+                layer[index]
+            );
+        }
+        // The composite provenance is preserved, and is thousands of basis
+        // points away from what was planned.
+        let composite =
+            observation_values(&structured, "subject_samples", "composite_x_basis_points");
+        for (index, expected) in [6_484_i64, 6_734, 6_984, 7_234, 7_484].iter().enumerate() {
+            assert!(
+                (composite[index] - expected).abs() <= 200,
+                "sample {index}: composite {} against the analytic {expected}",
+                composite[index]
+            );
+            // The gap runs 2515 bp at the first sample down to 1515 at the
+            // last, because the layer moves twice as far as the composite at
+            // scale 0.5. Either end is far outside any tracker error.
+            assert!(
+                (composite[index] - layer[index]).abs() > 1_400,
+                "the two spaces must not coincide, or this test proves nothing"
+            );
+        }
+        // 49.4444 percent of the layer, from composite pixel 125 of 180.
+        for value in observation_values(&structured, "subject_samples", "layer_y_basis_points") {
+            assert!(
+                (value - 4_944).abs() <= 200,
+                "vertical layer centre {value} against the analytic 4944"
+            );
+        }
+        // The subject template is rescaled onto the composite: 12 × 0.5 = 6 and
+        // 22 × 0.5 = 11 percent.
+        assert_eq!(
+            structured["coordinate_space"]["box_percent"],
+            json!([6, 11])
+        );
+        assert_eq!(
+            structured["coordinate_space"]["seed_center_percent"],
+            json!([65, 70])
+        );
+        assert_eq!(structured["coordinate_space"]["samples"][0]["scale"], 0.5);
+        assert_eq!(
+            structured["coordinate_space"]["samples"][0]["offset_x"],
+            0.4
+        );
+
+        // The focus is planned in the same space it is written in, so it stays
+        // near the layer-space subject and far from the composite reading.
+        let focus = observation_values(&structured, "focus_keyframes", "x_basis_points");
+        for (index, expected) in layer.iter().enumerate() {
+            assert!(
+                (focus[index] - expected).abs() <= 900,
+                "sample {index}: focus {} against the layer subject {expected}",
+                focus[index]
+            );
+        }
+
+        // Nothing is committed: no keyframes, no provenance marker.
+        let Event::QueryResult(QueryResult::Document(document)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("expected a document");
+        };
+        assert!(
+            document
+                .clip(ClipId(1))
+                .unwrap()
+                .effects
+                .iter()
+                .all(|effect| effect.keyframes.is_empty()),
+            "track_reframe_subject commits nothing"
+        );
+        assert!(document.markers.is_empty());
+    }
+
+    /// CC5 §5.2 (d), reframe half: the subject template is rescaled by the layer
+    /// scale, and a subject that maps past 75 percent of the composite is
+    /// refused with both numbers named.
+    #[test]
+    fn track_reframe_subject_refuses_a_subject_the_layer_scale_pushes_out_of_range() {
+        let frames = (0..60)
+            .map(|frame| (TimeCode(frame), transform_box_frame([160, 90], 20)))
+            .collect::<BTreeMap<_, _>>();
+        let doubled = Effect {
+            id: EffectId(9),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(200))]),
+            keyframes: BTreeMap::new(),
+        };
+        let (service, _core) =
+            transform_track_service(vec![doubled, tracking_reframe_effect([50, 50])], frames);
+
+        let result = service
+            .track_reframe_subject(&reframe_tracking_args([60, 60], [50, 50]))
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let message = result
+            .content
+            .iter()
+            .find_map(|content| content.as_text().map(|text| text.text.clone()))
+            .unwrap_or_default();
+        assert!(
+            message.contains("layer scale 2"),
+            "the refusal must name the layer scale: {message}"
+        );
+        assert!(
+            message.contains("120x120 percent template"),
+            "the refusal must name the composite template: {message}"
+        );
+    }
+
+    /// A layer scale that ramps 100 → 200 percent, linearly, over frames 0..=40.
+    ///
+    /// The twin of [`keyframed_scale_transform`]: it is *legal* at the seed and
+    /// illegal at the far end, which is exactly the case a seed-only template
+    /// gate lets through.
+    fn growing_scale_transform() -> Effect {
+        Effect {
+            id: EffectId(9),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
+            keyframes: BTreeMap::from([(
+                "scale_percent".to_owned(),
+                AutomationCurve {
+                    keyframes: vec![
+                        Keyframe {
+                            at: TimeCode(0),
+                            value: 100,
+                            interpolation: KeyframeInterpolation::Linear,
+                        },
+                        Keyframe {
+                            at: TimeCode(40),
+                            value: 200,
+                            interpolation: KeyframeInterpolation::Linear,
+                        },
+                    ],
+                },
+            )]),
+        }
+    }
+
+    /// CC5 §5.2: the provenance box is the converted layer centre bracketed by
+    /// the *declared* layer subject size — never the composite template, whose
+    /// size is pinned to the seed frame's scale.
+    ///
+    /// Worked at `scale 0.5 / x 20 / y 20`, whose inverse is
+    /// `u_layer = 2·u_composite − 0.9`: composite 0.65 is layer 0.40 (4000 bp)
+    /// and composite 0.695 is layer 0.49 (4900 bp). A 12 × 22 percent subject
+    /// has half extents of 600 and 1100 basis points, so the box is
+    /// 3400..4600 horizontally and 3800..6000 vertically — exactly 1200 and
+    /// 2200 wide, which is `percent · 100`.
+    #[test]
+    fn layer_subject_bounds_brackets_the_declared_subject_around_the_layer_centre() {
+        let transform = LayerTransform {
+            scale: 0.5,
+            offset_x: 0.4,
+            offset_y: 0.4,
+        };
+        let centre = transform.composite_to_layer_unit([0.65, 0.695]);
+        let bounds = layer_subject_bounds(TimeCode(7), centre, [12, 22]);
+
+        assert_eq!(bounds.at, TimeCode(7));
+        assert_eq!(bounds.left_basis_points, 3_400);
+        assert_eq!(bounds.right_basis_points, 4_600);
+        // The vertical pair takes the *second* declared percent, not the first.
+        assert_eq!(bounds.top_basis_points, 3_800);
+        assert_eq!(bounds.bottom_basis_points, 6_000);
+        assert_eq!(bounds.right_basis_points - bounds.left_basis_points, 1_200);
+        assert_eq!(bounds.bottom_basis_points - bounds.top_basis_points, 2_200);
+
+        // The composite template the tracker matched with is *not* the box: at
+        // this scale a 12 percent layer subject is a 6 percent composite
+        // template, and converting that back would halve the box.
+        assert_eq!(tracked_box_percent(12, transform.scale), 6);
+    }
+
+    /// CC5 §5.2: a box whose edges do not land on the basis-point grid rounds
+    /// **outward**, and a box that leaves the layer is clamped to `0..=10000`.
+    #[test]
+    fn layer_subject_bounds_rounds_outward_and_clamps_at_the_layer_edges() {
+        // Layer centre 3968.5 bp, half extent 600: 3368.5 floors to 3368 and
+        // 4568.5 ceils to 4569, so the box is one basis point wider than the
+        // declared 1200 and never narrower.
+        let bounds = layer_subject_bounds(TimeCode(0), [0.396_85, 0.5], [12, 12]);
+        assert_eq!(bounds.left_basis_points, 3_368);
+        assert_eq!(bounds.right_basis_points, 4_569);
+        assert_eq!(bounds.right_basis_points - bounds.left_basis_points, 1_201);
+
+        // 200 − 600 clamps to 0 and 9800 + 600 clamps to 10000: the crop can
+        // only sample layer uv 0..1, so a subject hanging off the layer is
+        // recorded up to the edge and no further.
+        let clamped = layer_subject_bounds(TimeCode(0), [0.02, 0.98], [12, 12]);
+        assert_eq!(clamped.left_basis_points, 0);
+        assert_eq!(clamped.right_basis_points, 800);
+        assert_eq!(clamped.top_basis_points, 9_200);
+        assert_eq!(clamped.bottom_basis_points, 10_000);
+    }
+
+    /// CC5 §5.2: under a keyframed scale the provenance box stays the declared
+    /// subject size in *layer* basis points at every sample, and the focus
+    /// curve tracks the analytic layer centre.
+    ///
+    /// The regression this pins: bracketing each composite centre with the
+    /// *seed-frame* template and converting the corners through the
+    /// *per-observation* scale inflates the box by `seed_scale / scale`. Here
+    /// the scale ramps 1.0 → 0.5, so the last sample's composite box becomes
+    /// more than 6000 bp in layer space against a 5625 bp delivery crop and
+    /// `focus_interval_for_subject_axis` refuses with "wider than the delivery
+    /// crop", even though the declared subject is 3000 bp wide.
+    ///
+    /// The subject is drawn at a constant composite size so the frame-to-frame
+    /// template match is a pure translation; the fixture's job is to exercise
+    /// the conversion, not the matcher. It sits at layer 32 percent, which is
+    /// as far off centre as a 30 percent subject can sit while the *pre-fix*
+    /// converted box still fits inside 0..=10000 — otherwise the old clamp
+    /// hides the inflation instead of refusing.
+    ///
+    /// Composite pixel centres are 102, 109, 116, 123 and 130 of 320, and
+    /// `u_layer = (u_composite − 0.5)/scale + 0.5` at scales 1.0, 0.875, 0.75,
+    /// 0.625 and 0.5 makes them layer 3203, 3196, 3188, 3175 and 3156 bp.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn track_reframe_subject_bounds_the_declared_subject_under_a_keyframed_scale() {
+        let frames = (0..60)
+            .map(|frame| {
+                (
+                    TimeCode(frame),
+                    transform_box_frame([102 + frame * 18 / 25, 90], 5),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let (service, _core) = transform_track_service(
+            vec![
+                keyframed_scale_transform(),
+                tracking_reframe_effect([32, 50]),
+            ],
+            frames,
+        );
+
+        let result = service
+            .track_reframe_subject(&reframe_tracking_args([30, 30], [32, 50]))
+            .unwrap();
+        let message = result
+            .content
+            .iter()
+            .find_map(|content| content.as_text().map(|text| text.text.clone()))
+            .unwrap_or_default();
+        assert!(
+            !message.contains("wider than the delivery crop"),
+            "the seed-template containment bug is back: {message}"
+        );
+        let structured = result.structured_content.clone().unwrap();
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "tracking refused: {structured}"
+        );
+
+        let samples = structured["subject_samples"].as_array().unwrap();
+        assert_eq!(samples.len(), TRANSFORM_TRACK_SAMPLES.len());
+        for (index, sample) in samples.iter().enumerate() {
+            let bounds = &sample["layer_bounds_basis_points"];
+            let left = bounds["left"].as_i64().unwrap();
+            let right = bounds["right"].as_i64().unwrap();
+            let top = bounds["top"].as_i64().unwrap();
+            let bottom = bounds["bottom"].as_i64().unwrap();
+            // 30 percent of the layer is 3000 basis points, plus at most the
+            // one basis point the outward rounding adds when the centre does
+            // not land on the grid. Nothing is clamped here: the box sits
+            // between 1656 and 4703, well inside 0..=10000.
+            assert!(
+                (3_000..=3_001).contains(&(right - left)),
+                "sample {index}: horizontal box {left}..{right} is not the declared 3000 bp"
+            );
+            assert!(
+                (3_000..=3_001).contains(&(bottom - top)),
+                "sample {index}: vertical box {top}..{bottom} is not the declared 3000 bp"
+            );
+            // The box is centred on the converted layer centre, not on a
+            // composite reading.
+            let centre = sample["layer_x_basis_points"].as_i64().unwrap();
+            assert!(
+                (i64::midpoint(left, right) - centre).abs() <= 1,
+                "sample {index}: box {left}..{right} is not centred on {centre}"
+            );
+        }
+
+        // The composite template stays the seed-scale one throughout, and at
+        // the last sample converting *its* bounds through that sample's own
+        // scale is what used to blow past the 5625 bp delivery crop.
+        let last = samples.last().unwrap();
+        let composite = &last["composite_bounds_basis_points"];
+        let composite_width =
+            composite["right"].as_i64().unwrap() - composite["left"].as_i64().unwrap();
+        let last_scale = last["layer_transform"]["scale"].as_f64().unwrap();
+        assert!((last_scale - 0.5).abs() < 1e-9, "last scale {last_scale}");
+        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+        let seed_template_layer_width = (composite_width as f64 / last_scale).round() as i64;
+        assert!(
+            seed_template_layer_width > 5_625,
+            "the pre-fix construction must be out of range, or this test proves nothing: {seed_template_layer_width}"
+        );
+
+        // The converted layer centres follow the analytic values. The template
+        // is a coarse 30 percent box, so the matcher is subsampled and lags by
+        // a couple of composite pixels; 200 bp covers that at every scale here.
+        let layer = observation_values(&structured, "subject_samples", "layer_x_basis_points");
+        let composite_centres =
+            observation_values(&structured, "subject_samples", "composite_x_basis_points");
+        for (index, expected) in [3_203_i64, 3_196, 3_188, 3_175, 3_156].iter().enumerate() {
+            assert!(
+                (layer[index] - expected).abs() <= 200,
+                "sample {index}: converted {} against the analytic layer {expected}",
+                layer[index]
+            );
+        }
+        // The composite reading walks away from the layer reading as the layer
+        // shrinks: 3203 bp at the seed against 4078 bp at the last sample.
+        assert!(
+            (composite_centres[4] - layer[4]).abs() > 700,
+            "the two spaces must not coincide, or this test proves nothing: {composite_centres:?} against {layer:?}"
+        );
+
+        // The focus is planned in the same space, so it stays near the layer
+        // subject; the three-sample median lags a ramp by one inter-sample
+        // step, which is about 120 bp here.
+        let focus = observation_values(&structured, "focus_keyframes", "x_basis_points");
+        for (index, expected) in layer.iter().enumerate() {
+            assert!(
+                (focus[index] - expected).abs() <= 700,
+                "sample {index}: focus {} against the layer subject {expected}",
+                focus[index]
+            );
+        }
+
+        // The published contract says the template is seed-sized while the
+        // conversion is per frame, and names the resolved range.
+        let note = structured["coordinate_space"]["keyframed_transform"]
+            .as_str()
+            .unwrap();
+        assert!(note.contains("seed frame's scale 1"), "{note}");
+        assert!(note.contains("0.5 at clip-local frame 40"), "{note}");
+        assert!(note.contains("1 at clip-local frame 0"), "{note}");
+    }
+
+    /// CC5 §5.2: the `1..=75` template gate is applied at the smallest and the
+    /// largest resolved scale, so a ramp that is legal at the seed and illegal
+    /// at the far end is refused — naming the offending frame and scale.
+    #[test]
+    fn track_reframe_subject_refuses_a_template_the_largest_sampled_scale_pushes_out_of_range() {
+        let frames = (0..60)
+            .map(|frame| (TimeCode(frame), transform_box_frame([160, 90], 20)))
+            .collect::<BTreeMap<_, _>>();
+        let (service, _core) = transform_track_service(
+            vec![growing_scale_transform(), tracking_reframe_effect([50, 50])],
+            frames,
+        );
+
+        // 50 × 1.0 = 50 percent is a legal template at the seed frame, so a
+        // seed-only gate would accept this and then match a 100 percent
+        // template at frame 40.
+        let result = service
+            .track_reframe_subject(&reframe_tracking_args([50, 50], [50, 50]))
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let message = result
+            .content
+            .iter()
+            .find_map(|content| content.as_text().map(|text| text.text.clone()))
+            .unwrap_or_default();
+        assert!(
+            message.contains("100x100 percent template"),
+            "the refusal must name the offending template: {message}"
+        );
+        assert!(
+            message.contains("layer scale 2"),
+            "the refusal must name the offending scale: {message}"
+        );
+        assert!(
+            message.contains("clip-local frame 40"),
+            "the refusal must name the offending frame: {message}"
+        );
+    }
+
+    /// The mask half of the same gate: legal at the seed, illegal at frame 40.
+    #[test]
+    fn track_mask_region_refuses_a_template_the_largest_sampled_scale_pushes_out_of_range() {
+        let frames = (0..60)
+            .map(|frame| (TimeCode(frame), transform_box_frame([160, 90], 20)))
+            .collect::<BTreeMap<_, _>>();
+        let (service, _core) = transform_track_service(
+            vec![
+                growing_scale_transform(),
+                tracking_mask_effect([50, 50], [50, 50]),
+            ],
+            frames,
+        );
+
+        let result = service.track_mask_region(&mask_tracking_args()).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let message = result
+            .content
+            .iter()
+            .find_map(|content| content.as_text().map(|text| text.text.clone()))
+            .unwrap_or_default();
+        assert!(
+            message.contains("100x100 percent template"),
+            "the refusal must name the offending template: {message}"
+        );
+        assert!(
+            message.contains("layer scale 2 at clip-local frame 40"),
+            "the refusal must name the offending frame and scale: {message}"
+        );
+    }
+
+    /// CC5 §5.2: a seed whose forward map leaves the composited frame names no
+    /// pixel, so the tracker refuses typed instead of clamping to the raster
+    /// edge and following whatever sits in the corner.
+    ///
+    /// `scale_percent 100` with `x_percent 100` accumulates `offset_x = 2.0`,
+    /// so `u_composite = (0.5 − 0.5)·1 + 2.0/2 + 0.5 = 1.5`.
+    #[test]
+    fn track_reframe_subject_refuses_a_seed_the_layer_transform_pushes_off_the_composite() {
+        let frames = (0..60)
+            .map(|frame| (TimeCode(frame), transform_box_frame([160, 90], 5)))
+            .collect::<BTreeMap<_, _>>();
+        let pushed_off = Effect {
+            id: EffectId(9),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([
+                ("scale_percent".to_owned(), ParamValue::Integer(100)),
+                ("x_percent".to_owned(), ParamValue::Integer(100)),
+            ]),
+            keyframes: BTreeMap::new(),
+        };
+        let (service, _core) =
+            transform_track_service(vec![pushed_off, tracking_reframe_effect([50, 50])], frames);
+
+        let result = service
+            .track_reframe_subject(&reframe_tracking_args([6, 11], [50, 50]))
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.clone().unwrap();
+        assert_eq!(structured["code"], "tracking_seed_outside_composite");
+        let details = &structured["details"];
+        // Only the horizontal axis left the frame, so the refusal names exactly
+        // the one repairable argument rather than both or a generic selector.
+        assert_eq!(details["field"], json!("initial_subject_x_percent"));
+        assert_eq!(details["observed"]["layer_center_unit"], json!([0.5, 0.5]));
+        assert_eq!(
+            details["observed"]["composite_center_unit"],
+            json!([1.5, 0.5])
+        );
+        assert_eq!(details["observed"]["scale"], 1.0);
+        assert_eq!(details["observed"]["offset_x"], 2.0);
+        assert_eq!(details["observed"]["clip_local_frame"], 0);
+        assert!(
+            details["allowed"].as_str().unwrap().contains("0..=1"),
+            "{details}"
+        );
+        assert!(
+            details["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("names none"),
+            "{details}"
+        );
+    }
+
+    /// CC5 §5.2: `track_matte_window` refuses an off-composite seed on exactly
+    /// the same terms as `track_reframe_subject`, and names the window's own
+    /// stored centre — the repairable parameter — rather than `window_index`.
+    ///
+    /// The fixture window is the neutral one, centred at 5000 bp on both axes.
+    /// `scale_percent 100` with `x_percent 100` accumulates `offset_x = 2.0`,
+    /// so `u_composite = (0.5 − 0.5)·1 + 2.0/2 + 0.5 = 1.5` horizontally while
+    /// the vertical axis stays at 0.5: only the horizontal parameter is named.
+    #[test]
+    fn track_matte_window_refuses_a_seed_the_layer_transform_pushes_off_the_composite() {
+        let pushed_off = Effect {
+            id: EffectId(9),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([
+                ("scale_percent".to_owned(), ParamValue::Integer(100)),
+                ("x_percent".to_owned(), ParamValue::Integer(100)),
+            ]),
+            keyframes: BTreeMap::new(),
+        };
+        let frames = BTreeMap::from([
+            (TimeCode(0), matte_box_frame([160, 90])),
+            (TimeCode(10), matte_box_frame([160, 90])),
+        ]);
+        let (service, _core) = matte_track_service(frames, BTreeMap::new(), vec![pushed_off]);
+
+        let result = service
+            .track_matte_window(&TrackMatteWindowArgs {
+                expected_revision: None,
+                clip_id: ClipId(1),
+                effect_id: EffectId(1),
+                window_index: 0,
+                start_local_frame: Some(TimeCode(0)),
+                end_local_frame: Some(TimeCode(11)),
+                step_frames: Some(10),
+                search_radius_percent: None,
+                max_width: None,
+                minimum_confidence_basis_points: None,
+            })
+            .unwrap();
+
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.clone().unwrap();
+        assert_eq!(structured["code"], "tracking_seed_outside_composite");
+        let details = &structured["details"];
+        // The offending *parameter*, not the selector that reached it.
+        assert_eq!(
+            details["field"],
+            json!("matte_window0_center_x_basis_points")
+        );
+        // The selector is still available, as context.
+        assert_eq!(details["observed"]["window_index"], 0);
+        assert_eq!(details["observed"]["layer_center_unit"], json!([0.5, 0.5]));
+        assert_eq!(
+            details["observed"]["composite_center_unit"],
+            json!([1.5, 0.5])
+        );
+        assert_eq!(details["observed"]["scale"], 1.0);
+        assert_eq!(details["observed"]["offset_x"], 2.0);
+        assert_eq!(details["observed"]["offset_y"], 0.0);
+        assert_eq!(details["observed"]["clip_local_frame"], 0);
+        assert!(
+            details["allowed"].as_str().unwrap().contains("0..=1"),
+            "{details}"
+        );
+        assert!(
+            details["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("names none"),
+            "{details}"
+        );
+    }
+
+    /// The reframe tool writes `focus_x/y_basis_points`, so re-tracking a clip
+    /// it already touched must seed from those, not from the coarse percent
+    /// twin the compositor itself overrides.
+    ///
+    /// Mirrors `compositor.rs`'s `ReframeFocusXBasisPoints` arm: an explicitly
+    /// stored basis-point focus wins, a missing one falls back to the percent,
+    /// and neither leaves the seed centred.
+    #[test]
+    fn track_reframe_subject_seeds_from_the_stored_focus_basis_points() {
+        let frames = (0..60)
+            .map(|frame| (TimeCode(frame), transform_box_frame([80, 90], 5)))
+            .collect::<BTreeMap<_, _>>();
+        let mut reframe = tracking_reframe_effect([50, 50]);
+        reframe.parameters.insert(
+            "focus_x_basis_points".to_owned(),
+            ParamValue::Integer(2_500),
+        );
+        let (service, _core) = transform_track_service(vec![reframe], frames);
+
+        let mut args = reframe_tracking_args([6, 11], [50, 50]);
+        args.initial_subject_x_percent = None;
+        args.initial_subject_y_percent = None;
+        let result = service.track_reframe_subject(&args).unwrap();
+        let structured = result.structured_content.clone().unwrap();
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "tracking refused: {structured}"
+        );
+
+        let initial = &structured["subject_template"]["initial_center_percent"];
+        assert_eq!(
+            initial["x"], 25,
+            "the stored 2500 bp focus must seed at 25 percent, not the 50 percent twin"
+        );
+        // No `focus_y_basis_points` is stored, so the vertical axis falls back
+        // to `focus_y_percent`.
+        assert_eq!(initial["y"], 50);
+        assert_eq!(
+            structured["coordinate_space"]["seed_center_percent"],
+            json!([25, 50])
+        );
+    }
+
     /// A 320 × 180 frame of deterministic per-frame noise.
     ///
     /// Every frame is unlike every other, so a SAD template match has nothing
@@ -16809,11 +18842,22 @@ mod tests {
                 .unwrap()
                 .contains("one value across the whole tracked range")
         );
+        // LOW C: the window is tracked with one fixed-size template, so the
+        // contract asks for a static transform to keep the window
+        // reproducible. It is *not* that a per-frame conversion is impossible
+        // — `track_mask_region` and `track_reframe_subject` both do one.
+        let recovery = details["recovery_action"].as_str().unwrap();
         assert!(
-            details["recovery_action"]
-                .as_str()
-                .unwrap()
-                .contains("single affine map")
+            recovery.contains("one template of one fixed size"),
+            "the rationale must name the fixed template: {recovery}"
+        );
+        assert!(
+            recovery.contains("reproducible"),
+            "the rationale must name reproducibility: {recovery}"
+        );
+        assert!(
+            !recovery.contains("single affine map"),
+            "the false rationale must be gone: {recovery}"
         );
     }
 
@@ -17001,6 +19045,8 @@ mod tests {
             "plan_secondary_correction",
             "inspect_grade_matte",
             "track_matte_window",
+            "track_mask_region",
+            "track_reframe_subject",
         ] {
             let tool = tools.iter().find(|tool| tool.name == name).unwrap();
             let description = tool.description.as_deref().unwrap_or_default();
