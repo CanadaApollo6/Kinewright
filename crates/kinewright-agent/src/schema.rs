@@ -13,7 +13,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 74] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 75] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -37,6 +37,10 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 74] = [
     "inspect_grade_matte",
     "track_matte_window",
     "plan_secondary_correction",
+    // CC6 §7: the working-stage QC surface. `get_` already infers
+    // `CapabilityKind::Inspector`, so no `CAPABILITY_KIND_OVERRIDES` entry is
+    // needed; that omission is a decision, not an oversight.
+    "get_color_qc",
     "get_media_status",
     "get_cache_status",
     "clear_media_cache",
@@ -111,6 +115,15 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 74] = [
 ///   node whose asset is already registered; nothing new is blocked.
 pub const UNGENERATED_OPERATION_VARIANTS: [&str; 3] =
     ["RelinkAsset", "AddLutAsset", "ConvertLegacyLook"];
+
+/// The shared serde default for a flag whose absence means `true`.
+///
+/// Shared rather than repeated per module: a second copy is a second place for
+/// a default to drift, and every caller means exactly the same thing by it.
+#[must_use]
+pub(crate) const fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone)]
 pub struct OperationToolDefinition {

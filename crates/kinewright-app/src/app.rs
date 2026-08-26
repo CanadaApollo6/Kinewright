@@ -124,6 +124,18 @@ pub(crate) struct KinewrightApp {
     pub(crate) media_cache_clear_result: Option<kinewright_core::MediaCacheClearResult>,
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) color_scopes: crate::color_scopes_ui::ColorScopesState,
+    /// CC6 §8.1 Colour QC: the read-only measurement window and its single
+    /// worker. Nothing in it can reach the document.
+    pub(crate) color_qc: crate::color_qc_ui::ColorQcState,
+    /// CC6 §8.2 QC clipping mask: the program viewer's whole-picture
+    /// replacement view and the working-proof worker behind it.
+    pub(crate) qc_mask: crate::preview_ui::QcMaskState,
+    /// The one full-resolution working proof CC6 §8.1 and §8.2 share.
+    ///
+    /// Both surfaces measure the same `working_linear_post_composite` raster at
+    /// the playhead, and each worker owns its own renderer; keyed by
+    /// `(session, revision, frame)`, one render answers both.
+    pub(crate) working_proof_cache: std::sync::Arc<crate::color_qc_ui::WorkingProofCache>,
     /// CC5 §6 matte overlay: the expanded section's identity, the selected
     /// window, the live drag, and the matte-view coverage worker.
     pub(crate) matte_overlay: crate::matte_overlay_ui::MatteOverlayState,
@@ -292,6 +304,9 @@ impl KinewrightApp {
             media_cache_clear_result: None,
             texture: None,
             color_scopes: crate::color_scopes_ui::ColorScopesState::default(),
+            color_qc: crate::color_qc_ui::ColorQcState::default(),
+            qc_mask: crate::preview_ui::QcMaskState::default(),
+            working_proof_cache: std::sync::Arc::default(),
             matte_overlay: crate::matte_overlay_ui::MatteOverlayState::default(),
             playing: false,
             meter_levels: [0.0; 2],
@@ -324,6 +339,8 @@ impl KinewrightApp {
                 focus_x_percent: 50,
                 focus_y_percent: 50,
                 conformance_cache: None,
+                delivery_bit_depth: kinewright_core::DeliveryEncodeDepth::default(),
+                verification: None,
             },
             export_job: None,
             help_open: false,
@@ -936,6 +953,25 @@ impl KinewrightApp {
     fn poll_background(&mut self, ctx: &egui::Context) {
         self.poll_agent(ctx);
         self.poll_export(ctx);
+        // Before any panel draws: the inspector's CC6 §8.3 clipping lines read
+        // the last report, and polling in `show_color_qc_window` — which runs
+        // after `panel_layout` — would leave every line one frame stale.
+        let session = self.focused();
+        let (session_id, revision, position) = (session.id, session.revision.0, session.position);
+        self.color_qc
+            .observe_context(session_id, revision, position);
+        // The shared working proof is a full-resolution raster: it is kept for
+        // the frame under the playhead and dropped the moment that moves.
+        self.working_proof_cache
+            .retain_context(crate::color_qc_ui::WorkingProofKey {
+                session_id,
+                revision,
+                frame: position,
+            });
+        self.color_qc.poll();
+        if self.color_qc.is_pending() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
         self.poll_recording(ctx);
         self.poll_media_workflow(ctx);
         self.recover_stranded_ab_hold(ctx);
@@ -1277,6 +1313,31 @@ impl KinewrightApp {
         });
     }
 
+    /// The `View` menu: the read-only inspection surfaces.
+    ///
+    /// CC6 §8.1 adds the Colour QC window here rather than to `File`: nothing
+    /// in it writes anything, so it belongs with the things you look through,
+    /// not with the things you save.
+    fn view_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("View", |ui| {
+            let binding = crate::keys::KEYMAP
+                .iter()
+                .find(|binding| binding.action == crate::keys::KeyAction::ColorQc);
+            if ui
+                .button("Colour QC…")
+                .on_hover_text(format!(
+                    "{}{}",
+                    crate::color_qc_ui::COLOR_QC_BANNER,
+                    binding.map_or_else(String::new, |binding| format!(" ({})", binding.shortcut))
+                ))
+                .clicked()
+            {
+                ui.close();
+                self.color_qc.open = true;
+            }
+        });
+    }
+
     /// The CC4 §7 `Look` menu: import a `.cube` and browse the catalogue.
     ///
     /// Both entries need a saved project, because an imported look is bytes
@@ -1367,6 +1428,7 @@ impl eframe::App for KinewrightApp {
         self.show_record_dialog(ui.ctx());
         self.show_settings_dialog(ui.ctx());
         self.show_media_cache_dialog(ui.ctx());
+        self.show_color_qc_window(ui.ctx());
         self.look_browser(ui.ctx());
         self.show_legacy_relink_confirmation(ui.ctx());
         self.show_help(ui.ctx());
@@ -1398,6 +1460,7 @@ impl KinewrightApp {
                     ui.label(theme::wordmark("KINEWRIGHT", color::TEXT_SECONDARY));
                     ui.separator();
                     self.file_menu(ui);
+                    self.view_menu(ui);
                     self.look_menu(ui);
                     if ui
                         .add_enabled(

@@ -21,6 +21,7 @@ mod sha256;
 mod timeline;
 mod title;
 mod transcript;
+mod verify;
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
@@ -39,6 +40,9 @@ mod cc4_fixtures;
 
 #[cfg(test)]
 mod cc5_fixtures;
+
+#[cfg(test)]
+mod cc6_fixtures;
 
 #[cfg(test)]
 mod gpu_test_support;
@@ -92,6 +96,7 @@ pub use transcript::{
     WHISPER_MODEL_LICENSE, WHISPER_MODEL_NAME, WHISPER_MODEL_SHA256, WHISPER_MODEL_URL,
     default_data_dir,
 };
+pub use verify::{DELIVERY_REFERENCE_DENOMINATOR, EBU_R103_TOLERANCE_CODES_8BIT, NativePlaneFrame};
 
 /// Initialize the linked `FFmpeg` libraries once for the current process.
 ///

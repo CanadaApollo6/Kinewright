@@ -63,9 +63,13 @@ pub const SCOPE_MAX_TEMPORAL_FRAMES: usize = 64;
 
 /// The pipeline boundary from which scope samples are taken.
 ///
-/// CC2 currently exposes exactly one renderable stage.  The explicit name is
-/// part of the evidence contract: adding a pre-grade or delivery stage later
-/// requires adding a new vocabulary value and its own tests.
+/// The vocabulary is shared by every colour surface, and each value states
+/// which engine may measure it.  The CC2 scope engine measures the RGBA8
+/// monitor image and nothing else; the CC6 colour QC engine measures the
+/// scene-linear working surface and nothing else.  One vocabulary keeps
+/// [`compare_scope_evidence`]'s stage equality comparing values from a single
+/// alphabet, and [`ScopeStage::measurable_by_scope_engine`] keeps both sides
+/// fail-closed (CC6 §2.1).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum ScopeStage {
     /// The managed monitor image after compositing, before any delivery codec.
@@ -75,6 +79,14 @@ pub enum ScopeStage {
         alias = "monitoring/post-composite"
     )]
     MonitoringPostComposite,
+    /// The composited scene-linear working surface, before any monitor or
+    /// delivery encode.  CC6 §2.
+    ///
+    /// Not measurable by this module: the scope engine consumes an RGBA8
+    /// monitor raster, and this stage carries unclamped `f32` linear light.
+    /// It is measured by `kinewright_core::color_qc` from a `WorkingProof`.
+    #[serde(rename = "working_linear_post_composite")]
+    WorkingLinearPostComposite,
 }
 
 impl ScopeStage {
@@ -83,7 +95,19 @@ impl ScopeStage {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::MonitoringPostComposite => "monitoring_post_composite",
+            Self::WorkingLinearPostComposite => "working_linear_post_composite",
         }
+    }
+
+    /// Whether the CC2 scope engine in this module can measure this stage.
+    ///
+    /// `true` only for [`Self::MonitoringPostComposite`].  Every other stage
+    /// belongs to another engine, and [`ScopeRequest::validate`] refuses it
+    /// with [`ScopeError::UnsupportedStage`] rather than silently falling back
+    /// to monitoring evidence (CC6 §2.1).
+    #[must_use]
+    pub const fn measurable_by_scope_engine(self) -> bool {
+        matches!(self, Self::MonitoringPostComposite)
     }
 }
 
@@ -480,11 +504,12 @@ impl ScopeRequest {
     /// Returns a typed error when the stage is not renderable, the ROI is
     /// invalid, or an output dimension exceeds its bound.
     pub fn validate(&self) -> Result<(), ScopeError> {
-        // Defence in depth: unreachable while `ScopeStage` has exactly one
-        // variant.  Retained so that adding a pre-grade, effect-scoped, or
-        // delivery stage fails closed here instead of silently falling back to
-        // monitoring evidence, which the CC2 contract forbids.
-        if self.stage != ScopeStage::MonitoringPostComposite {
+        // Fail closed for every stage this engine cannot measure.  CC6 adds
+        // `working_linear_post_composite`, which is measured by the colour QC
+        // engine from a linear `f32` working proof, so reaching this engine
+        // with it is a caller mistake rather than a fallback to monitoring
+        // evidence, which the CC2 contract forbids.
+        if !self.stage.measurable_by_scope_engine() {
             return Err(ScopeError::UnsupportedStage { stage: self.stage });
         }
         self.roi.validate().map_err(ScopeError::InvalidRoi)?;

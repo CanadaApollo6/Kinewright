@@ -499,3 +499,31 @@ fn widget(
         expansion: 0.0,
     }
 }
+
+/// Every string one painted frame emitted, in paint order.
+///
+/// Test support. egui keeps no retained widget tree, so the only way to prove
+/// a surface *said* something is to read the text shapes it painted. Shared
+/// here rather than transcribed per module so a headless assertion means the
+/// same thing everywhere.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn painted_text(output: &egui::FullOutput) -> Vec<String> {
+    fn collect(shape: &egui::epaint::Shape, into: &mut Vec<String>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => into.push(text.galley.text().to_owned()),
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, into);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut text = Vec::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, &mut text);
+    }
+    text
+}

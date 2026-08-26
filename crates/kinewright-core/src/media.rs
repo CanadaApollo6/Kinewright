@@ -10,8 +10,9 @@ use crossbeam_channel::{Receiver, Sender};
 use thiserror::Error;
 
 use crate::{
-    AssetId, ClipId, ColorDescription, Document, EffectId, LutAsset, LutAssetId, MediaAsset,
-    MediaSourceFingerprint, NormalizedRoi, Rational, SCOPE_BASIS_POINTS, TimeCode, TrackId,
+    AssetId, ClipId, ColorDescription, DeliveryVerification, DeliveryVerificationRequest, Document,
+    EffectId, LutAsset, LutAssetId, MediaAsset, MediaSourceFingerprint, NormalizedRoi, Rational,
+    SCOPE_BASIS_POINTS, TimeCode, TrackId,
 };
 
 /// The runtime truth about whether an imported source can currently be read.
@@ -435,6 +436,56 @@ impl MonitorProofMetadata {
 pub struct MonitorProof {
     pub image: RgbaImage,
     pub metadata: MonitorProofMetadata,
+}
+
+/// Row-major, top-left-origin linear RGBA readback of the working surface.
+///
+/// `pixels.len() == width * height * 4`, interleaved red, green, blue, alpha.
+/// Values are **scene-linear** BT.709/D65 light with no transfer and no
+/// clamp: they may be negative and may exceed `1.0`, which is the entire
+/// reason CC6 §2.3 names this surface. It is not display-referred, it is not
+/// a CPU reference, and a proxy raster may never be substituted for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearRgbaImage {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<f32>,
+}
+
+/// Always `"working_linear_post_composite"`.
+///
+/// Equals [`crate::ScopeStage::WorkingLinearPostComposite`]'s wire name: one
+/// vocabulary, two consumers (CC6 §2.1).
+pub const WORKING_PROOF_STAGE: &str = "working_linear_post_composite";
+
+/// Always `"scene_linear_bt709_f32"`: BT.709 primaries, D65, linear light, no
+/// clamp.
+pub const WORKING_PROOF_ENCODING: &str = "scene_linear_bt709_f32";
+
+/// Provenance for one full-raster scene-linear working proof.
+///
+/// This composes [`MonitorProofMetadata`] rather than extending
+/// [`MonitorProofRenderKind`], for CC5 §4.1's reason verbatim: that vocabulary
+/// names the renderer implementation, not an output target.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct WorkingProofMetadata {
+    /// Renderer provenance, reused unchanged from the managed monitor proof.
+    pub render: MonitorProofMetadata,
+    /// Always [`WORKING_PROOF_STAGE`].
+    pub stage: String,
+    /// Always [`WORKING_PROOF_ENCODING`].
+    pub encoding: String,
+    /// Rendered raster aspect ratio (`width / height`) in millionths.
+    pub raster_aspect_millionths: i64,
+}
+
+/// One full-raster scene-linear working proof and its renderer provenance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkingProof {
+    pub image: LinearRgbaImage,
+    pub metadata: WorkingProofMetadata,
 }
 
 /// Stable coverage encoding recorded in every [`MatteProofMetadata`].
@@ -959,19 +1010,32 @@ pub enum VisualAssetResult {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct ExportSettings {
     pub fps: Rational,
     pub resolution: (u32, u32),
-    /// Colour metadata declared for the encoded delivery.
+    /// Colour metadata declared for the encoded delivery, and the authority
+    /// for the delivery encode itself.
     ///
-    /// This is an output-tag contract only. The current export path does not
-    /// perform a colour transform; managed pixel transforms belong to CC1.
+    /// This is **not** a tag-only contract. Since CC1 the export path performs
+    /// the managed delivery transform — the compositor's delivery readback
+    /// encodes through `encode_delivery_for_description` and quantizes through
+    /// `quantize_delivery16`, and the export filter graph performs the
+    /// full-to-limited range and RGB-to-`Y'CbCr` conversion. `bit_depth` is the
+    /// single authority for the delivery encode depth (CC6 §4.1/§4.4): the
+    /// codec pixel format and the filter graph's `format` node are both driven
+    /// from it, so they cannot diverge.
     pub delivery_color: ColorDescription,
     pub video_codec: String,
     pub audio_codec: String,
     pub video_bitrate: u64,
     pub audio_bitrate: u64,
+    /// Runtime cancellation token. Deliberately **not** serialized: it is a
+    /// live handle, not a setting, and a deserialized value reconstructs a
+    /// fresh, uncancelled token (CC6 §9.5).
+    #[serde(skip)]
     pub cancellation: ExportCancellation,
 }
 
@@ -1322,6 +1386,31 @@ pub enum MediaError {
         /// A stable human-readable reason for recovery surfaces.
         reason: String,
     },
+    /// A managed delivery encode was refused with a typed colour reason.
+    ///
+    /// Structured rather than a `Backend(String)` so a rejection carries the
+    /// same four facts a source rejection has carried since CC0 (CC6 §4.2).
+    #[error(transparent)]
+    DeliveryColor(#[from] crate::DeliveryColorError),
+    /// Post-export delivery verification could not produce an honest
+    /// measurement (CC6 §4.2).
+    #[error(transparent)]
+    DeliveryVerification(#[from] crate::DeliveryVerificationError),
+    /// A colour QC measurement was refused with a typed reason (CC6 §3.8).
+    ///
+    /// [`crate::color_qc::nodes`] renders through an [`Analysis`] backend, so
+    /// every refusal it raises has to travel as a `MediaError`. Carrying the
+    /// [`crate::ColorQcError`] itself keeps `field`, `observed`,
+    /// `allowed_values`, and `recovery_action` intact all the way to an agent
+    /// or UI surface, which would otherwise have to parse the rendered
+    /// message back apart to recover the code.
+    ///
+    /// Not `#[from]` only because `color_qc.rs` owns the hand-written
+    /// `From<ColorQcError> for MediaError`, which builds exactly this variant
+    /// (errata E32); `?` on a `ColorQcError` therefore keeps the typed refusal,
+    /// and nothing flattens it to [`Self::Backend`] any more.
+    #[error(transparent)]
+    ColorQc(crate::ColorQcError),
     #[error("media backend error: {0}")]
     Backend(String),
 }
@@ -1332,6 +1421,9 @@ impl MediaError {
     pub const fn recovery_code(&self) -> Option<&'static str> {
         match self {
             Self::UnsupportedDecoderFormat { .. } => Some("unsupported_decoder_format"),
+            Self::DeliveryColor(error) => Some(error.code()),
+            Self::DeliveryVerification(error) => Some(error.code()),
+            Self::ColorQc(error) => Some(error.code()),
             Self::NotImplemented | Self::Cancelled | Self::Backend(_) => None,
         }
     }
@@ -1458,6 +1550,61 @@ pub trait Analysis: Send + Sync {
         _clip: ClipId,
         _effect: EffectId,
     ) -> Result<MatteProof, MediaError> {
+        Err(MediaError::NotImplemented)
+    }
+    /// Render one exact project frame's composited **scene-linear** working
+    /// surface at the document's full resolution (CC6 §2.2).
+    ///
+    /// Like [`Analysis::monitor_proof_for_document`] this is deliberately
+    /// separate from thumbnail and monitor rendering, and for the same reason:
+    /// proxy dimensions cannot establish full-raster conformance. It takes no
+    /// scale and binds full resolution, so **no proxy working proof can be
+    /// produced at all** — a QC consumer that finds
+    /// `metadata.render.full_resolution == false` refuses typed rather than
+    /// measuring a raster it cannot vouch for (CC6 §2.3).
+    ///
+    /// The readback applies **no transfer and no clamp**: values are the
+    /// production `Rgba16Float` composite target's own linear light, which may
+    /// be negative and may exceed `1.0`. That is the surface CC6 measures,
+    /// because the delivery clamp is the only clamp in the managed pipeline
+    /// and nothing downstream of it can count what it ate.
+    ///
+    /// Stateful backends must use a branch-scoped renderer and must not mutate
+    /// the live playback document or reuse a stale proxy surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the backend cannot render an isolated
+    /// full-resolution linear frame.
+    fn working_proof_for_document(
+        &self,
+        _document: Arc<Document>,
+        _at: TimeCode,
+    ) -> Result<WorkingProof, MediaError> {
+        Err(MediaError::NotImplemented)
+    }
+    /// Decode a finished delivery encode and compare it against a freshly
+    /// rendered delivery reference (CC6 §6.1).
+    ///
+    /// The implementation decodes through the crate's own bindings-based
+    /// decoder in one seek-based pass over a bounded, deterministic frame
+    /// sample; probes the written file's tags; measures the decoded file's
+    /// **native** `Y'CbCr` planes; and compares against the per-lane budgets the
+    /// request carries. It is a measurement: it must never move, rename, or
+    /// delete the encode it just read.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the output cannot be decoded, a sampled
+    /// reference render is not full-resolution, or the decoded frame count
+    /// disagrees with the document's implied count.
+    fn verify_delivery_output(
+        &self,
+        _document: Arc<Document>,
+        _path: &Path,
+        _settings: &ExportSettings,
+        _request: DeliveryVerificationRequest,
+    ) -> Result<DeliveryVerification, MediaError> {
         Err(MediaError::NotImplemented)
     }
     /// Queue derived speech recognition without blocking the caller. Repeated
@@ -2030,5 +2177,109 @@ mod tests {
             analysis.monitor_proof_for_document(document, TimeCode::ZERO),
             Err(MediaError::NotImplemented)
         );
+    }
+
+    /// CC6 §2.2/§6.1: the working proof and the delivery verification are
+    /// defaulted trait methods, so a backend that can render neither fails
+    /// typed rather than inventing a proof or a pass.
+    #[test]
+    fn working_proof_and_delivery_verification_default_to_not_implemented() {
+        let analysis = MinimalAnalysis::new();
+        let document = Arc::new(document_with_video_audio_and_unused());
+        let settings = crate::DeliveryProfile::SourceMaster.export_settings(
+            &document,
+            crate::DeliveryEncodeDepth::Eight,
+            ExportCancellation::default(),
+        );
+
+        assert_eq!(
+            analysis
+                .working_proof_for_document(Arc::clone(&document), TimeCode::ZERO)
+                .err(),
+            Some(MediaError::NotImplemented)
+        );
+        assert_eq!(
+            analysis
+                .verify_delivery_output(
+                    document,
+                    Path::new("never-read.mp4"),
+                    &settings,
+                    crate::DeliveryVerificationRequest::new(
+                        crate::DeliveryEncodeDepth::Eight,
+                        settings.delivery_color.clone(),
+                    ),
+                )
+                .err(),
+            Some(MediaError::NotImplemented)
+        );
+    }
+
+    /// CC6 §9.7: the two new typed delivery errors carry their own recovery
+    /// codes through `MediaError`, while a backend error still carries none.
+    #[test]
+    fn typed_delivery_errors_carry_their_recovery_code_through_media_error() {
+        let color = MediaError::from(crate::DeliveryColorError::EncoderPixelFormatUnavailable {
+            observed: "yuv420p".to_owned(),
+            allowed: "yuv420p10le".to_owned(),
+        });
+        assert_eq!(
+            color.recovery_code(),
+            Some("delivery_encoder_pixel_format_unavailable")
+        );
+        let verification =
+            MediaError::from(crate::DeliveryVerificationError::PlaneOutOfContainer {
+                observed: "1024".to_owned(),
+                allowed: "0..=1023",
+            });
+        assert_eq!(
+            verification.recovery_code(),
+            Some("delivery_verification_plane_out_of_container")
+        );
+        assert_eq!(
+            MediaError::Backend("opaque".to_owned()).recovery_code(),
+            None
+        );
+        assert_eq!(MediaError::NotImplemented.recovery_code(), None);
+    }
+
+    /// CC6 §3.8: every `ColorQcError` variant survives the trip through
+    /// `MediaError` with its own code, so the per-node attribution path never
+    /// has to recover a typed refusal by parsing a rendered message.
+    #[test]
+    fn every_color_qc_refusal_keeps_its_code_through_media_error() {
+        for expected in [
+            crate::ColorQcError::ProxyProofRefused {
+                observed: "false".to_owned(),
+                allowed: "true",
+            },
+            crate::ColorQcError::RasterLengthMismatch {
+                observed: "3".to_owned(),
+                allowed: "4".to_owned(),
+            },
+            crate::ColorQcError::EmptyPopulation {
+                observed: "0 visible pixels".to_owned(),
+                allowed: "at least one",
+            },
+            crate::ColorQcError::NodeBudgetExceeded {
+                observed: "17".to_owned(),
+                allowed: "1..=16",
+            },
+            crate::ColorQcError::MatteRegionRasterMismatch {
+                observed: "8x8".to_owned(),
+                allowed: "16x16".to_owned(),
+            },
+            crate::ColorQcError::NodeRemovalRejected {
+                clip: crate::ClipId(1),
+                effect: crate::EffectId(2),
+                reason: "clips are not sorted".to_owned(),
+            },
+        ] {
+            let carried = MediaError::ColorQc(expected.clone());
+            assert_eq!(carried.recovery_code(), Some(expected.code()));
+            // `#[error(transparent)]`: the rendered message is the refusal's
+            // own, with no wrapper label to strip back off.
+            assert_eq!(carried.to_string(), expected.to_string());
+            assert_eq!(carried, MediaError::ColorQc(expected));
+        }
     }
 }

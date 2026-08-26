@@ -12,11 +12,13 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender};
 use kinewright_core::{
-    Analysis, AssetId, DeliveryConformanceReport, DeliveryProfile, Document, Export,
-    ExportCancellation, ExportLutPreflightReport, ExportMediaPreflightIssue,
-    ExportMediaPreflightReport, ExportProgress, MediaAvailabilityKind, MediaError,
-    MediaSourceFingerprint, delivery_conformance, document_for_delivery_profile,
-    export_lut_preflight_with, export_media_preflight, lut_node_may_be_active,
+    Analysis, AssetId, DELIVERY_VERIFICATION_FRAME_COUNT, DeliveryBudgets,
+    DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile, DeliveryVerification,
+    DeliveryVerificationRequest, Document, Export, ExportCancellation, ExportLutPreflightReport,
+    ExportMediaPreflightIssue, ExportMediaPreflightReport, ExportProgress, ExportSettings,
+    MediaAvailabilityKind, MediaError, MediaSourceFingerprint, delivery_conformance,
+    document_for_delivery_profile, export_lut_preflight_with, export_media_preflight,
+    lut_node_may_be_active,
 };
 use kinewright_media::LutStore;
 use schemars::JsonSchema;
@@ -24,6 +26,17 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const DEFAULT_EXPORT_QUEUE_CAPACITY: usize = 64;
+
+/// Why a job that asked for a verification and was cancelled after its encode
+/// finished carries no measurement (CC6 §6.5).
+///
+/// Cancellation cannot un-write a finished file, and the only thing left for it
+/// to honour is skipping the measurement. That is a verification that could not
+/// run, so it is recorded in the one field that carries such reasons rather
+/// than left as a bare absence a caller could read as a pass nobody took. The
+/// wording is the app dialog's, so one operator reads one sentence whichever
+/// surface ran the export.
+pub const EXPORT_CANCELLED_BEFORE_VERIFICATION: &str = "cancelled before verification";
 
 /// Stable identifier assigned in enqueue order for the lifetime of a queue.
 #[derive(
@@ -43,6 +56,18 @@ pub struct QueueExportRequest {
     /// setting this to true.
     #[serde(default)]
     pub overwrite: bool,
+    /// CC6 §6.5: decode the finished encode and compare it against a freshly
+    /// rendered delivery reference. Defaults to **true**; verification reads a
+    /// file the caller just asked to write, so it needs no confirmation gate.
+    ///
+    /// A verification is a *measurement*. It never moves, renames, deletes, or
+    /// quarantines the encode it just read, and it never fails a job.
+    #[serde(default = "crate::schema::default_true")]
+    pub verify: bool,
+    /// CC6 §4.1: the delivery encode depth this job runs at. Defaults to the
+    /// 8-bit lane, so a pre-CC6 request means exactly what it used to.
+    #[serde(default)]
+    pub delivery_bit_depth: DeliveryEncodeDepth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -80,8 +105,61 @@ pub struct ExportJobRecord {
     pub state: ExportJobState,
     pub progress: ExportJobProgress,
     pub conformance: DeliveryConformanceReport,
+    /// The delivery lane this job encoded at.
+    ///
+    /// Defaulted on read, so a job record written before CC6 deserializes as
+    /// the 8-bit lane, which is what it meant (CC6 §9.3).
+    #[serde(default)]
+    pub delivery_bit_depth: DeliveryEncodeDepth,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// CC6 §6.5: the decoded, re-probed comparison of the finished encode.
+    ///
+    /// `None` when the job did not ask for verification, has not finished, or
+    /// could not be verified — in which case
+    /// [`Self::verification_unavailable_reason`] says why. A record that ran
+    /// with `verify: false` carries neither verification key, so it serializes
+    /// exactly as a pre-CC6 record did *apart from* `delivery_bit_depth`, which
+    /// is a plain defaulted field and is always emitted: a reader must always
+    /// be able to see which delivery lane a job ran at (CC6 §9.3/§9.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<DeliveryVerification>,
+    /// Why [`Self::verification`] is absent, when a verification was asked for
+    /// and could not run. Never invents a pass.
+    ///
+    /// **Normative (CC6 §6.5, errata E31): this field is the sole carrier.**
+    /// There is no `verification_unavailable` entry on any exception list, and
+    /// `ExportJobRecord` publishes no exception list of its own — the
+    /// exceptions that exist live inside [`DeliveryVerification`], which by
+    /// definition is absent exactly when this reason is present. A surface that
+    /// wants to render NOT VERIFIED reads this field.
+    ///
+    /// A job cancelled after its encode finished but before its verification
+    /// started carries [`EXPORT_CANCELLED_BEFORE_VERIFICATION`] here: the file
+    /// on disk is complete and nothing measured it, which is exactly what this
+    /// field exists to say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_unavailable_reason: Option<String>,
+    /// True only while the post-encode verification is actually running.
+    ///
+    /// CC6 §6.5: the encode and the verification are two different waits, and
+    /// [`ExportJobState::Running`] cannot tell them apart — a caller polling
+    /// `get_export_jobs` would otherwise see a job stalled at 100% of its
+    /// frames with no way to know whether it was still encoding. This is a
+    /// progress detail, not a state: it deliberately adds no
+    /// [`ExportJobState`] variant, so every existing terminal check keeps
+    /// meaning what it meant.
+    ///
+    /// **Verification is not interruptible.** Cancelling a job whose
+    /// verification has already started sets the record to
+    /// [`ExportJobState::Cancelled`] at once, but the in-flight measurement
+    /// runs to completion and is then discarded rather than published; this
+    /// flag clears when it does.
+    ///
+    /// Skipped when false, so a record that never verified — and every record
+    /// written before CC6 — serializes byte-identically.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub verifying: bool,
 }
 
 #[derive(Debug, Error)]
@@ -185,6 +263,10 @@ struct WorkItem {
     output_path: PathBuf,
     profile: DeliveryProfile,
     overwrite: bool,
+    /// CC6 §6.5: run the post-encode decoded comparison.
+    verify: bool,
+    /// CC6 §4.1: the delivery lane the settings are materialized at.
+    depth: DeliveryEncodeDepth,
     cancellation: ExportCancellation,
     /// The live source identity observed when this job passed preflight.
     ///
@@ -466,6 +548,8 @@ impl ExportQueue {
             focus_x_percent,
             focus_y_percent,
             overwrite,
+            verify,
+            delivery_bit_depth,
         } = request;
         if focus_x_percent > 100 || focus_y_percent > 100 {
             return Err(ExportQueueError::InvalidFocus {
@@ -486,8 +570,14 @@ impl ExportQueue {
             });
         }
         let output_path = normalize_output_path(&requested_output, overwrite)?;
-        let conformance = delivery_conformance(document, profile, focus_x_percent, focus_y_percent)
-            .map_err(|error| ExportQueueError::InvalidDelivery(error.to_string()))?;
+        let conformance = delivery_conformance(
+            document,
+            profile,
+            delivery_bit_depth,
+            focus_x_percent,
+            focus_y_percent,
+        )
+        .map_err(|error| ExportQueueError::InvalidDelivery(error.to_string()))?;
         if !conformance.export_ready() {
             return Err(ExportQueueError::Conformance(Box::new(conformance)));
         }
@@ -537,7 +627,11 @@ impl ExportQueue {
                 state: ExportJobState::Queued,
                 progress: ExportJobProgress::default(),
                 conformance,
+                delivery_bit_depth,
                 error: None,
+                verification: None,
+                verification_unavailable_reason: None,
+                verifying: false,
             };
             jobs.insert(
                 id,
@@ -555,6 +649,8 @@ impl ExportQueue {
             output_path,
             profile,
             overwrite,
+            verify,
+            depth: delivery_bit_depth,
             cancellation,
             verified_sources,
         };
@@ -613,7 +709,9 @@ fn worker_loop(state: &Arc<QueueState>, work_rx: &Receiver<WorkItem>) {
 
 fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
     if work.cancellation.is_cancelled() || !mark_running(state, work.id) {
-        mark_cancelled(state, work.id);
+        // Nothing was encoded, so there is no file a verification could have
+        // measured and no reason to record about one.
+        mark_cancelled(state, work.id, None);
         return;
     }
     let media_preflight = export_media_preflight(&work.document, state.analysis.as_ref());
@@ -637,9 +735,13 @@ fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
         return;
     }
 
-    let settings = work
-        .profile
-        .export_settings(&work.document, work.cancellation.clone());
+    let settings =
+        work.profile
+            .export_settings(&work.document, work.depth, work.cancellation.clone());
+    // CC6 §6.5: the verification compares the written file against the exact
+    // settings the encode ran under, so the settings are captured here rather
+    // than re-materialized afterwards.
+    let verification_settings = settings.clone();
     let (progress_tx, progress_rx) = crossbeam_channel::unbounded();
     let (stop_tx, stop_rx) = crossbeam_channel::bounded(1);
     let progress_state = Arc::clone(state);
@@ -660,7 +762,19 @@ fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
     }
 
     if work.cancellation.is_cancelled() {
-        mark_cancelled(state, work.id);
+        // CC6 §6.5: the state stays `Cancelled`. The operator said stop, and a
+        // job whose cancellation was observed here is not one the queue may
+        // report as completed. But a job that asked to be verified and was not
+        // has to say so: skipping the measurement is the one thing cancellation
+        // can still honour once the file is written, and an absent
+        // `verification` with no reason beside it is the shape a caller reads
+        // as "nothing to report".
+        mark_cancelled(
+            state,
+            work.id,
+            work.verify
+                .then(|| EXPORT_CANCELLED_BEFORE_VERIFICATION.to_owned()),
+        );
         return;
     }
     match result {
@@ -670,7 +784,25 @@ fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
         Ok(Ok(())) => {
             match source_identity_drift(&document, state.analysis.as_ref(), &work.verified_sources)
             {
-                None => mark_completed(state, work.id),
+                None => {
+                    // CC6 §6.5: verification runs only after the encode
+                    // succeeded *and* the source identity re-check passed, so
+                    // it never measures an output the queue has already
+                    // refused to vouch for.
+                    // CC6 §6.5: the encode is finished and the frame counter
+                    // has stopped moving, so say which wait this is rather
+                    // than leaving a caller to guess from a stalled Running.
+                    set_verifying(state, work.id, work.verify);
+                    let outcome = verify_output(
+                        state,
+                        work.verify,
+                        work.depth,
+                        &work.output_path,
+                        Arc::clone(&document),
+                        &verification_settings,
+                    );
+                    mark_completed(state, work.id, outcome);
+                }
                 Some(reason) => {
                     let quarantine = quarantine_untrusted_output(&work.output_path);
                     mark_failed(
@@ -684,7 +816,9 @@ fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
                 }
             }
         }
-        Ok(Err(MediaError::Cancelled)) => mark_cancelled(state, work.id),
+        // The exporter itself stopped: no complete file was written, so there
+        // is no skipped measurement to explain.
+        Ok(Err(MediaError::Cancelled)) => mark_cancelled(state, work.id, None),
         Ok(Err(error)) => mark_failed(state, work.id, error.to_string()),
         Err(payload) => mark_failed(
             state,
@@ -764,15 +898,109 @@ fn quarantine_untrusted_output(output_path: &Path) -> String {
     }
 }
 
-fn mark_completed(state: &Arc<QueueState>, id: ExportJobId) {
-    if let Some(job) = lock_jobs(state).get_mut(&id)
-        && job.record.state != ExportJobState::Cancelled
-    {
+/// What one job's post-encode verification produced (CC6 §6.5).
+///
+/// Three outcomes, never two: "not asked for" and "asked for and could not
+/// run" are different facts, and collapsing them would let an unavailable
+/// verification read as a job that opted out.
+#[derive(Debug)]
+enum VerificationOutcome {
+    /// The job ran with `verify: false`.
+    NotRequested,
+    /// A decoded comparison was produced. It may itself have failed its
+    /// budgets or its tag check; that is reported, never acted on.
+    Measured(Box<DeliveryVerification>),
+    /// A verification was asked for and could not run at all.
+    Unavailable(String),
+}
+
+/// Decode the finished encode and compare it against a fresh delivery
+/// reference (CC6 §6.1/§6.5).
+///
+/// **This is a measurement.** It never moves, renames, deletes, or quarantines
+/// the file it read, for any outcome: `quarantine_untrusted_output` belongs to
+/// the source-identity path and stays there. A false positive in a measurement
+/// must not be able to move a good file.
+fn verify_output(
+    state: &Arc<QueueState>,
+    verify: bool,
+    depth: DeliveryEncodeDepth,
+    output_path: &Path,
+    document: Arc<Document>,
+    settings: &ExportSettings,
+) -> VerificationOutcome {
+    if !verify {
+        return VerificationOutcome::NotRequested;
+    }
+    let request = DeliveryVerificationRequest {
+        frame_count: DELIVERY_VERIFICATION_FRAME_COUNT,
+        budgets: DeliveryBudgets::for_depth(depth),
+        expected_delivery: settings.delivery_color.clone(),
+    };
+    // A backend that panics while verifying must not take down the worker or
+    // destroy a finished encode either.
+    let measured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state
+            .analysis
+            .verify_delivery_output(document, output_path, settings, request)
+    }));
+    match measured {
+        Ok(Ok(verification)) => VerificationOutcome::Measured(Box::new(verification)),
+        Ok(Err(error)) => VerificationOutcome::Unavailable(error.to_string()),
+        Err(payload) => VerificationOutcome::Unavailable(format!(
+            "delivery verification panicked: {}",
+            panic_message(payload.as_ref())
+        )),
+    }
+}
+
+/// Complete a job and record its verification outcome.
+///
+/// **Normative (CC6 §6.5): verification never fails a job.** A budget overrun
+/// and a tag mismatch both leave the job `Completed` with `error: None` and
+/// `verification.technical_pass == false`; the encode succeeded and the file
+/// is a valid deliverable, and failing the job over a measurement would
+/// destroy work to report a number. A verification that could not run leaves
+/// `verification: None` and records the reason rather than inventing a pass.
+///
+/// A job cancelled while its verification was in flight keeps its `Cancelled`
+/// state and publishes no measurement — verification is not interruptible, so
+/// the result arrives, and a measurement of an export the caller abandoned is
+/// discarded rather than reported. The `verifying` flag is cleared either way,
+/// because by the time this runs the verification really has stopped.
+fn mark_completed(state: &Arc<QueueState>, id: ExportJobId, verification: VerificationOutcome) {
+    let mut jobs = lock_jobs(state);
+    let Some(job) = jobs.get_mut(&id) else {
+        return;
+    };
+    job.record.verifying = false;
+    if job.record.state != ExportJobState::Cancelled {
         job.record.state = ExportJobState::Completed;
         job.record.error = None;
+        match verification {
+            VerificationOutcome::NotRequested => {
+                job.record.verification = None;
+                job.record.verification_unavailable_reason = None;
+            }
+            VerificationOutcome::Measured(measured) => {
+                job.record.verification = Some(*measured);
+                job.record.verification_unavailable_reason = None;
+            }
+            VerificationOutcome::Unavailable(reason) => {
+                job.record.verification = None;
+                job.record.verification_unavailable_reason = Some(reason);
+            }
+        }
         if job.record.progress.total_frames > 0 {
             job.record.progress.completed_frames = job.record.progress.total_frames;
         }
+    }
+}
+
+/// Publish whether this job's post-encode verification is running right now.
+fn set_verifying(state: &Arc<QueueState>, id: ExportJobId, verifying: bool) {
+    if let Some(job) = lock_jobs(state).get_mut(&id) {
+        job.record.verifying = verifying;
     }
 }
 
@@ -785,11 +1013,25 @@ fn mark_failed(state: &Arc<QueueState>, id: ExportJobId, error: String) {
     }
 }
 
-fn mark_cancelled(state: &Arc<QueueState>, id: ExportJobId) {
+/// Settle a job as cancelled.
+///
+/// `verification_unavailable_reason` is `Some` only when the encode had already
+/// finished and a verification the job asked for was skipped because of the
+/// cancellation: the file exists, nothing measured it, and the record says so
+/// rather than presenting an absent measurement a caller could read as a pass.
+/// A job cancelled before or during its encode wrote no file to verify, so it
+/// carries no such reason.
+fn mark_cancelled(
+    state: &Arc<QueueState>,
+    id: ExportJobId,
+    verification_unavailable_reason: Option<String>,
+) {
     if let Some(job) = lock_jobs(state).get_mut(&id) {
         job.cancellation.cancel();
         job.record.state = ExportJobState::Cancelled;
         job.record.error = None;
+        job.record.verification = None;
+        job.record.verification_unavailable_reason = verification_unavailable_reason;
     }
 }
 
@@ -924,9 +1166,38 @@ mod tests {
 
     use super::*;
 
+    /// What the CC6 verification test double returns.
+    ///
+    /// The three outcomes the queue must distinguish — a backend with no
+    /// verification at all, a produced measurement, and a verification that
+    /// could not run — plus the two failure shapes that are not returns at
+    /// all: a backend that unwinds, and one that has not finished yet.
+    #[derive(Default)]
+    enum VerificationDouble {
+        #[default]
+        NotImplemented,
+        Measured(Box<DeliveryVerification>),
+        Refused(String),
+        /// A backend that unwinds instead of returning. The worker must
+        /// survive it, and the encode must survive it too.
+        Panics,
+        /// A backend that blocks until released, so a cancellation can be
+        /// delivered while the verification is genuinely in flight.
+        Blocking {
+            entered: Sender<()>,
+            release: Receiver<()>,
+            verification: Box<DeliveryVerification>,
+        },
+    }
+
     #[derive(Default)]
     struct AvailabilityAnalysis {
         statuses: Mutex<BTreeMap<AssetId, MediaAvailabilityStatus>>,
+        /// CC6 §6.5: the canned `verify_delivery_output` result.
+        verification: Mutex<VerificationDouble>,
+        /// Every verification call, so "was it called at all" is asserted
+        /// rather than inferred from an absent field.
+        verification_calls: Mutex<Vec<(PathBuf, DeliveryVerificationRequest, ExportSettings)>>,
     }
 
     impl AvailabilityAnalysis {
@@ -940,7 +1211,24 @@ mod tests {
                         .map(|(asset, kind)| (asset, Self::status(kind)))
                         .collect(),
                 ),
+                ..Self::default()
             }
+        }
+
+        fn with_verification(double: VerificationDouble) -> Self {
+            Self {
+                verification: Mutex::new(double),
+                ..Self::default()
+            }
+        }
+
+        fn verification_calls(
+            &self,
+        ) -> Vec<(PathBuf, DeliveryVerificationRequest, ExportSettings)> {
+            self.verification_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
 
         fn status(kind: MediaAvailabilityKind) -> MediaAvailabilityStatus {
@@ -977,6 +1265,42 @@ mod tests {
     impl Analysis for AvailabilityAnalysis {
         fn probe(&self, _path: &Path) -> Result<MediaAsset, MediaError> {
             Err(MediaError::NotImplemented)
+        }
+
+        fn verify_delivery_output(
+            &self,
+            _document: Arc<Document>,
+            path: &Path,
+            settings: &ExportSettings,
+            request: DeliveryVerificationRequest,
+        ) -> Result<DeliveryVerification, MediaError> {
+            self.verification_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((path.to_owned(), request, settings.clone()));
+            match &*self
+                .verification
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
+                VerificationDouble::NotImplemented => Err(MediaError::NotImplemented),
+                VerificationDouble::Measured(verification) => Ok((**verification).clone()),
+                VerificationDouble::Refused(reason) => Err(MediaError::Backend(reason.clone())),
+                VerificationDouble::Panics => {
+                    panic!("this verification backend unwinds instead of returning")
+                }
+                VerificationDouble::Blocking {
+                    entered,
+                    release,
+                    verification,
+                } => {
+                    entered.send(()).expect("the test observes the entry");
+                    release
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("the test releases the verification");
+                    Ok((**verification).clone())
+                }
+            }
         }
 
         fn media_availability(&self, asset: &MediaAsset) -> MediaAvailabilityStatus {
@@ -1639,6 +1963,10 @@ mod tests {
             focus_x_percent: 50,
             focus_y_percent: 50,
             overwrite,
+            // The queue's pre-CC6 tests describe an encode, not a
+            // verification, so they keep the default lane and opt out.
+            verify: false,
+            delivery_bit_depth: DeliveryEncodeDepth::Eight,
         }
     }
 
@@ -1753,6 +2081,593 @@ mod tests {
 
     fn cleanup_directory(path: &Path) {
         let _ = fs::remove_dir_all(path);
+    }
+
+    // ------------------------------------------------------------------
+    // CC6 §6.5: post-export verification is a measurement, never a gate.
+    // ------------------------------------------------------------------
+
+    /// An exporter that leaves a complete-looking file behind, so "the output
+    /// is still there, at its original path" is a real assertion.
+    struct WritingExporter {
+        bytes: &'static [u8],
+    }
+
+    impl Export for WritingExporter {
+        fn export(
+            &self,
+            _out: &Path,
+            _settings: ExportSettings,
+            _progress: kinewright_core::ProgressSink,
+        ) -> Result<(), MediaError> {
+            unreachable!("tests exercise immutable document export")
+        }
+
+        fn export_document(
+            &self,
+            _document: Arc<Document>,
+            out: &Path,
+            _settings: ExportSettings,
+            _progress: kinewright_core::ProgressSink,
+        ) -> Result<(), MediaError> {
+            fs::write(out, self.bytes).unwrap();
+            Ok(())
+        }
+    }
+
+    /// An encode that finishes, then observes the operator's Cancel.
+    ///
+    /// The race the queue has to survive: the file is complete on disk and the
+    /// exporter returned `Ok`, but the cancellation flag is set by the time the
+    /// worker reads it, so the verification never starts.
+    struct CancellingExporter {
+        bytes: &'static [u8],
+    }
+
+    impl Export for CancellingExporter {
+        fn export(
+            &self,
+            _out: &Path,
+            _settings: ExportSettings,
+            _progress: kinewright_core::ProgressSink,
+        ) -> Result<(), MediaError> {
+            unreachable!("tests exercise immutable document export")
+        }
+
+        fn export_document(
+            &self,
+            _document: Arc<Document>,
+            out: &Path,
+            settings: ExportSettings,
+            _progress: kinewright_core::ProgressSink,
+        ) -> Result<(), MediaError> {
+            fs::write(out, self.bytes).unwrap();
+            settings.cancellation.cancel();
+            Ok(())
+        }
+    }
+
+    fn verified_request(
+        output_path: PathBuf,
+        verify: bool,
+        delivery_bit_depth: DeliveryEncodeDepth,
+    ) -> QueueExportRequest {
+        QueueExportRequest {
+            output_path,
+            profile: DeliveryProfile::SourceMaster,
+            focus_x_percent: 50,
+            focus_y_percent: 50,
+            overwrite: false,
+            verify,
+            delivery_bit_depth,
+        }
+    }
+
+    fn channel_difference(maximum: u32) -> kinewright_core::DeliveryChannelDifference {
+        kinewright_core::DeliveryChannelDifference {
+            maximum_code_diff: maximum,
+            p99_code_diff_millionths: 1_000_000,
+            mean_code_diff_millionths: 250_000,
+        }
+    }
+
+    fn plane_excursion() -> kinewright_core::PlaneLegalExcursion {
+        kinewright_core::PlaneLegalExcursion {
+            below_count: 0,
+            above_count: 0,
+            below_basis_points: 0,
+            above_basis_points: 0,
+            minimum_code_hundredths: 1_600,
+            maximum_code_hundredths: 23_500,
+        }
+    }
+
+    /// One canned verification. `technical_pass` and its exceptions are chosen
+    /// by the caller, because the whole point of the outcome policy is that a
+    /// failing measurement still completes the job.
+    fn canned_verification(
+        output_path: &Path,
+        depth: DeliveryEncodeDepth,
+        technical_pass: bool,
+    ) -> DeliveryVerification {
+        let expected = ColorContext::sdr_rec709().delivery;
+        let exceptions = if technical_pass {
+            Vec::new()
+        } else {
+            vec![kinewright_core::ColorQcException {
+                code: "decoded_difference_over_budget".to_owned(),
+                severity: kinewright_core::QaSeverity::Error,
+                message: "the decoded luma plane exceeded its gated budget".to_owned(),
+                field: Some("luma.maximum_code_diff".to_owned()),
+                observed: Some("64".to_owned()),
+                allowed: Some(DeliveryBudgets::for_depth(depth).luma_max_code.to_string()),
+                clip: None,
+                effect: None,
+            }]
+        };
+        DeliveryVerification {
+            output_path: output_path.to_owned(),
+            delivery_bit_depth: depth,
+            probed: expected.clone(),
+            tags: kinewright_core::delivery_tag_check(
+                &expected,
+                &expected,
+                kinewright_core::DeliveryTagSource::ProbedOutputFile,
+            ),
+            decoded_pixel_format: depth.pixel_format().to_owned(),
+            comparison: kinewright_core::DeliveryComparison {
+                frames: vec![0, 14, 29, 44, 59],
+                luma: channel_difference(if technical_pass { 2 } else { 64 }),
+                red: channel_difference(3),
+                green: channel_difference(3),
+                blue: channel_difference(3),
+                combined: channel_difference(3),
+                psnr_db_hundredths: Some(if technical_pass { 4_800 } else { 2_100 }),
+                decoded_ycbcr: kinewright_core::YCbCrLegalReport {
+                    bit_depth: depth.bits(),
+                    luma: plane_excursion(),
+                    cb: plane_excursion(),
+                    cr: plane_excursion(),
+                    source: kinewright_core::YCbCrLegalSource::DecodedNativePlanes,
+                },
+                rgb_extremes_note: kinewright_core::DELIVERY_RGB_EXTREMES_NOTE.to_owned(),
+                budgets: DeliveryBudgets::for_depth(depth),
+                within_budgets: technical_pass,
+            },
+            exceptions,
+            technical_pass,
+        }
+    }
+
+    fn verifying_queue(analysis: Arc<AvailabilityAnalysis>) -> ExportQueue {
+        ExportQueue::new(
+            Arc::new(WritingExporter {
+                bytes: b"a complete-looking encode",
+            }),
+            analysis,
+        )
+        .unwrap()
+    }
+
+    /// CC6 §6.5: `verify: true` publishes the decoded comparison on the record,
+    /// at the lane the job asked for, and the request the backend received
+    /// carries that lane's own named budgets.
+    #[test]
+    fn cc6_a_verified_export_publishes_its_decoded_comparison_on_the_record() {
+        let directory = test_directory("verify-pass");
+        let output = directory.join("verified.mp4");
+        let analysis = Arc::new(AvailabilityAnalysis::with_verification(
+            VerificationDouble::Measured(Box::new(canned_verification(
+                &output,
+                DeliveryEncodeDepth::Ten,
+                true,
+            ))),
+        ));
+        let queue = verifying_queue(Arc::clone(&analysis));
+        let job = queue
+            .enqueue(
+                &renderable_document(10),
+                verified_request(output.clone(), true, DeliveryEncodeDepth::Ten),
+            )
+            .unwrap();
+        assert_eq!(job.delivery_bit_depth, DeliveryEncodeDepth::Ten);
+
+        let finished = wait_for_terminal(&queue, job.id);
+        assert_eq!(finished.state, ExportJobState::Completed);
+        assert_eq!(finished.error, None);
+        let verification = finished
+            .verification
+            .expect("verify: true must publish the decoded comparison");
+        assert!(verification.technical_pass);
+        assert_eq!(verification.delivery_bit_depth, DeliveryEncodeDepth::Ten);
+        assert_eq!(verification.decoded_pixel_format, "yuv420p10le");
+        assert_eq!(finished.verification_unavailable_reason, None);
+
+        // The backend was handed the default frame sample, the lane's own
+        // budgets, and the settings' materialized delivery description - not a
+        // set the queue invented.
+        let calls = analysis.verification_calls();
+        assert_eq!(calls.len(), 1);
+        let (path, request, settings) = &calls[0];
+        assert_eq!(path, &output);
+        assert_eq!(request.frame_count, DELIVERY_VERIFICATION_FRAME_COUNT);
+        assert_eq!(
+            request.budgets,
+            DeliveryBudgets::for_depth(DeliveryEncodeDepth::Ten)
+        );
+        assert_eq!(request.expected_delivery, settings.delivery_color);
+        assert_eq!(
+            settings.delivery_color.bit_depth,
+            DeliveryEncodeDepth::Ten.color_bit_depth()
+        );
+        cleanup_directory(&directory);
+    }
+
+    /// CC6 §6.5, normative: a failing verification is a measurement, not a
+    /// verdict. The job completes, `error` stays `None`, and the encode is
+    /// still exactly where the caller asked for it.
+    #[test]
+    fn cc6_a_failing_verification_completes_the_job_and_leaves_the_output_alone() {
+        let directory = test_directory("verify-fail");
+        let output = directory.join("over-budget.mp4");
+        let analysis = Arc::new(AvailabilityAnalysis::with_verification(
+            VerificationDouble::Measured(Box::new(canned_verification(
+                &output,
+                DeliveryEncodeDepth::Eight,
+                false,
+            ))),
+        ));
+        let queue = verifying_queue(analysis);
+        let job = queue
+            .enqueue(
+                &renderable_document(10),
+                verified_request(output.clone(), true, DeliveryEncodeDepth::Eight),
+            )
+            .unwrap();
+
+        let finished = wait_for_terminal(&queue, job.id);
+        assert_eq!(finished.state, ExportJobState::Completed);
+        assert_eq!(
+            finished.error, None,
+            "a measurement must never fail a finished encode"
+        );
+        let verification = finished.verification.expect("the measurement is published");
+        assert!(!verification.technical_pass);
+        assert!(
+            verification
+                .exceptions
+                .iter()
+                .any(|exception| exception.code == "decoded_difference_over_budget")
+        );
+        // `quarantine_untrusted_output` is not used by verification, for any
+        // outcome: the file is present, at its original path, unrenamed.
+        assert!(output.is_file(), "the encode must still be at {output:?}");
+        assert_eq!(
+            fs::read(&output).unwrap(),
+            b"a complete-looking encode".to_vec()
+        );
+        let quarantined = {
+            let mut path = output.clone().into_os_string();
+            path.push(".untrusted");
+            PathBuf::from(path)
+        };
+        assert!(
+            !quarantined.exists(),
+            "verification must never quarantine an output"
+        );
+        cleanup_directory(&directory);
+    }
+
+    /// CC6 §6.5: a verification that cannot run records why, and never invents
+    /// a pass.
+    #[test]
+    fn cc6_an_unavailable_verification_records_its_reason_instead_of_a_pass() {
+        let directory = test_directory("verify-unavailable");
+        let output = directory.join("unverifiable.mp4");
+        let analysis = Arc::new(AvailabilityAnalysis::with_verification(
+            VerificationDouble::Refused("no usable GPU adapter".to_owned()),
+        ));
+        let queue = verifying_queue(Arc::clone(&analysis));
+        let job = queue
+            .enqueue(
+                &renderable_document(10),
+                verified_request(output.clone(), true, DeliveryEncodeDepth::Eight),
+            )
+            .unwrap();
+
+        let finished = wait_for_terminal(&queue, job.id);
+        assert_eq!(finished.state, ExportJobState::Completed);
+        assert_eq!(finished.error, None);
+        assert!(finished.verification.is_none());
+        let reason = finished
+            .verification_unavailable_reason
+            .expect("an unavailable verification must say why");
+        assert!(reason.contains("no usable GPU adapter"), "{reason}");
+        assert_eq!(analysis.verification_calls().len(), 1);
+        assert!(output.is_file());
+        cleanup_directory(&directory);
+    }
+
+    /// CC6 §6.5: `verify: false` does not call the backend at all, and the two
+    /// verification fields serialize away entirely.
+    ///
+    /// The name says "byte-identically" and the assertions below are narrower
+    /// than that on purpose: `delivery_bit_depth` is a plain defaulted field,
+    /// **always** emitted, so a `verify: false` record is not byte-identical to
+    /// a pre-CC6 one. What is asserted is the claim that matters — no
+    /// verification key appears — plus the lane, which must be visible on every
+    /// record so a reader never has to infer which lane a job encoded at.
+    #[test]
+    fn cc6_verify_false_skips_the_measurement_and_serializes_byte_identically() {
+        let directory = test_directory("verify-off");
+        let output = directory.join("unverified.mp4");
+        let analysis = Arc::new(AvailabilityAnalysis::with_verification(
+            VerificationDouble::Measured(Box::new(canned_verification(
+                &output,
+                DeliveryEncodeDepth::Eight,
+                true,
+            ))),
+        ));
+        let queue = verifying_queue(Arc::clone(&analysis));
+        let job = queue
+            .enqueue(
+                &renderable_document(10),
+                verified_request(output.clone(), false, DeliveryEncodeDepth::Eight),
+            )
+            .unwrap();
+
+        let finished = wait_for_terminal(&queue, job.id);
+        assert_eq!(finished.state, ExportJobState::Completed);
+        assert!(finished.verification.is_none());
+        assert!(finished.verification_unavailable_reason.is_none());
+        assert!(
+            analysis.verification_calls().is_empty(),
+            "verify: false must not reach the backend"
+        );
+
+        let serialized = serde_json::to_value(&finished).unwrap();
+        let object = serialized.as_object().unwrap();
+        assert!(!object.contains_key("verification"));
+        assert!(!object.contains_key("verification_unavailable_reason"));
+        // `verifying` is a progress detail that is false on every terminal
+        // record, so it is skipped too.
+        assert!(!object.contains_key("verifying"));
+        // The lane is not skipped: it is a plain field with a default, so a
+        // reader can always see which lane a job ran at.
+        assert_eq!(object["delivery_bit_depth"], serde_json::json!("eight"));
+        cleanup_directory(&directory);
+    }
+
+    /// CC6 §6.5: a verification backend that unwinds is contained. The job
+    /// still completes, the reason names the panic, and — because a
+    /// measurement never acts on the file it read — the encode is untouched.
+    #[test]
+    fn cc6_a_panicking_verification_is_contained_and_leaves_the_output_alone() {
+        let directory = test_directory("verify-panic");
+        let output = directory.join("panicked-verify.mp4");
+        let analysis = Arc::new(AvailabilityAnalysis::with_verification(
+            VerificationDouble::Panics,
+        ));
+        let queue = verifying_queue(Arc::clone(&analysis));
+        let job = queue
+            .enqueue(
+                &renderable_document(10),
+                verified_request(output.clone(), true, DeliveryEncodeDepth::Eight),
+            )
+            .unwrap();
+
+        let finished = wait_for_terminal(&queue, job.id);
+        assert_eq!(finished.state, ExportJobState::Completed);
+        assert_eq!(
+            finished.error, None,
+            "a panicking measurement must not fail a finished encode"
+        );
+        assert!(finished.verification.is_none(), "no pass may be invented");
+        let reason = finished
+            .verification_unavailable_reason
+            .expect("a panicking verification must say so");
+        assert!(reason.contains("panicked"), "{reason}");
+        assert!(!finished.verifying);
+        assert_eq!(analysis.verification_calls().len(), 1);
+        // Untouched: same path, same bytes, nothing quarantined.
+        assert_eq!(
+            fs::read(&output).unwrap(),
+            b"a complete-looking encode".to_vec()
+        );
+        let quarantined = {
+            let mut path = output.clone().into_os_string();
+            path.push(".untrusted");
+            PathBuf::from(path)
+        };
+        assert!(!quarantined.exists());
+
+        // The worker survived it: the next job still runs.
+        let next = directory.join("after-panic.mp4");
+        let follower = queue
+            .enqueue(
+                &renderable_document(10),
+                verified_request(next, false, DeliveryEncodeDepth::Eight),
+            )
+            .unwrap();
+        assert_eq!(
+            wait_for_terminal(&queue, follower.id).state,
+            ExportJobState::Completed
+        );
+        cleanup_directory(&directory);
+    }
+
+    /// CC6 §6.5: a cancel observed *after* the encode finished and *before* the
+    /// verification started leaves a `Cancelled` record — and says why there is
+    /// no measurement on it.
+    ///
+    /// The state does not become `Completed`: the operator said stop and the
+    /// queue does not overrule them. But the file is written and a caller
+    /// asked for it to be verified, so the absence of a measurement is
+    /// explained rather than left as a bare `None` that reads like "nothing to
+    /// report". A job that never asked to be verified has nothing to explain.
+    #[test]
+    fn cc6_a_cancel_before_verification_records_why_the_file_is_unmeasured() {
+        for verify in [true, false] {
+            let directory = test_directory("cancel-before-verify");
+            let output = directory.join("cancelled-before-verify.mp4");
+            let analysis = Arc::new(AvailabilityAnalysis::with_verification(
+                VerificationDouble::Measured(Box::new(canned_verification(
+                    &output,
+                    DeliveryEncodeDepth::Eight,
+                    true,
+                ))),
+            ));
+            let shared: Arc<dyn Analysis> = analysis.clone();
+            let queue = ExportQueue::new(
+                Arc::new(CancellingExporter {
+                    bytes: b"a complete-looking encode",
+                }),
+                shared,
+            )
+            .unwrap();
+            let job = queue
+                .enqueue(
+                    &renderable_document(10),
+                    verified_request(output.clone(), verify, DeliveryEncodeDepth::Eight),
+                )
+                .unwrap();
+
+            let finished = wait_for_terminal(&queue, job.id);
+            assert_eq!(finished.state, ExportJobState::Cancelled);
+            assert_eq!(finished.error, None, "cancelling is not a failure");
+            assert!(
+                finished.verification.is_none(),
+                "no measurement ran, so none may be published"
+            );
+            assert_eq!(
+                finished.verification_unavailable_reason.as_deref(),
+                verify.then_some(EXPORT_CANCELLED_BEFORE_VERIFICATION),
+                "a job that asked to be verified says why it was not; one that did not asks \
+                 nothing and is owed no explanation"
+            );
+            assert!(!finished.verifying, "nothing is in flight");
+            assert!(
+                analysis.verification_calls().is_empty(),
+                "skipping the measurement is the one thing cancellation can still honour"
+            );
+            // Cancellation cannot un-write a finished file, and never tries.
+            assert_eq!(
+                fs::read(&output).unwrap(),
+                b"a complete-looking encode".to_vec()
+            );
+            let quarantined = {
+                let mut path = output.clone().into_os_string();
+                path.push(".untrusted");
+                PathBuf::from(path)
+            };
+            assert!(!quarantined.exists());
+            cleanup_directory(&directory);
+        }
+    }
+
+    /// CC6 §6.5: `verifying` distinguishes the verification wait from the
+    /// encode wait, and cancelling during it leaves a cancelled, unverified
+    /// record — the in-flight measurement is discarded, never published.
+    #[test]
+    fn cc6_cancelling_during_a_verification_leaves_the_record_cancelled_and_unverified() {
+        let directory = test_directory("verify-cancel");
+        let output = directory.join("cancelled-verify.mp4");
+        let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let analysis = Arc::new(AvailabilityAnalysis::with_verification(
+            VerificationDouble::Blocking {
+                entered: entered_tx,
+                release: release_rx,
+                verification: Box::new(canned_verification(
+                    &output,
+                    DeliveryEncodeDepth::Eight,
+                    true,
+                )),
+            },
+        ));
+        let queue = verifying_queue(Arc::clone(&analysis));
+        let job = queue
+            .enqueue(
+                &renderable_document(10),
+                verified_request(output.clone(), true, DeliveryEncodeDepth::Eight),
+            )
+            .unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the verification starts");
+
+        // The encode is done and the frame counter has stopped; the record
+        // says which wait this is instead of a bare Running.
+        let in_flight = queue.get(job.id).expect("the job is inspectable");
+        assert_eq!(in_flight.state, ExportJobState::Running);
+        assert!(
+            in_flight.verifying,
+            "a job whose verification is in flight must say so"
+        );
+        assert!(in_flight.verification.is_none());
+
+        let cancelled = queue.cancel(job.id).expect("the job is cancellable");
+        assert_eq!(cancelled.state, ExportJobState::Cancelled);
+        release_tx.send(()).unwrap();
+
+        // Verification is not interruptible: it runs to completion, and its
+        // result is then dropped rather than published on a cancelled job.
+        let settled = wait_for_settled_verification(&queue, job.id);
+        assert_eq!(settled.state, ExportJobState::Cancelled);
+        assert!(
+            settled.verification.is_none(),
+            "a cancelled job must publish no measurement"
+        );
+        assert_eq!(settled.verification_unavailable_reason, None);
+        assert_eq!(analysis.verification_calls().len(), 1);
+        cleanup_directory(&directory);
+    }
+
+    /// Wait for the verification wait to end, whatever the record's state.
+    ///
+    /// `wait_for_terminal` returns the instant a job is cancelled, which is
+    /// before an in-flight verification has finished unwinding out of the
+    /// worker; this waits for the flag the worker clears afterwards.
+    fn wait_for_settled_verification(queue: &ExportQueue, id: ExportJobId) -> ExportJobRecord {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let job = queue.get(id).expect("queued job must remain inspectable");
+            if !job.verifying {
+                return job;
+            }
+            assert!(Instant::now() < deadline, "verification did not settle");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// CC6 §9.3/§9.4: a job record written before CC6 still reads.
+    #[test]
+    fn cc6_a_pre_cc6_job_record_deserializes_with_the_eight_bit_lane_and_no_verification() {
+        let directory = test_directory("legacy-record");
+        let output = directory.join("legacy.mp4");
+        let queue = queue(Arc::new(WritingExporter { bytes: b"legacy" }));
+        let job = queue
+            .enqueue(
+                &renderable_document(10),
+                verified_request(output, false, DeliveryEncodeDepth::Eight),
+            )
+            .unwrap();
+        let finished = wait_for_terminal(&queue, job.id);
+
+        // Strip every key CC6 added, which is exactly what a pre-CC6 record is.
+        let mut legacy = serde_json::to_value(&finished).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("delivery_bit_depth");
+        object.remove("verification");
+        object.remove("verification_unavailable_reason");
+        assert!(!object.contains_key("verifying"));
+
+        let restored: ExportJobRecord = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.delivery_bit_depth, DeliveryEncodeDepth::Eight);
+        assert_eq!(restored.verification, None);
+        assert_eq!(restored.verification_unavailable_reason, None);
+        assert_eq!(restored, finished);
+        cleanup_directory(&directory);
     }
     /// Swap one source's live identity from inside the encode so the queue has
     /// to observe the change after the exporter returns.

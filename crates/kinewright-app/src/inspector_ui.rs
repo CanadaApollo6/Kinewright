@@ -1083,9 +1083,11 @@ impl KinewrightApp {
         // LUT asset, and cloning it keeps `self` free for the dispatch that
         // follows the frame.
         let availability = self.focused().lut_availability.clone();
+        let qc_clipping = self.color_qc.node_clipping();
         let looks = LookInspectorContext {
             document: &document,
             availability: &availability,
+            qc_clipping: &qc_clipping,
             store_unavailable: self.focused().lut_store_unavailable_reason(),
         };
         effects_section(ui, clip, &looks, &mut pending);
@@ -1127,9 +1129,11 @@ impl KinewrightApp {
         // LUT asset, and cloning it keeps `self` free for the dispatch that
         // follows the frame.
         let availability = self.focused().lut_availability.clone();
+        let qc_clipping = self.color_qc.node_clipping();
         let looks = LookInspectorContext {
             document: &document,
             availability: &availability,
+            qc_clipping: &qc_clipping,
             store_unavailable: self.focused().lut_store_unavailable_reason(),
         };
         effects_section(ui, clip, &looks, &mut pending);
@@ -1356,6 +1360,13 @@ impl KinewrightApp {
 pub(crate) struct LookInspectorContext<'a> {
     pub(crate) document: &'a Document,
     pub(crate) availability: &'a BTreeMap<LutAssetId, LutAvailabilityStatus>,
+    /// The last `ColorQcReport`'s per-node clipping attribution (CC6 §8.3).
+    ///
+    /// A snapshot cloned out of the report rather than a borrow of the app,
+    /// and a *report of the last measurement* rather than a live computation:
+    /// the line prints the frame it was measured at so a stale reading is
+    /// visible instead of misleading.
+    pub(crate) qc_clipping: &'a crate::color_qc_ui::ColorQcNodeClipping,
     /// Why this project cannot own LUT bytes, or `None` when it can.
     ///
     /// Two different refusals reach the same disabled controls: a project that
@@ -1525,9 +1536,15 @@ fn color_stage_section(
         }
         rendered += 1;
         match kind {
-            ColorNodeKind::Primary => primary_correction_section(ui, clip, effect, pending),
-            ColorNodeKind::Wheels => color_wheels_section(ui, clip, effect, stage_index, pending),
-            ColorNodeKind::Curves => color_curves_section(ui, clip, effect, stage_index, pending),
+            ColorNodeKind::Primary => {
+                primary_correction_section(ui, clip, effect, looks, pending);
+            }
+            ColorNodeKind::Wheels => {
+                color_wheels_section(ui, clip, effect, stage_index, looks, pending);
+            }
+            ColorNodeKind::Curves => {
+                color_curves_section(ui, clip, effect, stage_index, looks, pending);
+            }
             ColorNodeKind::TechnicalLut | ColorNodeKind::CreativeLook => {
                 lut_node_section(ui, clip, effect, kind, stage_index, looks, pending);
             }
@@ -1779,6 +1796,7 @@ fn lut_node_section(
                 format!("Inactive for this frame: {}", reason.as_str()),
             );
         }
+        color_node_clipping_line(ui, clip, effect, looks);
         let names: Vec<&'static str> = descriptor
             .parameters
             .iter()
@@ -2086,6 +2104,7 @@ fn primary_correction_section(
     ui: &mut egui::Ui,
     clip: &Clip,
     effect: &Effect,
+    looks: &LookInspectorContext<'_>,
     pending: &mut InspectorEdits,
 ) {
     let Some(descriptor) = EFFECT_DESCRIPTORS
@@ -2179,6 +2198,7 @@ fn primary_correction_section(
                 }
             });
         }
+        color_node_clipping_line(ui, clip, effect, looks);
         matte_section(ui, clip, effect, pending);
     });
 }
@@ -3135,6 +3155,7 @@ fn color_wheels_section(
     clip: &Clip,
     effect: &Effect,
     stage_index: usize,
+    looks: &LookInspectorContext<'_>,
     pending: &mut InspectorEdits,
 ) {
     let Some(descriptor) = kinewright_core::effect_descriptor("color_wheels") else {
@@ -3149,6 +3170,7 @@ fn color_wheels_section(
             &descriptor,
             stage_index,
             "Colour wheels",
+            looks,
             pending,
         );
         // Wrapped so a narrow inspector stacks the balls instead of clipping
@@ -3248,6 +3270,7 @@ fn color_curves_section(
     clip: &Clip,
     effect: &Effect,
     stage_index: usize,
+    looks: &LookInspectorContext<'_>,
     pending: &mut InspectorEdits,
 ) {
     let Some(descriptor) = kinewright_core::effect_descriptor("color_curves") else {
@@ -3262,6 +3285,7 @@ fn color_curves_section(
             &descriptor,
             stage_index,
             "Colour curves",
+            looks,
             pending,
         );
 
@@ -3698,7 +3722,10 @@ fn keyframe_fingerprint(effect: &Effect) -> u64 {
 }
 
 /// The shared header of a CC3 colour-node card: name, stage index, bypass,
-/// reset, and remove.
+/// reset, and remove, plus the CC6 §8.3 clipping-contribution line.
+// Every argument is a distinct thing the header draws; bundling them into a
+// struct would only move the same list one line up.
+#[allow(clippy::too_many_arguments)]
 fn color_node_header(
     ui: &mut egui::Ui,
     clip: &Clip,
@@ -3706,6 +3733,7 @@ fn color_node_header(
     descriptor: &kinewright_core::EffectDescriptor,
     stage_index: usize,
     title: &str,
+    looks: &LookInspectorContext<'_>,
     pending: &mut InspectorEdits,
 ) {
     ui.horizontal(|ui| {
@@ -3746,6 +3774,29 @@ fn color_node_header(
             color::TEXT_MUTED,
             format!("Inactive for this frame: {}", reason.as_str()),
         );
+    }
+    color_node_clipping_line(ui, clip, effect, looks);
+}
+
+/// The CC6 §8.3 clipping-contribution line, in the same muted slot the
+/// inactive reason occupies.
+///
+/// Absent when there is no report, when the node is not in it, or when both
+/// deltas are `<= 0`. It never computes anything: it reads the last
+/// measurement the Colour QC window took, and names the frame it was taken at.
+fn color_node_clipping_line(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    effect: &Effect,
+    looks: &LookInspectorContext<'_>,
+) {
+    if let Some(line) = looks.qc_clipping.line_for(clip.id, effect.id) {
+        ui.add(egui::Label::new(egui::RichText::new(line).color(color::TEXT_MUTED)).wrap())
+            .on_hover_text(
+                "Measured at working_linear_post_composite by removing this node from a scratch \
+             clone and re-measuring (CC6 §3.7). Evidence from the last Colour QC measurement, \
+             not a live reading.",
+            );
     }
 }
 
@@ -7530,17 +7581,25 @@ mod tests {
         let kind = ColorNodeKind::from_effect_name(name).expect("a registered colour node");
         let document = look_document(vec![effect.clone()], Vec::new());
         let availability = BTreeMap::new();
+        let qc_clipping = crate::color_qc_ui::ColorQcNodeClipping::default();
 
         let draw = |ui: &mut egui::Ui, edits: &mut InspectorEdits| {
             let looks = LookInspectorContext {
                 document: &document,
                 availability: &availability,
+                qc_clipping: &qc_clipping,
                 store_unavailable: None,
             };
             match kind {
-                ColorNodeKind::Primary => primary_correction_section(ui, &clip, &effect, edits),
-                ColorNodeKind::Wheels => color_wheels_section(ui, &clip, &effect, 0, edits),
-                ColorNodeKind::Curves => color_curves_section(ui, &clip, &effect, 0, edits),
+                ColorNodeKind::Primary => {
+                    primary_correction_section(ui, &clip, &effect, &looks, edits);
+                }
+                ColorNodeKind::Wheels => {
+                    color_wheels_section(ui, &clip, &effect, 0, &looks, edits);
+                }
+                ColorNodeKind::Curves => {
+                    color_curves_section(ui, &clip, &effect, 0, &looks, edits);
+                }
                 ColorNodeKind::TechnicalLut | ColorNodeKind::CreativeLook => {
                     lut_node_section(ui, &clip, &effect, kind, 0, &looks, edits);
                 }
@@ -7567,6 +7626,90 @@ mod tests {
             }
         }
         None
+    }
+
+    /// Every string one colour node's card paints, with the QC clipping
+    /// snapshot it was given.
+    fn painted_colour_node_card(
+        name: &str,
+        qc_clipping: &crate::color_qc_ui::ColorQcNodeClipping,
+    ) -> Vec<String> {
+        let ctx = egui::Context::default();
+        // The cards ask for the app's own font families, so the theme has to be
+        // installed before one can be laid out.
+        crate::theme::install(&ctx);
+        let effect = colour_effect(1, name);
+        let clip = look_clip(vec![effect.clone()]);
+        let kind = ColorNodeKind::from_effect_name(name).expect("a registered colour node");
+        let document = look_document(vec![effect.clone()], Vec::new());
+        let availability = BTreeMap::new();
+        let mut edits = InspectorEdits::default();
+
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let looks = LookInspectorContext {
+                document: &document,
+                availability: &availability,
+                qc_clipping,
+                store_unavailable: None,
+            };
+            match kind {
+                ColorNodeKind::Primary => {
+                    primary_correction_section(ui, &clip, &effect, &looks, &mut edits);
+                }
+                ColorNodeKind::Wheels => {
+                    color_wheels_section(ui, &clip, &effect, 0, &looks, &mut edits);
+                }
+                ColorNodeKind::Curves => {
+                    color_curves_section(ui, &clip, &effect, 0, &looks, &mut edits);
+                }
+                ColorNodeKind::TechnicalLut | ColorNodeKind::CreativeLook => {
+                    lut_node_section(ui, &clip, &effect, kind, 0, &looks, &mut edits);
+                }
+            }
+        });
+        assert!(
+            edits.operations().is_empty(),
+            "drawing a card writes nothing to the document"
+        );
+        crate::theme::painted_text(&output)
+    }
+
+    /// CC6 §8.3: the clipping contribution reaches the colour node's own card,
+    /// with the frame it was measured at, and only when there is one.
+    ///
+    /// Rendered headless rather than asserted through `line_for` alone: the
+    /// line has to be *drawn* by the card the operator is looking at, and a
+    /// card that never calls it would pass every test of the string.
+    #[test]
+    fn a_colour_node_card_draws_its_clipping_contribution_line() {
+        let clipping = crate::color_qc_ui::ColorQcNodeClipping::from_entries(
+            12,
+            vec![
+                (ClipId(10), EffectId(1), 903, 41),
+                // A node whose removal changed nothing, on the same report.
+                (ClipId(10), EffectId(2), 0, 0),
+            ],
+        );
+        let expected = "Clipping contribution: +903 bp range · +41 bp gamut (frame 12)";
+
+        for name in ["primary_correction", "color_wheels", "color_curves"] {
+            let painted = painted_colour_node_card(name, &clipping);
+            assert!(
+                painted.iter().any(|line| line == expected),
+                "{name}'s card does not draw the clipping line:\n{painted:#?}"
+            );
+
+            // And with no measurement, the card is exactly as it was: a report
+            // of nothing is not a line saying zero.
+            let quiet =
+                painted_colour_node_card(name, &crate::color_qc_ui::ColorQcNodeClipping::default());
+            assert!(
+                !quiet
+                    .iter()
+                    .any(|line| line.starts_with("Clipping contribution")),
+                "{name}'s card invents a line with no report behind it:\n{quiet:#?}"
+            );
+        }
     }
 
     /// Every matte-capable card draws the section, and `technical_lut` does

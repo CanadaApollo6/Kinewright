@@ -1,6 +1,7 @@
 mod app;
 mod captions;
 mod chat_ui;
+mod color_qc_ui;
 mod color_scopes_ui;
 mod color_ui;
 mod color_wheel_widget;

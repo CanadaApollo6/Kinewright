@@ -12,15 +12,17 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use kinewright_core::{
-    Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, BeatStatus, ClipId, Document,
-    EffectId, Export, ExportCancellation, ExportSettings, FrameTexture, LutAvailabilityKind,
-    LutAvailabilityStatus, MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE, MatteParams, MatteProof,
-    MatteProofError, MatteProofMetadata, MediaAsset, MediaAvailabilityKind,
-    MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus,
-    MediaCacheInventory, MediaError, MediaEvent, MonitorProof, Playback, PlaybackState,
-    ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat,
-    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus,
-    VisualAssetResult, export_lut_preflight_with,
+    Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, BeatStatus, ClipId,
+    DeliveryVerification, DeliveryVerificationRequest, Document, EffectId, Export,
+    ExportCancellation, ExportSettings, FrameTexture, LutAvailabilityKind, LutAvailabilityStatus,
+    MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE, MatteParams, MatteProof, MatteProofError,
+    MatteProofMetadata, MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus,
+    MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory,
+    MediaError, MediaEvent, MonitorProof, Playback, PlaybackState, ProgressSink, Rational,
+    RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, VisualAssetResult,
+    WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof, WorkingProofMetadata,
+    export_lut_preflight_with,
 };
 
 use crate::{
@@ -931,6 +933,63 @@ impl Analysis for FfmpegMediaEngine {
                 qualifier_enabled: matte.qualifier.is_enabled(),
             },
         })
+    }
+
+    fn working_proof_for_document(
+        &self,
+        document: Arc<Document>,
+        at: TimeCode,
+    ) -> Result<WorkingProof, MediaError> {
+        // Proof rendering is deliberately isolated from the playback worker,
+        // for `monitor_proof_for_document`'s reasons verbatim: a
+        // revision-bound before/after pair must not evict or reuse its proxy
+        // cache, alter transport state, or let one branch's asset ids collide
+        // with another branch.
+        let mut renderer = FrameRenderer::new(self.gpu.clone());
+        // CC4 2.4: bound to THIS document's asset hashes, not to whatever
+        // library was published most recently.
+        renderer.set_lut_library(self.document_lut_library(&document)?);
+        let resolution = document.resolution;
+        // Bind the scale once so the render and the claim it produces cannot
+        // drift apart. CC6 2.2: there is no proxy working proof, because this
+        // method takes no scale.
+        let scale = RenderScale::FullResolution;
+        let image =
+            renderer.render_working(&document, at, resolution, scale, DecodeStrategy::Seek)?;
+        let raster_aspect_millionths = raster_aspect_millionths(image.width, image.height);
+        Ok(WorkingProof {
+            metadata: WorkingProofMetadata {
+                // CC1 5: a proof may only claim the full raster when it was
+                // requested at full scale AND came back at the document
+                // raster. Derived, never asserted.
+                render: self.gpu.monitor_proof_metadata_for(
+                    scale,
+                    (image.width, image.height),
+                    resolution,
+                ),
+                stage: WORKING_PROOF_STAGE.to_owned(),
+                encoding: WORKING_PROOF_ENCODING.to_owned(),
+                raster_aspect_millionths,
+            },
+            image,
+        })
+    }
+
+    fn verify_delivery_output(
+        &self,
+        document: Arc<Document>,
+        path: &Path,
+        settings: &ExportSettings,
+        request: DeliveryVerificationRequest,
+    ) -> Result<DeliveryVerification, MediaError> {
+        crate::verify::verify_delivery_output(
+            &self.gpu,
+            self.document_lut_library(&document)?,
+            &document,
+            path,
+            settings,
+            &request,
+        )
     }
 
     fn request_waveform(&self, asset: MediaAsset, request_generation: u64) -> bool {

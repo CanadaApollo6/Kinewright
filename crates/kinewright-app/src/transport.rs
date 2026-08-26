@@ -71,6 +71,10 @@ impl KinewrightApp {
                 );
                 if response.drag_started() {
                     self.resume_after_scrub = self.playing;
+                    // CC6 §8.2: the drag pauses the transport, so `playing`
+                    // stops describing a moving playhead the instant the scrub
+                    // begins. The QC mask is told directly.
+                    self.qc_mask.set_scrubbing(true);
                     if self.playing {
                         self.playback.pause();
                     }
@@ -83,6 +87,7 @@ impl KinewrightApp {
                 if response.drag_stopped() || (response.changed() && !response.dragged()) {
                     let position = self.focused().position;
                     self.playback.seek(position);
+                    self.qc_mask.set_scrubbing(false);
                     if self.resume_after_scrub {
                         self.playback.play(position);
                     }

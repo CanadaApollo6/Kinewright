@@ -5,6 +5,7 @@ mod agent;
 mod automation;
 mod captions;
 mod color;
+mod color_qc;
 mod creator;
 mod delivery;
 mod editorial;
@@ -38,6 +39,21 @@ pub use color::{
     ColorSourceProfile, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint,
     classify_source, classify_source_with_assumption,
 };
+pub use color_qc::{
+    BT709_CB_DENOMINATOR, BT709_CR_DENOMINATOR, BT709_KB, BT709_KR, COLOR_QC_ENGINE,
+    ChannelRangeExcursion, ColorGamutReport, ColorNodeQcContribution, ColorQcCheck, ColorQcError,
+    ColorQcException, ColorQcNodeContributions, ColorQcProvenance, ColorQcRegion, ColorQcReport,
+    ColorQcRequest, ColorRangeReport, GAMUT_DEFINITION, MAX_QC_NODE_CONTRIBUTIONS,
+    MatteRegionScope, NODE_ATTRIBUTION_REMOVED, PlaneLegalExcursion,
+    QC_GAMUT_EXCEPTION_BASIS_POINTS, QC_RANGE_EXCEPTION_BASIS_POINTS,
+    SKIN_BAND_CENTER_CENTIDEGREES, SKIN_BAND_EXCEPTION_BASIS_POINTS,
+    SKIN_BAND_HALF_WIDTH_CENTIDEGREES, SKIN_DIAGNOSTIC_BOUNDARY, SKIN_MAX_SPREAD_CENTIDEGREES,
+    SKIN_MIN_CHROMA_MILLIONTHS, SKIN_PATCH_HUE_CENTIDEGREES, SkinDiagnostics,
+    YCBCR_CHROMA_LEGAL_HIGH, YCBCR_CHROMA_OFFSET, YCBCR_CHROMA_SPAN, YCBCR_LUMA_LEGAL_HIGH,
+    YCBCR_LUMA_OFFSET, YCBCR_LUMA_SPAN, YCbCrLegalReport, YCbCrLegalSource,
+    attach_node_contributions, bt709_limited_ycbcr, encode_bt709_delivery, measure_color_qc, nodes,
+    validate_node_budget,
+};
 pub use creator::{
     BeatMontageAnchorRepair, BeatMontageCadenceContract, BeatMontageCadenceSummary,
     BeatMontageCutAnchor, BeatMontagePlan, BeatMontageSelect, BeatMontageShot, BeatPacingPlan,
@@ -53,8 +69,20 @@ pub use creator::{
     validate_beat_montage_plan_cadence,
 };
 pub use delivery::{
-    DeliveryAspect, DeliveryConformanceReport, DeliveryProfile, DeliveryVariant,
-    DeliveryVariantError, delivery_conformance, document_for_delivery_profile,
+    DECODED_RANGE_EXCEPTION_BASIS_POINTS, DELIVERY_BIT_DEPTH_ALLOWED, DELIVERY_LUMA_MAX_CODE_8BIT,
+    DELIVERY_LUMA_MAX_CODE_10BIT, DELIVERY_LUMA_MEAN_CODE_8BIT_MILLIONTHS,
+    DELIVERY_LUMA_MEAN_CODE_10BIT_MILLIONTHS, DELIVERY_LUMA_P99_CODE_8BIT_MILLIONTHS,
+    DELIVERY_LUMA_P99_CODE_10BIT_MILLIONTHS, DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_8BIT,
+    DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_10BIT, DELIVERY_RGB_EXTREMES_NOTE,
+    DELIVERY_RGB_MEAN_CODE_8BIT_MILLIONTHS, DELIVERY_RGB_MEAN_CODE_10BIT_MILLIONTHS,
+    DELIVERY_VERIFICATION_FRAME_COUNT, DELIVERY_VERIFICATION_MAX_FRAMES, DeliveryAspect,
+    DeliveryBudgets, DeliveryChannelDifference, DeliveryColorError, DeliveryColorMismatch,
+    DeliveryComparison, DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile,
+    DeliveryTagCheck, DeliveryTagNotRepresentable, DeliveryTagSource, DeliveryVariant,
+    DeliveryVariantError, DeliveryVerification, DeliveryVerificationError,
+    DeliveryVerificationRequest, H264_WHITE_POINT_NOT_REPRESENTABLE_REASON,
+    delivery_color_for_depth, delivery_color_mismatch, delivery_color_mismatches,
+    delivery_conformance, delivery_tag_check, document_for_delivery_profile,
     document_for_delivery_variant,
 };
 pub use editorial::ThreePointMode;
@@ -94,16 +122,17 @@ pub use media::{
     AssetSilences, AssetTranscript, AudioLoudness, BeatMarker, BeatStatus, Export,
     ExportCancellation, ExportLutPreflightIssue, ExportLutPreflightReport,
     ExportMediaPreflightIssue, ExportMediaPreflightReport, ExportProgress, ExportSettings,
-    FrameTexture, LutAvailabilityKind, LutAvailabilityStatus, MATTE_COVERAGE_ENCODING,
-    MATTE_COVERAGE_HISTOGRAM_BUCKETS, MATTE_COVERAGE_SCALE, MatteCoverageError,
-    MatteCoverageStatistics, MatteProof, MatteProofError, MatteProofMetadata,
+    FrameTexture, LinearRgbaImage, LutAvailabilityKind, LutAvailabilityStatus,
+    MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_HISTOGRAM_BUCKETS, MATTE_COVERAGE_SCALE,
+    MatteCoverageError, MatteCoverageStatistics, MatteProof, MatteProofError, MatteProofMetadata,
     MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily,
     MediaCacheFamilyStatus, MediaCacheInventory, MediaError, MediaEvent, MonitorProof,
     MonitorProofMetadata, MonitorProofRenderKind, Playback, PlaybackState, ProgressSink, RgbaImage,
     SceneChange, SceneStatus, SilenceSpan, SilenceStatus, ThumbnailFrame, ThumbnailKey,
     TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TranscriptStatus, TranscriptWord, VisualAssetResult, VisualRequestKind, WaveformData,
-    WaveformPeak, export_lut_preflight_with, export_media_preflight, matte_coverage_statistics,
+    TranscriptStatus, TranscriptWord, VisualAssetResult, VisualRequestKind, WORKING_PROOF_ENCODING,
+    WORKING_PROOF_STAGE, WaveformData, WaveformPeak, WorkingProof, WorkingProofMetadata,
+    export_lut_preflight_with, export_media_preflight, matte_coverage_statistics,
 };
 pub use model::{
     AssetId, AudioBus, AudioBusId, AudioMix, BinId, Clip, ClipContent, ClipId, Document, Effect,

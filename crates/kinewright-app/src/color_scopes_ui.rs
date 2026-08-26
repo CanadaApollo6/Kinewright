@@ -104,8 +104,13 @@ impl ScopeRoi {
         RoiNormalization { roi, clamped }
     }
 
+    /// The core basis-point rectangle this ROI names.
+    ///
+    /// Crate-visible so the Colour QC window scopes its measurement to exactly
+    /// the region the scopes panel is measuring, rather than reimplementing
+    /// the conversion and drifting from it (CC6 §8.1).
     #[must_use]
-    fn to_core(self) -> NormalizedRoi {
+    pub(crate) fn to_core(self) -> NormalizedRoi {
         NormalizedRoi::new(
             u32::from(self.left),
             u32::from(self.top),
@@ -1074,6 +1079,9 @@ impl KinewrightApp {
                 },
             );
         });
+        if let Some(rows) = absolute_clipping_rows(Some(measurement)) {
+            paint_absolute_clipping(ui, rows);
+        }
         let (rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), 130.0),
             egui::Sense::hover(),
@@ -1147,6 +1155,88 @@ fn scope_measurement_from_proof(
         gpu_claim: proof.metadata.gpu_claim,
         evidence,
     })
+}
+
+/// The one-line note that keeps a monitor-stage display-code clip count from
+/// being read as a CC6 delivery excursion.
+pub(crate) const SCOPE_CLIPPING_NOTE: &str = "display-code clipping at the monitor stage; delivery range and gamut are measured at \
+working_linear_post_composite in the Colour QC window.";
+
+/// The tooltip that names the pinned 8-bit code thresholds.
+pub(crate) const SCOPE_CLIPPING_TOOLTIP: &str = "Counts 8-bit display codes at monitoring/post-composite: black is code <= \
+SCOPE_LOW_CLIP_CODE = 1, white is code >= SCOPE_HIGH_CLIP_CODE = 254. These are \
+monitor-stage display codes, not CC6 delivery range or gamut excursions.";
+
+/// One rendered absolute-clipping row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClippingRow {
+    pub(crate) channel: &'static str,
+    pub(crate) black_basis_points: u32,
+    pub(crate) white_basis_points: u32,
+}
+
+impl ClippingRow {
+    /// The row's text, exactly as the panel renders it.
+    #[must_use]
+    pub(crate) fn text(&self) -> String {
+        format!(
+            "black {} bp · white {} bp",
+            self.black_basis_points, self.white_basis_points
+        )
+    }
+}
+
+/// The four absolute clipping rows, in the channel order CC6 §10.6 pins.
+///
+/// `ScopeEvidence.clipping` has been computed since CC2 and never rendered:
+/// only the luma *delta* reached the UI. These are the absolute rates, which
+/// is what somebody looking at one shot actually needs.
+///
+/// `None` for a panel that has measured nothing: an unmeasured frame has no
+/// clipping rate, and rendering four zeroes would assert one.
+#[must_use]
+pub(crate) fn absolute_clipping_rows(
+    measurement: Option<&ScopeMeasurement>,
+) -> Option<[ClippingRow; 4]> {
+    let clipping = &measurement?.evidence.clipping;
+    Some(
+        [
+            ("R", clipping.red),
+            ("G", clipping.green),
+            ("B", clipping.blue),
+            ("luma", clipping.luma),
+        ]
+        .map(|(channel, rates)| ClippingRow {
+            channel,
+            black_basis_points: rates.black,
+            white_basis_points: rates.white,
+        }),
+    )
+}
+
+/// CC6 §8.3: the four-row absolute clipping table, its tooltip, and its note.
+fn paint_absolute_clipping(ui: &mut egui::Ui, rows: [ClippingRow; 4]) {
+    ui.group(|ui| {
+        ui.label(
+            egui::RichText::new("CLIPPING · ABSOLUTE").font(theme::semibold(type_size::CAPTION)),
+        )
+        .on_hover_text(SCOPE_CLIPPING_TOOLTIP);
+        egui::Grid::new("scope-absolute-clipping")
+            .num_columns(2)
+            .show(ui, |ui| {
+                for row in rows {
+                    ui.monospace(row.channel);
+                    ui.monospace(row.text());
+                    ui.end_row();
+                }
+            })
+            .response
+            .on_hover_text(SCOPE_CLIPPING_TOOLTIP);
+        ui.add(
+            egui::Label::new(egui::RichText::new(SCOPE_CLIPPING_NOTE).color(color::TEXT_MUTED))
+                .wrap(),
+        );
+    });
 }
 
 fn paint_waveform(
@@ -2247,5 +2337,91 @@ mod tests {
         state.set_matte_scope(true, Some(first));
         assert!(state.is_matte_scoped());
         assert!(!state.has_reference(), "a real rescope still invalidates");
+    }
+
+    /// CC6 §8.3 and §11.2.21: the absolute per-channel clipping rates the CC2
+    /// engine has always computed finally reach the panel — all four channels,
+    /// with the pinned values, and nothing at all before a frame is sampled.
+    #[test]
+    fn cc6_scopes_panel_renders_absolute_per_channel_clipping() {
+        assert_eq!(
+            absolute_clipping_rows(None),
+            None,
+            "a panel that has measured nothing renders no clipping rows"
+        );
+
+        // Four pixels: one pure black (every channel clipped low, luma low),
+        // one pure white (every channel clipped high, luma high), and two mid
+        // greys that clip nothing. Codes 0 and 255 are inside
+        // SCOPE_LOW_CLIP_CODE = 1 / SCOPE_HIGH_CLIP_CODE = 254.
+        let key = ScopeRequestKey {
+            session_id: 1,
+            revision: 0,
+            frame: TimeCode(0),
+            roi: ScopeRoi::full_frame(),
+        };
+        let evidence = measure_scope(
+            &kinewright_core::RgbaImage {
+                width: 4,
+                height: 1,
+                pixels: vec![
+                    0, 0, 0, 255, // clipped black
+                    255, 255, 255, 255, // clipped white
+                    128, 128, 128, 255, 128, 128, 128, 255,
+                ],
+            },
+            0,
+            &ScopeRequest::default(),
+        )
+        .expect("evidence");
+        let measurement = ScopeMeasurement {
+            key,
+            width: 4,
+            height: 1,
+            full_resolution: true,
+            stage: ScopeStage::MonitoringPostComposite,
+            backend: "test_double".to_owned(),
+            adapter: "test_double".to_owned(),
+            software_fallback: true,
+            gpu_claim: false,
+            evidence,
+        };
+
+        let rows = absolute_clipping_rows(Some(&measurement)).expect("four rows");
+        assert_eq!(
+            rows.iter().map(|row| row.channel).collect::<Vec<_>>(),
+            vec!["R", "G", "B", "luma"],
+            "every channel is present, in the pinned channel order"
+        );
+        // One clipped-low and one clipped-high pixel out of four: 2500 bp each.
+        for row in &rows {
+            assert_eq!(
+                (row.black_basis_points, row.white_basis_points),
+                (2_500, 2_500),
+                "{} disagrees with the hand-counted rate",
+                row.channel
+            );
+            assert_eq!(row.text(), "black 2500 bp · white 2500 bp");
+        }
+
+        // The note and the tooltip both keep a monitor-stage display-code
+        // count from being read as a CC6 delivery excursion.
+        assert!(SCOPE_CLIPPING_TOOLTIP.contains("SCOPE_LOW_CLIP_CODE = 1"));
+        assert!(SCOPE_CLIPPING_TOOLTIP.contains("SCOPE_HIGH_CLIP_CODE = 254"));
+        assert!(SCOPE_CLIPPING_NOTE.contains("working_linear_post_composite"));
+        assert_eq!(
+            u32::from(kinewright_core::SCOPE_LOW_CLIP_CODE),
+            1,
+            "the tooltip quotes the code constant, so the constant is asserted"
+        );
+        assert_eq!(u32::from(kinewright_core::SCOPE_HIGH_CLIP_CODE), 254);
+
+        // And it lays out: the table is drawn through a headless context so a
+        // grid or tooltip mistake is a failing test, not a runtime panic.
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_absolute_clipping(ui, rows.clone());
+        });
     }
 }

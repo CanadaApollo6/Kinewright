@@ -530,7 +530,7 @@ fn integer_depth_value(depth: &ColorBitDepth) -> Option<u8> {
     depth.integer_bits().filter(|bits| (8..=16).contains(bits))
 }
 
-fn decoder_format_name(pixel: ffmpeg::format::Pixel) -> String {
+pub(crate) fn decoder_format_name(pixel: ffmpeg::format::Pixel) -> String {
     pixel
         .descriptor()
         .map_or("unknown", ffmpeg::format::pixel::Descriptor::name)
@@ -728,7 +728,7 @@ fn mul_div_ceil(value: i64, multiplier: i64, divisor: i64) -> i64 {
     i64::try_from(rounded).unwrap_or(i64::MAX)
 }
 
-fn frame_to_global_timestamp(frame: TimeCode, fps: Rational) -> i64 {
+pub(crate) fn frame_to_global_timestamp(frame: TimeCode, fps: Rational) -> i64 {
     if frame.0 <= 0 {
         return 0;
     }
@@ -891,7 +891,7 @@ fn managed_filter_range(description: &ColorDescription) -> &'static str {
     }
 }
 
-fn managed_filter_graph(
+pub(crate) fn managed_filter_graph(
     path: &Path,
     decoder: &ffmpeg::codec::decoder::Video,
     stream_time_base: ffmpeg::Rational,
@@ -1556,7 +1556,7 @@ pub(crate) fn thumbnail(
     })
 }
 
-fn normalized_start(start: i64) -> i64 {
+pub(crate) fn normalized_start(start: i64) -> i64 {
     if start < -1_000_000_000_000 { 0 } else { start }
 }
 

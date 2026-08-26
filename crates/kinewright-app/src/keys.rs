@@ -28,11 +28,13 @@ pub(crate) enum KeyAction {
     SetOut,
     Save,
     Export,
+    /// CC6 §8.1: open the read-only Colour QC window.
+    ColorQc,
     Help,
 }
 
 #[cfg(test)]
-const ALL_ACTIONS: [KeyAction; 19] = [
+const ALL_ACTIONS: [KeyAction; 20] = [
     KeyAction::TogglePlayback,
     KeyAction::Split,
     KeyAction::Delete,
@@ -51,6 +53,7 @@ const ALL_ACTIONS: [KeyAction; 19] = [
     KeyAction::SetOut,
     KeyAction::Save,
     KeyAction::Export,
+    KeyAction::ColorQc,
     KeyAction::Help,
 ];
 
@@ -64,7 +67,7 @@ pub(crate) struct KeyBinding {
     pub(crate) description: &'static str,
 }
 
-pub(crate) const KEYMAP: [KeyBinding; 19] = [
+pub(crate) const KEYMAP: [KeyBinding; 20] = [
     KeyBinding {
         key: egui::Key::Space,
         ctrl: false,
@@ -210,6 +213,17 @@ pub(crate) const KEYMAP: [KeyBinding; 19] = [
         description: "Open export dialog",
     },
     KeyBinding {
+        // Free: no other binding uses C at all, and no binding in this map
+        // is Ctrl+Shift. Deliberately not Ctrl+Q, which every desktop
+        // environment already spends on Quit.
+        key: egui::Key::C,
+        ctrl: true,
+        shift: true,
+        action: KeyAction::ColorQc,
+        shortcut: "Ctrl+Shift+C",
+        description: "Open the Colour QC window (evidence only)",
+    },
+    KeyBinding {
         key: egui::Key::Questionmark,
         ctrl: false,
         shift: true,
@@ -276,6 +290,7 @@ impl KinewrightApp {
                 self.save_project(false);
             }
             KeyAction::Export => self.open_export_dialog(),
+            KeyAction::ColorQc => self.color_qc.open = true,
             KeyAction::Help => self.help_open = true,
         }
     }
@@ -405,10 +420,19 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(bindings.len(), KEYMAP.len(), "duplicate key binding");
 
+        // CC6 §8.1 added `ColorQc`, growing both arrays from 19 to 20. This is
+        // the assertion that keeps them together: an action added to the enum
+        // and to `ALL_ACTIONS` but given no binding fails here, as does a
+        // binding for an action nobody declared. The array lengths are
+        // compile-time constants and assert nothing on their own.
         let actions = KEYMAP
             .iter()
             .map(|binding| binding.action)
             .collect::<HashSet<_>>();
         assert_eq!(actions, HashSet::from(ALL_ACTIONS));
+        assert!(
+            actions.contains(&KeyAction::ColorQc),
+            "the Colour QC window is reachable from the keyboard"
+        );
     }
 }

@@ -445,6 +445,7 @@ fn gpu_linear(
             }],
         )
         .expect("production GPU working-surface readback")
+        .pixels
 }
 
 fn gpu_monitor(

@@ -21,12 +21,13 @@ use kinewright_core::{
     Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AudioBus, AudioBusId,
     AudioLoudness, AutomationCurve, BeatMontageCadenceContract, BeatMontageSelect, BeatStatus,
     CaptionCue, CaptionMotion, CaptionPreset, Clip, ClipContent, ClipId, ColorNodeKind,
-    ColorSourceError, Command, Core, DeliveryAspect, DeliveryProfile, DeliveryVariant, Document,
-    Effect, EffectId, Event, Export, ExportCancellation, Keyframe, KeyframeInterpolation, LutAsset,
-    MUSIC_STRUCTURE_DEFAULT_METER_BEATS, MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId,
-    MediaAsset, MediaAvailabilityKind, MediaCacheFamily, MediaCacheInventory, MediaKind, Operation,
-    ParamValue, Playback, Query, QueryResult, ReframeFocusBounds, RelinkCandidate, SceneStatus,
-    SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings, SubjectCenterBasisPointSample,
+    ColorSourceError, Command, Core, DeliveryAspect, DeliveryEncodeDepth, DeliveryProfile,
+    DeliveryVariant, Document, Effect, EffectId, Event, Export, ExportCancellation, Keyframe,
+    KeyframeInterpolation, LutAsset, MUSIC_STRUCTURE_DEFAULT_METER_BEATS,
+    MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId, MediaAsset, MediaAvailabilityKind,
+    MediaCacheFamily, MediaCacheInventory, MediaKind, Operation, ParamValue, Playback, Query,
+    QueryResult, ReframeFocusBounds, RelinkCandidate, SceneStatus, SilenceStatus,
+    SpeakerAngleAssignment, SpeakerMulticamSettings, SubjectCenterBasisPointSample,
     SubjectFocusBasisPointConstraint, SubjectReframeSettings, SyncGroupId, ThreePointMode,
     TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange,
     TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, Track, TrackId, TrackKind,
@@ -56,6 +57,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
+    color_qc_tool::{COLOR_QC_DESCRIPTION, ColorQcArgs, get_color_qc},
     color_scopes::{
         AnalyzeColorShotArgs, PlanShotMatchArgs, ScopeError, VideoScopesV2Args, analyze_color_shot,
         plan_shot_match, video_scopes_v2,
@@ -914,6 +916,10 @@ impl KinewrightMcp {
             "analyze_color_shot" => {
                 let args: AnalyzeColorShotArgs = decode_args("analyze_color_shot", arguments)?;
                 self.analyze_color_shot(&args)
+            }
+            "get_color_qc" => {
+                let args: ColorQcArgs = decode_args("get_color_qc", arguments)?;
+                self.color_qc(&args)
             }
             "plan_shot_match" => {
                 let args: PlanShotMatchArgs = decode_args("plan_shot_match", arguments)?;
@@ -3321,7 +3327,11 @@ impl KinewrightMcp {
     fn delivery_profiles(&self) -> Result<CallToolResult, McpError> {
         let (revision, document) = self.snapshot()?;
         let profiles = DeliveryProfile::ALL.map(|profile| {
-            let settings = profile.export_settings(&document, ExportCancellation::default());
+            let settings = profile.export_settings(
+                &document,
+                DeliveryEncodeDepth::Eight,
+                ExportCancellation::default(),
+            );
             serde_json::json!({
                 "id": profile.as_str(),
                 "container": profile.container_extension(),
@@ -3360,6 +3370,7 @@ impl KinewrightMcp {
         let report = match delivery_conformance(
             &document,
             args.profile,
+            args.delivery_bit_depth,
             args.focus_x_percent,
             args.focus_y_percent,
         ) {
@@ -3400,6 +3411,7 @@ impl KinewrightMcp {
         let conformance = match delivery_conformance(
             &document,
             args.profile,
+            DeliveryEncodeDepth::Eight,
             args.focus_x_percent,
             args.focus_y_percent,
         ) {
@@ -3596,6 +3608,8 @@ impl KinewrightMcp {
                 focus_x_percent: args.focus_x_percent,
                 focus_y_percent: args.focus_y_percent,
                 overwrite: args.overwrite,
+                verify: args.verify,
+                delivery_bit_depth: args.delivery_bit_depth,
             },
         ) {
             Ok(record) => record,
@@ -3779,6 +3793,31 @@ impl KinewrightMcp {
                 value,
             )),
             Err(error) => Ok(color_scope_error_result("analyze_color_shot", &error)),
+        }
+    }
+
+    /// CC6 §7: measure the working stage and publish evidence, nothing else.
+    ///
+    /// The revision is read once and republished; nothing on this path can
+    /// advance it, and the response says so at the top level.
+    fn color_qc(&self, args: &ColorQcArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        match get_color_qc(&document, revision, self.analysis.as_ref(), args) {
+            Ok(value) => Ok(success_structured(
+                format!(
+                    // Read as the typed values they are: `Value`'s own Display
+                    // would quote the stage and is only correct by accident.
+                    "evidence-only CC6 colour QC at timeline revision {revision}, stage={}, project frame {}; no operation was applied",
+                    value["stage"]
+                        .as_str()
+                        .unwrap_or(kinewright_core::WORKING_PROOF_STAGE),
+                    value["report"]["project_frame"]
+                        .as_i64()
+                        .unwrap_or_default()
+                ),
+                value,
+            )),
+            Err(error) => Ok(color_scope_error_result("get_color_qc", &error)),
         }
     }
 
@@ -8708,7 +8747,7 @@ struct EditorialReadinessArgs {
     profile: DeliveryProfile,
     /// Require transcript-safe silence clearance. Disable only when preserving
     /// continuous program audio or when dead-air editing is outside the brief.
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::schema::default_true")]
     check_silence: bool,
     /// Minimum transcript-safe cuttable silence in source frames. Defaults to 20.
     #[serde(default)]
@@ -8808,6 +8847,10 @@ struct DeliveryConformanceArgs {
     /// Explicit vertical focal point used when the profile changes aspect ratio.
     #[serde(default = "default_delivery_focus")]
     focus_y_percent: u8,
+    /// CC6 §4.1: the delivery encode depth to report conformance for. `eight`
+    /// (default) or `ten`; a report is bound to the lane it was produced for.
+    #[serde(default)]
+    delivery_bit_depth: DeliveryEncodeDepth,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -8825,6 +8868,18 @@ struct QueueExportArgs {
     /// Explicit permission to replace a regular destination file. Always requires human confirmation.
     #[serde(default)]
     overwrite: bool,
+    /// CC6 §6.5: decode the finished encode and compare it against a freshly
+    /// rendered delivery reference, recording tags, luma and RGB differences,
+    /// PSNR, and decoded legality on the job record. Defaults to true. A
+    /// verification is a measurement: it never fails the job and never moves,
+    /// renames, or deletes the output, so it needs no confirmation gate.
+    #[serde(default = "crate::schema::default_true")]
+    verify: bool,
+    /// CC6 §4.1: `eight` (default) or `ten`. Selects the encoder pixel format
+    /// and the declared delivery bit depth without editing the project's own
+    /// colour contract.
+    #[serde(default)]
+    delivery_bit_depth: DeliveryEncodeDepth,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -8834,10 +8889,6 @@ struct ExportJobArgs {
 
 const fn default_delivery_focus() -> u8 {
     50
-}
-
-const fn default_true() -> bool {
-    true
 }
 
 const fn default_target_lufs_hundredths() -> i32 {
@@ -9878,13 +9929,13 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_delivery_conformance",
-            "Materialize one delivery profile from the current branch snapshot and run structural QA against the exact document and export settings that would render.",
+            "Materialize one delivery profile from the current branch snapshot and run structural QA against the exact document and export settings that would render. delivery_bit_depth selects the eight- or ten-bit delivery lane; the report is bound to the lane it was produced for.",
             schema_object::<DeliveryConformanceArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
             "queue_export",
-            "Queue a serial export of an immutable revision-gated branch snapshot using one stable delivery profile. New files require no confirmation; overwrite=true always enters the human confirmation broker and source media can never be targeted.",
+            "Queue a serial export of an immutable revision-gated branch snapshot using one stable delivery profile at the eight- or ten-bit delivery lane. New files require no confirmation; overwrite=true always enters the human confirmation broker and source media can never be targeted. verify (default true) decodes the finished encode and records its tags, luma and RGB differences, PSNR, and decoded legality on the job record; that measurement never fails the job and never moves, renames, or deletes the output.",
             schema_object::<QueueExportArgs>(),
         )
         .with_annotations(
@@ -9896,7 +9947,7 @@ fn inspector_tools() -> Vec<Tool> {
         ),
         Tool::new(
             "get_export_jobs",
-            "Return every retained export job in enqueue order with immutable request, conformance, progress, terminal state, and error data.",
+            "Return every retained export job in enqueue order with immutable request, delivery lane, conformance, progress, terminal state, error data, and - for a verified job - the decoded post-export verification or the reason one could not run.",
             schema_object::<EmptyArgs>(),
         )
         .with_annotations(read_only()),
@@ -10024,6 +10075,12 @@ fn inspector_tools() -> Vec<Tool> {
             "analyze_color_shot",
             "Return evidence-only CC2 diagnosis for one explicit visual shot: bounded full-resolution-aware scopes, ROI/temporal provenance, signed measurements, confidence, and assumptions. This call never mutates the timeline.",
             schema_object::<AnalyzeColorShotArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_color_qc",
+            COLOR_QC_DESCRIPTION,
+            schema_object::<ColorQcArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -19008,7 +19065,12 @@ mod tests {
     /// CC5 §7: the three matte tools are registered, read-only, and
     /// `inspect_grade_matte` is an Inspector by explicit override because the
     /// `inspect_` prefix matches no inference rule.
+    ///
+    /// CC6 §7 extends the same registry bookkeeping to `get_color_qc`, which
+    /// needs **no** `CAPABILITY_KIND_OVERRIDES` entry because `get_` already
+    /// infers `Inspector` — asserted below so the omission is a decision.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn cc5_matte_tools_are_registered_read_only_inspectors() {
         let tools = KinewrightMcp::tools().unwrap();
         let names = tools
@@ -19019,6 +19081,7 @@ mod tests {
             "inspect_grade_matte",
             "track_matte_window",
             "plan_secondary_correction",
+            "get_color_qc",
         ] {
             assert!(names.contains(name), "missing CC5 tool {name}");
             let tool = tools.iter().find(|tool| tool.name == name).unwrap();
@@ -19028,7 +19091,7 @@ mod tests {
                 "{name} must be read-only"
             );
         }
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 74);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 75);
 
         // M36: every colour planner and every CC5 tool stays inside the
         // kilobyte description budget, measured on the *registered* descriptor
@@ -19047,6 +19110,7 @@ mod tests {
             "track_matte_window",
             "track_mask_region",
             "track_reframe_subject",
+            "get_color_qc",
         ] {
             let tool = tools.iter().find(|tool| tool.name == name).unwrap();
             let description = tool.description.as_deref().unwrap_or_default();
@@ -19107,6 +19171,31 @@ mod tests {
             kind("plan_secondary_correction"),
             crate::runtime::CapabilityKind::Planner
         );
+        // CC6 §7: `get_` infers Inspector with no override entry.
+        assert_eq!(
+            kind("get_color_qc"),
+            crate::runtime::CapabilityKind::Inspector
+        );
+        let color_qc = tools
+            .iter()
+            .find(|tool| tool.name == "get_color_qc")
+            .unwrap();
+        let annotations = color_qc.annotations.as_ref().unwrap();
+        assert_eq!(annotations.read_only_hint, Some(true));
+        assert_eq!(annotations.destructive_hint, Some(false));
+        assert_eq!(annotations.idempotent_hint, Some(true));
+        assert_eq!(annotations.open_world_hint, Some(false));
+        // CC6 R13: a working-stage measurement is full-resolution or refused,
+        // so the tool must not offer a resolution knob of any spelling.
+        let schema = serde_json::to_value(color_qc.input_schema.as_ref()).unwrap();
+        let properties = schema["properties"].as_object().unwrap();
+        for absent in ["resolution", "proxy_sampling", "max_width"] {
+            assert!(
+                !properties.contains_key(absent),
+                "get_color_qc must not carry {absent}"
+            );
+        }
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
     }
 
     #[test]
@@ -19160,6 +19249,7 @@ mod tests {
                 profile: DeliveryProfile::SourceMaster,
                 focus_x_percent: 50,
                 focus_y_percent: 50,
+                delivery_bit_depth: DeliveryEncodeDepth::Eight,
             })
             .unwrap();
         let conformance = conformance.structured_content.unwrap();

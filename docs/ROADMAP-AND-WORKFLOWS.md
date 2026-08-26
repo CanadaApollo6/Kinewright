@@ -226,10 +226,34 @@ The first three cycle intentions are:
    agent surface; the inspector gains a matte section, a preview overlay with
    drag editing, and a matte view. The contract is `CC5-SECONDARIES.md`.
 
+9. **CC6 QC and managed delivery — implemented 2026-08-25, pending platform
+   smoke.** A named high-precision stage, `working_linear_post_composite`, and
+   `Analysis::working_proof_for_document` read the production `Rgba16Float`
+   composite back as linear f32 before any encode; a pure core QC engine
+   (`color_qc`) measures range (delivery-encoded clamp events per channel),
+   gamut (negative linear channels with the desaturation fraction), a forward
+   BT.709 limited-range Y′CbCr reference at 8 and 10 bits, region-scoped skin
+   diagnostics against a band derived from the CC5 skin patches, a two-mode
+   typed delivery tag check, and per-node clipping attribution by effect
+   removal — all integer-reported and evidence-only. Managed delivery widens
+   by exactly one lane (10-bit H.264, `yuv420p10le`) with typed
+   `DeliveryColorError` rejections, the delivery intermediate is quantized on
+   swscale's 16-bit RGB white (`65280`), and `Analysis::verify_delivery_output`
+   decodes a written file at sampled frames, compares the native luma plane
+   and RGB against the full-resolution delivery reference under named
+   per-lane budgets, measures decoded Y′CbCr legality (EBU R 103), and probes
+   tags — wired into the export queue, `get_export_jobs`, and the export
+   dialog. The agent gains `get_color_qc`; the app gains a Colour QC window,
+   a QC clipping mask view, absolute clipping in the scopes panel, a per-node
+   clipping line, and the 8/10-bit choice with a post-export verification
+   block. The exit gate is a synthetic 60-frame source exported at both
+   depths on both CI operating systems and gated on tag, range, and
+   visual-difference budgets. The contract is `CC6-QC-AND-MANAGED-DELIVERY.md`.
+
 Before CC3 started, a six-lane review of CC1 and CC2 (2026-08-24) fixed the
 defects recorded in `CHANGELOG.md` and hardened both fixture suites so that
 every control has an analytic expected value and no parity case is vacuous.
-The next primary colour slice is **CC6 QC and managed delivery**.
+The next primary colour slice is **CC7 workflow evaluation**.
 
 Within that cadence, three workstreams remain active:
 
@@ -404,8 +428,8 @@ constructors, compositor inputs, `ExportSettings`, and FFmpeg stream/container
 metadata. Later stages cannot treat those surfaces as implicit or start before the
 required earlier exit gate passes.
 
-**Current status (2026-08-25): CC0, M41, CC1, M42, CC2, CC3, CC4, and CC5 are
-complete apart from the CC3/CC4/CC5 hands-on platform smoke gates.** CC0's exit evidence
+**Current status (2026-08-25): CC0, M41, CC1, M42, CC2, CC3, CC4, CC5, and CC6 are
+complete apart from the CC3/CC4/CC5/CC6 hands-on platform smoke gates.** CC0's exit evidence
 includes legacy project migration, known/partial/unknown and 10-bit probe fixtures,
 visible human and agent inspection, an undoable source override, delivery rejection
 outside the current contract, and an encoded file decoded again to verify its
@@ -426,7 +450,10 @@ relocatable sidecar store, the ordered technical/creative LUT nodes, the
 built-in looks as generated assets, the human `.cube` workflow, and look
 planners. CC5 adds node-owned mattes (windows, HSL qualifier, feather,
 keyframes, tracking), matte inspection, and matte-scoped scopes with an
-affected-pixel containment gate. CC6 QC and managed delivery is the next
+affected-pixel containment gate. CC6 adds the linear working-stage proof, the
+colour QC engine (range, gamut, Y′CbCr legality, skin diagnostics, tag checks,
+per-node attribution), the 10-bit H.264 delivery lane with typed rejection, and
+decoded-output verification of every export. CC7 workflow evaluation is the next
 primary colour slice.
 
 | Stage | Deliverable | Exit gate |

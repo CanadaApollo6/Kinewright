@@ -1604,6 +1604,386 @@ async fn cc2_scope_tools_are_read_only_over_the_live_endpoint() {
     server.shutdown();
 }
 
+/// CC6 §11.2.18: `get_color_qc` measures the working stage, publishes evidence
+/// only, is revision-gated without *requiring* a revision, refuses a skin check
+/// with no region, refuses a frame the project does not have, and offers no
+/// resolution knob of any spelling.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
+    let generated = managed_color_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    // The project is exactly the asset's frames, so `duration` below is the
+    // half-open project range `get_color_qc` has to enforce.
+    let duration = asset.duration.0;
+    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let before = query_document(&core);
+    let revision = invoke_capability(&client, "get_color_context", json!({}))
+        .await
+        .structured_content
+        .as_ref()
+        .unwrap()["timeline_revision"]
+        .as_u64()
+        .unwrap();
+
+    // CC6 R13: the published schema carries no `resolution`, `proxy_sampling`,
+    // or `max_width`. A working-stage measurement is full-resolution or it is
+    // refused, so there is nothing for a caller to turn down.
+    let opened = client
+        .call_tool(
+            CallToolRequestParams::new("get_capability")
+                .with_arguments(json!({"name": "get_color_qc"}).as_object().unwrap().clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(opened.is_error, Some(false));
+    let opened = opened.structured_content.as_ref().unwrap();
+    assert_eq!(opened["capability"]["kind"], "inspector");
+    let properties = opened["input_schema"]["properties"].as_object().unwrap();
+    for absent in ["resolution", "proxy_sampling", "max_width"] {
+        assert!(
+            !properties.contains_key(absent),
+            "get_color_qc must not carry {absent}: {opened}"
+        );
+    }
+    for present in ["roi", "matte_region", "checks", "delivery_bit_depth"] {
+        assert!(properties.contains_key(present), "missing {present}");
+    }
+
+    // A stale revision is the uniform envelope, refused before any render.
+    let stale = invoke_capability(
+        &client,
+        "get_color_qc",
+        json!({"expected_revision": revision + 7, "timecode": 5}),
+    )
+    .await;
+    assert_eq!(stale.is_error, Some(true));
+    let stale_body = stale.structured_content.as_ref().unwrap();
+    assert_eq!(stale_body["code"], "stale_revision");
+    assert_eq!(stale_body["applied"], false);
+    assert_eq!(stale_body["evidence_only"], true);
+    assert_eq!(stale_body["details"]["expected_revision"], revision + 7);
+    assert_eq!(stale_body["details"]["actual_revision"], revision);
+
+    // CC6 §3.5: skin is a diagnostic of a region the operator chose, so it is
+    // refused without one, before any render.
+    let unscoped_skin = invoke_capability(
+        &client,
+        "get_color_qc",
+        json!({"timecode": 5, "checks": ["skin"]}),
+    )
+    .await;
+    assert_eq!(unscoped_skin.is_error, Some(true));
+    let unscoped_body = unscoped_skin.structured_content.as_ref().unwrap();
+    assert_eq!(unscoped_body["code"], "color_qc_region_required");
+    assert_eq!(unscoped_body["details"]["field"], "checks");
+
+    // CC6 §7 / errata E32: a frame the project does not have is refused, not
+    // measured. Both directions, before any render: the compositor would
+    // happily return its cleared target and the report would read as a clean
+    // legal-range pass over opaque black that no export will ever contain.
+    assert!(duration > 0);
+    for (field, request) in [
+        ("timecode", json!({"timecode": -1})),
+        ("timecode", json!({"timecode": duration})),
+        ("frame", json!({"frame": duration + 1_000})),
+    ] {
+        let refused = invoke_capability(&client, "get_color_qc", request.clone()).await;
+        assert_eq!(refused.is_error, Some(true), "{request} must be refused");
+        let body = refused.structured_content.as_ref().unwrap();
+        assert_eq!(body["code"], "color_qc_frame_out_of_range", "{body}");
+        assert_eq!(body["applied"], false);
+        assert_eq!(body["evidence_only"], true);
+        assert_eq!(body["details"]["field"], field, "{body}");
+        assert_eq!(body["details"]["allowed"], format!("0..{duration}"));
+    }
+    // The last frame the project has is inside the half-open range, so the
+    // guard cannot be passing by refusing everything.
+    let last = invoke_capability(&client, "get_color_qc", json!({"timecode": duration - 1})).await;
+    assert_ne!(
+        last.structured_content.as_ref().unwrap()["code"],
+        json!("color_qc_frame_out_of_range"),
+        "the last project frame must not be refused as out of range"
+    );
+
+    // CC6 §7: `max_nodes` is validated on every call, not only when `per_node`
+    // is asked for - an out-of-range budget is a malformed request whether or
+    // not this call would have spent it. Refused before any render.
+    for budget in [0, 17] {
+        let refused = invoke_capability(
+            &client,
+            "get_color_qc",
+            json!({"timecode": 5, "max_nodes": budget}),
+        )
+        .await;
+        assert_eq!(refused.is_error, Some(true), "max_nodes={budget}");
+        let body = refused.structured_content.as_ref().unwrap();
+        assert_eq!(body["code"], "color_qc_node_budget_exceeded", "{body}");
+        assert_eq!(body["details"]["field"], "max_nodes");
+        assert_eq!(body["details"]["observed"], budget.to_string());
+    }
+
+    // The measurement itself. `expected_revision` is deliberately absent: this
+    // is an inspector, not a planner.
+    let report = invoke_capability(&client, "get_color_qc", json!({"timecode": 5})).await;
+    let body = report.structured_content.as_ref().unwrap();
+    if report.is_error == Some(true) {
+        // A test that accepts both branches asserts nothing: a renderer that
+        // silently stopped producing working proofs would look exactly like a
+        // green run. Refusing is a *skip*, and skipping is opt-in.
+        assert!(
+            std::env::var("KINEWRIGHT_GPU_TESTS_MAY_SKIP")
+                .ok()
+                .as_deref()
+                == Some("1"),
+            "get_color_qc refused: {body}. Set KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 to accept an \
+             unavailable working proof on a machine with no usable adapter."
+        );
+        // Even the skip branch asserts a typed code, so a refusal for the
+        // wrong reason still fails.
+        assert_eq!(body["code"], "working_proof_unavailable");
+        assert_eq!(body["applied"], false);
+        assert_eq!(body["evidence_only"], true);
+        assert_eq!(body["details"]["field"], "working_proof");
+        eprintln!(
+            "SKIPPED: KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 and this build cannot render a working \
+             proof; get_color_qc's measured report was not exercised."
+        );
+    } else {
+        // The human-readable line reads the envelope's typed values rather
+        // than `Value`'s Display, so the stage is not quoted and the frame is
+        // not a JSON number rendering.
+        let text = report.content[0].as_text().unwrap().text.clone();
+        assert!(
+            text.contains("stage=working_linear_post_composite,"),
+            "the stage must not arrive quoted: {text}"
+        );
+        assert!(text.contains("project frame 5;"), "{text}");
+        assert!(!text.contains('"'), "{text}");
+
+        assert_eq!(body["evidence_only"], true);
+        assert_eq!(body["applied"], false);
+        assert_eq!(body["stage"], "working_linear_post_composite");
+        assert_eq!(body["full_resolution"], true);
+        assert_eq!(body["timeline_revision"], revision);
+        let qc = &body["report"];
+        assert_eq!(qc["stage"], "working_linear_post_composite");
+        assert_eq!(qc["full_resolution"], true);
+        assert_eq!(qc["evidence_only"], true);
+        assert_eq!(qc["project_frame"], 5);
+        assert_eq!(qc["delivery_bit_depth"], 8);
+        // §3.1: the composite target is opaque by construction at this stage.
+        assert_eq!(qc["transparent_pixel_count"], 0);
+        // Exact, not merely self-consistent: an unscoped measurement is every
+        // pixel of the 320x180 raster, and alpha is 1 everywhere at this
+        // stage, so both counts are the full raster and neither can drift
+        // without failing here.
+        assert_eq!(qc["raster"], json!([320, 180]));
+        assert_eq!(qc["visible_pixel_count"], json!(320 * 180));
+        assert_eq!(qc["region"]["region_pixel_count"], json!(320 * 180));
+        // The default checks produce range, gamut, and a pre-export tag check,
+        // and never the optional sections.
+        assert!(qc["range"].is_object());
+        assert!(qc["gamut"].is_object());
+        assert_eq!(
+            qc["tags"]["tag_source"], "materialised_export_settings",
+            "get_color_qc is always pre-export tag mode: {qc}"
+        );
+        assert!(
+            qc["tags"]["not_representable"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(qc["tags"]["conforming"], true);
+        assert_eq!(qc["skin"], json!(null));
+        assert_eq!(qc["nodes"], json!(null));
+        // The default `checks` publish exactly six assumptions: the four that
+        // hold for every measurement, the pre-export tag note, and the
+        // evidence-only boundary. The skin and per-node notes are absent
+        // because those checks did not run - a `>= 4` bound would pass even if
+        // the tool started describing a skin population it never measured.
+        let assumptions = body["assumptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|assumption| assumption.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(assumptions.len(), 6, "{assumptions:#?}");
+        assert!(assumptions[0].starts_with("Measured at working_linear_post_composite"));
+        assert!(assumptions[1].starts_with("Always full resolution."));
+        assert!(assumptions[2].contains("alpha is 1 everywhere"));
+        assert!(
+            assumptions[3].contains("eight lane (8 bits)"),
+            "{assumptions:#?}"
+        );
+        assert!(assumptions[4].contains("pre-export mode"));
+        assert!(assumptions[5].starts_with("Evidence only."));
+        assert!(
+            !assumptions
+                .iter()
+                .any(|assumption| assumption.contains("Per-node attribution")),
+            "per_node is never a default: {assumptions:#?}"
+        );
+        assert!(
+            !assumptions
+                .iter()
+                .any(|assumption| assumption.contains("skin")
+                    && !assumption.contains("pre-export mode")),
+            "no skin assumption without a skin check: {assumptions:#?}"
+        );
+        assert!(body["exceptions"].is_array());
+        assert_eq!(qc["provenance"]["engine"], "kinewright_color_qc_v1");
+
+        // A region makes the skin check legal, and it measures the region the
+        // caller named rather than the whole raster.
+        let scoped = invoke_capability(
+            &client,
+            "get_color_qc",
+            json!({
+                "timecode": 5,
+                "checks": ["range", "gamut", "skin"],
+                "roi": {
+                    "x_basis_points": 2_500,
+                    "y_basis_points": 2_500,
+                    "width_basis_points": 5_000,
+                    "height_basis_points": 5_000
+                }
+            }),
+        )
+        .await;
+        assert_eq!(
+            scoped.is_error,
+            Some(false),
+            "{:?}",
+            scoped.structured_content
+        );
+        let scoped = scoped.structured_content.as_ref().unwrap();
+        assert!(scoped["report"]["skin"].is_object());
+        assert_eq!(scoped["report"]["tags"], json!(null));
+        // 2500..7500 basis points of 320x180 is x 80..240 and y 45..135 by
+        // CC2's floor/ceil rule: exactly 160 x 90 pixels, not merely "fewer".
+        assert_eq!(scoped["report"]["visible_pixel_count"], json!(160 * 90));
+        assert_eq!(
+            scoped["report"]["region"]["region_pixel_count"],
+            json!(160 * 90)
+        );
+        // Dropping `tags` and adding `skin` swaps exactly one assumption.
+        let scoped_assumptions = scoped["assumptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|assumption| assumption.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(scoped_assumptions.len(), 6, "{scoped_assumptions:#?}");
+        assert!(
+            !scoped_assumptions
+                .iter()
+                .any(|assumption| assumption.contains("pre-export mode")),
+            "no tag assumption without a tag check: {scoped_assumptions:#?}"
+        );
+        assert_eq!(
+            scoped_assumptions[4],
+            kinewright_core::SKIN_DIAGNOSTIC_BOUNDARY
+        );
+    }
+
+    // Whatever branch ran, nothing moved.
+    assert_eq!(
+        query_document(&core),
+        before,
+        "get_color_qc must never mutate the timeline"
+    );
+    assert_eq!(
+        invoke_capability(&client, "get_color_context", json!({}))
+            .await
+            .structured_content
+            .as_ref()
+            .unwrap()["timeline_revision"]
+            .as_u64()
+            .unwrap(),
+        revision,
+        "an evidence-only measurement must leave the revision unchanged"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// CC6 §11.2.16 (agent half): `get_video_scopes_v2` publishes a typed pointer
+/// at `get_color_qc` where it used to publish a fabricated zero, and the
+/// working stage is refused by the CC2 scope engine.
+#[tokio::test(flavor = "multi_thread")]
+async fn cc6_video_scopes_v2_points_at_get_color_qc_instead_of_a_fabricated_zero() {
+    let generated = managed_color_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let scopes = invoke_capability(&client, "get_video_scopes_v2", json!({"timecode": 5})).await;
+    assert_eq!(
+        scopes.is_error,
+        Some(false),
+        "{:?}",
+        scopes.structured_content
+    );
+    let scopes = scopes.structured_content.as_ref().unwrap();
+    assert_eq!(
+        scopes["provenance"]["stage_measured"],
+        "monitoring_post_composite"
+    );
+    let gamut = &scopes["gamut"];
+    assert_eq!(gamut["measured"], false);
+    assert_eq!(gamut["code"], "gamut_requires_working_stage");
+    assert_eq!(gamut["stage_required"], "working_linear_post_composite");
+    assert_eq!(gamut["tool"], "get_color_qc");
+    assert!(
+        gamut["definition"]
+            .as_str()
+            .is_some_and(|definition| definition.contains("display-clamped")),
+        "{gamut}"
+    );
+    // The fabricated zero is the actual defect: it reads as "measured, none
+    // found". Both keys must be absent, not zero.
+    let gamut = gamut.as_object().unwrap();
+    assert!(!gamut.contains_key("out_of_range_pixels"));
+    assert!(!gamut.contains_key("out_of_range_basis_points"));
+
+    // CC6 §2.1: the working stage is a real name in one shared vocabulary, and
+    // the CC2 scope engine fails closed on it rather than falling back to
+    // monitoring evidence.
+    let working = invoke_capability(
+        &client,
+        "get_video_scopes_v2",
+        json!({"stage": "working_linear_post_composite", "timecode": 5}),
+    )
+    .await;
+    assert_eq!(working.is_error, Some(true));
+    let working = working.structured_content.as_ref().unwrap();
+    assert_eq!(working["code"], "unsupported_stage");
+    assert_eq!(working["applied"], false);
+    assert_eq!(working["details"]["stage"], "working_linear_post_composite");
+    assert_eq!(
+        working["details"]["supported_stages"][0],
+        "monitoring_post_composite"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
 fn edit_plan_document() -> Document {
     let asset = MediaAsset {
         id: AssetId(1),

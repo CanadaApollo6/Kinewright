@@ -856,6 +856,10 @@ impl KinewrightApp {
         }
         if scrub_started {
             self.resume_after_scrub = self.playing;
+            // CC6 §8.2: the drag pauses the transport, so `playing` stops
+            // describing a moving playhead the instant the scrub begins. The
+            // QC mask is told directly.
+            self.qc_mask.set_scrubbing(true);
             if self.playing {
                 self.playback.pause();
             }
@@ -869,6 +873,7 @@ impl KinewrightApp {
             }
         }
         if scrub_stopped {
+            self.qc_mask.set_scrubbing(false);
             if self.resume_after_scrub {
                 self.playback.play(playhead_position);
             }

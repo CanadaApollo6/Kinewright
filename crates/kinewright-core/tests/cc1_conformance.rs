@@ -11,9 +11,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 use kinewright_core::{
     AssetId, Clip, ClipContent, ClipId, ColorBitDepth, ColorContext, ColorDescription, ColorMatrix,
     ColorPipelineState, ColorPrimaries, ColorProvenance, ColorRange, ColorSourceError,
-    ColorTransfer, ColorWhitePoint, DeliveryProfile, Document, Effect, EffectId, MediaAsset,
-    MediaKind, Operation, ParamValue, QaSeverity, Rational, TimeCode, Track, TrackId, TrackKind,
-    classify_source, delivery_conformance, qa_document,
+    ColorTransfer, ColorWhitePoint, DeliveryEncodeDepth, DeliveryProfile, Document, Effect,
+    EffectId, MediaAsset, MediaKind, Operation, ParamValue, QaSeverity, Rational, TimeCode, Track,
+    TrackId, TrackKind, classify_source, delivery_conformance, qa_document,
 };
 
 /// A path that always exists so `missing_media` never masks a colour issue.
@@ -92,8 +92,14 @@ fn legacy_brightness_is_reported_by_qa_and_delivery_without_silent_translation()
         "CC1 §4.4 keeps legacy colour semantics reportable but non-blocking"
     );
 
-    let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
-        .expect("delivery conformance must produce a report");
+    let report = delivery_conformance(
+        &document,
+        DeliveryProfile::SourceMaster,
+        DeliveryEncodeDepth::Eight,
+        50,
+        50,
+    )
+    .expect("delivery conformance must produce a report");
     let delivery_issue = report
         .issues
         .iter()
@@ -290,8 +296,14 @@ fn section_2_1_source_failures_report_field_observed_and_allowed_values() {
 #[test]
 fn user_override_that_is_still_unsupported_keeps_blocking_managed_delivery() {
     let mut document = managed_document();
-    let baseline = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
-        .expect("baseline conformance");
+    let baseline = delivery_conformance(
+        &document,
+        DeliveryProfile::SourceMaster,
+        DeliveryEncodeDepth::Eight,
+        50,
+        50,
+    )
+    .expect("baseline conformance");
     assert!(baseline.export_ready());
 
     let unsupported_override = ColorDescription {
@@ -316,8 +328,14 @@ fn user_override_that_is_still_unsupported_keeps_blocking_managed_delivery() {
         "the override is stored verbatim, not normalised"
     );
 
-    let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
-        .expect("an unsupported override must be reported, not returned as an error");
+    let report = delivery_conformance(
+        &document,
+        DeliveryProfile::SourceMaster,
+        DeliveryEncodeDepth::Eight,
+        50,
+        50,
+    )
+    .expect("an unsupported override must be reported, not returned as an error");
     let issue = report
         .issues
         .iter()

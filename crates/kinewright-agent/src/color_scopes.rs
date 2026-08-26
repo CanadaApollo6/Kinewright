@@ -41,7 +41,7 @@ const MAX_WAVEFORM_COLUMNS: usize = 256;
 const MAX_VECTOR_BINS: usize = 64;
 /// The stable code published when a matte-scoped measurement cannot resolve the
 /// coverage it was asked to scope to (CC5 §4.3).
-const MATTE_REGION_UNAVAILABLE: &str = "matte_region_unavailable";
+pub(crate) const MATTE_REGION_UNAVAILABLE: &str = "matte_region_unavailable";
 
 /// One `plan_shot_match` call renders one full-resolution monitor proof per
 /// candidate.  The candidate list is therefore capped exactly like the
@@ -524,7 +524,7 @@ pub(crate) struct ScopeError {
 }
 
 impl ScopeError {
-    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
@@ -532,7 +532,7 @@ impl ScopeError {
         }
     }
 
-    fn with_details(mut self, details: Value) -> Self {
+    pub(crate) fn with_details(mut self, details: Value) -> Self {
         self.details = details;
         self
     }
@@ -597,7 +597,7 @@ impl ScopeError {
         )
     }
 
-    fn stale(expected: TimelineRevision, actual: TimelineRevision) -> Self {
+    pub(crate) fn stale(expected: TimelineRevision, actual: TimelineRevision) -> Self {
         Self::new(
             "stale_revision",
             format!("timeline revision conflict: expected {expected}, actual {actual}"),
@@ -1519,7 +1519,14 @@ fn scope_response(
                 "resolution": sample.provenance,
             })).collect::<Vec<_>>(),
         },
-        "gamut": {"out_of_range_pixels": 0, "out_of_range_basis_points": 0, "definition": "RGBA8 monitor proof is display-clamped; source/working gamut requires a named high-precision stage"},
+        // CC6 §7: a typed pointer, never a fabricated zero.  The former
+        // `"out_of_range_pixels": 0` read as "measured, none found" when
+        // nothing had been measured at all, and the two keys are now asserted
+        // absent.  Measuring gamut inline would need a *second* full-resolution
+        // render inside every scopes call and would place a
+        // `working_linear_post_composite` number inside a result whose
+        // `stage_measured` says `monitoring_post_composite`.
+        "gamut": gamut_pointer(),
         // `core_evidence` is the single typed source of truth.  The former
         // top-level waveform/rgb_parade/vectorscope/histogram/clipping aliases
         // repeated the same arrays verbatim and roughly doubled the payload.
@@ -1543,6 +1550,32 @@ fn scope_response(
             serde_json::to_value(&matte_region).unwrap_or(Value::Null);
     }
     Ok(value)
+}
+
+/// CC6 §7: the typed gamut pointer `get_video_scopes_v2` publishes.
+///
+/// The RGBA8 monitor proof this engine measures is display-clamped, so a gamut
+/// or legal-range excursion is not observable here at all.  The object states
+/// that it was not measured, names the stage that can measure it, and names
+/// the tool that does — and carries **no** `out_of_range_pixels` or
+/// `out_of_range_basis_points` key, because a zero in those keys reads as
+/// "measured, none found".
+pub(crate) const GAMUT_REQUIRES_WORKING_STAGE: &str = "gamut_requires_working_stage";
+
+/// See [`GAMUT_REQUIRES_WORKING_STAGE`].
+pub(crate) const GAMUT_POINTER_DEFINITION: &str = "the RGBA8 monitor proof is display-clamped, so a gamut or legal-range excursion is not \
+observable at monitoring_post_composite; measure it at working_linear_post_composite with get_color_qc";
+
+/// The pointer object itself, built in one place so the scopes response and
+/// its fixture cannot drift.
+pub(crate) fn gamut_pointer() -> Value {
+    json!({
+        "measured": false,
+        "code": GAMUT_REQUIRES_WORKING_STAGE,
+        "stage_required": ScopeStage::WorkingLinearPostComposite.as_str(),
+        "tool": "get_color_qc",
+        "definition": GAMUT_POINTER_DEFINITION,
+    })
 }
 
 fn measure_core_scopes(
@@ -1972,7 +2005,7 @@ fn assumptions(document: &Document, asset: AssetId, request: &ScopeRequest) -> V
     Value::Array(entries)
 }
 
-fn visual_clip(document: &Document, clip_id: ClipId) -> Result<&Clip, ScopeError> {
+pub(crate) fn visual_clip(document: &Document, clip_id: ClipId) -> Result<&Clip, ScopeError> {
     for track in &document.tracks {
         if let Some(clip) = track.clips.iter().find(|clip| clip.id == clip_id) {
             if track.kind != TrackKind::Video
@@ -1990,7 +2023,10 @@ fn visual_clip(document: &Document, clip_id: ClipId) -> Result<&Clip, ScopeError
     )))
 }
 
-fn clip_midpoint(document: &Document, clip: &Clip) -> Result<(TimeCode, TimeCode), ScopeError> {
+pub(crate) fn clip_midpoint(
+    document: &Document,
+    clip: &Clip,
+) -> Result<(TimeCode, TimeCode), ScopeError> {
     let duration = document.clip_duration(clip).map_err(|error| {
         ScopeError::invalid_request(format!("clip {} timing is invalid: {error}", clip.id))
     })?;
@@ -3799,5 +3835,47 @@ mod tests {
         );
         // Every pixel is measured, because nothing scoped the population.
         assert_eq!(value["core_evidence"]["metadata"]["visible_pixel_count"], 8);
+    }
+
+    /// CC6 §7: the gamut pointer names the stage and the tool that *can*
+    /// measure a gamut excursion, and publishes neither count key.
+    ///
+    /// The two exported constants are consumed here rather than only inside
+    /// the builder, so a rename or a reworded definition has to travel through
+    /// an assertion instead of silently changing what callers read.
+    #[test]
+    fn the_gamut_pointer_names_its_stage_and_tool_and_publishes_no_count() {
+        let pointer = gamut_pointer();
+        assert_eq!(pointer["measured"], json!(false));
+        assert_eq!(pointer["code"], GAMUT_REQUIRES_WORKING_STAGE);
+        assert_eq!(pointer["definition"], GAMUT_POINTER_DEFINITION);
+        assert_eq!(pointer["tool"], "get_color_qc");
+        assert_eq!(
+            pointer["stage_required"],
+            ScopeStage::WorkingLinearPostComposite.as_str()
+        );
+        // The definition has to say why, not just that: an operator reading
+        // "measured: false" needs the display-clamp reason in the same object.
+        assert!(
+            GAMUT_POINTER_DEFINITION.contains("display-clamped")
+                && GAMUT_POINTER_DEFINITION.contains("get_color_qc"),
+            "{GAMUT_POINTER_DEFINITION}"
+        );
+        // A zero in either key would read as "measured, none found", which is
+        // the exact defect the pointer replaced.
+        let pointer = pointer.as_object().unwrap().clone();
+        assert!(!pointer.contains_key("out_of_range_pixels"));
+        assert!(!pointer.contains_key("out_of_range_basis_points"));
+        // The pointer is what the response actually carries, not a copy of it.
+        assert_eq!(
+            gamut_pointer(),
+            json!({
+                "measured": false,
+                "code": "gamut_requires_working_stage",
+                "stage_required": "working_linear_post_composite",
+                "tool": "get_color_qc",
+                "definition": GAMUT_POINTER_DEFINITION,
+            })
+        );
     }
 }

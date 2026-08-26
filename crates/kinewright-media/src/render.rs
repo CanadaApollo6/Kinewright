@@ -7,8 +7,8 @@ use std::{
 use kinewright_core::{
     AssetId, ClipId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
     ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Document, Effect,
-    EffectId, FrameTexture, MatteProofError, MediaError, MediaSourceFingerprint, Rational,
-    TimeCode, Title, classify_source_with_assumption,
+    EffectId, FrameTexture, LinearRgbaImage, MatteProofError, MediaError, MediaSourceFingerprint,
+    Rational, TimeCode, Title, classify_source_with_assumption,
 };
 
 use crate::{
@@ -329,6 +329,34 @@ impl FrameRenderer {
             &document.color_context.delivery,
             Some(&self.lut_library),
         )
+    }
+
+    /// Composite one project frame's **scene-linear working surface** (CC6
+    /// §2.2).
+    ///
+    /// Layers are resolved exactly as [`Self::render`] and
+    /// [`Self::render_delivery`] resolve them — the same `decoded_layers`, the
+    /// same `compositor_layers`, the same LUT library — and the only
+    /// difference is the readback that is asked for: the `Rgba16Float`
+    /// composite target read back verbatim, with no transfer and no clamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the colour context, decode, or GPU
+    /// readback fails.
+    pub(crate) fn render_working(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+        strategy: DecodeStrategy,
+    ) -> Result<LinearRgbaImage, MediaError> {
+        let decoded_layers =
+            self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+        let layers = compositor_layers(&decoded_layers);
+        self.compositor
+            .render_working_with_luts(resolution, &layers, Some(&self.lut_library))
     }
 
     /// Render one clip's CC5 matte coverage instead of its colour.

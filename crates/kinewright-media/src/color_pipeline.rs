@@ -36,10 +36,10 @@ pub type SourceProfileAssumption = ColorSourceProfileAssumption;
 const BT709_LUMA_RED: f32 = 0.2126;
 const BT709_LUMA_GREEN: f32 = 0.7152;
 const BT709_LUMA_BLUE: f32 = 0.0722;
-const BT709_RED_FROM_CR: f32 = 1.5748;
-const BT709_GREEN_FROM_CB: f32 = -0.187_324;
-const BT709_GREEN_FROM_CR: f32 = -0.468_124;
-const BT709_BLUE_FROM_CB: f32 = 1.8556;
+pub(crate) const BT709_RED_FROM_CR: f32 = 1.5748;
+pub(crate) const BT709_GREEN_FROM_CB: f32 = -0.187_324;
+pub(crate) const BT709_GREEN_FROM_CR: f32 = -0.468_124;
+pub(crate) const BT709_BLUE_FROM_CB: f32 = 1.8556;
 
 /// A metadata or control error that prevents the managed reference path from
 /// making an implicit colour decision.

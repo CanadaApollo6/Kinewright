@@ -13,8 +13,8 @@ use std::{
 use kinewright_core::{
     AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, AssetTranscript, AudioLoudness,
     CaptionMotion, Clip, ClipContent, ClipId, Command, Core, DeliveryConformanceReport,
-    DeliveryProfile, Document, Event, Export, ExportCancellation, HarnessInfo, MediaKind,
-    Operation, ParamValue, Playback, Query, QueryResult, SessionConfig, TimeCode,
+    DeliveryEncodeDepth, DeliveryProfile, Document, Event, Export, ExportCancellation, HarnessInfo,
+    MediaKind, Operation, ParamValue, Playback, Query, QueryResult, SessionConfig, TimeCode,
     TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, Track,
     TrackId, TrackKind, TranscriptStatus, dedup_timeline_words, delivery_conformance,
     document_for_delivery_profile, map_source_range_to_project, qa_document,
@@ -989,6 +989,7 @@ fn produce_deliverable(
     let report = match delivery_conformance(
         document,
         spec.profile,
+        DeliveryEncodeDepth::Eight,
         spec.focus_x_percent,
         spec.focus_y_percent,
     ) {
@@ -1126,9 +1127,11 @@ fn export_and_probe(
         ));
         return;
     }
-    let settings = spec
-        .profile
-        .export_settings(document, ExportCancellation::default());
+    let settings = spec.profile.export_settings(
+        document,
+        DeliveryEncodeDepth::Eight,
+        ExportCancellation::default(),
+    );
     let (progress_tx, progress_rx) = crossbeam_channel::unbounded();
     if let Err(error) = exporter.export_document(
         Arc::clone(document),
@@ -6148,7 +6151,13 @@ fn evaluate_styled_captions(
 }
 
 fn evaluate_caption_safe_area(profile: DeliveryProfile, outcome: &EvalOutcome) -> AssertionResult {
-    match delivery_conformance(&outcome.final_document, profile, 50, 50) {
+    match delivery_conformance(
+        &outcome.final_document,
+        profile,
+        DeliveryEncodeDepth::Eight,
+        50,
+        50,
+    ) {
         Ok(report) => {
             let violations = report
                 .issues
@@ -8682,6 +8691,7 @@ mod tests {
         deliverable.proof_path = existing_file;
         deliverable.conformance = Some(DeliveryConformanceReport {
             profile: DeliveryProfile::VerticalShort,
+            delivery_bit_depth: DeliveryEncodeDepth::Eight,
             container: "mp4".to_owned(),
             resolution: (1_080, 1_920),
             delivery_color: document.color_context.delivery.clone(),

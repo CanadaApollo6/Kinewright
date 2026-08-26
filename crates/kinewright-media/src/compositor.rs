@@ -11,10 +11,10 @@ use half::f16;
 use kinewright_core::{
     COLOR_NODE_LIMIT_PER_LAYER, ClipId, ColorContext, ColorCurveChannel, ColorDescription,
     ColorNodeKind, ColorWheelChannel, ColorWheelsParams, CurvePoints, Effect, EffectId,
-    EffectParameterDescriptor, EffectUniform, FrameTexture, LutNodeParams, MATTE_WINDOW_LIMIT,
-    MatteParams, MatteProofError, MediaError, MonitorProofMetadata, MonitorProofRenderKind,
-    ParamValue, ResolvedCurves, classify_color_node, color_node_inactive_reason, effect_descriptor,
-    managed_color_node_count,
+    EffectParameterDescriptor, EffectUniform, FrameTexture, LinearRgbaImage, LutNodeParams,
+    MATTE_WINDOW_LIMIT, MatteParams, MatteProofError, MediaError, MonitorProofMetadata,
+    MonitorProofRenderKind, ParamValue, ResolvedCurves, classify_color_node,
+    color_node_inactive_reason, effect_descriptor, managed_color_node_count,
 };
 
 use crate::{
@@ -1711,28 +1711,36 @@ impl Compositor {
         })
     }
 
-    /// Render and read back the production working surface for CC1 evidence.
+    /// Render and read back the production working surface (CC6 §2.2).
     ///
-    /// This is deliberately test-only: the public compositor contract ends at
-    /// the monitor `FrameTexture`, while the fixture gate needs to compare the
-    /// actual `Rgba16Float` render target against the canonical CPU reference.
-    #[cfg(test)]
-    pub(crate) fn render_working(
+    /// This is the composited scene-linear `Rgba16Float` render target read
+    /// back verbatim: **no transfer and no clamp**, so values may be negative
+    /// and may exceed `1.0`. The delivery clamp is the only clamp in the
+    /// managed pipeline and nothing downstream of it can count what it ate,
+    /// which is exactly why CC6 names this surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the composite or the GPU readback fails.
+    pub fn render_working<F: CompositorInput>(
         &self,
         resolution: (u32, u32),
-        layers: &[CompositorLayer<'_, WorkingFrame>],
-    ) -> Result<Vec<f32>, MediaError> {
+        layers: &[CompositorLayer<'_, F>],
+    ) -> Result<LinearRgbaImage, MediaError> {
         self.render_working_with_luts(resolution, layers, None)
     }
 
     /// [`Self::render_working`] with the verified CC4 LUT library.
-    #[cfg(test)]
-    pub(crate) fn render_working_with_luts(
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the composite or the GPU readback fails.
+    pub fn render_working_with_luts<F: CompositorInput>(
         &self,
         resolution: (u32, u32),
-        layers: &[CompositorLayer<'_, WorkingFrame>],
+        layers: &[CompositorLayer<'_, F>],
         library: Option<&LutLibrary>,
-    ) -> Result<Vec<f32>, MediaError> {
+    ) -> Result<LinearRgbaImage, MediaError> {
         let (width, height) = resolution;
         let (output, resources, encoder) = self.composite(width, height, layers, library, None)?;
         let mut values = Vec::with_capacity(
@@ -1746,7 +1754,11 @@ impl Compositor {
                 values.extend(linear);
                 Ok(())
             })
-            .map(|()| values);
+            .map(|()| LinearRgbaImage {
+                width,
+                height,
+                pixels: values,
+            });
         self.release_layer_textures(resources);
         readback
     }
@@ -3378,6 +3390,7 @@ mod tests {
                 }],
             )
             .expect("production GPU working-surface readback")
+            .pixels
     }
 
     fn crop(id: u64, left: i64, right: i64, top: i64, bottom: i64) -> Effect {
@@ -4235,6 +4248,7 @@ mod tests {
                 Some(luts.library()),
             )
             .expect("production GPU working-surface readback")
+            .pixels
     }
 
     /// Every pixel of a solid readback equals `expected` within `tolerance`.
@@ -5177,7 +5191,8 @@ mod tests {
                     transition: TransitionRenderParams::default(),
                 }],
             )
-            .expect("chroma-key working-surface readback");
+            .expect("chroma-key working-surface readback")
+            .pixels;
         let unkeyed = compositor
             .render_working(
                 (4, 4),
@@ -5187,7 +5202,8 @@ mod tests {
                     transition: TransitionRenderParams::default(),
                 }],
             )
-            .expect("neutral working-surface readback");
+            .expect("neutral working-surface readback")
+            .pixels;
 
         // CC1 2.2.5: no colour stage clamps RGB, and CC1 2.2.4: keying does
         // not change the colour of pixels it keeps.
@@ -5263,7 +5279,8 @@ mod tests {
                     transition: TransitionRenderParams::default(),
                 }],
             )
-            .expect("chroma-key working-surface readback");
+            .expect("chroma-key working-surface readback")
+            .pixels;
         let unkeyed = compositor
             .render_working(
                 (4, 4),
@@ -5273,7 +5290,8 @@ mod tests {
                     transition: TransitionRenderParams::default(),
                 }],
             )
-            .expect("neutral working-surface readback");
+            .expect("neutral working-surface readback")
+            .pixels;
 
         assert!(
             keyed[1] < 0.0,
@@ -5352,7 +5370,8 @@ mod tests {
                     transition: TransitionRenderParams::default(),
                 }],
             )
-            .expect("chroma-key edge working-surface readback");
+            .expect("chroma-key edge working-surface readback")
+            .pixels;
 
         let [red, green, blue, ..] = keyed[0..4] else {
             panic!("four channels");
@@ -6770,5 +6789,250 @@ mod tests {
         assert_matte_window_geometry(&compositor);
         assert_matte_feather_codes(&compositor);
         assert_matte_qualifier_anchors(&compositor);
+    }
+
+    // -----------------------------------------------------------------------
+    // CC6 §11.2.6 / §11.2.7 / §11.2.8: the working proof.
+    // -----------------------------------------------------------------------
+
+    // §11.1's QC raster, its populations, and the three CC5-derived patch
+    // tables live in `cc6_fixtures.rs`: three files measure that raster and a
+    // second copy would be a second definition of every population in §11.1.
+    use crate::cc6_fixtures::{CC6_QC_RASTER, cc6_qc_raster};
+
+    /// A full CC3 + CC4 + CC5 node stack: a primary, wheels, curves, an
+    /// asset-backed creative look, and a matte-scoped secondary.
+    fn cc6_node_stack(lut: i64) -> Vec<Effect> {
+        vec![
+            effect_with(
+                1,
+                "primary_correction",
+                &[("exposure_milli_stops", 350), ("contrast_percent", 12)],
+            ),
+            wheels(
+                2,
+                &[
+                    ("lift_red_basis_points", -220),
+                    ("gamma_green_thousandths", 1_120),
+                    ("gain_blue_thousandths", 1_180),
+                ],
+            ),
+            effect_with(
+                3,
+                "color_curves",
+                &[
+                    ("master_point_count", 3),
+                    ("master_x0", 0),
+                    ("master_y0", 0),
+                    ("master_x1", 5_000),
+                    ("master_y1", 5_600),
+                    ("master_x2", 10_000),
+                    ("master_y2", 10_000),
+                ],
+            ),
+            // Token 2 is `grade709`, the encoding the chart patches are
+            // authored in.
+            creative_look(4, lut, 2, 7_000),
+            with_matte(
+                wheels(5, &[("gain_red_thousandths", 1_250)]),
+                &[
+                    ("matte_window_count", 1),
+                    ("matte_window_0_shape", 1),
+                    ("matte_window_0_center_x_basis_points", 3_000),
+                    ("matte_window_0_center_y_basis_points", 7_000),
+                    ("matte_window_0_width_basis_points", 4_000),
+                    ("matte_window_0_height_basis_points", 4_000),
+                    ("matte_window_0_softness_basis_points", 2_500),
+                ],
+            ),
+        ]
+    }
+
+    /// The §11.2.6 comparison: production GPU working surface against the
+    /// production CPU reference, banded by CC1 §6.2 magnitude.
+    fn assert_cc6_working_parity(fixture: &crate::cc1_fixtures::FixtureGpu) {
+        use crate::cc1_fixtures::{
+            LINEAR_CPU_GPU_MAX, LINEAR_CPU_GPU_MEAN, LINEAR_CPU_GPU_P99, LINEAR_GATE_DOMAIN,
+            LINEAR_GATE_IN_GAMUT, LINEAR_OVER_RANGE_MEAN, LINEAR_OVER_RANGE_P99,
+            assert_linear_parity, linear_parity_metrics,
+        };
+
+        // §11.2.6: no new tolerance is invented. The banded gate is asserted
+        // to *be* the CC1 §6.2 constants before it is applied, so a future
+        // widening of either constant cannot slip through as a CC6 change.
+        assert!((LINEAR_CPU_GPU_MAX - 1.5e-3).abs() <= f32::EPSILON);
+        assert!((LINEAR_CPU_GPU_P99 - 7.5e-4).abs() <= f32::EPSILON);
+        assert!((LINEAR_CPU_GPU_MEAN - 2.5e-4).abs() <= f32::EPSILON);
+        assert!((LINEAR_OVER_RANGE_P99 - 9.765_625e-4).abs() <= f32::EPSILON);
+        assert!((LINEAR_OVER_RANGE_MEAN - 9.765_625e-4).abs() <= f32::EPSILON);
+        assert!((LINEAR_GATE_IN_GAMUT - 1.0).abs() <= f32::EPSILON);
+        assert!((LINEAR_GATE_DOMAIN - 2.0).abs() <= f32::EPSILON);
+
+        let luts = TestLuts::build("cc6-working-proof", &[lut_b_cube()]);
+        let compositor = Compositor::new(fixture.context());
+        let frame = cc6_qc_raster();
+        let effects = cc6_node_stack(1);
+        let nodes = crate::color_pipeline::resolve_color_nodes_with(&effects, luts.library())
+            .expect("the CC6 node stack resolves against the verified library");
+        assert_eq!(nodes.len(), 5, "the CC6 stack is CC1 + CC3 x2 + CC4 + CC5");
+
+        let image = compositor
+            .render_working_with_luts(
+                CC6_QC_RASTER,
+                &[CompositorLayer {
+                    frame: &frame,
+                    effects: &effects,
+                    transition: TransitionRenderParams::default(),
+                }],
+                Some(luts.library()),
+            )
+            .expect("production GPU working-surface readback");
+        // The productionised readback carries its own raster, which is what
+        // makes a `WorkingProof` able to state a raster at all.
+        assert_eq!((image.width, image.height), CC6_QC_RASTER);
+        assert_eq!(
+            image.pixels.len(),
+            (CC6_QC_RASTER.0 * CC6_QC_RASTER.1 * 4) as usize
+        );
+
+        let reference = cc6_cpu_reference_linear(&frame, &nodes);
+        let metrics = linear_parity_metrics(&image.pixels, &reference);
+        assert!(
+            metrics.compared() >= (CC6_QC_RASTER.0 * CC6_QC_RASTER.1) as usize,
+            "the CC6 working-proof gate has too few in-domain RGB samples: {metrics:?}"
+        );
+        assert_linear_parity(&metrics, "cc6_working_proof");
+        println!(
+            "CC6_WORKING_PROOF lane={} in_gamut_max={} in_gamut_p99={} in_gamut_mean={} over_range_max={} over_range_samples={} above_domain={}",
+            fixture.lane.id(),
+            metrics.in_gamut.max,
+            metrics.in_gamut.p99,
+            metrics.in_gamut.mean,
+            metrics.over_range.max,
+            metrics.over_range_samples,
+            metrics.above_domain
+        );
+
+        // Failing direction (rule 11.0.5): the same comparison against a
+        // reference perturbed by 2 x LINEAR_CPU_GPU_MAX must exceed the gate,
+        // so the gate is known to be able to fail.
+        let perturbed = reference
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|rgba| {
+                [
+                    rgba[0] + 2.0 * LINEAR_CPU_GPU_MAX,
+                    rgba[1],
+                    rgba[2],
+                    rgba[3],
+                ]
+            })
+            .collect::<Vec<_>>();
+        let perturbed = linear_parity_metrics(&image.pixels, &perturbed);
+        assert!(
+            perturbed.in_gamut.max > LINEAR_CPU_GPU_MAX,
+            "a 2x-perturbed reference must break the linear gate: {perturbed:?}"
+        );
+    }
+
+    /// The production CPU reference in the linear working domain, including
+    /// the normative `Rgba16Float` storage quantization.
+    fn cc6_cpu_reference_linear(
+        frame: &WorkingFrame,
+        nodes: &[crate::color_pipeline::ColorNode],
+    ) -> Vec<f32> {
+        #[allow(clippy::cast_precision_loss)]
+        let aspect = frame.width.max(1) as f32 / frame.height.max(1) as f32;
+        let width = frame.width.max(1) as usize;
+        frame
+            .pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .enumerate()
+            .flat_map(|(index, rgba)| {
+                #[allow(clippy::cast_precision_loss)]
+                let uv = [
+                    ((index % width) as f32 + 0.5) / frame.width.max(1) as f32,
+                    ((index / width) as f32 + 0.5) / frame.height.max(1) as f32,
+                ];
+                let output = crate::color_pipeline::apply_color_nodes_at(
+                    nodes,
+                    [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()],
+                    uv,
+                    aspect,
+                );
+                output
+                    .into_iter()
+                    .map(|value| f16::from_f32(value).to_f32())
+                    .chain(std::iter::once(f16::from_f32(rgba[3].to_f32()).to_f32()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cc6_working_proof_matches_the_cpu_reference_on_the_software_lane() {
+        assert_cc6_working_parity(&crate::cc1_fixtures::fallback_gpu());
+    }
+
+    #[test]
+    #[ignore = "requires a physical supported GPU; run explicitly with --ignored --nocapture"]
+    fn cc6_working_proof_matches_the_cpu_reference_on_hardware() {
+        assert_cc6_working_parity(&crate::cc1_fixtures::hardware_gpu());
+    }
+
+    #[test]
+    fn cc6_working_proof_refuses_a_claim_that_is_not_full_resolution() {
+        use kinewright_core::{
+            ColorQcRequest, LinearRgbaImage, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE,
+            WorkingProof, WorkingProofMetadata, measure_color_qc,
+        };
+
+        let fixture = crate::cc1_fixtures::fallback_gpu();
+        let gpu = fixture.context();
+        let document = (8_u32, 4_u32);
+        let proof_for = |metadata: MonitorProofMetadata| WorkingProof {
+            image: LinearRgbaImage {
+                width: document.0,
+                height: document.1,
+                pixels: vec![0.5; (document.0 * document.1 * 4) as usize],
+            },
+            metadata: WorkingProofMetadata {
+                render: metadata,
+                stage: WORKING_PROOF_STAGE.to_owned(),
+                encoding: WORKING_PROOF_ENCODING.to_owned(),
+                raster_aspect_millionths: 2_000_000,
+            },
+        };
+
+        // Both legs of the `full_resolution` conjunction, built through the
+        // production derivation rather than by asserting a flag: a proxy scale
+        // at the document raster, and full scale at a raster that is not the
+        // document's. Either one alone must refuse.
+        let proxy_scale =
+            gpu.monitor_proof_metadata_for(RenderScale::Proxy { max_width: 4 }, document, document);
+        assert!(!proxy_scale.full_resolution);
+        let wrong_raster =
+            gpu.monitor_proof_metadata_for(RenderScale::FullResolution, (4, 2), document);
+        assert!(!wrong_raster.full_resolution);
+
+        for (leg, metadata) in [("proxy_scale", proxy_scale), ("wrong_raster", wrong_raster)] {
+            let error = measure_color_qc(&proof_for(metadata), &ColorQcRequest::default())
+                .expect_err("a proof that is not full-resolution is refused");
+            assert_eq!(error.code(), "color_qc_proxy_proof_refused", "leg {leg}");
+            assert_eq!(error.field(), "full_resolution", "leg {leg}");
+            assert_eq!(error.observed(), "false", "leg {leg}");
+            assert!(!error.allowed_values().is_empty(), "leg {leg}");
+        }
+
+        // Passing direction: the derivation's own `true` measures normally.
+        let full = gpu.monitor_proof_metadata_for(RenderScale::FullResolution, document, document);
+        assert!(full.full_resolution);
+        let report = measure_color_qc(&proof_for(full), &ColorQcRequest::default())
+            .expect("a full-resolution proof measures normally");
+        assert!(report.full_resolution);
+        assert_eq!(report.stage, WORKING_PROOF_STAGE);
+        assert_eq!(report.raster, document);
     }
 }

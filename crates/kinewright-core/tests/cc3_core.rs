@@ -13,13 +13,13 @@ use kinewright_core::{
     AssetId, AutomationCurve, COLOR_CURVE_PARAMETER_COUNT, COLOR_CURVES_PARAMETER_COUNT,
     COLOR_NODE_LIMIT_PER_LAYER, Clip, ClipContent, ClipId, ColorContext, ColorCurveChannel,
     ColorDescription, ColorNodeInactiveReason, ColorNodeKind, ColorWheelsParams, Command, Core,
-    CurvePoints, DeliveryProfile, Document, Effect, EffectId, EffectUniform, Event, JournalCommand,
-    Keyframe, KeyframeInterpolation, MANAGED_COLOR_NODE_NAMES, MATTE_PARAMETER_COUNT, MediaAsset,
-    MediaKind, OpError, Operation, ParamValue, QaSeverity, Rational, ResolvedCurves, TimeCode,
-    Track, TrackId, TrackKind, active_color_nodes, classify_color_node,
-    color_curve_parameter_names, color_node_inactive_reason, delivery_conformance,
-    effect_compatibility_stage, effect_descriptor, is_managed_color_node, managed_color_node_count,
-    qa_document,
+    CurvePoints, DeliveryEncodeDepth, DeliveryProfile, Document, Effect, EffectId, EffectUniform,
+    Event, JournalCommand, Keyframe, KeyframeInterpolation, MANAGED_COLOR_NODE_NAMES,
+    MATTE_PARAMETER_COUNT, MediaAsset, MediaKind, OpError, Operation, ParamValue, QaSeverity,
+    Rational, ResolvedCurves, TimeCode, Track, TrackId, TrackKind, active_color_nodes,
+    classify_color_node, color_curve_parameter_names, color_node_inactive_reason,
+    delivery_conformance, effect_compatibility_stage, effect_descriptor, is_managed_color_node,
+    managed_color_node_count, qa_document,
 };
 
 /// A path that always exists so `missing_media` never masks a colour issue.
@@ -972,8 +972,14 @@ fn qa_and_delivery_report_nothing_for_managed_colour_nodes() {
     }
     assert!(report.export_ready());
 
-    let delivery = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
-        .expect("delivery conformance must produce a report");
+    let delivery = delivery_conformance(
+        &document,
+        DeliveryProfile::SourceMaster,
+        DeliveryEncodeDepth::Eight,
+        50,
+        50,
+    )
+    .expect("delivery conformance must produce a report");
     for code in colour_codes {
         assert!(
             !delivery.issues.iter().any(|issue| issue.code == code),

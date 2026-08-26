@@ -9,6 +9,14 @@ All notable changes to Kinewright are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Fixed
+- Every H.264 export lost its last frame on playback: video packets were
+  muxed without a duration, so the MP4 muxer computed a track duration one
+  frame short and wrote an edit list that hid the final coded picture
+  (12 packets, 11 presented). Found by CC6's decoded-output verification,
+  which reads the file as a player would and therefore refused to sample
+  frame `T − 1`. Frames now carry their duration into the muxer, and
+  verification cross-checks the presented frame count so a regression fails
+  typed with `delivery_verification_frame_count_mismatch`.
 - The managed delivery path quantized the 16-bit RGBA intermediate handed to
   the export filter graph on a `65535 = white` scale, while libswscale treats
   16-bit RGB input on the `255 << 8 = 65280` scale (the same `P_8` CC1 §3.1
@@ -33,6 +41,35 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   whatever is there.
 
 ### Added
+- CC6 QC and managed delivery: a named high-precision stage
+  (`working_linear_post_composite`, `Analysis::working_proof_for_document`)
+  reads the production composite back as linear f32 before any encode; the
+  core `color_qc` engine reports range (delivery-encoded clamp events per
+  channel, basis points and extremes), gamut (negative linear channels and
+  the desaturation fraction), a forward BT.709 limited-range Y′CbCr reference
+  at 8 and 10 bits with legality counts, region-scoped skin diagnostics
+  (circular mean/spread, chroma, in-band rate against a band derived from the
+  CC5 skin patches — a diagnostic of a chosen region, not a detector), a
+  two-mode typed delivery tag check, and per-node clipping attribution by
+  effect removal on a scratch document, all integer-reported and
+  evidence-only. Delivery gains a 10-bit H.264 lane (`DeliveryEncodeDepth`,
+  `yuv420p10le`), typed `DeliveryColorError` rejections with
+  `code/field/observed/allowed`, serializable `ExportSettings`, and
+  `Analysis::verify_delivery_output`, which decodes the written file at
+  sampled frames in one seek-based pass, compares the native luma plane and
+  RGB against the full-resolution delivery reference under named per-lane
+  budgets (RGB max is reported, never gated: 4:2:0 chroma decimation at
+  saturated edges dominates it in both lanes), measures decoded Y′CbCr
+  legality against the EBU R 103 box, and probes tags; verification never
+  moves a finished file. The agent gains `get_color_qc`, `queue_export`
+  `verify`/`delivery_bit_depth`, verification on `get_export_jobs`, and a
+  typed pointer in place of `get_video_scopes_v2`'s fabricated gamut zero.
+  The app gains a Colour QC window, a QC clipping mask view, absolute
+  per-channel clipping in the scopes panel, a per-node clipping line in the
+  inspector, and an 8/10-bit choice plus a post-export verification block in
+  the export dialog. The exit gate is a synthetic 60-frame source exported at
+  both depths, re-probed, decoded, and gated on tag, range, and
+  visual-difference budgets in the default lane on both CI operating systems.
 - CC5 secondaries: node-owned mattes on `primary_correction`, `color_wheels`,
   `color_curves`, and `creative_look` (never on `technical_lut`), expressed as
   47 generated integer parameters per node — up to four rectangular or

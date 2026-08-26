@@ -35,10 +35,11 @@ use half::f16;
 use kinewright_core::{
     Analysis, AssetId, Clip, ClipContent, ClipId, ColorBitDepth, ColorContext, ColorDescription,
     ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange, ColorSourceProfile,
-    ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Command, Core, DeliveryProfile,
-    Document, Effect, EffectId, Event, ExportCancellation, ExportSettings, JournalCommand,
-    MediaAsset, MediaError, MediaKind, Operation, ParamValue, Rational, TimeCode, Track, TrackId,
-    TrackKind, delivery_conformance, effect_compatibility_stage, is_legacy_display_effect,
+    ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Command, Core,
+    DeliveryEncodeDepth, DeliveryProfile, Document, Effect, EffectId, Event, ExportCancellation,
+    ExportSettings, JournalCommand, MediaAsset, MediaError, MediaKind, Operation, ParamValue,
+    Rational, TimeCode, Track, TrackId, TrackKind, delivery_conformance,
+    effect_compatibility_stage, is_legacy_display_effect,
 };
 use serde_json::{Value, json};
 
@@ -117,7 +118,7 @@ pub(crate) const MIN_CHANGED_LINEAR_BASIS_POINTS: u64 = 500;
 
 /// Absolute/relative tolerance used when the f32 production reference is
 /// compared against the f64 spec equations written out in this file.
-const SPEC_F64_TOLERANCE: f64 = 1.0e-6;
+pub(crate) const SPEC_F64_TOLERANCE: f64 = 1.0e-6;
 
 #[derive(Debug, Clone, Copy)]
 enum RampEncoding {
@@ -1348,7 +1349,8 @@ fn assert_gpu_control_case(
                 transition: TransitionRenderParams::default(),
             }],
         )
-        .expect("production GPU working-surface readback");
+        .expect("production GPU working-surface readback")
+        .pixels;
     let linear_metric = linear_parity_metrics(&actual_linear, &expected_linear);
     assert!(
         linear_metric.compared() >= width as usize * height as usize,
@@ -2901,7 +2903,8 @@ fn cc1_no_intermediate_clamp_preserves_recoverable_over_range_values() {
                 transition: TransitionRenderParams::default(),
             }],
         )
-        .expect("production WGSL no-intermediate-clamp readback");
+        .expect("production WGSL no-intermediate-clamp readback")
+        .pixels;
     assert_eq!(working.len(), 4);
     for (actual, expected) in working[..3].iter().copied().zip(input) {
         assert!(
@@ -2938,7 +2941,8 @@ fn cc1_no_intermediate_clamp_preserves_recoverable_over_range_values() {
                 transition: TransitionRenderParams::default(),
             }],
         )
-        .expect("production WGSL over-range ramp readback");
+        .expect("production WGSL over-range ramp readback")
+        .pixels;
     let expected_ramp = ramp_rgb
         .iter()
         .flat_map(|rgb| {
@@ -3340,9 +3344,14 @@ fn cc1_source_profile_classification_is_typed_and_actionable() {
     let mut blocked_asset = probe_path(&actual_path, AssetId(7)).expect("actual source probe");
     blocked_asset.color_description.transfer = ColorTransfer::AribStdB67;
     let blocked_document = simple_document(blocked_asset, (32, 16));
-    let conformance =
-        delivery_conformance(&blocked_document, DeliveryProfile::SourceMaster, 50, 50)
-            .expect("unsupported source should produce a blocking QA report");
+    let conformance = delivery_conformance(
+        &blocked_document,
+        DeliveryProfile::SourceMaster,
+        DeliveryEncodeDepth::Eight,
+        50,
+        50,
+    )
+    .expect("unsupported source should produce a blocking QA report");
     assert!(!conformance.export_ready());
     assert!(conformance.issues.iter().any(|issue| {
         issue.severity == kinewright_core::QaSeverity::Error && issue.code.contains("source")
@@ -3396,8 +3405,11 @@ fn cc1_unsupported_source_blocks_managed_proof_and_export() {
     );
 
     let blocked_export_path = directory.path("cc1-blocked-export.mp4");
-    let blocked_settings = DeliveryProfile::SourceMaster
-        .export_settings(&blocked_document, ExportCancellation::default());
+    let blocked_settings = DeliveryProfile::SourceMaster.export_settings(
+        &blocked_document,
+        DeliveryEncodeDepth::Eight,
+        ExportCancellation::default(),
+    );
     let (progress_tx, _progress_rx) = crossbeam_channel::unbounded();
     let export_error = match crate::export::export_document(
         &blocked_document,
@@ -3457,8 +3469,11 @@ fn cc1_unsupported_source_blocks_managed_proof_and_export() {
             Err(error) => error,
         };
     let override_export_path = directory.path("cc1-blocked-override-export.mp4");
-    let override_settings =
-        DeliveryProfile::SourceMaster.export_settings(&overridden, ExportCancellation::default());
+    let override_settings = DeliveryProfile::SourceMaster.export_settings(
+        &overridden,
+        DeliveryEncodeDepth::Eight,
+        ExportCancellation::default(),
+    );
     let override_export_error = match crate::export::export_document(
         &overridden,
         &override_export_path,

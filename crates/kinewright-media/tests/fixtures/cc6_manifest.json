@@ -1,0 +1,923 @@
+{
+  "contract": "CC6 QC and managed delivery",
+  "contract_token": "cc6_qc_and_managed_delivery",
+  "manifest_version": 1,
+  "stages": [
+    {
+      "stage": "monitoring_post_composite",
+      "measurable_by_scope_engine": true
+    },
+    {
+      "stage": "working_linear_post_composite",
+      "measurable_by_scope_engine": false,
+      "note": "CC6 §2.1: the working stage is a QC surface, not a scope surface. `ScopeRequest::validate` refuses it through the existing `UnsupportedStage`."
+    }
+  ],
+  "working_proof": {
+    "stage": "working_linear_post_composite",
+    "encoding": "scene_linear_bt709_f32",
+    "full_resolution_only": true
+  },
+  "delivery_lanes": [
+    {
+      "name": "eight",
+      "bit_depth": 8,
+      "pixel_format": "yuv420p",
+      "codec": "libx264",
+      "x264_params": "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+      "profile_option": null,
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "bt709",
+      "range": "limited",
+      "white_point": "d65"
+    },
+    {
+      "name": "ten",
+      "bit_depth": 10,
+      "pixel_format": "yuv420p10le",
+      "codec": "libx264",
+      "x264_params": "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+      "profile_option": null,
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "bt709",
+      "range": "limited",
+      "white_point": "d65"
+    }
+  ],
+  "delivery_intermediate": {
+    "white": 65280,
+    "source_commit": "ad6f6a8"
+  },
+  "skin": {
+    "band_center_centidegrees": 12339,
+    "band_half_width_centidegrees": 1200,
+    "patch_hue_centidegrees": [
+      12385,
+      12396,
+      12385,
+      12188
+    ],
+    "min_chroma_millionths": 20000,
+    "band_exception_basis_points": 5000,
+    "max_spread_centidegrees": 18000,
+    "derivation": "The four CC5 CHART_PATCHES skin triples, decoded from grade709, delivery-encoded, converted to Cb/Cr through §3.4 and taken to atan2, give [12385, 12396, 12385, 12188]; the band centre is their circular mean 12339 with R = 0.999885, and the half width 1200 centidegrees puts every patch at least 1049 centidegrees inside the edge. The derived NTSC +I axis at 12300 corroborates it; Rec.709 red at 10291 and CC5 product_red at 10137 are outside."
+  },
+  "ycbcr": {
+    "bt709_kr": 0.2126,
+    "bt709_kb": 0.0722,
+    "bt709_cb_denominator": 1.8556,
+    "bt709_cr_denominator": 1.5748,
+    "luma_offset": 16,
+    "luma_span": 219,
+    "chroma_offset": 128,
+    "chroma_span": 224,
+    "luma_legal_high": 235,
+    "chroma_legal_high": 240,
+    "anchors": [
+      {
+        "encoded_rgb": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "y_8": 235.0,
+        "cb_8": 128.0,
+        "cr_8": 128.0,
+        "y_10": 940.0,
+        "cb_10": 512.0,
+        "cr_10": 512.0
+      },
+      {
+        "encoded_rgb": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "y_8": 16.0,
+        "cb_8": 128.0,
+        "cr_8": 128.0,
+        "y_10": 64.0,
+        "cb_10": 512.0,
+        "cr_10": 512.0
+      },
+      {
+        "encoded_rgb": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "y_8": 125.5,
+        "cb_8": 128.0,
+        "cr_8": 128.0,
+        "y_10": 502.0,
+        "cb_10": 512.0,
+        "cr_10": 512.0
+      },
+      {
+        "encoded_rgb": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "y_8": 62.5594,
+        "cb_8": 102.335848,
+        "cr_8": 240.0,
+        "y_10": 250.2376,
+        "cb_10": 409.343393,
+        "cr_10": 960.0
+      },
+      {
+        "encoded_rgb": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "y_8": 172.6288,
+        "cb_8": 41.664152,
+        "cr_8": 26.269749,
+        "y_10": 690.5152,
+        "cb_10": 166.656607,
+        "cr_10": 105.078994
+      },
+      {
+        "encoded_rgb": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "y_8": 31.8118,
+        "cb_8": 240.0,
+        "cr_8": 117.730251,
+        "y_10": 127.2472,
+        "cb_10": 960.0,
+        "cr_10": 470.921006
+      },
+      {
+        "encoded_rgb": [
+          1.0,
+          1.0,
+          0.0
+        ],
+        "y_8": 219.1882,
+        "cb_8": 16.0,
+        "cr_8": 138.269749,
+        "y_10": 876.7528,
+        "cb_10": 64.0,
+        "cr_10": 553.078994
+      },
+      {
+        "encoded_rgb": [
+          0.0,
+          1.0,
+          1.0
+        ],
+        "y_8": 188.4406,
+        "cb_8": 153.664152,
+        "cr_8": 16.0,
+        "y_10": 753.7624,
+        "cb_10": 614.656607,
+        "cr_10": 64.0
+      }
+    ],
+    "bound_note": "The anchors that land exactly on 16/240 (10-bit 64/960) are NOT excursions under the strict `>` / `<` tests: red and blue attain the chroma maximum, yellow and cyan the minimum."
+  },
+  "raster": {
+    "width": 80,
+    "height": 40,
+    "pixels": 3200,
+    "basis_points_per_pixel_x": 125,
+    "basis_points_per_pixel_y": 250,
+    "populations": {
+      "in_range_ramp": 1152,
+      "over_block": 288,
+      "under_block": 288,
+      "skin_patches": 384,
+      "product_patches": 192,
+      "below_black_pixel": 1,
+      "isolated_over_pixel": 1,
+      "surround": 894
+    },
+    "whole_raster_basis_points": {
+      "over": 903,
+      "under_red": 903,
+      "under_green_blue": 3,
+      "out_of_gamut": 903,
+      "clamped": 1806
+    },
+    "sub_threshold_roi": {
+      "left_basis_points": 0,
+      "top_basis_points": 0,
+      "width_basis_points": 6125,
+      "height_basis_points": 6000,
+      "pixels": 1176,
+      "every_counter_basis_points": 8
+    },
+    "delivery_source": {
+      "width": 320,
+      "height": 180,
+      "fps": 25,
+      "frames": 60,
+      "gop": 50,
+      "sampled_frames": [
+        0,
+        14,
+        29,
+        44,
+        59
+      ],
+      "moving_element": "a 16x16 white square whose top-left corner is at (4 * frame, 20), x = 0 .. 236 over frames 0-59",
+      "pixel_format": "yuv444p",
+      "codec": "ffv1",
+      "range": "limited"
+    }
+  },
+  "thresholds": {
+    "bt709_kr": 0.2126,
+    "bt709_kb": 0.0722,
+    "bt709_cb_denominator": 1.8556,
+    "bt709_cr_denominator": 1.5748,
+    "ycbcr_luma_offset": 16,
+    "ycbcr_luma_span": 219,
+    "ycbcr_chroma_offset": 128,
+    "ycbcr_chroma_span": 224,
+    "ycbcr_luma_legal_high": 235,
+    "ycbcr_chroma_legal_high": 240,
+    "qc_range_exception_basis_points": 10,
+    "qc_gamut_exception_basis_points": 10,
+    "skin_min_chroma_millionths": 20000,
+    "skin_band_center_centidegrees": 12339,
+    "skin_band_half_width_centidegrees": 1200,
+    "skin_band_exception_basis_points": 5000,
+    "skin_max_spread_centidegrees": 18000,
+    "max_qc_node_contributions": 16,
+    "delivery_verification_frame_count": 5,
+    "delivery_verification_max_frames": 16,
+    "delivery_luma_max_code_8bit": 8,
+    "delivery_luma_p99_code_8bit_millionths": 3000000,
+    "delivery_luma_mean_code_8bit_millionths": 400000,
+    "delivery_rgb_mean_code_8bit_millionths": 1750000,
+    "delivery_psnr_floor_db_hundredths_8bit": 3300,
+    "delivery_luma_max_code_10bit": 16,
+    "delivery_luma_p99_code_10bit_millionths": 4000000,
+    "delivery_luma_mean_code_10bit_millionths": 1000000,
+    "delivery_rgb_mean_code_10bit_millionths": 1000000,
+    "delivery_psnr_floor_db_hundredths_10bit": 3300,
+    "decoded_range_exception_basis_points": 100,
+    "delivery_intermediate_white": 65280,
+    "delivery_reference_denominator": 65280,
+    "ebu_r103_tolerance_codes_8bit": 11
+  },
+  "budgets": {
+    "measurement": {
+      "os": "linux",
+      "lane": "software_fallback",
+      "adapter": "llvmpipe (LLVM 22.1.8, 256 bits)",
+      "source": "cc6_delivery_source() at 320x180, 60 frames, DeliveryProfile::SourceMaster (20 Mb/s)",
+      "ffmpeg": "mifi/ffmpeg-builds 8.0-1, libavcodec 62.11.100, libswscale 9.1.100, x264 core 165",
+      "note": "Recorded from the CC6 fixture's own run, per §6.3's rule that every budget is confirmed against cc6_delivery_source() and re-baselined BEFORE the fixture lands. Every margin_ratio below is at least 2.0. The two luma terms and the luma mean are the codec-only gate; the RGB mean and PSNR are whole-raster sanity floors dominated by 4:2:0 chroma decimation on this source, which §6.3(c) says must never be gated on its extremes."
+    },
+    "eight_bit": {
+      "luma_max_code": {
+        "threshold": 8,
+        "measured": 2,
+        "margin_ratio": 4.0
+      },
+      "luma_p99_code_millionths": {
+        "threshold": 3000000,
+        "measured": 1000000,
+        "margin_ratio": 3.0,
+        "note": "Re-baselined from 2000000: at that threshold the margin was exactly 2.0x, at the 2x bar rather than above it, with nothing budgeted for the R5 Windows divergence a second libx264 can introduce."
+      },
+      "luma_mean_code_millionths": {
+        "threshold": 400000,
+        "measured": 85247,
+        "margin_ratio": 4.6922
+      },
+      "rgb_mean_code_millionths": {
+        "threshold": 1750000,
+        "measured": 743535,
+        "margin_ratio": 2.3536,
+        "note": "Re-baselined from 1500000, which cleared the 2x rule by 0.02x and left the same R5 Windows divergence unbudgeted as the P99 term above."
+      },
+      "psnr_floor_db_hundredths": {
+        "threshold": 3300,
+        "measured": 3686,
+        "headroom_db_hundredths": 386
+      },
+      "rgb_max_code_reported_not_gated": 63,
+      "rgb_p99_code_millionths_reported_not_gated": 7000000,
+      "units": "luma_* are luma code units at the lane depth; rgb_mean_code_millionths is 8-bit-equivalent (§6.3), which at eight bits is the same number; rgb_max/rgb_p99 are lane code units and are reported, never gated."
+    },
+    "ten_bit": {
+      "luma_max_code": {
+        "threshold": 16,
+        "measured": 1,
+        "margin_ratio": 16.0
+      },
+      "luma_p99_code_millionths": {
+        "threshold": 4000000,
+        "measured": 0,
+        "margin_ratio": "infinite (measured exactly zero)",
+        "note": "Not approached: the ten-bit lane's P99 luma difference on the passing source is exactly 0, so this threshold has no passing measurement near it. The bound that gives it a failing direction is the starved ten-bit lane below, which measures 24000000 against the same 4000000."
+      },
+      "luma_mean_code_millionths": {
+        "threshold": 1000000,
+        "measured": 5545,
+        "margin_ratio": 180.3427
+      },
+      "rgb_mean_code_millionths": {
+        "threshold": 1000000,
+        "measured": 414572,
+        "margin_ratio": 2.4121
+      },
+      "psnr_floor_db_hundredths": {
+        "threshold": 3300,
+        "measured": 3700,
+        "headroom_db_hundredths": 400
+      },
+      "rgb_max_code_reported_not_gated": 242,
+      "rgb_p99_code_millionths_reported_not_gated": 27000000,
+      "units": "luma_* are luma code units at ten bits; rgb_mean_code_millionths is 8-bit-equivalent (§6.3), so it is directly comparable with the eight-bit lane's and the fixture converts nothing; rgb_max/rgb_p99 are ten-bit lane code units and are reported, never gated."
+    },
+    "ten_bit_justification": {
+      "units": "8-bit-equivalent, per §6.3; DeliveryComparison.combined.mean_code_diff_millionths is already in those units, so the fixture compares the two lanes field to field",
+      "eight_bit_rgb_mean_code_millionths": 743535,
+      "ten_bit_rgb_mean_code_millionths": 414572,
+      "eight_bit_psnr_db_hundredths": 3686,
+      "ten_bit_psnr_db_hundredths": 3700,
+      "strictly_better": true
+    },
+    "monitor_cpu_gpu": {
+      "max_code": 2,
+      "p99_code": 1,
+      "mean_code": 0.5,
+      "distinctness": "CC6's lane budgets are asserted numerically distinct from these three, so a compositor tolerance and a codec tolerance can never be silently substituted."
+    },
+    "starved_bitrate_failing_direction": {
+      "video_bitrate": 100000,
+      "units": "as budgets.eight_bit.units / budgets.ten_bit.units",
+      "eight_bit": {
+        "luma_max_code_diff": 35,
+        "luma_p99_code_millionths": 6000000,
+        "luma_mean_code_millionths": 621205,
+        "rgb_mean_code_millionths_8bit_equivalent": 1330318,
+        "psnr_db_hundredths": 3588,
+        "over_budget_fields": [
+          "luma.maximum_code_diff",
+          "luma.mean_code_diff_millionths",
+          "luma.p99_code_diff_millionths"
+        ],
+        "inside_budget_terms": [
+          "combined.mean_code_diff_millionths",
+          "psnr_db_hundredths"
+        ]
+      },
+      "ten_bit": {
+        "luma_max_code_diff": 121,
+        "luma_p99_code_millionths": 24000000,
+        "luma_mean_code_millionths": 2640545,
+        "rgb_mean_code_millionths_8bit_equivalent": 1180978,
+        "psnr_db_hundredths": 3598,
+        "over_budget_fields": [
+          "combined.mean_code_diff_millionths",
+          "luma.maximum_code_diff",
+          "luma.mean_code_diff_millionths",
+          "luma.p99_code_diff_millionths"
+        ],
+        "inside_budget_terms": [
+          "psnr_db_hundredths"
+        ]
+      },
+      "within_budgets": false,
+      "technical_pass": false,
+      "outcome": "Completed, error: None, output left at its original path",
+      "note": "Both lanes fail on the codec-only luma terms, which is what a starved codec is supposed to break. The ten-bit lane also crosses its RGB-mean sanity floor, whose threshold is tighter (1.0 vs 1.5 8-bit-equivalent codes) because its healthy measurement is lower; PSNR stays inside its floor on both lanes."
+    }
+  },
+  "performance": {
+    "raster": "1920x1080",
+    "frames": 8,
+    "qc_soft_budget_milliseconds": 41.666666666666664,
+    "lanes": [
+      {
+        "lane": "software_fallback",
+        "adapter": "llvmpipe (LLVM 22.1.8, 256 bits)",
+        "working_proof_milliseconds": 1798.7,
+        "color_qc_milliseconds": 4.9,
+        "working_proof_plus_color_qc_milliseconds": 1803.6,
+        "export_milliseconds": 15577.3,
+        "verify_five_frames_milliseconds": 12679.9,
+        "verify_per_sampled_frame_milliseconds": 2536.0
+      },
+      {
+        "lane": "hardware",
+        "adapter": "NVIDIA GeForce RTX 3080",
+        "working_proof_milliseconds": 1727.1,
+        "color_qc_milliseconds": 4.7,
+        "working_proof_plus_color_qc_milliseconds": 1731.8,
+        "export_milliseconds": 15449.4,
+        "verify_five_frames_milliseconds": 12609.5,
+        "verify_per_sampled_frame_milliseconds": 2521.9
+      }
+    ],
+    "finding": "The colour QC measurement itself costs about 5 ms at 1080p on both lanes, an order of magnitude inside the one-frame soft budget; the cost is the working proof (about 1.8 s) and, for verification, the five full-resolution delivery re-renders (about 2.5 s per sampled frame). The hardware lane is within 4 % of the software lane, so the cost is decode, readback, and upload rather than shading."
+  },
+  "measured_behaviour": {
+    "dither": "libswscale 9.1.100 applies a deterministic 8x8 ordered dither with 64 threshold levels on 16->8-bit RGB->YUV and none on 16->10-bit. A flat 8-bit delivery patch legitimately produces two adjacent Y codes in a fixed 8x8 tiling; 251 of 256 flat grey tiles come out non-flat at 8 bits, 0 of 256 at 10. DELIVERY_DITHER_OPTION does not exist.",
+    "inert_options": [
+      "sws_dither=none",
+      "sws_dither=bayer",
+      "sws_dither=ed",
+      "sws_dither=a_dither",
+      "sws_dither=x_dither",
+      "accurate_rnd"
+    ],
+    "scaler": {
+      "chosen": "bicubic",
+      "comparison": [
+        {
+          "flags": "bicubic",
+          "max_code": 3,
+          "p99_code": 2.0,
+          "mad_code": 0.2693,
+          "psnr_db": 53.486
+        },
+        {
+          "flags": "lanczos",
+          "max_code": 4,
+          "p99_code": 2.0,
+          "mad_code": 0.3778,
+          "psnr_db": 51.367
+        },
+        {
+          "flags": "spline",
+          "max_code": 3,
+          "p99_code": 2.0,
+          "mad_code": 0.3038,
+          "psnr_db": 52.674
+        }
+      ]
+    },
+    "decode_flags_rule": "Verification decodes through the crate's own managed decoder (flags=bicubic with explicit in/out matrix and range) and must not add full_chroma_int: bicubic and bicubic+accurate_rnd both measure max 70 / P99 2.0 / MAD 0.3753 / 43.560 dB, while adding full_chroma_int costs 63 codes on max and 5 dB. bilinear+accurate_rnd+full_chroma_int is broken in this build (max 255, 14.008 dB) and is recorded, not worked around.",
+    "ten_bit_profile_option": "profile=high10 is not set: the pixel format selects it and the output is byte-identical either way."
+  },
+  "required_fixtures": [
+    {
+      "item": 1,
+      "name": "cc6_range_anchors_match_the_hand_derived_delivery_encode",
+      "owners": [
+        {
+          "owner": "kinewright-core",
+          "sources": [
+            "crates/kinewright-core/tests/cc6_core.rs"
+          ],
+          "tests": [
+            "cc6_range_anchors_match_the_hand_derived_delivery_encode"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 2,
+      "name": "cc6_gamut_and_range_under_describe_the_same_pixel_set",
+      "owners": [
+        {
+          "owner": "kinewright-core",
+          "sources": [
+            "crates/kinewright-core/tests/cc6_core.rs"
+          ],
+          "tests": [
+            "cc6_gamut_and_range_under_describe_the_same_pixel_set"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 3,
+      "name": "cc6_bt709_forward_ycbcr_matches_the_spec_at_eight_and_ten_bits",
+      "owners": [
+        {
+          "owner": "kinewright-core",
+          "sources": [
+            "crates/kinewright-core/tests/cc6_core.rs"
+          ],
+          "tests": [
+            "cc6_bt709_forward_ycbcr_matches_the_spec_at_eight_and_ten_bits"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 4,
+      "name": "cc6_skin_band_constants_are_derived_from_the_cc5_patches",
+      "owners": [
+        {
+          "owner": "kinewright-core",
+          "sources": [
+            "crates/kinewright-core/tests/cc6_core.rs"
+          ],
+          "tests": [
+            "cc6_skin_band_constants_are_derived_from_the_cc5_patches"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 5,
+      "name": "cc6_skin_diagnostics_report_circular_statistics_on_a_chosen_region",
+      "owners": [
+        {
+          "owner": "kinewright-core",
+          "sources": [
+            "crates/kinewright-core/tests/cc6_core.rs"
+          ],
+          "tests": [
+            "cc6_skin_diagnostics_report_circular_statistics_on_a_chosen_region"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 6,
+      "name": "cc6_working_proof_matches_the_cpu_reference_on_the_software_lane",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "sources": [
+            "crates/kinewright-media/src/compositor.rs"
+          ],
+          "tests": [
+            "cc6_working_proof_matches_the_cpu_reference_on_the_software_lane"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 7,
+      "name": "cc6_working_proof_matches_the_cpu_reference_on_hardware",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "sources": [
+            "crates/kinewright-media/src/compositor.rs"
+          ],
+          "tests": [
+            "cc6_working_proof_matches_the_cpu_reference_on_hardware"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 8,
+      "name": "cc6_working_proof_refuses_a_claim_that_is_not_full_resolution",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "sources": [
+            "crates/kinewright-media/src/compositor.rs"
+          ],
+          "tests": [
+            "cc6_working_proof_refuses_a_claim_that_is_not_full_resolution"
+          ]
+        },
+        {
+          "owner": "kinewright-core",
+          "sources": [
+            "crates/kinewright-core/tests/cc6_core.rs"
+          ],
+          "tests": [
+            "cc6_working_proof_refuses_a_claim_that_is_not_full_resolution"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 9,
+      "name": "cc6_delivery_tag_check_covers_both_modes_and_marks_white_point_not_representable",
+      "owners": [
+        {
+          "owner": "kinewright-core",
+          "sources": [
+            "crates/kinewright-core/tests/cc6_core.rs"
+          ],
+          "tests": [
+            "cc6_delivery_tag_check_covers_both_modes_and_marks_white_point_not_representable"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 10,
+      "name": "cc6_eight_bit_encoded_delivery_passes_tag_luma_and_difference_budgets",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "sources": [
+            "crates/kinewright-media/src/cc6_fixtures.rs"
+          ],
+          "tests": [
+            "cc6_eight_bit_encoded_delivery_passes_tag_luma_and_difference_budgets",
+            "cc6_qc_raster_populations_are_the_contract_table",
+            "cc6_delivery_source_moves_the_pinned_element_across_the_sampled_frames"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 11,
+      "name": "cc6_ten_bit_encoded_delivery_passes_tag_luma_and_difference_budgets",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "sources": [
+            "crates/kinewright-media/src/cc6_fixtures.rs",
+            "crates/kinewright-media/src/export.rs"
+          ],
+          "tests": [
+            "cc6_ten_bit_encoded_delivery_passes_tag_luma_and_difference_budgets",
+            "libx264_advertises_both_delivery_lane_pixel_formats",
+            "ten_bit_export_probes_as_rec709_limited_ten_bit_yuv420p10le"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 12,
+      "name": "cc6_decoded_native_planes_report_ycbcr_excursions_in_delivery_code_units",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "sources": [
+            "crates/kinewright-media/src/verify.rs"
+          ],
+          "tests": [
+            "cc6_decoded_native_planes_report_ycbcr_excursions_in_delivery_code_units",
+            "cc6_delivery_verification_plane_out_of_container_is_typed",
+            "cc6_an_unseen_plane_reports_the_empty_interval_and_an_empty_sample_set_is_refused"
+          ]
+        },
+        {
+          "owner": "kinewright-core",
+          "sources": [
+            "crates/kinewright-core/tests/cc6_core.rs"
+          ],
+          "tests": [
+            "cc6_plane_excursion_basis_points_count_both_directions"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 13,
+      "name": "cc6_starved_bitrate_export_trips_the_decoded_difference_budget (+ cc6_starved_bitrate_ten_bit_export_trips_the_decoded_difference_budget)",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "sources": [
+            "crates/kinewright-media/src/cc6_fixtures.rs"
+          ],
+          "tests": [
+            "cc6_starved_bitrate_export_trips_the_decoded_difference_budget",
+            "cc6_starved_bitrate_ten_bit_export_trips_the_decoded_difference_budget"
+          ]
+        },
+        {
+          "owner": "kinewright-agent",
+          "sources": [
+            "crates/kinewright-agent/src/export_queue.rs"
+          ],
+          "tests": [
+            "cc6_a_failing_verification_completes_the_job_and_leaves_the_output_alone",
+            "cc6_an_unavailable_verification_records_its_reason_instead_of_a_pass",
+            "cc6_a_verified_export_publishes_its_decoded_comparison_on_the_record",
+            "cc6_a_cancel_before_verification_records_why_the_file_is_unmeasured"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 14,
+      "name": "cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it",
+      "owners": [
+        {
+          "owner": "kinewright-core",
+          "sources": [
+            "crates/kinewright-core/tests/cc6_core.rs"
+          ],
+          "tests": [
+            "cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it"
+          ]
+        },
+        {
+          "owner": "kinewright-media",
+          "sources": [
+            "crates/kinewright-media/src/cc6_fixtures.rs"
+          ],
+          "tests": [
+            "cc6_per_node_contribution_order_matches_production_z_order"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 15,
+      "name": "cc6_typed_qc_refusals_carry_code_field_observed_and_allowed",
+      "owners": [
+        {
+          "owner": "kinewright-core",
+          "sources": [
+            "crates/kinewright-core/tests/cc6_core.rs"
+          ],
+          "tests": [
+            "cc6_typed_qc_refusals_carry_code_field_observed_and_allowed",
+            "cc6_qc_refusals_keep_their_code_through_media_error"
+          ]
+        },
+        {
+          "owner": "kinewright-media",
+          "sources": [
+            "crates/kinewright-media/src/verify.rs",
+            "crates/kinewright-media/src/export.rs"
+          ],
+          "tests": [
+            "cc6_eight_bit_export_verifies_end_to_end_through_the_production_surface",
+            "cc6_verification_refuses_an_export_whose_edit_list_drops_the_last_frame",
+            "cc6_verification_refuses_budgets_from_the_other_delivery_lane",
+            "cc6_verification_refuses_a_frame_count_the_sampler_would_have_clamped",
+            "cc6_a_decoded_frame_that_is_not_the_requested_frame_is_refused",
+            "rejects_a_pixel_format_that_does_not_carry_the_declared_delivery_depth",
+            "rejects_a_delivery_pixel_format_this_build_does_not_advertise",
+            "rejects_a_delivery_depth_outside_the_two_managed_lanes"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 16,
+      "name": "cc6_video_scopes_v2_points_at_get_color_qc_instead_of_a_fabricated_zero",
+      "owners": [
+        {
+          "owner": "kinewright-agent",
+          "sources": [
+            "crates/kinewright-agent/tests/mcp_server.rs"
+          ],
+          "tests": [
+            "cc6_video_scopes_v2_points_at_get_color_qc_instead_of_a_fabricated_zero"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 17,
+      "name": "cc6_export_settings_and_job_records_serialize_deterministically",
+      "owners": [
+        {
+          "owner": "kinewright-core",
+          "sources": [
+            "crates/kinewright-core/tests/cc6_core.rs"
+          ],
+          "tests": [
+            "cc6_export_settings_and_job_records_serialize_deterministically"
+          ]
+        },
+        {
+          "owner": "kinewright-agent",
+          "sources": [
+            "crates/kinewright-agent/src/export_queue.rs"
+          ],
+          "tests": [
+            "cc6_a_pre_cc6_job_record_deserializes_with_the_eight_bit_lane_and_no_verification",
+            "cc6_verify_false_skips_the_measurement_and_serializes_byte_identically"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 18,
+      "name": "cc6_get_color_qc_is_evidence_only_and_revision_gated",
+      "owners": [
+        {
+          "owner": "kinewright-agent",
+          "sources": [
+            "crates/kinewright-agent/tests/mcp_server.rs"
+          ],
+          "tests": [
+            "cc6_get_color_qc_is_evidence_only_and_revision_gated"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 19,
+      "name": "cc6_export_dialog_and_queue_agree_on_delivery_color",
+      "owners": [
+        {
+          "owner": "kinewright-app",
+          "sources": [
+            "crates/kinewright-app/src/export_ui.rs"
+          ],
+          "tests": [
+            "cc6_export_dialog_and_queue_agree_on_delivery_color"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 20,
+      "name": "cc6_conformance_cache_does_not_cross_delivery_lanes",
+      "owners": [
+        {
+          "owner": "kinewright-app",
+          "sources": [
+            "crates/kinewright-app/src/export_ui.rs"
+          ],
+          "tests": [
+            "cc6_conformance_cache_does_not_cross_delivery_lanes"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 21,
+      "name": "app cases",
+      "owners": [
+        {
+          "owner": "kinewright-app",
+          "sources": [
+            "crates/kinewright-app/src/preview_ui.rs",
+            "crates/kinewright-app/src/export_ui.rs",
+            "crates/kinewright-app/src/color_scopes_ui.rs"
+          ],
+          "tests": [
+            "cc6_qc_mask_marks_only_the_flagged_pixels",
+            "cc6_export_dialog_reports_the_verification_result",
+            "cc6_scopes_panel_renders_absolute_per_channel_clipping",
+            "cc6_a_panicking_verification_is_contained_and_the_encode_is_still_reported"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 22,
+      "name": "cc6_core_delivery_transfer_is_bit_identical_to_the_media_transfer",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "sources": [
+            "crates/kinewright-media/src/cc6_fixtures.rs"
+          ],
+          "tests": [
+            "cc6_core_delivery_transfer_is_bit_identical_to_the_media_transfer"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 23,
+      "name": "cc6_manifest_declares_every_required_fixture_and_constant",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "sources": [
+            "crates/kinewright-media/src/cc6_fixtures.rs"
+          ],
+          "tests": [
+            "cc6_manifest_declares_every_required_fixture_and_constant",
+            "cc6_declared_test_names_exist_in_their_source_files"
+          ]
+        }
+      ]
+    },
+    {
+      "item": 24,
+      "name": "performance evidence",
+      "owners": [
+        {
+          "owner": "kinewright-media",
+          "sources": [
+            "crates/kinewright-media/src/cc6_fixtures.rs"
+          ],
+          "tests": [
+            "cc6_performance_evidence_is_recorded_on_software_fallback",
+            "cc6_performance_evidence_is_recorded_on_hardware"
+          ]
+        }
+      ]
+    }
+  ],
+  "evidence_fixtures": [
+    "cc6_eight_bit_encoded_delivery_passes_tag_luma_and_difference_budgets",
+    "cc6_ten_bit_encoded_delivery_passes_tag_luma_and_difference_budgets",
+    "cc6_starved_bitrate_export_trips_the_decoded_difference_budget",
+    "cc6_starved_bitrate_ten_bit_export_trips_the_decoded_difference_budget",
+    "cc6_per_node_contribution_order_matches_production_z_order",
+    "cc6_performance_evidence_is_recorded_on_software_fallback",
+    "cc6_performance_evidence_is_recorded_on_hardware"
+  ],
+  "manifest_self_test": {
+    "test": "cc6_manifest_declares_every_required_fixture_and_constant",
+    "inventory_test": "cc6_declared_test_names_exist_in_their_source_files"
+  }
+}

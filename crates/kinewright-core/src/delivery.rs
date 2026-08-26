@@ -20,6 +20,75 @@ pub enum DeliveryAspect {
     Square,
 }
 
+/// The delivery encode precision, orthogonal to [`DeliveryProfile`].
+///
+/// A profile names a *composition* — raster, aspect, bitrate, platform. A bit
+/// depth names an *encoding precision*. Folding the depth into the profile
+/// would take four wire strings to eight now and to sixteen the moment a
+/// second codec arrives, so it is its own enum and every existing
+/// `DeliveryProfile` wire string stays byte-identical (CC6 §4.1).
+///
+/// The depth lives on [`crate::ExportSettings`], not in the project document:
+/// [`crate::ColorContext::sdr_rec709`] pins the project's delivery description
+/// to 8-bit, and this enum selects the depth when settings are materialized.
+/// A 10-bit master is therefore exportable without editing the document's
+/// colour contract, and `get_color_context` keeps reporting that contract.
+/// The consequence is normative: a 10-bit job's
+/// `settings.delivery_color.bit_depth` legitimately differs from the
+/// document's, and a delivery tag check compares against the **settings**.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryEncodeDepth {
+    #[default]
+    Eight,
+    Ten,
+}
+
+impl DeliveryEncodeDepth {
+    pub const ALL: [Self; 2] = [Self::Eight, Self::Ten];
+
+    /// Stable wire identifier used by agent and application surfaces.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eight => "eight",
+            Self::Ten => "ten",
+        }
+    }
+
+    /// The integer sample depth of the encoded delivery.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        match self {
+            Self::Eight => 8,
+            Self::Ten => 10,
+        }
+    }
+
+    /// The declared delivery colour depth for this lane.
+    #[must_use]
+    pub const fn color_bit_depth(self) -> ColorBitDepth {
+        match self {
+            Self::Eight => ColorBitDepth::Eight,
+            Self::Ten => ColorBitDepth::Ten,
+        }
+    }
+
+    /// The encoder pixel format for this lane.
+    ///
+    /// The pixel format is what selects libx264's High 10 profile; no
+    /// `profile` option is set on either lane, because a 10-bit encode is
+    /// measured byte-identical with and without `-profile:v high10` on the
+    /// pinned build (CC6 §4.3).
+    #[must_use]
+    pub const fn pixel_format(self) -> &'static str {
+        match self {
+            Self::Eight => "yuv420p",
+            Self::Ten => "yuv420p10le",
+        }
+    }
+}
+
 /// Stable export compositions. Names describe the delivery target while the
 /// exact codec, raster, and bitrate contract remains inspectable by agents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -72,10 +141,17 @@ impl DeliveryProfile {
         }
     }
 
+    /// Materialize the export settings for this profile at one delivery depth.
+    ///
+    /// `delivery_color` is the document's delivery description with
+    /// `bit_depth` replaced by `depth`'s (CC6 §4.1): the document keeps
+    /// declaring the project's 8-bit delivery contract while the job carries
+    /// the lane it will actually encode.
     #[must_use]
     pub fn export_settings(
         self,
         document: &Document,
+        depth: DeliveryEncodeDepth,
         cancellation: ExportCancellation,
     ) -> ExportSettings {
         let high_frame_rate = u64::from(document.fps.numerator())
@@ -98,7 +174,7 @@ impl DeliveryProfile {
         ExportSettings {
             fps: document.fps,
             resolution: self.resolution(document.resolution),
-            delivery_color: document.color_context.delivery.clone(),
+            delivery_color: delivery_color_for_depth(document, depth),
             video_codec: "libx264".to_owned(),
             audio_codec: "aac".to_owned(),
             video_bitrate,
@@ -111,6 +187,13 @@ impl DeliveryProfile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DeliveryConformanceReport {
     pub profile: DeliveryProfile,
+    /// The delivery lane this report was produced for.
+    ///
+    /// Defaulted on read so a report recorded before CC6 deserializes as the
+    /// 8-bit lane, which is what it meant (CC6 §9.3).
+    #[serde(default)]
+    #[schemars(default)]
+    pub delivery_bit_depth: DeliveryEncodeDepth,
     pub container: String,
     pub resolution: (u32, u32),
     pub delivery_color: ColorDescription,
@@ -237,6 +320,7 @@ pub fn document_for_delivery_profile(
 pub fn delivery_conformance(
     document: &Document,
     profile: DeliveryProfile,
+    depth: DeliveryEncodeDepth,
     horizontal_focus_percent: u8,
     vertical_focus_percent: u8,
 ) -> Result<DeliveryConformanceReport, DeliveryVariantError> {
@@ -246,7 +330,7 @@ pub fn delivery_conformance(
         horizontal_focus_percent,
         vertical_focus_percent,
     )?;
-    let settings = profile.export_settings(&delivery, ExportCancellation::default());
+    let settings = profile.export_settings(&delivery, depth, ExportCancellation::default());
     let mut issues = qa_document(&delivery).issues;
     append_managed_pipeline_issues(&delivery, &mut issues);
     append_managed_source_issues(&delivery, &mut issues);
@@ -273,7 +357,7 @@ pub fn delivery_conformance(
             severity: QaSeverity::Error,
             code: "unsupported_delivery_color".to_owned(),
             message: format!(
-                "Current libx264/YUV420P export requires explicit 8-bit SDR Rec.709 delivery colour metadata: field={}, observed={}, allowed={}. Reset the delivery colour target explicitly.",
+                "Current libx264 export requires explicit 8-bit or 10-bit SDR Rec.709 delivery colour metadata: field={}, observed={}, allowed={}. Reset the delivery colour target explicitly.",
                 mismatch.field, mismatch.observed, mismatch.allowed,
             ),
             asset: None,
@@ -285,6 +369,7 @@ pub fn delivery_conformance(
     let delivery_color = settings.delivery_color.clone();
     Ok(DeliveryConformanceReport {
         profile,
+        delivery_bit_depth: depth,
         container: profile.container_extension().to_owned(),
         resolution: settings.resolution,
         delivery_color,
@@ -408,86 +493,120 @@ fn append_managed_source_issues(document: &Document, issues: &mut Vec<QaIssue>) 
     }
 }
 
-/// The first delivery-colour field that the current export contract rejects.
+/// One delivery-colour field that the current export contract rejects.
 ///
 /// This carries the same three facts as [`ColorSourceError`] — the field, the
 /// observed value, and the allowed values — so a rejection is diagnosable
 /// rather than one opaque sentence.
 ///
-/// They are not, however, *reported* the same way. [`QaIssue`] has no
-/// structured detail map, so both `unsupported_delivery_color` and
-/// `unsupported_source_color` format the three facts into `message` as
-/// `field=..., observed=..., allowed=...`. Consumers that want them as data
-/// must parse that text or classify the description themselves; the tests that
-/// assert on these issues match the message substrings for that reason.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DeliveryColorMismatch {
-    field: &'static str,
-    observed: String,
-    allowed: &'static str,
+/// [`QaIssue`] still has no structured detail map, so
+/// `unsupported_delivery_color` formats the three facts into `message` as
+/// `field=..., observed=..., allowed=...`. A consumer that wants them as data
+/// uses [`delivery_color_mismatch`] or [`delivery_color_mismatches`] directly
+/// rather than parsing that text (CC6 §3.6).
+///
+/// **This type must never be applied to a *probed* description.** A decoded
+/// H.264 stream necessarily carries [`ColorProvenance::StreamMetadata`] and an
+/// unknown white point, both of which are correct for a decoded file and both
+/// of which this check rejects. [`delivery_tag_check`] is the only function
+/// that may compare a probed description.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeliveryColorMismatch {
+    /// Stable wire field name, such as `primaries` or `bit_depth`.
+    pub field: String,
+    pub observed: String,
+    pub allowed: String,
 }
 
-fn delivery_color_mismatch(color: &ColorDescription) -> Option<DeliveryColorMismatch> {
-    let mismatch =
-        |field: &'static str, observed: String, allowed: &'static str| DeliveryColorMismatch {
-            field,
+/// Every delivery-colour field the current export contract rejects, in the
+/// fixed check order.
+///
+/// The order is `primaries → transfer → matrix → range → white_point →
+/// bit_depth → provenance → confidence`. An empty vector means the
+/// description conforms.
+#[must_use]
+pub fn delivery_color_mismatches(color: &ColorDescription) -> Vec<DeliveryColorMismatch> {
+    let mut mismatches = Vec::new();
+    let mut push = |field: &str, observed: String, allowed: &str| {
+        mismatches.push(DeliveryColorMismatch {
+            field: field.to_owned(),
             observed,
-            allowed,
-        };
+            allowed: allowed.to_owned(),
+        });
+    };
 
     if !matches!(&color.primaries, ColorPrimaries::Bt709) {
-        return Some(mismatch(
-            "primaries",
-            format!("{:?}", color.primaries),
-            "bt709",
-        ));
+        push("primaries", format!("{:?}", color.primaries), "bt709");
     }
     if !matches!(&color.transfer, ColorTransfer::Bt709) {
-        return Some(mismatch(
-            "transfer",
-            format!("{:?}", color.transfer),
-            "bt709",
-        ));
+        push("transfer", format!("{:?}", color.transfer), "bt709");
     }
     if !matches!(&color.matrix, ColorMatrix::Bt709) {
-        return Some(mismatch("matrix", format!("{:?}", color.matrix), "bt709"));
+        push("matrix", format!("{:?}", color.matrix), "bt709");
     }
     if !matches!(&color.range, ColorRange::Limited) {
-        return Some(mismatch("range", format!("{:?}", color.range), "limited"));
+        push("range", format!("{:?}", color.range), "limited");
     }
     if !matches!(&color.white_point, ColorWhitePoint::D65) {
-        return Some(mismatch(
-            "white_point",
-            format!("{:?}", color.white_point),
-            "d65",
-        ));
+        push("white_point", format!("{:?}", color.white_point), "d65");
     }
-    // CC1 §2.1: `Integer(8)` and `Eight` are the same declared depth.
-    if color.bit_depth != ColorBitDepth::Eight {
-        return Some(mismatch(
+    // CC1 §2.1 makes `Integer(8)` and `Eight` the same declared depth, and CC6
+    // §4.1 widens the accepted set to the two managed lanes; every other depth
+    // stays rejected with a typed reason.
+    if !DeliveryEncodeDepth::ALL
+        .iter()
+        .any(|depth| color.bit_depth == depth.color_bit_depth())
+    {
+        push(
             "bit_depth",
             format!("{:?}", color.bit_depth),
-            "8 (named eight or integer 8)",
-        ));
+            DELIVERY_BIT_DEPTH_ALLOWED,
+        );
     }
     if !matches!(
         &color.provenance,
         ColorProvenance::ApplicationDefault | ColorProvenance::UserOverride
     ) {
-        return Some(mismatch(
+        push(
             "provenance",
             format!("{:?}", color.provenance),
             "application_default or user_override",
-        ));
+        );
     }
     if !color.confidence_is_valid() || color.confidence_basis_points == 0 {
-        return Some(mismatch(
+        push(
             "confidence_basis_points",
             color.confidence_basis_points.to_string(),
             "1..=10000",
-        ));
+        );
     }
-    None
+    mismatches
+}
+
+/// The allowed delivery depths, as one stable phrase.
+pub const DELIVERY_BIT_DEPTH_ALLOWED: &str = "8 or 10 (named eight/ten or integer 8/10)";
+
+/// The first delivery-colour field that the current export contract rejects.
+#[must_use]
+pub fn delivery_color_mismatch(color: &ColorDescription) -> Option<DeliveryColorMismatch> {
+    delivery_color_mismatches(color).into_iter().next()
+}
+
+/// The delivery colour description a document exports with at one depth.
+///
+/// The document's own delivery description is left untouched; only
+/// `bit_depth` is replaced (CC6 §3.0/§4.1). This is the single entry point
+/// for the delivery depth, so the codec context and the filter graph cannot
+/// diverge.
+#[must_use]
+pub fn delivery_color_for_depth(
+    document: &Document,
+    depth: DeliveryEncodeDepth,
+) -> ColorDescription {
+    ColorDescription {
+        bit_depth: depth.color_bit_depth(),
+        ..document.color_context.delivery.clone()
+    }
 }
 
 /// Materialize a non-destructive delivery document from a master cut.
@@ -571,6 +690,715 @@ pub fn document_for_delivery_variant(
     }
     output.validate()?;
     Ok(output)
+}
+
+// ---------------------------------------------------------------------------
+// CC6 §4.2: typed delivery rejection.
+// ---------------------------------------------------------------------------
+
+/// A managed delivery encode refused for a typed colour reason.
+///
+/// Modelled on [`ColorSourceError`]: every variant carries the observed value
+/// and the allowed set, and exposes `code`, `field`, `observed`,
+/// `allowed_values`, and `recovery_action` so a rejection is data rather than
+/// one opaque sentence (CC6 §4.2).
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DeliveryColorError {
+    #[error(
+        "unsupported_delivery_codec: video codec {observed} cannot carry managed delivery tags"
+    )]
+    UnsupportedCodec {
+        observed: String,
+        allowed: &'static str,
+    },
+    #[error(
+        "unsupported_delivery_color: delivery colour field {} is {}, allowed {}",
+        .0.field, .0.observed, .0.allowed
+    )]
+    UnsupportedField(DeliveryColorMismatch),
+    #[error(
+        "delivery_pixel_format_depth_mismatch: negotiated pixel format {observed} does not carry the declared depth, allowed {allowed}"
+    )]
+    PixelFormatDepthMismatch { observed: String, allowed: String },
+    #[error(
+        "delivery_encoder_pixel_format_unavailable: this build's encoder does not offer {allowed}; it advertises {observed}"
+    )]
+    EncoderPixelFormatUnavailable { observed: String, allowed: String },
+}
+
+impl DeliveryColorError {
+    /// Stable machine-readable status code for agent and UI consumers.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::UnsupportedCodec { .. } => "unsupported_delivery_codec",
+            Self::UnsupportedField(_) => "unsupported_delivery_color",
+            Self::PixelFormatDepthMismatch { .. } => "delivery_pixel_format_depth_mismatch",
+            Self::EncoderPixelFormatUnavailable { .. } => {
+                "delivery_encoder_pixel_format_unavailable"
+            }
+        }
+    }
+
+    /// Stable settings field associated with the failure.
+    #[must_use]
+    pub fn field(&self) -> &str {
+        match self {
+            Self::UnsupportedCodec { .. } => "video_codec",
+            Self::UnsupportedField(mismatch) => mismatch.field.as_str(),
+            Self::PixelFormatDepthMismatch { .. } | Self::EncoderPixelFormatUnavailable { .. } => {
+                "pixel_format"
+            }
+        }
+    }
+
+    /// Observed value formatted for a structured status surface.
+    #[must_use]
+    pub fn observed(&self) -> String {
+        match self {
+            Self::UnsupportedCodec { observed, .. }
+            | Self::PixelFormatDepthMismatch { observed, .. }
+            | Self::EncoderPixelFormatUnavailable { observed, .. } => observed.clone(),
+            Self::UnsupportedField(mismatch) => mismatch.observed.clone(),
+        }
+    }
+
+    /// Allowed values for the failed field.
+    #[must_use]
+    pub fn allowed_values(&self) -> String {
+        match self {
+            Self::UnsupportedCodec { allowed, .. } => (*allowed).to_owned(),
+            Self::UnsupportedField(mismatch) => mismatch.allowed.clone(),
+            Self::PixelFormatDepthMismatch { allowed, .. }
+            | Self::EncoderPixelFormatUnavailable { allowed, .. } => allowed.clone(),
+        }
+    }
+
+    /// Recovery action suitable for a visible status or agent response.
+    #[must_use]
+    pub const fn recovery_action(&self) -> &'static str {
+        match self {
+            Self::UnsupportedCodec { .. } => {
+                "Select the managed libx264 delivery lane before exporting."
+            }
+            Self::UnsupportedField(_) => {
+                "Reset the delivery colour target explicitly, or choose a supported delivery depth."
+            }
+            Self::PixelFormatDepthMismatch { .. } => {
+                "Re-materialize the export settings so the declared delivery depth and the encoder pixel format come from one source."
+            }
+            Self::EncoderPixelFormatUnavailable { .. } => {
+                "Export the 8-bit lane, or install an FFmpeg build whose libx264 offers the 10-bit pixel format. The export never silently falls back."
+            }
+        }
+    }
+
+    /// Render the complete actionable status while retaining the structured
+    /// accessors above for machine consumers.
+    #[must_use]
+    pub fn actionable_message(&self) -> String {
+        format!(
+            "{} (field={}, observed={}, allowed={}). {}",
+            self,
+            self.field(),
+            self.observed(),
+            self.allowed_values(),
+            self.recovery_action()
+        )
+    }
+}
+
+/// Post-export delivery verification could not produce an honest measurement.
+///
+/// Each variant is a refusal to publish a number, not a codec failure: a
+/// verification that cannot compare like with like reports why instead of
+/// reporting a difference it did not measure (CC6 §4.2/§6).
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DeliveryVerificationError {
+    #[error(
+        "delivery_verification_not_full_resolution: sampled reference render is {observed}, allowed {allowed}"
+    )]
+    NotFullResolution {
+        observed: String,
+        allowed: &'static str,
+    },
+    #[error(
+        "delivery_verification_plane_out_of_container: native sample {observed} exceeds the container, allowed {allowed}"
+    )]
+    PlaneOutOfContainer {
+        observed: String,
+        allowed: &'static str,
+    },
+    #[error(
+        "delivery_verification_frame_count_mismatch: decoded {observed} frames, expected {allowed}"
+    )]
+    FrameCountMismatch { observed: String, allowed: String },
+    #[error(
+        "delivery_verification_frame_count_out_of_range: requested frame_count is {observed}, allowed {allowed}"
+    )]
+    FrameCountOutOfRange {
+        observed: String,
+        allowed: &'static str,
+    },
+    /// The request's budgets are not the ones
+    /// [`DeliveryBudgets::for_depth`] names for the lane the export settings
+    /// declare.
+    ///
+    /// A verification that compared a lane against another lane's budgets
+    /// would still report `within_budgets`, and the number it published would
+    /// be a pass against a gate nobody chose. This is a refusal rather than a
+    /// silent substitution of the correct budgets, because a caller that
+    /// assembled the wrong pair is asking a question about the wrong lane.
+    #[error(
+        "delivery_verification_budget_lane_mismatch: request carries {observed}, allowed {allowed}"
+    )]
+    BudgetLaneMismatch { observed: String, allowed: String },
+}
+
+impl DeliveryVerificationError {
+    /// Stable machine-readable status code for agent and UI consumers.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotFullResolution { .. } => "delivery_verification_not_full_resolution",
+            Self::PlaneOutOfContainer { .. } => "delivery_verification_plane_out_of_container",
+            Self::FrameCountMismatch { .. } => "delivery_verification_frame_count_mismatch",
+            Self::FrameCountOutOfRange { .. } => "delivery_verification_frame_count_out_of_range",
+            Self::BudgetLaneMismatch { .. } => "delivery_verification_budget_lane_mismatch",
+        }
+    }
+
+    /// Stable verification field associated with the failure.
+    #[must_use]
+    pub const fn field(&self) -> &'static str {
+        match self {
+            Self::NotFullResolution { .. } => "full_resolution",
+            Self::PlaneOutOfContainer { .. } => "native_plane_sample",
+            Self::FrameCountMismatch { .. } | Self::FrameCountOutOfRange { .. } => "frame_count",
+            Self::BudgetLaneMismatch { .. } => "budgets",
+        }
+    }
+
+    /// Observed value formatted for a structured status surface.
+    #[must_use]
+    pub fn observed(&self) -> String {
+        match self {
+            Self::NotFullResolution { observed, .. }
+            | Self::PlaneOutOfContainer { observed, .. }
+            | Self::FrameCountMismatch { observed, .. }
+            | Self::FrameCountOutOfRange { observed, .. }
+            | Self::BudgetLaneMismatch { observed, .. } => observed.clone(),
+        }
+    }
+
+    /// Allowed values for the failed field.
+    #[must_use]
+    pub fn allowed_values(&self) -> String {
+        match self {
+            Self::NotFullResolution { allowed, .. }
+            | Self::PlaneOutOfContainer { allowed, .. }
+            | Self::FrameCountOutOfRange { allowed, .. } => (*allowed).to_owned(),
+            Self::FrameCountMismatch { allowed, .. } | Self::BudgetLaneMismatch { allowed, .. } => {
+                allowed.clone()
+            }
+        }
+    }
+
+    /// Recovery action suitable for a visible status or agent response.
+    #[must_use]
+    pub const fn recovery_action(&self) -> &'static str {
+        match self {
+            Self::NotFullResolution { .. } => {
+                "Re-run verification against a full-resolution delivery render; a proxy raster may never be labelled a delivery reference."
+            }
+            Self::PlaneOutOfContainer { .. } => {
+                "The decoded plane does not fit its declared container. Re-check the decoded pixel format before trusting any plane measurement."
+            }
+            Self::FrameCountMismatch { .. } => {
+                "Verify the export wrote every frame the document implies; verification never silently samples a shorter file."
+            }
+            Self::FrameCountOutOfRange { .. } => {
+                "Request between 1 and 16 sampled frames. A request outside the range is refused rather than quietly clamped, because a clamped sample is a different measurement reported under the number that was asked for."
+            }
+            Self::BudgetLaneMismatch { .. } => {
+                "Build the request with DeliveryVerificationRequest::new for the depth the export settings declare, so the budgets are the ones DeliveryBudgets::for_depth names for that lane."
+            }
+        }
+    }
+
+    /// Render the complete actionable status while retaining the structured
+    /// accessors above for machine consumers.
+    #[must_use]
+    pub fn actionable_message(&self) -> String {
+        format!(
+            "{} (field={}, observed={}, allowed={}). {}",
+            self,
+            self.field(),
+            self.observed(),
+            self.allowed_values(),
+            self.recovery_action()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CC6 §3.6: delivery tag checks.
+// ---------------------------------------------------------------------------
+
+/// Which side of an export a [`DeliveryTagCheck`] was taken from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryTagSource {
+    /// Pre-export: the expected description was materialized from
+    /// [`crate::ExportSettings`] and nothing has been written yet.
+    MaterialisedExportSettings,
+    /// Post-export: the observed description was probed from a written file.
+    ProbedOutputFile,
+}
+
+impl DeliveryTagSource {
+    /// Stable wire identifier used by agent and application surfaces.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MaterialisedExportSettings => "materialised_export_settings",
+            Self::ProbedOutputFile => "probed_output_file",
+        }
+    }
+}
+
+/// A field the container cannot carry at all, reported instead of a mismatch.
+///
+/// A field that a format has no syntax for is not evidence of a wrong tag, and
+/// reporting it as a mismatch would be a fabricated failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeliveryTagNotRepresentable {
+    pub field: String,
+    pub expected: String,
+    pub reason: String,
+}
+
+/// The reason H.264/AVC cannot carry a white point, stated once.
+pub const H264_WHITE_POINT_NOT_REPRESENTABLE_REASON: &str = "H.264/AVC carries colour_primaries, transfer_characteristics, and matrix_coefficients \
+but no white-point field; bt709 primaries imply D65";
+
+/// An expected delivery description compared against an observed one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeliveryTagCheck {
+    /// [`DeliveryTagSource::as_str`] for the mode this check ran in.
+    pub tag_source: String,
+    pub expected: ColorDescription,
+    pub observed: ColorDescription,
+    /// Every mismatching field, in the fixed check order.
+    pub mismatches: Vec<DeliveryColorMismatch>,
+    /// Fields the container has no syntax for. Post-export mode only.
+    pub not_representable: Vec<DeliveryTagNotRepresentable>,
+    /// `mismatches.is_empty()`.
+    pub conforming: bool,
+}
+
+/// Compare an expected delivery description against an observed one.
+///
+/// **Pre-export mode** ([`DeliveryTagSource::MaterialisedExportSettings`]):
+/// nothing has been written, so there is no independent observation. The check
+/// answers "would this document's delivery description be accepted by the
+/// gates at this depth?" — `mismatches` is
+/// [`delivery_color_mismatches`]`(expected)` and `not_representable` is empty.
+/// The caller passes the materialized description as both arguments.
+///
+/// **Post-export mode** ([`DeliveryTagSource::ProbedOutputFile`]): `observed`
+/// is the probed description of a written file, and three fields are excluded
+/// from the mismatch list because a decoded file is *correct* to disagree on
+/// them (CC6 §3.6):
+///
+/// - `white_point` — H.264/AVC has no white-point field, so it is reported as
+///   not representable;
+/// - `provenance` — a probed description necessarily carries
+///   [`ColorProvenance::StreamMetadata`];
+/// - `confidence_basis_points` — a probe states its own confidence.
+///
+/// This is the **only** function that may be applied to a probed description:
+/// [`delivery_color_mismatch`] would reject every re-probed export.
+#[must_use]
+pub fn delivery_tag_check(
+    expected: &ColorDescription,
+    observed: &ColorDescription,
+    tag_source: DeliveryTagSource,
+) -> DeliveryTagCheck {
+    let (mismatches, not_representable) = match tag_source {
+        DeliveryTagSource::MaterialisedExportSettings => {
+            (delivery_color_mismatches(expected), Vec::new())
+        }
+        DeliveryTagSource::ProbedOutputFile => {
+            let mut mismatches = Vec::new();
+            let mut compare = |field: &str, expected: String, observed: String| {
+                if expected != observed {
+                    mismatches.push(DeliveryColorMismatch {
+                        field: field.to_owned(),
+                        observed,
+                        allowed: expected,
+                    });
+                }
+            };
+            compare(
+                "primaries",
+                format!("{:?}", expected.primaries),
+                format!("{:?}", observed.primaries),
+            );
+            compare(
+                "transfer",
+                format!("{:?}", expected.transfer),
+                format!("{:?}", observed.transfer),
+            );
+            compare(
+                "matrix",
+                format!("{:?}", expected.matrix),
+                format!("{:?}", observed.matrix),
+            );
+            compare(
+                "range",
+                format!("{:?}", expected.range),
+                format!("{:?}", observed.range),
+            );
+            if expected.bit_depth != observed.bit_depth {
+                mismatches.push(DeliveryColorMismatch {
+                    field: "bit_depth".to_owned(),
+                    observed: format!("{:?}", observed.bit_depth),
+                    allowed: format!("{:?}", expected.bit_depth),
+                });
+            }
+            let not_representable = vec![DeliveryTagNotRepresentable {
+                field: "white_point".to_owned(),
+                expected: format!("{:?}", expected.white_point).to_lowercase(),
+                reason: H264_WHITE_POINT_NOT_REPRESENTABLE_REASON.to_owned(),
+            }];
+            (mismatches, not_representable)
+        }
+    };
+    DeliveryTagCheck {
+        tag_source: tag_source.as_str().to_owned(),
+        expected: expected.clone(),
+        observed: observed.clone(),
+        conforming: mismatches.is_empty(),
+        mismatches,
+        not_representable,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CC6 §6.2/§6.3: verification request, budgets, and decoded comparison.
+// ---------------------------------------------------------------------------
+
+/// Default number of frames one verification samples.
+pub const DELIVERY_VERIFICATION_FRAME_COUNT: u8 = 5;
+/// Hard cap on the number of frames one verification may sample.
+pub const DELIVERY_VERIFICATION_MAX_FRAMES: u8 = 16;
+
+/// Gated luma-plane maximum absolute difference, 8-bit lane, luma code units.
+///
+/// **Re-baselined on the CC6 fixture's own Linux measurement** (§6.3: a budget
+/// is re-baselined *before* the fixture lands, never widened afterwards to make
+/// a red build green). `cc6_delivery_source()` measures **2**; the margin is
+/// **4.0x**, so the starting value stands unchanged.
+///
+/// This term and the two below it are the **codec-only** gate: the decoded
+/// native `Y'` plane against a reference `Y'` through §3.4's matrix, with no
+/// chroma decimation term in it at all.
+pub const DELIVERY_LUMA_MAX_CODE_8BIT: u32 = 8;
+/// Gated luma-plane P99 absolute difference, 8-bit lane, code millionths (3.0).
+///
+/// **Re-baselined on the CC6 fixture's own Linux measurement**:
+/// `cc6_delivery_source()` measures **1 000 000** (1.0 code). At the draft's
+/// 2 000 000 the margin was exactly **2.0x** — *at* the bar and not above it,
+/// with no room for R5's cross-platform rule: the Windows build (§11.3's
+/// second measurement) is a different libx264 and a P99 that lands one whole
+/// code higher there would turn a healthy encode red. Widened to 3 000 000 for
+/// a **3.0x** margin, which is still one third of the 10-bit lane's own
+/// 8-bit-equivalent P99 budget and still numerically distinct from
+/// `MONITOR_CPU_GPU_P99` (1.0).
+pub const DELIVERY_LUMA_P99_CODE_8BIT_MILLIONTHS: i64 = 3_000_000;
+/// Gated luma-plane mean absolute difference, 8-bit lane, code millionths (0.4).
+///
+/// **Re-baselined on the CC6 fixture's own Linux measurement**:
+/// `cc6_delivery_source()` measures **85 247** (0.085 codes) against the
+/// draft's 1 000 000, an 11.7x margin — far looser than a measurement that
+/// close warrants. Tightened to 400 000, which still keeps a **4.69x** margin.
+///
+/// **Not** 0.5 codes, which would be the obvious halving: `MONITOR_CPU_GPU_MEAN`
+/// is exactly 0.5, and §6.3 requires CC6's lane budgets to be *numerically
+/// distinct* from the three compositor tolerances so a codec tolerance and a
+/// compositor tolerance can never be silently substituted for one another.
+/// 0.4 is the nearest value that tightens the budget and keeps them distinct.
+pub const DELIVERY_LUMA_MEAN_CODE_8BIT_MILLIONTHS: i64 = 400_000;
+/// Gated whole-raster RGB mean absolute difference, 8-bit lane,
+/// **8-bit-equivalent** code millionths (1.75).
+///
+/// **Re-baselined on the CC6 fixture's own Linux measurement**:
+/// `cc6_delivery_source()` measures **743 535** (0.744 codes) against the
+/// draft's 1 000 000, a 1.34x margin — below the 2x rule. Widened to
+/// 1 750 000 for a **2.35x** margin. Not 1 500 000, which would clear the 2x
+/// rule by 0.02x and leave the same R5 Windows divergence unbudgeted as the
+/// P99 term above.
+///
+/// This is a whole-raster **sanity floor**, not a codec gate. It is dominated
+/// by 4:2:0 chroma decimation on the CC6 source, whose hard saturated edges are
+/// a far larger fraction of a 320x180 raster than of the 1920x1080 chart the
+/// draft value was baselined on (§6.3(c): the RGB extremes are evidence, never
+/// a gate). The **luma** plane above is the codec-only gate.
+pub const DELIVERY_RGB_MEAN_CODE_8BIT_MILLIONTHS: i64 = 1_750_000;
+/// Gated PSNR floor, 8-bit lane, hundredths of a dB (33.00 dB).
+///
+/// **Re-baselined on the CC6 fixture's own Linux measurement**:
+/// `cc6_delivery_source()` measures **3 686** (36.86 dB) against the draft's
+/// 4 000, a shortfall of 3.14 dB. Lowered to 3 300 for **3.86 dB** of headroom,
+/// and the starved-bitrate direction still trips well below it.
+///
+/// Like the RGB mean, PSNR is a whole-raster sanity floor computed on every RGB
+/// sample, so it too is dominated by 4:2:0 chroma decimation on this source;
+/// the luma plane is the codec-only gate.
+pub const DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_8BIT: i32 = 3_300;
+
+/// Gated luma-plane maximum absolute difference, 10-bit lane, luma code units.
+///
+/// Baselined, never derived: scaling the 8-bit constants by four would reuse a
+/// compositor tolerance as a codec tolerance, which the roadmap forbids.
+///
+/// **Re-baselined on the CC6 fixture's own Linux measurement**:
+/// `cc6_delivery_source()` measures **1** code against the draft's 32, a 32x
+/// margin. Tightened to 16, which still keeps a **16.0x** margin.
+pub const DELIVERY_LUMA_MAX_CODE_10BIT: u32 = 16;
+/// Gated luma-plane P99 absolute difference, 10-bit lane, code millionths (4.0).
+///
+/// Baselined, never derived. **Re-baselined on the CC6 fixture's own Linux
+/// measurement**: `cc6_delivery_source()` measures **0** — the 10-bit lane's
+/// P99 luma difference is exactly zero, so the margin is infinite and the
+/// draft's 8 000 000 was pure headroom. Halved to 4 000 000, which is still
+/// four times the 8-bit lane's own measured P99 in 8-bit-equivalent terms.
+pub const DELIVERY_LUMA_P99_CODE_10BIT_MILLIONTHS: i64 = 4_000_000;
+/// Gated luma-plane mean absolute difference, 10-bit lane, code millionths (1.0).
+///
+/// Baselined, never derived. **Re-baselined on the CC6 fixture's own Linux
+/// measurement**: `cc6_delivery_source()` measures **5 545** (0.0055 codes)
+/// against the draft's 4 000 000, a 721x margin. Tightened to 1 000 000, which
+/// still keeps a **180.3x** margin.
+pub const DELIVERY_LUMA_MEAN_CODE_10BIT_MILLIONTHS: i64 = 1_000_000;
+/// Gated whole-raster RGB mean absolute difference, 10-bit lane,
+/// **8-bit-equivalent** code millionths (1.0).
+///
+/// Baselined, never derived. **Re-baselined on the CC6 fixture's own Linux
+/// measurement**: `cc6_delivery_source()` measures **414 572**
+/// 8-bit-equivalent code millionths (0.415 codes) against the draft's 500 000,
+/// a 1.21x margin — below the 2x rule. Widened to 1 000 000 for a **2.41x**
+/// margin, which is still strictly tighter than the 8-bit lane's 1 500 000, as
+/// the lane's justification requires.
+///
+/// A whole-raster **sanity floor**, not a codec gate: it is dominated by 4:2:0
+/// chroma decimation, which costs the 10-bit lane the same as the 8-bit one on
+/// the saturated edges §11.1 mandates. The luma plane above is the codec-only
+/// gate.
+pub const DELIVERY_RGB_MEAN_CODE_10BIT_MILLIONTHS: i64 = 1_000_000;
+/// Gated PSNR floor, 10-bit lane, hundredths of a dB on the 8-bit-equivalent
+/// MSE (33.00 dB).
+///
+/// Baselined, never derived. **Re-baselined on the CC6 fixture's own Linux
+/// measurement**: `cc6_delivery_source()` measures **3 700** (37.00 dB) against
+/// the draft's 4 000, a shortfall of 3.00 dB. Lowered to 3 300 for **4.00 dB**
+/// of headroom.
+///
+/// A whole-raster sanity floor for the same reason as the 8-bit lane's: the
+/// 10-bit lane buys ~9 dB on flat fields and nothing at all on a 4:2:0 edge.
+pub const DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_10BIT: i32 = 3_300;
+
+/// Strict-legal-box excursion rate at which a decoded plane raises
+/// `decoded_range_excursion` (1 %, CC6 §6.4).
+pub const DECODED_RANGE_EXCEPTION_BASIS_POINTS: u32 = 100;
+
+/// Why the whole-raster RGB extremes are evidence rather than a gate.
+pub const DELIVERY_RGB_EXTREMES_NOTE: &str = "4:2:0 chroma decimation at hard saturated edges dominates these two numbers in both lanes; \
+they are evidence, not a gate.";
+
+/// Every gated number of CC6 §6.3 for one delivery lane.
+///
+/// A caller may not invent a looser set: [`DeliveryBudgets::for_depth`] is the
+/// only constructor that names the lane's constants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeliveryBudgets {
+    /// Luma-plane maximum absolute difference, delivery code units at the lane
+    /// depth.
+    pub luma_max_code: u32,
+    pub luma_p99_code_millionths: i64,
+    pub luma_mean_code_millionths: i64,
+    /// Whole-raster RGB mean absolute difference, 8-bit-equivalent code units.
+    pub rgb_mean_code_millionths: i64,
+    pub psnr_floor_db_hundredths: i32,
+}
+
+impl DeliveryBudgets {
+    /// The named constants for one delivery lane.
+    #[must_use]
+    pub const fn for_depth(depth: DeliveryEncodeDepth) -> Self {
+        match depth {
+            DeliveryEncodeDepth::Eight => Self {
+                luma_max_code: DELIVERY_LUMA_MAX_CODE_8BIT,
+                luma_p99_code_millionths: DELIVERY_LUMA_P99_CODE_8BIT_MILLIONTHS,
+                luma_mean_code_millionths: DELIVERY_LUMA_MEAN_CODE_8BIT_MILLIONTHS,
+                rgb_mean_code_millionths: DELIVERY_RGB_MEAN_CODE_8BIT_MILLIONTHS,
+                psnr_floor_db_hundredths: DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_8BIT,
+            },
+            DeliveryEncodeDepth::Ten => Self {
+                luma_max_code: DELIVERY_LUMA_MAX_CODE_10BIT,
+                luma_p99_code_millionths: DELIVERY_LUMA_P99_CODE_10BIT_MILLIONTHS,
+                luma_mean_code_millionths: DELIVERY_LUMA_MEAN_CODE_10BIT_MILLIONTHS,
+                rgb_mean_code_millionths: DELIVERY_RGB_MEAN_CODE_10BIT_MILLIONTHS,
+                psnr_floor_db_hundredths: DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_10BIT,
+            },
+        }
+    }
+}
+
+/// One post-export verification request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeliveryVerificationRequest {
+    /// `1..=`[`DELIVERY_VERIFICATION_MAX_FRAMES`]; defaults to
+    /// [`DELIVERY_VERIFICATION_FRAME_COUNT`].
+    pub frame_count: u8,
+    pub budgets: DeliveryBudgets,
+    /// The tags the file is expected to carry: `ExportSettings.delivery_color`.
+    pub expected_delivery: ColorDescription,
+}
+
+impl DeliveryVerificationRequest {
+    /// A default-sampled request for one lane and one expected description.
+    #[must_use]
+    pub fn new(depth: DeliveryEncodeDepth, expected_delivery: ColorDescription) -> Self {
+        Self {
+            frame_count: DELIVERY_VERIFICATION_FRAME_COUNT,
+            budgets: DeliveryBudgets::for_depth(depth),
+            expected_delivery,
+        }
+    }
+
+    /// Refuse a request whose `frame_count` is outside
+    /// `1..=`[`DELIVERY_VERIFICATION_MAX_FRAMES`].
+    ///
+    /// Callers validate **before** sampling: [`Self::sample_frames`] clamps so
+    /// that it can stay total and infallible, and a clamp is a different
+    /// measurement reported under the number that was asked for. This is the
+    /// one place that difference is turned into a typed refusal carrying
+    /// `code`, `field`, `observed`, and `allowed_values`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeliveryVerificationError::FrameCountOutOfRange`] for `0` and
+    /// for anything above [`DELIVERY_VERIFICATION_MAX_FRAMES`].
+    pub fn validate(&self) -> Result<(), DeliveryVerificationError> {
+        if self.frame_count == 0 || self.frame_count > DELIVERY_VERIFICATION_MAX_FRAMES {
+            return Err(DeliveryVerificationError::FrameCountOutOfRange {
+                observed: self.frame_count.to_string(),
+                allowed: "1..=16",
+            });
+        }
+        Ok(())
+    }
+
+    /// The frames one verification samples, given the document's implied frame
+    /// count `total_frames` (CC6 §6.2).
+    ///
+    /// Closed-form integer arithmetic: no clock, no adaptive stride. For
+    /// `n >= 2` the sample always includes frame `0` and frame `T - 1`; for
+    /// `n == 1` it includes frame `0` only. Duplicates, possible only when `T`
+    /// is small, are removed while preserving order.
+    ///
+    /// **Callers validate first.** A `frame_count` outside
+    /// `1..=`[`DELIVERY_VERIFICATION_MAX_FRAMES`] is clamped here so this
+    /// function stays total, which means the sample it returns is *not* the
+    /// one the caller asked for. [`Self::validate`] is the refusal that keeps
+    /// that from being published as if it were, and every entry point calls it
+    /// before sampling.
+    #[must_use]
+    pub fn sample_frames(&self, total_frames: u64) -> Vec<u64> {
+        let requested = u64::from(self.frame_count.clamp(1, DELIVERY_VERIFICATION_MAX_FRAMES));
+        if total_frames == 0 {
+            return Vec::new();
+        }
+        if requested == 1 {
+            return vec![0];
+        }
+        if total_frames <= requested {
+            return (0..total_frames).collect();
+        }
+        let mut frames = Vec::with_capacity(usize::try_from(requested).unwrap_or(0));
+        for index in 0..requested {
+            let frame = index * (total_frames - 1) / (requested - 1);
+            if frames.last() != Some(&frame) {
+                frames.push(frame);
+            }
+        }
+        frames
+    }
+}
+
+/// Absolute-difference statistics for one compared channel or plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeliveryChannelDifference {
+    /// Lane code units (8-bit codes on the 8-bit lane, 10-bit codes on the
+    /// 10-bit lane). For the RGB channels this is reported, never gated.
+    pub maximum_code_diff: u32,
+    /// Lane code units, millionths. For the RGB channels reported, never gated.
+    pub p99_code_diff_millionths: i64,
+    /// For the luma plane: lane code units, millionths. For the RGB channels
+    /// and `combined`: **8-bit-equivalent** code units (`d / 2^(bits − 8)`),
+    /// millionths, so the §6.3 RGB-mean budget and the §11.2.11 lane
+    /// comparison read the same scale on both lanes.
+    pub mean_code_diff_millionths: i64,
+}
+
+/// The decoded-versus-reference comparison of one verified export.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeliveryComparison {
+    /// Project frame identities, the `i64` identity
+    /// `ScopeMeasurementMetadata.project_frames` carries.
+    pub frames: Vec<i64>,
+    /// GATED: the luma plane at full resolution, delivery code units at the
+    /// lane depth. This is codec-only error; no chroma decimation term enters
+    /// it.
+    pub luma: DeliveryChannelDifference,
+    /// REPORTED, NOT GATED — see [`DeliveryComparison::rgb_extremes_note`].
+    pub red: DeliveryChannelDifference,
+    /// REPORTED, NOT GATED.
+    pub green: DeliveryChannelDifference,
+    /// REPORTED, NOT GATED.
+    pub blue: DeliveryChannelDifference,
+    /// Only `mean_code_diff_millionths` is gated.
+    pub combined: DeliveryChannelDifference,
+    /// GATED. `None` means the 8-bit-equivalent MSE was exactly zero.
+    pub psnr_db_hundredths: Option<i32>,
+    /// Measured from the decoded file's native planes, never from a raster
+    /// that has already been through the scaler.
+    pub decoded_ycbcr: crate::YCbCrLegalReport,
+    /// Always [`DELIVERY_RGB_EXTREMES_NOTE`].
+    pub rgb_extremes_note: String,
+    pub budgets: DeliveryBudgets,
+    pub within_budgets: bool,
+}
+
+/// One decoded, re-probed, and compared delivery encode.
+///
+/// Produced only by `Analysis::verify_delivery_output`. A verification is a
+/// measurement: it never moves, renames, or deletes the file it read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeliveryVerification {
+    pub output_path: std::path::PathBuf,
+    pub delivery_bit_depth: DeliveryEncodeDepth,
+    pub probed: ColorDescription,
+    /// `tag_source` is always
+    /// [`DeliveryTagSource::ProbedOutputFile`].
+    pub tags: DeliveryTagCheck,
+    pub decoded_pixel_format: String,
+    pub comparison: DeliveryComparison,
+    pub exceptions: Vec<crate::ColorQcException>,
+    /// No `Error`-severity entry in `exceptions`.
+    pub technical_pass: bool,
 }
 
 #[cfg(test)]
@@ -802,8 +1630,13 @@ mod tests {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         for profile in DeliveryProfile::ALL {
             let document = document_for_delivery_profile(&source, profile, 40, 60).unwrap();
-            let settings = profile.export_settings(&document, ExportCancellation::default());
-            let report = delivery_conformance(&source, profile, 40, 60).unwrap();
+            let settings = profile.export_settings(
+                &document,
+                DeliveryEncodeDepth::Eight,
+                ExportCancellation::default(),
+            );
+            let report =
+                delivery_conformance(&source, profile, DeliveryEncodeDepth::Eight, 40, 60).unwrap();
 
             assert_eq!(document.resolution, settings.resolution);
             assert_eq!(report.profile, profile);
@@ -820,8 +1653,14 @@ mod tests {
 
     #[test]
     fn missing_source_media_blocks_delivery() {
-        let report =
-            delivery_conformance(&fixture(), DeliveryProfile::SourceMaster, 50, 50).unwrap();
+        let report = delivery_conformance(
+            &fixture(),
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .unwrap();
 
         assert!(!report.export_ready());
         assert!(
@@ -849,8 +1688,14 @@ mod tests {
             color_description: ColorContext::sdr_rec709().delivery,
         });
 
-        let report =
-            delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50).unwrap();
+        let report = delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .unwrap();
 
         assert!(report.export_ready());
         assert!(
@@ -884,8 +1729,14 @@ mod tests {
             },
         ]);
 
-        let report =
-            delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50).unwrap();
+        let report = delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .unwrap();
         let warnings = report
             .issues
             .iter()
@@ -905,8 +1756,11 @@ mod tests {
     fn youtube_profile_uses_recommended_high_frame_rate_bitrate() {
         let mut source = fixture();
         source.fps = Rational::new(60, 1).unwrap();
-        let settings =
-            DeliveryProfile::Youtube1080p.export_settings(&source, ExportCancellation::default());
+        let settings = DeliveryProfile::Youtube1080p.export_settings(
+            &source,
+            DeliveryEncodeDepth::Eight,
+            ExportCancellation::default(),
+        );
 
         assert_eq!(settings.resolution, (1920, 1080));
         assert_eq!(settings.video_bitrate, 12_000_000);
@@ -921,7 +1775,11 @@ mod tests {
             ColorContext::sdr_rec709().delivery
         );
         for profile in DeliveryProfile::ALL {
-            let settings = profile.export_settings(&document, ExportCancellation::default());
+            let settings = profile.export_settings(
+                &document,
+                DeliveryEncodeDepth::Eight,
+                ExportCancellation::default(),
+            );
 
             assert_eq!(settings.delivery_color, document.color_context.delivery);
         }
@@ -936,12 +1794,21 @@ mod tests {
         custom_delivery.transfer = ColorTransfer::Smpte2084;
         document.color_context.delivery = custom_delivery.clone();
 
-        let settings =
-            DeliveryProfile::SourceMaster.export_settings(&document, ExportCancellation::default());
+        let settings = DeliveryProfile::SourceMaster.export_settings(
+            &document,
+            DeliveryEncodeDepth::Eight,
+            ExportCancellation::default(),
+        );
         assert_eq!(settings.delivery_color, custom_delivery);
 
-        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
-            .expect("custom delivery context should still produce a report");
+        let report = delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .expect("custom delivery context should still produce a report");
         assert_eq!(report.delivery_color, custom_delivery);
         assert!(!report.export_ready());
         assert!(
@@ -958,8 +1825,14 @@ mod tests {
         document.media_pool[0].path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         document.color_context.delivery.provenance = ColorProvenance::UserOverride;
-        let user_override =
-            delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50).unwrap();
+        let user_override = delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .unwrap();
         assert!(user_override.export_ready());
 
         for provenance in [
@@ -971,8 +1844,14 @@ mod tests {
             ColorProvenance::Other("future_project_source".to_owned()),
         ] {
             document.color_context.delivery.provenance = provenance.clone();
-            let report =
-                delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50).unwrap();
+            let report = delivery_conformance(
+                &document,
+                DeliveryProfile::SourceMaster,
+                DeliveryEncodeDepth::Eight,
+                50,
+                50,
+            )
+            .unwrap();
 
             assert!(
                 !report.export_ready(),
@@ -997,8 +1876,14 @@ mod tests {
         document.color_context.monitoring.provenance = ColorProvenance::UserOverride;
         document.color_context.monitoring.confidence_basis_points = 9_500;
 
-        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
-            .expect("user-authorized managed context should produce a report");
+        let report = delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .expect("user-authorized managed context should produce a report");
 
         assert!(report.export_ready());
         assert!(!report.issues.iter().any(|issue| {
@@ -1018,8 +1903,14 @@ mod tests {
         document.color_context.working.bit_depth = crate::ColorBitDepth::Eight;
         document.color_context.monitoring.transfer = ColorTransfer::Bt1886;
 
-        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
-            .expect("incompatible colour context should still produce a report");
+        let report = delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .expect("incompatible colour context should still produce a report");
 
         assert!(!report.export_ready());
         for code in [
@@ -1054,8 +1945,14 @@ mod tests {
         });
         document.media_pool[0].color_description = crate::ColorDescription::unknown();
 
-        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
-            .expect("source metadata failures should be reported, not returned as errors");
+        let report = delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .expect("source metadata failures should be reported, not returned as errors");
 
         assert!(!report.export_ready());
         let blocking_assets: Vec<_> = report
@@ -1103,8 +2000,14 @@ mod tests {
             }],
         });
 
-        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
-            .expect("audio-only A/V use should remain deliverable");
+        let report = delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .expect("audio-only A/V use should remain deliverable");
 
         assert!(report.export_ready());
         assert!(!report.issues.iter().any(|issue| {
@@ -1128,8 +2031,14 @@ mod tests {
             provenance: crate::ColorProvenance::StreamMetadata,
         };
 
-        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
-            .expect("unsupported source profile should produce a report");
+        let report = delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .expect("unsupported source profile should produce a report");
         let issue = report
             .issues
             .iter()
@@ -1157,8 +2066,14 @@ mod tests {
             provenance: crate::ColorProvenance::Inferred,
         };
 
-        let report =
-            delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50).unwrap();
+        let report = delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .unwrap();
         let warning = report
             .issues
             .iter()
@@ -1183,8 +2098,14 @@ mod tests {
         document.media_pool[0].path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         mutate(&mut document.color_context.delivery);
-        delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
-            .expect("unsupported delivery colour must be reported, not returned as an error")
+        delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .expect("unsupported delivery colour must be reported, not returned as an error")
     }
 
     /// `(field, observed, allowed, delivery description)` for every field the
@@ -1235,15 +2156,6 @@ mod tests {
                 "d65",
                 ColorDescription {
                     white_point: ColorWhitePoint::D50,
-                    ..supported.clone()
-                },
-            ),
-            (
-                "bit_depth",
-                "Ten",
-                "8 (named eight or integer 8)",
-                ColorDescription {
-                    bit_depth: ColorBitDepth::Ten,
                     ..supported.clone()
                 },
             ),
@@ -1312,14 +2224,93 @@ mod tests {
     }
 
     #[test]
+    fn delivery_bit_depth_leg_accepts_the_two_managed_lanes_and_rejects_every_other() {
+        let supported = ColorContext::sdr_rec709().delivery;
+        // Passing direction: both managed lanes, in both spellings. CC1 §2.1
+        // makes `Integer(n)` and the named variant the same declared depth.
+        for accepted in [
+            ColorBitDepth::Eight,
+            ColorBitDepth::Ten,
+            ColorBitDepth::Integer(8),
+            ColorBitDepth::Integer(10),
+        ] {
+            let color = ColorDescription {
+                bit_depth: accepted.clone(),
+                ..supported.clone()
+            };
+            assert_eq!(
+                delivery_color_mismatch(&color),
+                None,
+                "{accepted:?} is a managed delivery lane"
+            );
+        }
+        // Failing direction: every other depth, one step away.
+        for rejected in [
+            ColorBitDepth::Twelve,
+            ColorBitDepth::Sixteen,
+            ColorBitDepth::Integer(9),
+            ColorBitDepth::Float16,
+            ColorBitDepth::Unknown,
+        ] {
+            let color = ColorDescription {
+                bit_depth: rejected.clone(),
+                ..supported.clone()
+            };
+            assert_eq!(
+                delivery_color_mismatch(&color),
+                Some(DeliveryColorMismatch {
+                    field: "bit_depth".to_owned(),
+                    observed: format!("{rejected:?}"),
+                    allowed: DELIVERY_BIT_DEPTH_ALLOWED.to_owned(),
+                }),
+                "{rejected:?} is not a managed delivery lane"
+            );
+        }
+    }
+
+    #[test]
+    fn both_managed_delivery_depths_are_accepted_and_carry_their_own_lane() {
+        for depth in DeliveryEncodeDepth::ALL {
+            let mut document = fixture();
+            document.media_pool[0].path =
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+            let report =
+                delivery_conformance(&document, DeliveryProfile::SourceMaster, depth, 50, 50)
+                    .expect("both managed lanes should produce a report");
+
+            assert_eq!(report.delivery_bit_depth, depth);
+            assert_eq!(report.delivery_color.bit_depth, depth.color_bit_depth());
+            // The document keeps declaring the project's 8-bit contract.
+            assert_eq!(
+                document.color_context.delivery.bit_depth,
+                ColorBitDepth::Eight
+            );
+            assert!(
+                !report
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == "unsupported_delivery_color"),
+                "{depth:?} must be an accepted delivery lane"
+            );
+            assert!(report.export_ready());
+        }
+    }
+
+    #[test]
     fn numeric_integer_eight_delivery_depth_is_accepted_like_the_named_variant() {
         let mut document = fixture();
         document.media_pool[0].path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         document.color_context.delivery.bit_depth = ColorBitDepth::Integer(8);
 
-        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
-            .expect("numeric integer depth should produce a report");
+        let report = delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .expect("numeric integer depth should produce a report");
 
         assert!(
             !report
@@ -1336,8 +2327,14 @@ mod tests {
         let mut document = fixture();
         document.media_pool[0].path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        let report = delivery_conformance(&document, DeliveryProfile::SourceMaster, 50, 50)
-            .expect("fixture should produce a conformance report");
+        let report = delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .expect("fixture should produce a conformance report");
         let serialized = serde_json::to_value(&report).expect("report should serialize");
 
         assert_eq!(
