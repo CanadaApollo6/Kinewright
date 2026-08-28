@@ -1,0 +1,256 @@
+{
+  "schema_version": 6,
+  "benchmark_id": "kinewright-color-workflow-v6",
+  "title": "Kinewright Colour Workflow v6",
+  "status": "pending_real_harness_run",
+  "runner": "KINEWRIGHT_EVAL=1 cargo run -p kinewright-agent --bin kinewright-eval -- --suite color-workflow-v6",
+  "implementation": "crates/kinewright-agent/src/bin/kinewright-eval.rs",
+  "contract": "docs/CC7-WORKFLOW-EVALUATION.md",
+  "authority": "kinewright_core::cc7_scenarios",
+  "fixture_provenance": {
+    "policy": "CC7 checks in no fixture bytes. Every raster is authored in Rust from kinewright_core::cc7_scenarios' analytic values and muxed at fixture time, so the benchmark is offline, deterministic, and byte-identical on one operating system.",
+    "generator": "kinewright_media::cc7_sources",
+    "scene": "320x180 at 25 fps: a neutral ramp band, twelve achromatic chart patches, five saturated primaries with the pure red deliberately absent, a seven-patch skin/product/shadow row, and an achromatic surround at code 115. Scenario (f) replaces it with the four static skin patches plus a 24 px product_red square on a (100, 40) px sinusoid, occluded on frames 43..=47.",
+    "mux": "ffmpeg -f rawvideo -pix_fmt yuv444p -s 320x180 -r 25 -vf setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709 -c:v ffv1 -level 3 -g 1 -pix_fmt yuv444p -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv, written to .mkv",
+    "lut": "c3 writes log_like_inverse_cube(65) as log-inverse.cube beside a saved project, and is the only task whose PreparedFixture carries a project_path; without it import_lut_asset refuses project_not_saved and the task is unsatisfiable.",
+    "checked_in_bytes": "none: manifest.json, ground-truth.json and README.md are the only files in this directory."
+  },
+  "score_layers": {
+    "technical_gates": "The seven gate families of CC7 §4, discharged by ordinary cargo test in the default GPU lane on both CI operating systems, with no model and no network. They do not need this suite.",
+    "model_workflow": "This suite: one model turn per scenario, scored by the machine assertions below plus the shared budget and deliverable checks.",
+    "blind_human_review": {
+      "form": "blind/review-form.json, keyed on blind_id alone. It is the only file the reviewer opens.",
+      "key": "blind-key.json, written to the run root and deliberately outside blind/.",
+      "not_applicable_dimensions": [
+        "story",
+        "pacing",
+        "audio_finish",
+        "captions"
+      ],
+      "rated_dimensions": [
+        "visual_finish",
+        "delivery_readiness"
+      ],
+      "not_blinded": [
+        "scenario_identity"
+      ]
+    }
+  },
+  "acceptance_target": {
+    "samples_per_scenario": 3,
+    "minimum_machine_passes_per_scenario": 3,
+    "minimum_human_accepts_per_scenario": 2,
+    "minimum_mean_human_rating": 4.0,
+    "every_question_answered": true,
+    "note": "One success does not satisfy the slice. N/A dimensions are excluded from the means."
+  },
+  "tasks": [
+    {
+      "id": "c1",
+      "scenario": "a",
+      "name": "Mixed-camera interview match",
+      "fixture": "fixture_cc7_mixed_camera",
+      "ground_truth": "benchmarks/auto-edit/v6/ground-truth.json",
+      "prompt": "Clips 1 and 2 are the same interview shot from two cameras. Clip 1 is the reference the colourist approved. Match clip 2 to it so the neutral chart in both reads neutral and the two cut together, leave clip 1 exactly as it is, then show me a proof of the corrected clip and confirm the skin in clip 2 still reads as skin.",
+      "human_question": "Does the match preserve natural and intentional differences?",
+      "delivery": {
+        "profile": "source_master",
+        "delivery_bit_depth": "eight",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 5,
+        "proof_cell_width": 160,
+        "require_audio": false
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 16,
+        "operations": 8,
+        "tokens": 60000,
+        "cost_usd": 2.0,
+        "wall_time_ms": 900000,
+        "undos": 8
+      },
+      "machine_assertions": [
+        "clip 1, the approved reference, is byte-identical to its pre-session form and carries no effect",
+        "the twelve achromatic chart patches on the matched candidate spread at most CC7_MATCH_NEUTRAL_SPREAD_MAX_CODE monitoring codes",
+        "the candidate's skin band still reads in-band at CC7_SKIN_IN_BAND_EXACT_BASIS_POINTS over its considered pixels",
+        "colour QC over range, gamut and tags reports technical_pass on the corrected candidate",
+        "the eight-bit delivery encode decodes inside CC6's budgets and raises no Error",
+        "the shot-match workflow tools were used: analyze_color_shot, plan_shot_match, prepare_edit_plan, commit_edit_plan, render_color_proof, get_color_qc",
+        "undo integrity: the session's operations unwind to the original document"
+      ]
+    },
+    {
+      "id": "c2",
+      "scenario": "b",
+      "name": "Wrong white balance and underexposure",
+      "fixture": "fixture_cc7_white_balance",
+      "ground_truth": "benchmarks/auto-edit/v6/ground-truth.json",
+      "prompt": "Clip 2 was shot on the wrong white-balance preset and badly underexposed; clip 1 is a correctly balanced take of the same scene. Recover clip 2 as far as the primary controls allow, tell me plainly where you ran out of authority, and check whether the recovered clip now pushes anything outside the delivery range.",
+      "human_question": "Is the proposed compromise acceptable?",
+      "delivery": {
+        "profile": "source_master",
+        "delivery_bit_depth": "eight",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 5,
+        "proof_cell_width": 160,
+        "require_audio": false
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 16,
+        "operations": 8,
+        "tokens": 60000,
+        "cost_usd": 2.0,
+        "wall_time_ms": 900000,
+        "undos": 8
+      },
+      "machine_assertions": [
+        "the recovered candidate's skin band still reads at least CC7_C2_SKIN_IN_BAND_REPORTED_BASIS_POINTS, above the exception threshold",
+        "colour QC over range, gamut, tags and per-node attribution reports technical_pass: the range excursion is a Warning, not an Error",
+        "the eight-bit delivery encode decodes inside CC6's budgets and raises no Error",
+        "the recovery workflow tools were used: plan_shot_match, prepare_edit_plan, commit_edit_plan, get_color_qc",
+        "undo integrity: the session's operations unwind to the original document"
+      ]
+    },
+    {
+      "id": "c3",
+      "scenario": "c",
+      "name": "Log-like input normalisation",
+      "fixture": "fixture_cc7_log_like",
+      "ground_truth": "benchmarks/auto-edit/v6/ground-truth.json",
+      "prompt": "Clip 1 was recorded on a flat, log-like curve and looks washed out. The project is saved, and a matching inverse LUT is on disk beside it as `log-inverse.cube`. Normalise clip 1 back to a correct Rec.709 rendering using that file, then show me the result and a QC report.",
+      "human_question": null,
+      "delivery": {
+        "profile": "source_master",
+        "delivery_bit_depth": "eight",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 5,
+        "proof_cell_width": 160,
+        "require_audio": false
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 16,
+        "operations": 8,
+        "tokens": 60000,
+        "cost_usd": 2.0,
+        "wall_time_ms": 900000,
+        "undos": 8
+      },
+      "machine_assertions": [
+        "colour QC over range, gamut and tags reports technical_pass on the normalised clip",
+        "the eight-bit delivery encode decodes inside CC6's budgets and raises no Error",
+        "the import workflow tools were used: import_lut_asset, list_look_assets, plan_technical_lut, prepare_edit_plan, commit_edit_plan, get_color_qc",
+        "undo integrity: the session's operations unwind to the original document"
+      ]
+    },
+    {
+      "id": "c4",
+      "scenario": "d",
+      "name": "Product and skin secondary",
+      "fixture": "fixture_cc7_product_and_skin",
+      "ground_truth": "benchmarks/auto-edit/v6/ground-truth.json",
+      "prompt": "On clip 1, make the red product read richer without touching anyone's skin. Show me exactly which pixels you affected, and prove the skin tones are unchanged.",
+      "human_question": "Does attention remain on the intended subject?",
+      "delivery": {
+        "profile": "source_master",
+        "delivery_bit_depth": "eight",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 5,
+        "proof_cell_width": 160,
+        "require_audio": false
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 16,
+        "operations": 8,
+        "tokens": 60000,
+        "cost_usd": 2.0,
+        "wall_time_ms": 900000,
+        "undos": 8
+      },
+      "machine_assertions": [
+        "the matte covers exactly CC7_PRODUCT_PATCH_PIXEL_COUNT pixels of the product patch, all of them fully, with no partial pixel",
+        "the skin band reads in-band at CC7_SKIN_IN_BAND_EXACT_BASIS_POINTS, unchanged by the secondary",
+        "colour QC over range, gamut and tags reports technical_pass",
+        "the eight-bit delivery encode decodes inside CC6's budgets and raises no Error",
+        "the secondary workflow tools were used: plan_secondary_correction, prepare_edit_plan, commit_edit_plan, inspect_grade_matte, get_color_qc",
+        "undo integrity: the session's operations unwind to the original document"
+      ]
+    },
+    {
+      "id": "c5",
+      "scenario": "e",
+      "name": "Creative look with a gamut exception",
+      "fixture": "fixture_cc7_creative_look",
+      "ground_truth": "benchmarks/auto-edit/v6/ground-truth.json",
+      "prompt": "Give clip 1 a warm evening look using one of the built-in looks. Show me before, after, and the look bypassed at the same frame, and tell me whether the look pushes any pixels out of gamut.",
+      "human_question": "Does the look support the story?",
+      "delivery": {
+        "profile": "source_master",
+        "delivery_bit_depth": "eight",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 5,
+        "proof_cell_width": 160,
+        "require_audio": false
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 16,
+        "operations": 8,
+        "tokens": 60000,
+        "cost_usd": 2.0,
+        "wall_time_ms": 900000,
+        "undos": 8
+      },
+      "machine_assertions": [
+        "bypassing the look node renders byte-identically to removing it",
+        "colour QC over range, gamut and tags reports technical_pass: the gamut excursion is a Warning, not an Error",
+        "the eight-bit delivery encode decodes inside CC6's budgets and raises no Error",
+        "the look workflow tools were used: plan_creative_look, prepare_edit_plan, commit_edit_plan, render_color_proof, get_color_qc, list_look_assets",
+        "undo integrity: the session's operations unwind to the original document"
+      ]
+    },
+    {
+      "id": "c6",
+      "scenario": "f",
+      "name": "Tracked secondary through an occlusion",
+      "fixture": "fixture_cc7_tracked_secondary",
+      "ground_truth": "benchmarks/auto-edit/v6/ground-truth.json",
+      "prompt": "On clip 1, isolate the moving red product with a tracked secondary and lift its saturation. Something crosses in front of it partway through — do not invent a position you did not measure, and tell me which samples you could not trust.",
+      "human_question": "Are any visible corrections distracting?",
+      "delivery": {
+        "profile": "source_master",
+        "delivery_bit_depth": "eight",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 5,
+        "proof_cell_width": 160,
+        "require_audio": false
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 24,
+        "operations": 24,
+        "tokens": 60000,
+        "cost_usd": 2.0,
+        "wall_time_ms": 1500000,
+        "undos": 24
+      },
+      "machine_assertions": [
+        "the committed matte_window0_center_x_basis_points curve carries a keyframe at every surviving sample and none at the occluded frame 47",
+        "the committed matte_window0_center_y_basis_points curve carries a keyframe at every surviving sample and none at the occluded frame 47",
+        "colour QC over range, gamut and tags reports technical_pass",
+        "the eight-bit delivery encode decodes inside CC6's budgets and raises no Error",
+        "the tracking workflow tools were used: plan_secondary_correction, track_matte_window, prepare_edit_plan, commit_edit_plan, inspect_grade_matte",
+        "undo integrity: the session's operations unwind to the original document"
+      ]
+    }
+  ]
+}

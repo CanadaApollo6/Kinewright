@@ -217,7 +217,7 @@ impl InspectorEdits {
     }
 
     #[cfg(test)]
-    fn operations(&self) -> &[Operation] {
+    pub(crate) fn operations(&self) -> &[Operation] {
         &self.operations
     }
 
@@ -1817,7 +1817,11 @@ fn lut_node_section(
 /// A drag emits one operation per frame under the node's mix key so the
 /// preview stays live; `is_live_drag` keeps the release frame inside the
 /// gesture, so the whole drag is exactly one undo entry (CC4 §7).
-fn look_mix_row(
+///
+/// `pub(crate)` so CC7 §6's (e) person-path test can drive it from
+/// `look_browser_ui`, where the **Add as new look** builder it pairs with
+/// lives.
+pub(crate) fn look_mix_row(
     ui: &mut egui::Ui,
     clip: &Clip,
     effect: &Effect,
@@ -7734,6 +7738,961 @@ mod tests {
             None,
             "a technical input transform has no matte section to expand, so \
              forcing the id open reports nothing and the viewer stays inert"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CC7 §6 — the person path, at the operation-builder level
+    // -----------------------------------------------------------------------
+
+    use kinewright_core::cc7_scenarios::{
+        CC7_A_OPERATIONS, CC7_B1_OPERATIONS, CC7_B2_OPERATIONS, CC7_D_OPERATIONS,
+        CC7_D2_OPERATIONS, CC7_LOG_CUBE_BYTES_REPORTED, CC7_LOG_CUBE_SIZE, CC7_LOG_CUBE_TITLE,
+        CC7_LUT_ASSET_ID, CC7_MATCH_PROPOSAL_B, CC7_MATCH_PROPOSAL_C1, CC7_MATCH_PROPOSAL_C2,
+        CC7_SCENARIOS, CC7_SECONDARY_SATURATION_PERCENT, CC7_SOURCE_FPS, CC7_SOURCE_FRAMES,
+        CC7_SOURCE_HEIGHT, CC7_SOURCE_WIDTH, CC7_TRACK_PERSON_PATH_REASON, Cc7Operation,
+        Cc7PersonPath, Cc7Scenario, cc7_b1_canonical_operations, cc7_canonical_operations,
+        cc7_d2_canonical_operations, cc7_log_lut_asset, cc7_lut_backed_canonical_operations,
+        cc7_spec, cc7_target_clip,
+    };
+
+    /// The CC7 §2.3.4 / §2.3.5 document a scenario's canonical batch applies
+    /// to: its clips in timeline order, each 60 frames, carrying no effects.
+    ///
+    /// Every number here comes from `cc7_scenarios`; CC7 §2.1 forbids
+    /// restating one as a literal, which is why the raster, the rate, and the
+    /// clip ids are all read off the spec.
+    fn cc7_base_document(scenario: Cc7Scenario) -> Document {
+        let spec = cc7_spec(scenario);
+        let fps = Rational::new(CC7_SOURCE_FPS, 1).expect("the CC7 rate is valid");
+        let length = TimeCode(i64::from(CC7_SOURCE_FRAMES));
+        let mut media_pool = Vec::with_capacity(spec.clips.len());
+        let mut clips = Vec::with_capacity(spec.clips.len());
+        for (index, clip) in spec.clips.iter().enumerate() {
+            let asset = AssetId(u64::try_from(index).expect("a CC7 clip index fits") + 1);
+            media_pool.push(MediaAsset {
+                id: asset,
+                path: PathBuf::from(format!("cc7-{}-{index}.mkv", spec.id)),
+                name: format!("{} {index}", spec.title),
+                duration: length,
+                fps,
+                kind: MediaKind::Video,
+                resolution: Some((CC7_SOURCE_WIDTH, CC7_SOURCE_HEIGHT)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+                color_description: kinewright_core::ColorDescription::default(),
+            });
+            clips.push(Clip {
+                id: ClipId(clip.clip_id),
+                asset,
+                source_range: TimeCode::ZERO..length,
+                content: ClipContent::Media,
+                timeline_start: TimeCode(
+                    i64::try_from(index).expect("a CC7 clip index fits") * length.0,
+                ),
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
+            });
+        }
+        Document {
+            media_pool,
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips,
+            }],
+            color_context: kinewright_core::ColorContext::default(),
+            fps,
+            resolution: (CC7_SOURCE_WIDTH, CC7_SOURCE_HEIGHT),
+            duration: TimeCode(
+                i64::try_from(spec.clips.len()).expect("a CC7 clip count fits") * length.0,
+            ),
+            ..Document::default()
+        }
+    }
+
+    /// Feed a batch through core one operation at a time, so every
+    /// intermediate document is a legal project — the CC7 §6 rule, and the
+    /// shape `every_curve_edit_batch_is_accepted_by_core_in_order` uses.
+    fn cc7_apply_in_order(document: &mut Document, operations: &[Operation]) {
+        for operation in operations {
+            kinewright_core::apply_batch(document, std::slice::from_ref(operation))
+                .unwrap_or_else(|error| panic!("core rejected {operation:?}: {error}"));
+        }
+        document
+            .validate()
+            .expect("the document a person authored is valid");
+    }
+
+    /// The canonical document: the scenario's clips plus its canonical batch.
+    fn cc7_canonical_document(scenario: Cc7Scenario, canonical: &[Operation]) -> Document {
+        let mut document = cc7_base_document(scenario);
+        cc7_apply_in_order(&mut document, canonical);
+        document
+    }
+
+    /// The same batch with every inserted node stripped of its values.
+    ///
+    /// This is the document a person is looking at before they touch a
+    /// control: the node exists, at the index and under the id the canonical
+    /// batch gives it, and stores nothing. Deriving it from the canonical
+    /// batch rather than writing a second literal is what keeps the seed
+    /// honest — a person who then writes exactly the canonical values must
+    /// land exactly the canonical document.
+    fn cc7_unvalued(operations: &[Operation]) -> Vec<Operation> {
+        operations
+            .iter()
+            .map(|operation| match operation {
+                Operation::InsertEffect {
+                    clip,
+                    index,
+                    effect,
+                } => Operation::InsertEffect {
+                    clip: *clip,
+                    index: *index,
+                    effect: Effect {
+                        id: effect.id,
+                        name: effect.name.clone(),
+                        parameters: BTreeMap::new(),
+                        keyframes: BTreeMap::new(),
+                    },
+                },
+                other => other.clone(),
+            })
+            .collect()
+    }
+
+    /// The document a person starts from, and the clip and node their card is
+    /// drawn against.
+    fn cc7_seeded(scenario: Cc7Scenario, canonical: &[Operation]) -> (Document, Clip, Effect) {
+        let mut document = cc7_base_document(scenario);
+        cc7_apply_in_order(&mut document, &cc7_unvalued(canonical));
+        let clip = document
+            .clip(cc7_target_clip(scenario))
+            .expect("the scenario's target clip")
+            .clone();
+        let effect = clip
+            .effects
+            .first()
+            .expect("the seeded canonical node")
+            .clone();
+        (document, clip, effect)
+    }
+
+    /// The `(name, value)` pairs one batch of `SetEffectParam`s writes.
+    ///
+    /// A map rather than a list: independent parameter writes commute, so CC7
+    /// §6 compares them order-insensitively, while the names and the values
+    /// stay exact.
+    fn cc7_written(operations: &[Operation]) -> BTreeMap<String, i64> {
+        operations
+            .iter()
+            .map(|operation| match operation {
+                Operation::SetEffectParam {
+                    name,
+                    value: ParamValue::Integer(value),
+                    ..
+                } => (name.clone(), *value),
+                other => panic!("a person's control writes SetEffectParam, not {other:?}"),
+            })
+            .collect()
+    }
+
+    /// The parameters one canonical node carries, in the same shape.
+    fn cc7_expected(node: &Cc7Operation) -> BTreeMap<String, i64> {
+        node.parameters
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), *value))
+            .collect()
+    }
+
+    /// One frame of a live slider gesture, exactly as
+    /// `primary_correction_section` records it: the operation the control
+    /// builds, under the parameter's own coalesce key so the whole drag is one
+    /// undo entry.
+    fn cc7_primary_drag(clip: &Clip, effect: &Effect, name: &str, value: i64) -> Vec<Operation> {
+        let key = primary_coalesce_key(clip.id, effect.id, name);
+        let mut gesture = InspectorEdits::default();
+        gesture.begin_gesture();
+        gesture.push_live(
+            effect_param_operation(clip.id, effect.id, name, value),
+            key.clone(),
+        );
+        assert_eq!(
+            gesture.coalesce_key(),
+            Some(key.as_str()),
+            "{name}'s drag must land as one undo entry"
+        );
+        gesture.operations().to_vec()
+    }
+
+    /// One frame of a discrete matte edit — a checkbox, or a `DragValue` typed
+    /// rather than dragged — as `matte_section_body` and
+    /// `matte_integer_control` record it.
+    fn cc7_matte_edit(clip: &Clip, effect: &Effect, name: &str, value: i64) -> Vec<Operation> {
+        let mut edits = InspectorEdits::default();
+        edits.push(effect_param_operation(clip.id, effect.id, name, value));
+        assert_eq!(
+            edits.coalesce_key(),
+            None,
+            "{name} is a discrete edit and is never coalesced"
+        );
+        edits.operations().to_vec()
+    }
+
+    /// Draw one primary-correction card headlessly and return every string it
+    /// painted, asserting that merely drawing it writes nothing.
+    fn cc7_painted_primary_card(document: &Document, clip: &Clip, effect: &Effect) -> Vec<String> {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let availability = BTreeMap::new();
+        let qc_clipping = crate::color_qc_ui::ColorQcNodeClipping::default();
+        let mut edits = InspectorEdits::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let looks = LookInspectorContext {
+                document,
+                availability: &availability,
+                qc_clipping: &qc_clipping,
+                store_unavailable: None,
+            };
+            primary_correction_section(ui, clip, effect, &looks, &mut edits);
+        });
+        assert!(
+            edits.operations().is_empty(),
+            "drawing the card writes nothing to the document"
+        );
+        crate::theme::painted_text(&output)
+    }
+
+    /// Draw the **real** primary-correction card and return what it painted
+    /// together with what it wrote (CC7 §6 (b), R2-MAJ-4).
+    ///
+    /// `egui::Slider` defaults to `SliderClamping::Always`, so
+    /// `Slider::new(&mut value, parameter.min..=parameter.max)` at
+    /// `inspector_ui.rs:2159` clamps the card's local `value` into the
+    /// descriptor's range in place before it paints (`egui-0.35.0`
+    /// `slider.rs:597-604`, `:950-955`). The card's own readout at `:2168` is
+    /// then formatted from that clamped local, so drawing the section over an
+    /// out-of-range stored value measures **the range the section passes**
+    /// rather than a replica of the expression that builds it.
+    ///
+    /// The clamp does **not** reach `slider.changed()`: `get_value` clamps on
+    /// the way in as well, so `old_value == value` and `mark_changed` is never
+    /// called (`slider.rs:951-966`). The card therefore shows the bound and
+    /// writes nothing, which is why the operations are returned and asserted
+    /// empty rather than compared to a batch.
+    fn cc7_painted_card_and_edits(
+        document: &Document,
+        clip: &Clip,
+        effect: &Effect,
+    ) -> (Vec<String>, Vec<Operation>) {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let availability = BTreeMap::new();
+        let qc_clipping = crate::color_qc_ui::ColorQcNodeClipping::default();
+        let mut edits = InspectorEdits::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let looks = LookInspectorContext {
+                document,
+                availability: &availability,
+                qc_clipping: &qc_clipping,
+                store_unavailable: None,
+            };
+            primary_correction_section(ui, clip, effect, &looks, &mut edits);
+        });
+        (
+            crate::theme::painted_text(&output),
+            edits.operations().to_vec(),
+        )
+    }
+
+    /// The bound one matte control offers, asserted to be a **registered**
+    /// descriptor range rather than `matte_parameter_range`'s inert
+    /// `value..=value` fallback for a name the node does not register, which
+    /// `contains` would satisfy trivially (R2 minor 17).
+    fn cc7_matte_range(effect: &Effect, name: &str, value: i64) -> std::ops::RangeInclusive<i64> {
+        let parameter = kinewright_core::effect_descriptor(&effect.name)
+            .and_then(|descriptor| descriptor.parameter(name))
+            .unwrap_or_else(|| panic!("{name} must be a registered {} control", effect.name));
+        let range = matte_parameter_range(effect, name, value);
+        assert_eq!(
+            (*range.start(), *range.end()),
+            (parameter.min, parameter.max),
+            "{name}'s control must offer the descriptor's own bound, not the inert fallback"
+        );
+        range
+    }
+
+    /// A value one code away from `value`, kept inside `range` so the failing
+    /// direction is a wrong number rather than a rejected one.
+    fn cc7_off_by_one(range: &std::ops::RangeInclusive<i64>, value: i64) -> i64 {
+        if value < *range.end() {
+            value + 1
+        } else {
+            value - 1
+        }
+    }
+
+    /// Draw one node's matte section body headlessly — the section CC7 §6
+    /// names for (d), (d2) and (f) — and return every string it painted.
+    fn cc7_painted_matte_body(clip: &Clip, effect: &Effect) -> Vec<String> {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let params = MatteParams::from_effect(effect);
+        let mut edits = InspectorEdits::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            matte_section_body(ui, clip, effect, &params, &mut edits);
+        });
+        assert!(
+            edits.operations().is_empty(),
+            "drawing the matte section writes nothing to the document"
+        );
+        crate::theme::painted_text(&output)
+    }
+
+    fn cc7_assert_painted(painted: &[String], needles: &[&str], what: &str) {
+        for needle in needles {
+            assert!(
+                painted.iter().any(|line| line == needle),
+                "{what} does not draw {needle:?}:\n{painted:#?}"
+            );
+        }
+    }
+
+    /// Every primary-correction value is inside the bound the person's own
+    /// slider offers, which is the descriptor's (CC7 §6, scenario (b)).
+    fn cc7_primary_parameter(name: &str) -> &'static EffectParameterDescriptor {
+        let descriptor = EFFECT_DESCRIPTORS
+            .iter()
+            .find(|descriptor| descriptor.name == "primary_correction")
+            .expect("the CC1 primary_correction descriptor");
+        assert!(
+            should_render_effect_parameter(descriptor, name),
+            "{name} must be one of the card's own sliders"
+        );
+        descriptor
+            .parameter(name)
+            .unwrap_or_else(|| panic!("{name} is a primary_correction control"))
+    }
+
+    /// CC7 §6 (a): a person balances the second interview camera by moving
+    /// three primary sliders, and lands exactly the document the planner's
+    /// proposal commits.
+    ///
+    /// Both directions: the same three controls set one code away from the
+    /// proposal build a batch that is **not** the canonical one, so the
+    /// comparison is a measurement rather than a tautology.
+    #[test]
+    fn cc7_a_a_person_can_author_the_matched_primary_by_hand() {
+        let scenario = Cc7Scenario::MixedCamera;
+        let canonical = cc7_canonical_operations(scenario);
+        let (mut document, clip, effect) = cc7_seeded(scenario, &canonical);
+
+        // The card the person is looking at draws a slider for each of the
+        // three values, and drawing it changes nothing.
+        let painted = cc7_painted_primary_card(&document, &clip, &effect);
+        cc7_assert_painted(
+            &painted,
+            &["Primary correction", "Exposure", "Temperature", "Tint"],
+            "the primary correction card",
+        );
+
+        // The proposal `cc7_scenarios` pins and the node it commits are the
+        // same three numbers, so the person is authoring the planner's answer
+        // rather than a second one.
+        assert_eq!(
+            cc7_expected(&CC7_A_OPERATIONS[0]),
+            BTreeMap::from([
+                (
+                    "exposure_milli_stops".to_owned(),
+                    CC7_MATCH_PROPOSAL_B.exposure_milli_stops
+                ),
+                (
+                    "temperature_percent".to_owned(),
+                    CC7_MATCH_PROPOSAL_B.temperature_percent
+                ),
+                ("tint_percent".to_owned(), CC7_MATCH_PROPOSAL_B.tint_percent),
+            ])
+        );
+
+        let mut batch = Vec::new();
+        for (name, value) in CC7_A_OPERATIONS[0].parameters {
+            let parameter = cc7_primary_parameter(name);
+            assert!(
+                (parameter.min..=parameter.max).contains(value),
+                "{name} = {value} is outside the slider's own bound"
+            );
+            batch.extend(cc7_primary_drag(&clip, &effect, name, *value));
+        }
+        assert_eq!(cc7_written(&batch), cc7_expected(&CC7_A_OPERATIONS[0]));
+
+        cc7_apply_in_order(&mut document, &batch);
+        assert_eq!(
+            document,
+            cc7_canonical_document(scenario, &canonical),
+            "the person's three drags land the canonical (a) document"
+        );
+
+        // The failing direction: one code off on the temperature slider.
+        let (mut wrong_document, wrong_clip, wrong_effect) = cc7_seeded(scenario, &canonical);
+        let mut wrong = Vec::new();
+        for (name, value) in CC7_A_OPERATIONS[0].parameters {
+            let authored = if *name == "temperature_percent" {
+                value + 1
+            } else {
+                *value
+            };
+            wrong.extend(cc7_primary_drag(&wrong_clip, &wrong_effect, name, authored));
+        }
+        assert_ne!(
+            cc7_written(&wrong),
+            cc7_expected(&CC7_A_OPERATIONS[0]),
+            "a wrong slider value must not build the canonical batch"
+        );
+        cc7_apply_in_order(&mut wrong_document, &wrong);
+        assert_ne!(
+            wrong_document,
+            cc7_canonical_document(scenario, &canonical),
+            "and it must not land the canonical document either"
+        );
+    }
+
+    /// CC7 §6 (b): the person meets the same clamp the planner published.
+    ///
+    /// `temperature_percent` is bounded `-100..=100` by its descriptor
+    /// (`effect.rs:571-585`), and the card builds its slider from that bound,
+    /// so C2's raw `+248` cannot be authored by hand any more than it can be
+    /// proposed. Both (b1), which needs no clamp, and (b2), whose stored value
+    /// **is** the clamp, are authored and applied.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn cc7_b_the_temperature_slider_stops_where_the_planner_clamps() {
+        let scenario = Cc7Scenario::WhiteBalance;
+        let parameter = cc7_primary_parameter("temperature_percent");
+
+        // The slider's range is the descriptor's, measured by driving the real
+        // widget: the raw delta the planner clamped lands on the same bound.
+        let raw = CC7_MATCH_PROPOSAL_C2
+            .temperature_unrounded_delta
+            .expect("C2's proposal clamped");
+        let mut typed = raw;
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.add(
+                egui::Slider::new(&mut typed, parameter.min..=parameter.max)
+                    .text(primary_parameter_label("temperature_percent"))
+                    .integer(),
+            );
+        });
+        assert!(
+            raw > parameter.max,
+            "C2's raw delta must be outside the control the person has"
+        );
+        assert_eq!(
+            typed, CC7_MATCH_PROPOSAL_C2.temperature_percent,
+            "the slider stops exactly where the planner clamped"
+        );
+        let clamped: Vec<bool> = [
+            CC7_MATCH_PROPOSAL_B,
+            CC7_MATCH_PROPOSAL_C1,
+            CC7_MATCH_PROPOSAL_C2,
+        ]
+        .iter()
+        .map(|proposal| proposal.temperature_clamped)
+        .collect();
+        assert_eq!(
+            clamped,
+            vec![false, false, true],
+            "only C2 asks for more temperature than the control has"
+        );
+        assert!(
+            (parameter.min..=parameter.max).contains(&CC7_MATCH_PROPOSAL_C1.temperature_percent),
+            "C1 is recoverable inside the same control"
+        );
+
+        // (b2): the committed document, whose temperature value is the clamp.
+        let canonical = cc7_canonical_operations(scenario);
+        let (mut document, clip, effect) = cc7_seeded(scenario, &canonical);
+
+        // R2-MAJ-4: the range above is one the test built. This is the range
+        // the **card** passes: seed the node with C2's raw `+248`, draw the
+        // real `primary_correction_section`, and read what its own
+        // `changed()` branch emitted. If the card ever narrowed the bound, or
+        // switched to `SliderClamping::Never`, this stops equalling the value
+        // the planner published while the replica above stays green.
+        {
+            let (raw_document, raw_clip, mut raw_effect) = cc7_seeded(scenario, &canonical);
+            raw_effect
+                .parameters
+                .insert("temperature_percent".to_owned(), ParamValue::Integer(raw));
+            let (painted_raw, written_raw) =
+                cc7_painted_card_and_edits(&raw_document, &raw_clip, &raw_effect);
+            let clamped_readout = primary_parameter_readout(
+                "temperature_percent",
+                CC7_MATCH_PROPOSAL_C2.temperature_percent,
+            );
+            let raw_readout = primary_parameter_readout("temperature_percent", raw);
+            assert!(
+                painted_raw.contains(&clamped_readout),
+                "the card must read out the planner's clamp {clamped_readout}:\n{painted_raw:#?}"
+            );
+            assert!(
+                !painted_raw.contains(&raw_readout),
+                "the card must not offer C2's raw {raw_readout}:\n{painted_raw:#?}"
+            );
+            assert!(
+                written_raw.is_empty(),
+                "the clamp is what the person is shown, not an edit the card makes: \
+                 {written_raw:?}"
+            );
+            // And the same card over the in-range seeded node reads out the
+            // neutral, so the clamped readout above came from the bound rather
+            // than from the card always printing its maximum.
+            let (painted_neutral, written_neutral) =
+                cc7_painted_card_and_edits(&document, &clip, &effect);
+            assert!(
+                painted_neutral
+                    .iter()
+                    .any(|line| *line == primary_parameter_readout("temperature_percent", 0)),
+                "the untouched card reads out the descriptor neutral:\n{painted_neutral:#?}"
+            );
+            assert!(
+                !painted_neutral.contains(&clamped_readout),
+                "the untouched card must not already read out the clamp:\n{painted_neutral:#?}"
+            );
+            assert!(
+                written_neutral.is_empty(),
+                "drawing the card writes nothing"
+            );
+        }
+
+        let painted = cc7_painted_primary_card(&document, &clip, &effect);
+        cc7_assert_painted(
+            &painted,
+            &["Exposure", "Temperature", "Tint"],
+            "the primary correction card",
+        );
+        let mut batch = Vec::new();
+        for (name, value) in CC7_B2_OPERATIONS[0].parameters {
+            let bound = cc7_primary_parameter(name);
+            assert!((bound.min..=bound.max).contains(value));
+            batch.extend(cc7_primary_drag(&clip, &effect, name, *value));
+        }
+        assert_eq!(cc7_written(&batch), cc7_expected(&CC7_B2_OPERATIONS[0]));
+        cc7_apply_in_order(&mut document, &batch);
+        assert_eq!(document, cc7_canonical_document(scenario, &canonical));
+
+        // (b1): the recoverable candidate, a second (b) document (A-E2).
+        let b1 = cc7_b1_canonical_operations();
+        let (mut b1_document, b1_clip, b1_effect) = cc7_seeded(scenario, &b1);
+        let mut b1_batch = Vec::new();
+        for (name, value) in CC7_B1_OPERATIONS[0].parameters {
+            let bound = cc7_primary_parameter(name);
+            assert!((bound.min..=bound.max).contains(value));
+            b1_batch.extend(cc7_primary_drag(&b1_clip, &b1_effect, name, *value));
+        }
+        assert_eq!(cc7_written(&b1_batch), cc7_expected(&CC7_B1_OPERATIONS[0]));
+        cc7_apply_in_order(&mut b1_document, &b1_batch);
+        assert_eq!(b1_document, cc7_canonical_document(scenario, &b1));
+        assert_ne!(
+            b1_document,
+            cc7_canonical_document(scenario, &canonical),
+            "(b1) and (b2) are two documents, not one"
+        );
+
+        // The failing direction (R2 minor 16): the values above are read out
+        // of the same constants they are compared against, so (b2) is authored
+        // once more with one control a code off and must land neither the
+        // batch nor the document.
+        let (mut wrong_document, wrong_clip, wrong_effect) = cc7_seeded(scenario, &canonical);
+        let mut wrong = Vec::new();
+        for (name, value) in CC7_B2_OPERATIONS[0].parameters {
+            let bound = cc7_primary_parameter(name);
+            let authored = if *name == "temperature_percent" {
+                cc7_off_by_one(&(bound.min..=bound.max), *value)
+            } else {
+                *value
+            };
+            wrong.extend(cc7_primary_drag(&wrong_clip, &wrong_effect, name, authored));
+        }
+        assert_ne!(
+            cc7_written(&wrong),
+            cc7_expected(&CC7_B2_OPERATIONS[0]),
+            "a temperature one code off the clamp is not the canonical batch"
+        );
+        cc7_apply_in_order(&mut wrong_document, &wrong);
+        assert_ne!(
+            wrong_document,
+            cc7_canonical_document(scenario, &canonical),
+            "and it must not land the canonical (b2) document either"
+        );
+    }
+
+    /// CC7 §6 (c): `Look → Import LUT…` on a selected clip registers the asset
+    /// and binds one `technical_lut` at the input stage, carrying **only**
+    /// `lut_asset_id` — `input_encoding_token = 0` is the descriptor neutral
+    /// and is not stored.
+    ///
+    /// The `.cube`'s digest is a property of the generated file, which the app
+    /// crate never reads; the same digest is handed to both sides, so what is
+    /// measured here is that the app's `into_lut_asset` mapping and
+    /// `cc7_log_lut_asset` produce the same record, and that the batch shape
+    /// is the canonical one.
+    #[test]
+    fn cc7_c_a_person_can_import_and_bind_the_technical_lut() {
+        let scenario = Cc7Scenario::LogLike;
+        let sha256 = "c7".repeat(32);
+        let source_path = "/cc7/log-inverse.cube";
+        let byte_len = u64::try_from(CC7_LOG_CUBE_BYTES_REPORTED).expect("a byte count fits");
+        let import = kinewright_media::LutAssetImport {
+            sha256: sha256.clone(),
+            title: CC7_LOG_CUBE_TITLE.to_owned(),
+            kind: kinewright_core::LutAssetKind::Cube3d,
+            size: CC7_LOG_CUBE_SIZE,
+            byte_len,
+            domain_min_millionths: [0, 0, 0],
+            domain_max_millionths: [1_000_000, 1_000_000, 1_000_000],
+            source_path: source_path.to_owned(),
+        };
+        let asset = cc7_log_lut_asset(&sha256, byte_len, source_path);
+        let canonical = cc7_lut_backed_canonical_operations(scenario, asset.clone());
+
+        let mut document = cc7_base_document(scenario);
+        let clip = document
+            .clip(cc7_target_clip(scenario))
+            .expect("the log clip")
+            .id;
+        let batch = crate::media_workflow::lut_import_operations(
+            &document,
+            import,
+            &crate::media_workflow::LutImportIntent::Apply {
+                clip: Some(clip),
+                stage: ColorStage::Input,
+            },
+        )
+        .expect("the import batch builds");
+        assert_eq!(batch.target_lost, None);
+        assert_eq!(batch.asset, asset);
+        assert_eq!(
+            batch.operations, canonical,
+            "the person's import batch is the canonical (c) batch"
+        );
+        assert_eq!(batch.asset.id, CC7_LUT_ASSET_ID);
+
+        cc7_apply_in_order(&mut document, &batch.operations);
+        assert_eq!(document, cc7_canonical_document(scenario, &canonical));
+
+        // The bound node stores the binding and nothing else: the input
+        // encoding stays at its neutral, unstored.
+        let node = document
+            .clip(clip)
+            .expect("the log clip")
+            .effects
+            .first()
+            .expect("the technical_lut the import bound")
+            .clone();
+        assert_eq!(
+            node.parameters.keys().collect::<Vec<_>>(),
+            vec![LUT_ASSET_ID_PARAMETER],
+        );
+        assert_eq!(LutNodeParams::from_effect(&node).input_encoding_token, 0);
+    }
+
+    /// CC7 §6 (d): a person types the same nine qualifier bands the agent's
+    /// `derive_qualifier_from_sample` produced, turns the matte and the
+    /// qualifier on, and pulls saturation down — the app has no eyedropper and
+    /// CC7 adds none.
+    ///
+    /// The node stores **ten** matte parameters, not nine (A-E5): the nine
+    /// derived bands plus `matte_qualifier_enabled`, whose neutral is `0`.
+    #[test]
+    fn cc7_d_a_person_can_author_the_product_qualifier_by_hand() {
+        let scenario = Cc7Scenario::ProductAndSkin;
+        let canonical = cc7_canonical_operations(scenario);
+        let (mut document, clip, effect) = cc7_seeded(scenario, &canonical);
+
+        let painted = cc7_painted_matte_body(&clip, &effect);
+        let mut needles = vec!["Enable matte", "Qualifier (HSL)", "Reset qualifier"];
+        needles.extend(MATTE_QUALIFIER_LABELS);
+        cc7_assert_painted(&painted, &needles, "the matte section");
+
+        // The ten matte parameters the canonical node carries are exactly the
+        // master switch plus the qualifier leg the card owns.
+        let expected = cc7_expected(&CC7_D_OPERATIONS[0]);
+        let matte_names: Vec<&str> = expected
+            .keys()
+            .filter(|name| is_matte_parameter(name))
+            .map(String::as_str)
+            .collect();
+        let mut owned = vec![MATTE_ENABLED_PARAMETER];
+        owned.extend(MATTE_QUALIFIER_PARAMETERS);
+        owned.sort_unstable();
+        assert_eq!(
+            matte_names, owned,
+            "(d) is the qualifier leg, and no window"
+        );
+
+        let mut batch = Vec::new();
+        batch.extend(cc7_matte_edit(
+            &clip,
+            &effect,
+            MATTE_ENABLED_PARAMETER,
+            expected[MATTE_ENABLED_PARAMETER],
+        ));
+        batch.extend(cc7_matte_edit(
+            &clip,
+            &effect,
+            MATTE_QUALIFIER_PARAMETERS[0],
+            expected[MATTE_QUALIFIER_PARAMETERS[0]],
+        ));
+        for name in MATTE_QUALIFIER_PARAMETERS.iter().skip(1) {
+            let value = expected[*name];
+            assert!(
+                cc7_matte_range(&effect, name, value).contains(&value),
+                "{name} = {value} is outside the control the person has"
+            );
+            batch.extend(cc7_matte_edit(&clip, &effect, name, value));
+        }
+        let saturation = cc7_primary_parameter("saturation_percent");
+        assert_eq!(
+            expected["saturation_percent"],
+            CC7_SECONDARY_SATURATION_PERCENT
+        );
+        assert!(
+            (saturation.min..=saturation.max).contains(&CC7_SECONDARY_SATURATION_PERCENT),
+            "the secondary's saturation is inside the card's own slider"
+        );
+        batch.extend(cc7_primary_drag(
+            &clip,
+            &effect,
+            "saturation_percent",
+            CC7_SECONDARY_SATURATION_PERCENT,
+        ));
+
+        assert_eq!(cc7_written(&batch), expected);
+        cc7_apply_in_order(&mut document, &batch);
+        assert_eq!(
+            document,
+            cc7_canonical_document(scenario, &canonical),
+            "the typed qualifier lands the canonical (d) document"
+        );
+
+        // The failing direction (R2 minor 16): the person mistypes one
+        // qualifier band by a single basis point. Without this the test can
+        // only fail on plumbing, because every value it authors is read out of
+        // the constant it is compared against.
+        let mistyped = MATTE_QUALIFIER_PARAMETERS[1];
+        let (mut wrong_document, wrong_clip, wrong_effect) = cc7_seeded(scenario, &canonical);
+        let mut wrong = Vec::new();
+        for (name, value) in &expected {
+            let authored = if name == mistyped {
+                cc7_off_by_one(&cc7_matte_range(&wrong_effect, name, *value), *value)
+            } else {
+                *value
+            };
+            if is_matte_parameter(name) {
+                wrong.extend(cc7_matte_edit(&wrong_clip, &wrong_effect, name, authored));
+            } else {
+                wrong.extend(cc7_primary_drag(&wrong_clip, &wrong_effect, name, authored));
+            }
+        }
+        assert_ne!(
+            cc7_written(&wrong),
+            expected,
+            "a qualifier band one code off is not the canonical batch"
+        );
+        cc7_apply_in_order(&mut wrong_document, &wrong);
+        assert_ne!(
+            wrong_document,
+            cc7_canonical_document(scenario, &canonical),
+            "and it must not land the canonical (d) document either"
+        );
+    }
+
+    /// CC7 §6 (d2): the window-only node is a separate document (R-B4), and a
+    /// person authors it with `Add window` plus five typed values.
+    ///
+    /// `matte_window0_shape_token = 1` is the rect's descriptor neutral, so
+    /// the card never writes it and the canonical node never stores it
+    /// (A-E3) — asserted here, so a merge of (d) and (d2) fails on the
+    /// document rather than silently measuring the wrong coverage.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn cc7_d2_a_person_can_author_the_window_only_matte_by_hand() {
+        let scenario = Cc7Scenario::ProductAndSkin;
+        let canonical = cc7_d2_canonical_operations();
+        let (mut document, clip, effect) = cc7_seeded(scenario, &canonical);
+        let names = kinewright_core::matte_window_parameter_names(0).expect("window 0's names");
+
+        // The row's nine controls and its two actions are all drawn.
+        let painted = cc7_painted_matte_body(&clip, &effect);
+        cc7_assert_painted(
+            &painted,
+            &["Enable matte", "Add window", MATTE_TRACK_BUTTON_LABEL],
+            "the matte section",
+        );
+        let row = {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let mut edits = InspectorEdits::default();
+            let window = MatteWindowParams::NEUTRAL;
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                matte_window_row(ui, &clip, &effect, 0, 1, &window, &mut edits);
+            });
+            assert!(
+                edits.operations().is_empty(),
+                "drawing the window row writes nothing"
+            );
+            crate::theme::painted_text(&output)
+        };
+        cc7_assert_painted(
+            &row,
+            &[
+                "W0",
+                "Rect",
+                "Ellipse",
+                "Centre X",
+                "Centre Y",
+                "Half width",
+                "Half height",
+                "Rotation (cd)",
+                "Feather",
+                "Invert",
+                "Select in viewer",
+                "Remove",
+            ],
+            "the window row",
+        );
+
+        // `Add window` on a node with no matte writes the master switch and
+        // the count, and nothing else: a fresh window *is* the descriptor
+        // neutral, so none of its eight values needs writing.
+        let mut batch = matte_add_window_operations(clip.id, &effect);
+        assert_eq!(
+            cc7_written(&batch),
+            BTreeMap::from([
+                (MATTE_ENABLED_PARAMETER.to_owned(), 1),
+                (MATTE_WINDOW_COUNT_PARAMETER.to_owned(), 1),
+            ])
+        );
+
+        let expected = cc7_expected(&CC7_D2_OPERATIONS[0]);
+        // The three window controls the person leaves alone are exactly the
+        // three the canonical node does not store.
+        for index in [0_usize, 5, 7] {
+            assert!(
+                !expected.contains_key(names[index]),
+                "{} is at its descriptor neutral and must not be stored",
+                names[index]
+            );
+        }
+        for index in [1_usize, 2, 3, 4, 6] {
+            let name = names[index];
+            let value = expected[name];
+            assert!(
+                cc7_matte_range(&effect, name, value).contains(&value),
+                "{name} = {value} is outside the control the person has"
+            );
+            batch.extend(cc7_matte_edit(&clip, &effect, name, value));
+        }
+        batch.extend(cc7_primary_drag(
+            &clip,
+            &effect,
+            "saturation_percent",
+            expected["saturation_percent"],
+        ));
+
+        assert_eq!(cc7_written(&batch), expected);
+        cc7_apply_in_order(&mut document, &batch);
+        assert_eq!(
+            document,
+            cc7_canonical_document(scenario, &canonical),
+            "`Add window` plus five typed values lands the canonical (d2) document"
+        );
+
+        // And it is a different document from (d)'s qualifier-only node.
+        let d = cc7_canonical_operations(scenario);
+        assert_ne!(
+            document,
+            cc7_canonical_document(scenario, &d),
+            "(d) and (d2) are two nodes and two documents (R-B4)"
+        );
+
+        // The resolved window is the `product_red` patch's own rect, and the
+        // shape it resolves to is the rect neutral the card never wrote.
+        let node = document
+            .clip(cc7_target_clip(scenario))
+            .expect("the target clip")
+            .effects
+            .first()
+            .expect("the window-only node");
+        let resolved = MatteParams::from_effect(node);
+        assert_eq!(resolved.window_count, 1);
+        assert_eq!(
+            resolved.windows[0].shape_token,
+            MatteWindowParams::NEUTRAL.shape_token
+        );
+        assert_eq!(
+            resolved.windows[0].feather_bp,
+            expected["matte_window0_feather_basis_points"]
+        );
+        assert_eq!(resolved.qualifier, MatteQualifierParams::NEUTRAL);
+    }
+
+    /// CC7 §6 (f): the person path does not exist, and the code says why.
+    ///
+    /// Asserted rather than commented, so a later slice that enables the
+    /// button has to come back and revisit CC7 §6's 5-of-6 scorecard line
+    /// instead of silently changing what the app can do.
+    #[test]
+    fn cc7_f_the_person_path_is_not_available_and_says_so() {
+        assert!(
+            !matte_track_button_enabled(),
+            "CC5 §6: the tracking control is never interactive"
+        );
+        assert!(MATTE_TRACK_BUTTON_TOOLTIP.contains("track_matte_window"));
+        assert!(
+            MATTE_TRACK_BUTTON_TOOLTIP.starts_with(CC7_TRACK_PERSON_PATH_REASON),
+            "the reason CC7 records must be the tooltip the app shows:\n\
+             {MATTE_TRACK_BUTTON_TOOLTIP}"
+        );
+
+        // Exactly one of the six scenarios is person-N/A, and it is (f).
+        let not_applicable: Vec<&str> = CC7_SCENARIOS
+            .iter()
+            .map(|scenario| cc7_spec(*scenario))
+            .filter(|spec| spec.person_path != Cc7PersonPath::Expressible)
+            .map(|spec| spec.id)
+            .collect();
+        assert_eq!(not_applicable, vec!["f"]);
+        assert_eq!(
+            cc7_spec(Cc7Scenario::TrackedSecondary).person_path,
+            Cc7PersonPath::NotApplicable {
+                reason: CC7_TRACK_PERSON_PATH_REASON
+            }
+        );
+
+        // The disabled control is still drawn, so the human sees the reason
+        // rather than an absent affordance.
+        let scenario = Cc7Scenario::TrackedSecondary;
+        // The node alone: the two `SetEffectKeyframes` curves are the tracker's
+        // answer, and there is no person path that produces them.
+        let node: Vec<Operation> = cc7_canonical_operations(scenario)
+            .into_iter()
+            .filter(|operation| matches!(operation, Operation::InsertEffect { .. }))
+            .collect();
+        let (_document, clip, effect) = cc7_seeded(scenario, &node);
+        let painted = cc7_painted_matte_body(&clip, &effect);
+        cc7_assert_painted(
+            &painted,
+            &[MATTE_TRACK_BUTTON_LABEL],
+            "the matte section of a tracked node",
         );
     }
 }

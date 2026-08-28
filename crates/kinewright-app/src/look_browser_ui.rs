@@ -599,4 +599,174 @@ mod tests {
                 .contains('9')
         );
     }
+
+    // -----------------------------------------------------------------------
+    // CC7 §6 (e) — the person path for the creative look
+    // -----------------------------------------------------------------------
+
+    use kinewright_core::cc7_scenarios::{
+        CC7_E_OPERATIONS, CC7_LOOK_MIX_BASIS_POINTS, CC7_LUT_ASSET_ID, CC7_SOURCE_FPS,
+        CC7_SOURCE_FRAMES, CC7_SOURCE_HEIGHT, CC7_SOURCE_WIDTH, Cc7Scenario,
+        cc7_canonical_operations, cc7_lut_backed_canonical_operations, cc7_spec, cc7_target_clip,
+    };
+
+    /// CC7 §2.3.5's one-clip (e) document, carrying no effect and no asset.
+    fn cc7_look_document() -> (Document, Clip) {
+        let spec = cc7_spec(Cc7Scenario::CreativeLook);
+        let fps = kinewright_core::Rational::new(CC7_SOURCE_FPS, 1).expect("the CC7 rate is valid");
+        let length = TimeCode(i64::from(CC7_SOURCE_FRAMES));
+        let clip = Clip {
+            id: cc7_target_clip(Cc7Scenario::CreativeLook),
+            asset: AssetId(1),
+            source_range: TimeCode::ZERO..length,
+            content: ClipContent::Media,
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+        };
+        let mut document = Document {
+            media_pool: vec![kinewright_core::MediaAsset {
+                id: AssetId(1),
+                path: std::path::PathBuf::from("cc7-e-0.mkv"),
+                name: spec.title.to_owned(),
+                duration: length,
+                fps,
+                kind: kinewright_core::MediaKind::Video,
+                resolution: Some((CC7_SOURCE_WIDTH, CC7_SOURCE_HEIGHT)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+                color_description: kinewright_core::ColorDescription::default(),
+            }],
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![clip.clone()],
+            }],
+            fps,
+            resolution: (CC7_SOURCE_WIDTH, CC7_SOURCE_HEIGHT),
+            lut_assets: Vec::new(),
+            duration: length,
+            ..Document::default()
+        };
+        document.color_context = kinewright_core::ColorContext::default();
+        (document, clip)
+    }
+
+    /// CC7 §6 (e): **Add as new look** on the built-in `warm` asset registers
+    /// it and stacks one `creative_look` carrying **only** `lut_asset_id`.
+    ///
+    /// `mix_basis_points = 10 000` is the neutral (CC4 §5), so the card's mix
+    /// row shows full strength without storing it — driven headlessly here, so
+    /// the claim is about the control the person sees rather than about the
+    /// document alone.
+    #[test]
+    fn cc7_e_a_person_can_add_the_built_in_warm_look() {
+        let scenario = Cc7Scenario::CreativeLook;
+        let (mut document, clip) = cc7_look_document();
+        let asset = BuiltinLook::Warm.to_lut_asset(CC7_LUT_ASSET_ID);
+        let canonical = cc7_lut_backed_canonical_operations(scenario, asset.clone());
+
+        // The browser row the person clicks, and the builder behind it.
+        let rows = look_rows(&document, &BTreeMap::new(), None);
+        let warm = rows
+            .iter()
+            .find(|row| row.entry == LookEntry::Builtin(BuiltinLook::Warm))
+            .expect("the warm built-in is offered on an empty project");
+        assert!(!warm.selected && warm.availability.is_none());
+
+        let operations =
+            add_look_operations(&document, &clip, &warm.entry).expect("the add batch builds");
+        assert_eq!(
+            operations,
+            builtin_look_operations(&document, &clip, BuiltinLook::Warm, ColorStage::Look)
+                .expect("the §6 builder"),
+            "**Add as new look** is `builtin_look_operations` at the look stage"
+        );
+        assert_eq!(
+            operations, canonical,
+            "the person's batch is the canonical (e) batch"
+        );
+        let Operation::AddLutAsset { asset: registered } = &operations[0] else {
+            panic!("the batch must lead with AddLutAsset");
+        };
+        assert_eq!(registered, &asset);
+
+        for operation in &operations {
+            apply_batch(&mut document, std::slice::from_ref(operation))
+                .unwrap_or_else(|error| panic!("core rejected {operation:?}: {error}"));
+        }
+        document.validate().expect("the look document is valid");
+
+        let expected = {
+            let (mut expected, _) = cc7_look_document();
+            for operation in &canonical {
+                apply_batch(&mut expected, std::slice::from_ref(operation)).expect("core accepts");
+            }
+            expected
+        };
+        expected
+            .validate()
+            .expect("the canonical document is valid");
+        assert_eq!(document, expected);
+
+        // The node stores the binding and nothing else, and the one node CC7
+        // pins for (e) is the `creative_look` at the look stage.
+        let node = document
+            .clip(clip.id)
+            .expect("the clip")
+            .effects
+            .first()
+            .expect("the look the browser stacked")
+            .clone();
+        assert_eq!(node.name, ColorNodeKind::CreativeLook.effect_name());
+        assert_eq!(
+            node.parameters.keys().collect::<Vec<_>>(),
+            vec![LUT_ASSET_ID_PARAMETER]
+        );
+        assert_eq!(
+            CC7_E_OPERATIONS[0]
+                .parameters
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>(),
+            vec![LUT_ASSET_ID_PARAMETER]
+        );
+        assert_eq!(canonical, {
+            let mut batch = vec![Operation::AddLutAsset {
+                asset: asset.clone(),
+            }];
+            batch.extend(cc7_canonical_operations(scenario));
+            batch
+        });
+
+        // The mix row: the neutral is shown, and untouched it writes nothing.
+        let params = LutNodeParams::from_effect(&node);
+        assert_eq!(params.mix_basis_points, CC7_LOOK_MIX_BASIS_POINTS);
+        assert!(
+            !node.parameters.contains_key("mix_basis_points"),
+            "the neutral mix is resolved, never stored"
+        );
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut pending = crate::inspector_ui::InspectorEdits::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            crate::inspector_ui::look_mix_row(ui, &clip, &node, params, &mut pending);
+        });
+        assert!(
+            pending.operations().is_empty(),
+            "drawing the mix row writes nothing to the document"
+        );
+        let painted = theme::painted_text(&output);
+        assert!(
+            painted
+                .iter()
+                .any(|line| line == &format!("{CC7_LOOK_MIX_BASIS_POINTS} bp")),
+            "the row shows the resolved neutral beside the slider:\n{painted:#?}"
+        );
+    }
 }

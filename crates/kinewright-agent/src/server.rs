@@ -20955,6 +20955,18 @@ mod tests {
         assert_eq!(served_metrics.tool_count, 7);
         assert!(served_metrics.tool_count < registry_metrics.tool_count / 4);
         assert!(served_metrics.serialized_bytes < registry_metrics.serialized_bytes / 4);
+        // CC7 §5.4, R2-MAJ-3: M36's registry byte count is only measurable from
+        // inside the crate (`capability_tools` is private), so it is pinned
+        // here beside the served figure CC7 asserts is byte-identical to CC6's.
+        // Errata D-E9 claimed this test already did that; it did not until now.
+        assert_eq!(
+            (
+                registry_metrics.serialized_bytes,
+                served_metrics.serialized_bytes
+            ),
+            (1_280_060, 5_660),
+            "registry={registry_metrics:?} served={served_metrics:?}"
+        );
 
         let catalog = capabilities(&registry);
         assert!(

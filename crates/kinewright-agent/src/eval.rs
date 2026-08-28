@@ -12,12 +12,15 @@ use std::{
 
 use kinewright_core::{
     AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, AssetTranscript, AudioLoudness,
-    CaptionMotion, Clip, ClipContent, ClipId, Command, Core, DeliveryConformanceReport,
-    DeliveryEncodeDepth, DeliveryProfile, Document, Event, Export, ExportCancellation, HarnessInfo,
-    MediaKind, Operation, ParamValue, Playback, Query, QueryResult, SessionConfig, TimeCode,
+    CaptionMotion, Clip, ClipContent, ClipId, ColorQcCheck, ColorQcReport, ColorQcRequest, Command,
+    Core, DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile, DeliveryVerification,
+    DeliveryVerificationRequest, Document, EffectId, Event, Export, ExportCancellation,
+    HarnessInfo, MatteCoverageStatistics, MediaKind, NormalizedRoi, Operation, ParamValue,
+    Playback, Query, QueryResult, RgbaImage, SessionConfig, SkinDiagnostics, TimeCode,
     TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, Track,
-    TrackId, TrackKind, TranscriptStatus, dedup_timeline_words, delivery_conformance,
-    document_for_delivery_profile, map_source_range_to_project, qa_document,
+    TrackId, TrackKind, TranscriptStatus, apply_batch, dedup_timeline_words, delivery_conformance,
+    document_for_delivery_profile, map_source_range_to_project, matte_coverage_statistics,
+    measure_color_qc, qa_document,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -89,6 +92,14 @@ pub struct EvalDefinition {
     pub assertions: Vec<EvalAssertion>,
     pub budgets: EvalBudgets,
     pub deliverable: Option<EvalDeliverableSpec>,
+    /// What the colour evidence block measures for this task, and where.
+    ///
+    /// `None` for every non-colour suite: the runner then records no
+    /// [`ColorEvalEvidence`] at all and `EvalOutcome::color` stays `None`.
+    /// A colour suite builds one with
+    /// [`ColorEvalRequest::from_assertions`] so the region rectangles are
+    /// written down exactly once, on the assertions that gate them.
+    pub color: Option<ColorEvalRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +115,13 @@ pub struct EvalDeliverableSpec {
     pub maximum_caption_word_error_rate_basis_points: Option<u16>,
     pub loudness: Option<EvalLoudnessSpec>,
     pub audio_tail: Option<EvalAudioTailSpec>,
+    /// The lane this task's finished encode is written and verified at.
+    ///
+    /// A plain field with no `serde` attribute and no `Default` impl: the
+    /// struct carries no serde derives, so this is a compile-time edit at
+    /// every existing literal rather than a wire migration, and a future
+    /// field cannot be forgotten silently.
+    pub delivery_bit_depth: DeliveryEncodeDepth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -436,6 +454,320 @@ pub enum EvalAssertion {
     },
     QaExportReady,
     UndoIntegrity,
+    // -----------------------------------------------------------------------
+    // Colour workflow (CC7 §7.5). Every variant below reads only
+    // `EvalOutcome::color`, `EvalOutcome::original_document` and
+    // `EvalOutcome::final_document`: none needs a per-call tool log, because
+    // `SessionMetrics` has none and CC7 adds none. Thresholds are variant
+    // fields exactly as every existing variant carries them; a colour suite
+    // passes a `cc7_scenarios` constant into each one instead of a literal.
+    // -----------------------------------------------------------------------
+    /// The scenario's colour QC measurement reports `technical_pass`.
+    ColorQcTechnicalPass {
+        clip_id: u64,
+        frame: i64,
+        /// Wire tokens from [`ColorQcCheck`], such as `range` or `per_node`.
+        checks: Vec<String>,
+    },
+    /// The written delivery encode was decoded and compared inside CC6's
+    /// budgets at the named depth, and raised no `Error`-severity exception.
+    DeliveryVerificationWithinBudgets {
+        depth: DeliveryEncodeDepth,
+    },
+    /// The worst per-patch channel spread `max(|R−G|, |G−B|)` over the named
+    /// achromatic rectangles is at most `maximum_code` monitoring codes.
+    NeutralPatchSpreadAtMost {
+        patch_rois: Vec<NormalizedRoi>,
+        maximum_code: i64,
+    },
+    /// The reference clip is byte-identical to its pre-session form and
+    /// carries no effect.
+    ReferenceClipUntouched {
+        clip_id: u64,
+    },
+    /// The named region's skin diagnostic reports at least this in-band rate
+    /// over its **considered (chromatic)** pixels.
+    SkinHueWithinBand {
+        roi: NormalizedRoi,
+        minimum_in_band_basis_points: u32,
+    },
+    /// The matte coverage cropped to `roi` matches all three counts exactly.
+    MatteContainmentExact {
+        roi: NormalizedRoi,
+        expected_covered_pixel_count: u64,
+        expected_full_pixel_count: u64,
+        expected_partial_pixel_count: u64,
+    },
+    /// The committed document carries a keyframe on `parameter` at every
+    /// expected clip-local frame and at none of the absent ones.
+    ///
+    /// This replaces a tool-log assertion deliberately: the committed
+    /// keyframes are the durable evidence of what the tracker did, and the
+    /// harness has no per-call tool log to read instead.
+    TrackKeyframesMatchExpected {
+        parameter: String,
+        expected_local_frames: Vec<i64>,
+        absent_local_frames: Vec<i64>,
+    },
+    /// Bypassing the named look node renders byte-identically to removing it.
+    LookBypassMatchesAbsent {
+        clip_id: u64,
+        effect_id: u64,
+        frame: i64,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Colour evidence (CC7 §7.5).
+//
+// `evaluate_assertion` sees only an `EvalDefinition` and an `EvalOutcome`: it
+// holds no `Analysis`, no `Core` and no exporter, and the fixture's handles
+// are dropped before it runs. Every colour quantity is therefore measured
+// once, inside `run_eval_with_artifacts`, where those handles are still alive,
+// and carried on the outcome as one typed block. The assertion arms read the
+// block and the two documents and nothing else.
+// ---------------------------------------------------------------------------
+
+/// The two-pixel inset every patch statistic is taken on, so that a patch's
+/// own edge pixels never enter its measurement (CC7 §4).
+const COLOR_PATCH_INSET_PIXELS: u32 = 2;
+
+/// The matte master switch, whose descriptor lives in
+/// `kinewright_core::effect` and which core exports no constant for.
+const MATTE_ENABLED_PARAMETER: &str = "matte_enabled";
+
+/// What one task's colour evidence measures, and where.
+///
+/// Every field is independently optional: the runner measures exactly what
+/// was asked for and leaves the rest of [`ColorEvalEvidence`] `None`, so a
+/// scenario never pays for a proof render it does not read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColorEvalRequest {
+    /// The project frame every proof render is taken at.
+    pub project_frame: i64,
+    /// Achromatic patch rectangles for `neutral_spread_max_code`.
+    pub neutral_patch_rois: Vec<NormalizedRoi>,
+    /// The chart-band rectangle whose luma means are differenced.
+    pub chart_luma_roi: Option<NormalizedRoi>,
+    /// The reference frame of that difference (the subtrahend).
+    pub chart_luma_reference_frame: i64,
+    /// The candidate frame of that difference (the minuend).
+    pub chart_luma_candidate_frame: i64,
+    /// `None` measures the whole raster.
+    pub qc_roi: Option<NormalizedRoi>,
+    /// An empty list measures no colour QC at all.
+    pub qc_checks: Vec<ColorQcCheck>,
+    pub qc_max_nodes: u8,
+    pub qc_delivery_bit_depth: DeliveryEncodeDepth,
+    /// The region whose [`SkinDiagnostics`] are recorded.
+    pub skin_roi: Option<NormalizedRoi>,
+    /// The region the coverage raster is **cropped to** before
+    /// `matte_coverage_statistics`, which takes one argument, measures the
+    /// whole raster it is given, and has no ROI parameter.
+    pub matte_roi: Option<NormalizedRoi>,
+    /// The matte-carrying node. `None` resolves the single node in the final
+    /// document whose `matte_enabled` parameter is non-zero.
+    pub matte_node: Option<(ClipId, EffectId)>,
+    /// The region whose out-of-gamut population is recorded.
+    pub gamut_roi: Option<NormalizedRoi>,
+    /// The look node whose bypass render is compared against its absence,
+    /// and the project frame both are rendered at.
+    pub look_bypass: Option<(ClipId, EffectId, i64)>,
+    /// Decode and compare the written delivery encode at this depth.
+    pub delivery_verification: Option<DeliveryEncodeDepth>,
+    /// Parameters whose committed keyframes are summarised into
+    /// [`EffectSummary::keyframes`]. An empty list summarises every
+    /// keyframed parameter.
+    pub keyframe_parameters: Vec<String>,
+}
+
+impl Default for ColorEvalRequest {
+    fn default() -> Self {
+        Self {
+            project_frame: 0,
+            neutral_patch_rois: Vec::new(),
+            chart_luma_roi: None,
+            chart_luma_reference_frame: 0,
+            chart_luma_candidate_frame: 0,
+            qc_roi: None,
+            qc_checks: Vec::new(),
+            qc_max_nodes: ColorQcRequest::default().max_nodes,
+            qc_delivery_bit_depth: DeliveryEncodeDepth::Eight,
+            skin_roi: None,
+            matte_roi: None,
+            matte_node: None,
+            gamut_roi: None,
+            look_bypass: None,
+            delivery_verification: None,
+            keyframe_parameters: Vec::new(),
+        }
+    }
+}
+
+impl ColorEvalRequest {
+    /// Derive the request from the assertions that gate it, so a region
+    /// rectangle is written down once — on the assertion — instead of twice.
+    ///
+    /// Returns `None` when the list carries no colour assertion, which is
+    /// what keeps every non-colour suite's `EvalOutcome::color` at `None`.
+    #[must_use]
+    pub fn from_assertions(assertions: &[EvalAssertion]) -> Option<Self> {
+        let mut request = Self::default();
+        let mut colored = false;
+        for assertion in assertions {
+            match assertion {
+                EvalAssertion::ColorQcTechnicalPass { frame, checks, .. } => {
+                    colored = true;
+                    request.project_frame = *frame;
+                    request.qc_checks = checks
+                        .iter()
+                        .filter_map(|check| color_qc_check_from_token(check))
+                        .collect();
+                }
+                EvalAssertion::DeliveryVerificationWithinBudgets { depth } => {
+                    colored = true;
+                    request.delivery_verification = Some(*depth);
+                    request.qc_delivery_bit_depth = *depth;
+                }
+                EvalAssertion::NeutralPatchSpreadAtMost { patch_rois, .. } => {
+                    colored = true;
+                    request.neutral_patch_rois.clone_from(patch_rois);
+                }
+                EvalAssertion::SkinHueWithinBand { roi, .. } => {
+                    colored = true;
+                    request.skin_roi = Some(*roi);
+                }
+                EvalAssertion::MatteContainmentExact { roi, .. } => {
+                    colored = true;
+                    request.matte_roi = Some(*roi);
+                }
+                EvalAssertion::TrackKeyframesMatchExpected { parameter, .. } => {
+                    colored = true;
+                    request.keyframe_parameters.push(parameter.clone());
+                }
+                EvalAssertion::LookBypassMatchesAbsent {
+                    clip_id,
+                    effect_id,
+                    frame,
+                } => {
+                    colored = true;
+                    request.look_bypass = Some((ClipId(*clip_id), EffectId(*effect_id), *frame));
+                }
+                EvalAssertion::ReferenceClipUntouched { .. } => colored = true,
+                _ => {}
+            }
+        }
+        colored.then_some(request)
+    }
+}
+
+fn color_qc_check_from_token(token: &str) -> Option<ColorQcCheck> {
+    match token {
+        "range" => Some(ColorQcCheck::Range),
+        "gamut" => Some(ColorQcCheck::Gamut),
+        "skin" => Some(ColorQcCheck::Skin),
+        "tags" => Some(ColorQcCheck::Tags),
+        "per_node" => Some(ColorQcCheck::PerNode),
+        _ => None,
+    }
+}
+
+/// One committed colour node, flattened for assertion arms that must read a
+/// document without re-walking it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectSummary {
+    pub clip: ClipId,
+    pub effect: EffectId,
+    pub name: String,
+    pub parameters: BTreeMap<String, ParamValue>,
+    /// Clip-local keyframe frames per parameter, in ascending frame order.
+    pub keyframes: BTreeMap<String, Vec<i64>>,
+}
+
+/// Everything a colour scenario measured, computed where the `Analysis` and
+/// the exporter were still alive.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ColorEvalEvidence {
+    /// Worst `max(|R−G|, |G−B|)` over the requested achromatic patches.
+    pub neutral_spread_max_code: Option<i64>,
+    /// `mean(luma at candidate frame) − mean(luma at reference frame)` over
+    /// the chart band, in monitoring-code millionths, half away from zero.
+    pub chart_luma_mean_delta_millionths: Option<i64>,
+    pub skin: Option<SkinDiagnostics>,
+    /// Coverage statistics of the matte proof **cropped to** `matte_roi`.
+    pub matte: Option<MatteCoverageStatistics>,
+    /// `out_of_gamut_pixel_count` over `gamut_roi`.
+    pub gamut_pixel_count: Option<u64>,
+    pub qc: Option<ColorQcReport>,
+    pub verification: Option<DeliveryVerification>,
+    pub look_bypass_matches_absent: Option<bool>,
+    pub final_effects: Vec<EffectSummary>,
+    /// Measurement failures, recorded rather than thrown. A proof that could
+    /// not render must still leave a scored, reviewable result behind, and an
+    /// unmeasured quantity must read as "not measured", never as "passed".
+    ///
+    /// Each error names the quantity whose inputs failed, so a partially
+    /// measured quantity fails **its own** assertion with the recorded reason
+    /// and no other assertion is touched.
+    pub errors: Vec<ColorEvidenceError>,
+}
+
+/// The measured quantity an error belongs to.
+///
+/// Attribution is the point: a matte proof that will not render must fail the
+/// matte containment claim and leave the skin claim alone, and a neutral
+/// patch that will not resolve must fail the spread claim even though the
+/// other eleven patches measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ColorEvidenceQuantity {
+    NeutralSpread,
+    ChartLuma,
+    Qc,
+    Skin,
+    Gamut,
+    Matte,
+    LookBypass,
+    DeliveryVerification,
+}
+
+/// One recorded measurement failure and the quantity it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColorEvidenceError {
+    pub quantity: ColorEvidenceQuantity,
+    pub message: String,
+}
+
+impl ColorEvalEvidence {
+    fn record(&mut self, quantity: ColorEvidenceQuantity, message: String) {
+        self.errors.push(ColorEvidenceError { quantity, message });
+    }
+
+    /// Every recorded reason a quantity could not be measured, joined.
+    ///
+    /// `Some(_)` means the quantity's inputs failed, which fails that
+    /// quantity's assertion: a partially measured quantity is not a
+    /// measurement.
+    #[must_use]
+    pub fn unmeasurable_reason(&self, quantity: ColorEvidenceQuantity) -> Option<String> {
+        let reasons = self
+            .errors
+            .iter()
+            .filter(|error| error.quantity == quantity)
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>();
+        (!reasons.is_empty()).then(|| reasons.join("; "))
+    }
+}
+
+/// One numeric colour claim, so the number reaches `results.jsonl` as data
+/// rather than as free text inside an assertion detail string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EvalMeasurement {
+    pub name: String,
+    pub observed: i64,
+    pub budget: i64,
+    pub unit: String,
+    pub passed: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -461,6 +793,14 @@ pub struct PreparedFixture {
     pub analysis: Arc<dyn Analysis>,
     pub exporter: Arc<dyn Export>,
     pub context: FixtureContext,
+    /// The saved project this fixture's session runs against.
+    ///
+    /// The runner starts every MCP server with a fresh `None` project path,
+    /// so any tool that needs a project-relative asset store — `import_lut_asset`
+    /// most visibly — refuses `project_not_saved` unless a fixture supplies
+    /// one here. This is a **shared-runner** field: every suite carries it and
+    /// the suites that do not save a project pass `None`.
+    pub project_path: Option<PathBuf>,
     _resources: Vec<Box<dyn Send>>,
 }
 
@@ -474,6 +814,7 @@ impl PreparedFixture {
         original_document: Document,
         media: Arc<T>,
         context: FixtureContext,
+        project_path: Option<PathBuf>,
         resources: Vec<Box<dyn Send>>,
     ) -> Result<Self, EvalError>
     where
@@ -495,6 +836,7 @@ impl PreparedFixture {
             analysis,
             exporter,
             context,
+            project_path,
             _resources: resources,
         })
     }
@@ -537,6 +879,14 @@ impl SessionMetrics {
 #[derive(Debug, Clone)]
 pub struct EvalOutcome {
     pub final_document: Document,
+    /// The fixture's document as it stood before the session, so an assertion
+    /// can prove a clip was left alone instead of trusting a planner's own
+    /// hardcoded claim that it was.
+    pub original_document: Document,
+    /// Colour measurements taken inside the runner, where the fixture's
+    /// `Analysis` and exporter were still alive. `None` for every suite whose
+    /// definition carries no [`ColorEvalRequest`].
+    pub color: Option<ColorEvalEvidence>,
     pub final_words: Vec<String>,
     pub final_timeline_words: Vec<TimelineTranscriptWord>,
     pub remaining_silences: Vec<TimelineSilenceSpan>,
@@ -560,6 +910,15 @@ pub struct EvalResult {
     pub rationale: String,
     pub passed: bool,
     pub assertions: Vec<AssertionResult>,
+    /// Numeric evidence beside the boolean assertions.
+    ///
+    /// `EvalResult` derives `Serialize` only and `results.jsonl` is
+    /// write-only, so there is no parse-compatibility claim to make here and
+    /// `#[serde(default)]` would be inert. What is guaranteed instead is that
+    /// a result with no measurements serialises byte-identically to a
+    /// pre-CC7 one, which `skip_serializing_if` is exactly what delivers.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub measurements: Vec<EvalMeasurement>,
     pub turns: u32,
     pub tool_calls: BTreeMap<String, u32>,
     pub input_tokens: u64,
@@ -653,6 +1012,9 @@ pub struct RenderedTranscriptVerification {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HumanReviewFile {
+    /// `1` or `2`. Version 2 adds `blind_id` and `questions`; a version 1
+    /// file loads and scores exactly as it always has, and a version 2 file
+    /// carrying neither new field round-trips byte-identically to one.
     pub schema_version: u32,
     pub benchmark_id: String,
     pub run_id: String,
@@ -660,9 +1022,34 @@ pub struct HumanReviewFile {
     pub tasks: Vec<HumanTaskReview>,
 }
 
+/// The highest `human-review.json` schema this build writes.
+pub const HUMAN_REVIEW_SCHEMA_VERSION: u32 = 2;
+
+/// Characters of the artefact digest that make a blind identifier.
+pub const BLIND_ID_HEX_LENGTH: usize = 12;
+
+/// Derive a task's blind identifier from its artefact digest.
+///
+/// Derived, never random: two identical artefacts share a `blind_id`, which
+/// is what makes the existing "one viewing may be applied to several rows
+/// when the artifact hashes are identical" convention mechanical rather than
+/// a note in a document.
+#[must_use]
+pub fn blind_id_for_artifact(artifact_sha256: Option<&str>) -> Option<String> {
+    let hash = artifact_sha256?;
+    if hash.len() < BLIND_ID_HEX_LENGTH || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(hash[..BLIND_ID_HEX_LENGTH].to_ascii_lowercase())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HumanTaskReview {
     pub task_id: String,
+    /// Twelve lowercase hex characters derived from `artifact_sha256`, or
+    /// `None` for a task with no artefact. Absent in schema version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blind_id: Option<String>,
     pub artifact_sha256: Option<String>,
     pub accepted: Option<bool>,
     pub ratings: HumanRatings,
@@ -671,7 +1058,141 @@ pub struct HumanTaskReview {
     /// empty list.
     #[serde(default)]
     pub not_applicable: Vec<HumanRatingDimension>,
+    /// The scenario questions a machine has no business answering. Absent in
+    /// schema version 1, and empty for every suite that poses none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<HumanQuestion>,
     pub notes: Option<String>,
+}
+
+/// One creative question put to a blind reviewer, verbatim.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HumanQuestion {
+    /// The scenario letter this question belongs to, such as `a` or `g`.
+    pub id: String,
+    pub prompt: String,
+    pub answer: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+/// The schema of `blind/review-form.json` and `blind-key.json`.
+pub const BLIND_SCHEMA_VERSION: u32 = 1;
+
+/// The directory the reviewer is handed, and the only one they open.
+pub const BLIND_DIRECTORY_NAME: &str = "blind";
+
+/// The reviewer's file, inside [`BLIND_DIRECTORY_NAME`].
+pub const BLIND_FORM_FILE_NAME: &str = "review-form.json";
+
+/// The key, deliberately in the **run root** and never inside `blind/`.
+pub const BLIND_KEY_FILE_NAME: &str = "blind-key.json";
+
+/// The only file a blind reviewer opens.
+///
+/// It is keyed on `blind_id` and carries nothing else that identifies
+/// anything: no task id, no run id, no benchmark id, no harness or model
+/// name, no machine result, no assertion name, and no parameter name or
+/// value. What is deliberately **not** blinded is the scenario identity,
+/// which is inherent in the question being asked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BlindReviewForm {
+    pub schema_version: u32,
+    pub entries: Vec<BlindReviewEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BlindReviewEntry {
+    pub blind_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<HumanQuestion>,
+    pub ratings: HumanRatings,
+    #[serde(default)]
+    pub not_applicable: Vec<HumanRatingDimension>,
+    pub accepted: Option<bool>,
+    pub notes: Option<String>,
+}
+
+/// The mapping from a blind identifier back to the run it came from.
+///
+/// It lives in the run root rather than in `blind/`, so the directory handed
+/// to a reviewer can be handed over whole.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BlindKeyFile {
+    pub schema_version: u32,
+    pub benchmark_id: String,
+    pub run_id: String,
+    pub entries: Vec<BlindKeyEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BlindKeyEntry {
+    pub blind_id: String,
+    pub task_id: String,
+    pub sample: u32,
+    pub artifact_sha256: String,
+    pub artifact_path: String,
+}
+
+impl BlindKeyFile {
+    /// Resolve one blind identifier to every task it stands for, or refuse
+    /// by name.
+    ///
+    /// A blind identifier is a digest prefix, so two tasks whose artefacts
+    /// are byte-identical share one. Returning every match is what makes the
+    /// existing "one viewing may be applied to several rows when the artifact
+    /// hashes are identical" convention mechanical instead of manual.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the identifier when the key does not carry it.
+    pub fn resolve_all(&self, blind_id: &str) -> Result<Vec<&BlindKeyEntry>, EvalError> {
+        let matches = self
+            .entries
+            .iter()
+            .filter(|entry| entry.blind_id == blind_id)
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            return Err(EvalError::Output(format!(
+                "blind id {blind_id:?} is not in {BLIND_KEY_FILE_NAME}"
+            )));
+        }
+        Ok(matches)
+    }
+
+    /// Rebuild the unblinded review a blind form stands for.
+    ///
+    /// This is the resolution that must happen **before** artefact bindings
+    /// are verified: the binding check looks tasks up by `task_id`, and a
+    /// form keyed on `blind_id` fails there for every task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming any `blind_id` the key does not carry.
+    pub fn unblind(&self, form: &BlindReviewForm) -> Result<HumanReviewFile, EvalError> {
+        let mut tasks = Vec::with_capacity(form.entries.len());
+        for entry in &form.entries {
+            for keyed in self.resolve_all(&entry.blind_id)? {
+                tasks.push(HumanTaskReview {
+                    task_id: keyed.task_id.clone(),
+                    blind_id: Some(entry.blind_id.clone()),
+                    artifact_sha256: Some(keyed.artifact_sha256.clone()),
+                    accepted: entry.accepted,
+                    ratings: entry.ratings.clone(),
+                    not_applicable: entry.not_applicable.clone(),
+                    questions: entry.questions.clone(),
+                    notes: entry.notes.clone(),
+                });
+            }
+        }
+        Ok(HumanReviewFile {
+            schema_version: HUMAN_REVIEW_SCHEMA_VERSION,
+            benchmark_id: self.benchmark_id.clone(),
+            run_id: self.run_id.clone(),
+            reviewer: None,
+            tasks,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -750,6 +1271,7 @@ impl EvalResult {
             rationale: definition.rationale.to_owned(),
             passed: false,
             assertions: Vec::new(),
+            measurements: Vec::new(),
             turns: 0,
             tool_calls: BTreeMap::new(),
             input_tokens: 0,
@@ -853,6 +1375,7 @@ pub fn run_eval(
 ///
 /// Returns setup or observation failures. Delivery failures are retained as
 /// scored task failures so the run still produces reviewable evidence.
+#[allow(clippy::too_many_lines)]
 pub fn run_eval_with_artifacts(
     definition: &EvalDefinition,
     driver: &dyn AgentDriver,
@@ -869,6 +1392,7 @@ pub fn run_eval_with_artifacts(
         Arc::clone(&fixture.analysis),
     )
     .map_err(|error| EvalError::Server(error.to_string()))?;
+    apply_fixture_project_path(&server, &fixture);
     let confirmations = server.confirmations();
     let config = SessionConfig {
         working_directory: working_directory.map(Path::to_path_buf),
@@ -930,6 +1454,16 @@ pub fn run_eval_with_artifacts(
             },
         )
     });
+    // Measure colour HERE, before the fixture's handles go out of scope and
+    // before the timeline is restored: this is the last point at which the
+    // `Analysis`, the written deliverable and the edited document are all
+    // alive at once, and no later stage of the pipeline sees any of them.
+    let color = measure_color_block(
+        definition,
+        fixture.analysis.as_ref(),
+        &final_document,
+        definition.deliverable.zip(deliverable.as_ref()),
+    );
     let undo_steps_to_original = restore_original(
         &fixture.core,
         &fixture.original_document,
@@ -938,6 +1472,8 @@ pub fn run_eval_with_artifacts(
     session.wall_time_ms = duration_millis(eval_started.elapsed());
     let outcome = EvalOutcome {
         final_document: (*final_document).clone(),
+        original_document: fixture.original_document.clone(),
+        color,
         final_words,
         final_timeline_words,
         remaining_silences,
@@ -957,6 +1493,41 @@ pub fn run_eval_with_artifacts(
     }
     server.shutdown();
     Ok(result)
+}
+
+/// Hand a fixture's saved project path to the server it will be driven
+/// through.
+///
+/// [`McpServer::start`] always begins with a fresh `None` project path, so a
+/// fixture that saved a project must publish it here or every
+/// project-relative tool — `import_lut_asset` most visibly — refuses
+/// `project_not_saved` for the whole session. This is **shared-runner**
+/// behaviour: a fixture that saved nothing carries `None` and the call is a
+/// no-op, which is why v1-v5 are byte-unchanged.
+fn apply_fixture_project_path(server: &McpServer, fixture: &PreparedFixture) {
+    if let Some(project_path) = fixture.project_path.clone() {
+        server.set_project_path(Some(project_path));
+    }
+}
+
+/// The colour block, built exactly where `run_eval_with_artifacts` builds it.
+///
+/// The plumbing **is** the design (R-B1): a definition that carries a colour
+/// request measures one, and a definition that does not leaves
+/// `EvalOutcome::color` at `None`, which is what keeps v1-v5 untouched. It is
+/// a named function so a test can exercise the same expression the runner
+/// runs rather than a copy of it.
+#[must_use]
+fn measure_color_block(
+    definition: &EvalDefinition,
+    analysis: &dyn Analysis,
+    final_document: &Arc<Document>,
+    deliverable: Option<(EvalDeliverableSpec, &EvalDeliverableResult)>,
+) -> Option<ColorEvalEvidence> {
+    definition
+        .color
+        .as_ref()
+        .map(|request| measure_color_evidence(request, analysis, final_document, deliverable))
 }
 
 fn produce_deliverable(
@@ -989,7 +1560,7 @@ fn produce_deliverable(
     let report = match delivery_conformance(
         document,
         spec.profile,
-        DeliveryEncodeDepth::Eight,
+        spec.delivery_bit_depth,
         spec.focus_x_percent,
         spec.focus_y_percent,
     ) {
@@ -1080,6 +1651,522 @@ pub fn render_saved_deliverable(
     )
 }
 
+/// Measure everything a colour scenario claims, in the one place where the
+/// fixture's `Analysis`, the written deliverable and the edited document are
+/// all still alive.
+///
+/// Nothing here throws: a proof that will not render records its failure in
+/// [`ColorEvalEvidence::errors`] and leaves its quantity `None`, so an
+/// unmeasured claim reads as "not measured" rather than as "passed", and the
+/// run still produces a scored, reviewable result.
+///
+/// The exporter is deliberately **not** a parameter: by the time this runs
+/// the deliverable step has already written the encode through it, and
+/// `Analysis::verify_delivery_output` reads that written file.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn measure_color_evidence(
+    request: &ColorEvalRequest,
+    analysis: &dyn Analysis,
+    final_document: &Arc<Document>,
+    deliverable: Option<(EvalDeliverableSpec, &EvalDeliverableResult)>,
+) -> ColorEvalEvidence {
+    let mut evidence = ColorEvalEvidence {
+        final_effects: summarize_effects(final_document, &request.keyframe_parameters),
+        ..ColorEvalEvidence::default()
+    };
+    let at = TimeCode(request.project_frame);
+
+    if !request.neutral_patch_rois.is_empty() {
+        match analysis.monitor_proof_for_document(Arc::clone(final_document), at) {
+            Ok(proof) => {
+                // CC6's rule for a QC consumer: a raster that does not claim
+                // to be full resolution is refused rather than measured, and
+                // a refusal here is an error on the record, not a pass.
+                if !proof.metadata.full_resolution {
+                    evidence.record(
+                        ColorEvidenceQuantity::NeutralSpread,
+                        "the monitor proof is not full resolution, so its patch statistics cannot be vouched for"
+                            .to_owned(),
+                    );
+                }
+                let mut worst: Option<i64> = None;
+                for roi in &request.neutral_patch_rois {
+                    match patch_spread_max_code(&proof.image, *roi) {
+                        Ok(Some(spread)) => {
+                            worst = Some(worst.map_or(spread, |current| current.max(spread)));
+                        }
+                        // A patch that resolved to no pixel was requested and
+                        // not measured. Recording it keeps the detail's
+                        // "over N patch(es)" honest: N is the requested
+                        // count, and a shortfall now fails rather than
+                        // silently reporting the worst of the rest.
+                        Ok(None) => evidence.record(
+                            ColorEvidenceQuantity::NeutralSpread,
+                            format!("the neutral patch {roi:?} resolved to no pixel"),
+                        ),
+                        Err(message) => {
+                            evidence.record(ColorEvidenceQuantity::NeutralSpread, message);
+                        }
+                    }
+                }
+                evidence.neutral_spread_max_code = worst;
+            }
+            Err(error) => evidence.record(
+                ColorEvidenceQuantity::NeutralSpread,
+                format!("monitor proof for the neutral patches failed: {error}"),
+            ),
+        }
+    }
+
+    if let Some(roi) = request.chart_luma_roi {
+        let reference = mean_luma_millionths_at(
+            analysis,
+            final_document,
+            TimeCode(request.chart_luma_reference_frame),
+            roi,
+        );
+        let candidate = mean_luma_millionths_at(
+            analysis,
+            final_document,
+            TimeCode(request.chart_luma_candidate_frame),
+            roi,
+        );
+        match (reference, candidate) {
+            (Ok(Some(reference)), Ok(Some(candidate))) => {
+                evidence.chart_luma_mean_delta_millionths =
+                    Some(candidate.saturating_sub(reference));
+            }
+            (Err(message), _) | (_, Err(message)) => {
+                evidence.record(ColorEvidenceQuantity::ChartLuma, message);
+            }
+            _ => evidence.record(
+                ColorEvidenceQuantity::ChartLuma,
+                "the chart luma region resolved to no pixel".to_owned(),
+            ),
+        }
+    }
+
+    if !request.qc_checks.is_empty() || request.skin_roi.is_some() || request.gamut_roi.is_some() {
+        match analysis.working_proof_for_document(Arc::clone(final_document), at) {
+            Ok(proof) => {
+                if !request.qc_checks.is_empty() {
+                    match measure_color_qc(
+                        &proof,
+                        &ColorQcRequest {
+                            roi: request.qc_roi,
+                            checks: request.qc_checks.clone(),
+                            delivery_bit_depth: request.qc_delivery_bit_depth,
+                            max_nodes: request.qc_max_nodes,
+                            project_frame: request.project_frame,
+                            ..ColorQcRequest::default()
+                        },
+                    ) {
+                        Ok(report) => evidence.qc = Some(report),
+                        Err(error) => evidence.record(
+                            ColorEvidenceQuantity::Qc,
+                            format!("colour qc failed: {error}"),
+                        ),
+                    }
+                }
+                if let Some(roi) = request.skin_roi {
+                    match measure_color_qc(
+                        &proof,
+                        &ColorQcRequest {
+                            roi: Some(roi),
+                            checks: vec![ColorQcCheck::Skin],
+                            delivery_bit_depth: request.qc_delivery_bit_depth,
+                            max_nodes: request.qc_max_nodes,
+                            project_frame: request.project_frame,
+                            ..ColorQcRequest::default()
+                        },
+                    ) {
+                        Ok(report) => evidence.skin = report.skin,
+                        Err(error) => evidence.record(
+                            ColorEvidenceQuantity::Skin,
+                            format!("skin diagnostic failed: {error}"),
+                        ),
+                    }
+                }
+                if let Some(roi) = request.gamut_roi {
+                    match measure_color_qc(
+                        &proof,
+                        &ColorQcRequest {
+                            roi: Some(roi),
+                            checks: vec![ColorQcCheck::Gamut],
+                            delivery_bit_depth: request.qc_delivery_bit_depth,
+                            max_nodes: request.qc_max_nodes,
+                            project_frame: request.project_frame,
+                            ..ColorQcRequest::default()
+                        },
+                    ) {
+                        Ok(report) => {
+                            evidence.gamut_pixel_count =
+                                Some(report.gamut.out_of_gamut_pixel_count);
+                        }
+                        Err(error) => evidence.record(
+                            ColorEvidenceQuantity::Gamut,
+                            format!("gamut measurement failed: {error}"),
+                        ),
+                    }
+                }
+            }
+            Err(error) => {
+                // One proof feeds three quantities, so one failure to render
+                // it is recorded against each of the three that asked for it.
+                let message = format!("working proof failed: {error}");
+                if !request.qc_checks.is_empty() {
+                    evidence.record(ColorEvidenceQuantity::Qc, message.clone());
+                }
+                if request.skin_roi.is_some() {
+                    evidence.record(ColorEvidenceQuantity::Skin, message.clone());
+                }
+                if request.gamut_roi.is_some() {
+                    evidence.record(ColorEvidenceQuantity::Gamut, message);
+                }
+            }
+        }
+    }
+
+    if let Some(roi) = request.matte_roi {
+        match request
+            .matte_node
+            .or_else(|| resolve_matte_node(final_document))
+        {
+            Some((clip, effect)) => {
+                match analysis.matte_proof_for_document(
+                    Arc::clone(final_document),
+                    at,
+                    clip,
+                    effect,
+                ) {
+                    // `matte_coverage_statistics` takes one argument, measures
+                    // the whole raster it is given, and has no ROI parameter,
+                    // so a region measurement crops the coverage raster first.
+                    Ok(proof) => {
+                        if !proof.metadata.render.full_resolution {
+                            evidence.record(
+                                ColorEvidenceQuantity::Matte,
+                                "the matte proof is not full resolution, so its coverage counts cannot be vouched for"
+                                    .to_owned(),
+                            );
+                        }
+                        match crop_rgba(&proof.coverage, roi) {
+                            Ok(cropped) => match matte_coverage_statistics(&cropped) {
+                                Ok(statistics) => evidence.matte = Some(statistics),
+                                Err(error) => evidence.record(
+                                    ColorEvidenceQuantity::Matte,
+                                    format!("matte coverage statistics failed: {error}"),
+                                ),
+                            },
+                            Err(message) => {
+                                evidence.record(ColorEvidenceQuantity::Matte, message);
+                            }
+                        }
+                    }
+                    Err(error) => evidence.record(
+                        ColorEvidenceQuantity::Matte,
+                        format!("matte proof failed: {error}"),
+                    ),
+                }
+            }
+            None => evidence.record(
+                ColorEvidenceQuantity::Matte,
+                "matte containment was requested but the final document carries no matte-enabled colour node"
+                    .to_owned(),
+            ),
+        }
+    }
+
+    if let Some((clip, effect, frame)) = request.look_bypass {
+        match look_bypass_matches_absent(analysis, final_document, clip, effect, TimeCode(frame)) {
+            Ok(matches) => evidence.look_bypass_matches_absent = Some(matches),
+            Err(message) => evidence.record(ColorEvidenceQuantity::LookBypass, message),
+        }
+    }
+
+    if let Some(depth) = request.delivery_verification {
+        match deliverable {
+            Some((spec, result)) => {
+                match verify_delivery_encode(analysis, final_document, spec, result, depth) {
+                    Ok(verification) => evidence.verification = Some(verification),
+                    Err(message) => {
+                        evidence.record(ColorEvidenceQuantity::DeliveryVerification, message);
+                    }
+                }
+            }
+            None => evidence.record(
+                ColorEvidenceQuantity::DeliveryVerification,
+                "delivery verification was requested but this task produced no deliverable"
+                    .to_owned(),
+            ),
+        }
+    }
+
+    evidence
+}
+
+fn summarize_effects(document: &Document, keyframe_parameters: &[String]) -> Vec<EffectSummary> {
+    let mut summaries = Vec::new();
+    for track in &document.tracks {
+        for clip in &track.clips {
+            for effect in &clip.effects {
+                let keyframes = effect
+                    .keyframes
+                    .iter()
+                    .filter(|(name, _)| {
+                        keyframe_parameters.is_empty()
+                            || keyframe_parameters.iter().any(|wanted| wanted == *name)
+                    })
+                    .map(|(name, curve)| {
+                        (
+                            name.clone(),
+                            curve
+                                .keyframes
+                                .iter()
+                                .map(|keyframe| keyframe.at.0)
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                summaries.push(EffectSummary {
+                    clip: clip.id,
+                    effect: effect.id,
+                    name: effect.name.clone(),
+                    parameters: effect.parameters.clone(),
+                    keyframes,
+                });
+            }
+        }
+    }
+    summaries
+}
+
+/// The single matte-carrying colour node, when the request did not name one.
+fn resolve_matte_node(document: &Document) -> Option<(ClipId, EffectId)> {
+    document
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .find_map(|clip| {
+            clip.effects
+                .iter()
+                .find(|effect| {
+                    matches!(
+                        effect.parameters.get(MATTE_ENABLED_PARAMETER),
+                        Some(ParamValue::Integer(value)) if *value != 0
+                    )
+                })
+                .map(|effect| (clip.id, effect.id))
+        })
+}
+
+/// Resolve a normalized rectangle against a raster, insetting each edge so a
+/// patch's own boundary pixels never enter its statistic. An inset that would
+/// empty the rectangle is not applied.
+fn resolve_patch_rect(
+    width: u32,
+    height: u32,
+    roi: NormalizedRoi,
+    inset: u32,
+) -> Result<(u32, u32, u32, u32), String> {
+    let pixels = roi
+        .to_pixels(width, height)
+        .map_err(|error| format!("region {roi:?} does not resolve on {width}x{height}: {error}"))?;
+    let shrink = inset.saturating_mul(2);
+    if pixels.width > shrink && pixels.height > shrink {
+        Ok((
+            pixels.x.saturating_add(inset),
+            pixels.y.saturating_add(inset),
+            pixels.width - shrink,
+            pixels.height - shrink,
+        ))
+    } else {
+        Ok((pixels.x, pixels.y, pixels.width, pixels.height))
+    }
+}
+
+/// The worst `max(|R−G|, |G−B|)` over one patch's inset pixels.
+fn patch_spread_max_code(image: &RgbaImage, roi: NormalizedRoi) -> Result<Option<i64>, String> {
+    let (x0, y0, width, height) =
+        resolve_patch_rect(image.width, image.height, roi, COLOR_PATCH_INSET_PIXELS)?;
+    let mut worst: Option<i64> = None;
+    for y in y0..y0.saturating_add(height) {
+        for x in x0..x0.saturating_add(width) {
+            let index = ((y as usize * image.width as usize) + x as usize) * 4;
+            let Some(pixel) = image.pixels.get(index..index + 3) else {
+                return Err(format!("monitor proof raster is shorter than {roi:?}"));
+            };
+            let red = i64::from(pixel[0]);
+            let green = i64::from(pixel[1]);
+            let blue = i64::from(pixel[2]);
+            let spread = (red - green).abs().max((green - blue).abs());
+            worst = Some(worst.map_or(spread, |current: i64| current.max(spread)));
+        }
+    }
+    Ok(worst)
+}
+
+/// The BT.709 luma mean of one region's inset pixels, in monitoring-code
+/// millionths, rounded half away from zero.
+fn mean_luma_millionths(image: &RgbaImage, roi: NormalizedRoi) -> Result<Option<i64>, String> {
+    let (x0, y0, width, height) =
+        resolve_patch_rect(image.width, image.height, roi, COLOR_PATCH_INSET_PIXELS)?;
+    let mut total = 0.0_f64;
+    let mut count = 0_u32;
+    for y in y0..y0.saturating_add(height) {
+        for x in x0..x0.saturating_add(width) {
+            let index = ((y as usize * image.width as usize) + x as usize) * 4;
+            let Some(pixel) = image.pixels.get(index..index + 3) else {
+                return Err(format!("monitor proof raster is shorter than {roi:?}"));
+            };
+            total += 0.2126 * f64::from(pixel[0])
+                + 0.7152 * f64::from(pixel[1])
+                + 0.0722 * f64::from(pixel[2]);
+            count = count.saturating_add(1);
+        }
+    }
+    if count == 0 {
+        return Ok(None);
+    }
+    let mean = total / f64::from(count);
+    Ok(Some(round_half_away_from_zero(mean * 1_000_000.0)))
+}
+
+fn mean_luma_millionths_at(
+    analysis: &dyn Analysis,
+    document: &Arc<Document>,
+    at: TimeCode,
+    roi: NormalizedRoi,
+) -> Result<Option<i64>, String> {
+    let proof = analysis
+        .monitor_proof_for_document(Arc::clone(document), at)
+        .map_err(|error| format!("monitor proof at frame {} failed: {error}", at.0))?;
+    mean_luma_millionths(&proof.image, roi)
+}
+
+/// Round half away from zero and saturate at the `i64` bounds, so the
+/// millionths convention is the same one every other CC7 number uses.
+#[allow(clippy::cast_possible_truncation)]
+fn round_half_away_from_zero(value: f64) -> i64 {
+    if !value.is_finite() {
+        return 0;
+    }
+    let rounded = if value >= 0.0 {
+        (value + 0.5).floor()
+    } else {
+        (value - 0.5).ceil()
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let clamped = rounded.clamp(i64::MIN as f64, i64::MAX as f64);
+    clamped as i64
+}
+
+fn crop_rgba(image: &RgbaImage, roi: NormalizedRoi) -> Result<RgbaImage, String> {
+    let (x0, y0, width, height) = resolve_patch_rect(image.width, image.height, roi, 0)?;
+    if width == 0 || height == 0 {
+        return Err(format!("region {roi:?} resolves to no pixel"));
+    }
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in y0..y0.saturating_add(height) {
+        for x in x0..x0.saturating_add(width) {
+            let index = ((y as usize * image.width as usize) + x as usize) * 4;
+            let Some(pixel) = image.pixels.get(index..index + 4) else {
+                return Err(format!("coverage raster is shorter than {roi:?}"));
+            };
+            pixels.extend_from_slice(pixel);
+        }
+    }
+    Ok(RgbaImage {
+        width,
+        height,
+        pixels,
+    })
+}
+
+/// Render the node bypassed and the node removed, and compare the two
+/// rasters byte for byte. A bypassed node that still contributes something is
+/// exactly what this is here to catch.
+fn look_bypass_matches_absent(
+    analysis: &dyn Analysis,
+    document: &Arc<Document>,
+    clip: ClipId,
+    effect: EffectId,
+    at: TimeCode,
+) -> Result<bool, String> {
+    let absent = scratch_document(
+        document,
+        &[Operation::RemoveEffect { clip, effect }],
+        "node-removed",
+    )?;
+    let bypassed = scratch_document(
+        document,
+        &[Operation::SetEffectParam {
+            clip,
+            effect,
+            name: kinewright_core::COLOR_NODE_BYPASS_PARAMETER.to_owned(),
+            value: ParamValue::Integer(1),
+        }],
+        "node-bypassed",
+    )?;
+    let absent = analysis
+        .monitor_proof_for_document(absent, at)
+        .map_err(|error| format!("node-removed proof failed: {error}"))?;
+    let bypassed = analysis
+        .monitor_proof_for_document(bypassed, at)
+        .map_err(|error| format!("node-bypassed proof failed: {error}"))?;
+    Ok(absent.image.width == bypassed.image.width
+        && absent.image.height == bypassed.image.height
+        && absent.image.pixels == bypassed.image.pixels)
+}
+
+fn scratch_document(
+    document: &Arc<Document>,
+    operations: &[Operation],
+    label: &str,
+) -> Result<Arc<Document>, String> {
+    let mut scratch = (**document).clone();
+    apply_batch(&mut scratch, operations)
+        .map_err(|error| format!("{label} scratch document could not be built: {error}"))?;
+    Ok(Arc::new(scratch))
+}
+
+fn verify_delivery_encode(
+    analysis: &dyn Analysis,
+    document: &Arc<Document>,
+    spec: EvalDeliverableSpec,
+    result: &EvalDeliverableResult,
+    depth: DeliveryEncodeDepth,
+) -> Result<DeliveryVerification, String> {
+    if !result.output_path.exists() {
+        return Err(format!(
+            "delivery verification found no encode at {}",
+            result.output_path.display()
+        ));
+    }
+    let delivery_document = document_for_delivery_profile(
+        document,
+        spec.profile,
+        spec.focus_x_percent,
+        spec.focus_y_percent,
+    )
+    .map_err(|error| format!("delivery document could not be built: {error}"))?;
+    let delivery_document = Arc::new(delivery_document);
+    let settings =
+        spec.profile
+            .export_settings(&delivery_document, depth, ExportCancellation::default());
+    let verification_request =
+        DeliveryVerificationRequest::new(depth, settings.delivery_color.clone());
+    analysis
+        .verify_delivery_output(
+            Arc::clone(&delivery_document),
+            &result.output_path,
+            &settings,
+            verification_request,
+        )
+        .map_err(|error| format!("delivery verification failed: {error}"))
+}
+
 fn rendered_transcript_expectation<'a>(
     spec: EvalDeliverableSpec,
     context: &'a FixtureContext,
@@ -1129,7 +2216,7 @@ fn export_and_probe(
     }
     let settings = spec.profile.export_settings(
         document,
-        DeliveryEncodeDepth::Eight,
+        spec.delivery_bit_depth,
         ExportCancellation::default(),
     );
     let (progress_tx, progress_rx) = crossbeam_channel::unbounded();
@@ -1638,11 +2725,39 @@ fn deliverable_shell(
     }
 }
 
+/// The colour-workflow benchmark, whose review template renders no dialogue,
+/// no music and no captions and therefore rates none of them.
+pub const COLOR_WORKFLOW_BENCHMARK_ID: &str = "kinewright-color-workflow-v6";
+
+/// The dimensions the colour suite pre-marks not applicable: rating a story,
+/// a pacing, an audio finish or a caption on a chart raster would be
+/// fabrication, so the template says so instead of asking.
+pub const COLOR_WORKFLOW_NOT_APPLICABLE: [HumanRatingDimension; 4] = [
+    HumanRatingDimension::Story,
+    HumanRatingDimension::Pacing,
+    HumanRatingDimension::AudioFinish,
+    HumanRatingDimension::Captions,
+];
+
 #[must_use]
 pub fn human_review_template(
     benchmark_id: &str,
     run_id: &str,
     results: &[EvalResult],
+) -> HumanReviewFile {
+    human_review_template_with_questions(benchmark_id, run_id, results, &BTreeMap::new())
+}
+
+/// Build the review template, attaching each task's scenario questions.
+///
+/// `questions` is keyed by **base** task id — `c1`, not `c1-sample-2` — so a
+/// multi-sample run poses the same question to every sample of one scenario.
+#[must_use]
+pub fn human_review_template_with_questions(
+    benchmark_id: &str,
+    run_id: &str,
+    results: &[EvalResult],
+    questions: &BTreeMap<String, Vec<HumanQuestion>>,
 ) -> HumanReviewFile {
     let mut occurrences = BTreeMap::<&str, usize>::new();
     let mut tasks = Vec::new();
@@ -1662,27 +2777,64 @@ pub fn human_review_template(
         } else {
             format!("{base_task_id}-sample-{occurrence}")
         };
-        let not_applicable = if deliverable.rendered_caption_alignment_required {
+        let not_applicable = if benchmark_id == COLOR_WORKFLOW_BENCHMARK_ID {
+            COLOR_WORKFLOW_NOT_APPLICABLE.to_vec()
+        } else if deliverable.rendered_caption_alignment_required {
             Vec::new()
         } else {
             vec![HumanRatingDimension::Captions]
         };
         tasks.push(HumanTaskReview {
             task_id,
+            blind_id: blind_id_for_artifact(deliverable.output_sha256.as_deref()),
             artifact_sha256: deliverable.output_sha256.clone(),
             accepted: None,
             ratings: HumanRatings::default(),
             not_applicable,
+            questions: questions.get(base_task_id).cloned().unwrap_or_default(),
             notes: None,
         });
     }
 
     HumanReviewFile {
-        schema_version: 1,
+        schema_version: HUMAN_REVIEW_SCHEMA_VERSION,
         benchmark_id: benchmark_id.to_owned(),
         run_id: run_id.to_owned(),
         reviewer: None,
         tasks,
+    }
+}
+
+/// Reduce a review template to the reviewer's copy.
+///
+/// Only the blind identifier, the questions and the empty rating slots
+/// survive: the task id, the run, the benchmark, the machine verdict and
+/// every parameter the agent chose are all left behind in the run root.
+/// Entries are ordered by `blind_id` ascending — deterministic, and carrying
+/// no provenance, because the identifier is a hash prefix rather than a
+/// position in the run.
+#[must_use]
+pub fn blind_review_form(review: &HumanReviewFile) -> BlindReviewForm {
+    let mut entries = review
+        .tasks
+        .iter()
+        .filter_map(|task| {
+            let blind_id = task.blind_id.clone()?;
+            Some(BlindReviewEntry {
+                blind_id,
+                questions: task.questions.clone(),
+                ratings: task.ratings.clone(),
+                not_applicable: task.not_applicable.clone(),
+                accepted: task.accepted,
+                notes: task.notes.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.blind_id.cmp(&right.blind_id));
+    entries.dedup_by(|left, right| left.blind_id == right.blind_id);
+    BlindReviewForm {
+        schema_version: BLIND_SCHEMA_VERSION,
+        entries,
     }
 }
 
@@ -1695,7 +2847,7 @@ pub fn human_review_template(
 /// ratings outside the inclusive 1..=5 scale or its half-point increments.
 #[allow(clippy::too_many_lines)]
 pub fn summarize_human_review(review: &HumanReviewFile) -> Result<HumanReviewSummary, EvalError> {
-    if review.schema_version != 1 {
+    if !matches!(review.schema_version, 1 | 2) {
         return Err(EvalError::Output(format!(
             "unsupported human-review schema version {}",
             review.schema_version
@@ -1767,6 +2919,19 @@ pub fn summarize_human_review(review: &HumanReviewFile) -> Result<HumanReviewSum
                     return Err(EvalError::Output(format!(
                         "task {} must rate or mark not applicable every dimension; missing {:?}",
                         task.task_id, missing
+                    )));
+                }
+                // Schema version 2: an acceptance decision that leaves the
+                // scenario question unanswered is not a review, because the
+                // question is the only thing the machine could not decide.
+                if let Some(unanswered) = task
+                    .questions
+                    .iter()
+                    .find(|question| question.answer.is_none())
+                {
+                    return Err(EvalError::Output(format!(
+                        "task {} must answer question {:?} before it can be accepted or rejected",
+                        task.task_id, unanswered.id
                     )));
                 }
                 reviewed.push(task);
@@ -2469,12 +3634,19 @@ pub fn evaluate(definition: &EvalDefinition, outcome: &EvalOutcome) -> EvalResul
         .map(|assertion| evaluate_assertion(assertion, definition, outcome))
         .collect::<Vec<_>>();
     assertions.extend(evaluate_budgets(&definition.budgets, outcome));
+    let mut measurements = definition
+        .assertions
+        .iter()
+        .filter_map(|assertion| color_measurement(assertion, outcome))
+        .collect::<Vec<_>>();
+    measurements.extend(ungated_color_measurements(outcome));
     let passed = assertions.iter().all(|assertion| assertion.passed);
     EvalResult {
         name: definition.name.to_owned(),
         rationale: definition.rationale.to_owned(),
         passed,
         assertions,
+        measurements,
         turns: outcome.session.turns,
         tool_calls: outcome.session.tool_calls.clone(),
         input_tokens: outcome.session.input_tokens,
@@ -2901,7 +4073,581 @@ fn evaluate_assertion(
                 |steps| format!("original restored after {steps} undos"),
             ),
         ),
+        EvalAssertion::ColorQcTechnicalPass { .. }
+        | EvalAssertion::DeliveryVerificationWithinBudgets { .. }
+        | EvalAssertion::NeutralPatchSpreadAtMost { .. }
+        | EvalAssertion::ReferenceClipUntouched { .. }
+        | EvalAssertion::SkinHueWithinBand { .. }
+        | EvalAssertion::MatteContainmentExact { .. }
+        | EvalAssertion::TrackKeyframesMatchExpected { .. }
+        | EvalAssertion::LookBypassMatchesAbsent { .. } => {
+            color_assertion_outcome(assertion, outcome).result
+        }
     }
+}
+
+/// The boolean verdict and the number behind it, produced together so the
+/// two can never disagree.
+struct ColorAssertionOutcome {
+    result: AssertionResult,
+    measurement: EvalMeasurement,
+}
+
+/// The eight colour variants, written as an **exhaustive** match rather than
+/// a `matches!`.
+///
+/// A ninth colour variant added later must be classified here or the build
+/// fails; under a `matches!` it would compile, emit no `EvalMeasurement`, and
+/// fall through `color_assertion_outcome`'s generic arm at run time.
+const fn is_color_assertion(assertion: &EvalAssertion) -> bool {
+    match assertion {
+        EvalAssertion::ColorQcTechnicalPass { .. }
+        | EvalAssertion::DeliveryVerificationWithinBudgets { .. }
+        | EvalAssertion::NeutralPatchSpreadAtMost { .. }
+        | EvalAssertion::ReferenceClipUntouched { .. }
+        | EvalAssertion::SkinHueWithinBand { .. }
+        | EvalAssertion::MatteContainmentExact { .. }
+        | EvalAssertion::TrackKeyframesMatchExpected { .. }
+        | EvalAssertion::LookBypassMatchesAbsent { .. } => true,
+        EvalAssertion::TimelineNonEmpty
+        | EvalAssertion::ClipCount { .. }
+        | EvalAssertion::MediaClipCount { .. }
+        | EvalAssertion::AssetOrder { .. }
+        | EvalAssertion::AssetAbsent { .. }
+        | EvalAssertion::Gapless
+        | EvalAssertion::MediaGapless
+        | EvalAssertion::DurationBounds { .. }
+        | EvalAssertion::ExactSourceClips { .. }
+        | EvalAssertion::ExactTrackClips { .. }
+        | EvalAssertion::ExactProjectDuration { .. }
+        | EvalAssertion::ExactTrackMediaCoverage { .. }
+        | EvalAssertion::RequiredAssetsOnTrack { .. }
+        | EvalAssertion::SourceRangesSeparated { .. }
+        | EvalAssertion::SourceRangesChronological { .. }
+        | EvalAssertion::SourceRangesSceneClean { .. }
+        | EvalAssertion::SourceRangesAvoid { .. }
+        | EvalAssertion::ShotCadenceVariation { .. }
+        | EvalAssertion::NoAlternatingShotPattern { .. }
+        | EvalAssertion::BeatAlignedCuts { .. }
+        | EvalAssertion::CutsAlignedToBeatSetAtLeast { .. }
+        | EvalAssertion::MusicFit { .. }
+        | EvalAssertion::MusicSourceEnd { .. }
+        | EvalAssertion::AssetUseMinimum { .. }
+        | EvalAssertion::AssetTemporalSpread { .. }
+        | EvalAssertion::ClipSourceWithin { .. }
+        | EvalAssertion::EdgeShotHolds { .. }
+        | EvalAssertion::WordsRetained { .. }
+        | EvalAssertion::WordsAbsent { .. }
+        | EvalAssertion::CaptionWordsExact { .. }
+        | EvalAssertion::CaptionSentencesCoherent
+        | EvalAssertion::CaptionPresentation { .. }
+        | EvalAssertion::NoSilenceAtLeast { .. }
+        | EvalAssertion::DialoguePauseBounds { .. }
+        | EvalAssertion::SceneChangesAreCuts { .. }
+        | EvalAssertion::RequiredToolUsage { .. }
+        | EvalAssertion::EffectOnAsset { .. }
+        | EvalAssertion::TransitionOnAsset { .. }
+        | EvalAssertion::NoVisualTransitionsEffectsOrRetiming { .. }
+        | EvalAssertion::TitleCard { .. }
+        | EvalAssertion::SourcePhaseArc { .. }
+        | EvalAssertion::StyledCaptions { .. }
+        | EvalAssertion::CaptionSafeArea { .. }
+        | EvalAssertion::AudioPresent
+        | EvalAssertion::ProgramAudioContinuous { .. }
+        | EvalAssertion::SingleAudioMediaClip { .. }
+        | EvalAssertion::ReframeStability { .. }
+        | EvalAssertion::QaExportReady
+        | EvalAssertion::UndoIntegrity => false,
+    }
+}
+
+/// Every colour assertion emits an `EvalMeasurement` beside its
+/// `AssertionResult`, so the observed number reaches `results.jsonl` as data
+/// rather than as prose inside a detail string.
+fn color_measurement(assertion: &EvalAssertion, outcome: &EvalOutcome) -> Option<EvalMeasurement> {
+    is_color_assertion(assertion).then(|| color_assertion_outcome(assertion, outcome).measurement)
+}
+
+/// The two colour quantities §4.1 records as **measured, not budgeted**.
+///
+/// No `EvalAssertion` reads either of them, so without this they would be
+/// rendered at full resolution and then dropped when `run_eval_with_artifacts`
+/// returns. Emitting them as `budget: 0, passed: true` rows puts them in
+/// `results.jsonl` beside the gated numbers, which is where §4.1's
+/// measured-not-budgeted column has to come from.
+fn ungated_color_measurements(outcome: &EvalOutcome) -> Vec<EvalMeasurement> {
+    let Some(color) = outcome.color.as_ref() else {
+        return Vec::new();
+    };
+    let mut measurements = Vec::new();
+    if let Some(delta) = color.chart_luma_mean_delta_millionths {
+        measurements.push(EvalMeasurement {
+            name: CHART_LUMA_MEASUREMENT_NAME.to_owned(),
+            observed: delta,
+            budget: 0,
+            unit: "millionths".to_owned(),
+            passed: true,
+        });
+    }
+    if let Some(count) = color.gamut_pixel_count {
+        measurements.push(EvalMeasurement {
+            name: GAMUT_MEASUREMENT_NAME.to_owned(),
+            observed: i64::try_from(count).unwrap_or(i64::MAX),
+            budget: 0,
+            unit: "pixels".to_owned(),
+            passed: true,
+        });
+    }
+    measurements
+}
+
+/// The name the chart luma delta reaches `results.jsonl` under.
+pub const CHART_LUMA_MEASUREMENT_NAME: &str = "chart luma mean delta";
+
+/// The name the deep-shadow gamut population reaches `results.jsonl` under.
+pub const GAMUT_MEASUREMENT_NAME: &str = "deep shadow out-of-gamut pixels";
+
+fn color_outcome(
+    name: &str,
+    passed: bool,
+    detail: String,
+    observed: i64,
+    budget: i64,
+    unit: &str,
+) -> ColorAssertionOutcome {
+    ColorAssertionOutcome {
+        result: assertion_result(name, passed, detail),
+        measurement: EvalMeasurement {
+            name: name.to_owned(),
+            observed,
+            budget,
+            unit: unit.to_owned(),
+            passed,
+        },
+    }
+}
+
+fn color_not_measured(
+    name: &str,
+    unit: &str,
+    evidence: Option<&ColorEvalEvidence>,
+    quantity: ColorEvidenceQuantity,
+) -> String {
+    evidence.map_or_else(
+        || format!("{name} has no colour evidence block ({unit} not measured)"),
+        |evidence| {
+            evidence.unmeasurable_reason(quantity).map_or_else(
+                || format!("{name} was not measured for this task ({unit})"),
+                |reason| format!("{name} could not be measured: {reason}"),
+            )
+        },
+    )
+}
+
+/// A quantity whose inputs failed is **not** a measurement.
+///
+/// A partially measured quantity — three of twelve patch rectangles that
+/// would not resolve, a proof that does not claim full resolution — fails the
+/// assertion that gates it, with the recorded reason, rather than reporting
+/// the worst of whatever did measure. Returns `None` when nothing was
+/// recorded against the quantity, which is the ordinary path.
+fn color_unmeasurable(
+    name: &str,
+    evidence: Option<&ColorEvalEvidence>,
+    quantity: ColorEvidenceQuantity,
+    not_measured: i64,
+    budget: i64,
+    unit: &str,
+) -> Option<ColorAssertionOutcome> {
+    let reason = evidence?.unmeasurable_reason(quantity)?;
+    Some(color_outcome(
+        name,
+        false,
+        format!("{name} could not be measured: {reason}"),
+        not_measured,
+        budget,
+        unit,
+    ))
+}
+
+#[allow(clippy::too_many_lines)]
+fn color_assertion_outcome(
+    assertion: &EvalAssertion,
+    outcome: &EvalOutcome,
+) -> ColorAssertionOutcome {
+    let evidence = outcome.color.as_ref();
+    match assertion {
+        EvalAssertion::ColorQcTechnicalPass {
+            clip_id,
+            frame,
+            checks,
+        } => {
+            let name = "colour qc technical pass";
+            if let Some(refused) =
+                color_unmeasurable(name, evidence, ColorEvidenceQuantity::Qc, 0, 1, "boolean")
+            {
+                return refused;
+            }
+            evidence.and_then(|evidence| evidence.qc.as_ref()).map_or_else(
+                || color_outcome(name, false, color_not_measured(name, "boolean", evidence, ColorEvidenceQuantity::Qc), 0, 1, "boolean"),
+                |report| {
+                    let codes = report
+                        .exceptions
+                        .iter()
+                        .map(|exception| exception.code.clone())
+                        .collect::<Vec<_>>();
+                    color_outcome(
+                        name,
+                        report.technical_pass,
+                        format!(
+                            "clip {clip_id} frame {frame} checks {checks:?}: technical_pass={}, exceptions={codes:?}",
+                            report.technical_pass
+                        ),
+                        i64::from(report.technical_pass),
+                        1,
+                        "boolean",
+                    )
+                },
+            )
+        }
+        EvalAssertion::DeliveryVerificationWithinBudgets { depth } => {
+            let name = "delivery verification within budgets";
+            if let Some(refused) = color_unmeasurable(
+                name,
+                evidence,
+                ColorEvidenceQuantity::DeliveryVerification,
+                0,
+                1,
+                "boolean",
+            ) {
+                return refused;
+            }
+            evidence
+                .and_then(|evidence| evidence.verification.as_ref())
+                .map_or_else(
+                    || {
+                        color_outcome(
+                            name,
+                            false,
+                            color_not_measured(
+                                name,
+                                "boolean",
+                                evidence,
+                                ColorEvidenceQuantity::DeliveryVerification,
+                            ),
+                            0,
+                            1,
+                            "boolean",
+                        )
+                    },
+                    |verification| {
+                        let depth_matches = verification.delivery_bit_depth == *depth;
+                        let passed = depth_matches
+                            && verification.comparison.within_budgets
+                            && verification.technical_pass;
+                        color_outcome(
+                            name,
+                            passed,
+                            format!(
+                                "depth={} (requested {}), within_budgets={}, technical_pass={}, conforming={}, decoded_pixel_format={}",
+                                verification.delivery_bit_depth.as_str(),
+                                depth.as_str(),
+                                verification.comparison.within_budgets,
+                                verification.technical_pass,
+                                verification.tags.conforming,
+                                verification.decoded_pixel_format,
+                            ),
+                            i64::from(passed),
+                            1,
+                            "boolean",
+                        )
+                    },
+                )
+        }
+        EvalAssertion::NeutralPatchSpreadAtMost {
+            patch_rois,
+            maximum_code,
+        } => {
+            let name = "neutral patch spread";
+            if let Some(refused) = color_unmeasurable(
+                name,
+                evidence,
+                ColorEvidenceQuantity::NeutralSpread,
+                -1,
+                *maximum_code,
+                "monitoring_code",
+            ) {
+                return refused;
+            }
+            evidence
+                .and_then(|evidence| evidence.neutral_spread_max_code)
+                .map_or_else(
+                    || {
+                        color_outcome(
+                            name,
+                            false,
+                            color_not_measured(
+                                name,
+                                "monitoring_code",
+                                evidence,
+                                ColorEvidenceQuantity::NeutralSpread,
+                            ),
+                            -1,
+                            *maximum_code,
+                            "monitoring_code",
+                        )
+                    },
+                    |observed| {
+                        color_outcome(
+                            name,
+                            observed <= *maximum_code,
+                            format!(
+                                "worst spread {observed} over {} patch(es), budget {maximum_code}",
+                                patch_rois.len()
+                            ),
+                            observed,
+                            *maximum_code,
+                            "monitoring_code",
+                        )
+                    },
+                )
+        }
+        EvalAssertion::ReferenceClipUntouched { clip_id } => {
+            evaluate_reference_clip_untouched(*clip_id, outcome)
+        }
+        EvalAssertion::SkinHueWithinBand {
+            roi,
+            minimum_in_band_basis_points,
+        } => {
+            let name = "skin hue within band";
+            let budget = i64::from(*minimum_in_band_basis_points);
+            if let Some(refused) = color_unmeasurable(
+                name,
+                evidence,
+                ColorEvidenceQuantity::Skin,
+                -1,
+                budget,
+                "basis_points",
+            ) {
+                return refused;
+            }
+            evidence.and_then(|evidence| evidence.skin.as_ref()).map_or_else(
+                || color_outcome(name, false, color_not_measured(name, "basis_points", evidence, ColorEvidenceQuantity::Skin), -1, budget, "basis_points"),
+                |skin| {
+                    let observed = i64::from(skin.in_band_basis_points);
+                    // A `None` mean hue is a failure, not a pass by default:
+                    // a region with no chromatic pixel has no hue to be in or
+                    // out of the band.
+                    let passed = skin.mean_hue_centidegrees.is_some() && observed >= budget;
+                    color_outcome(
+                        name,
+                        passed,
+                        format!(
+                            "roi {roi:?}: in_band={observed} bp of {} considered ({} achromatic excluded), mean_hue={:?}, minimum {budget} bp",
+                            skin.considered_pixel_count,
+                            skin.excluded_achromatic_pixel_count,
+                            skin.mean_hue_centidegrees,
+                        ),
+                        observed,
+                        budget,
+                        "basis_points",
+                    )
+                },
+            )
+        }
+        EvalAssertion::MatteContainmentExact {
+            roi,
+            expected_covered_pixel_count,
+            expected_full_pixel_count,
+            expected_partial_pixel_count,
+        } => {
+            let name = "matte containment";
+            let budget = i64::try_from(*expected_covered_pixel_count).unwrap_or(i64::MAX);
+            if let Some(refused) = color_unmeasurable(
+                name,
+                evidence,
+                ColorEvidenceQuantity::Matte,
+                -1,
+                budget,
+                "pixels",
+            ) {
+                return refused;
+            }
+            evidence.and_then(|evidence| evidence.matte.as_ref()).map_or_else(
+                || color_outcome(name, false, color_not_measured(name, "pixels", evidence, ColorEvidenceQuantity::Matte), -1, budget, "pixels"),
+                |matte| {
+                    let passed = matte.covered_pixel_count == *expected_covered_pixel_count
+                        && matte.full_pixel_count == *expected_full_pixel_count
+                        && matte.partial_pixel_count == *expected_partial_pixel_count;
+                    color_outcome(
+                        name,
+                        passed,
+                        format!(
+                            "inside roi {roi:?} only: covered {}/{expected_covered_pixel_count}, full {}/{expected_full_pixel_count}, partial {}/{expected_partial_pixel_count} of {} pixel(s)",
+                            matte.covered_pixel_count,
+                            matte.full_pixel_count,
+                            matte.partial_pixel_count,
+                            matte.total_pixel_count,
+                        ),
+                        i64::try_from(matte.covered_pixel_count).unwrap_or(i64::MAX),
+                        budget,
+                        "pixels",
+                    )
+                },
+            )
+        }
+        EvalAssertion::TrackKeyframesMatchExpected {
+            parameter,
+            expected_local_frames,
+            absent_local_frames,
+        } => evaluate_track_keyframes(
+            parameter,
+            expected_local_frames,
+            absent_local_frames,
+            outcome,
+        ),
+        EvalAssertion::LookBypassMatchesAbsent {
+            clip_id,
+            effect_id,
+            frame,
+        } => {
+            let name = "look bypass matches absent";
+            if let Some(refused) = color_unmeasurable(
+                name,
+                evidence,
+                ColorEvidenceQuantity::LookBypass,
+                0,
+                1,
+                "boolean",
+            ) {
+                return refused;
+            }
+            evidence
+                .and_then(|evidence| evidence.look_bypass_matches_absent)
+                .map_or_else(
+                    || {
+                        color_outcome(
+                            name,
+                            false,
+                            color_not_measured(
+                                name,
+                                "boolean",
+                                evidence,
+                                ColorEvidenceQuantity::LookBypass,
+                            ),
+                            0,
+                            1,
+                            "boolean",
+                        )
+                    },
+                    |matches| {
+                        color_outcome(
+                            name,
+                            matches,
+                            format!(
+                                "clip {clip_id} effect {effect_id} at frame {frame}: bypass_matches_absent={matches}"
+                            ),
+                            i64::from(matches),
+                            1,
+                            "boolean",
+                        )
+                    },
+                )
+        }
+        _ => color_outcome(
+            "colour assertion",
+            false,
+            "assertion is not a colour assertion".to_owned(),
+            0,
+            1,
+            "boolean",
+        ),
+    }
+}
+
+/// The reference clip must be byte-identical to its pre-session form.
+///
+/// The **effect count and the serialized clip are the evidence**: a planner's
+/// own `reference_retained` field is a hardcoded literal and asserts nothing
+/// about what happened, so nothing here reads one.
+fn evaluate_reference_clip_untouched(clip_id: u64, outcome: &EvalOutcome) -> ColorAssertionOutcome {
+    let name = "reference clip untouched";
+    let clip = ClipId(clip_id);
+    let before = outcome.original_document.clip(clip);
+    let after = outcome.final_document.clip(clip);
+    match (before, after) {
+        (Some(before), Some(after)) => {
+            let observed = i64::try_from(after.effects.len()).unwrap_or(i64::MAX);
+            let identical = serde_json::to_string(before).ok() == serde_json::to_string(after).ok();
+            let passed = identical && after.effects.is_empty();
+            color_outcome(
+                name,
+                passed,
+                format!(
+                    "clip {clip_id}: {observed} effect(s) after the session, serialized clip {}",
+                    if identical { "unchanged" } else { "CHANGED" }
+                ),
+                observed,
+                0,
+                "effects",
+            )
+        }
+        _ => color_outcome(
+            name,
+            false,
+            format!("clip {clip_id} is missing from the original or the final document"),
+            -1,
+            0,
+            "effects",
+        ),
+    }
+}
+
+/// Read the committed keyframes, which are the durable evidence of what the
+/// tracker did. There is no per-call tool log in `SessionMetrics` and CC7
+/// adds none, so an assertion about "which samples survived" is an assertion
+/// about which keyframes were written.
+fn evaluate_track_keyframes(
+    parameter: &str,
+    expected_local_frames: &[i64],
+    absent_local_frames: &[i64],
+    outcome: &EvalOutcome,
+) -> ColorAssertionOutcome {
+    let name = "track keyframes match expected";
+    let mut observed_frames = BTreeSet::new();
+    for track in &outcome.final_document.tracks {
+        for clip in &track.clips {
+            for effect in &clip.effects {
+                if let Some(curve) = effect.keyframes.get(parameter) {
+                    observed_frames.extend(curve.keyframes.iter().map(|keyframe| keyframe.at.0));
+                }
+            }
+        }
+    }
+    let missing = expected_local_frames
+        .iter()
+        .filter(|frame| !observed_frames.contains(frame))
+        .copied()
+        .collect::<Vec<_>>();
+    let unexpected = absent_local_frames
+        .iter()
+        .filter(|frame| observed_frames.contains(frame))
+        .copied()
+        .collect::<Vec<_>>();
+    let present = i64::try_from(expected_local_frames.len().saturating_sub(missing.len()))
+        .unwrap_or(i64::MAX);
+    let budget = i64::try_from(expected_local_frames.len()).unwrap_or(i64::MAX);
+    color_outcome(
+        name,
+        missing.is_empty() && unexpected.is_empty(),
+        format!(
+            "{parameter}: observed {:?}, missing {missing:?}, unexpectedly present {unexpected:?}",
+            observed_frames.iter().copied().collect::<Vec<_>>()
+        ),
+        present,
+        budget,
+        "keyframes",
+    )
 }
 
 fn evaluate_budgets(budgets: &EvalBudgets, outcome: &EvalOutcome) -> Vec<AssertionResult> {
@@ -6151,6 +7897,10 @@ fn evaluate_styled_captions(
 }
 
 fn evaluate_caption_safe_area(profile: DeliveryProfile, outcome: &EvalOutcome) -> AssertionResult {
+    // The third hard-coded depth in this file, and deliberately the one that
+    // stays: this assertion has no `EvalDeliverableSpec` in scope, and a
+    // caption safe area is not a colour deliverable. Plumbing a depth through
+    // the caption path is explicitly out of scope.
     match delivery_conformance(
         &outcome.final_document,
         profile,
@@ -6731,6 +8481,8 @@ mod tests {
     fn outcome_for(final_document: Document, context: FixtureContext) -> EvalOutcome {
         EvalOutcome {
             final_document,
+            original_document: Document::default(),
+            color: None,
             final_words: Vec::new(),
             final_timeline_words: Vec::new(),
             remaining_silences: Vec::new(),
@@ -7772,6 +9524,9 @@ mod tests {
     }
 
     #[test]
+    // Two more fields on `EvalOutcome` pushed this existing case one line over
+    // the pedantic limit; the case itself is unchanged.
+    #[allow(clippy::too_many_lines)]
     fn fake_driver_eval_accepts_the_transcript_clamped_bound_and_rounding_allowance() {
         let silences = AssetSilences {
             asset: AssetId(1),
@@ -7858,9 +9613,12 @@ mod tests {
             }],
             budgets: budgets(),
             deliverable: None,
+            color: None,
         };
         let outcome = EvalOutcome {
             final_document,
+            original_document: Document::default(),
+            color: None,
             final_words: Vec::new(),
             final_timeline_words: Vec::new(),
             remaining_silences: Vec::new(),
@@ -7920,9 +9678,12 @@ mod tests {
             ],
             budgets: budgets(),
             deliverable: None,
+            color: None,
         };
         let outcome = EvalOutcome {
             final_document: document(),
+            original_document: Document::default(),
+            color: None,
             final_words: vec!["alpha".to_owned(), "bravo".to_owned()],
             final_timeline_words: Vec::new(),
             remaining_silences: Vec::new(),
@@ -8412,6 +10173,8 @@ mod tests {
         ));
         let mut outcome = EvalOutcome {
             final_document,
+            original_document: Document::default(),
+            color: None,
             final_words: Vec::new(),
             final_timeline_words: Vec::new(),
             remaining_silences: Vec::new(),
@@ -8497,6 +10260,8 @@ mod tests {
         );
         let mut outcome = EvalOutcome {
             final_document,
+            original_document: Document::default(),
+            color: None,
             final_words: Vec::new(),
             final_timeline_words: Vec::new(),
             remaining_silences: Vec::new(),
@@ -8649,6 +10414,7 @@ mod tests {
                     minimum_active_integrated_lufs_hundredths: -3_000,
                     maximum_trailing_inactive_frames: TimeCode(30),
                 }),
+                delivery_bit_depth: DeliveryEncodeDepth::Eight,
             },
             &document(),
             Path::new("artifacts/audio-tail"),
@@ -8682,6 +10448,7 @@ mod tests {
                 minimum_active_integrated_lufs_hundredths: -3_000,
                 maximum_trailing_inactive_frames: TimeCode(30),
             }),
+            delivery_bit_depth: DeliveryEncodeDepth::Eight,
         };
         let document = document();
         let existing_file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
@@ -8753,6 +10520,7 @@ mod tests {
                 maximum_caption_word_error_rate_basis_points: None,
                 loudness: None,
                 audio_tail: None,
+                delivery_bit_depth: DeliveryEncodeDepth::Eight,
             },
             &document(),
             Path::new("artifacts/f2"),
@@ -8814,6 +10582,7 @@ mod tests {
             assertions: Vec::new(),
             budgets: budgets(),
             deliverable: None,
+            color: None,
         };
         let mut result =
             EvalResult::execution_failure(&definition, &EvalError::Agent("deliberate".to_owned()));
@@ -8859,6 +10628,7 @@ mod tests {
             assertions: Vec::new(),
             budgets: budgets(),
             deliverable: None,
+            color: None,
         };
         let mut result =
             EvalResult::execution_failure(&definition, &EvalError::Agent("unused".to_owned()));
@@ -8875,6 +10645,7 @@ mod tests {
                 maximum_caption_word_error_rate_basis_points: None,
                 loudness: None,
                 audio_tail: None,
+                delivery_bit_depth: DeliveryEncodeDepth::Eight,
             },
             &document(),
             Path::new("artifacts/f1"),
@@ -8935,6 +10706,8 @@ mod tests {
             reviewer: None,
             tasks: vec![HumanTaskReview {
                 task_id: "f1".to_owned(),
+                blind_id: None,
+                questions: Vec::new(),
                 artifact_sha256: Some("b".repeat(64)),
                 accepted: Some(false),
                 ratings: HumanRatings {
@@ -8969,6 +10742,8 @@ mod tests {
             reviewer: Some("human".to_owned()),
             tasks: vec![HumanTaskReview {
                 task_id: "g3".to_owned(),
+                blind_id: None,
+                questions: Vec::new(),
                 artifact_sha256: None,
                 accepted: Some(true),
                 ratings: HumanRatings {
@@ -9029,6 +10804,8 @@ mod tests {
             reviewer: None,
             tasks: vec![HumanTaskReview {
                 task_id: "g3".to_owned(),
+                blind_id: None,
+                questions: Vec::new(),
                 artifact_sha256: None,
                 accepted: Some(true),
                 ratings: HumanRatings {
@@ -9064,6 +10841,8 @@ mod tests {
             reviewer: None,
             tasks: vec![HumanTaskReview {
                 task_id: "g3".to_owned(),
+                blind_id: None,
+                questions: Vec::new(),
                 artifact_sha256: None,
                 accepted: Some(true),
                 ratings: HumanRatings {
@@ -9090,5 +10869,1176 @@ mod tests {
             vec![TimeCode(0), TimeCode(3), TimeCode(6), TimeCode(9)]
         );
         assert_eq!(uniform_sample_frames(TimeCode(10), 1), vec![TimeCode(4)]);
+    }
+
+    // -----------------------------------------------------------------------
+    // CC7 §11.2.32 — the shared-runner half of the eval inventory.
+    // -----------------------------------------------------------------------
+
+    fn cc7_result_without_measurements() -> EvalResult {
+        EvalResult {
+            name: "g3 mixed footage".to_owned(),
+            rationale: "a pre-CC7 record".to_owned(),
+            passed: true,
+            assertions: vec![AssertionResult {
+                assertion: "timeline non-empty".to_owned(),
+                passed: true,
+                detail: "observed 3 clips".to_owned(),
+            }],
+            measurements: Vec::new(),
+            turns: 1,
+            tool_calls: BTreeMap::from([("commit_edit_plan".to_owned(), 2_u32)]),
+            input_tokens: 10,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            output_tokens: 20,
+            reasoning_output_tokens: None,
+            tool_surface: crate::ToolSurfaceMetrics::default(),
+            cost_usd: Some(0.25),
+            wall_time_ms: 1_234,
+            operations_applied: 2,
+            deliverable: None,
+            execution_error: None,
+        }
+    }
+
+    /// `EvalResult` derives `Serialize` only and `results.jsonl` is
+    /// write-only, so there is no "a pre-CC7 record still parses" claim to
+    /// make. What is guaranteed is that a record with no measurements still
+    /// serialises byte for byte as it did before the field existed — which is
+    /// what keeps every checked-in baseline JSON and every historic JSONL
+    /// line exactly the shape it was recorded in.
+    #[test]
+    fn cc7_a_v5_result_serialises_byte_identically_without_measurements() {
+        let result = cc7_result_without_measurements();
+        let json = serde_json::to_string(&result).expect("v5-shaped result serialises");
+        assert!(
+            !json.contains("measurements"),
+            "an empty measurement list must not reach the wire: {json}"
+        );
+
+        // The same record, with a measurement, does carry the key — so the
+        // absence above is `skip_serializing_if` doing its job rather than a
+        // field that never serialises at all.
+        let mut measured = cc7_result_without_measurements();
+        measured.measurements.push(EvalMeasurement {
+            name: "neutral patch spread".to_owned(),
+            observed: 2,
+            budget: 5,
+            unit: "monitoring_code".to_owned(),
+            passed: true,
+        });
+        let measured_json = serde_json::to_string(&measured).expect("measured result serialises");
+        assert!(measured_json.contains("\"measurements\""));
+        assert!(measured_json.contains("\"monitoring_code\""));
+
+        // And every other key is untouched: removing the measurements
+        // recovers the original bytes exactly.
+        measured.measurements.clear();
+        assert_eq!(
+            serde_json::to_string(&measured).expect("cleared result serialises"),
+            json
+        );
+    }
+
+    fn cc7_keyframed_document(parameter: &str, frames: &[i64]) -> Document {
+        let mut document = document();
+        let mut effect = kinewright_core::Effect {
+            id: kinewright_core::EffectId(7),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::from([
+                ("saturation_percent".to_owned(), ParamValue::Integer(40)),
+                (MATTE_ENABLED_PARAMETER.to_owned(), ParamValue::Integer(1)),
+            ]),
+            keyframes: BTreeMap::new(),
+        };
+        effect.keyframes.insert(
+            parameter.to_owned(),
+            kinewright_core::AutomationCurve {
+                keyframes: frames
+                    .iter()
+                    .map(|frame| kinewright_core::Keyframe {
+                        at: TimeCode(*frame),
+                        value: 5_000,
+                        interpolation: kinewright_core::KeyframeInterpolation::default(),
+                    })
+                    .collect(),
+            },
+        );
+        document.tracks[0].clips[0].effects.push(effect);
+        document
+    }
+
+    /// The committed keyframes are the durable evidence of what the tracker
+    /// did, which is why this variant replaces a tool-log assertion: there is
+    /// no per-call tool log in `SessionMetrics` and CC7 adds none.
+    #[test]
+    fn cc7_track_keyframes_match_expected_reads_the_committed_document() {
+        let parameter = "matte_window0_center_x_basis_points";
+        let surviving = [0_i64, 4, 9, 14, 18, 23, 28, 32, 37, 42];
+        let assertion = EvalAssertion::TrackKeyframesMatchExpected {
+            parameter: parameter.to_owned(),
+            expected_local_frames: surviving.to_vec(),
+            absent_local_frames: vec![47],
+        };
+
+        let outcome = outcome_for(
+            cc7_keyframed_document(parameter, &surviving),
+            FixtureContext::default(),
+        );
+        let landed = color_assertion_outcome(&assertion, &outcome);
+        assert!(landed.result.passed, "{}", landed.result.detail);
+        assert_eq!(landed.measurement.observed, 10);
+        assert_eq!(landed.measurement.budget, 10);
+        assert_eq!(landed.measurement.unit, "keyframes");
+        assert!(landed.measurement.passed);
+
+        // A document that also keyframed the occluded sample fails, so the
+        // absent list is load-bearing rather than decorative.
+        let mut with_occluded = surviving.to_vec();
+        with_occluded.push(47);
+        let leaked = outcome_for(
+            cc7_keyframed_document(parameter, &with_occluded),
+            FixtureContext::default(),
+        );
+        let leaked = color_assertion_outcome(&assertion, &leaked);
+        assert!(!leaked.result.passed);
+        assert!(leaked.result.detail.contains("unexpectedly present [47]"));
+
+        // And a document that dropped a surviving sample fails too.
+        let dropped = outcome_for(
+            cc7_keyframed_document(parameter, &surviving[..9]),
+            FixtureContext::default(),
+        );
+        let dropped = color_assertion_outcome(&assertion, &dropped);
+        assert!(!dropped.result.passed);
+        assert_eq!(dropped.measurement.observed, 9);
+    }
+
+    /// A colour assertion with no evidence block reads as "not measured" and
+    /// fails; it never passes by default.
+    #[test]
+    fn cc7_a_colour_assertion_without_evidence_fails_rather_than_passing() {
+        let outcome = outcome_for(document(), FixtureContext::default());
+        assert!(outcome.color.is_none());
+        for assertion in [
+            EvalAssertion::NeutralPatchSpreadAtMost {
+                patch_rois: vec![NormalizedRoi::new(0, 2_000, 3_000, 888)],
+                maximum_code: 5,
+            },
+            EvalAssertion::SkinHueWithinBand {
+                roi: NormalizedRoi::new(0, 4_223, 1_500, 888),
+                minimum_in_band_basis_points: 10_000,
+            },
+            EvalAssertion::LookBypassMatchesAbsent {
+                clip_id: 1,
+                effect_id: 7,
+                frame: 0,
+            },
+            EvalAssertion::DeliveryVerificationWithinBudgets {
+                depth: DeliveryEncodeDepth::Eight,
+            },
+            EvalAssertion::ColorQcTechnicalPass {
+                clip_id: 1,
+                frame: 0,
+                checks: vec!["range".to_owned()],
+            },
+            EvalAssertion::MatteContainmentExact {
+                roi: NormalizedRoi::new(1_500, 4_223, 375, 888),
+                expected_covered_pixel_count: 192,
+                expected_full_pixel_count: 192,
+                expected_partial_pixel_count: 0,
+            },
+        ] {
+            let landed = color_assertion_outcome(&assertion, &outcome);
+            assert!(
+                !landed.result.passed,
+                "{} passed with no evidence: {}",
+                landed.result.assertion, landed.result.detail
+            );
+            assert!(color_measurement(&assertion, &outcome).is_some());
+        }
+
+        // A partially measured quantity is not a measurement (R1-M3): nine of
+        // twelve patches measuring 2 codes against a budget of 5 is a pass
+        // until the three that did not resolve are on the record, at which
+        // point the claim fails with the reason it could not be made.
+        let spread = EvalAssertion::NeutralPatchSpreadAtMost {
+            patch_rois: vec![NormalizedRoi::new(0, 2_000, 3_000, 888)],
+            maximum_code: 5,
+        };
+        let measured = ColorEvalEvidence {
+            neutral_spread_max_code: Some(2),
+            ..ColorEvalEvidence::default()
+        };
+        let passing = EvalOutcome {
+            color: Some(measured.clone()),
+            ..outcome_for(document(), FixtureContext::default())
+        };
+        assert!(color_assertion_outcome(&spread, &passing).result.passed);
+
+        let mut partial = measured;
+        partial.record(
+            ColorEvidenceQuantity::NeutralSpread,
+            "the neutral patch chart09 resolved to no pixel".to_owned(),
+        );
+        // An error on a different quantity's inputs leaves this claim alone.
+        partial.record(
+            ColorEvidenceQuantity::Matte,
+            "matte proof failed: not implemented".to_owned(),
+        );
+        let failing = EvalOutcome {
+            color: Some(partial),
+            ..outcome_for(document(), FixtureContext::default())
+        };
+        let landed = color_assertion_outcome(&spread, &failing);
+        assert!(!landed.result.passed, "{}", landed.result.detail);
+        assert!(
+            landed.result.detail.contains("chart09"),
+            "{}",
+            landed.result.detail
+        );
+        assert!(
+            !landed.result.detail.contains("matte proof"),
+            "a matte failure must not be reported as the spread's reason: {}",
+            landed.result.detail
+        );
+        assert!(!landed.measurement.passed);
+    }
+
+    /// Every colour assertion emits a measurement; no other assertion does.
+    #[test]
+    fn cc7_only_colour_assertions_emit_measurements() {
+        let outcome = outcome_for(document(), FixtureContext::default());
+        assert!(color_measurement(&EvalAssertion::TimelineNonEmpty, &outcome).is_none());
+        assert!(color_measurement(&EvalAssertion::UndoIntegrity, &outcome).is_none());
+        assert!(
+            color_measurement(
+                &EvalAssertion::ReferenceClipUntouched { clip_id: 1 },
+                &outcome
+            )
+            .is_some()
+        );
+    }
+
+    /// The request is derived from the assertions that gate it, so a region
+    /// rectangle is written down once and a non-colour suite gets no request
+    /// at all.
+    #[test]
+    fn cc7_a_colour_request_is_derived_from_the_assertions_only() {
+        assert!(
+            ColorEvalRequest::from_assertions(&[
+                EvalAssertion::TimelineNonEmpty,
+                EvalAssertion::UndoIntegrity
+            ])
+            .is_none()
+        );
+        let roi = NormalizedRoi::new(1_500, 4_223, 375, 888);
+        let request = ColorEvalRequest::from_assertions(&[
+            EvalAssertion::TimelineNonEmpty,
+            EvalAssertion::ColorQcTechnicalPass {
+                clip_id: 1,
+                frame: 60,
+                checks: vec!["range".to_owned(), "per_node".to_owned()],
+            },
+            EvalAssertion::MatteContainmentExact {
+                roi,
+                expected_covered_pixel_count: 192,
+                expected_full_pixel_count: 192,
+                expected_partial_pixel_count: 0,
+            },
+            EvalAssertion::DeliveryVerificationWithinBudgets {
+                depth: DeliveryEncodeDepth::Ten,
+            },
+            EvalAssertion::TrackKeyframesMatchExpected {
+                parameter: "matte_window0_center_x_basis_points".to_owned(),
+                expected_local_frames: vec![0],
+                absent_local_frames: vec![47],
+            },
+        ])
+        .expect("a colour assertion yields a request");
+        assert_eq!(request.project_frame, 60);
+        assert_eq!(
+            request.qc_checks,
+            vec![ColorQcCheck::Range, ColorQcCheck::PerNode]
+        );
+        assert_eq!(request.matte_roi, Some(roi));
+        assert_eq!(
+            request.delivery_verification,
+            Some(DeliveryEncodeDepth::Ten)
+        );
+        assert_eq!(
+            request.keyframe_parameters,
+            vec!["matte_window0_center_x_basis_points".to_owned()]
+        );
+    }
+
+    fn cc7_reviewed_task(task_id: &str) -> HumanTaskReview {
+        HumanTaskReview {
+            task_id: task_id.to_owned(),
+            blind_id: None,
+            artifact_sha256: Some("a".repeat(64)),
+            accepted: Some(true),
+            ratings: HumanRatings {
+                story: Some(4.0),
+                pacing: Some(4.0),
+                visual_finish: Some(4.5),
+                audio_finish: Some(4.0),
+                captions: Some(4.0),
+                delivery_readiness: Some(4.5),
+            },
+            not_applicable: Vec::new(),
+            questions: Vec::new(),
+            notes: None,
+        }
+    }
+
+    /// A schema version 1 file loads and scores exactly as it always has, and
+    /// round-trips byte-identically through the version 2 code.
+    #[test]
+    fn cc7_human_review_v1_files_still_load_and_score() {
+        let v1 = serde_json::json!({
+            "schema_version": 1,
+            "benchmark_id": "kinewright-finished-cut-v2",
+            "run_id": "kinewright-eval-20260101T000000Z-claude-code",
+            "reviewer": "riel",
+            "tasks": [{
+                "task_id": "f1",
+                "artifact_sha256": "b".repeat(64),
+                "accepted": true,
+                "ratings": {
+                    "story": 4.0, "pacing": 4.0, "visual_finish": 4.5,
+                    "audio_finish": 4.0, "captions": 4.0, "delivery_readiness": 4.5
+                },
+                "not_applicable": [],
+                "notes": null
+            }]
+        });
+        let bytes = serde_json::to_vec(&v1).expect("v1 fixture serialises");
+        let review: HumanReviewFile =
+            serde_json::from_slice(&bytes).expect("a v1 review still parses");
+        assert_eq!(review.schema_version, 1);
+        assert_eq!(review.tasks[0].blind_id, None);
+        assert!(review.tasks[0].questions.is_empty());
+
+        let summary = summarize_human_review(&review).expect("a v1 review still scores");
+        assert_eq!(summary.tasks_reviewed, 1);
+        assert_eq!(summary.tasks_accepted, 1);
+
+        // Byte-identical round trip: neither new field reaches the wire.
+        let round_tripped = serde_json::to_value(&review).expect("v1 review re-serialises");
+        assert_eq!(round_tripped, v1);
+    }
+
+    /// A schema version 2 file carries `blind_id` and `questions` and round
+    /// trips through them.
+    #[test]
+    fn cc7_human_review_v2_round_trips_blind_id_and_questions() {
+        let mut task = cc7_reviewed_task("c1");
+        task.blind_id = Some("0f3a1c2d4e5b".to_owned());
+        task.not_applicable = COLOR_WORKFLOW_NOT_APPLICABLE.to_vec();
+        task.ratings = HumanRatings {
+            visual_finish: Some(4.5),
+            delivery_readiness: Some(4.0),
+            ..HumanRatings::default()
+        };
+        task.questions = vec![HumanQuestion {
+            id: "a".to_owned(),
+            prompt: "Does the match preserve natural and intentional differences?".to_owned(),
+            answer: Some(true),
+            notes: None,
+        }];
+        let review = HumanReviewFile {
+            schema_version: HUMAN_REVIEW_SCHEMA_VERSION,
+            benchmark_id: COLOR_WORKFLOW_BENCHMARK_ID.to_owned(),
+            run_id: "kinewright-eval-20260101T000000Z-claude-code".to_owned(),
+            reviewer: Some("riel".to_owned()),
+            tasks: vec![task],
+        };
+        let bytes = serde_json::to_vec_pretty(&review).expect("v2 review serialises");
+        let parsed: HumanReviewFile = serde_json::from_slice(&bytes).expect("v2 review parses");
+        assert_eq!(parsed, review);
+        assert_eq!(parsed.schema_version, 2);
+        assert_eq!(parsed.tasks[0].blind_id.as_deref(), Some("0f3a1c2d4e5b"));
+        assert_eq!(parsed.tasks[0].questions[0].answer, Some(true));
+
+        let summary = summarize_human_review(&parsed).expect("a v2 review scores");
+        assert_eq!(summary.tasks_accepted, 1);
+        // The four editorial dimensions are excluded rather than fabricated.
+        assert_eq!(summary.mean_ratings.story, None);
+        assert_eq!(summary.mean_ratings.visual_finish, Some(4.5));
+
+        assert!(
+            summarize_human_review(&HumanReviewFile {
+                schema_version: 3,
+                ..review
+            })
+            .is_err()
+        );
+    }
+
+    /// Acceptance requires every question answered, in both directions.
+    #[test]
+    fn cc7_accepted_requires_every_question_answered() {
+        let mut task = cc7_reviewed_task("c5");
+        task.questions = vec![HumanQuestion {
+            id: "e".to_owned(),
+            prompt: "Does the look support the story?".to_owned(),
+            answer: None,
+            notes: None,
+        }];
+        let mut review = HumanReviewFile {
+            schema_version: HUMAN_REVIEW_SCHEMA_VERSION,
+            benchmark_id: COLOR_WORKFLOW_BENCHMARK_ID.to_owned(),
+            run_id: "run-1".to_owned(),
+            reviewer: None,
+            tasks: vec![task],
+        };
+        let error = summarize_human_review(&review)
+            .expect_err("an unanswered question blocks acceptance")
+            .to_string();
+        assert!(error.contains("question"), "{error}");
+        assert!(error.contains("\"e\""), "{error}");
+
+        review.tasks[0].questions[0].answer = Some(false);
+        let summary = summarize_human_review(&review).expect("an answered question scores");
+        assert_eq!(summary.tasks_reviewed, 1);
+
+        // A pending task with an unanswered question is still merely pending.
+        review.tasks[0].accepted = None;
+        review.tasks[0].ratings = HumanRatings::default();
+        review.tasks[0].questions[0].answer = None;
+        let pending = summarize_human_review(&review).expect("a pending task stays pending");
+        assert_eq!(pending.tasks_pending, 1);
+        assert_eq!(pending.tasks_reviewed, 0);
+    }
+
+    /// The blind identifier is a hash prefix, never a random token, so two
+    /// identical artefacts share one and the mapping is reproducible.
+    #[test]
+    fn cc7_blind_ids_are_derived_from_the_artifact_digest() {
+        let hash = "0f3a1c2d4e5b".to_owned() + &"9".repeat(52);
+        assert_eq!(
+            blind_id_for_artifact(Some(&hash)).as_deref(),
+            Some("0f3a1c2d4e5b")
+        );
+        assert_eq!(blind_id_for_artifact(None), None);
+        assert_eq!(blind_id_for_artifact(Some("short")), None);
+        assert_eq!(blind_id_for_artifact(Some(&"z".repeat(64))), None);
+    }
+
+    /// One deterministic analysis double, so the colour measurement path
+    /// itself is exercised rather than merely compiled.
+    struct Cc7StubAnalysis {
+        monitor: BTreeMap<TimeCode, RgbaImage>,
+        coverage: RgbaImage,
+        working: kinewright_core::LinearRgbaImage,
+    }
+
+    impl Cc7StubAnalysis {
+        fn frame(&self, at: TimeCode) -> RgbaImage {
+            self.monitor
+                .range(..=at)
+                .next_back()
+                .or_else(|| self.monitor.iter().next())
+                .map(|(_, image)| image.clone())
+                .expect("the stub carries at least one frame")
+        }
+    }
+
+    impl Analysis for Cc7StubAnalysis {
+        // Every fallible method returns `kinewright_core::MediaError`.
+        fn probe(
+            &self,
+            _path: &Path,
+        ) -> Result<kinewright_core::MediaAsset, kinewright_core::MediaError> {
+            Err(kinewright_core::MediaError::NotImplemented)
+        }
+
+        fn thumbnail_at(
+            &self,
+            at: TimeCode,
+            _max_width: u32,
+        ) -> Result<RgbaImage, kinewright_core::MediaError> {
+            Ok(self.frame(at))
+        }
+
+        fn monitor_proof_for_document(
+            &self,
+            _document: Arc<Document>,
+            at: TimeCode,
+        ) -> Result<kinewright_core::MonitorProof, kinewright_core::MediaError> {
+            Ok(kinewright_core::MonitorProof {
+                image: self.frame(at),
+                metadata: kinewright_core::MonitorProofMetadata::test_double(),
+            })
+        }
+
+        fn matte_proof_for_document(
+            &self,
+            _document: Arc<Document>,
+            _at: TimeCode,
+            clip: ClipId,
+            effect: EffectId,
+        ) -> Result<kinewright_core::MatteProof, kinewright_core::MediaError> {
+            Ok(kinewright_core::MatteProof {
+                metadata: kinewright_core::MatteProofMetadata {
+                    render: kinewright_core::MonitorProofMetadata::test_double(),
+                    clip,
+                    effect,
+                    node_kind: "primary_correction".to_owned(),
+                    coverage_encoding: kinewright_core::MATTE_COVERAGE_ENCODING.to_owned(),
+                    coverage_scale: kinewright_core::MATTE_COVERAGE_SCALE,
+                    raster_aspect_millionths: 2_000_000,
+                    matte_enabled: true,
+                    window_count: 0,
+                    qualifier_enabled: true,
+                },
+                coverage: self.coverage.clone(),
+            })
+        }
+
+        fn working_proof_for_document(
+            &self,
+            _document: Arc<Document>,
+            _at: TimeCode,
+        ) -> Result<kinewright_core::WorkingProof, kinewright_core::MediaError> {
+            Ok(kinewright_core::WorkingProof {
+                metadata: kinewright_core::WorkingProofMetadata {
+                    render: kinewright_core::MonitorProofMetadata::test_double(),
+                    stage: kinewright_core::WORKING_PROOF_STAGE.to_owned(),
+                    encoding: kinewright_core::WORKING_PROOF_ENCODING.to_owned(),
+                    raster_aspect_millionths: 2_000_000,
+                },
+                image: self.working.clone(),
+            })
+        }
+
+        fn request_transcription(&self, _asset: kinewright_core::MediaAsset) {}
+
+        fn transcript_status(&self, _asset: &kinewright_core::MediaAsset) -> TranscriptStatus {
+            TranscriptStatus::NotRequested
+        }
+
+        fn timeline_transcript(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+        ) -> Result<Vec<TimelineTranscriptWord>, kinewright_core::MediaError> {
+            Ok(Vec::new())
+        }
+
+        fn request_silence_detection(&self, _asset: kinewright_core::MediaAsset) {}
+
+        fn silence_status(
+            &self,
+            _asset: &kinewright_core::MediaAsset,
+        ) -> kinewright_core::SilenceStatus {
+            kinewright_core::SilenceStatus::NotRequested
+        }
+
+        fn timeline_silences(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+            _minimum_source_frames: TimeCode,
+        ) -> Result<Vec<TimelineSilenceSpan>, kinewright_core::MediaError> {
+            Ok(Vec::new())
+        }
+
+        fn request_scene_detection(&self, _asset: kinewright_core::MediaAsset) {}
+
+        fn scene_status(
+            &self,
+            _asset: &kinewright_core::MediaAsset,
+        ) -> kinewright_core::SceneStatus {
+            kinewright_core::SceneStatus::NotRequested
+        }
+
+        fn timeline_scene_changes(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+            _minimum_confidence_basis_points: u16,
+        ) -> Result<Vec<TimelineSceneChange>, kinewright_core::MediaError> {
+            Ok(Vec::new())
+        }
+
+        fn request_waveform(
+            &self,
+            _asset: kinewright_core::MediaAsset,
+            _request_generation: u64,
+        ) -> bool {
+            false
+        }
+
+        fn request_thumbnail(
+            &self,
+            _asset: kinewright_core::MediaAsset,
+            _source_at: TimeCode,
+            _max_width: u32,
+            _request_generation: u64,
+        ) -> bool {
+            false
+        }
+
+        fn visual_asset_results(&self) -> Receiver<kinewright_core::VisualAssetResult> {
+            crossbeam_channel::never()
+        }
+    }
+
+    // `PreparedFixture::new` takes one media handle that plays, analyses and
+    // exports, so the analysis double carries the other two surfaces. Neither
+    // is exercised by the project-path plumbing; they exist so the fixture
+    // the runner builds can be built here without a real media engine, whose
+    // process-exit teardown would make this lane flaky (F-E6).
+    impl kinewright_core::Playback for Cc7StubAnalysis {
+        fn set_document(&self, _document: Arc<Document>) {}
+        fn request_frame(&self, _at: TimeCode) {}
+        fn frames(&self) -> Receiver<(TimeCode, kinewright_core::FrameTexture)> {
+            crossbeam_channel::never()
+        }
+        fn events(&self) -> Receiver<kinewright_core::MediaEvent> {
+            crossbeam_channel::never()
+        }
+        fn play(&self, _from: TimeCode) {}
+        fn pause(&self) {}
+        fn seek(&self, _to: TimeCode) {}
+        fn position(&self) -> TimeCode {
+            TimeCode::ZERO
+        }
+        fn output_peaks(&self) -> [f32; 2] {
+            [0.0, 0.0]
+        }
+    }
+
+    impl kinewright_core::Export for Cc7StubAnalysis {
+        fn export(
+            &self,
+            _out: &Path,
+            _settings: kinewright_core::ExportSettings,
+            _progress: kinewright_core::ProgressSink,
+        ) -> Result<(), kinewright_core::MediaError> {
+            Err(kinewright_core::MediaError::NotImplemented)
+        }
+    }
+
+    fn cc7_stub_media() -> Cc7StubAnalysis {
+        Cc7StubAnalysis {
+            monitor: BTreeMap::from([(TimeCode(0), cc7_flat_raster(4, 4, 10))]),
+            coverage: cc7_flat_raster(4, 4, 0),
+            working: kinewright_core::LinearRgbaImage {
+                width: 4,
+                height: 4,
+                pixels: [0.5, 0.5, 0.5, 1.0].repeat(16),
+            },
+        }
+    }
+
+    /// A 2x2x2 identity `.cube`: the smallest file CC4's parser accepts, so
+    /// the import under test is the project-path branch and not a LUT.
+    const CC7_IDENTITY_CUBE: &str = "TITLE \"CC7 eval identity\"\nLUT_3D_SIZE 2\n\
+         0.0 0.0 0.0\n1.0 0.0 0.0\n0.0 1.0 0.0\n1.0 1.0 0.0\n\
+         0.0 0.0 1.0\n1.0 0.0 1.0\n0.0 1.0 1.0\n1.0 1.0 1.0\n";
+
+    async fn cc7_import_lut_asset(
+        client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+        cube: &Path,
+    ) -> rmcp::model::CallToolResult {
+        client
+            .call_tool(
+                rmcp::model::CallToolRequestParams::new("invoke_capability").with_arguments(
+                    serde_json::json!({
+                        "name": "import_lut_asset",
+                        "arguments": {
+                            "expected_revision": 0,
+                            "path": cube.display().to_string(),
+                        },
+                    })
+                    .as_object()
+                    .expect("the invocation is an object")
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("the tool call completes")
+    }
+
+    /// R-B2, both directions, through the shared runner's own helper.
+    ///
+    /// `apply_fixture_project_path` is the only reader of
+    /// `PreparedFixture::project_path`, and c3 is unsatisfiable without it:
+    /// `McpServer::start` begins with a fresh `None` path, so
+    /// `import_lut_asset` refuses `project_not_saved` until a fixture hands
+    /// one over. Both directions run against a real `McpServer` on a
+    /// synthetic core, because the refusal and the acceptance are the
+    /// server's, not the harness's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cc7_a_fixture_project_path_reaches_the_server() {
+        use rmcp::ServiceExt as _;
+
+        let temporary = kinewright_media::test_support::TempDirectory::new("cc7-eval-project-path");
+        let project = temporary.path("cc7-eval.kinewright");
+        std::fs::write(&project, b"{}").expect("the saved project file is written");
+        let cube = temporary.path("log-inverse.cube");
+        std::fs::write(&cube, CC7_IDENTITY_CUBE).expect("the cube is written");
+
+        // Direction one: `project_path: None`, exactly as v1-v5 pass it.
+        let unsaved = PreparedFixture::new(
+            document(),
+            Arc::new(cc7_stub_media()),
+            FixtureContext::default(),
+            None,
+            Vec::new(),
+        )
+        .expect("the fixture builds");
+        assert_eq!(unsaved.project_path, None);
+        let server = McpServer::start(
+            unsaved.core.clone(),
+            Arc::clone(&unsaved.playback),
+            Arc::clone(&unsaved.analysis),
+        )
+        .expect("the server starts");
+        apply_fixture_project_path(&server, &unsaved);
+        let client = ()
+            .serve(rmcp::transport::StreamableHttpClientTransport::from_uri(
+                server.endpoint(),
+            ))
+            .await
+            .expect("the client connects");
+        let refused = cc7_import_lut_asset(&client, &cube).await;
+        assert_eq!(refused.is_error, Some(true));
+        assert_eq!(
+            refused
+                .structured_content
+                .as_ref()
+                .expect("a typed refusal")["code"],
+            "project_not_saved"
+        );
+        // `tests/mcp_server.rs`'s teardown order: cancel the client before the
+        // server goes away, or the transport's stream is left waiting on a
+        // server that will never answer.
+        client.cancel().await.expect("the client cancels");
+        server.shutdown();
+
+        // Direction two: the same fixture, saved. The confirmation is
+        // approved beside the awaited call, because `import_lut_asset` blocks
+        // on the broker before it reads a byte.
+        let saved = PreparedFixture::new(
+            document(),
+            Arc::new(cc7_stub_media()),
+            FixtureContext::default(),
+            Some(project.clone()),
+            Vec::new(),
+        )
+        .expect("the fixture builds");
+        assert_eq!(saved.project_path.as_deref(), Some(project.as_path()));
+        let server = McpServer::start(
+            saved.core.clone(),
+            Arc::clone(&saved.playback),
+            Arc::clone(&saved.analysis),
+        )
+        .expect("the server starts");
+        apply_fixture_project_path(&server, &saved);
+        let broker = server.confirmations();
+        let approvals = tokio::spawn(async move {
+            loop {
+                for request in broker.pending_requests() {
+                    assert_eq!(request.tool_name, "import_lut_asset");
+                    assert!(broker.approve(request.id));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        });
+        let client = ()
+            .serve(rmcp::transport::StreamableHttpClientTransport::from_uri(
+                server.endpoint(),
+            ))
+            .await
+            .expect("the client connects");
+        let imported = cc7_import_lut_asset(&client, &cube).await;
+        approvals.abort();
+        assert_eq!(
+            imported.is_error,
+            Some(false),
+            "{:?}",
+            imported.structured_content
+        );
+        let imported = imported.structured_content.expect("a typed success");
+        assert_eq!(imported["lut_asset"]["size"], 2);
+        assert_eq!(
+            query_document(&saved.core)
+                .expect("the document")
+                .lut_assets
+                .len(),
+            1
+        );
+        client.cancel().await.expect("the client cancels");
+        server.shutdown();
+    }
+
+    fn cc7_flat_raster(width: u32, height: u32, code: u8) -> RgbaImage {
+        RgbaImage {
+            width,
+            height,
+            pixels: [code, code, code, 255].repeat((width * height) as usize),
+        }
+    }
+
+    /// Left half achromatic, right half deliberately split by six codes.
+    fn cc7_split_raster(width: u32, height: u32) -> RgbaImage {
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..height {
+            for x in 0..width {
+                if x < width / 2 {
+                    pixels.extend([10, 10, 10, 255]);
+                } else {
+                    pixels.extend([20, 16, 10, 255]);
+                }
+            }
+        }
+        RgbaImage {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    /// The patch statistics themselves, on rasters whose answers are
+    /// arithmetic rather than rendered.
+    #[test]
+    fn cc7_patch_statistics_are_taken_on_a_two_pixel_inset() {
+        let raster = cc7_split_raster(16, 8);
+        let left = NormalizedRoi::new(0, 0, 5_000, 10_000);
+        let right = NormalizedRoi::new(5_000, 0, 5_000, 10_000);
+        assert_eq!(patch_spread_max_code(&raster, left).unwrap(), Some(0));
+        assert_eq!(patch_spread_max_code(&raster, right).unwrap(), Some(6));
+        // The left half is uniform code 10, whose BT.709 luma is exactly 10.
+        assert_eq!(
+            mean_luma_millionths(&raster, left).unwrap(),
+            Some(10_000_000)
+        );
+
+        // A rectangle too small to inset is measured whole rather than
+        // silently emptied.
+        let tiny = NormalizedRoi::new(0, 0, 1_250, 2_500);
+        assert_eq!(tiny.to_pixels(16, 8).unwrap().width, 2);
+        assert_eq!(patch_spread_max_code(&raster, tiny).unwrap(), Some(0));
+
+        assert_eq!(round_half_away_from_zero(0.5), 1);
+        assert_eq!(round_half_away_from_zero(-0.5), -1);
+        assert_eq!(round_half_away_from_zero(f64::NAN), 0);
+    }
+
+    /// Cropping is exact and never inset: the containment counts are counts.
+    #[test]
+    fn cc7_coverage_cropping_is_exact_and_never_inset() {
+        let mut coverage = cc7_flat_raster(16, 8, 0);
+        for y in 0..8_usize {
+            for x in 8..16_usize {
+                let index = (y * 16 + x) * 4;
+                coverage.pixels[index] = 255;
+                coverage.pixels[index + 1] = 255;
+                coverage.pixels[index + 2] = 255;
+            }
+        }
+        let right = NormalizedRoi::new(5_000, 0, 5_000, 10_000);
+        let cropped = crop_rgba(&coverage, right).expect("the right half crops");
+        assert_eq!((cropped.width, cropped.height), (8, 8));
+        let statistics = matte_coverage_statistics(&cropped).expect("coverage statistics");
+        assert_eq!(statistics.total_pixel_count, 64);
+        assert_eq!(statistics.covered_pixel_count, 64);
+        assert_eq!(statistics.full_pixel_count, 64);
+        assert_eq!(statistics.partial_pixel_count, 0);
+    }
+
+    fn cc7_matte_document() -> Document {
+        let mut document = document();
+        document.tracks[0].clips[0]
+            .effects
+            .push(kinewright_core::Effect {
+                id: EffectId(3),
+                name: "primary_correction".to_owned(),
+                parameters: BTreeMap::from([
+                    ("saturation_percent".to_owned(), ParamValue::Integer(40)),
+                    (MATTE_ENABLED_PARAMETER.to_owned(), ParamValue::Integer(1)),
+                ]),
+                keyframes: BTreeMap::new(),
+            });
+        // `bypass` is a colour-node control that `primary_correction` does
+        // not declare, so the look leg uses a node that does.
+        document.tracks[0].clips[0]
+            .effects
+            .push(kinewright_core::Effect {
+                id: EffectId(4),
+                name: "color_wheels".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::new(),
+            });
+        document
+    }
+
+    /// The measurement runs where the `Analysis` is alive, fills exactly the
+    /// quantities the request asked for, leaves the rest `None`, and reaches
+    /// `EvalOutcome::color` through the runner's own expression.
+    ///
+    /// The plumbing is the design (R-B1), so the test drives
+    /// `measure_color_block` — the named function `run_eval_with_artifacts`
+    /// calls — rather than a copy of it, and asserts the `None` direction a
+    /// v1-v5 definition takes through the same call.
+    // One measurement, both plumbing directions and the two ungated rows: the
+    // body is long because each is a separate claim about the same call, not
+    // because the test does several things.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn cc7_color_evidence_is_computed_where_the_analysis_is_alive() {
+        let mut coverage = cc7_flat_raster(16, 8, 0);
+        for y in 0..8_usize {
+            for x in 8..16_usize {
+                let index = (y * 16 + x) * 4;
+                coverage.pixels[index] = 255;
+                coverage.pixels[index + 1] = 255;
+                coverage.pixels[index + 2] = 255;
+            }
+        }
+        let analysis = Cc7StubAnalysis {
+            monitor: BTreeMap::from([
+                (TimeCode(0), cc7_flat_raster(16, 8, 10)),
+                (TimeCode(60), cc7_split_raster(16, 8)),
+            ]),
+            coverage,
+            working: kinewright_core::LinearRgbaImage {
+                width: 16,
+                height: 8,
+                pixels: [0.5, 0.5, 0.5, 1.0].repeat(16 * 8),
+            },
+        };
+        let document = Arc::new(cc7_matte_document());
+        let right = NormalizedRoi::new(5_000, 0, 5_000, 10_000);
+        let request = ColorEvalRequest {
+            project_frame: 60,
+            neutral_patch_rois: vec![NormalizedRoi::new(0, 0, 5_000, 10_000), right],
+            chart_luma_roi: Some(right),
+            chart_luma_reference_frame: 0,
+            chart_luma_candidate_frame: 60,
+            qc_checks: vec![ColorQcCheck::Range, ColorQcCheck::Gamut],
+            gamut_roi: Some(right),
+            matte_roi: Some(right),
+            look_bypass: Some((ClipId(1), EffectId(4), 60)),
+            ..ColorEvalRequest::default()
+        };
+
+        // The runner's own expression, not a copy of it: a definition that
+        // carries a request measures one.
+        let colored = EvalDefinition {
+            name: "c1 Mixed-camera interview match",
+            rationale: "exercise the colour plumbing",
+            fixture_builder: unused_fixture,
+            prompts: &["match them"],
+            assertions: Vec::new(),
+            budgets: budgets(),
+            deliverable: None,
+            color: Some(request.clone()),
+        };
+        let evidence = measure_color_block(&colored, &analysis, &document, None)
+            .expect("a definition carrying a colour request measures one");
+        assert!(evidence.errors.is_empty(), "{:?}", evidence.errors);
+        assert_eq!(evidence.neutral_spread_max_code, Some(6));
+        // Right half luma 0.2126·20 + 0.7152·16 + 0.0722·10 = 16.4172,
+        // against a flat 10.0 at the reference frame. The tolerance absorbs
+        // the last bit of an `f64` accumulation, not a measurement error.
+        let delta = evidence
+            .chart_luma_mean_delta_millionths
+            .expect("the chart luma delta is measured");
+        assert!((delta - 6_417_200).abs() <= 2, "observed {delta}");
+        let matte = evidence.matte.expect("matte coverage is measured");
+        assert_eq!(matte.covered_pixel_count, 64);
+        assert_eq!(matte.full_pixel_count, 64);
+        assert_eq!(matte.partial_pixel_count, 0);
+        assert_eq!(evidence.gamut_pixel_count, Some(0));
+        assert!(
+            evidence
+                .qc
+                .as_ref()
+                .expect("colour qc is measured")
+                .technical_pass
+        );
+        // The stub renders the same raster with and without the node, which
+        // is exactly what a lossless bypass looks like.
+        assert_eq!(evidence.look_bypass_matches_absent, Some(true));
+        assert_eq!(evidence.final_effects.len(), 2);
+        assert_eq!(evidence.final_effects[0].effect, EffectId(3));
+        assert_eq!(evidence.final_effects[0].name, "primary_correction");
+        assert_eq!(evidence.final_effects[1].name, "color_wheels");
+        // Nothing that was not requested was measured.
+        assert_eq!(evidence.skin, None);
+        assert_eq!(evidence.verification, None);
+
+        // It lands on `EvalOutcome::color`, which is what every assertion
+        // arm reads.
+        let outcome = EvalOutcome {
+            color: Some(evidence),
+            ..outcome_for((*document).clone(), FixtureContext::default())
+        };
+        assert!(outcome.color.is_some());
+
+        // R1-M2: the two quantities no variant gates still reach
+        // `results.jsonl`, as `budget: 0, passed: true` rows. `colored` gates
+        // nothing, so these are the only measurements it can produce.
+        let measurements = evaluate(&colored, &outcome).measurements;
+        let ungated = measurements
+            .iter()
+            .map(|measurement| {
+                (
+                    measurement.name.as_str(),
+                    measurement.budget,
+                    measurement.passed,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ungated,
+            vec![
+                (CHART_LUMA_MEASUREMENT_NAME, 0, true),
+                (GAMUT_MEASUREMENT_NAME, 0, true),
+            ]
+        );
+        assert_eq!(measurements[0].observed, delta);
+        assert_eq!(measurements[1].observed, 0);
+
+        // The other direction, through the same call: a v1-v5 definition
+        // carries no request, so no proof is rendered and the block stays
+        // `None` — the other five suites are untouched.
+        let uncolored = EvalDefinition {
+            name: "v5 generalization",
+            rationale: "a suite that is not a colour suite",
+            fixture_builder: unused_fixture,
+            prompts: &["cut it"],
+            assertions: Vec::new(),
+            budgets: budgets(),
+            deliverable: None,
+            color: None,
+        };
+        assert_eq!(
+            measure_color_block(&uncolored, &analysis, &document, None),
+            None
+        );
+        let plain = outcome_for((*document).clone(), FixtureContext::default());
+        assert!(plain.color.is_none());
+        assert!(evaluate(&uncolored, &plain).measurements.is_empty());
+    }
+
+    /// Delivery verification that was asked for and could not be taken is an
+    /// error on the record, never a silent pass.
+    #[test]
+    fn cc7_delivery_verification_without_a_deliverable_is_recorded_as_an_error() {
+        let analysis = Cc7StubAnalysis {
+            monitor: BTreeMap::from([(TimeCode(0), cc7_flat_raster(4, 4, 10))]),
+            coverage: cc7_flat_raster(4, 4, 0),
+            working: kinewright_core::LinearRgbaImage {
+                width: 4,
+                height: 4,
+                pixels: [0.5, 0.5, 0.5, 1.0].repeat(16),
+            },
+        };
+        let document = Arc::new(document());
+        let request = ColorEvalRequest {
+            delivery_verification: Some(DeliveryEncodeDepth::Ten),
+            ..ColorEvalRequest::default()
+        };
+        let evidence = measure_color_evidence(&request, &analysis, &document, None);
+        assert_eq!(evidence.verification, None);
+        assert_eq!(evidence.errors.len(), 1);
+        assert_eq!(
+            evidence.errors[0].quantity,
+            ColorEvidenceQuantity::DeliveryVerification
+        );
+        assert!(
+            evidence.errors[0].message.contains("no deliverable"),
+            "{:?}",
+            evidence.errors
+        );
+
+        let outcome = EvalOutcome {
+            color: Some(evidence),
+            ..outcome_for((*document).clone(), FixtureContext::default())
+        };
+        let landed = color_assertion_outcome(
+            &EvalAssertion::DeliveryVerificationWithinBudgets {
+                depth: DeliveryEncodeDepth::Ten,
+            },
+            &outcome,
+        );
+        assert!(!landed.result.passed);
+        assert!(landed.result.detail.contains("could not be measured"));
+    }
+
+    /// The colour template rates only what a chart raster can be rated on,
+    /// and attaches the scenario's question.
+    #[test]
+    fn cc7_the_colour_template_marks_the_editorial_dimensions_not_applicable() {
+        let mut result = cc7_result_without_measurements();
+        result.name = "c1 Mixed-camera interview match".to_owned();
+        let mut deliverable = deliverable_shell(
+            EvalDeliverableSpec {
+                profile: DeliveryProfile::SourceMaster,
+                focus_x_percent: 50,
+                focus_y_percent: 50,
+                proof_frames: 9,
+                proof_cell_width: 240,
+                require_audio: false,
+                expected_transcript_word_set: None,
+                maximum_word_error_rate_basis_points: 10_000,
+                maximum_caption_word_error_rate_basis_points: None,
+                loudness: None,
+                audio_tail: None,
+                delivery_bit_depth: DeliveryEncodeDepth::Eight,
+            },
+            &document(),
+            Path::new("artifacts/c1-sample-1"),
+        );
+        deliverable.output_sha256 = Some("0f3a1c2d4e5b".to_owned() + &"7".repeat(52));
+        result.deliverable = Some(deliverable);
+
+        let questions = BTreeMap::from([(
+            "c1".to_owned(),
+            vec![HumanQuestion {
+                id: "a".to_owned(),
+                prompt: "Does the match preserve natural and intentional differences?".to_owned(),
+                answer: None,
+                notes: None,
+            }],
+        )]);
+        let review = human_review_template_with_questions(
+            COLOR_WORKFLOW_BENCHMARK_ID,
+            "run-1",
+            std::slice::from_ref(&result),
+            &questions,
+        );
+        assert_eq!(review.schema_version, 2);
+        assert_eq!(review.tasks[0].task_id, "c1");
+        assert_eq!(review.tasks[0].blind_id.as_deref(), Some("0f3a1c2d4e5b"));
+        assert_eq!(
+            review.tasks[0].not_applicable,
+            COLOR_WORKFLOW_NOT_APPLICABLE.to_vec()
+        );
+        assert_eq!(review.tasks[0].questions.len(), 1);
+        assert_eq!(review.tasks[0].questions[0].id, "a");
+
+        // The form the reviewer opens carries the question and the blind id
+        // and nothing that names the task.
+        let form = blind_review_form(&review);
+        assert_eq!(form.entries.len(), 1);
+        assert_eq!(form.entries[0].blind_id, "0f3a1c2d4e5b");
+        let bytes = serde_json::to_string(&form).expect("the form serialises");
+        assert!(!bytes.contains("c1"));
+        assert!(!bytes.contains("task_id"));
+
+        // A non-colour benchmark keeps its existing not-applicable rule.
+        let editorial = human_review_template("kinewright-finished-cut-v2", "run-1", &[result]);
+        assert_eq!(
+            editorial.tasks[0].not_applicable,
+            vec![HumanRatingDimension::Captions]
+        );
     }
 }

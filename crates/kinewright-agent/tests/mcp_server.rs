@@ -2116,3 +2116,2700 @@ async fn resolve_plan_confirmation(broker: kinewright_agent::ConfirmationBroker,
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
 }
+
+// ===========================================================================
+// CC7 §5 — the six scripted agent end-to-end tests.
+//
+// One `cc7_` test per scenario, driving the *real* MCP endpoint over
+// `McpServer::start` + `StreamableHttpClientTransport` with scripted tool
+// calls. There is no LLM here and no `AgentDriver`: every number these tests
+// assert comes from `kinewright_core::cc7_scenarios` (the scenario authority,
+// CC7 §2) or from `kinewright_media::cc7_sources` (the one raster generator,
+// CC7 §3), never from a literal restated at this call site.
+//
+// CC7 §5.1's uniform assertions run in every one of the six:
+//   1. every planner/inspector response carries `evidence_only: true` and
+//      `applied: false`, and the document is unchanged after planning;
+//   2. a stale `expected_revision` returns the typed `stale_revision`;
+//   3. one commit advances `timeline_revision` exactly once;
+//   4. the committed document EQUALS `cc7_canonical_operations` applied to the
+//      same base document — a regression pin on `match_parameters`, whose
+//      values were measured by an independent f64 transcription (R-M8);
+//   5. the same integers are re-read from `get_color_context`'s `color_nodes`.
+// ===========================================================================
+
+use kinewright_core::{
+    NormalizedRoi, Operation, SCOPE_BASIS_POINTS, apply_batch,
+    cc7_scenarios::{
+        CC7_C2_OVER_RANGE_BASIS_POINTS_REPORTED, CC7_C2_OVER_RANGE_PIXELS_REPORTED,
+        CC7_CANDIDATE_CLIP_ID, CC7_CHART_BAND_ROI, CC7_DEEP_SHADOW_RECT, CC7_DEEP_SHADOW_ROI,
+        CC7_F_KEYFRAMED_PARAMETERS, CC7_LOG_CUBE_SIZE, CC7_LOG_FIRST_PERCENTILE_MIN_CODE16,
+        CC7_LOG_P99_MAX_CODE16, CC7_LOOK_DEEP_SHADOW_OUT_OF_GAMUT_PIXELS,
+        CC7_LOOK_MIX_BASIS_POINTS, CC7_LUT_ASSET_ID, CC7_MATCH_PROPOSAL_B, CC7_MATCH_PROPOSAL_C1,
+        CC7_MATCH_PROPOSAL_C2, CC7_PRODUCT_PATCH_PIXEL_COUNT, CC7_PRODUCT_RED_ROI,
+        CC7_REFERENCE_CLIP_ID, CC7_SECONDARY_SATURATION_PERCENT, CC7_SINGLE_CLIP_ID,
+        CC7_SKIN_BAND_ROI, CC7_SKIN_IN_BAND_EXACT_BASIS_POINTS,
+        CC7_TRACK_ANALYTIC_CENTRES_BASIS_POINTS, CC7_TRACK_EXPECTED_LOW_CONFIDENCE_FRAMES,
+        CC7_TRACK_F2_SAMPLE_FRAMES, CC7_TRACK_F2_STEP_FRAMES, CC7_TRACK_MAX_WIDTH,
+        CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS, CC7_TRACK_OBSERVED_CENTRES_BASIS_POINTS,
+        CC7_TRACK_OBSERVED_CONFIDENCE_BASIS_POINTS, CC7_TRACK_RANGE_END_LOCAL_FRAME,
+        CC7_TRACK_RANGE_START_LOCAL_FRAME, CC7_TRACK_SEARCH_RADIUS_PERCENT,
+        CC7_TRACK_SEEDED_WINDOW_CENTRE_BASIS_POINTS,
+        CC7_TRACK_SEEDED_WINDOW_HALF_HEIGHT_BASIS_POINTS,
+        CC7_TRACK_SEEDED_WINDOW_HALF_WIDTH_BASIS_POINTS, CC7_TRACK_STEP_FRAMES,
+        CC7_TRACK_SURVIVING_SAMPLE_FRAMES, CC7_TRACK_TOLERANCE_BASIS_POINTS, Cc7Camera,
+        Cc7Scenario, cc7_canonical_operations, cc7_lut_backed_canonical_operations,
+        cc7_track_keyframe_centres, cc7_tracking_sample_frames,
+    },
+};
+use kinewright_media::cc7_sources::{
+    cc7_camera_source, cc7_log_source, cc7_tracked_source, write_log_like_inverse_cube,
+};
+
+/// The default `MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS` (`server.rs:11192-11204`,
+/// `pub(crate)` in the agent crate and therefore unreachable from an
+/// integration test). Restated here with its owner, exactly as CC7 §2.7's
+/// R-M2 transcription rule allows, because CC7 §4(f)(1) asserts the CC7 floor
+/// is **not** this number and that this number drops nothing.
+const CC7_DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS: i64 = 5_000;
+
+/// `MATTE_TRACK_MINIMUM_SAMPLES` (`server.rs:11204`), the number of surviving
+/// observations `track_matte_window` needs before it will publish a curve.
+/// Private to the agent crate, so — like the floor above — it is restated here
+/// with its owner rather than written as a bare literal inside the (f2) gate.
+const CC7_MATTE_TRACK_MINIMUM_SAMPLES: i64 = 2;
+
+/// The descriptor bound one CC1 `primary_correction` control offers, which is
+/// exactly what `primary_parameter_bounds` (`color_scopes.rs:1786-1794`) reads
+/// and therefore what `proposal_details[..].{min,max}` must publish. CC7 §4(b)(2)
+/// asks for `-100 / 100` on `temperature_percent`; taking it from the
+/// descriptor rather than from the clamped value means a descriptor change and
+/// a clamp change cannot move together and cancel (R2 minor 1/2).
+fn cc7_primary_bounds(name: &str) -> (i64, i64) {
+    let parameter = kinewright_core::effect_descriptor("primary_correction")
+        .and_then(|descriptor| descriptor.parameter(name))
+        .unwrap_or_else(|| panic!("{name} is a registered primary_correction control"));
+    (parameter.min, parameter.max)
+}
+
+/// CC7 §2.3.4: two clips on one video track referencing **two distinct
+/// encodes**, never one asset split in half. `two_shot_color_document`
+/// (`:489`) is colorimetrically vacuous and CC7 does not reuse it.
+fn cc7_two_clip_document(reference: MediaAsset, candidate: MediaAsset) -> Document {
+    let reference_duration = reference.duration;
+    let candidate_duration = candidate.duration;
+    let mut document = single_clip_document(reference);
+    let mut second = document.tracks[0].clips[0].clone();
+    second.id = CC7_CANDIDATE_CLIP_ID;
+    second.asset = candidate.id;
+    second.source_range = TimeCode::ZERO..candidate_duration;
+    second.timeline_start = reference_duration;
+    document.tracks[0].clips.push(second);
+    document.media_pool.push(candidate);
+    document.duration = TimeCode(reference_duration.0 + candidate_duration.0);
+    document
+        .validate()
+        .expect("the CC7 two-clip document is valid");
+    document
+}
+
+/// CC7 §5.1(4): the canonical document is `operations` applied to the same
+/// base the live server started from, by Core's own `apply_batch`.
+fn cc7_canonical_document(base: &Document, operations: &[Operation]) -> Document {
+    let mut expected = base.clone();
+    apply_batch(&mut expected, operations)
+        .expect("the canonical batch is accepted by core in order");
+    expected
+}
+
+/// CC7 errata D-E1: `plan_primary_correction` emits `AddEffect` carrying
+/// **all ten** non-matte CC1 controls at their descriptor neutrals
+/// (`color_status.rs:1529-1540`, `:1598-1610`) and only then `SetEffectParam`
+/// for the ones it moved, so a node the CC1/CC2 planners create stores seven
+/// neutral controls §2.5's `InsertEffect` canonical batch does not — and it is
+/// an `AddEffect`, not an `InsertEffect`. CC7 §5.1(4)'s equality is therefore
+/// taken against the canonical document with exactly those descriptor neutrals
+/// filled in. Nothing else is forgiven: every parameter the canonical batch
+/// names still has to match exactly, and a stored value that is *not* the
+/// descriptor's neutral still fails the comparison.
+fn cc7_with_cc1_neutral_fill(mut document: Document, clip: ClipId) -> Document {
+    let descriptor = kinewright_core::effect_descriptor("primary_correction")
+        .expect("primary_correction is a registered effect");
+    for track in &mut document.tracks {
+        for target in track.clips.iter_mut().filter(|target| target.id == clip) {
+            for effect in target
+                .effects
+                .iter_mut()
+                .filter(|effect| effect.name == "primary_correction")
+            {
+                for parameter in descriptor
+                    .parameters
+                    .iter()
+                    .filter(|parameter| !kinewright_core::is_matte_parameter(parameter.name))
+                {
+                    effect
+                        .parameters
+                        .entry(parameter.name.to_owned())
+                        .or_insert(ParamValue::Integer(parameter.neutral));
+                }
+            }
+        }
+    }
+    document
+}
+
+/// The current `timeline_revision`, read through `get_color_context`.
+async fn cc7_revision(client: &RunningService<RoleClient, ()>) -> u64 {
+    invoke_capability(client, "get_color_context", json!({}))
+        .await
+        .structured_content
+        .as_ref()
+        .expect("get_color_context publishes machine-readable status")["timeline_revision"]
+        .as_u64()
+        .unwrap()
+}
+
+/// CC7 §5.1(1): evidence-only, and nothing applied.
+fn cc7_assert_evidence_only(body: &serde_json::Value, tool: &str) {
+    assert_eq!(body["applied"], false, "{tool} must apply nothing: {body}");
+    assert_eq!(
+        body["evidence_only"], true,
+        "{tool} must publish evidence_only: {body}"
+    );
+}
+
+/// CC7 §5.1(2): a stale `expected_revision` is the typed refusal, before any
+/// render.
+async fn cc7_assert_stale_revision(
+    client: &RunningService<RoleClient, ()>,
+    tool: &str,
+    arguments: serde_json::Value,
+    revision: u64,
+    stale: u64,
+) {
+    let refused = invoke_capability(client, tool, arguments).await;
+    assert_eq!(
+        refused.is_error,
+        Some(true),
+        "{tool} must refuse a stale revision"
+    );
+    let body = refused
+        .structured_content
+        .as_ref()
+        .expect("a typed refusal carries structured content");
+    assert_eq!(body["code"], "stale_revision", "{body}");
+    assert_eq!(body["applied"], false, "{body}");
+    assert_eq!(body["details"]["expected_revision"], stale, "{body}");
+    assert_eq!(body["details"]["actual_revision"], revision, "{body}");
+}
+
+/// CC7 errata D-E2: the **CC4/CC5** planners (`plan_technical_lut`,
+/// `plan_creative_look`, `plan_secondary_correction`, `track_matte_window`)
+/// publish a revision conflict as `revision_conflict_text`
+/// (`server.rs:13255-13259`), which is `error_text` — prose, no structured
+/// body and no `code`. Only CC2's scope planners and `get_color_qc` publish
+/// the typed `stale_revision` §5.1(2) names. This helper asserts the strongest
+/// claim those tools actually make: `is_error == true`, both revisions named
+/// in the message, and nothing applied.
+async fn cc7_assert_stale_revision_prose(
+    client: &RunningService<RoleClient, ()>,
+    core: &Core,
+    tool: &str,
+    arguments: serde_json::Value,
+    revision: u64,
+    stale: u64,
+) {
+    let before = query_document(core);
+    let refused = invoke_capability(client, tool, arguments).await;
+    assert_eq!(
+        refused.is_error,
+        Some(true),
+        "{tool} must refuse a stale revision"
+    );
+    let text = refused.content[0].as_text().unwrap().text.clone();
+    assert!(
+        text.contains("timeline revision conflict")
+            && text.contains(&format!("expected {stale}"))
+            && text.contains(&format!("actual {revision}")),
+        "{tool} must name both revisions: {text}"
+    );
+    assert_eq!(&query_document(core), &before, "a refusal changes nothing");
+}
+
+/// A `plan_shot_match` / `analyze_color_shot` ROI, which is normalized
+/// `0..=1` floats rather than basis points (`color_scopes.rs:175-191`).
+fn cc7_scope_roi(roi: NormalizedRoi) -> serde_json::Value {
+    let scale = f64::from(SCOPE_BASIS_POINTS);
+    json!({
+        "x": f64::from(roi.x_basis_points) / scale,
+        "y": f64::from(roi.y_basis_points) / scale,
+        "width": f64::from(roi.width_basis_points) / scale,
+        "height": f64::from(roi.height_basis_points) / scale,
+    })
+}
+
+/// A `get_color_qc` ROI, which *is* basis points (`color_qc_tool.rs`).
+fn cc7_qc_roi(roi: NormalizedRoi) -> serde_json::Value {
+    json!({
+        "x_basis_points": roi.x_basis_points,
+        "y_basis_points": roi.y_basis_points,
+        "width_basis_points": roi.width_basis_points,
+        "height_basis_points": roi.height_basis_points,
+    })
+}
+
+/// The approval loop's own bookkeeping, read back on the test's thread.
+///
+/// A panic inside a `tokio::spawn`ed task whose `JoinHandle` is only ever
+/// `abort()`ed is swallowed, so the loop asserts nothing itself: it *counts*
+/// what it approved and what it refused to recognise, and the test asserts
+/// both after the awaited call returns (R2 minor 7).
+struct Cc7Approvals {
+    task: tokio::task::JoinHandle<()>,
+    approved: Arc<std::sync::atomic::AtomicUsize>,
+    foreign: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Cc7Approvals {
+    /// Assert the confirmation really was raised and approved — and that no
+    /// *other* tool asked for one — then stop the loop.
+    fn assert_approved_and_stop(&self, tool_name: &str) {
+        use std::sync::atomic::Ordering;
+        assert_eq!(
+            self.foreign.load(Ordering::SeqCst),
+            0,
+            "only {tool_name} may raise a confirmation in this scenario"
+        );
+        assert!(
+            self.approved.load(Ordering::SeqCst) >= 1,
+            "{tool_name} must have raised a confirmation that this test approved"
+        );
+        self.task.abort();
+    }
+}
+
+/// Approve every destructive-tool confirmation this scenario raises until the
+/// task is aborted. `import_lut_asset` blocks on the broker
+/// (`server.rs:1912`), so the approval has to run beside the awaited call.
+fn cc7_approve_confirmations(
+    broker: kinewright_agent::ConfirmationBroker,
+    tool_name: &'static str,
+) -> Cc7Approvals {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let approved = Arc::new(AtomicUsize::new(0));
+    let foreign = Arc::new(AtomicUsize::new(0));
+    let approved_counter = Arc::clone(&approved);
+    let foreign_counter = Arc::clone(&foreign);
+    let task = tokio::spawn(async move {
+        loop {
+            for request in broker.pending_requests() {
+                if request.tool_name == tool_name {
+                    if broker.approve(request.id) {
+                        approved_counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                } else {
+                    foreign_counter.fetch_add(1, Ordering::SeqCst);
+                    let _ = broker.approve(request.id);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    });
+    Cc7Approvals {
+        task,
+        approved,
+        foreign,
+    }
+}
+
+/// CC7 §5.1(3)/(4): prepare the planner's exact operations, commit them, and
+/// assert the revision advanced exactly once and the document is canonical.
+async fn cc7_prepare_commit_and_compare(
+    client: &RunningService<RoleClient, ()>,
+    core: &Core,
+    revision: u64,
+    operations: serde_json::Value,
+    expected: &Document,
+) {
+    let prepared = prepare_plan(client, revision, operations).await;
+    assert_eq!(
+        prepared.is_error,
+        Some(false),
+        "{:?}",
+        prepared.structured_content
+    );
+    let committed = client
+        .call_tool(commit_request(revision, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(
+        committed.is_error,
+        Some(false),
+        "{:?}",
+        committed.structured_content
+    );
+    assert_eq!(
+        cc7_revision(client).await,
+        revision + 1,
+        "one committed plan must advance the revision exactly once"
+    );
+    assert_eq!(
+        &query_document(core),
+        expected,
+        "the committed document must equal cc7_canonical_operations applied to the same base"
+    );
+}
+
+/// CC7 §5.4: CC7 adds no tool, so the served surface, the internal registry
+/// and `INSPECTOR_TOOL_NAMES` are byte-for-byte what CC6 published.
+#[tokio::test(flavor = "multi_thread")]
+async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
+    let core = Core::spawn(Document::default()).unwrap();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let server = McpServer::start(core, media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    // The served surface, over the live endpoint.
+    let tools = client.list_tools(None).await.unwrap().tools;
+    assert_eq!(tools.len(), 7, "CC7 adds no served tool");
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<Vec<_>>(),
+        kinewright_agent::compact_tool_names()
+    );
+
+    // The internal registry: 124 tools, of which `INSPECTOR_TOOL_NAMES` is 75.
+    let registry = kinewright_agent::capability_tool_names().unwrap();
+    let operations = kinewright_agent::operation_tools().unwrap();
+    assert_eq!(registry.len(), 124, "CC7 adds no registry tool");
+    assert_eq!(
+        registry.len() - operations.len(),
+        75,
+        "INSPECTOR_TOOL_NAMES stays at 75"
+    );
+
+    // The served byte counts CC6 recorded, asserted byte-identically.
+    let metrics = server.tool_surface_metrics();
+    assert_eq!(metrics.tool_count, 7);
+    assert_eq!(metrics.serialized_bytes, 5_660, "{metrics:?}");
+    assert_eq!(metrics.input_schema_bytes, 3_510, "{metrics:?}");
+    assert_eq!(metrics.description_bytes, 998, "{metrics:?}");
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// CC7 §5.2 (a) — mixed-camera interview.
+///
+/// `analyze_color_shot` ×2 → `plan_shot_match` → `prepare_edit_plan` →
+/// `commit_edit_plan` → `get_color_qc` → `render_color_proof`. The reference
+/// clip keeps **zero** effects, `saturation_percent` is proposed nowhere, and
+/// the committed document equals `cc7_canonical_operations(MixedCamera)`.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn cc7_a_mixed_camera_match_retains_the_reference_and_lands_the_canonical_grade() {
+    let reference_media = cc7_camera_source(Cc7Camera::A);
+    let candidate_media = cc7_camera_source(Cc7Camera::B);
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let reference = media.probe(reference_media.path()).unwrap();
+    let candidate = media.probe(candidate_media.path()).unwrap();
+    let candidate_start = reference.duration.0;
+    let base = cc7_two_clip_document(reference, candidate);
+    let expected = cc7_with_cc1_neutral_fill(
+        cc7_canonical_document(&base, &cc7_canonical_operations(Cc7Scenario::MixedCamera)),
+        CC7_CANDIDATE_CLIP_ID,
+    );
+    let core = Core::spawn(base.clone()).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let revision = cc7_revision(&client).await;
+    assert_eq!(revision, 0);
+
+    // Both shots, read-only.
+    for clip in [CC7_REFERENCE_CLIP_ID, CC7_CANDIDATE_CLIP_ID] {
+        let analysis = invoke_capability(
+            &client,
+            "analyze_color_shot",
+            json!({"expected_revision": revision, "clip_id": clip.0}),
+        )
+        .await;
+        assert_eq!(
+            analysis.is_error,
+            Some(false),
+            "{:?}",
+            analysis.structured_content
+        );
+        cc7_assert_evidence_only(
+            analysis.structured_content.as_ref().unwrap(),
+            "analyze_color_shot",
+        );
+    }
+
+    // CC7 §5.1(2): the planner fails closed on a stale snapshot.
+    cc7_assert_stale_revision(
+        &client,
+        "plan_shot_match",
+        json!({
+            "expected_revision": revision + 7,
+            "reference_clip_id": CC7_REFERENCE_CLIP_ID.0,
+            "candidate_clip_ids": [CC7_CANDIDATE_CLIP_ID.0],
+        }),
+        revision,
+        revision + 7,
+    )
+    .await;
+
+    // CC7 §4(a)(1) failing direction: the reference may not also be a
+    // candidate, so "the reference was retained" cannot be satisfied by
+    // matching it against itself.
+    let self_match = invoke_capability(
+        &client,
+        "plan_shot_match",
+        json!({
+            "expected_revision": revision,
+            "reference_clip_id": CC7_REFERENCE_CLIP_ID.0,
+            "candidate_clip_ids": [CC7_REFERENCE_CLIP_ID.0],
+        }),
+    )
+    .await;
+    assert_eq!(self_match.is_error, Some(true));
+    let self_match_body = self_match.structured_content.as_ref().unwrap();
+    assert_eq!(
+        self_match_body["code"], "invalid_request",
+        "{self_match_body}"
+    );
+
+    // The match itself, over CC7 §2.3.3's twelve-patch achromatic chart band.
+    let matched = invoke_capability(
+        &client,
+        "plan_shot_match",
+        json!({
+            "expected_revision": revision,
+            "reference_clip_id": CC7_REFERENCE_CLIP_ID.0,
+            "candidate_clip_ids": [CC7_CANDIDATE_CLIP_ID.0],
+            "roi": cc7_scope_roi(CC7_CHART_BAND_ROI),
+        }),
+    )
+    .await;
+    assert_eq!(
+        matched.is_error,
+        Some(false),
+        "{:?}",
+        matched.structured_content
+    );
+    let matched = matched.structured_content.as_ref().unwrap().clone();
+    cc7_assert_evidence_only(&matched, "plan_shot_match");
+    // `reference_retained` is a hardcoded literal (`color_scopes.rs:906`) and
+    // is asserted **present**, never as the evidence of retention (R-M19).
+    assert_eq!(matched["reference_retained"], true);
+    let candidates = matched["editable_operations"].as_array().unwrap();
+    assert_eq!(candidates.len(), 1);
+    let proposal = &candidates[0];
+    assert_eq!(proposal["clip_id"], CC7_CANDIDATE_CLIP_ID.0);
+    cc7_assert_evidence_only(proposal, "plan_shot_match candidate");
+
+    // CC7 §5.1(4): the regression pin. These integers are exactly what
+    // `match_parameters` produced when probe-2 transcribed it in f64.
+    assert_eq!(
+        proposal["parameters"]["exposure_milli_stops"], CC7_MATCH_PROPOSAL_B.exposure_milli_stops,
+        "{proposal}"
+    );
+    assert_eq!(
+        proposal["parameters"]["temperature_percent"], CC7_MATCH_PROPOSAL_B.temperature_percent,
+        "{proposal}"
+    );
+    assert_eq!(
+        proposal["parameters"]["tint_percent"], CC7_MATCH_PROPOSAL_B.tint_percent,
+        "{proposal}"
+    );
+    // CC7 §4(a)(4): the intentional desaturation is not corrected away, so no
+    // saturation term is proposed anywhere in the response.
+    assert!(
+        proposal["parameters"].get("saturation_percent").is_none(),
+        "no saturation term may be proposed: {proposal}"
+    );
+    assert!(
+        proposal["proposal_details"]
+            .get("saturation_percent")
+            .is_none(),
+        "no saturation control may appear in proposal_details: {proposal}"
+    );
+    // CC7 §4(b)(1)'s absent-key rule, in the passing direction here: every
+    // control the planner *did* propose is unclamped for cam B.
+    for name in [
+        "exposure_milli_stops",
+        "temperature_percent",
+        "tint_percent",
+    ] {
+        assert_eq!(
+            proposal["proposal_details"][name]["clamped"], false,
+            "cam B is inside the planner's authority: {proposal}"
+        );
+    }
+
+    // CC7 §5.1(1): planning applied nothing.
+    assert_eq!(query_document(&core), base);
+
+    cc7_prepare_commit_and_compare(
+        &client,
+        &core,
+        revision,
+        proposal["operations"].clone(),
+        &expected,
+    )
+    .await;
+
+    // CC7 §4(a)(1): the reference clip carries zero effects, and its
+    // serialized form is byte-identical to its pre-commit form.
+    let after = query_document(&core);
+    assert!(
+        after.tracks[0].clips[0].effects.is_empty(),
+        "the reference clip must carry zero effects"
+    );
+    assert_eq!(
+        serde_json::to_string(&after.tracks[0].clips[0]).unwrap(),
+        serde_json::to_string(&base.tracks[0].clips[0]).unwrap(),
+        "the reference clip must be byte-identical to its pre-commit form"
+    );
+    let effects = &after.tracks[0].clips[1].effects;
+    assert_eq!(effects.len(), 1);
+    let effect_id = effects[0].id.0;
+
+    // CC7 §5.1(5): the agent-visible manifest carries the same integers.
+    let context = invoke_capability(&client, "get_color_context", json!({})).await;
+    let context = context.structured_content.as_ref().unwrap();
+    assert!(
+        context["clips"][0]["color_nodes"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the reference clip publishes no colour node: {context}"
+    );
+    let node = &context["clips"][1]["color_nodes"][0];
+    assert_eq!(node["kind"], "primary_correction");
+    assert_eq!(
+        node["parameters"]["exposure_milli_stops"], CC7_MATCH_PROPOSAL_B.exposure_milli_stops,
+        "{node}"
+    );
+    assert_eq!(
+        node["parameters"]["temperature_percent"], CC7_MATCH_PROPOSAL_B.temperature_percent,
+        "{node}"
+    );
+    assert_eq!(
+        node["parameters"]["tint_percent"], CC7_MATCH_PROPOSAL_B.tint_percent,
+        "{node}"
+    );
+
+    // CC7 §4(a)(4): the skin band on the matched candidate.
+    let qc = invoke_capability(
+        &client,
+        "get_color_qc",
+        json!({
+            "timecode": candidate_start,
+            "checks": ["skin"],
+            "roi": cc7_qc_roi(CC7_SKIN_BAND_ROI),
+        }),
+    )
+    .await;
+    let qc_body = qc.structured_content.as_ref().unwrap();
+    if qc.is_error == Some(true) {
+        assert!(
+            std::env::var("KINEWRIGHT_GPU_TESTS_MAY_SKIP")
+                .ok()
+                .as_deref()
+                == Some("1"),
+            "get_color_qc refused: {qc_body}. Set KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 to accept an \
+             unavailable working proof on a machine with no usable adapter."
+        );
+        assert_eq!(qc_body["code"], "working_proof_unavailable");
+        assert_eq!(qc_body["applied"], false);
+        eprintln!(
+            "SKIPPED: KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 and this build cannot render a working \
+             proof; scenario (a)'s skin band was not measured."
+        );
+    } else {
+        let skin = &qc_body["report"]["skin"];
+        assert!(skin.is_object(), "{qc_body}");
+        assert_eq!(
+            skin["in_band_basis_points"], CC7_SKIN_IN_BAND_EXACT_BASIS_POINTS,
+            "the matched candidate's skin band is exact: {skin}"
+        );
+        assert!(
+            skin["mean_hue_centidegrees"].is_i64(),
+            "mean_hue_centidegrees must be Some on a chromatic skin band: {skin}"
+        );
+        assert!(
+            qc_body["exceptions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|exception| exception["code"] != "skin_region_outside_band"),
+            "a skin band at 10000 raises no Info exception: {qc_body}"
+        );
+    }
+
+    // CC7 §5.2 (a)'s last call: the AFTER proof of the stored node.
+    let proof = invoke_capability(
+        &client,
+        "render_color_proof",
+        json!({
+            "expected_revision": revision + 1,
+            "clip_id": CC7_CANDIDATE_CLIP_ID.0,
+            "timecode": candidate_start,
+            "effect_id": effect_id,
+            "look_comparison": "after",
+        }),
+    )
+    .await;
+    let proof_body = proof.structured_content.as_ref().unwrap();
+    if proof.is_error == Some(true) {
+        assert!(
+            std::env::var("KINEWRIGHT_GPU_TESTS_MAY_SKIP")
+                .ok()
+                .as_deref()
+                == Some("1"),
+            "render_color_proof refused: {proof_body}. Set KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 to \
+             accept an unavailable proof on a machine with no usable adapter."
+        );
+        assert_eq!(proof_body["code"], "color_proof_render_failed");
+        assert_eq!(proof_body["applied"], false);
+        eprintln!(
+            "SKIPPED: KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 and this build cannot render a colour \
+             proof; scenario (a)'s AFTER proof was not exercised."
+        );
+    } else {
+        cc7_assert_evidence_only(proof_body, "render_color_proof");
+        assert_eq!(proof_body["look_comparison"]["effect_id"], effect_id);
+        assert_eq!(proof_body["look_comparison"]["variant"], "after");
+        assert_ne!(
+            proof_body["hashes"]["before_rgba8_pixels_sha256"],
+            proof_body["hashes"]["after_rgba8_pixels_sha256"],
+            "the matched grade must change the picture: {proof_body}"
+        );
+    }
+
+    // Whatever branch ran, the revision moved exactly once in this test.
+    assert_eq!(cc7_revision(&client).await, revision + 1);
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// CC7 §5.2 (b) — wrong white balance and underexposure.
+///
+/// `plan_shot_match` on the recoverable C1 document, then on the C2 document
+/// that is beyond the planner's authority → prepare/commit (C2) →
+/// `get_color_qc` with `range`, `gamut`, `tags` and `per_node`. (b1) publishes
+/// **no** clamp; (b2) publishes the `temperature_percent` clamp at the
+/// descriptor bound and one `delivery_range_excursion` **Warning** whose
+/// per-node attribution names the primary node alone.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
+    let reference_media = cc7_camera_source(Cc7Camera::A);
+    let recoverable_media = cc7_camera_source(Cc7Camera::C1);
+    let unrecoverable_media = cc7_camera_source(Cc7Camera::C2);
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+
+    // ---------------------------------------------------------------- (b1)
+    let reference = media.probe(reference_media.path()).unwrap();
+    let recoverable = media.probe(recoverable_media.path()).unwrap();
+    let candidate_start = reference.duration.0;
+    let base = cc7_two_clip_document(reference, recoverable);
+    let core = Core::spawn(base.clone()).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media.clone()).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let revision = cc7_revision(&client).await;
+    cc7_assert_stale_revision(
+        &client,
+        "plan_shot_match",
+        json!({
+            "expected_revision": revision + 3,
+            "reference_clip_id": CC7_REFERENCE_CLIP_ID.0,
+            "candidate_clip_ids": [CC7_CANDIDATE_CLIP_ID.0],
+        }),
+        revision,
+        revision + 3,
+    )
+    .await;
+
+    let matched = invoke_capability(
+        &client,
+        "plan_shot_match",
+        json!({
+            "expected_revision": revision,
+            "reference_clip_id": CC7_REFERENCE_CLIP_ID.0,
+            "candidate_clip_ids": [CC7_CANDIDATE_CLIP_ID.0],
+            "roi": cc7_scope_roi(CC7_CHART_BAND_ROI),
+        }),
+    )
+    .await;
+    assert_eq!(
+        matched.is_error,
+        Some(false),
+        "{:?}",
+        matched.structured_content
+    );
+    let matched = matched.structured_content.as_ref().unwrap().clone();
+    cc7_assert_evidence_only(&matched, "plan_shot_match");
+    let recoverable_proposal = &matched["editable_operations"][0];
+    // CC7 §4(b)(1), R-M19: an absent `proposal_details` key means *not
+    // proposed*, never *zero* (`color_scopes.rs:1897-1903`), so the gate
+    // iterates the controls that ARE present — and separately asserts
+    // `temperature_percent` is one of them, so a run in which the planner
+    // proposed nothing at all cannot pass by vacuous iteration.
+    let details = recoverable_proposal["proposal_details"]
+        .as_object()
+        .unwrap();
+    assert!(
+        details.contains_key("temperature_percent"),
+        "the recoverable candidate must propose a temperature: {recoverable_proposal}"
+    );
+    let mut present = Vec::new();
+    for name in [
+        "exposure_milli_stops",
+        "temperature_percent",
+        "tint_percent",
+    ] {
+        if let Some(control) = details.get(name) {
+            present.push(name);
+            // `cc7_b_c1_publishes_no_clamp`, inline: C1 is recoverable, so
+            // every control it *did* propose is inside its descriptor bound,
+            // and (b2)'s clamp assertion below is therefore not tautological.
+            assert_eq!(
+                control["clamped"], false,
+                "C1 is inside the planner's authority: {control}"
+            );
+            assert_eq!(
+                control["requested"], control["value"],
+                "an unclamped control writes exactly what it requested: {control}"
+            );
+        }
+    }
+    assert!(
+        !present.is_empty(),
+        "the planner must propose something for C1: {recoverable_proposal}"
+    );
+    // CC7 §5.1(4), R2-MAJ-1: `CC7_MATCH_PROPOSAL_C1` is a **regression pin on
+    // the live planner**, taken here against the real `match_parameters`
+    // (`color_scopes.rs:1860-1965`) rather than only against the media crate's
+    // independent f64 replica. Without these three lines a planner that
+    // stopped proposing exposure, or moved `+1 465`, would still pass the
+    // iteration above — which is the vacuity R-M19 exists to close.
+    assert_eq!(
+        recoverable_proposal["parameters"]["exposure_milli_stops"],
+        CC7_MATCH_PROPOSAL_C1.exposure_milli_stops,
+        "{recoverable_proposal}"
+    );
+    assert_eq!(
+        recoverable_proposal["parameters"]["temperature_percent"],
+        CC7_MATCH_PROPOSAL_C1.temperature_percent,
+        "{recoverable_proposal}"
+    );
+    // Errata D-E5: C1's tint delta rounds to `0`, so the control is omitted
+    // entirely — the absent-key rule (R-M19) exercised by a real measurement.
+    // `CC7_MATCH_PROPOSAL_C1.tint_percent == 0` *means* "not proposed".
+    assert_eq!(CC7_MATCH_PROPOSAL_C1.tint_percent, 0);
+    assert!(
+        !details.contains_key("tint_percent"),
+        "C1's tint rounds to zero, so the control is not proposed: {details:?}"
+    );
+    assert!(
+        recoverable_proposal["parameters"]
+            .get("tint_percent")
+            .is_none(),
+        "a control that is not proposed writes no parameter: {recoverable_proposal}"
+    );
+    assert_eq!(
+        present,
+        vec!["exposure_milli_stops", "temperature_percent"],
+        "C1 proposes exactly two controls: {recoverable_proposal}"
+    );
+    const {
+        assert!(!CC7_MATCH_PROPOSAL_C1.temperature_clamped);
+    }
+    eprintln!(
+        "CC7 (b1) measured on the amended twelve-patch band: present={present:?} parameters={} details={}",
+        recoverable_proposal["parameters"], recoverable_proposal["proposal_details"],
+    );
+    // §5.2's (b) script commits C2, never C1: (b1)'s canonical document is
+    // proved by the media fixtures, so nothing is committed on this server and
+    // the revision must not have moved.
+    assert_eq!(query_document(&core), base);
+    assert_eq!(cc7_revision(&client).await, revision);
+    client.cancel().await.unwrap();
+    server.shutdown();
+
+    // ---------------------------------------------------------------- (b2)
+    let reference = media.probe(reference_media.path()).unwrap();
+    let unrecoverable = media.probe(unrecoverable_media.path()).unwrap();
+    let base = cc7_two_clip_document(reference, unrecoverable);
+    let expected = cc7_with_cc1_neutral_fill(
+        cc7_canonical_document(&base, &cc7_canonical_operations(Cc7Scenario::WhiteBalance)),
+        CC7_CANDIDATE_CLIP_ID,
+    );
+    let core = Core::spawn(base.clone()).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    let revision = cc7_revision(&client).await;
+
+    let matched = invoke_capability(
+        &client,
+        "plan_shot_match",
+        json!({
+            "expected_revision": revision,
+            "reference_clip_id": CC7_REFERENCE_CLIP_ID.0,
+            "candidate_clip_ids": [CC7_CANDIDATE_CLIP_ID.0],
+            "roi": cc7_scope_roi(CC7_CHART_BAND_ROI),
+        }),
+    )
+    .await;
+    assert_eq!(
+        matched.is_error,
+        Some(false),
+        "{:?}",
+        matched.structured_content
+    );
+    let matched = matched.structured_content.as_ref().unwrap().clone();
+    let proposal = &matched["editable_operations"][0];
+    assert_eq!(
+        proposal["parameters"]["exposure_milli_stops"], CC7_MATCH_PROPOSAL_C2.exposure_milli_stops,
+        "{proposal}"
+    );
+    assert_eq!(
+        proposal["parameters"]["temperature_percent"], CC7_MATCH_PROPOSAL_C2.temperature_percent,
+        "{proposal}"
+    );
+    assert_eq!(
+        proposal["parameters"]["tint_percent"], CC7_MATCH_PROPOSAL_C2.tint_percent,
+        "{proposal}"
+    );
+    // CC7 §4(b)(2): the clamp is published, with its bound and the raw term.
+    let temperature = &proposal["proposal_details"]["temperature_percent"];
+    assert_eq!(
+        temperature["clamped"], CC7_MATCH_PROPOSAL_C2.temperature_clamped,
+        "{temperature}"
+    );
+    // R2 minor 1/2: the published bound is the **descriptor's**, read from the
+    // same place `primary_parameter_bounds` reads it. Comparing `max` against
+    // the clamped value would let a descriptor change and a clamp change move
+    // together and cancel; a bare `-100` would restate a CC1 fact at the call
+    // site (§2.1).
+    let (temperature_min, temperature_max) = cc7_primary_bounds("temperature_percent");
+    assert_eq!(temperature["min"], temperature_min, "{temperature}");
+    assert_eq!(temperature["max"], temperature_max, "{temperature}");
+    assert_eq!(
+        CC7_MATCH_PROPOSAL_C2.temperature_percent, temperature_max,
+        "C2's published value IS the descriptor's upper bound"
+    );
+    // `requested` is `current + delta`, i.e. the **rounded** first-order term
+    // for a non-composed proposal (`color_scopes.rs:1918-1924`).
+    // `CC7_MATCH_PROPOSAL_C2.temperature_unrounded_delta` is that rounded
+    // number despite its name (R2 minor 3), so the response's real `f64`
+    // `unrounded_delta` is read here too and asserted to round onto it — the
+    // one place the two quantities are tied together.
+    let requested = CC7_MATCH_PROPOSAL_C2
+        .temperature_unrounded_delta
+        .expect("C2's temperature clamps from a measured raw delta");
+    assert_eq!(temperature["requested"], requested, "{temperature}");
+    let unrounded = temperature["unrounded_delta"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("a clamped control publishes its raw term: {temperature}"));
+    #[allow(clippy::cast_possible_truncation)]
+    let rounded = unrounded.round() as i64;
+    assert_eq!(
+        rounded, requested,
+        "the published unrounded_delta must round onto requested: {temperature}"
+    );
+    assert!(
+        requested > temperature_max,
+        "the clamp is only meaningful if the raw term left the bound: {temperature}"
+    );
+    assert_eq!(
+        proposal["proposal_details"]["exposure_milli_stops"]["clamped"], false,
+        "exposure stays inside its bound while temperature clamps: {proposal}"
+    );
+
+    // CC7 §5.1(1), R2 minor 9: planning applied nothing on the (b2) leg
+    // either — the same check (a), (c), (d) and (e) make before their commits.
+    assert_eq!(query_document(&core), base, "planning must apply nothing");
+
+    cc7_prepare_commit_and_compare(
+        &client,
+        &core,
+        revision,
+        proposal["operations"].clone(),
+        &expected,
+    )
+    .await;
+
+    // CC7 §5.1(5), R2-MAJ-2: the same three integers, re-read from
+    // `get_color_context`'s `color_nodes` manifest, so the committed document
+    // and the agent-visible manifest cannot disagree.
+    let context = invoke_capability(&client, "get_color_context", json!({})).await;
+    let context = context.structured_content.as_ref().unwrap();
+    assert!(
+        context["clips"][0]["color_nodes"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the reference clip publishes no colour node: {context}"
+    );
+    let node = &context["clips"][1]["color_nodes"][0];
+    assert_eq!(node["kind"], "primary_correction", "{node}");
+    assert_eq!(
+        node["parameters"]["exposure_milli_stops"], CC7_MATCH_PROPOSAL_C2.exposure_milli_stops,
+        "{node}"
+    );
+    assert_eq!(
+        node["parameters"]["temperature_percent"], CC7_MATCH_PROPOSAL_C2.temperature_percent,
+        "{node}"
+    );
+    assert_eq!(
+        node["parameters"]["tint_percent"], CC7_MATCH_PROPOSAL_C2.tint_percent,
+        "{node}"
+    );
+    // The manifest publishes the clamped value, never the raw term the planner
+    // asked for.
+    assert_ne!(
+        node["parameters"]["temperature_percent"], requested,
+        "{node}"
+    );
+
+    // CC6 §7: `max_nodes` is validated on every call, not only when `per_node`
+    // is asked for.
+    let over_budget = invoke_capability(
+        &client,
+        "get_color_qc",
+        json!({"timecode": candidate_start, "max_nodes": 17}),
+    )
+    .await;
+    assert_eq!(over_budget.is_error, Some(true));
+    assert_eq!(
+        over_budget.structured_content.as_ref().unwrap()["code"],
+        "color_qc_node_budget_exceeded"
+    );
+
+    // CC7 §4(b)(3): the compromise is visible and typed.
+    let qc = invoke_capability(
+        &client,
+        "get_color_qc",
+        json!({
+            "timecode": candidate_start,
+            "checks": ["range", "gamut", "tags", "per_node"],
+            "max_nodes": 16,
+        }),
+    )
+    .await;
+    let qc_body = qc.structured_content.as_ref().unwrap();
+    if qc.is_error == Some(true) {
+        assert!(
+            std::env::var("KINEWRIGHT_GPU_TESTS_MAY_SKIP")
+                .ok()
+                .as_deref()
+                == Some("1"),
+            "get_color_qc refused: {qc_body}. Set KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 to accept an \
+             unavailable working proof on a machine with no usable adapter."
+        );
+        assert_eq!(qc_body["code"], "working_proof_unavailable");
+        assert_eq!(qc_body["applied"], false);
+        eprintln!(
+            "SKIPPED: KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 and this build cannot render a working \
+             proof; scenario (b2)'s range Warning was not measured."
+        );
+    } else {
+        cc7_assert_evidence_only(qc_body, "get_color_qc");
+        let report = &qc_body["report"];
+        // A Warning is not an Error: the encode still passes technically.
+        assert_eq!(report["technical_pass"], true, "{report}");
+        let exceptions = qc_body["exceptions"].as_array().unwrap();
+        let excursions = exceptions
+            .iter()
+            .filter(|exception| exception["code"] == "delivery_range_excursion")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            excursions.len(),
+            1,
+            "exactly one range excursion is expected: {exceptions:#?}"
+        );
+        assert_eq!(excursions[0]["severity"], "warning", "{:#?}", excursions[0]);
+        assert_eq!(
+            excursions[0]["field"], "blue.over_basis_points",
+            "{:#?}",
+            excursions[0]
+        );
+        assert_eq!(excursions[0]["allowed"], "< 10", "{:#?}", excursions[0]);
+        assert_eq!(
+            excursions[0]["observed"],
+            CC7_C2_OVER_RANGE_BASIS_POINTS_REPORTED.to_string(),
+            "{:#?}",
+            excursions[0]
+        );
+        // CC7 §4(b)(3), A16: the excursion is on the blue channel alone.
+        assert_eq!(
+            report["range"]["blue"]["over_pixel_count"], CC7_C2_OVER_RANGE_PIXELS_REPORTED,
+            "{report}"
+        );
+        assert_eq!(report["range"]["red"]["over_pixel_count"], 0, "{report}");
+        assert_eq!(report["range"]["green"]["over_pixel_count"], 0, "{report}");
+        // R2 minor 5: §4(b)(3)'s `maximum_over_excursion_millionths` was
+        // printed and never read. The magnitude itself has no constant in
+        // `cc7_scenarios` (recorded as owed in the errata; §4(b)(3) states
+        // 41 538 in prose and §2.1 forbids restating it here), but the
+        // channel it lands on is asserted: the excursion's depth is on blue
+        // alone, so a run that clipped red or green fails here rather than in
+        // a printed line nobody reads.
+        assert!(
+            report["range"]["blue"]["maximum_over_excursion_millionths"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("the range report publishes a depth: {report}"))
+                > 0,
+            "{report}"
+        );
+        assert_eq!(
+            report["range"]["red"]["maximum_over_excursion_millionths"], 0,
+            "{report}"
+        );
+        assert_eq!(
+            report["range"]["green"]["maximum_over_excursion_millionths"], 0,
+            "{report}"
+        );
+        // CC6's `qc_per_node_truncated` Info must be absent at 16 nodes.
+        assert!(
+            exceptions
+                .iter()
+                .all(|exception| exception["code"] != "qc_per_node_truncated"),
+            "{exceptions:#?}"
+        );
+        // CC7 §4(b)(3): per-node attribution names the primary alone.
+        let nodes = &report["nodes"];
+        assert_eq!(nodes["attribution"], "node_removed", "{nodes}");
+        assert_eq!(nodes["truncated"], false, "{nodes}");
+        let contributions = nodes["nodes"].as_array().unwrap();
+        assert_eq!(contributions.len(), 1, "{nodes}");
+        assert_eq!(contributions[0]["node_kind"], "primary_correction");
+        assert_eq!(contributions[0]["clip"], CC7_CANDIDATE_CLIP_ID.0);
+        assert_eq!(contributions[0]["gamut_basis_points_delta"], 0, "{nodes}");
+        assert!(
+            contributions[0]["range_basis_points_delta"]
+                .as_i64()
+                .unwrap()
+                > 0,
+            "the primary node is the sole cause of the excursion: {nodes}"
+        );
+        eprintln!(
+            "CC7 (b2) measured: blue.over_basis_points={} over_pixel_count={} \
+             maximum_over_excursion_millionths={} red.over_pixel_count={} \
+             green.over_pixel_count={} range_basis_points_delta={}",
+            report["range"]["blue"]["over_basis_points"],
+            report["range"]["blue"]["over_pixel_count"],
+            report["range"]["blue"]["maximum_over_excursion_millionths"],
+            report["range"]["red"]["over_pixel_count"],
+            report["range"]["green"]["over_pixel_count"],
+            contributions[0]["range_basis_points_delta"],
+        );
+    }
+
+    assert_eq!(cc7_revision(&client).await, revision + 1);
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// CC7 §5.2 (c) — log-like input normalised by an imported technical LUT.
+///
+/// The server carries the project session's saved-project-path handle, exactly
+/// as `cc4_branch_server_with_the_project_path_handle_resolves_imported_availability`
+/// (`:1351`) does, because `import_lut_asset` reports `project_not_saved`
+/// without one (`server.rs:352`). Script: `analyze_color_shot` →
+/// `import_lut_asset` → `list_look_assets` → `plan_technical_lut` →
+/// prepare/commit → `get_color_qc` → `render_color_proof`.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn cc7_c_log_like_input_is_normalised_by_an_imported_technical_lut() {
+    let directory = std::env::temp_dir().join(format!(
+        "kinewright-cc7-c-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let project = directory.join("log-like.kinewright");
+    let cube = write_log_like_inverse_cube(&directory, CC7_LOG_CUBE_SIZE);
+    let cube_bytes = std::fs::read(&cube).unwrap();
+    let asset_record = kinewright_core::cc7_scenarios::cc7_log_lut_asset(
+        &kinewright_media::sha256_bytes(&cube_bytes),
+        cube_bytes.len() as u64,
+        &cube.display().to_string(),
+    );
+
+    let generated = cc7_log_source();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let carrier = media.probe(generated.path()).unwrap();
+    let base = single_clip_document(carrier);
+    let expected = cc7_canonical_document(
+        &base,
+        &cc7_lut_backed_canonical_operations(Cc7Scenario::LogLike, asset_record),
+    );
+    let core = Core::spawn(base.clone()).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let approvals = cc7_approve_confirmations(server.confirmations(), "import_lut_asset");
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let revision = cc7_revision(&client).await;
+    assert_eq!(revision, 0);
+
+    // CC7 §4(c)(1), A21: the log signature, in the 16-bit unit the tool
+    // publishes. `mean_code_values.luma` is an 8-bit mean and is the wrong
+    // field; these two are `ChannelStatistics` percentiles (`scopes.rs:576`).
+    let analysis = invoke_capability(
+        &client,
+        "analyze_color_shot",
+        json!({"expected_revision": revision, "clip_id": CC7_SINGLE_CLIP_ID.0}),
+    )
+    .await;
+    assert_eq!(
+        analysis.is_error,
+        Some(false),
+        "{:?}",
+        analysis.structured_content
+    );
+    let analysis = analysis.structured_content.as_ref().unwrap();
+    cc7_assert_evidence_only(analysis, "analyze_color_shot");
+    let luma = &analysis["shot"]["scope_statistics"]["luma"];
+    let first_percentile = luma["first_percentile"].as_i64().unwrap();
+    let ninety_ninth = luma["ninety_ninth_percentile"].as_i64().unwrap();
+    eprintln!(
+        "CC7 (c) measured carrier luma percentiles (16-bit): p1={first_percentile} p99={ninety_ninth}"
+    );
+    assert!(
+        first_percentile >= CC7_LOG_FIRST_PERCENTILE_MIN_CODE16,
+        "the carrier's shadows must sit off the floor: {first_percentile}"
+    );
+    assert!(
+        ninety_ninth <= CC7_LOG_P99_MAX_CODE16,
+        "the carrier's highlights must sit off the ceiling: {ninety_ninth}"
+    );
+
+    // CC7 §4(c)(5): the import needs a saved project, and says so.
+    let unsaved = invoke_capability(
+        &client,
+        "import_lut_asset",
+        json!({"expected_revision": revision, "path": cube.display().to_string()}),
+    )
+    .await;
+    assert_eq!(unsaved.is_error, Some(true));
+    assert_eq!(
+        unsaved.structured_content.as_ref().unwrap()["code"],
+        "project_not_saved"
+    );
+    assert_eq!(
+        query_document(&core),
+        base,
+        "a refused import changes nothing"
+    );
+
+    // The saved-project handle, shared exactly as the session publishes it.
+    server.set_project_path(Some(project.clone()));
+    let imported = invoke_capability(
+        &client,
+        "import_lut_asset",
+        json!({"expected_revision": revision, "path": cube.display().to_string()}),
+    )
+    .await;
+    assert_eq!(
+        imported.is_error,
+        Some(false),
+        "{:?}",
+        imported.structured_content
+    );
+    let imported = imported.structured_content.as_ref().unwrap().clone();
+    assert_eq!(imported["reused_existing_asset"], false);
+    let lut_asset_id = imported["lut_asset"]["lut_asset_id"].as_u64().unwrap();
+    assert_eq!(lut_asset_id, CC7_LUT_ASSET_ID.0);
+    assert_eq!(imported["lut_asset"]["size"], CC7_LOG_CUBE_SIZE);
+    // `import_lut_asset` applies its own `AddLutAsset`, so the revision has
+    // already moved once before the node is planned.
+    let after_import = cc7_revision(&client).await;
+    assert_eq!(after_import, revision + 1);
+
+    let listed = invoke_capability(&client, "list_look_assets", json!({})).await;
+    let listed = listed.structured_content.as_ref().unwrap();
+    assert_eq!(listed["store_root_known"], true);
+    assert_eq!(listed["assets"][0]["availability"]["kind"], "verified");
+    assert_eq!(
+        listed["assets"][0]["sha256"],
+        kinewright_media::sha256_bytes(&cube_bytes)
+    );
+
+    // CC7 §5.5: an unregistered asset id is the typed look refusal.
+    let missing = invoke_capability(
+        &client,
+        "plan_technical_lut",
+        json!({
+            "expected_revision": after_import,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "lut_asset_id": lut_asset_id + 98,
+        }),
+    )
+    .await;
+    assert_eq!(missing.is_error, Some(true));
+    assert_eq!(
+        missing.structured_content.as_ref().unwrap()["code"],
+        "missing_lut_asset"
+    );
+
+    cc7_assert_stale_revision_prose(
+        &client,
+        &core,
+        "plan_technical_lut",
+        json!({
+            "expected_revision": after_import + 5,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "lut_asset_id": lut_asset_id,
+        }),
+        after_import,
+        after_import + 5,
+    )
+    .await;
+
+    let plan = invoke_capability(
+        &client,
+        "plan_technical_lut",
+        json!({
+            "expected_revision": after_import,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "lut_asset_id": lut_asset_id,
+            "input_encoding_token": 0,
+        }),
+    )
+    .await;
+    assert_eq!(plan.is_error, Some(false), "{:?}", plan.structured_content);
+    let plan = plan.structured_content.as_ref().unwrap().clone();
+    cc7_assert_evidence_only(&plan, "plan_technical_lut");
+    assert_eq!(plan["kind"], "technical_lut");
+    assert_eq!(plan["color_stage"], "input");
+    assert_eq!(plan["insert_index"], 0);
+    assert_eq!(plan["created_new_node"], true);
+    let effect_id = plan["target_effect_id"].as_u64().unwrap();
+    assert!(
+        query_document(&core).tracks[0].clips[0].effects.is_empty(),
+        "planning must not apply anything"
+    );
+
+    cc7_prepare_commit_and_compare(
+        &client,
+        &core,
+        after_import,
+        plan["operations"].clone(),
+        &expected,
+    )
+    .await;
+
+    // CC7 §4(c)(4): node order, on the agent-visible manifest.
+    let context = invoke_capability(&client, "get_color_context", json!({})).await;
+    let context = context.structured_content.as_ref().unwrap();
+    let nodes = context["clips"][0]["color_nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0]["kind"], "technical_lut");
+    assert_eq!(nodes[0]["color_stage"], "input");
+    assert_eq!(nodes[0]["stage_index"], 0);
+    assert_eq!(nodes[0]["lut_asset_id"], lut_asset_id);
+    // `input_encoding_token = 0` is the descriptor neutral and is therefore
+    // not stored, but the manifest still resolves it (§2.5).
+    assert_eq!(nodes[0]["input_encoding"], "display709");
+    assert_eq!(nodes[0]["mix_basis_points"], CC7_LOOK_MIX_BASIS_POINTS);
+    // R2 minor 6: the ordering loop that used to stand here could never run —
+    // `nodes.len() == 1` above — so it read as a gate and was not one. §4(c)(4)
+    // on a one-node stack is exactly the two facts asserted above: the node is
+    // at the **input** stage and at `stage_index 0`, so nothing precedes it.
+    assert!(
+        nodes
+            .iter()
+            .all(|node| node["color_stage"] != "correction" && node["color_stage"] != "look"),
+        "(c) commits one input-stage node and nothing else: {nodes:#?}"
+    );
+
+    // CC7 errata D-E3: the agent server never publishes an imported LUT's
+    // bytes to the renderer — the boundary
+    // `cc4_render_color_proof_reports_the_unpublished_lut_asset_from_the_real_renderer`
+    // (`:1439`) already pins — so (c)'s proof-side calls cannot render, and
+    // both refuse **deterministically and typed**. That is not a GPU-
+    // availability question, so §5.3's skip branch does not apply and these
+    // are asserted unconditionally: accepting either branch would assert
+    // nothing.
+    let qc = invoke_capability(&client, "get_color_qc", json!({"timecode": 0})).await;
+    let qc_body = qc.structured_content.as_ref().unwrap();
+    assert_eq!(qc.is_error, Some(true), "{qc_body}");
+    assert_eq!(qc_body["code"], "working_proof_unavailable", "{qc_body}");
+    assert_eq!(qc_body["applied"], false, "{qc_body}");
+    assert_eq!(qc_body["evidence_only"], true, "{qc_body}");
+    assert_eq!(qc_body["details"]["field"], "working_proof", "{qc_body}");
+    assert!(
+        qc_body["details"]["observed"]
+            .as_str()
+            .is_some_and(|observed| observed.contains("missing_lut_asset")),
+        "the refusal names the unpublished asset, not a GPU adapter: {qc_body}"
+    );
+
+    let proof = invoke_capability(
+        &client,
+        "render_color_proof",
+        json!({
+            "expected_revision": after_import + 1,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "timecode": 0,
+            "effect_id": effect_id,
+            "look_comparison": "after",
+        }),
+    )
+    .await;
+    let proof_body = proof.structured_content.as_ref().unwrap();
+    assert_eq!(proof.is_error, Some(true), "{proof_body}");
+    assert_eq!(proof_body["code"], "missing_lut_asset", "{proof_body}");
+    assert_eq!(proof_body["details"]["lut_asset_id"], lut_asset_id);
+    assert_eq!(proof_body["details"]["effect_id"], effect_id);
+    assert_eq!(proof_body["details"]["stage"], "after");
+    assert_eq!(
+        proof_body["details"]["lut_sha256"],
+        kinewright_media::sha256_bytes(&cube_bytes)
+    );
+
+    assert_eq!(cc7_revision(&client).await, after_import + 1);
+    approvals.assert_approved_and_stop("import_lut_asset");
+    client.cancel().await.unwrap();
+    server.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// CC7 §5.2 (d) — product and skin.
+///
+/// `plan_secondary_correction` derives the qualifier from the `product_red`
+/// patch, `plan_primary_correction` writes the `saturation_percent = 40` the
+/// secondary planner has no field for (errata D-E4), and the committed node is
+/// `cc7_canonical_operations(ProductAndSkin)` exactly. `inspect_grade_matte`
+/// then measures `covered == full == 192`, `partial == 0`, and the skin band's
+/// hue is unchanged by the grade.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn cc7_d_product_qualifier_selects_its_patch_and_leaves_skin_alone() {
+    let generated = cc7_camera_source(Cc7Camera::A);
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let base = single_clip_document(asset);
+    let expected = cc7_canonical_document(
+        &base,
+        &cc7_canonical_operations(Cc7Scenario::ProductAndSkin),
+    );
+    let core = Core::spawn(base.clone()).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let revision = cc7_revision(&client).await;
+    assert_eq!(revision, 0);
+
+    // CC7 §4(d)(3): the skin band before the grade, so "unchanged" is a
+    // measured difference rather than a single reading.
+    let skin_before = invoke_capability(
+        &client,
+        "get_color_qc",
+        json!({
+            "timecode": 0,
+            "checks": ["skin"],
+            "roi": cc7_qc_roi(CC7_SKIN_BAND_ROI),
+        }),
+    )
+    .await;
+    let skin_before_body = skin_before.structured_content.as_ref().unwrap().clone();
+    let gpu_may_skip = std::env::var("KINEWRIGHT_GPU_TESTS_MAY_SKIP")
+        .ok()
+        .as_deref()
+        == Some("1");
+    if skin_before.is_error == Some(true) {
+        assert!(
+            gpu_may_skip,
+            "get_color_qc refused: {skin_before_body}. Set KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 to \
+             accept an unavailable working proof on a machine with no usable adapter."
+        );
+        assert_eq!(skin_before_body["code"], "working_proof_unavailable");
+        assert_eq!(skin_before_body["applied"], false, "{skin_before_body}");
+        eprintln!(
+            "SKIPPED: KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 and this build cannot render a working \
+             proof; scenario (d)'s skin hue was not measured."
+        );
+    }
+
+    // CC7 §5.5: a technical input transform carries no matte.
+    let technical = invoke_capability(
+        &client,
+        "plan_secondary_correction",
+        json!({
+            "expected_revision": revision,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "node_kind": "technical_lut",
+            "sample_roi": cc7_scope_roi(CC7_PRODUCT_RED_ROI),
+            "derive_qualifier_from_sample": true,
+        }),
+    )
+    .await;
+    assert_eq!(technical.is_error, Some(true));
+    assert_eq!(
+        technical.structured_content.as_ref().unwrap()["code"],
+        "matte_unsupported_node_kind"
+    );
+
+    // CC7 §5.5: a skin check needs a region, and is refused before any render.
+    let unscoped = invoke_capability(
+        &client,
+        "get_color_qc",
+        json!({"timecode": 0, "checks": ["skin"]}),
+    )
+    .await;
+    assert_eq!(unscoped.is_error, Some(true));
+    assert_eq!(
+        unscoped.structured_content.as_ref().unwrap()["code"],
+        "color_qc_region_required"
+    );
+
+    cc7_assert_stale_revision_prose(
+        &client,
+        &core,
+        "plan_secondary_correction",
+        json!({
+            "expected_revision": revision + 4,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "node_kind": "primary_correction",
+            "sample_roi": cc7_scope_roi(CC7_PRODUCT_RED_ROI),
+            "derive_qualifier_from_sample": true,
+        }),
+        revision,
+        revision + 4,
+    )
+    .await;
+
+    let plan = invoke_capability(
+        &client,
+        "plan_secondary_correction",
+        json!({
+            "expected_revision": revision,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "node_kind": "primary_correction",
+            "sample_roi": cc7_scope_roi(CC7_PRODUCT_RED_ROI),
+            "derive_qualifier_from_sample": true,
+            "timecode": 0,
+        }),
+    )
+    .await;
+    assert_eq!(plan.is_error, Some(false), "{:?}", plan.structured_content);
+    let plan = plan.structured_content.as_ref().unwrap().clone();
+    cc7_assert_evidence_only(&plan, "plan_secondary_correction");
+    assert_eq!(plan["kind"], "primary_correction");
+    assert_eq!(plan["created_new_node"], true);
+    let effect_id = plan["target_effect_id"].as_u64().unwrap();
+    assert!(
+        query_document(&core).tracks[0].clips[0].effects.is_empty(),
+        "planning must not apply anything"
+    );
+
+    let prepared = prepare_plan(&client, revision, plan["operations"].clone()).await;
+    assert_eq!(prepared.is_error, Some(false));
+    assert_eq!(
+        client
+            .call_tool(commit_request(revision, &prepared))
+            .await
+            .unwrap()
+            .is_error,
+        Some(false)
+    );
+    assert_eq!(cc7_revision(&client).await, revision + 1);
+
+    // CC7 errata D-E4: `SecondaryCorrectionPlanArgs` has no `saturation_percent`
+    // field (`color_status.rs:4326-4374`), so §5.2's (d) call is two calls: the
+    // matte through the secondary planner, then the grade through the CC1
+    // primary planner, which retargets the same node in place and therefore
+    // emits `SetEffectParam` alone — no second `AddEffect` and no neutral fill.
+    let grade = invoke_capability(
+        &client,
+        "plan_primary_correction",
+        json!({
+            "expected_revision": revision + 1,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "parameters": {"saturation_percent": CC7_SECONDARY_SATURATION_PERCENT},
+        }),
+    )
+    .await;
+    assert_eq!(
+        grade.is_error,
+        Some(false),
+        "{:?}",
+        grade.structured_content
+    );
+    let grade = grade.structured_content.as_ref().unwrap().clone();
+    assert_eq!(grade["applied"], false);
+    assert_eq!(
+        grade["target_effect_id"].as_u64().unwrap(),
+        effect_id,
+        "the grade must land on the matted node, not on a second one"
+    );
+
+    cc7_prepare_commit_and_compare(
+        &client,
+        &core,
+        revision + 1,
+        grade["operations"].clone(),
+        &expected,
+    )
+    .await;
+
+    // CC7 §5.1(5): the manifest publishes the same qualifier integers.
+    let context = invoke_capability(&client, "get_color_context", json!({})).await;
+    let context = context.structured_content.as_ref().unwrap();
+    let node = &context["clips"][0]["color_nodes"][0];
+    assert_eq!(node["kind"], "primary_correction");
+    assert_eq!(node["matte"]["enabled"], true);
+    assert_eq!(node["matte"]["qualifier"]["enabled"], true);
+    assert_eq!(node["matte"]["window_count"], 0);
+    assert_eq!(
+        node["parameters"]["saturation_percent"],
+        CC7_SECONDARY_SATURATION_PERCENT
+    );
+
+    // CC7 §4(d)(1): the qualifier covers exactly its patch.
+    let inspect = invoke_capability(
+        &client,
+        "inspect_grade_matte",
+        json!({
+            "expected_revision": revision + 2,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "effect_id": effect_id,
+            "timecode": 0,
+        }),
+    )
+    .await;
+    let inspect_body = inspect.structured_content.as_ref().unwrap();
+    if inspect.is_error == Some(true) {
+        assert!(
+            gpu_may_skip,
+            "inspect_grade_matte refused: {inspect_body}. Set KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 to \
+             accept an unavailable matte proof on a machine with no usable adapter."
+        );
+        assert_eq!(inspect_body["code"], "matte_proof_unavailable");
+        assert_eq!(inspect_body["applied"], false);
+        assert_eq!(inspect_body["details"]["observed"]["has_matte"], true);
+        eprintln!(
+            "SKIPPED: KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 and this build cannot render a matte proof; \
+             scenario (d)'s containment was not measured."
+        );
+    } else {
+        let statistics = &inspect_body["statistics"];
+        eprintln!(
+            "CC7 (d) measured: covered={} full={} partial={} covered_basis_points={}",
+            statistics["covered_pixel_count"],
+            statistics["full_pixel_count"],
+            statistics["partial_pixel_count"],
+            statistics["covered_basis_points"],
+        );
+        assert_eq!(
+            statistics["covered_pixel_count"], CC7_PRODUCT_PATCH_PIXEL_COUNT,
+            "{statistics}"
+        );
+        assert_eq!(
+            statistics["full_pixel_count"], CC7_PRODUCT_PATCH_PIXEL_COUNT,
+            "{statistics}"
+        );
+        assert_eq!(statistics["partial_pixel_count"], 0, "{statistics}");
+    }
+
+    // CC7 §4(d)(3): the skin band's hue is untouched by the product grade.
+    let skin_after = invoke_capability(
+        &client,
+        "get_color_qc",
+        json!({
+            "timecode": 0,
+            "checks": ["skin"],
+            "roi": cc7_qc_roi(CC7_SKIN_BAND_ROI),
+        }),
+    )
+    .await;
+    let skin_after_body = skin_after.structured_content.as_ref().unwrap();
+    if skin_after.is_error == Some(true) {
+        assert!(
+            gpu_may_skip,
+            "get_color_qc refused: {skin_after_body}. Set KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 to \
+             accept an unavailable working proof on a machine with no usable adapter."
+        );
+        assert_eq!(skin_after_body["code"], "working_proof_unavailable");
+        assert_eq!(skin_after_body["applied"], false, "{skin_after_body}");
+        eprintln!(
+            "SKIPPED: KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 and this build cannot render a working \
+             proof; scenario (d)'s post-grade skin band was not measured."
+        );
+    } else {
+        let before = &skin_before_body["report"]["skin"];
+        let after = &skin_after_body["report"]["skin"];
+        assert!(
+            before["mean_hue_centidegrees"].is_i64(),
+            "mean_hue_centidegrees must be Some on both sides: {before}"
+        );
+        assert!(
+            after["mean_hue_centidegrees"].is_i64(),
+            "mean_hue_centidegrees must be Some on both sides: {after}"
+        );
+        assert_eq!(
+            before["mean_hue_centidegrees"], after["mean_hue_centidegrees"],
+            "the product qualifier must not move the skin hue"
+        );
+        assert_eq!(
+            before["in_band_basis_points"], CC7_SKIN_IN_BAND_EXACT_BASIS_POINTS,
+            "{before}"
+        );
+        assert_eq!(
+            after["in_band_basis_points"], CC7_SKIN_IN_BAND_EXACT_BASIS_POINTS,
+            "{after}"
+        );
+        eprintln!(
+            "CC7 (d) skin: hue={} in_band={} considered={} excluded_achromatic={}",
+            after["mean_hue_centidegrees"],
+            after["in_band_basis_points"],
+            after["considered_pixel_count"],
+            after["excluded_achromatic_pixel_count"],
+        );
+    }
+
+    assert_eq!(cc7_revision(&client).await, revision + 2);
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// CC7 §5.2 (e) — creative look.
+///
+/// `plan_creative_look` binds the built-in `warm` asset at its neutral mix →
+/// prepare/commit → `render_color_proof` in all three variants → `get_color_qc`
+/// on the `deep_shadow` patch → `list_look_assets` across a Save-As
+/// relocation. `bypass_matches_absent` is `true` and `bypass_not_lossless` is
+/// asserted **absent**.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut() {
+    let directory = std::env::temp_dir().join(format!("kinewright-cc7-e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let project = directory.join("look.kinewright");
+    let relocated = directory.join("look-saved-as.kinewright");
+    let cube = write_log_like_inverse_cube(&directory, CC7_LOG_CUBE_SIZE);
+    let cube_sha = kinewright_media::sha256_bytes(&std::fs::read(&cube).unwrap());
+
+    let generated = cc7_camera_source(Cc7Camera::A);
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let warm = kinewright_media::BuiltinLook::Warm;
+    let mut base = single_clip_document(asset);
+    // A built-in look is `verified` from this binary's own bake, so the
+    // scenario's own node needs no store (CC4 §2.6).
+    base.lut_assets = vec![warm.to_lut_asset(CC7_LUT_ASSET_ID)];
+    base.validate().expect("the CC7 (e) base document is valid");
+    let expected =
+        cc7_canonical_document(&base, &cc7_canonical_operations(Cc7Scenario::CreativeLook));
+
+    let core = Core::spawn(base.clone()).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    server.set_project_path(Some(project.clone()));
+    let approvals = cc7_approve_confirmations(server.confirmations(), "import_lut_asset");
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let revision = cc7_revision(&client).await;
+    assert_eq!(revision, 0);
+
+    cc7_assert_stale_revision_prose(
+        &client,
+        &core,
+        "plan_creative_look",
+        json!({
+            "expected_revision": revision + 6,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "lut_asset_id": CC7_LUT_ASSET_ID.0,
+        }),
+        revision,
+        revision + 6,
+    )
+    .await;
+
+    let plan = invoke_capability(
+        &client,
+        "plan_creative_look",
+        json!({
+            "expected_revision": revision,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "lut_asset_id": CC7_LUT_ASSET_ID.0,
+            "mix_basis_points": CC7_LOOK_MIX_BASIS_POINTS,
+        }),
+    )
+    .await;
+    assert_eq!(plan.is_error, Some(false), "{:?}", plan.structured_content);
+    let plan = plan.structured_content.as_ref().unwrap().clone();
+    cc7_assert_evidence_only(&plan, "plan_creative_look");
+    assert_eq!(plan["kind"], "creative_look");
+    assert_eq!(plan["color_stage"], "look");
+    assert_eq!(plan["lut_asset"]["sha256"], warm.pinned_sha256());
+    let effect_id = plan["target_effect_id"].as_u64().unwrap();
+    assert!(
+        query_document(&core).tracks[0].clips[0].effects.is_empty(),
+        "planning must not apply anything"
+    );
+
+    cc7_prepare_commit_and_compare(
+        &client,
+        &core,
+        revision,
+        plan["operations"].clone(),
+        &expected,
+    )
+    .await;
+    let after_commit = revision + 1;
+
+    // CC7 §5.1(5), R2-MAJ-2: the binding and the mix, re-read from
+    // `get_color_context`'s `color_nodes` manifest.
+    let context = invoke_capability(&client, "get_color_context", json!({})).await;
+    let context = context.structured_content.as_ref().unwrap();
+    let nodes = context["clips"][0]["color_nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1, "{context}");
+    let node = &nodes[0];
+    assert_eq!(node["kind"], "creative_look", "{node}");
+    assert_eq!(node["color_stage"], "look", "{node}");
+    assert_eq!(node["lut_asset_id"], CC7_LUT_ASSET_ID.0, "{node}");
+    assert_eq!(node["lut_sha256"], warm.pinned_sha256(), "{node}");
+    // The neutral mix is resolved by the manifest and stored by neither the
+    // planner nor the document (§2.5), so the manifest republishes `10 000`
+    // while the node's parameter map does not carry it.
+    assert_eq!(
+        node["mix_basis_points"], CC7_LOOK_MIX_BASIS_POINTS,
+        "{node}"
+    );
+    assert!(
+        !query_document(&core).tracks[0].clips[0].effects[0]
+            .parameters
+            .contains_key("mix_basis_points"),
+        "the neutral mix is resolved, never stored"
+    );
+
+    // CC7 §5.5: `look_comparison` without an `effect_id` is typed.
+    let unbound = invoke_capability(
+        &client,
+        "render_color_proof",
+        json!({
+            "expected_revision": after_commit,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "timecode": 0,
+            "look_comparison": "bypass",
+        }),
+    )
+    .await;
+    assert_eq!(unbound.is_error, Some(true));
+    assert_eq!(
+        unbound.structured_content.as_ref().unwrap()["code"],
+        "look_comparison_requires_effect_id"
+    );
+
+    // CC7 §4(e)(1): before, after, bypass.
+    let mut bypass_seen = false;
+    for variant in ["before", "after", "bypass"] {
+        let proof = invoke_capability(
+            &client,
+            "render_color_proof",
+            json!({
+                "expected_revision": after_commit,
+                "clip_id": CC7_SINGLE_CLIP_ID.0,
+                "timecode": 0,
+                "effect_id": effect_id,
+                "look_comparison": variant,
+            }),
+        )
+        .await;
+        let body = proof.structured_content.as_ref().unwrap();
+        if proof.is_error == Some(true) {
+            assert!(
+                std::env::var("KINEWRIGHT_GPU_TESTS_MAY_SKIP")
+                    .ok()
+                    .as_deref()
+                    == Some("1"),
+                "render_color_proof refused: {body}. Set KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 to \
+                 accept an unavailable proof on a machine with no usable adapter."
+            );
+            assert_eq!(body["code"], "color_proof_render_failed");
+            assert_eq!(body["applied"], false);
+            eprintln!(
+                "SKIPPED: KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 and this build cannot render a colour \
+                 proof; scenario (e)'s {variant} cell was not exercised."
+            );
+            continue;
+        }
+        // `bypass_not_lossless` is a refusal, never a `false` footnote
+        // (R-M4): reaching this branch is the assertion that it did not fire.
+        // R2 minor 13: `assert_ne!(body["code"], "bypass_not_lossless")` on a
+        // success body compared `Value::Null` against a string and could never
+        // fire, so the claim is made in the only non-vacuous form there is —
+        // a successful proof publishes **no** refusal code at all.
+        assert_eq!(
+            body["code"],
+            json!(null),
+            "a successful proof publishes no refusal code: {body}"
+        );
+        cc7_assert_evidence_only(body, "render_color_proof");
+        assert_eq!(body["look_comparison"]["variant"], variant, "{body}");
+        assert_eq!(
+            body["look_comparison"]["before_variant"], "absent",
+            "{body}"
+        );
+        if variant == "bypass" {
+            bypass_seen = true;
+            assert_eq!(
+                body["look_comparison"]["bypass_matches_absent"], true,
+                "{body}"
+            );
+            assert_eq!(
+                body["hashes"]["before_rgba8_pixels_sha256"],
+                body["hashes"]["after_rgba8_pixels_sha256"],
+                "a bypassed node is the byte-identical twin of an absent one: {body}"
+            );
+        } else {
+            assert_eq!(
+                body["look_comparison"]["bypass_matches_absent"],
+                json!(null),
+                "only the bypass cell publishes the claim: {body}"
+            );
+            if variant == "after" {
+                assert_ne!(
+                    body["hashes"]["before_rgba8_pixels_sha256"],
+                    body["hashes"]["after_rgba8_pixels_sha256"],
+                    "the warm look must change the picture: {body}"
+                );
+            }
+        }
+    }
+
+    // CC7 §4(e)(2): the gamut excursion, exactly where it is analytic.
+    let qc = invoke_capability(
+        &client,
+        "get_color_qc",
+        json!({
+            "timecode": 0,
+            "checks": ["gamut", "range"],
+            "roi": cc7_qc_roi(CC7_DEEP_SHADOW_ROI),
+        }),
+    )
+    .await;
+    let qc_body = qc.structured_content.as_ref().unwrap();
+    if qc.is_error == Some(true) {
+        assert!(
+            std::env::var("KINEWRIGHT_GPU_TESTS_MAY_SKIP")
+                .ok()
+                .as_deref()
+                == Some("1"),
+            "get_color_qc refused: {qc_body}. Set KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 to accept an \
+             unavailable working proof on a machine with no usable adapter."
+        );
+        assert_eq!(qc_body["code"], "working_proof_unavailable");
+        assert_eq!(qc_body["applied"], false, "{qc_body}");
+        eprintln!(
+            "SKIPPED: KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 and this build cannot render a working \
+             proof; scenario (e)'s gamut count was not measured."
+        );
+    } else {
+        assert!(
+            bypass_seen,
+            "the bypass cell must have rendered wherever the QC did"
+        );
+        let report = &qc_body["report"];
+        assert_eq!(report["technical_pass"], true, "{report}");
+        // R2 minor 12: "how many pixels the ROI resolves to" and "how many of
+        // them are out of gamut" are two quantities and are read from two
+        // constants, so an ROI that shrank and a look that stopped clipping
+        // can no longer cancel. §11.2.1's resolved-pixel-rect claim is the
+        // first; §4(e)(2)'s gamut count is the second.
+        assert_eq!(
+            report["region"]["region_pixel_count"],
+            CC7_DEEP_SHADOW_RECT.pixels(),
+            "the deep_shadow ROI must resolve to its own pixel rect: {report}"
+        );
+        assert_eq!(
+            report["gamut"]["out_of_gamut_pixel_count"], CC7_LOOK_DEEP_SHADOW_OUT_OF_GAMUT_PIXELS,
+            "{report}"
+        );
+        let excursions = qc_body["exceptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|exception| exception["code"] == "delivery_gamut_excursion")
+            .collect::<Vec<_>>();
+        assert_eq!(excursions.len(), 1, "{:#?}", qc_body["exceptions"]);
+        assert_eq!(excursions[0]["severity"], "warning", "{:#?}", excursions[0]);
+        eprintln!(
+            "CC7 (e) measured on deep_shadow: out_of_gamut={} basis_points={} below_black={} \
+             minimum_linear_millionths={}",
+            report["gamut"]["out_of_gamut_pixel_count"],
+            report["gamut"]["out_of_gamut_basis_points"],
+            report["gamut"]["below_black_pixel_count"],
+            report["gamut"]["minimum_linear_millionths"],
+        );
+    }
+
+    // CC7 §4(e)(4): the one agent-visible portability check. Import an asset
+    // into this project's store, Save As, and read the availability back.
+    let imported = invoke_capability(
+        &client,
+        "import_lut_asset",
+        json!({"expected_revision": after_commit, "path": cube.display().to_string()}),
+    )
+    .await;
+    assert_eq!(
+        imported.is_error,
+        Some(false),
+        "{:?}",
+        imported.structured_content
+    );
+    let imported_id = imported.structured_content.as_ref().unwrap()["lut_asset"]["lut_asset_id"]
+        .as_u64()
+        .unwrap();
+    let availability = |listed: &serde_json::Value, id: u64| -> serde_json::Value {
+        listed["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["lut_asset_id"] == id)
+            .expect("the imported asset is listed")
+            .clone()
+    };
+    let listed = invoke_capability(&client, "list_look_assets", json!({})).await;
+    let listed = listed.structured_content.as_ref().unwrap().clone();
+    assert_eq!(
+        availability(&listed, imported_id)["availability"]["kind"],
+        "verified"
+    );
+    assert_eq!(availability(&listed, imported_id)["sha256"], cube_sha);
+
+    // A *bare* relocation — the project path moves and the store does not —
+    // must not report `verified`, so the check below is not vacuous.
+    server.set_project_path(Some(relocated.clone()));
+    let unrelocated = invoke_capability(&client, "list_look_assets", json!({})).await;
+    let unrelocated = unrelocated.structured_content.as_ref().unwrap().clone();
+    assert_ne!(
+        availability(&unrelocated, imported_id)["availability"]["kind"],
+        "verified",
+        "a bare relocation cannot report verified: {unrelocated}"
+    );
+
+    // Save As copies the store beside the new project file, and the same
+    // sha256 verifies again.
+    let store_root = directory.join("look.kinewright-assets");
+    let relocated_root = directory.join("look-saved-as.kinewright-assets");
+    cc7_copy_directory(&store_root, &relocated_root);
+    let saved_as = invoke_capability(&client, "list_look_assets", json!({})).await;
+    let saved_as = saved_as.structured_content.as_ref().unwrap().clone();
+    assert_eq!(saved_as["store_root_known"], true);
+    assert_eq!(
+        availability(&saved_as, imported_id)["availability"]["kind"],
+        "verified",
+        "{saved_as}"
+    );
+    assert_eq!(availability(&saved_as, imported_id)["sha256"], cube_sha);
+
+    approvals.assert_approved_and_stop("import_lut_asset");
+    client.cancel().await.unwrap();
+    server.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Copy a LUT store directory wholesale, which is what Save As does to the
+/// project's `<stem>.kinewright-assets` root (CC4 §2.2).
+fn cc7_copy_directory(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            cc7_copy_directory(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// CC7 §5.2 (f) — tracked secondary.
+///
+/// `plan_secondary_correction` seeds the window on frame 0's square →
+/// `plan_primary_correction` writes the grade → `track_matte_window` over
+/// `0..48` at `step_frames 5` drops **exactly** the occluded sample 47 →
+/// prepare/commit → `inspect_grade_matte` at five sampled frames → the (f2)
+/// two-sample range refuses `tracking_confidence_too_low`.
+///
+/// Every gate reads `observations[]`, never `curves` (A17): the smoothed
+/// curve's final keyframe carries the tool's published `known_systematic_lag`.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
+    let generated = cc7_tracked_source();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let base = single_clip_document(asset);
+    let expected = cc7_canonical_document(
+        &base,
+        &cc7_canonical_operations(Cc7Scenario::TrackedSecondary),
+    );
+    let core = Core::spawn(base.clone()).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let revision = cc7_revision(&client).await;
+    assert_eq!(revision, 0);
+
+    // The seeded window: CC7 §2.3.6's `375 / 667` bp half extents on frame 0's
+    // square. Its centre is the descriptor neutral `5 000 / 5 000`, which is
+    // exactly frame 0's continuous centre, so it is resolved and not stored
+    // (errata A-E4).
+    let plan = invoke_capability(
+        &client,
+        "plan_secondary_correction",
+        json!({
+            "expected_revision": revision,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "node_kind": "primary_correction",
+            "windows": [{
+                "center_x": CC7_TRACK_SEEDED_WINDOW_CENTRE_BASIS_POINTS[0],
+                "center_y": CC7_TRACK_SEEDED_WINDOW_CENTRE_BASIS_POINTS[1],
+                "half_width": CC7_TRACK_SEEDED_WINDOW_HALF_WIDTH_BASIS_POINTS,
+                "half_height": CC7_TRACK_SEEDED_WINDOW_HALF_HEIGHT_BASIS_POINTS,
+            }],
+            "timecode": 0,
+        }),
+    )
+    .await;
+    assert_eq!(plan.is_error, Some(false), "{:?}", plan.structured_content);
+    let plan = plan.structured_content.as_ref().unwrap().clone();
+    cc7_assert_evidence_only(&plan, "plan_secondary_correction");
+    let effect_id = plan["target_effect_id"].as_u64().unwrap();
+    // CC7 §5.1(1), R2 minor 9: planning applied nothing on the (f) leg either.
+    assert_eq!(
+        query_document(&core),
+        base,
+        "planning must apply nothing to the (f) document"
+    );
+    let prepared = prepare_plan(&client, revision, plan["operations"].clone()).await;
+    assert_eq!(prepared.is_error, Some(false));
+    assert_eq!(
+        client
+            .call_tool(commit_request(revision, &prepared))
+            .await
+            .unwrap()
+            .is_error,
+        Some(false)
+    );
+    assert_eq!(cc7_revision(&client).await, revision + 1);
+
+    let grade = invoke_capability(
+        &client,
+        "plan_primary_correction",
+        json!({
+            "expected_revision": revision + 1,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "parameters": {"saturation_percent": CC7_SECONDARY_SATURATION_PERCENT},
+        }),
+    )
+    .await;
+    assert_eq!(
+        grade.is_error,
+        Some(false),
+        "{:?}",
+        grade.structured_content
+    );
+    let grade = grade.structured_content.as_ref().unwrap().clone();
+    assert_eq!(grade["target_effect_id"].as_u64().unwrap(), effect_id);
+    let prepared = prepare_plan(&client, revision + 1, grade["operations"].clone()).await;
+    assert_eq!(prepared.is_error, Some(false));
+    assert_eq!(
+        client
+            .call_tool(commit_request(revision + 1, &prepared))
+            .await
+            .unwrap()
+            .is_error,
+        Some(false)
+    );
+    let tracked_revision = revision + 2;
+    assert_eq!(cc7_revision(&client).await, tracked_revision);
+    // The document the tracker is handed, kept so §5.1(1) can be asserted
+    // against it: `track_matte_window` is evidence-only and must not write.
+    let graded = query_document(&core);
+
+    // CC7 §5.5: a window index past the node's one active window is typed.
+    let out_of_range = invoke_capability(
+        &client,
+        "track_matte_window",
+        json!({
+            "expected_revision": tracked_revision,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "effect_id": effect_id,
+            "window_index": 4,
+        }),
+    )
+    .await;
+    assert_eq!(out_of_range.is_error, Some(true));
+    assert_eq!(
+        out_of_range.structured_content.as_ref().unwrap()["code"],
+        "matte_window_index_out_of_range"
+    );
+
+    cc7_assert_stale_revision_prose(
+        &client,
+        &core,
+        "track_matte_window",
+        json!({
+            "expected_revision": tracked_revision + 8,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "effect_id": effect_id,
+            "window_index": 0,
+        }),
+        tracked_revision,
+        tracked_revision + 8,
+    )
+    .await;
+
+    let track_arguments = |floor: i64, step: i64| {
+        json!({
+            "expected_revision": tracked_revision,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "effect_id": effect_id,
+            "window_index": 0,
+            "start_local_frame": CC7_TRACK_RANGE_START_LOCAL_FRAME,
+            "end_local_frame": CC7_TRACK_RANGE_END_LOCAL_FRAME,
+            "step_frames": step,
+            "search_radius_percent": CC7_TRACK_SEARCH_RADIUS_PERCENT,
+            "max_width": CC7_TRACK_MAX_WIDTH,
+            "minimum_confidence_basis_points": floor,
+        })
+    };
+
+    // CC7 §4(f)(1): the floor drops exactly the occluded sample.
+    let tracked = invoke_capability(
+        &client,
+        "track_matte_window",
+        track_arguments(CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS, CC7_TRACK_STEP_FRAMES),
+    )
+    .await;
+    let tracked_body = tracked.structured_content.as_ref().unwrap().clone();
+    assert_eq!(tracked.is_error, Some(false), "{tracked_body}");
+    assert_eq!(tracked_body["applied"], false, "{tracked_body}");
+    assert_eq!(
+        tracked_body["minimum_confidence_basis_points"],
+        CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS
+    );
+    // CC7 §5.1(1), R2 minor 9: the tracker publishes a prepared plan and
+    // writes nothing until it is committed.
+    assert_eq!(
+        query_document(&core),
+        graded,
+        "track_matte_window must apply nothing"
+    );
+
+    let low = tracked_body["low_confidence_samples"].as_array().unwrap();
+    let low_frames = low
+        .iter()
+        .map(|sample| sample["local_frame"].as_i64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        low_frames,
+        CC7_TRACK_EXPECTED_LOW_CONFIDENCE_FRAMES.to_vec(),
+        "only the occluded sample may drop: {tracked_body}"
+    );
+
+    let observations = tracked_body["observations"].as_array().unwrap();
+    let observed_frames = observations
+        .iter()
+        .map(|sample| sample["local_frame"].as_i64().unwrap())
+        .collect::<Vec<_>>();
+    let sample_frames = cc7_tracking_sample_frames();
+    let surviving = sample_frames
+        .iter()
+        .copied()
+        .filter(|frame| !CC7_TRACK_EXPECTED_LOW_CONFIDENCE_FRAMES.contains(frame))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed_frames, surviving,
+        "the tool's even-distribution rule gives CC7_TRACK_SAMPLE_FRAMES: {tracked_body}"
+    );
+
+    // R4-M1: the two pinned observation tables are indexed by position in
+    // `sample_frames`, so their length is asserted before either is indexed.
+    assert_eq!(
+        sample_frames.len(),
+        CC7_TRACK_OBSERVED_CENTRES_BASIS_POINTS.len()
+    );
+    assert_eq!(
+        sample_frames.len(),
+        CC7_TRACK_OBSERVED_CONFIDENCE_BASIS_POINTS.len()
+    );
+
+    // CC7 §4(f)(2): every surviving observation is within CC5's tolerance of
+    // the analytic centre — read from `observations[]`, in **layer** space.
+    let mut worst = 0_i64;
+    for sample in observations {
+        let frame = sample["local_frame"].as_i64().unwrap();
+        let index = sample_frames
+            .iter()
+            .position(|candidate| *candidate == frame)
+            .expect("every observation is a contract sample frame");
+        let analytic = CC7_TRACK_ANALYTIC_CENTRES_BASIS_POINTS[index];
+        for (axis, key) in ["center_x_basis_points", "center_y_basis_points"]
+            .into_iter()
+            .enumerate()
+        {
+            let error = (sample[key].as_i64().unwrap() - analytic[axis]).abs();
+            worst = worst.max(error);
+            assert!(
+                error <= CC7_TRACK_TOLERANCE_BASIS_POINTS,
+                "frame {frame} axis {axis} is {error} bp off the analytic centre: {sample}"
+            );
+        }
+        assert!(
+            sample["confidence_basis_points"].as_i64().unwrap()
+                >= CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS
+        );
+        // CC7 §5.1(4), R4-M1: the analytic gate above is a 200 bp tolerance and
+        // cannot see a systematic drift smaller than that.
+        // `CC7_TRACK_OBSERVED_CENTRES_BASIS_POINTS` and
+        // `CC7_TRACK_OBSERVED_CONFIDENCE_BASIS_POINTS` are compared against the
+        // live `track_matte_window` **nowhere else in the workspace** — media's
+        // containment fixture reads the table and is therefore a pure function
+        // of it — so a tracker that moved every observation 150 bp would leave
+        // both gates green. R-M8 permits these two tables as regression pins;
+        // this is where they are taken, exactly, against the shipped tracker.
+        assert_eq!(
+            [
+                sample["center_x_basis_points"].as_i64().unwrap(),
+                sample["center_y_basis_points"].as_i64().unwrap(),
+            ],
+            CC7_TRACK_OBSERVED_CENTRES_BASIS_POINTS[index],
+            "frame {frame} is not the pinned observed centre: {sample}"
+        );
+        assert_eq!(
+            sample["confidence_basis_points"].as_i64().unwrap(),
+            CC7_TRACK_OBSERVED_CONFIDENCE_BASIS_POINTS[index],
+            "frame {frame} is not the pinned observed confidence: {sample}"
+        );
+    }
+    eprintln!(
+        "CC7 (f) measured: worst raw observation error {worst} bp; occluded confidence {}",
+        low[0]["confidence_basis_points"]
+    );
+    assert!(
+        low[0]["confidence_basis_points"].as_i64().unwrap() < CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS
+    );
+    // R4-M1: the dropped sample is the eleventh row of both tables — the
+    // frozen pre-occlusion position and the confidence that fails the floor.
+    let occluded = sample_frames.len() - 1;
+    assert_eq!(
+        [
+            low[0]["center_x_basis_points"].as_i64().unwrap(),
+            low[0]["center_y_basis_points"].as_i64().unwrap(),
+        ],
+        CC7_TRACK_OBSERVED_CENTRES_BASIS_POINTS[occluded],
+        "the occluded sample is not the pinned frozen centre: {}",
+        low[0]
+    );
+    assert_eq!(
+        low[0]["confidence_basis_points"].as_i64().unwrap(),
+        CC7_TRACK_OBSERVED_CONFIDENCE_BASIS_POINTS[occluded],
+        "the occluded sample is not the pinned confidence: {}",
+        low[0]
+    );
+
+    // CC7 §4(f)(1) failing direction: the tool's own default drops nothing, so
+    // `CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS` is load-bearing.
+    let defaulted = invoke_capability(
+        &client,
+        "track_matte_window",
+        track_arguments(
+            CC7_DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS,
+            CC7_TRACK_STEP_FRAMES,
+        ),
+    )
+    .await;
+    let defaulted_body = defaulted.structured_content.as_ref().unwrap();
+    assert_eq!(defaulted.is_error, Some(false), "{defaulted_body}");
+    assert!(
+        defaulted_body["low_confidence_samples"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the 5000 default drops nothing: {defaulted_body}"
+    );
+    assert_ne!(
+        CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS,
+        CC7_DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS
+    );
+
+    // Commit the tracker's own prepared plan: `track_matte_window` publishes a
+    // `prepared_edit_plan`, not a bare operation list.
+    let plan_id = tracked_body["prepared_edit_plan"]["plan_id"].clone();
+    let committed = client
+        .call_tool(
+            CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                json!({"plan_id": plan_id, "expected_revision": tracked_revision})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        committed.is_error,
+        Some(false),
+        "{:?}",
+        committed.structured_content
+    );
+    assert_eq!(cc7_revision(&client).await, tracked_revision + 1);
+    assert_eq!(
+        query_document(&core),
+        expected,
+        "the committed document must equal cc7_canonical_operations(TrackedSecondary)"
+    );
+
+    // CC7 §4(f)(3), R4-M1: the committed curves, keyframe by keyframe, against
+    // `cc7_track_keyframe_centres(axis)` — the smoother's own output over the
+    // pinned observations. The whole-document equality above covers this as a
+    // `Document` diff; taken here by name, a tracker regression is reported as
+    // "curve X keyframe i" rather than as a two-thousand-line struct mismatch,
+    // and the derivation table gets a second, explicit live comparison.
+    let tracked_document = query_document(&core);
+    let tracked_effects = &tracked_document.tracks[0].clips[0].effects;
+    assert_eq!(tracked_effects.len(), 1, "{tracked_effects:?}");
+    for (axis, name) in CC7_F_KEYFRAMED_PARAMETERS.into_iter().enumerate() {
+        let curve = tracked_effects[0]
+            .keyframes
+            .get(name)
+            .unwrap_or_else(|| panic!("the (f) commit must write a {name} curve"));
+        let smoothed = cc7_track_keyframe_centres(axis);
+        assert_eq!(
+            curve.keyframes.len(),
+            smoothed.len(),
+            "{name} must carry one keyframe per surviving sample"
+        );
+        for (index, keyframe) in curve.keyframes.iter().enumerate() {
+            assert_eq!(
+                keyframe.at.0, CC7_TRACK_SURVIVING_SAMPLE_FRAMES[index],
+                "{name} keyframe {index} is at the wrong frame"
+            );
+            assert_eq!(
+                keyframe.value, smoothed[index],
+                "{name} keyframe {index} is not the smoother's value for the pinned observations"
+            );
+        }
+    }
+
+    // CC7 §5.1(5), R2-MAJ-2: the tracked node, re-read from
+    // `get_color_context`'s `color_nodes` manifest. The tracker writes two
+    // **curves** and no static centre, so the manifest — which reports the
+    // stored static values for this metadata-only surface
+    // (`color_status.rs:3111-3114`) — must still publish the seeded window at
+    // its neutral centre and the contract's own half extents. A manifest that
+    // silently flattened the curve into the static centre, or a commit that
+    // lost the window, fails here.
+    let context = invoke_capability(&client, "get_color_context", json!({})).await;
+    let context = context.structured_content.as_ref().unwrap();
+    let manifest_nodes = context["clips"][0]["color_nodes"].as_array().unwrap();
+    assert_eq!(manifest_nodes.len(), 1, "{context}");
+    let node = &manifest_nodes[0];
+    assert_eq!(node["kind"], "primary_correction", "{node}");
+    assert_eq!(
+        node["parameters"]["saturation_percent"], CC7_SECONDARY_SATURATION_PERCENT,
+        "{node}"
+    );
+    assert_eq!(node["matte"]["enabled"], true, "{node}");
+    assert_eq!(node["matte"]["window_count"], 1, "{node}");
+    assert_eq!(node["matte"]["qualifier"]["enabled"], false, "{node}");
+    let windows = node["matte"]["windows"].as_array().unwrap();
+    assert_eq!(windows.len(), 1, "{node}");
+    assert_eq!(
+        windows[0]["half_width_basis_points"], CC7_TRACK_SEEDED_WINDOW_HALF_WIDTH_BASIS_POINTS,
+        "{node}"
+    );
+    assert_eq!(
+        windows[0]["half_height_basis_points"], CC7_TRACK_SEEDED_WINDOW_HALF_HEIGHT_BASIS_POINTS,
+        "{node}"
+    );
+    assert_eq!(
+        windows[0]["center_x_basis_points"], CC7_TRACK_SEEDED_WINDOW_CENTRE_BASIS_POINTS[0],
+        "{node}"
+    );
+    assert_eq!(
+        windows[0]["center_y_basis_points"], CC7_TRACK_SEEDED_WINDOW_CENTRE_BASIS_POINTS[1],
+        "{node}"
+    );
+
+    // CC7 §5.2 (f): the matte is inspectable at the sampled frames it moved
+    // through. R2 minor 10: §5.2's five frames are **indexed out of**
+    // `CC7_TRACK_SAMPLE_FRAMES` rather than restated as literals — positions
+    // 0, 2, 4 and 6, plus the last surviving sample at position 9.
+    let gpu_may_skip = std::env::var("KINEWRIGHT_GPU_TESTS_MAY_SKIP")
+        .ok()
+        .as_deref()
+        == Some("1");
+    for frame in [0_usize, 2, 4, 6, 9].map(|index| sample_frames[index]) {
+        let inspect = invoke_capability(
+            &client,
+            "inspect_grade_matte",
+            json!({
+                "expected_revision": tracked_revision + 1,
+                "clip_id": CC7_SINGLE_CLIP_ID.0,
+                "effect_id": effect_id,
+                "timecode": frame,
+            }),
+        )
+        .await;
+        let body = inspect.structured_content.as_ref().unwrap();
+        if inspect.is_error == Some(true) {
+            assert!(
+                gpu_may_skip,
+                "inspect_grade_matte refused: {body}. Set KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 to \
+                 accept an unavailable matte proof on a machine with no usable adapter."
+            );
+            assert_eq!(body["code"], "matte_proof_unavailable");
+            assert_eq!(body["applied"], false);
+            eprintln!(
+                "SKIPPED: KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 and this build cannot render a matte \
+                 proof; scenario (f)'s coverage at frame {frame} was not measured."
+            );
+            continue;
+        }
+        let statistics = &body["statistics"];
+        let total = statistics["total_pixel_count"].as_u64().unwrap();
+        let covered = statistics["covered_pixel_count"].as_u64().unwrap();
+        assert!(covered > 0, "frame {frame} covered nothing: {statistics}");
+        assert!(
+            covered < total,
+            "frame {frame} covered the whole raster: {statistics}"
+        );
+    }
+
+    // CC7 §4(f)(4): (f2), the two-sample total loss.
+    let refused = invoke_capability(
+        &client,
+        "track_matte_window",
+        json!({
+            "expected_revision": tracked_revision + 1,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "effect_id": effect_id,
+            "window_index": 0,
+            "start_local_frame": CC7_TRACK_RANGE_START_LOCAL_FRAME,
+            "end_local_frame": CC7_TRACK_RANGE_END_LOCAL_FRAME,
+            "step_frames": CC7_TRACK_F2_STEP_FRAMES,
+            "search_radius_percent": CC7_TRACK_SEARCH_RADIUS_PERCENT,
+            "max_width": CC7_TRACK_MAX_WIDTH,
+            "minimum_confidence_basis_points": CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS,
+        }),
+    )
+    .await;
+    assert_eq!(refused.is_error, Some(true));
+    let refused_body = refused.structured_content.as_ref().unwrap();
+    assert_eq!(
+        refused_body["code"], "tracking_confidence_too_low",
+        "{refused_body}"
+    );
+    assert_eq!(refused_body["applied"], false, "{refused_body}");
+    assert_eq!(refused_body["evidence_only"], true, "{refused_body}");
+    let details = &refused_body["details"];
+    assert_eq!(details["field"], "minimum_confidence_basis_points");
+    assert_eq!(details["observed"]["surviving_samples"], 1, "{details}");
+    assert_eq!(
+        details["observed"]["total_samples"],
+        CC7_TRACK_F2_SAMPLE_FRAMES.len(),
+        "{details}"
+    );
+    assert_eq!(
+        details["observed"]["minimum_confidence_basis_points"],
+        CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS
+    );
+    assert_eq!(
+        details["allowed"]["minimum_surviving_samples"], CC7_MATTE_TRACK_MINIMUM_SAMPLES,
+        "{details}"
+    );
+    assert_eq!(
+        details["observed"]["low_confidence_samples"][0]["local_frame"],
+        CC7_TRACK_F2_SAMPLE_FRAMES[1]
+    );
+    assert!(
+        details["recovery_action"]
+            .as_str()
+            .is_some_and(|action| action.contains("minimum_confidence_basis_points")),
+        "{details}"
+    );
+    eprintln!(
+        "CC7 (f2) measured: occluded confidence {}",
+        details["observed"]["low_confidence_samples"][0]["confidence_basis_points"]
+    );
+
+    // CC7 §4(f)(4)'s second direction: the same call at the 5 000 default does
+    // **not** refuse, so the floor is what produced the refusal.
+    let permissive = invoke_capability(
+        &client,
+        "track_matte_window",
+        json!({
+            "expected_revision": tracked_revision + 1,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "effect_id": effect_id,
+            "window_index": 0,
+            "start_local_frame": CC7_TRACK_RANGE_START_LOCAL_FRAME,
+            "end_local_frame": CC7_TRACK_RANGE_END_LOCAL_FRAME,
+            "step_frames": CC7_TRACK_F2_STEP_FRAMES,
+            "search_radius_percent": CC7_TRACK_SEARCH_RADIUS_PERCENT,
+            "max_width": CC7_TRACK_MAX_WIDTH,
+            "minimum_confidence_basis_points":
+                CC7_DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS,
+        }),
+    )
+    .await;
+    let permissive_body = permissive.structured_content.as_ref().unwrap();
+    assert_eq!(permissive.is_error, Some(false), "{permissive_body}");
+    assert_eq!(
+        permissive_body["observations"].as_array().unwrap().len(),
+        CC7_TRACK_F2_SAMPLE_FRAMES.len(),
+        "at 5000 both (f2) samples survive: {permissive_body}"
+    );
+
+    // Nothing after the one tracked commit moved the timeline.
+    assert_eq!(cc7_revision(&client).await, tracked_revision + 1);
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// CC7 §4(f)(4), §11.2.28's agent half: the **(f2) failing direction**.
+///
+/// The identical two-sample range at the tool's own
+/// `DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS = 5 000` does **not**
+/// refuse, so `CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS` is what produced
+/// `cc7_f_tracked_secondary_drops_only_the_occluded_samples`' refusal rather
+/// than the recipe alone. Stated as its own test because a floor nobody can
+/// show is load-bearing is decoration.
+#[tokio::test(flavor = "multi_thread")]
+async fn cc7_f2_the_default_floor_does_not_refuse() {
+    let generated = cc7_tracked_source();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let revision = cc7_revision(&client).await;
+    let plan = invoke_capability(
+        &client,
+        "plan_secondary_correction",
+        json!({
+            "expected_revision": revision,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "node_kind": "primary_correction",
+            "windows": [{
+                "center_x": CC7_TRACK_SEEDED_WINDOW_CENTRE_BASIS_POINTS[0],
+                "center_y": CC7_TRACK_SEEDED_WINDOW_CENTRE_BASIS_POINTS[1],
+                "half_width": CC7_TRACK_SEEDED_WINDOW_HALF_WIDTH_BASIS_POINTS,
+                "half_height": CC7_TRACK_SEEDED_WINDOW_HALF_HEIGHT_BASIS_POINTS,
+            }],
+            "timecode": 0,
+        }),
+    )
+    .await;
+    assert_eq!(plan.is_error, Some(false), "{:?}", plan.structured_content);
+    let plan = plan.structured_content.as_ref().unwrap().clone();
+    let effect_id = plan["target_effect_id"].as_u64().unwrap();
+    let prepared = prepare_plan(&client, revision, plan["operations"].clone()).await;
+    assert_eq!(prepared.is_error, Some(false));
+    assert_eq!(
+        client
+            .call_tool(commit_request(revision, &prepared))
+            .await
+            .unwrap()
+            .is_error,
+        Some(false)
+    );
+    let tracked_revision = revision + 1;
+
+    let f2 = |floor: i64| {
+        json!({
+            "expected_revision": tracked_revision,
+            "clip_id": CC7_SINGLE_CLIP_ID.0,
+            "effect_id": effect_id,
+            "window_index": 0,
+            "start_local_frame": CC7_TRACK_RANGE_START_LOCAL_FRAME,
+            "end_local_frame": CC7_TRACK_RANGE_END_LOCAL_FRAME,
+            "step_frames": CC7_TRACK_F2_STEP_FRAMES,
+            "search_radius_percent": CC7_TRACK_SEARCH_RADIUS_PERCENT,
+            "max_width": CC7_TRACK_MAX_WIDTH,
+            "minimum_confidence_basis_points": floor,
+        })
+    };
+
+    let refused = invoke_capability(
+        &client,
+        "track_matte_window",
+        f2(CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS),
+    )
+    .await;
+    assert_eq!(refused.is_error, Some(true));
+    assert_eq!(
+        refused.structured_content.as_ref().unwrap()["code"],
+        "tracking_confidence_too_low"
+    );
+
+    let permitted = invoke_capability(
+        &client,
+        "track_matte_window",
+        f2(CC7_DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS),
+    )
+    .await;
+    let permitted_body = permitted.structured_content.as_ref().unwrap();
+    assert_eq!(permitted.is_error, Some(false), "{permitted_body}");
+    assert!(
+        permitted_body["low_confidence_samples"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the 5000 default drops neither (f2) sample: {permitted_body}"
+    );
+    assert_eq!(
+        permitted_body["observations"].as_array().unwrap().len(),
+        CC7_TRACK_F2_SAMPLE_FRAMES.len()
+    );
+
+    // Neither call moved the timeline: both are evidence-only.
+    assert_eq!(cc7_revision(&client).await, tracked_revision);
+    client.cancel().await.unwrap();
+    server.shutdown();
+}

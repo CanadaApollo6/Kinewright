@@ -295,6 +295,37 @@ regressions for text intent, semantic grouping, subject-safe presentation, and
 caption agreement with independently transcribed rendered speech. This single
 run does not satisfy the family gate.
 
+The colour workflow contract lives under
+[`benchmarks/auto-edit/v6`](../benchmarks/auto-edit/v6/README.md). It runs the
+six named colour workflows of CC7 — mixed-camera match, wrong white balance,
+log-like normalisation, product-and-skin secondary, creative look, and a tracked
+secondary through an occlusion — one model turn each. Every prompt names the
+clips and the intended outcome and never names a parameter or a value. No
+fixture bytes are checked in: every raster is authored in Rust by
+`kinewright_media::cc7_sources` and muxed FFV1 at fixture time, so the run is
+offline and deterministic. The same six scenarios are discharged objectively by
+ordinary `cargo test` fixtures that do not need this suite
+(`docs/CC7-WORKFLOW-EVALUATION.md` §4–§6). Run it with:
+
+```bash
+source ./scripts/setup-ffmpeg.sh
+KINEWRIGHT_EVAL=1 cargo run -p kinewright-agent --bin kinewright-eval -- \
+  --suite color-workflow-v6 \
+  --harness claude-code \
+  --samples 3
+```
+
+Every packaged run now writes `blind/` and `blind-key.json`. The reviewer is
+handed `blind/` alone and opens only `blind/review-form.json`; the key stays in
+the run root and `machine-report.json` is never opened before scoring. Score the
+filled-in form with `--score-review target/evals/<run>/blind/review-form.json`,
+which resolves the blind ids through the key and writes the unblinded
+`human-review.json` (schema 2, with the per-task questions). CC7's gate is 3/3
+machine passes per scenario, at least 2 of 3 outputs accepted, every question
+answered, and a mean human rating of at least 4.0/5 over the applicable
+dimensions; the scenario identity is not blinded (it is inherent in the
+question), machine provenance is.
+
 ## Seed suite
 
 | Eval | Rationale | USD ceiling |
@@ -332,3 +363,13 @@ This is the latest complete live run. Assertion failures remain part of the meas
 ### Failures
 
 - `e7 flagship rough cut`: long silence absent (observed 3 cuttable silence spans from raw spans at least 20 source frames); duration bounds (expected 178..=445 frames, observed 459)
+
+### color-workflow-v6
+
+Pending real-harness run. CI covers the suite's unit tests — construction,
+packaging, the blind-package leak test, and
+`published_v6_manifest_tracks_the_color_workflow_suite` — and spends nothing.
+`cc7_every_color_fixture_builds_a_valid_document` boots the real media engine
+and is `#[ignore]`d because that engine's process-exit teardown raises the
+known SIGSEGV; run it by hand with `--ignored`. No model result is recorded
+yet.

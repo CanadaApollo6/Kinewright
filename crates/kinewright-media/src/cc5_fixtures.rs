@@ -1081,13 +1081,13 @@ fn gpu_coverage(
 
 /// Counts of changed RGB samples on either side of a matte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ContainmentCounts {
-    inside_pixels: usize,
-    outside_pixels: usize,
-    inside_changed_pixels: usize,
-    outside_changed_pixels: usize,
-    inside_changed_samples: u64,
-    inside_samples: u64,
+pub(crate) struct ContainmentCounts {
+    pub(crate) inside_pixels: usize,
+    pub(crate) outside_pixels: usize,
+    pub(crate) inside_changed_pixels: usize,
+    pub(crate) outside_changed_pixels: usize,
+    pub(crate) inside_changed_samples: u64,
+    pub(crate) inside_samples: u64,
 }
 
 impl ContainmentCounts {
@@ -1146,7 +1146,7 @@ fn containment_counts(actual: &[f32], baseline: &[f32], inside: &[bool]) -> Cont
 }
 
 /// The CC5 §9.0 rule 7 two-sided vacuity gate.
-fn assert_matte_containment(
+pub(crate) fn assert_matte_containment(
     actual: &[f32],
     baseline: &[f32],
     inside: &[bool],

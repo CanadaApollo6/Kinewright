@@ -26,6 +26,12 @@ mod verify;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
 
+/// CC7 §3's source generators. Gated exactly as [`test_support`] is, and for
+/// the same reason: it depends on `test_support`'s `GeneratedMedia` and
+/// `run_ffmpeg`, which are themselves behind this feature.
+#[cfg(any(test, feature = "test-util"))]
+pub mod cc7_sources;
+
 #[cfg(test)]
 mod media_matrix_tests;
 
@@ -43,6 +49,9 @@ mod cc5_fixtures;
 
 #[cfg(test)]
 mod cc6_fixtures;
+
+#[cfg(test)]
+mod cc7_fixtures;
 
 #[cfg(test)]
 mod gpu_test_support;

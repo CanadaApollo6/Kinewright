@@ -1,0 +1,2598 @@
+{
+  "contract": "CC7 workflow evaluation",
+  "contract_token": "cc7_workflow_evaluation",
+  "manifest_version": 1,
+  "fixture_quality_rules": "docs/CC6-QC-AND-MANAGED-DELIVERY.md:1352-1362",
+  "scenarios": [
+    {
+      "id": "a",
+      "title": "Mixed-camera interview",
+      "clips": [
+        "A",
+        "B"
+      ],
+      "frames": 120,
+      "canonical_operations": [
+        {
+          "effect": "primary_correction",
+          "parameters": {
+            "exposure_milli_stops": 477,
+            "temperature_percent": -45,
+            "tint_percent": 6
+          }
+        }
+      ],
+      "human_question": "Does the match preserve natural and intentional differences?",
+      "person_path": "Expressible"
+    },
+    {
+      "id": "b",
+      "title": "Wrong white balance and underexposure",
+      "clips": [
+        "A",
+        "C2"
+      ],
+      "frames": 120,
+      "canonical_operations": [
+        {
+          "effect": "primary_correction",
+          "parameters": {
+            "exposure_milli_stops": 2410,
+            "temperature_percent": 100,
+            "tint_percent": -30
+          }
+        }
+      ],
+      "human_question": "Is the proposed compromise acceptable?",
+      "person_path": "Expressible"
+    },
+    {
+      "id": "c",
+      "title": "Log-like input",
+      "clips": [
+        "LogLike"
+      ],
+      "frames": 60,
+      "canonical_operations": [
+        {
+          "effect": "technical_lut",
+          "parameters": {
+            "lut_asset_id": 1
+          }
+        }
+      ],
+      "human_question": null,
+      "person_path": "Expressible"
+    },
+    {
+      "id": "d",
+      "title": "Product and skin",
+      "clips": [
+        "A"
+      ],
+      "frames": 60,
+      "canonical_operations": [
+        {
+          "effect": "primary_correction",
+          "parameters": {
+            "matte_enabled": 1,
+            "matte_hue_center_centidegrees": 35865,
+            "matte_hue_softness_centidegrees": 1000,
+            "matte_hue_width_centidegrees": 1500,
+            "matte_luma_high_basis_points": 3513,
+            "matte_luma_low_basis_points": 1513,
+            "matte_luma_softness_basis_points": 1000,
+            "matte_qualifier_enabled": 1,
+            "matte_saturation_high_basis_points": 9728,
+            "matte_saturation_low_basis_points": 7728,
+            "matte_saturation_softness_basis_points": 1000,
+            "saturation_percent": 40
+          }
+        }
+      ],
+      "human_question": "Does attention remain on the intended subject?",
+      "person_path": "Expressible"
+    },
+    {
+      "id": "e",
+      "title": "Creative look",
+      "clips": [
+        "A"
+      ],
+      "frames": 60,
+      "canonical_operations": [
+        {
+          "effect": "creative_look",
+          "parameters": {
+            "lut_asset_id": 1
+          }
+        }
+      ],
+      "human_question": "Does the look support the story?",
+      "person_path": "Expressible"
+    },
+    {
+      "id": "f",
+      "title": "Tracked secondary",
+      "clips": [
+        "Tracked"
+      ],
+      "frames": 100,
+      "canonical_operations": [
+        {
+          "effect": "primary_correction",
+          "parameters": {
+            "matte_enabled": 1,
+            "matte_window0_half_height_basis_points": 667,
+            "matte_window0_half_width_basis_points": 375,
+            "matte_window_count": 1,
+            "saturation_percent": 40
+          }
+        }
+      ],
+      "human_question": "Are any visible corrections distracting?",
+      "person_path": "NotApplicable"
+    }
+  ],
+  "raster": {
+    "size": [
+      320,
+      180
+    ],
+    "fps": 25,
+    "frames": {
+      "base_scene": 60,
+      "tracked": 100
+    },
+    "basis_point_rule": "start_bp = ceil(p0 * 10000 / E); end_bp = floor(p1 * 10000 / E); width_bp = end_bp - start_bp. NormalizedRoi::to_pixels floors the start and ceils the exclusive end, so the ceiled start is load-bearing: the naive deep_shadow y of 4222 resolves to y 75, h 17 = 204 pixels.",
+    "regions": [
+      {
+        "name": "neutral_ramp_band",
+        "pixel_rect": [
+          0,
+          0,
+          320,
+          20
+        ],
+        "roi": [
+          0,
+          0,
+          10000,
+          1111
+        ]
+      },
+      {
+        "name": "achromatic_chart_band",
+        "pixel_rect": [
+          0,
+          36,
+          96,
+          16
+        ],
+        "roi": [
+          0,
+          2000,
+          3000,
+          888
+        ]
+      },
+      {
+        "name": "primaries_band",
+        "pixel_rect": [
+          0,
+          56,
+          40,
+          16
+        ],
+        "roi": [
+          0,
+          3112,
+          1250,
+          888
+        ]
+      },
+      {
+        "name": "patch_row",
+        "pixel_rect": [
+          0,
+          76,
+          84,
+          16
+        ],
+        "roi": [
+          0,
+          4223,
+          2625,
+          888
+        ]
+      },
+      {
+        "name": "skin_band",
+        "pixel_rect": [
+          0,
+          76,
+          48,
+          16
+        ],
+        "roi": [
+          0,
+          4223,
+          1500,
+          888
+        ]
+      },
+      {
+        "name": "product_red",
+        "pixel_rect": [
+          48,
+          76,
+          12,
+          16
+        ],
+        "roi": [
+          1500,
+          4223,
+          375,
+          888
+        ]
+      },
+      {
+        "name": "deep_shadow",
+        "pixel_rect": [
+          72,
+          76,
+          12,
+          16
+        ],
+        "roi": [
+          2250,
+          4223,
+          375,
+          888
+        ]
+      },
+      {
+        "name": "d2_window",
+        "centre_basis_points": [
+          1687,
+          4666
+        ],
+        "half_extents_basis_points": [
+          187,
+          444
+        ],
+        "feather_basis_points": 1000
+      }
+    ],
+    "populations": {
+      "neutral_ramp_band": 6400,
+      "achromatic_chart_band": 1536,
+      "primaries_band": 640,
+      "patch_row": 1344,
+      "surround": 47680
+    },
+    "population_total": 57600,
+    "a1_guard": {
+      "chart_is_achromatic": true,
+      "pure_red_primary_present": false,
+      "qualifier_hue_distance_to_nearest_primary_centidegrees": 6000,
+      "asserted_by": "cc7_the_chart_band_is_achromatic_and_the_primaries_band_has_no_red"
+    },
+    "luma_percentiles": {
+      "a": {
+        "frame": 60,
+        "unit": "sixteen_bit_code",
+        "first": 2827,
+        "median": 29041,
+        "ninety_ninth": 61680
+      },
+      "b": {
+        "frame": 60,
+        "unit": "sixteen_bit_code",
+        "first": 3341,
+        "median": 28527,
+        "ninety_ninth": 60138
+      },
+      "c": {
+        "frame": 0,
+        "unit": "sixteen_bit_code",
+        "first": 2827,
+        "median": 29812,
+        "ninety_ninth": 61937
+      },
+      "d": {
+        "frame": 0,
+        "unit": "sixteen_bit_code",
+        "first": 2570,
+        "median": 29555,
+        "ninety_ninth": 62194
+      },
+      "e": {
+        "frame": 0,
+        "unit": "sixteen_bit_code",
+        "first": 771,
+        "median": 29555,
+        "ninety_ninth": 64507
+      },
+      "f": {
+        "frame": 0,
+        "unit": "sixteen_bit_code",
+        "first": 14649,
+        "median": 29555,
+        "ninety_ninth": 29555
+      }
+    }
+  },
+  "patches": {
+    "chart": [
+      0,
+      11,
+      24,
+      48,
+      72,
+      104,
+      128,
+      152,
+      180,
+      208,
+      242,
+      255
+    ],
+    "primaries": [
+      [
+        0,
+        255,
+        0
+      ],
+      [
+        0,
+        0,
+        255
+      ],
+      [
+        0,
+        255,
+        255
+      ],
+      [
+        255,
+        0,
+        255
+      ],
+      [
+        255,
+        255,
+        0
+      ]
+    ],
+    "cam_a": [
+      [
+        217,
+        173,
+        153
+      ],
+      [
+        184,
+        135,
+        112
+      ],
+      [
+        140,
+        97,
+        77
+      ],
+      [
+        82,
+        51,
+        38
+      ],
+      [
+        204,
+        26,
+        31
+      ],
+      [
+        26,
+        166,
+        191
+      ],
+      [
+        13,
+        13,
+        13
+      ]
+    ],
+    "row_names": [
+      "skin_light",
+      "skin_medium",
+      "skin_tan",
+      "skin_deep",
+      "product_red",
+      "product_cyan",
+      "deep_shadow"
+    ],
+    "cameras": {
+      "b": {
+        "0": [
+          0,
+          0,
+          0
+        ],
+        "11": [
+          8,
+          8,
+          7
+        ],
+        "104": [
+          88,
+          85,
+          83
+        ],
+        "180": [
+          154,
+          150,
+          146
+        ],
+        "242": [
+          209,
+          204,
+          198
+        ],
+        "255": [
+          220,
+          215,
+          209
+        ],
+        "deep_shadow": [
+          10,
+          9,
+          9
+        ]
+      },
+      "c1": {
+        "0": [
+          0,
+          0,
+          0
+        ],
+        "11": [
+          4,
+          4,
+          4
+        ],
+        "104": [
+          53,
+          56,
+          59
+        ],
+        "180": [
+          99,
+          103,
+          108
+        ],
+        "242": [
+          136,
+          142,
+          148
+        ],
+        "255": [
+          144,
+          150,
+          156
+        ],
+        "deep_shadow": [
+          4,
+          5,
+          5
+        ]
+      },
+      "c2": {
+        "0": [
+          0,
+          0,
+          0
+        ],
+        "11": [
+          2,
+          2,
+          2
+        ],
+        "104": [
+          28,
+          34,
+          40
+        ],
+        "180": [
+          60,
+          69,
+          79
+        ],
+        "242": [
+          86,
+          97,
+          110
+        ],
+        "255": [
+          91,
+          103,
+          117
+        ],
+        "deep_shadow": [
+          2,
+          2,
+          3
+        ]
+      }
+    },
+    "qualifier": {
+      "sample_roi": [
+        1500,
+        4223,
+        375,
+        888
+      ],
+      "hue_median_centidegrees": 35865,
+      "saturation_p10_basis_points": 8728,
+      "saturation_p90_basis_points": 8728,
+      "luma_p10_basis_points": 2513,
+      "luma_p90_basis_points": 2513,
+      "derived": {
+        "matte_hue_center_centidegrees": 35865,
+        "matte_hue_width_centidegrees": 1500,
+        "matte_hue_softness_centidegrees": 1000,
+        "matte_saturation_low_basis_points": 7728,
+        "matte_saturation_high_basis_points": 9728,
+        "matte_saturation_softness_basis_points": 1000,
+        "matte_luma_low_basis_points": 1513,
+        "matte_luma_high_basis_points": 3513,
+        "matte_luma_softness_basis_points": 1000
+      }
+    }
+  },
+  "log": {
+    "curve": {
+      "offset_stops": 8,
+      "span_stops": 12,
+      "anchors": {
+        "unity_millionths": 666667,
+        "unity_code": 170,
+        "mid_grey_millionths": 460506,
+        "mid_grey_code": 117
+      },
+      "stored_codes": [
+        0,
+        28,
+        52,
+        79,
+        98,
+        117,
+        129,
+        139,
+        149,
+        157,
+        167,
+        170
+      ],
+      "row_codes": [
+        [
+          160,
+          147,
+          139
+        ],
+        [
+          150,
+          132,
+          121
+        ],
+        [
+          134,
+          113,
+          101
+        ],
+        [
+          104,
+          81,
+          69
+        ],
+        [
+          156,
+          54,
+          60
+        ],
+        [
+          54,
+          144,
+          152
+        ],
+        [
+          32,
+          32,
+          32
+        ]
+      ],
+      "surround_code": 123
+    },
+    "round_trip": {
+      "inverse_codes": [
+        4,
+        11,
+        24,
+        48,
+        72,
+        103,
+        128,
+        153,
+        181,
+        206,
+        243,
+        255
+      ],
+      "error_codes": [
+        4,
+        0,
+        0,
+        0,
+        0,
+        -1,
+        0,
+        1,
+        1,
+        -2,
+        1,
+        0
+      ],
+      "structural_floors": {
+        "black_patch_code": 4,
+        "saturated_primary_code": 5
+      }
+    },
+    "signature": {
+      "field": "scope_statistics.luma",
+      "unit": "sixteen_bit_code",
+      "scale": 257,
+      "first_percentile_min": 5140,
+      "p99_max": 51400,
+      "eight_bit_prose": [
+        20,
+        200
+      ],
+      "carrier": [
+        7196,
+        31611,
+        42919
+      ],
+      "cam_a": [
+        2570,
+        29555,
+        62194
+      ],
+      "wrong_field": "mean_code_values.luma"
+    },
+    "cube_size": 65,
+    "size_is_pinned_not_selected": true,
+    "cube_size_ladder": {
+      "17": 13,
+      "33": 7,
+      "65": 4
+    },
+    "cube_size_ladder_measured_on_the_production_monitor_proof": {
+      "17": 14,
+      "33": 7,
+      "65": 4
+    },
+    "cube_size_ladder_monotone_non_increasing": true,
+    "cube_bytes": 7414990,
+    "cube_bytes_by_size": {
+      "17": 132766,
+      "33": 970414,
+      "65": 7414990
+    },
+    "identity_cube_worst": 85,
+    "identity_cube_chart06": 1,
+    "black_patch_code": 4,
+    "primary_code_not_gated": 5,
+    "cube_title": "CC7 log inverse",
+    "clamp_kept": true
+  },
+  "tracking": {
+    "path_formula": "x(f) = round(148 + 100 sin(2 pi f / 100)); y(f) = round(78 + 40 sin(2 pi f / 100))",
+    "amplitudes": [
+      100,
+      40
+    ],
+    "square_size": 24,
+    "occlusion_frames": [
+      43,
+      47
+    ],
+    "range": [
+      0,
+      48
+    ],
+    "step_frames": 5,
+    "search_radius_percent": 10,
+    "max_width": 256,
+    "sample_frames": [
+      0,
+      4,
+      9,
+      14,
+      18,
+      23,
+      28,
+      32,
+      37,
+      42,
+      47
+    ],
+    "expected_low_confidence_frames": [
+      47
+    ],
+    "analytic_centres_basis_points": [
+      [
+        5000,
+        5000
+      ],
+      [
+        5781,
+        5556
+      ],
+      [
+        6688,
+        6167
+      ],
+      [
+        7406,
+        6722
+      ],
+      [
+        7813,
+        7000
+      ],
+      [
+        8094,
+        7222
+      ],
+      [
+        8063,
+        7167
+      ],
+      [
+        7813,
+        7000
+      ],
+      [
+        7281,
+        6611
+      ],
+      [
+        6500,
+        6056
+      ],
+      [
+        5594,
+        5389
+      ]
+    ],
+    "seeded_window_half_sizes_basis_points": [
+      375,
+      667
+    ],
+    "containment_window_half_sizes_basis_points": [
+      563,
+      1000
+    ],
+    "confidence_floor": 8500,
+    "occluded_confidence_max": 7411,
+    "clean_confidence_min": 9740,
+    "worst_raw_observation_error_basis_points": 49,
+    "containment_required_half_extents_pixels_hundredths": [
+      1478,
+      1288
+    ],
+    "containment_required_half_extents_measured_hundredths": [
+      1478,
+      1288
+    ],
+    "containment_worst_margin_pixels_hundredths": [
+      323,
+      511
+    ],
+    "containment_worst_margin_measured_hundredths": [
+      324,
+      512
+    ],
+    "seeded_window_shortfall_pixels_hundredths": 278,
+    "final_keyframe_lag_basis_points": 746,
+    "f2": {
+      "range": [
+        0,
+        48
+      ],
+      "step_frames": 47,
+      "samples": [
+        0,
+        47
+      ],
+      "occluded_confidence": 7309
+    },
+    "no_re_acquisition_drift_basis_points": 5176,
+    "radius_10_and_25_identical": true,
+    "owner": "kinewright-agent"
+  },
+  "transcriptions": {
+    "functions": [
+      "encode_bt709",
+      "decode_display709",
+      "grade709_decode"
+    ],
+    "owner": "crates/kinewright-media/src/color_pipeline.rs",
+    "transcribed_in": "crates/kinewright-core/src/cc7_scenarios.rs",
+    "contract_section": "CC7 2.7 (R-M2)",
+    "tolerance": 1e-06,
+    "sweep": {
+      "low": -2.0,
+      "high": 2.0,
+      "step": 0.000244140625,
+      "samples_compared": 49515
+    },
+    "worst_error": 8.569286409354504e-07,
+    "cross_checked_by": "cc7_core_transcriptions_agree_with_the_pipeline"
+  },
+  "thresholds": {
+    "cc7_match_neutral_spread_max_code": 5,
+    "cc7_b1_residual_spread_max_code": 6,
+    "cc7_match_luma_mean_max_code_millionths": 5000000,
+    "cc7_log_first_percentile_min_code16": 5140,
+    "cc7_log_p99_max_code16": 51400,
+    "cc7_log_inverse_max_code": 12,
+    "cc7_log_cube_size": 65,
+    "cc7_feather_partial_tolerance_pixels": 4,
+    "cc7_look_deep_shadow_out_of_gamut_pixels": 192,
+    "cc7_track_min_confidence_basis_points": 8500,
+    "cc7_track_tolerance_basis_points": 200,
+    "cc7_track_range_end_local_frame": 48,
+    "cc7_track_f2_step_frames": 47,
+    "cc7_unrecoverable_residual_spread_reported_code": 19,
+    "cc7_c2_skin_in_band_reported_basis_points": 10000,
+    "cc7_c2_over_range_pixels_reported": 672,
+    "cc7_c2_over_range_basis_points_reported": 116,
+    "cc7_warm_whole_raster_out_of_gamut_pixels_reported": 1480,
+    "cc7_warm_whole_raster_out_of_gamut_basis_points": 256,
+    "cc7_log_black_patch_reported_code": 4,
+    "cc7_log_primary_reported_code": 5,
+    "cc7_log_identity_cube_reported_code": 85,
+    "cc7_log_cube_bytes_reported": 7414990,
+    "cc7_track_occluded_confidence_max_reported": 7411,
+    "cc7_track_clean_confidence_min_reported": 9740,
+    "cc7_track_occluded_confidence_on_the_recipe_reported": 7349,
+    "cc7_track_f2_occluded_confidence_reported": 7309,
+    "cc7_track_worst_raw_observation_error_basis_points_reported": 49,
+    "cc7_track_final_keyframe_lag_basis_points_reported": 746,
+    "cc7_track_no_reacquisition_drift_basis_points": 5176,
+    "cc7_d2_continuous_area_wrong_model_pixels_tenths": 768,
+    "cc7_source_width": 320,
+    "cc7_source_height": 180,
+    "cc7_source_fps": 25,
+    "cc7_source_frames": 60,
+    "cc7_track_frames": 100,
+    "cc7_surround_code": 115,
+    "cc7_chart_patch_width": 8,
+    "cc7_row_patch_width": 12,
+    "cc7_chart_patch_pixels": 128,
+    "cc7_primary_patch_count": 5,
+    "cc7_chart_patch_count": 12,
+    "cc7_row_patch_pixels": 192,
+    "cc7_product_patch_pixel_count": 192,
+    "cc7_track_square_size": 24,
+    "cc7_track_step_frames": 5,
+    "cc7_track_search_radius_percent": 10,
+    "cc7_track_max_width": 256,
+    "cc7_track_occlusion_first_frame": 43,
+    "cc7_track_occlusion_last_frame": 47,
+    "cc7_track_centre_x_pixels": 148,
+    "cc7_track_amplitude_x_pixels": 100,
+    "cc7_track_centre_y_pixels": 78,
+    "cc7_track_amplitude_y_pixels": 40,
+    "cc7_track_lagging_final_keyframe": 42,
+    "cc7_track_seeded_window_half_width_basis_points": 375,
+    "cc7_track_seeded_window_half_height_basis_points": 667,
+    "cc7_track_window_half_width_basis_points": 563,
+    "cc7_track_window_half_height_basis_points": 1000,
+    "cc7_track_containment_required_half_width_pixels_reported": 1478,
+    "cc7_track_containment_required_half_height_pixels_reported": 1288,
+    "cc7_track_containment_worst_margin_x_pixels_hundredths": 323,
+    "cc7_track_containment_worst_margin_y_pixels_hundredths": 511,
+    "cc7_track_confidence_separation_min_basis_points": 1000,
+    "cc7_feather_basis_points": 1000,
+    "cc7_secondary_saturation_percent": 40,
+    "cc7_look_mix_basis_points": 10000,
+    "cc7_log_offset_stops": 8,
+    "cc7_log_span_stops": 12,
+    "cc7_log_floor_linear_millionths": 3906,
+    "cc7_look_blue_zero_crossing_display709_millionths": 74074,
+    "cc7_look_blue_zero_crossing_linear_millionths": 16461,
+    "cc7_skin_in_band_exact_basis_points": 10000,
+    "cc7_matte_outside_changed_pixels_max": 0,
+    "cc7_delivery_leg_budget_seconds_linux": 90,
+    "cc7_scope_sixteen_bit_scale": 257,
+    "cc7_log_first_percentile_min_code8_prose": 20,
+    "cc7_log_p99_max_code8_prose": 200,
+    "cc7_matte_sample_hue_width_centidegrees": 1500,
+    "cc7_matte_sample_softness": 1000,
+    "cc7_matte_sample_band_margin_basis_points": 1000,
+    "cc7_product_sample_hue_median_centidegrees": 35865,
+    "cc7_product_sample_saturation_basis_points": 8728,
+    "cc7_product_sample_luma_basis_points": 2513
+  },
+  "thresholds_distinctness": {
+    "asserted_by": "cc7_budgets_are_distinct_from_every_neighbouring_constant",
+    "track_min_confidence_is_not_the_default": true,
+    "neighbours": [
+      "MONITOR_CPU_GPU_MAX",
+      "DELIVERY_CODEC_MAX",
+      "MATTE_TRACK_MAX_STEP_BASIS_POINTS",
+      "DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS"
+    ],
+    "note": "MATTE_TRACK_DEAD_ZONE_BASIS_POINTS is 0, so distinctness from it is trivially true for every positive constant and CC7 does not assert it (minor 4)."
+  },
+  "delivery_allowed_info_codes": [
+    "delivery_tag_not_representable"
+  ],
+  "budgets": {
+    "terms": {
+      "neutral spread, matched cam B": {
+        "constant": "CC7_MATCH_NEUTRAL_SPREAD_MAX_CODE",
+        "budget": 5,
+        "measured": 2,
+        "margin": 2.5
+      },
+      "(b1) residual spread": {
+        "constant": "CC7_B1_RESIDUAL_SPREAD_MAX_CODE",
+        "budget": 6,
+        "measured": 3,
+        "margin": 2.0,
+        "note": "the (b1) row has its own budget, one code above the (a) match budget: the corrected C1 document measures 3 on the amended twelve-patch band, a 1.67x margin against 5 but a 2.0x margin against 6. CC7_MATCH_NEUTRAL_SPREAD_MAX_CODE could not be widened to 6, because 6 is exactly what unmatched cam B measures and a shared budget would admit (a)'s own failing direction (A15). Ruling recorded as Implementer G's resolution of erratum C-E7."
+      },
+      "chart luma mean delta": {
+        "constant": "CC7_MATCH_LUMA_MEAN_MAX_CODE_MILLIONTHS",
+        "budget": 5000000,
+        "measured": -1381567,
+        "margin": 3.6191
+      },
+      "log first percentile (floor), 16-bit": {
+        "constant": "CC7_LOG_FIRST_PERCENTILE_MIN_CODE16",
+        "budget": 5140,
+        "measured": 7196,
+        "margin": 2056
+      },
+      "log 99th percentile (ceiling), 16-bit": {
+        "constant": "CC7_LOG_P99_MAX_CODE16",
+        "budget": 51400,
+        "measured": 42919,
+        "margin": 8481
+      },
+      "log inverse patch error (set-wide)": {
+        "constant": "CC7_LOG_INVERSE_MAX_CODE",
+        "budget": 12,
+        "measured": 4,
+        "margin": 3.0
+      },
+      "feather counts": {
+        "constant": "CC7_FEATHER_PARTIAL_TOLERANCE_PIXELS",
+        "budget": 4,
+        "measured": 0,
+        "margin": "infinite (measured exactly zero)"
+      },
+      "deep-shadow gamut count": {
+        "constant": "CC7_LOOK_DEEP_SHADOW_OUT_OF_GAMUT_PIXELS",
+        "budget": 192,
+        "measured": 192,
+        "margin": "exact"
+      },
+      "delivery, 8-bit luma max": {
+        "constant": "DELIVERY_LUMA_MAX_CODE_8BIT",
+        "budget": 8,
+        "measured": 2,
+        "margin": 4.0
+      },
+      "delivery, 8-bit luma P99": {
+        "constant": "DELIVERY_LUMA_P99_CODE_8BIT_MILLIONTHS",
+        "budget": 3000000,
+        "measured": 1000000,
+        "margin": 3.0
+      },
+      "delivery, 8-bit luma mean": {
+        "constant": "DELIVERY_LUMA_MEAN_CODE_8BIT_MILLIONTHS",
+        "budget": 400000,
+        "measured": 377538,
+        "margin": 1.0595,
+        "kind": "RecordedMargin",
+        "note": "re-pinned from probe-1's pre-A1 185 059 to the worst per-scenario amended-scene measurement, 377 538 on (e): a 1.06x margin against a CC6 constant CC7 must not move (Implementer C erratum C-E8, review R4-M2). This is the one row that does not clear the 2x bar, so Cc7BudgetKind::RecordedMargin records the margin instead of asserting a ratio the slice does not have; cc7_every_budget_carries_the_declared_margin asserts that classification in both directions."
+      },
+      "delivery, 8-bit RGB mean": {
+        "constant": "DELIVERY_RGB_MEAN_CODE_8BIT_MILLIONTHS",
+        "budget": 1750000,
+        "measured": 855810,
+        "margin": 2.0448,
+        "note": "re-pinned from probe-1's pre-A1 499 781 to the worst per-scenario amended-scene measurement, 855 810 on (e). It still clears the 2x bar, by 2.2 percent of the budget, so it stays a ratio row (R4-M2)."
+      },
+      "delivery, 8-bit PSNR": {
+        "constant": "DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_8BIT",
+        "budget": 3300,
+        "measured": 4059,
+        "margin": 759,
+        "note": "re-pinned from probe-1's pre-A1 4 148 to the worst per-scenario amended-scene measurement, 4 059 on (e). A floor row: the margin is a code distance, never a ratio (R4-M2)."
+      },
+      "delivery, 10-bit luma max": {
+        "constant": "DELIVERY_LUMA_MAX_CODE_10BIT",
+        "budget": 16,
+        "measured": 1,
+        "margin": 16.0
+      },
+      "delivery, 10-bit luma P99": {
+        "constant": "DELIVERY_LUMA_P99_CODE_10BIT_MILLIONTHS",
+        "budget": 4000000,
+        "measured": 0,
+        "margin": "infinite (measured exactly zero)"
+      },
+      "delivery, 10-bit luma mean": {
+        "constant": "DELIVERY_LUMA_MEAN_CODE_10BIT_MILLIONTHS",
+        "budget": 1000000,
+        "measured": 347,
+        "margin": 2881.8444,
+        "note": "re-pinned from probe-1's pre-A1 972 to the worst per-scenario amended-scene measurement, 347 on (e) (R4-M2)."
+      },
+      "delivery, 10-bit RGB mean": {
+        "constant": "DELIVERY_RGB_MEAN_CODE_10BIT_MILLIONTHS",
+        "budget": 1000000,
+        "measured": 385514,
+        "margin": 2.5939,
+        "note": "re-pinned from probe-1's pre-A1 199 455 to the worst per-scenario amended-scene measurement, 385 514 on (e), a 2.59x margin (R4-M2)."
+      }
+    },
+    "delivery": {
+      "a": {
+        "eight_bit": {
+          "sample_frames": [
+            0,
+            29,
+            59,
+            89,
+            119
+          ],
+          "luma_max_code": {
+            "budget": 8,
+            "measured": 2,
+            "margin": 4.0
+          },
+          "luma_p99_code_millionths": {
+            "budget": 3000000,
+            "measured": 1000000,
+            "margin": 3.0
+          },
+          "luma_mean_code_millionths": {
+            "budget": 400000,
+            "measured": 18677,
+            "margin": 21.4167
+          },
+          "rgb_mean_code_millionths": {
+            "budget": 1750000,
+            "measured": 402050,
+            "margin": 4.3527
+          },
+          "psnr_db_hundredths": {
+            "budget": 3300,
+            "measured": 4204,
+            "margin": 904
+          },
+          "reported_not_gated": {
+            "rgb_max_code": 62,
+            "rgb_p99_code_millionths": 3000000,
+            "red_mean_code_millionths": 243559,
+            "green_mean_code_millionths": 98733,
+            "blue_mean_code_millionths": 863858
+          },
+          "export_seconds": 6.568,
+          "verify_seconds": 0.426
+        },
+        "ten_bit": {
+          "sample_frames": [
+            0,
+            29,
+            59,
+            89,
+            119
+          ],
+          "luma_max_code": {
+            "budget": 16,
+            "measured": 1,
+            "margin": 16.0
+          },
+          "luma_p99_code_millionths": {
+            "budget": 4000000,
+            "measured": 0,
+            "margin": "infinite (measured exactly zero)"
+          },
+          "luma_mean_code_millionths": {
+            "budget": 1000000,
+            "measured": 278,
+            "margin": 3597.1223
+          },
+          "rgb_mean_code_millionths": {
+            "budget": 1000000,
+            "measured": 233488,
+            "margin": 4.2829
+          },
+          "psnr_db_hundredths": {
+            "budget": 3300,
+            "measured": 4239,
+            "margin": 939
+          },
+          "reported_not_gated": {
+            "rgb_max_code": 242,
+            "rgb_p99_code_millionths": 9000000,
+            "red_mean_code_millionths": 275973,
+            "green_mean_code_millionths": 146305,
+            "blue_mean_code_millionths": 278186
+          },
+          "export_seconds": 6.555,
+          "verify_seconds": 0.425
+        }
+      },
+      "b": {
+        "eight_bit": {
+          "sample_frames": [
+            0,
+            29,
+            59,
+            89,
+            119
+          ],
+          "luma_max_code": {
+            "budget": 8,
+            "measured": 2,
+            "margin": 4.0
+          },
+          "luma_p99_code_millionths": {
+            "budget": 3000000,
+            "measured": 1000000,
+            "margin": 3.0
+          },
+          "luma_mean_code_millionths": {
+            "budget": 400000,
+            "measured": 38177,
+            "margin": 10.4775
+          },
+          "rgb_mean_code_millionths": {
+            "budget": 1750000,
+            "measured": 458622,
+            "margin": 3.8158
+          },
+          "psnr_db_hundredths": {
+            "budget": 3300,
+            "measured": 4129,
+            "margin": 829
+          },
+          "reported_not_gated": {
+            "rgb_max_code": 62,
+            "rgb_p99_code_millionths": 3000000,
+            "red_mean_code_millionths": 453472,
+            "green_mean_code_millionths": 132420,
+            "blue_mean_code_millionths": 789972
+          },
+          "export_seconds": 6.455,
+          "verify_seconds": 0.427
+        },
+        "ten_bit": {
+          "sample_frames": [
+            0,
+            29,
+            59,
+            89,
+            119
+          ],
+          "luma_max_code": {
+            "budget": 16,
+            "measured": 1,
+            "margin": 16.0
+          },
+          "luma_p99_code_millionths": {
+            "budget": 4000000,
+            "measured": 0,
+            "margin": "infinite (measured exactly zero)"
+          },
+          "luma_mean_code_millionths": {
+            "budget": 1000000,
+            "measured": 278,
+            "margin": 3597.1223
+          },
+          "rgb_mean_code_millionths": {
+            "budget": 1000000,
+            "measured": 181593,
+            "margin": 5.5068
+          },
+          "psnr_db_hundredths": {
+            "budget": 3300,
+            "measured": 4165,
+            "margin": 865
+          },
+          "reported_not_gated": {
+            "rgb_max_code": 242,
+            "rgb_p99_code_millionths": 11000000,
+            "red_mean_code_millionths": 230000,
+            "green_mean_code_millionths": 78049,
+            "blue_mean_code_millionths": 236728
+          },
+          "export_seconds": 6.511,
+          "verify_seconds": 0.424
+        }
+      },
+      "c": {
+        "eight_bit": {
+          "sample_frames": [
+            0,
+            14,
+            29,
+            44,
+            59
+          ],
+          "luma_max_code": {
+            "budget": 8,
+            "measured": 1,
+            "margin": 8.0
+          },
+          "luma_p99_code_millionths": {
+            "budget": 3000000,
+            "measured": 1000000,
+            "margin": 3.0
+          },
+          "luma_mean_code_millionths": {
+            "budget": 400000,
+            "measured": 195351,
+            "margin": 2.0476
+          },
+          "rgb_mean_code_millionths": {
+            "budget": 1750000,
+            "measured": 512581,
+            "margin": 3.4141
+          },
+          "psnr_db_hundredths": {
+            "budget": 3300,
+            "measured": 4126,
+            "margin": 826
+          },
+          "reported_not_gated": {
+            "rgb_max_code": 61,
+            "rgb_p99_code_millionths": 3000000,
+            "red_mean_code_millionths": 444010,
+            "green_mean_code_millionths": 293538,
+            "blue_mean_code_millionths": 800194
+          },
+          "export_seconds": 3.339,
+          "verify_seconds": 0.473
+        },
+        "ten_bit": {
+          "sample_frames": [
+            0,
+            14,
+            29,
+            44,
+            59
+          ],
+          "luma_max_code": {
+            "budget": 16,
+            "measured": 0,
+            "margin": "infinite (measured exactly zero)"
+          },
+          "luma_p99_code_millionths": {
+            "budget": 4000000,
+            "measured": 0,
+            "margin": "infinite (measured exactly zero)"
+          },
+          "luma_mean_code_millionths": {
+            "budget": 1000000,
+            "measured": 0,
+            "margin": "infinite (measured exactly zero)"
+          },
+          "rgb_mean_code_millionths": {
+            "budget": 1000000,
+            "measured": 169867,
+            "margin": 5.887
+          },
+          "psnr_db_hundredths": {
+            "budget": 3300,
+            "measured": 4172,
+            "margin": 872
+          },
+          "reported_not_gated": {
+            "rgb_max_code": 238,
+            "rgb_p99_code_millionths": 12000000,
+            "red_mean_code_millionths": 219146,
+            "green_mean_code_millionths": 77644,
+            "blue_mean_code_millionths": 212813
+          },
+          "export_seconds": 3.45,
+          "verify_seconds": 0.48
+        }
+      },
+      "d": {
+        "eight_bit": {
+          "sample_frames": [
+            0,
+            14,
+            29,
+            44,
+            59
+          ],
+          "luma_max_code": {
+            "budget": 8,
+            "measured": 1,
+            "margin": 8.0
+          },
+          "luma_p99_code_millionths": {
+            "budget": 3000000,
+            "measured": 0,
+            "margin": "infinite (measured exactly zero)"
+          },
+          "luma_mean_code_millionths": {
+            "budget": 400000,
+            "measured": 3108,
+            "margin": 128.7001
+          },
+          "rgb_mean_code_millionths": {
+            "budget": 1750000,
+            "measured": 349950,
+            "margin": 5.0007
+          },
+          "psnr_db_hundredths": {
+            "budget": 3300,
+            "measured": 4103,
+            "margin": 803
+          },
+          "reported_not_gated": {
+            "rgb_max_code": 62,
+            "rgb_p99_code_millionths": 2000000,
+            "red_mean_code_millionths": 234490,
+            "green_mean_code_millionths": 84229,
+            "blue_mean_code_millionths": 731132
+          },
+          "export_seconds": 3.284,
+          "verify_seconds": 0.419
+        },
+        "ten_bit": {
+          "sample_frames": [
+            0,
+            14,
+            29,
+            44,
+            59
+          ],
+          "luma_max_code": {
+            "budget": 16,
+            "measured": 0,
+            "margin": "infinite (measured exactly zero)"
+          },
+          "luma_p99_code_millionths": {
+            "budget": 4000000,
+            "measured": 0,
+            "margin": "infinite (measured exactly zero)"
+          },
+          "luma_mean_code_millionths": {
+            "budget": 1000000,
+            "measured": 0,
+            "margin": "infinite (measured exactly zero)"
+          },
+          "rgb_mean_code_millionths": {
+            "budget": 1000000,
+            "measured": 162161,
+            "margin": 6.1667
+          },
+          "psnr_db_hundredths": {
+            "budget": 3300,
+            "measured": 4130,
+            "margin": 830
+          },
+          "reported_not_gated": {
+            "rgb_max_code": 242,
+            "rgb_p99_code_millionths": 9000000,
+            "red_mean_code_millionths": 215524,
+            "green_mean_code_millionths": 68212,
+            "blue_mean_code_millionths": 202747
+          },
+          "export_seconds": 3.257,
+          "verify_seconds": 0.427
+        }
+      },
+      "e": {
+        "eight_bit": {
+          "sample_frames": [
+            0,
+            14,
+            29,
+            44,
+            59
+          ],
+          "luma_max_code": {
+            "budget": 8,
+            "measured": 2,
+            "margin": 4.0
+          },
+          "luma_p99_code_millionths": {
+            "budget": 3000000,
+            "measured": 1000000,
+            "margin": 3.0
+          },
+          "luma_mean_code_millionths": {
+            "budget": 400000,
+            "measured": 377538,
+            "margin": 1.0595
+          },
+          "rgb_mean_code_millionths": {
+            "budget": 1750000,
+            "measured": 855810,
+            "margin": 2.0448
+          },
+          "psnr_db_hundredths": {
+            "budget": 3300,
+            "measured": 4059,
+            "margin": 759
+          },
+          "reported_not_gated": {
+            "rgb_max_code": 64,
+            "rgb_p99_code_millionths": 3000000,
+            "red_mean_code_millionths": 1083160,
+            "green_mean_code_millionths": 465979,
+            "blue_mean_code_millionths": 1018292
+          },
+          "export_seconds": 3.373,
+          "verify_seconds": 0.442
+        },
+        "ten_bit": {
+          "sample_frames": [
+            0,
+            14,
+            29,
+            44,
+            59
+          ],
+          "luma_max_code": {
+            "budget": 16,
+            "measured": 1,
+            "margin": 16.0
+          },
+          "luma_p99_code_millionths": {
+            "budget": 4000000,
+            "measured": 0,
+            "margin": "infinite (measured exactly zero)"
+          },
+          "luma_mean_code_millionths": {
+            "budget": 1000000,
+            "measured": 347,
+            "margin": 2881.8444
+          },
+          "rgb_mean_code_millionths": {
+            "budget": 1000000,
+            "measured": 385514,
+            "margin": 2.5939
+          },
+          "psnr_db_hundredths": {
+            "budget": 3300,
+            "measured": 4129,
+            "margin": 829
+          },
+          "reported_not_gated": {
+            "rgb_max_code": 255,
+            "rgb_p99_code_millionths": 9000000,
+            "red_mean_code_millionths": 648168,
+            "green_mean_code_millionths": 284449,
+            "blue_mean_code_millionths": 223927
+          },
+          "export_seconds": 3.314,
+          "verify_seconds": 0.426
+        }
+      },
+      "f": {
+        "eight_bit": {
+          "sample_frames": [
+            0,
+            24,
+            49,
+            74,
+            99
+          ],
+          "luma_max_code": {
+            "budget": 8,
+            "measured": 1,
+            "margin": 8.0
+          },
+          "luma_p99_code_millionths": {
+            "budget": 3000000,
+            "measured": 0,
+            "margin": "infinite (measured exactly zero)"
+          },
+          "luma_mean_code_millionths": {
+            "budget": 400000,
+            "measured": 1760,
+            "margin": 227.2727
+          },
+          "rgb_mean_code_millionths": {
+            "budget": 1750000,
+            "measured": 271299,
+            "margin": 6.4504
+          },
+          "psnr_db_hundredths": {
+            "budget": 3300,
+            "measured": 4579,
+            "margin": 1279
+          },
+          "reported_not_gated": {
+            "rgb_max_code": 64,
+            "rgb_p99_code_millionths": 2000000,
+            "red_mean_code_millionths": 145667,
+            "green_mean_code_millionths": 40274,
+            "blue_mean_code_millionths": 627955
+          },
+          "export_seconds": 5.414,
+          "verify_seconds": 0.416
+        },
+        "ten_bit": {
+          "sample_frames": [
+            0,
+            24,
+            49,
+            74,
+            99
+          ],
+          "luma_max_code": {
+            "budget": 16,
+            "measured": 1,
+            "margin": 16.0
+          },
+          "luma_p99_code_millionths": {
+            "budget": 4000000,
+            "measured": 0,
+            "margin": "infinite (measured exactly zero)"
+          },
+          "luma_mean_code_millionths": {
+            "budget": 1000000,
+            "measured": 281,
+            "margin": 3558.7189
+          },
+          "rgb_mean_code_millionths": {
+            "budget": 1000000,
+            "measured": 77446,
+            "margin": 12.9122
+          },
+          "psnr_db_hundredths": {
+            "budget": 3300,
+            "measured": 4674,
+            "margin": 1374
+          },
+          "reported_not_gated": {
+            "rgb_max_code": 254,
+            "rgb_p99_code_millionths": 4000000,
+            "red_mean_code_millionths": 140352,
+            "green_mean_code_millionths": 35678,
+            "blue_mean_code_millionths": 56308
+          },
+          "export_seconds": 5.416,
+          "verify_seconds": 0.42
+        }
+      }
+    },
+    "delivery_constants": {
+      "eight_bit": {
+        "luma_max_code": 8,
+        "luma_p99_code_millionths": 3000000,
+        "luma_mean_code_millionths": 400000,
+        "rgb_mean_code_millionths": 1750000,
+        "psnr_floor_db_hundredths": 3300
+      },
+      "ten_bit": {
+        "luma_max_code": 16,
+        "luma_p99_code_millionths": 4000000,
+        "luma_mean_code_millionths": 1000000,
+        "rgb_mean_code_millionths": 1000000,
+        "psnr_floor_db_hundredths": 3300
+      }
+    },
+    "delivery_note": "CC6 owns these constants; CC7 measures against them and never re-baselines one",
+    "failing_direction": {
+      "neutral spread (1)": {
+        "fixture": "cc7_a_the_unmatched_candidate_exceeds_the_neutral_spread_budget",
+        "measured": 6
+      },
+      "neutral spread (2)": {
+        "fixture": "cc7_a_the_unrecoverable_candidate_exceeds_the_neutral_spread_budget",
+        "measured": 19
+      },
+      "(b1) residual spread": {
+        "fixture": "cc7_b1_the_uncorrected_candidate_exceeds_the_residual_budget",
+        "measured": 7,
+        "note": "uncorrected C1 = 7 and corrected C2 = 19 are both over the budget of 6"
+      },
+      "chart luma mean": {
+        "fixture": "cc7_a_the_unmatched_candidate_exceeds_the_luma_mean_budget",
+        "measured": -19904917
+      },
+      "(b1) clamp": {
+        "fixture": "cc7_b_c1_publishes_no_clamp",
+        "measured": "clamped == false on both present controls"
+      },
+      "(b2) range excursion": {
+        "fixture": "cc7_b_c1_raises_no_range_excursion",
+        "measured": 0
+      },
+      "skin band": {
+        "fixture": "cc7_a_skin_band_rejects_the_product_row",
+        "measured": 0
+      },
+      "log inverse": {
+        "fixture": "cc7_c_an_identity_cube_does_not_undo_the_log_curve",
+        "measured": 85
+      },
+      "lattice sweep": {
+        "fixture": "cc7_c_the_cube_size_sweep_is_monotone_and_size_seventeen_fails",
+        "measured": 14
+      },
+      "feather counts": {
+        "fixture": "cc7_d_feather_zero_has_no_partial_pixels",
+        "measured": 0
+      },
+      "qualifier containment": {
+        "fixture": "cc7_d_a_qualifier_that_selects_two_patches_is_rejected",
+        "measured": 448
+      },
+      "skin hue": {
+        "fixture": "cc7_d_a_qualifier_over_the_skin_row_moves_the_skin_hue",
+        "measured": 12503
+      },
+      "gamut count": {
+        "fixture": "cc7_e_the_base_scene_without_the_look_is_in_gamut",
+        "measured": 0
+      },
+      "containment": {
+        "fixture": "cc7_f_a_window_smaller_than_the_square_loses_containment",
+        "measured": 278
+      },
+      "delivery budgets": {
+        "fixture": "cc7_g_a_starved_encode_trips_the_decoded_difference_budget",
+        "measured": {
+          "bitrate_bits_per_second": 100000,
+          "luma_max_code": 17,
+          "allowed": "<= 8",
+          "luma_p99_code_millionths": 2000000,
+          "luma_mean_code_millionths": 107549,
+          "rgb_mean_code_millionths": 427720,
+          "psnr_db_hundredths": 4176,
+          "within_budgets": false,
+          "technical_pass": false,
+          "output_still_on_disk": true
+        }
+      },
+      "render parity": {
+        "fixture": "the CC6 negative control at 2 x LINEAR_CPU_GPU_MAX",
+        "measured": 0.003488302230834961
+      }
+    },
+    "reported_not_gated": {
+      "c2_residual_spread_code": 19,
+          "c2_over_range_pixels": 672,
+      "c2_over_range_basis_points": 116,
+      "c2_blue_maximum_over_excursion_millionths": 41538,
+      "warm_whole_raster_out_of_gamut_pixels": 1480,
+      "warm_whole_raster_out_of_gamut_basis_points": 256,
+      "warm_deep_shadow_out_of_gamut_basis_points_measured": 10000,
+      "log_primary_code": 5,
+      "log_black_patch_code": 4,
+      "skin_row_chroma_spread_codes": {
+        "reference": 242.0,
+        "matched_b": 208.0,
+        "unmatched_b": 201.0
+      },
+      "rgb_extremes_note": "DELIVERY_RGB_EXTREMES_NOTE covers the 4:2:0 hard-edge terms; they are recorded per scenario in budgets.delivery[*].reported_not_gated"
+    },
+    "measurement": {
+      "os": "linux",
+      "arch": "x86_64",
+      "kernel": "7.1.9-arch1-2",
+      "lane": "software_fallback",
+      "adapter": "llvmpipe (LLVM 22.1.8, 256 bits)",
+      "backend": "vulkan",
+      "source_generator": "kinewright_media::cc7_sources (idiom A, FFV1 -level 3 -g 1, yuv444p, BT.709 limited, .mkv)",
+      "ffmpeg_build": "n8.0-23-gd1f31a829d-20251022 (third_party/ffmpeg, scripts/setup-ffmpeg.sh)",
+      "libavcodec": "62.11.100",
+      "libswscale": "9.1.100",
+      "libavutil": "60.8.100",
+      "x264_core": "165",
+      "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+      "commit": "99faee368a9cd292ae1414c3e878792065473102",
+      "date": "2026-08-27",
+      "probe": "CC7 12 step 5, Implementer C, measured live in cc7_fixtures.rs",
+      "accumulation": "row-major from the top-left, sums in f64 (CC7 10.7)"
+    }
+  },
+  "performance": {
+    "export_and_verify_seconds_per_lane": {
+      "a": {
+        "eight_bit": 6.994,
+        "ten_bit": 6.9799999999999995
+      },
+      "b": {
+        "eight_bit": 6.882,
+        "ten_bit": 6.9350000000000005
+      },
+      "c": {
+        "eight_bit": 3.812,
+        "ten_bit": 3.93
+      },
+      "d": {
+        "eight_bit": 3.703,
+        "ten_bit": 3.684
+      },
+      "e": {
+        "eight_bit": 3.8150000000000004,
+        "ten_bit": 3.74
+      },
+      "f": {
+        "eight_bit": 5.83,
+        "ten_bit": 5.836
+      }
+    },
+    "delivery_leg_seconds_measured": 73.736,
+    "delivery_leg_budget_seconds_linux": 90,
+    "media_suite_budget_seconds_linux": 180,
+    "media_suite_seconds_measured": 45.24,
+    "note": "the 60-frame single-clip lanes measure ~3.7 s export + ~0.45 s verify; the 120-frame two-clip (a)/(b) lanes ~6.5 s + ~0.43 s; the 100-frame (f) lane ~5.4 s + ~0.42 s",
+    "media_suite_filter": "cargo test -p kinewright-media --lib -- cc7_ (38 tests, default thread count)"
+  },
+  "eval": {
+    "benchmark_id": "kinewright-color-workflow-v6",
+    "task_ids": [
+      "c1",
+      "c2",
+      "c3",
+      "c4",
+      "c5",
+      "c6"
+    ],
+    "assertion_variants": [
+      "NeutralSpreadWithinBudget",
+      "ChartLumaMeanWithinBudget",
+      "LogSignatureWithinBounds",
+      "MatteContainmentExact",
+      "SkinBandInBand",
+      "GamutCountExact",
+      "TrackKeyframesMatchExpected",
+      "DeliveryVerificationWithinBudgets"
+    ],
+    "color_eval_evidence_fields": [
+      "neutral_spread_max_code",
+      "chart_luma_mean_delta_millionths",
+      "log_luma_percentiles_code16",
+      "matte_coverage",
+      "skin_in_band_basis_points",
+      "gamut_out_of_gamut_pixel_count",
+      "track_keyframes",
+      "delivery_verification",
+      "original_document",
+      "errors"
+    ],
+    "project_path_required_for": [
+      "c3"
+    ],
+    "delivery_bit_depth_literal_sites": 5,
+    "published_manifest_keys": [
+      "benchmark",
+      "tasks",
+      "assertions",
+      "deliverables"
+    ],
+    "owner": "Implementer B / D (CC7 12 step 8)"
+  },
+  "review": {
+    "schema_version": 2,
+    "blind_id_derivation": "the artefact digest's first twelve hex characters",
+    "blind_form_keys": [
+      "blind_id",
+      "scenario",
+      "questions",
+      "dimensions",
+      "notes"
+    ],
+    "blind_key_location": "run_root",
+    "not_blinded": [
+      "scenario_identity"
+    ],
+    "not_applicable_dimensions": [
+      "caption_safe_area"
+    ],
+    "leak_test_needles": {
+      "task_ids": [
+        "c1",
+        "c2",
+        "c3",
+        "c4",
+        "c5",
+        "c6"
+      ],
+      "machine_provenance": [
+        "-sample-",
+        "agent",
+        "person",
+        "model",
+        "harness",
+        "passed",
+        "assert"
+      ],
+      "canonical_parameter_names": [
+        "exposure_milli_stops",
+        "input_encoding_token",
+        "lut_asset_id",
+        "matte_enabled",
+        "matte_hue_center_centidegrees",
+        "matte_hue_softness_centidegrees",
+        "matte_hue_width_centidegrees",
+        "matte_luma_high_basis_points",
+        "matte_luma_low_basis_points",
+        "matte_luma_softness_basis_points",
+        "matte_qualifier_enabled",
+        "matte_saturation_high_basis_points",
+        "matte_saturation_low_basis_points",
+        "matte_saturation_softness_basis_points",
+        "matte_window0_center_x_basis_points",
+        "matte_window0_center_y_basis_points",
+        "matte_window0_feather_basis_points",
+        "matte_window0_half_height_basis_points",
+        "matte_window0_half_width_basis_points",
+        "matte_window_count",
+        "mix_basis_points",
+        "saturation_percent",
+        "temperature_percent",
+        "tint_percent"
+      ],
+      "value_needles": [
+        "477",
+        "1465",
+        "2410",
+        "10000",
+        "8500",
+        "35865"
+      ],
+      "owner": "kinewright-eval.rs cc7_leak_needles / cc7_leak_value_needles (B-E9)"
+    },
+    "questions": {
+      "a": "Does the match preserve natural and intentional differences?",
+      "b": "Is the proposed compromise acceptable?",
+      "c": null,
+      "d": "Does attention remain on the intended subject?",
+      "e": "Does the look support the story?",
+      "f": "Are any visible corrections distracting?"
+    },
+    "human_gate": "M40's wording: the reviewer answers only the five creative questions; every objective claim is discharged by cargo test."
+  },
+  "scorecard": {
+    "objective_assertion_count": {
+      "a": 5,
+      "b": 4,
+      "c": 5,
+      "d": 4,
+      "e": 4,
+      "f": 6
+    },
+    "human_question_count": {
+      "a": 1,
+      "b": 1,
+      "c": 0,
+      "d": 1,
+      "e": 1,
+      "f": 1
+    },
+    "person_agent_parity": "5 of 6 scenarios have a person path; (f) is person-N/A by construction",
+    "generalization_matrix": "six scenarios x three execution paths (media fixture, scripted agent, person builders)"
+  },
+  "m36": {
+    "registry_tools": 124,
+    "registry_bytes": 1280060,
+    "served_tools": 7,
+    "served_bytes": 5660,
+    "changed_by_cc7": false
+  },
+  "external_owners": [
+    {
+      "fixture": "cc1_fixtures.rs:3139/3146/3153",
+      "claim": "log-tagged source refusals"
+    },
+    {
+      "fixture": "cc1_fixtures.rs:3294-3296",
+      "claim": "managed decode blocked for log profiles"
+    },
+    {
+      "fixture": "cc4_fixtures.rs:3516",
+      "claim": "relocating the store reproduces the render bit-identically"
+    },
+    {
+      "fixture": "mcp_server.rs:1351",
+      "claim": "the branch-server project-path handle"
+    },
+    {
+      "fixture": "mcp_server.rs:1439",
+      "claim": "render_color_proof reports the unpublished LUT asset"
+    },
+    {
+      "fixture": "cc5_fixtures.rs:1149-1172",
+      "claim": "assert_matte_containment"
+    },
+    {
+      "fixture": "cc6_fixtures.rs:2346",
+      "claim": "the verified export record"
+    },
+    {
+      "fixture": "inspector_ui.rs:5673",
+      "claim": "the insert index puts a technical_lut before every correction"
+    },
+    {
+      "constants": "CC6 6.3's DELIVERY_* budgets",
+      "claim": "reused verbatim; CC7 never re-baselines one"
+    }
+  ],
+  "evidence_fixtures": [
+    "cc7_mixed_camera_match_meets_the_neutral_spread_and_luma_budgets",
+    "cc7_wrong_balance_clamps_temperature_and_raises_one_range_warning",
+    "cc7_log_inverse_lands_every_patch_inside_the_budget",
+    "cc7_product_qualifier_covers_exactly_its_patch_and_changes_nothing_outside",
+    "cc7_warm_look_out_of_gamut_count_is_exact_on_the_deep_shadow_patch",
+    "cc7_every_scenario_verifies_at_eight_bits",
+    "cc7_every_scenario_verifies_at_ten_bits",
+    "cc7_canonical_node_stack_matches_the_cpu_reference_on_the_software_lane"
+  ],
+  "required_fixtures": [
+    {
+      "item": "1",
+      "test": "cc7_scenario_geometry_round_trips_through_normalized_roi",
+      "owner": "core"
+    },
+    {
+      "item": "2",
+      "test": "cc7_chart_and_primary_codes_are_the_contract_table",
+      "owner": "core"
+    },
+    {
+      "item": "3",
+      "test": "cc7_camera_a_patch_codes_are_the_hand_derived_display_encoding",
+      "owner": "core"
+    },
+    {
+      "item": "4",
+      "test": "cc7_log_curve_anchors_and_patch_codes_are_the_contract_table",
+      "owner": "core"
+    },
+    {
+      "item": "5",
+      "test": "cc7_log_inverse_error_floors_are_properties_of_the_curve",
+      "owner": "core"
+    },
+    {
+      "item": "6",
+      "test": "cc7_camera_transforms_are_applied_in_linear_light",
+      "owner": "core"
+    },
+    {
+      "item": "7",
+      "test": "cc7_analytic_square_path_stays_in_frame_and_clears_the_patch_row",
+      "owner": "core"
+    },
+    {
+      "item": "8",
+      "test": "cc7_tracking_sample_frames_are_the_closed_form_distribution",
+      "owner": "core"
+    },
+    {
+      "item": "8b",
+      "test": "cc7_the_keyframe_smoother_transcription_matches_core",
+      "owner": "core"
+    },
+    {
+      "item": "9",
+      "test": "cc7_budgets_are_distinct_from_every_neighbouring_constant",
+      "owner": "core"
+    },
+    {
+      "item": "10",
+      "test": "cc7_every_budget_carries_the_declared_margin",
+      "owner": "core"
+    },
+    {
+      "item": "11",
+      "test": "cc7_canonical_operations_are_accepted_by_core_in_order",
+      "owner": "core"
+    },
+    {
+      "item": "12",
+      "test": "cc7_base_scene_populations_are_the_contract_table",
+      "owner": "media/cc7_sources"
+    },
+    {
+      "item": "12b",
+      "test": "cc7_core_transcriptions_agree_with_the_pipeline",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "13",
+      "test": "cc7_the_chart_band_is_achromatic_and_the_primaries_band_has_no_red",
+      "owner": "media/cc7_sources"
+    },
+    {
+      "item": "14",
+      "test": "cc7_camera_sources_differ_from_the_reference_at_every_neutral_patch",
+      "owner": "media/cc7_sources"
+    },
+    {
+      "item": "15",
+      "test": "cc7_log_source_is_not_the_base_scene",
+      "owner": "media/cc7_sources"
+    },
+    {
+      "item": "16",
+      "test": "cc7_tracked_source_moves_and_occludes",
+      "owner": "media/cc7_sources"
+    },
+    {
+      "item": "17",
+      "test": "cc7_tracked_square_never_covers_the_static_patch_row",
+      "owner": "media/cc7_sources"
+    },
+    {
+      "item": "18",
+      "test": "cc7_ffv1_round_trip_is_byte_exact",
+      "owner": "media/cc7_sources"
+    },
+    {
+      "item": "18b",
+      "test": "cc7_log_like_inverse_cube_is_canonical_text_of_the_pinned_size",
+      "owner": "media/cc7_sources"
+    },
+    {
+      "item": "19",
+      "test": "cc7_mixed_camera_match_meets_the_neutral_spread_and_luma_budgets",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "20",
+      "test": "cc7_a_the_unmatched_candidate_exceeds_the_neutral_spread_budget",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "20b",
+      "test": "cc7_a_the_unrecoverable_candidate_exceeds_the_neutral_spread_budget",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "21",
+      "test": "cc7_a_the_unmatched_candidate_exceeds_the_luma_mean_budget",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "21b",
+      "test": "cc7_a_the_intentional_difference_survives_the_match",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "21c",
+      "test": "cc7_a_skin_band_rejects_the_product_row",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "22",
+      "test": "cc7_wrong_balance_clamps_temperature_and_raises_one_range_warning",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "22b",
+      "test": "cc7_b_c1_publishes_no_clamp",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "22c",
+      "test": "cc7_b_c1_raises_no_range_excursion",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "22d",
+      "test": "cc7_b1_residual_spread_meets_the_match_budget",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "22e",
+      "test": "cc7_b1_the_uncorrected_candidate_exceeds_the_residual_budget",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "23",
+      "test": "cc7_log_inverse_lands_every_patch_inside_the_budget",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "23b",
+      "test": "cc7_c_an_identity_cube_does_not_undo_the_log_curve",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "24",
+      "test": "cc7_c_the_cube_size_sweep_is_monotone_and_size_seventeen_fails",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "25",
+      "test": "cc7_product_qualifier_covers_exactly_its_patch_and_changes_nothing_outside",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "25b",
+      "test": "cc7_d_a_qualifier_that_selects_two_patches_is_rejected",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "25c",
+      "test": "cc7_d_the_skin_hue_is_unmoved_by_the_product_qualifier",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "25d",
+      "test": "cc7_d_a_qualifier_over_the_skin_row_moves_the_skin_hue",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "26",
+      "test": "cc7_feather_counts_match_the_discrete_pixel_centre_model",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "26b",
+      "test": "cc7_d_feather_zero_has_no_partial_pixels",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "27",
+      "test": "cc7_warm_look_out_of_gamut_count_is_exact_on_the_deep_shadow_patch",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "27b",
+      "test": "cc7_e_the_base_scene_without_the_look_is_in_gamut",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "28",
+      "test": "cc7_tracked_window_contains_the_square_at_every_sampled_frame",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "28b",
+      "test": "cc7_f_a_window_smaller_than_the_square_loses_containment",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "29",
+      "test": "cc7_every_scenario_verifies_at_eight_bits",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "29b",
+      "test": "cc7_every_scenario_verifies_at_ten_bits",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "29c",
+      "test": "cc7_g_a_starved_encode_trips_the_decoded_difference_budget",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "29d",
+      "test": "cc7_canonical_node_stack_matches_the_cpu_reference_on_the_software_lane",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "29e",
+      "test": "cc7_canonical_node_stack_matches_the_cpu_reference_on_hardware",
+      "owner": "media/cc7_fixtures (ignored lane)"
+    },
+    {
+      "item": "R-M15",
+      "test": "cc7_scenario_luma_percentiles_match_the_manifest",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "30a",
+      "test": "cc7_the_agent_surface_is_unchanged_by_this_slice",
+      "owner": "agent/mcp_server"
+    },
+    {
+      "item": "30b",
+      "test": "cc7_a_mixed_camera_match_retains_the_reference_and_lands_the_canonical_grade",
+      "owner": "agent/mcp_server"
+    },
+    {
+      "item": "30c",
+      "test": "cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning",
+      "owner": "agent/mcp_server"
+    },
+    {
+      "item": "30d",
+      "test": "cc7_c_log_like_input_is_normalised_by_an_imported_technical_lut",
+      "owner": "agent/mcp_server"
+    },
+    {
+      "item": "30e",
+      "test": "cc7_d_product_qualifier_selects_its_patch_and_leaves_skin_alone",
+      "owner": "agent/mcp_server"
+    },
+    {
+      "item": "30f",
+      "test": "cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut",
+      "owner": "agent/mcp_server"
+    },
+    {
+      "item": "30g",
+      "test": "cc7_f_tracked_secondary_drops_only_the_occluded_samples",
+      "owner": "agent/mcp_server"
+    },
+    {
+      "item": "30h",
+      "test": "cc7_f2_the_default_floor_does_not_refuse",
+      "owner": "agent/mcp_server"
+    },
+    {
+      "item": "31a",
+      "test": "cc7_a_a_person_can_author_the_matched_primary_by_hand",
+      "owner": "app/inspector_ui"
+    },
+    {
+      "item": "31b",
+      "test": "cc7_b_the_temperature_slider_stops_where_the_planner_clamps",
+      "owner": "app/inspector_ui"
+    },
+    {
+      "item": "31c",
+      "test": "cc7_c_a_person_can_import_and_bind_the_technical_lut",
+      "owner": "app/inspector_ui"
+    },
+    {
+      "item": "31d",
+      "test": "cc7_d_a_person_can_author_the_product_qualifier_by_hand",
+      "owner": "app/inspector_ui"
+    },
+    {
+      "item": "31e",
+      "test": "cc7_d2_a_person_can_author_the_window_only_matte_by_hand",
+      "owner": "app/inspector_ui"
+    },
+    {
+      "item": "31f",
+      "test": "cc7_f_the_person_path_is_not_available_and_says_so",
+      "owner": "app/inspector_ui"
+    },
+    {
+      "item": "31g",
+      "test": "cc7_e_a_person_can_add_the_built_in_warm_look",
+      "owner": "app/look_browser_ui"
+    },
+    {
+      "item": "32a",
+      "test": "cc7_a_v5_result_serialises_byte_identically_without_measurements",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "32b",
+      "test": "cc7_track_keyframes_match_expected_reads_the_committed_document",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "32c",
+      "test": "cc7_a_colour_assertion_without_evidence_fails_rather_than_passing",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "32d",
+      "test": "cc7_only_colour_assertions_emit_measurements",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "32e",
+      "test": "cc7_a_colour_request_is_derived_from_the_assertions_only",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "32f",
+      "test": "cc7_human_review_v1_files_still_load_and_score",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "32g",
+      "test": "cc7_human_review_v2_round_trips_blind_id_and_questions",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "32h",
+      "test": "cc7_accepted_requires_every_question_answered",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "32i",
+      "test": "cc7_blind_ids_are_derived_from_the_artifact_digest",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "32j",
+      "test": "cc7_patch_statistics_are_taken_on_a_two_pixel_inset",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "32k",
+      "test": "cc7_coverage_cropping_is_exact_and_never_inset",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "32l",
+      "test": "cc7_color_evidence_is_computed_where_the_analysis_is_alive",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "32m",
+      "test": "cc7_delivery_verification_without_a_deliverable_is_recorded_as_an_error",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "32n",
+      "test": "cc7_the_colour_template_marks_the_editorial_dimensions_not_applicable",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "32o",
+      "test": "cc7_the_blind_package_discloses_no_machine_provenance",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32p",
+      "test": "cc7_score_review_resolves_a_blind_form_before_binding",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32q",
+      "test": "cc7_one_viewing_scores_every_row_with_the_same_artifact",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32r",
+      "test": "cc7_a_blind_form_without_its_key_is_refused_by_name",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32s",
+      "test": "cc7_score_review_still_takes_the_plain_human_review_path",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32t",
+      "test": "cc7_every_suite_constructor_declares_a_delivery_bit_depth",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32u",
+      "test": "cc7_color_workflow_suite_is_a_packaged_benchmark",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32v",
+      "test": "cc7_the_usage_banner_lists_every_registered_suite",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32w",
+      "test": "cc7_every_color_task_carries_a_color_eval_request",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32x",
+      "test": "cc7_every_color_assertion_threshold_is_a_cc7_scenarios_constant",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32y",
+      "test": "cc7_the_color_review_template_asks_only_the_matrix_question",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32z",
+      "test": "cc7_every_color_fixture_builds_a_valid_document",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32aa",
+      "test": "published_v6_manifest_tracks_the_color_workflow_suite",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32ab",
+      "test": "cc7_a_fixture_project_path_reaches_the_server",
+      "owner": "agent/eval"
+    },
+    {
+      "item": "33",
+      "test": "cc7_manifest_declares_every_required_fixture_and_constant",
+      "owner": "media/cc7_fixtures"
+    },
+    {
+      "item": "33b",
+      "test": "cc7_declared_test_names_exist_in_their_source_files",
+      "owner": "media/cc7_fixtures"
+    }
+  ],
+  "inventory": {
+    "asserted_by": "cc7_declared_test_names_exist_in_their_source_files",
+    "declared_test_count": 96,
+    "arrays": {
+      "CC7_MEDIA_TESTS": [
+        "cc7_mixed_camera_match_meets_the_neutral_spread_and_luma_budgets",
+        "cc7_a_the_unmatched_candidate_exceeds_the_neutral_spread_budget",
+        "cc7_a_the_unrecoverable_candidate_exceeds_the_neutral_spread_budget",
+        "cc7_a_the_unmatched_candidate_exceeds_the_luma_mean_budget",
+        "cc7_a_the_intentional_difference_survives_the_match",
+        "cc7_a_skin_band_rejects_the_product_row",
+        "cc7_wrong_balance_clamps_temperature_and_raises_one_range_warning",
+        "cc7_b_c1_publishes_no_clamp",
+        "cc7_b1_residual_spread_meets_the_match_budget",
+        "cc7_b1_the_uncorrected_candidate_exceeds_the_residual_budget",
+        "cc7_b_c1_raises_no_range_excursion",
+        "cc7_log_inverse_lands_every_patch_inside_the_budget",
+        "cc7_c_an_identity_cube_does_not_undo_the_log_curve",
+        "cc7_c_the_cube_size_sweep_is_monotone_and_size_seventeen_fails",
+        "cc7_product_qualifier_covers_exactly_its_patch_and_changes_nothing_outside",
+        "cc7_d_a_qualifier_that_selects_two_patches_is_rejected",
+        "cc7_d_the_skin_hue_is_unmoved_by_the_product_qualifier",
+        "cc7_d_a_qualifier_over_the_skin_row_moves_the_skin_hue",
+        "cc7_feather_counts_match_the_discrete_pixel_centre_model",
+        "cc7_d_feather_zero_has_no_partial_pixels",
+        "cc7_warm_look_out_of_gamut_count_is_exact_on_the_deep_shadow_patch",
+        "cc7_e_the_base_scene_without_the_look_is_in_gamut",
+        "cc7_tracked_window_contains_the_square_at_every_sampled_frame",
+        "cc7_f_a_window_smaller_than_the_square_loses_containment",
+        "cc7_every_scenario_verifies_at_eight_bits",
+        "cc7_every_scenario_verifies_at_ten_bits",
+        "cc7_g_a_starved_encode_trips_the_decoded_difference_budget",
+        "cc7_canonical_node_stack_matches_the_cpu_reference_on_the_software_lane",
+        "cc7_canonical_node_stack_matches_the_cpu_reference_on_hardware",
+        "cc7_core_transcriptions_agree_with_the_pipeline",
+        "cc7_scenario_luma_percentiles_match_the_manifest",
+        "cc7_manifest_declares_every_required_fixture_and_constant",
+        "cc7_declared_test_names_exist_in_their_source_files",
+        "cc7_base_scene_populations_are_the_contract_table",
+        "cc7_the_chart_band_is_achromatic_and_the_primaries_band_has_no_red",
+        "cc7_camera_sources_differ_from_the_reference_at_every_neutral_patch",
+        "cc7_log_source_is_not_the_base_scene",
+        "cc7_tracked_source_moves_and_occludes",
+        "cc7_tracked_square_never_covers_the_static_patch_row",
+        "cc7_ffv1_round_trip_is_byte_exact",
+        "cc7_log_like_inverse_cube_is_canonical_text_of_the_pinned_size"
+      ],
+      "CC7_CORE_TESTS": [
+        "cc7_scenario_geometry_round_trips_through_normalized_roi",
+        "cc7_chart_and_primary_codes_are_the_contract_table",
+        "cc7_camera_a_patch_codes_are_the_hand_derived_display_encoding",
+        "cc7_log_curve_anchors_and_patch_codes_are_the_contract_table",
+        "cc7_log_inverse_error_floors_are_properties_of_the_curve",
+        "cc7_camera_transforms_are_applied_in_linear_light",
+        "cc7_analytic_square_path_stays_in_frame_and_clears_the_patch_row",
+        "cc7_tracking_sample_frames_are_the_closed_form_distribution",
+        "cc7_budgets_are_distinct_from_every_neighbouring_constant",
+        "cc7_every_budget_carries_the_declared_margin",
+        "cc7_canonical_operations_are_accepted_by_core_in_order",
+        "cc7_the_keyframe_smoother_transcription_matches_core"
+      ],
+      "CC7_AGENT_TESTS": [
+        "cc7_the_agent_surface_is_unchanged_by_this_slice",
+        "cc7_a_mixed_camera_match_retains_the_reference_and_lands_the_canonical_grade",
+        "cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning",
+        "cc7_c_log_like_input_is_normalised_by_an_imported_technical_lut",
+        "cc7_d_product_qualifier_selects_its_patch_and_leaves_skin_alone",
+        "cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut",
+        "cc7_f_tracked_secondary_drops_only_the_occluded_samples",
+        "cc7_f2_the_default_floor_does_not_refuse"
+      ],
+      "CC7_APP_TESTS": [
+        "cc7_a_a_person_can_author_the_matched_primary_by_hand",
+        "cc7_b_the_temperature_slider_stops_where_the_planner_clamps",
+        "cc7_c_a_person_can_import_and_bind_the_technical_lut",
+        "cc7_d_a_person_can_author_the_product_qualifier_by_hand",
+        "cc7_d2_a_person_can_author_the_window_only_matte_by_hand",
+        "cc7_f_the_person_path_is_not_available_and_says_so",
+        "cc7_e_a_person_can_add_the_built_in_warm_look"
+      ],
+      "CC7_EVAL_TESTS": [
+        "cc7_a_v5_result_serialises_byte_identically_without_measurements",
+        "cc7_track_keyframes_match_expected_reads_the_committed_document",
+        "cc7_a_colour_assertion_without_evidence_fails_rather_than_passing",
+        "cc7_only_colour_assertions_emit_measurements",
+        "cc7_a_colour_request_is_derived_from_the_assertions_only",
+        "cc7_human_review_v1_files_still_load_and_score",
+        "cc7_human_review_v2_round_trips_blind_id_and_questions",
+        "cc7_accepted_requires_every_question_answered",
+        "cc7_blind_ids_are_derived_from_the_artifact_digest",
+        "cc7_patch_statistics_are_taken_on_a_two_pixel_inset",
+        "cc7_coverage_cropping_is_exact_and_never_inset",
+        "cc7_color_evidence_is_computed_where_the_analysis_is_alive",
+        "cc7_delivery_verification_without_a_deliverable_is_recorded_as_an_error",
+        "cc7_the_colour_template_marks_the_editorial_dimensions_not_applicable",
+        "cc7_a_fixture_project_path_reaches_the_server",
+        "cc7_the_blind_package_discloses_no_machine_provenance",
+        "cc7_score_review_resolves_a_blind_form_before_binding",
+        "cc7_one_viewing_scores_every_row_with_the_same_artifact",
+        "cc7_a_blind_form_without_its_key_is_refused_by_name",
+        "cc7_score_review_still_takes_the_plain_human_review_path",
+        "cc7_every_suite_constructor_declares_a_delivery_bit_depth",
+        "cc7_color_workflow_suite_is_a_packaged_benchmark",
+        "cc7_the_usage_banner_lists_every_registered_suite",
+        "cc7_every_color_task_carries_a_color_eval_request",
+        "cc7_every_color_assertion_threshold_is_a_cc7_scenarios_constant",
+        "cc7_the_color_review_template_asks_only_the_matrix_question",
+        "cc7_every_color_fixture_builds_a_valid_document",
+        "published_v6_manifest_tracks_the_color_workflow_suite"
+      ],
+      "CC7_INVENTORY_TESTS": [
+        "cc7_manifest_declares_every_required_fixture_and_constant",
+        "cc7_declared_test_names_exist_in_their_source_files"
+      ],
+      "CC7_EVIDENCE_FIXTURES": [
+        "cc7_mixed_camera_match_meets_the_neutral_spread_and_luma_budgets",
+        "cc7_wrong_balance_clamps_temperature_and_raises_one_range_warning",
+        "cc7_log_inverse_lands_every_patch_inside_the_budget",
+        "cc7_product_qualifier_covers_exactly_its_patch_and_changes_nothing_outside",
+        "cc7_warm_look_out_of_gamut_count_is_exact_on_the_deep_shadow_patch",
+        "cc7_every_scenario_verifies_at_eight_bits",
+        "cc7_every_scenario_verifies_at_ten_bits",
+        "cc7_canonical_node_stack_matches_the_cpu_reference_on_the_software_lane"
+      ],
+      "CC7_EXTERNAL_OWNERS": [
+        "cc1_fixtures.rs:3139/3146/3153",
+        "cc1_fixtures.rs:3294-3296",
+        "cc4_fixtures.rs:3516",
+        "mcp_server.rs:1351",
+        "mcp_server.rs:1439",
+        "cc5_fixtures.rs:1149-1172",
+        "cc6_fixtures.rs:2346",
+        "inspector_ui.rs:5673",
+        "CC6 6.3's DELIVERY_* budgets"
+      ]
+    },
+    "test_sources": [
+      "crates/kinewright-media/src/cc7_fixtures.rs",
+      "crates/kinewright-media/src/cc7_sources.rs",
+      "crates/kinewright-core/tests/cc7_core.rs",
+      "crates/kinewright-agent/tests/mcp_server.rs",
+      "crates/kinewright-agent/src/eval.rs",
+      "crates/kinewright-agent/src/bin/kinewright-eval.rs",
+      "crates/kinewright-app/src/inspector_ui.rs",
+      "crates/kinewright-app/src/look_browser_ui.rs"
+    ],
+    "explicit_non_prefixed_tests": [
+      "published_v6_manifest_tracks_the_color_workflow_suite"
+    ],
+    "forbidden_helpers": [
+      "fixture_gpu_or_skip",
+      "KINEWRIGHT_GPU_TESTS_MAY_SKIP",
+      "std::env::var"
+    ],
+    "gpu_skip_owner": "crates/kinewright-agent/tests/mcp_server.rs",
+    "skip_branch_typed_codes": [
+      "matte_proof_unavailable",
+      "working_proof_unavailable",
+      "color_proof_render_failed"
+    ],
+    "reason": "CC7_TEST_SOURCES include_str!s mcp_server.rs (12 step 4), inspector_ui.rs and look_browser_ui.rs (step 7) and eval.rs / kinewright-eval.rs (step 8) at COMPILE time, so the inventory is 12 step 9b and could not be authored before them (R-M12)."
+  },
+  "manifest_self_test": [
+    "cc7_manifest_declares_every_required_fixture_and_constant",
+    "cc7_declared_test_names_exist_in_their_source_files"
+  ]
+}

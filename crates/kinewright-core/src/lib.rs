@@ -4,6 +4,7 @@ mod actor;
 mod agent;
 mod automation;
 mod captions;
+pub mod cc7_scenarios;
 mod color;
 mod color_qc;
 mod creator;
@@ -32,6 +33,17 @@ pub use captions::{
     CaptionCue, CaptionMotion, CaptionPlanError, animated_caption_operations,
     animated_caption_operations_at, authored_caption_cues, caption_cues, caption_title_operations,
     dedup_timeline_words, srt, vtt,
+};
+pub use cc7_scenarios::{
+    CC7_A_OPERATIONS, CC7_B1_OPERATIONS, CC7_B2_OPERATIONS, CC7_C_OPERATIONS, CC7_D_OPERATIONS,
+    CC7_D2_OPERATIONS, CC7_E_OPERATIONS, CC7_F_OPERATIONS, CC7_SCENARIO_SPECS, CC7_SCENARIOS,
+    Cc7Camera, Cc7CameraTransform, Cc7Clip, Cc7MatchProposal, Cc7Operation, Cc7Patch,
+    Cc7PersonPath, Cc7PixelRect, Cc7Scenario, Cc7ScenarioSpec, Cc7Source,
+    cc7_analytic_square_centre_basis_points, cc7_analytic_square_top_left,
+    cc7_b1_canonical_operations, cc7_camera_code, cc7_camera_patch_codes, cc7_camera_transform,
+    cc7_canonical_operations, cc7_d2_canonical_operations, cc7_decode_display709, cc7_encode_bt709,
+    cc7_grade709_decode, cc7_log_encode_code, cc7_log_inverse_display,
+    cc7_lut_backed_canonical_operations, cc7_spec, cc7_tracking_sample_frames,
 };
 pub use color::{
     COLOR_CONFIDENCE_MAX_BASIS_POINTS, ColorBitDepth, ColorContext, ColorDescription, ColorMatrix,

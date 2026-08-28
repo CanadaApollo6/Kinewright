@@ -253,7 +253,37 @@ The first three cycle intentions are:
 Before CC3 started, a six-lane review of CC1 and CC2 (2026-08-24) fixed the
 defects recorded in `CHANGELOG.md` and hardened both fixture suites so that
 every control has an analytic expected value and no parity case is vacuous.
-The next primary colour slice is **CC7 workflow evaluation**.
+10. **CC7 workflow evaluation — implemented 2026-08-27, pending the real-harness
+   run and the blind review.** No colour feature and no MCP tool; CC7 consumes the
+   CC0–CC6 surface and records the margins. A core scenario authority
+   (`cc7_scenarios`) pins six synthetic scenarios with analytic expectations —
+   mixed-camera interview, wrong white balance and underexposure (recoverable
+   and beyond control authority), a BT.709-tagged log-like carrier undone by an
+   imported inverse `.cube`, qualifier-only product/skin containment plus a
+   window-only feather-edge case, the built-in `warm` look with an exact
+   out-of-gamut count, and a tracked secondary with a one-sample occlusion — and
+   test-support media generators (`cc7_sources`, compiled for tests and the
+   `test-util` feature) author every raster in Rust and mux
+   it lossless. Every objective claim is an ordinary `cargo test` on both CI
+   operating systems: media gates on the canonical document of each scenario
+   (neutral-patch spread, luma delta, skin band, matte coverage, gamut, track
+   confidence and containment, decoded delivery at both depths under CC6's
+   unchanged budgets), scripted `cc7_` MCP tests that complete every workflow
+   through the real endpoint and commit the canonical document, and app tests
+   that prove the person path expresses the same operations through the
+   inspector builders. The model path is a sixth eval suite,
+   `color-workflow-v6`, whose colour measurements are computed inside the
+   runner and carried on the outcome; its review package is blinded to machine
+   provenance (`blind/` artefacts and a review form keyed by a derived id, the
+   key outside), and `human-review.json` moves to schema 2 with per-task
+   questions. The exit gate is the technical gates green on both CI operating
+   systems with the human reviewer left only the matrix's creative questions.
+   The contract is `CC7-WORKFLOW-EVALUATION.md`.
+
+With CC7 the colour programme table is complete; HDR, camera RAW, ACES/OCIO,
+calibrated-monitor output, and temporal noise reduction remain deliberate later
+programmes, and the M40 gauntlet continues to rotate colour tasks as
+regressions.
 
 Within that cadence, three workstreams remain active:
 
@@ -428,8 +458,9 @@ constructors, compositor inputs, `ExportSettings`, and FFmpeg stream/container
 metadata. Later stages cannot treat those surfaces as implicit or start before the
 required earlier exit gate passes.
 
-**Current status (2026-08-25): CC0, M41, CC1, M42, CC2, CC3, CC4, CC5, and CC6 are
-complete apart from the CC3/CC4/CC5/CC6 hands-on platform smoke gates.** CC0's exit evidence
+**Current status (2026-08-27): CC0, M41, CC1, M42, CC2, CC3, CC4, CC5, CC6, and CC7
+are complete apart from the CC3–CC7 hands-on platform smoke gates and CC7's
+real-harness eval run and blind review.** CC0's exit evidence
 includes legacy project migration, known/partial/unknown and 10-bit probe fixtures,
 visible human and agent inspection, an undoable source override, delivery rejection
 outside the current contract, and an encoded file decoded again to verify its
@@ -453,8 +484,11 @@ keyframes, tracking), matte inspection, and matte-scoped scopes with an
 affected-pixel containment gate. CC6 adds the linear working-stage proof, the
 colour QC engine (range, gamut, Y′CbCr legality, skin diagnostics, tag checks,
 per-node attribution), the 10-bit H.264 delivery lane with typed rejection, and
-decoded-output verification of every export. CC7 workflow evaluation is the next
-primary colour slice.
+decoded-output verification of every export. CC7 adds the scenario authority,
+the lossless synthetic scenario sources, the per-scenario technical gates on
+both CI operating systems, the scripted agent and person paths, the
+`color-workflow-v6` suite, and the blinded review package; with it the colour
+programme table below is complete.
 
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |

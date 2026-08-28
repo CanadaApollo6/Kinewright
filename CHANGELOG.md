@@ -41,6 +41,35 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   whatever is there.
 
 ### Added
+- CC7 workflow evaluation: no colour feature and no MCP tool — the slice
+  evaluates the CC0–CC6 surface. `kinewright_core::cc7_scenarios` is the single
+  authority for six synthetic scenarios (patch geometry, analytic codes, camera
+  transforms in linear light, canonical operations, every budget constant),
+  `kinewright_media::cc7_sources` authors each raster in Rust and muxes it FFV1
+  lossless, and `cc7_fixtures.rs` gates the canonical document of every
+  scenario on both CI operating systems: mixed-camera match (neutral spread ≤ 5
+  codes, luma delta ≤ 5.0 codes, reference untouched, saturation left as the
+  intentional difference), wrong white balance recovered within authority and
+  beyond it (clamped control published, range excursion attributed to the
+  primary, `technical_pass` kept), a log-like carrier undone by an imported
+  65³ inverse `.cube` within 12 codes, qualifier-only product containment
+  (192/192/0/0) and a window-only feather edge (252/140/112), the `warm` look's
+  exact 192-pixel out-of-gamut patch, a tracked secondary whose one occluded
+  sample is dropped at a floor of 8 500 bp and whose window contains the
+  subject at every surviving sample, and decoded delivery at both depths under
+  CC6's unchanged budgets. Six scripted `cc7_` MCP tests complete each workflow
+  over the live endpoint and commit the canonical document; app tests prove the
+  person path through the inspector builders. The eval runner gains a typed
+  colour evidence block computed inside the run, `original_document` on the
+  outcome, `delivery_bit_depth` on the deliverable spec, a saved-project handle
+  for fixtures, the `color-workflow-v6` suite (`c1`–`c6`), `human-review.json`
+  schema 2 with per-task questions, and a review package blinded to machine
+  provenance (`blind/` artefacts plus a form keyed by a derived id, with the key
+  in the run root and `--score-review` unblinding through it). Probing found
+  three tool boundaries that the contract now records: `track_matte_window`
+  never re-acquires after an occlusion (a range must end at it),
+  `analyze_color_shot` percentiles are 16-bit codes, and the tracker's samples
+  are evenly distributed rather than stepped. See docs/CC7-WORKFLOW-EVALUATION.md.
 - CC6 QC and managed delivery: a named high-precision stage
   (`working_linear_post_composite`, `Analysis::working_proof_for_document`)
   reads the production composite back as linear f32 before any encode; the
