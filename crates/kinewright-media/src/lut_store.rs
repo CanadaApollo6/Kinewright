@@ -1395,27 +1395,32 @@ LUT_3D_SIZE 2
 
     #[test]
     fn store_root_is_the_project_stem_plus_the_asset_suffix() {
-        let unix = LutStore::for_project(Path::new("/home/riel/edits/Demo Project.kinewright"))
-            .expect("a saved unix project path should derive a store");
+        // Both the fixture and the expectation are composed from the same
+        // absolute directory rather than spelled as a literal: a leading-slash
+        // string such as "/home/riel/edits" is drive-relative on Windows, so
+        // `for_project` absolutizes it onto the current drive and the literal
+        // it came from is no longer the answer. Composing both sides keeps the
+        // assertion about the derivation instead of about the host's drives.
+        // The directory need not exist - the derivation is a pure operation on
+        // the parent and the stem.
+        let temporary = TempDirectory::new("lut-store-root-stem");
+        let edits = temporary.path("edits");
+
+        let saved = LutStore::for_project(&edits.join("Demo Project.kinewright"))
+            .expect("a saved project path should derive a store");
+        assert_eq!(saved.root(), edits.join("Demo Project.kinewright-assets"));
         assert_eq!(
-            unix.root(),
-            Path::new("/home/riel/edits/Demo Project.kinewright-assets")
-        );
-        assert_eq!(
-            unix.luts_dir(),
-            Path::new("/home/riel/edits/Demo Project.kinewright-assets/luts")
+            saved.luts_dir(),
+            edits.join("Demo Project.kinewright-assets").join("luts")
         );
 
-        // The derivation is a pure string operation on the parent and the
-        // stem: "replace the project extension with `.kinewright-assets`",
-        // with the stem surviving verbatim, spaces and punctuation included.
-        let awkward = LutStore::for_project(Path::new(
-            "/mnt/c/Users/riel/Demo Project v2.final.kinewright",
-        ))
-        .expect("an awkward but saved project path should derive a store");
+        // "Replace the project extension with `.kinewright-assets`", with the
+        // stem surviving verbatim, spaces and interior dots included.
+        let awkward = LutStore::for_project(&edits.join("Demo Project v2.final.kinewright"))
+            .expect("an awkward but saved project path should derive a store");
         assert_eq!(
             awkward.root(),
-            Path::new("/mnt/c/Users/riel/Demo Project v2.final.kinewright-assets")
+            edits.join("Demo Project v2.final.kinewright-assets")
         );
 
         // A Windows path derives the same way on Windows. On a unix host the

@@ -455,9 +455,14 @@ mod tests {
         let first = hashes.get(&path).unwrap();
 
         // Keep both metadata fields identical so a size+mtime memoization scheme
-        // would incorrectly return `first`.
+        // would incorrectly return `first`. The handle that rewinds the
+        // modification time is opened for writing because Windows backs
+        // `set_modified` with `SetFileTime`, which needs `FILE_WRITE_ATTRIBUTES`
+        // and denies access on a read-only handle; unix `futimens` does not care.
         fs::write(&path, b"other").unwrap();
-        fs::File::open(&path)
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
             .unwrap()
             .set_modified(original_modified)
             .unwrap();
