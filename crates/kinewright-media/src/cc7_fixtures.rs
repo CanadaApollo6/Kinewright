@@ -2752,13 +2752,37 @@ fn assert_cc7_delivery_lane(measurement: &Cc7DeliveryMeasurement, output: &Path)
     let budgets = comparison.budgets;
     assert_eq!(budgets, kinewright_core::DeliveryBudgets::for_depth(depth));
 
-    // R4-M2: every gated term of this lane equals the manifest's recorded
-    // measurement for this scenario at this depth, so the per-scenario
-    // `budget | measured | margin` triples cannot go stale behind the gate the
-    // way `CC7_MEASURED_DELIVERY_EIGHT` did. The manifest is the measured
-    // column of §4.1; `CC7_MEASURED_DELIVERY_*` is its worst-per-term
-    // summary, and `cc7_manifest_declares_every_required_fixture_and_constant`
-    // ties that summary to the same rows.
+    // R4-M2, restated on §0.3 C-E8's pre-authorised fallback, which the first
+    // honest Windows run **exercised**.
+    //
+    // R4-M2 originally asserted each lane's live term **equal** to the
+    // manifest's recorded measurement. That equality is an exact comparison
+    // against decoded H.264 output, and the two CI FFmpeg builds do not decode
+    // the same encode to the same numbers: the Windows package
+    // (`System233/ffmpeg-msvc-prebuilt 8.0.1-r3`) measured (a)/8-bit luma mean
+    // **18 688** against the Linux pin's (`mifi/ffmpeg-builds 8.0-1`) **18 677**
+    // and (b)/10-bit RGB mean **181 569** against **181 593**. Neither figure
+    // is near its CC6 budget; only the equality broke.
+    //
+    // None of the three obvious repairs is available. A `cfg(windows)` switch
+    // is the environment gating §4 forbids ("nothing environment-gated, same
+    // gates both OSes"); a per-OS constant is forbidden outright by R5; and an
+    // invented ±n window around a Linux decode figure is a tolerance
+    // "invented, scaled, or inherited from another lane", which Appendix A
+    // forbids, and would still be a guess against the fifty-eight terms the
+    // Windows run never reached.
+    //
+    // Taken instead, exactly as §0.3 C-E8 pre-authorised: the per-scenario
+    // **measured** figures become *reported, not gated*. What gates — the same
+    // way on both operating systems — is CC6's own bound, asserted here per
+    // term in the direction the term has, against the **live** measurement and
+    // against the **recorded** one, so the manifest row can neither hide a live
+    // overrun nor keep a stale over-budget claim. The manifest's `budget`
+    // column stays an exact tie to the CC6 code constant, and
+    // `cc7_manifest_declares_every_required_fixture_and_constant` ties
+    // `CC7_MEASURED_DELIVERY_*` to the worst of these recorded rows, which is
+    // R4-M2's anti-staleness purpose stated between two static numbers rather
+    // than against a build-dependent decode.
     let spec_id = cc7_spec(measurement.scenario).id;
     let depth_key = match depth {
         DeliveryEncodeDepth::Eight => "eight_bit",
@@ -2768,26 +2792,66 @@ fn assert_cc7_delivery_lane(measurement: &Cc7DeliveryMeasurement, output: &Path)
     let psnr = comparison
         .psnr_db_hundredths
         .expect("a delivery lane whose MSE is non-zero reports a PSNR");
-    for (term, measured) in [
+    for (term, measured, budget, is_floor) in [
         (
             "luma_max_code",
             i64::from(comparison.luma.maximum_code_diff),
+            i64::from(budgets.luma_max_code),
+            false,
         ),
         (
             "luma_p99_code_millionths",
             comparison.luma.p99_code_diff_millionths,
+            budgets.luma_p99_code_millionths,
+            false,
         ),
         (
             "luma_mean_code_millionths",
             comparison.luma.mean_code_diff_millionths,
+            budgets.luma_mean_code_millionths,
+            false,
         ),
         (
             "rgb_mean_code_millionths",
             comparison.combined.mean_code_diff_millionths,
+            budgets.rgb_mean_code_millionths,
+            false,
         ),
-        ("psnr_db_hundredths", i64::from(psnr)),
+        (
+            "psnr_db_hundredths",
+            i64::from(psnr),
+            i64::from(budgets.psnr_floor_db_hundredths),
+            true,
+        ),
     ] {
-        assert_manifest_i64(&declared[term], "measured", measured);
+        let row = &declared[term];
+        // The budget column is a CC6 code constant, not a measurement, so it
+        // is still asserted exactly and on both operating systems.
+        assert_manifest_i64(row, "budget", budget);
+        let recorded = row
+            .get("measured")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| panic!("{label}: the manifest must record a measured {term}"));
+        for (source, value) in [("live", measured), ("recorded-linux", recorded)] {
+            if is_floor {
+                assert!(
+                    value >= budget,
+                    "{label}: {source} {term} {value} is below CC6's floor {budget}"
+                );
+            } else {
+                assert!(
+                    value <= budget,
+                    "{label}: {source} {term} {value} exceeds CC6's budget {budget}"
+                );
+            }
+        }
+        // Reported, not gated: the live figure is on the record on whichever
+        // machine ran it, beside the Linux figure the manifest publishes.
+        println!(
+            "CC7_DELIVERY_MEASURED scenario={spec_id} depth={depth_key} term={term} \
+             live={measured} recorded_linux={recorded} budget={budget} os={}",
+            std::env::consts::OS
+        );
     }
 
     json!({
@@ -3907,6 +3971,93 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
     assert_eq!(
         budgets["delivery_note"],
         "CC6 owns these constants; CC7 measures against them and never re-baselines one"
+    );
+    // R4-M2's anti-staleness purpose, kept without an exact comparison against
+    // a build-dependent decode (§0.3 C-E8, exercised — see
+    // `assert_cc7_delivery_lane`). `CC7_MEASURED_DELIVERY_*` is §4.1's
+    // worst-per-term summary of the twelve per-scenario rows below: the
+    // **maximum** for the four difference ceilings and the **minimum** for the
+    // PSNR floor. Both sides of this comparison are recorded numbers, so it
+    // holds identically on every operating system and still fails the moment
+    // a per-scenario row moves without the summary following it — which is
+    // exactly the drift R4-M2 was ruled against.
+    for (depth_key, summary) in [
+        (
+            "eight_bit",
+            kinewright_core::cc7_scenarios::CC7_MEASURED_DELIVERY_EIGHT,
+        ),
+        (
+            "ten_bit",
+            kinewright_core::cc7_scenarios::CC7_MEASURED_DELIVERY_TEN,
+        ),
+    ] {
+        for (index, term) in [
+            "luma_max_code",
+            "luma_p99_code_millionths",
+            "luma_mean_code_millionths",
+            "rgb_mean_code_millionths",
+            "psnr_db_hundredths",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let rows: Vec<i64> = CC7_SCENARIOS
+                .iter()
+                .map(|scenario| {
+                    budgets["delivery"][cc7_spec(*scenario).id][depth_key][term]["measured"]
+                        .as_i64()
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{}/{depth_key}: {term} must record an integer measurement",
+                                cc7_spec(*scenario).id
+                            )
+                        })
+                })
+                .collect();
+            let worst = if term == "psnr_db_hundredths" {
+                rows.iter().min()
+            } else {
+                rows.iter().max()
+            };
+            assert_eq!(
+                worst,
+                Some(&summary[index]),
+                "{depth_key}: CC7_MEASURED_DELIVERY_* {term} is not the worst of the \
+                 per-scenario rows"
+            );
+        }
+    }
+    // §14 / R5: a per-OS **note**, never a per-OS constant. The first honest
+    // Windows CI run (run 33225964499) is P10's measurement, and the two
+    // figures it reached before the equality assertion stopped it are recorded
+    // here so the divergence is on the record rather than only in a build log.
+    // Nothing reads this block as a gate.
+    assert!(
+        budgets["delivery_measured_note"]
+            .as_str()
+            .is_some_and(|note| note.contains("reported, not gated")),
+        "the delivery block must state that its measured column is not a gate"
+    );
+    let windows = &budgets["delivery_windows_observed"];
+    assert_eq!(
+        windows["ffmpeg_build"],
+        "System233/ffmpeg-msvc-prebuilt ffmpeg-8.0.1-r3"
+    );
+    assert_manifest_i64(
+        &windows["a"]["eight_bit"],
+        "luma_mean_code_millionths",
+        18_688,
+    );
+    assert_manifest_i64(
+        &windows["b"]["ten_bit"],
+        "rgb_mean_code_millionths",
+        181_569,
+    );
+    assert!(
+        windows["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("reported, not gated")),
+        "the Windows observation block must state that these figures are not gated"
     );
     for depth in [DeliveryEncodeDepth::Eight, DeliveryEncodeDepth::Ten] {
         let key = match depth {

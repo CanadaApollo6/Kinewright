@@ -1763,22 +1763,46 @@ mod tests {
             "mid-gray must land on the two codes straddling 170.51, nothing else"
         );
 
-        // Neutral gray and neutral white are both exactly 128.0 in chroma, so
-        // the *only* reason a neighbouring code appears is swscale's
-        // deterministic ordered dither, which straddles the exact value: Cb
-        // rounds up on part of the plane, Cr rounds down. Nothing may reach
-        // 126 or 130.
+        // (c) Neutral gray and neutral white are both exactly 128.0 in chroma.
+        // The claim is that neutral input stays neutral: every chroma sample
+        // lands on 128 or on one of its two neighbours, 128 itself is always
+        // present, and nothing reaches 126 or 130.
+        //
+        // The claim is stated as that window rather than as an exact code set
+        // because the exact set is a property of the *build*, not of the
+        // conversion. Chroma sits exactly on a code, and CC6 §5.4's normative
+        // rule — "a flat 8-bit delivery patch legitimately produces two
+        // adjacent Y codes in a fixed 8x8 tiling; no assertion may require a
+        // single code from an 8-bit delivery output except where the input
+        // lands exactly on a code" — permits both outcomes here, and both
+        // occur. The Linux pin (`mifi/ffmpeg-builds 8.0-1`, libswscale
+        // 9.1.100) straddles: `Cb {128, 129}`, `Cr {127, 128}`. The Windows CI
+        // package (`System233/ffmpeg-msvc-prebuilt ffmpeg-8.0.1-r3`) does not:
+        // `Cb {128}`. Both sets are recorded here because both are
+        // measurements.
+        //
+        // No production change closes that gap. Adding `accurate_rnd` to
+        // `DELIVERY_SCALER_FLAGS` reproduces the Windows chroma exactly on
+        // Linux — measured, and CC6 §5.4's "accurate_rnd is inert" holds only
+        // for the luma plane it was measured on — but it also moves the pinned
+        // decode figures (CC7 scenario (a)'s 8-bit luma mean goes 18 677 ->
+        // 18 688, which is the Windows number), and `DELIVERY_SCALER_FLAGS` is
+        // a CC6 constant whose value CC6 §5.3 measured and declined to change.
+        // The dither straddle is therefore recorded and the window asserted,
+        // exactly as CC6 §5.4 requires of a flat 8-bit delivery patch.
+        let neutral_window = BTreeSet::from([127_u8, 128, 129]);
         for frame in [&filtered_white, &filtered_gray] {
-            assert_eq!(
-                chroma_codes(frame, 1),
-                BTreeSet::from([128, 129]),
-                "neutral input must stay neutral in Cb"
-            );
-            assert_eq!(
-                chroma_codes(frame, 2),
-                BTreeSet::from([127, 128]),
-                "neutral input must stay neutral in Cr"
-            );
+            for (plane, name) in [(1_usize, "Cb"), (2, "Cr")] {
+                let codes = chroma_codes(frame, plane);
+                assert!(
+                    !codes.is_empty() && codes.is_subset(&neutral_window),
+                    "neutral input must stay neutral in {name}: {codes:?}"
+                );
+                assert!(
+                    codes.contains(&128),
+                    "neutral input must reach the neutral code itself in {name}: {codes:?}"
+                );
+            }
         }
     }
 

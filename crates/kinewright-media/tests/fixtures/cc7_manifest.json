@@ -1599,6 +1599,27 @@
       }
     },
     "delivery_note": "CC6 owns these constants; CC7 measures against them and never re-baselines one",
+    "delivery_measured_note": "Every 'measured' figure in budgets.delivery is a Linux measurement (see budgets.measurement) and is reported, not gated: the two CI FFmpeg builds decode the same encode to different numbers, so what assert_cc7_delivery_lane gates on both operating systems is the CC6 budget bound in this row's 'budget' column, against the live measurement and against this recorded one. CC7_MEASURED_DELIVERY_EIGHT/TEN stay tied to these rows as the worst per term.",
+    "delivery_windows_observed": {
+      "ffmpeg_build": "System233/ffmpeg-msvc-prebuilt ffmpeg-8.0.1-r3",
+      "linux_ffmpeg_build": "mifi/ffmpeg-builds 8.0-1",
+      "ci_run": "33225964499",
+      "note": "P10's measurement, first honest Windows run. These two figures are reported, not gated, and are recorded as a per-OS note rather than a per-OS constant (§14, R5). Only the two terms below were reached before the equality assertion this run replaced stopped each test; the other fifty-eight terms are still unmeasured on Windows. Both figures sit far inside their CC6 budgets. Root cause, reproduced on Linux: adding accurate_rnd to the delivery scaler flags makes the Linux 8-bit lane measure the Windows number exactly, so the MSVC build's swscale rounds chroma as if SWS_ACCURATE_RND were set; the 10-bit divergence is not reproduced by that flag and remains a separate build difference.",
+      "a": {
+        "eight_bit": {
+          "luma_mean_code_millionths": 18688,
+          "linux_measured": 18677,
+          "budget": 400000
+        }
+      },
+      "b": {
+        "ten_bit": {
+          "rgb_mean_code_millionths": 181569,
+          "linux_measured": 181593,
+          "budget": 1000000
+        }
+      }
+    },
     "failing_direction": {
       "neutral spread (1)": {
         "fixture": "cc7_a_the_unmatched_candidate_exceeds_the_neutral_spread_budget",
