@@ -1542,7 +1542,16 @@ async fn cc2_scope_tools_are_read_only_over_the_live_endpoint() {
         json!({"expected_revision": revision, "timecode": 5}),
     )
     .await;
-    assert_eq!(scopes.is_error, Some(false));
+    // This call failed exactly once on a loaded Windows runner (CI run
+    // 33228085881) and passed on the same commit's next run; the bare
+    // assertion discarded the refusal payload, so the log could not say why.
+    // Carry the body so a recurrence is diagnosable.
+    assert_eq!(
+        scopes.is_error,
+        Some(false),
+        "get_video_scopes_v2 refused: {:?}",
+        scopes.structured_content
+    );
     let scopes = scopes.structured_content.as_ref().unwrap();
     assert_eq!(scopes["full_resolution"], true);
     assert_eq!(scopes["stage"], "monitoring_post_composite");
@@ -1556,7 +1565,12 @@ async fn cc2_scope_tools_are_read_only_over_the_live_endpoint() {
         json!({"expected_revision": revision, "clip_id": 1}),
     )
     .await;
-    assert_eq!(analysis.is_error, Some(false));
+    assert_eq!(
+        analysis.is_error,
+        Some(false),
+        "analyze_color_shot refused: {:?}",
+        analysis.structured_content
+    );
     let analysis = analysis.structured_content.as_ref().unwrap();
     assert_eq!(analysis["applied"], false);
     assert_eq!(analysis["full_resolution"], true);
@@ -1576,7 +1590,12 @@ async fn cc2_scope_tools_are_read_only_over_the_live_endpoint() {
         }),
     )
     .await;
-    assert_eq!(matched.is_error, Some(false));
+    assert_eq!(
+        matched.is_error,
+        Some(false),
+        "plan_shot_match refused: {:?}",
+        matched.structured_content
+    );
     let matched = matched.structured_content.as_ref().unwrap();
     assert_eq!(matched["applied"], false);
     assert_eq!(matched["full_resolution"], true);
