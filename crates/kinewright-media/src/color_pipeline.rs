@@ -11,12 +11,12 @@ use std::fmt;
 use std::sync::Arc;
 
 use kinewright_core::{
-    COLOR_CURVE_MIN_POINTS, COLOR_NODE_LIMIT_PER_LAYER, ColorBitDepth, ColorCurveChannel,
-    ColorDescription, ColorMatrix, ColorNodeKind, ColorPrimaries, ColorRange, ColorTransfer,
-    ColorWheelsParams, ColorWhitePoint, CurvePoints, Effect, LutAssetId, LutNodeParams,
-    MatteParams, MatteQualifierParams, MatteWindowParams, ParamValue, ResolvedCurves,
-    active_color_nodes, cc8_hlg_decode_working_linear, cc8_pq_decode_working_linear,
-    effect_descriptor, is_matte_parameter, managed_color_node_count,
+    CC8_REC2020_TO_BT709, COLOR_CURVE_MIN_POINTS, COLOR_NODE_LIMIT_PER_LAYER, ColorBitDepth,
+    ColorCurveChannel, ColorDescription, ColorMatrix, ColorNodeKind, ColorPrimaries, ColorRange,
+    ColorTransfer, ColorWheelsParams, ColorWhitePoint, CurvePoints, Effect, LutAssetId,
+    LutNodeParams, MatteParams, MatteQualifierParams, MatteWindowParams, ParamValue,
+    ResolvedCurves, active_color_nodes, cc8_apply_matrix, cc8_hlg_decode_working_linear,
+    cc8_pq_decode_working_linear, effect_descriptor, is_matte_parameter, managed_color_node_count,
 };
 
 use crate::lut::CubeLut;
@@ -286,9 +286,22 @@ pub fn rgba64_promoted_max(description: &ColorDescription) -> Result<u32, ColorP
 /// [`rgba64_promoted_max`].  There are two explicit swscale details that are
 /// part of this boundary contract:
 ///
-/// * the direct BT.709 limited-range YUV-to-RGB path uses its 8-bit fixed-point
+/// * the direct limited-range YUV-to-RGB path uses its 8-bit fixed-point
 ///   RGB scale even when the input YUV planes are 10 bits (or deeper), so its
-///   nominal legal-white denominator is the 8-bit promoted maximum; and
+///   nominal legal-white denominator is the 8-bit promoted maximum.  CC1 §3.1
+///   states this for BT.709; CC8 §10 step 4 measured the **same** denominator on
+///   the BT.2020 NCL limited lane, because it is one swscale fixed-point
+///   YUV-to-RGB path whose matrix coefficients are selected by
+///   `in_color_matrix` and whose destination scale is not.  Measured on the
+///   pinned Linux build (`n8.0-23-gd1f31a829d`), a 10-bit `bt2020nc` limited
+///   legal-white patch (`Y' = 940`, neutral chroma) lands on RGBA64 `65283`,
+///   the identical figure CC1 §3.1 records for the BT.709 lane's legal white,
+///   while legal black lands on `0`;
+///   `cc8_bt2020_limited_boundary_uses_the_p8_denominator` re-measures it
+///   through the production filter graph rather than restating the number.
+///   Reusing the 10-bit promoted maximum `P_10 = 65472` there would make
+///   nominal white read `0.9971` instead of `1.0000` — a wrong number, not an
+///   approximate one; and
 /// * the direct planar RGB path uses a true 16-bit destination scale for source
 ///   depths above 8 bits, reaching `65535` rather than a left-shifted source
 ///   maximum (its limited-range expansion is a separate working-frame step).
@@ -304,8 +317,16 @@ pub fn rgba64_promoted_max(description: &ColorDescription) -> Result<u32, ColorP
 /// depth in the inclusive 8--16 bit range.
 pub fn rgba64_normalization_max(description: &ColorDescription) -> Result<u32, ColorPipelineError> {
     let bits = integer_bit_depth(description)?;
-    if matches!(description.matrix, ColorMatrix::Bt709)
-        && matches!(description.range, ColorRange::Limited)
+    // The BT.2020 NCL arm is CC8 §10 step 4's addition and is unreachable from
+    // an SDR source: `classify_source_with_assumption` admits only `bt709`,
+    // `rgb`, and `identity` matrices for `rec709_video` / `srgb_full`, so this
+    // branch is entered exactly when the matrix column already says BT.2020,
+    // which only a CC8 §2.1 HDR profile can carry. The BT.709 answer is
+    // byte-unchanged.
+    if matches!(
+        description.matrix,
+        ColorMatrix::Bt709 | ColorMatrix::Bt2020Ncl
+    ) && matches!(description.range, ColorRange::Limited)
     {
         return Ok((u32::from(u8::MAX)) << 8);
     }
@@ -390,11 +411,10 @@ pub fn decode_transfer(transfer: &ColorTransfer, encoded: f32) -> Result<f32, Co
 ///
 /// **The result is Rec.2020-primaried linear light**, not working BT.709.
 /// §3.3's next stage is "primaries conversion to working BT.709 D65 (\* now
-/// non-identity)", and that stage is §10 step 4's, with §9.1 fixture 3 as its
-/// gate. `kinewright_core::CC8_REC2020_TO_BT709` is already pinned and tested
-/// for it. Until step 4 lands, [`VideoDecoder::open_scaled_managed`] refuses an
-/// HDR-profile source rather than composite Rec.2020 values as though they were
-/// BT.709 — see `decode::hdr_managed_decode_not_yet_available`.
+/// non-identity)", and that stage is [`source_primaries_to_working_linear`].
+/// [`decode_source_rgb`] composes the two in §3.3's order; a caller that takes
+/// this function alone has the transfer half only, which is why the composition
+/// has its own name.
 ///
 /// **No clamp, at any stage.** CC1 §2.2 invariant 5, restated by CC8 §2.3.
 /// Undershoot below black survives as negative working values and over-range
@@ -417,6 +437,79 @@ pub fn decode_hdr_source_working_linear(
         // error, not a silent identity.
         profile => Err(ColorPipelineError::NotAnHdrSourceProfile(profile)),
     }
+}
+
+/// CC8 §2.3 / §3.3's **primaries conversion to working BT.709 D65** — the named
+/// stage CC1 §3 reserved, non-identity for the first time.
+///
+/// ```text
+/// pq_rec2020 | hlg_rec2020:  working = CC8_REC2020_TO_BT709 · linear
+/// rec709_video | srgb_full:  working = linear          (the identity CC1 has)
+/// ```
+///
+/// **The matrix is selected by source profile and by nothing else.** CC1 §3
+/// wrote the stage as "an identity matrix... still a named stage so that CC2+
+/// can add real conversion without changing the order", and CC8 §3.3 keeps that
+/// promise from the other side: "the two `*` transfer stages and the primaries
+/// conversion are selected by source profile, and on a Rec.709 source the
+/// primaries stage stays the identity matrix it is now." So the SDR arm here
+/// returns its argument — it does not multiply by an identity matrix, because
+/// three multiplies and two adds per channel against pinned `f32` ones and
+/// zeros is not guaranteed to be the identity in the last bit, and CC8's SDR
+/// obligation (§7 item 1, §9.1 fixture 6) is byte-equality rather than
+/// closeness.
+///
+/// **No clamp.** §2.3: "It is **not** a gamut map. Colours outside the Rec.709
+/// triangle become negative BT.709 components and **must not be clamped** — CC1
+/// §2.2 invariant 5 already forbids it, and CC8 restates it because negatives
+/// here look like a bug and will tempt a future contributor to 'fix' them."
+/// [`kinewright_core::cc8_apply_matrix`] is the unclamped application and
+/// [`kinewright_core::CC8_BT709_TO_REC2020`] restores the excursion at delivery
+/// (§10 step 6). §9.1 fixture 3 gates the round trip and asserts the negatives
+/// are present, so the fixture cannot pass vacuously on in-gamut content.
+///
+/// The coefficients come from `kinewright_core::CC8_REC2020_TO_BT709`, which
+/// §2.3 requires to be "derived from the two primary sets and D65, transcribed
+/// to f32, not taken from a backend". The `cc8_derive_*` functions in that
+/// module are the derivation the pinned rows are a transcription of, asserted
+/// against them by `cc8_pinned_matrices_are_the_derivation_transcribed`; they
+/// are cross-checks, not the production path, so nothing here derives a matrix
+/// at run time.
+#[must_use]
+pub fn source_primaries_to_working_linear(
+    profile: ColorSourceProfile,
+    linear_rgb: [f32; 3],
+) -> [f32; 3] {
+    match profile {
+        ColorSourceProfile::PqRec2020 | ColorSourceProfile::HlgRec2020 => {
+            cc8_apply_matrix(CC8_REC2020_TO_BT709, linear_rgb)
+        }
+        ColorSourceProfile::Rec709Video | ColorSourceProfile::SrgbFull => linear_rgb,
+    }
+}
+
+/// CC8 §3.3's HDR source chain end to end: coded RGB to **working BT.709 D65**
+/// linear light.
+///
+/// [`decode_hdr_source_working_linear`] then [`source_primaries_to_working_linear`],
+/// in §3.3's order, with no intermediate clamp between them and none inside
+/// either. This exists as one name for the same reason
+/// `cc8_pq_decode_working_linear` fuses ST 2084's two stages: a caller that took
+/// the transfer decode alone would be holding Rec.2020-primaried values and
+/// would composite them as BT.709, which CC8 §1 forbids.
+///
+/// # Errors
+///
+/// Returns [`ColorPipelineError::SourceProfile`] when the profile is not one of
+/// CC8 §2.1's two, forwarded from [`decode_hdr_source_working_linear`].
+pub fn hdr_source_to_working_bt709_linear(
+    profile: ColorSourceProfile,
+    coded_rgb: [f32; 3],
+) -> Result<[f32; 3], ColorPipelineError> {
+    Ok(source_primaries_to_working_linear(
+        profile,
+        decode_hdr_source_working_linear(profile, coded_rgb)?,
+    ))
 }
 
 /// Encode a linear value with the CC1 BT.709 display transfer.
@@ -571,9 +664,12 @@ pub fn decode_bt709_ycbcr(
 /// The profile selects the interpretation, which is the whole point of CC1
 /// §2.1's and CC8 §2.1's closed sets: a CC1 SDR profile takes the per-channel
 /// [`decode_transfer`], and one of CC8 §2.1's two HDR profiles takes §3.3's
-/// named HDR stages through [`decode_hdr_source_working_linear`]. The HDR
-/// result is Rec.2020-primaried linear light in working units; §3.3's
-/// primaries conversion is the next stage and is §10 step 4's.
+/// named HDR stages through [`hdr_source_to_working_bt709_linear`].
+///
+/// **Both arms return working BT.709 D65 linear light.** §3.3's primaries
+/// conversion is the last source-side stage in both, and on a CC1 SDR profile
+/// it is the identity CC1 §3 already has, so the SDR arm below is byte-for-byte
+/// what it was before CC8 §10 step 4.
 ///
 /// # Errors
 ///
@@ -587,7 +683,7 @@ pub fn decode_source_rgb(
     let profile = classify_source_with_assumption(description, assumption)
         .map_err(ColorPipelineError::SourceProfile)?;
     if profile.is_hdr() {
-        return decode_hdr_source_working_linear(profile, encoded_rgb);
+        return hdr_source_to_working_bt709_linear(profile, encoded_rgb);
     }
     let mut decoded = [0.0; 3];
     for (index, value) in encoded_rgb.into_iter().enumerate() {
@@ -2748,6 +2844,51 @@ mod tests {
         )
         .expect("the PQ peak decodes");
         assert!(peak.iter().all(|value| *value > 49.0));
+    }
+
+    /// CC8 §2.3/§3.3's primaries stage, at the unit-test scale that sits beside
+    /// the function; §9.1 fixture 3 is the raster-scale gate.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn source_primaries_stage_is_selected_by_profile_and_is_never_clamped() {
+        // §3.3: "on a Rec.709 source the primaries stage stays the identity
+        // matrix it is now" — bit-for-bit, so the CC1 lanes cannot move.
+        for profile in [
+            ColorSourceProfile::Rec709Video,
+            ColorSourceProfile::SrgbFull,
+        ] {
+            for value in [[0.0_f32; 3], [0.25, 0.5, 0.75], [1.5, -0.05, 49.26]] {
+                assert_eq!(source_primaries_to_working_linear(profile, value), value);
+            }
+        }
+        // Both §2.1 HDR rows select the same non-identity matrix, because both
+        // carry the same `Primaries` column.
+        let saturated = [0.0_f32, 1.0, 0.0];
+        let working = source_primaries_to_working_linear(ColorSourceProfile::PqRec2020, saturated);
+        assert_eq!(
+            working,
+            source_primaries_to_working_linear(ColorSourceProfile::HlgRec2020, saturated),
+        );
+        // §2.3: a saturated Rec.2020 primary leaves **negative** BT.709
+        // components, and nothing clamps them.
+        assert!(
+            working[0] < -0.1 && working[2] < 0.0,
+            "a saturated Rec.2020 green must leave negatives: {working:?}",
+        );
+        // And the composition is the one `decode_source_rgb` runs, so a caller
+        // cannot get the transfer half alone from the production entry point.
+        let coded = kinewright_core::cc8_pq_inverse_eotf(kinewright_core::cc8_hdr::cc8_as_f32(
+            kinewright_core::CC8_REFERENCE_WHITE_NITS,
+        ));
+        let composed =
+            hdr_source_to_working_bt709_linear(ColorSourceProfile::PqRec2020, [coded, coded, 0.0])
+                .expect("the PQ profile decodes");
+        let staged = source_primaries_to_working_linear(
+            ColorSourceProfile::PqRec2020,
+            decode_hdr_source_working_linear(ColorSourceProfile::PqRec2020, [coded, coded, 0.0])
+                .expect("the PQ transfer stages run"),
+        );
+        assert_eq!(composed, staged);
     }
 
     #[test]

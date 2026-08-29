@@ -8,7 +8,8 @@ use kinewright_core::{
 };
 
 use crate::color_pipeline::{
-    PrimaryCorrection, decode_srgb, decode_transfer, expand_native_range, rgba64_normalization_max,
+    PrimaryCorrection, classify_source_with_assumption, decode_srgb, decode_transfer,
+    expand_native_range, hdr_source_to_working_bt709_linear, rgba64_normalization_max,
 };
 
 /// Scene-linear RGBA working pixels stored as IEEE-754 binary16 values.
@@ -35,6 +36,19 @@ impl WorkingFrame {
         let rgb_max = rgba64_normalization_max(description).map_err(|error| {
             MediaError::Backend(format!("managed source depth rejected: {error}"))
         })? as f32;
+        // CC8 §10 step 4's HDR arm, and the whole of it: the profile is
+        // classified **once** per frame rather than per pixel, and the SDR path
+        // below is entered whenever this is `None` — which is every description
+        // that is not one of CC8 §2.1's two HDR profiles, including every
+        // description that fails to classify at all. That is what keeps the SDR
+        // lane byte-unchanged: for a `rec709_video` or `srgb_full` source the
+        // executed statements are character-for-character the ones that were
+        // here before, and the classifier's own refusal still arrives through
+        // `decode_transfer` with the message it always had rather than through a
+        // new early return.
+        let hdr_profile = classify_source_with_assumption(description, assumption)
+            .ok()
+            .filter(|profile| profile.is_hdr());
         let expected = pixel_count(width, height)
             .and_then(|count| count.checked_mul(8))
             .ok_or_else(|| MediaError::Backend("managed source frame is too large".to_owned()))?;
@@ -73,19 +87,40 @@ impl WorkingFrame {
             } else {
                 [red, green, blue]
             };
-            let decoded = coded_rgb
-                .map(|value| decode_transfer(&description.transfer, value))
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| {
-                    MediaError::Backend(format!(
-                        "managed source colour decode failed (transfer={:?}, matrix={:?}, range={:?}, white_point={:?}, assumption={assumption:?}): {error}",
-                        description.transfer,
-                        description.matrix,
-                        description.range,
-                        description.white_point,
-                    ))
-                })?;
+            let decoded = if let Some(profile) = hdr_profile {
+                // CC8 §3.3's source-side chain, in §3.3's order and with no
+                // clamp anywhere in it: transfer decode (and the HLG OOTF), the
+                // reference-white normalization, then the primaries conversion
+                // to working BT.709 D65. The result is a working-space value in
+                // the same units the SDR arm produces, which is why both arms
+                // land in the same `f16` storage below.
+                hdr_source_to_working_bt709_linear(profile, coded_rgb)
+                    .map_err(|error| {
+                        MediaError::Backend(format!(
+                            "managed HDR source colour decode failed (profile={}, transfer={:?}, matrix={:?}, range={:?}, white_point={:?}, assumption={assumption:?}): {error}",
+                            profile.id(),
+                            description.transfer,
+                            description.matrix,
+                            description.range,
+                            description.white_point,
+                        ))
+                    })?
+                    .to_vec()
+            } else {
+                coded_rgb
+                    .map(|value| decode_transfer(&description.transfer, value))
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| {
+                        MediaError::Backend(format!(
+                            "managed source colour decode failed (transfer={:?}, matrix={:?}, range={:?}, white_point={:?}, assumption={assumption:?}): {error}",
+                            description.transfer,
+                            description.matrix,
+                            description.range,
+                            description.white_point,
+                        ))
+                    })?
+            };
             pixels.extend(decoded.into_iter().map(f16::from_f32));
             pixels.push(f16::from_f32(alpha));
         }

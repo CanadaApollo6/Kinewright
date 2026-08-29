@@ -3,8 +3,8 @@ use std::{path::Path, sync::Arc};
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
     AssetId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
-    ColorRange, ColorSourceProfile, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint,
-    FrameTexture, MediaAsset, MediaError, MediaKind, Rational, RgbaImage, TimeCode,
+    ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, FrameTexture,
+    MediaAsset, MediaError, MediaKind, Rational, RgbaImage, TimeCode,
     classify_source_with_assumption,
 };
 
@@ -873,9 +873,40 @@ enum VideoConverter {
     Managed(ffmpeg::filter::Graph),
 }
 
-fn managed_filter_matrix(description: &ColorDescription) -> &'static str {
+/// The `buffer` source filter's `colorspace` spelling for one source matrix.
+///
+/// CC1 §3.1 forbids an unspecified matrix here ("no unspecified/default matrix,
+/// range, transfer, or colour-space selection is allowed"), so every arm is an
+/// explicit name from `buffersrc`'s own `colorspace` option table.
+///
+/// CC8 §10 step 4 adds the `bt2020_ncl` arm. It is unreachable from an SDR
+/// source: `classify_source_with_assumption` admits only `bt709`, `rgb`, and
+/// `identity` matrices for `rec709_video` / `srgb_full`, and
+/// [`VideoDecoder::open_scaled_managed`] classifies before building the graph,
+/// so a description that reaches this arm has already been classified as one of
+/// CC8 §2.1's two HDR profiles. Every SDR description takes the same arm it took
+/// before.
+pub(crate) fn managed_filter_matrix(description: &ColorDescription) -> &'static str {
     match description.matrix {
         ColorMatrix::Rgb | ColorMatrix::Identity => "gbr",
+        ColorMatrix::Bt2020Ncl => "bt2020nc",
+        _ => "bt709",
+    }
+}
+
+/// The `scale` filter's `in_color_matrix` / `out_color_matrix` spelling for the
+/// same source matrix.
+///
+/// It is a **different vocabulary from [`managed_filter_matrix`]'s** and that is
+/// a property of `FFmpeg`, not a choice: `buffersrc`'s `colorspace` option
+/// enumerates `AVColorSpace` names (`bt2020nc`), while `vf_scale`'s
+/// `in_color_matrix` enumerates its own shorter set (`bt2020`, which is
+/// `AVCOL_SPC_BT2020_NCL = 9`). Writing one spelling into the other option
+/// silently leaves the matrix unset, so the two names are derived here from the
+/// single `ColorMatrix` and never copied between call sites.
+pub(crate) fn managed_scale_color_matrix(description: &ColorDescription) -> &'static str {
+    match description.matrix {
+        ColorMatrix::Bt2020Ncl => "bt2020",
         _ => "bt709",
     }
 }
@@ -884,7 +915,7 @@ fn managed_filter_is_rgb(description: &ColorDescription) -> bool {
     matches!(description.matrix, ColorMatrix::Rgb | ColorMatrix::Identity)
 }
 
-fn managed_filter_range(description: &ColorDescription) -> &'static str {
+pub(crate) fn managed_filter_range(description: &ColorDescription) -> &'static str {
     match description.range {
         ColorRange::Limited => "mpeg",
         _ => "jpeg",
@@ -927,6 +958,7 @@ pub(crate) fn managed_filter_graph(
     let source_range = managed_filter_range(description);
     let source_matrix = managed_filter_matrix(description);
     let rgb_source = managed_filter_is_rgb(description);
+    let scale_matrix = managed_scale_color_matrix(description);
     let args = format!(
         "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect=1/1:colorspace={}:range={}",
         decoder.width(),
@@ -942,8 +974,15 @@ pub(crate) fn managed_filter_graph(
             "w={scaled_width}:h={scaled_height}:flags=bicubic:in_range={source_range}:out_range=jpeg"
         )
     } else {
+        // CC8 §10 step 4: `bt709` becomes `{scale_matrix}`, which is `bt709` for
+        // every CC1 source and `bt2020` only for a classified CC8 §2.1 HDR
+        // profile — so the SDR lane's string is byte-identical to the one it has
+        // always produced. Both directions are named because CC1 §3.1 forbids
+        // leaving either unspecified; the output side is RGBA64, so
+        // `out_color_matrix` selects no coefficients, and naming it the lane's
+        // own matrix keeps the graph from claiming a matrix it is not on.
         format!(
-            "w={scaled_width}:h={scaled_height}:flags=bicubic:in_color_matrix=bt709:out_color_matrix=bt709:in_range={source_range}:out_range=jpeg"
+            "w={scaled_width}:h={scaled_height}:flags=bicubic:in_color_matrix={scale_matrix}:out_color_matrix={scale_matrix}:in_range={source_range}:out_range=jpeg"
         )
     };
     let mut graph = ffmpeg::filter::Graph::new();
@@ -1047,49 +1086,6 @@ impl DecoderFrame for WorkingFrame {
     }
 }
 
-/// CC8 §10 step 3's boundary: a classified HDR source is refused by the
-/// managed *frame* decoder, with a typed reason naming what is missing.
-///
-/// §10 step 3 delivers "source profiles and transfer decode": the
-/// classification (§2.1), the named §3.3 interpretation stages
-/// (`color_pipeline::decode_hdr_source_working_linear`), and their fixtures 1,
-/// 2 and 5. It does **not** deliver §3.3's next two stages, and both are
-/// required before a frame of HDR media can be composited honestly:
-///
-/// - **the primaries conversion to working BT.709 D65**, which §3.3 marks
-///   "(\* now non-identity)" and §10 step 4 owns with §9.1 fixture 3 as its
-///   gate. The matrices are already pinned and tested
-///   (`kinewright_core::CC8_REC2020_TO_BT709`), but landing the stage before
-///   its fixture would put an ungated non-identity transform in the production
-///   path; and
-/// - **the BT.2020 NCL source matrix decode**, which `managed_filter_graph`
-///   still pins to `in_color_matrix=bt709`, and whose swscale boundary
-///   normalization (`color_pipeline::rgba64_normalization_max`) has a
-///   BT.709-limited special case with no BT.2020 sibling.
-///
-/// Decoding anyway would composite Rec.2020 values as though they were BT.709
-/// — a wrong picture, silently. §1 forbids exactly that shape of silence
-/// ("**must not** be silently treated as Rec.709"), so this fails typed and
-/// says which step supplies the missing stage. §10 step 4 removes it.
-///
-/// This is **not** the §7 item 2 delivery block, which is permanent and lives
-/// in `kinewright_core::delivery` under `HDR_SOURCE_ON_SDR_DELIVERY`.
-pub(crate) fn hdr_managed_decode_not_yet_available(
-    path: &Path,
-    profile: ColorSourceProfile,
-) -> MediaError {
-    MediaError::Backend(format!(
-        "managed HDR frame decode is not available yet for {} (source_profile={}): CC8 §10 \
-         step 3 lands the source profile and the §3.3 transfer-decode stages; §3.3's \
-         primaries conversion to working BT.709 D65 and the BT.2020 NCL source matrix \
-         decode are §10 step 4, gated by §9.1 fixture 3. Decoding without them would \
-         composite Rec.2020 values as BT.709, which CC8 §1 forbids. Recovery: relink to \
-         an SDR source, or apply an explicit supported SDR source-colour override.",
-        path.display(),
-        profile.id(),
-    ))
-}
-
 pub(crate) struct VideoDecoder {
     path: std::path::PathBuf,
     input: ffmpeg::format::context::Input,
@@ -1132,15 +1128,20 @@ impl VideoDecoder {
         description: &ColorDescription,
         assumption: Option<ColorSourceProfileAssumption>,
     ) -> Result<Self, MediaError> {
-        let source = classify_source_with_assumption(description, assumption).map_err(|error| {
-            MediaError::Backend(format!(
-                "managed source profile rejected for {} (assumption={assumption:?}): {error}",
-                path.display()
-            ))
-        })?;
-        if source.is_hdr() {
-            return Err(hdr_managed_decode_not_yet_available(path, source));
-        }
+        // CC8 §10 step 4: the classification is still required — §1 forbids
+        // treating an unclassifiable source as Rec.709 — but a classified HDR
+        // profile is no longer refused. `managed_filter_graph` now carries the
+        // BT.2020 NCL source matrix into the YCbCr -> RGB conversion and
+        // `WorkingFrame::from_rgba64_le` runs §3.3's HDR transfer and primaries
+        // stages, so the frame that reaches the compositor is working BT.709 D65
+        // linear light for both HDR and SDR sources.
+        let _source =
+            classify_source_with_assumption(description, assumption).map_err(|error| {
+                MediaError::Backend(format!(
+                    "managed source profile rejected for {} (assumption={assumption:?}): {error}",
+                    path.display()
+                ))
+            })?;
         let _declared_depth = declared_integer_depth(description).map_err(|error| {
             unsupported_decoder_format(
                 path,

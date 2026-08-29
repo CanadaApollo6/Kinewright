@@ -1283,8 +1283,14 @@ pub(crate) fn legacy_stage_warnings(clip: &Clip) -> Vec<Value> {
 /// `stages` lists CC8 §3.3's source-side additions **in §3.3's order**, which
 /// §3.3 requires of every added stage ("Every added stage is separately named
 /// in the colour status and proof"). `managed_decode` states plainly which of
-/// them the executed path can run today; §10 step 4 changes that answer and
-/// §10 step 8 adds §4's preview rows.
+/// them the executed path can run today; §10 step 4 made that answer `true` by
+/// landing the primaries conversion and the BT.2020 NCL source matrix decode,
+/// and §10 step 8 adds §4's preview rows.
+///
+/// `managed_decode.available` is about the **frame decode**, not about export.
+/// An HDR source still blocks managed export under `HDR_SOURCE_ON_SDR_DELIVERY`
+/// (§7 item 2) because §5.1's delivery lane is §10 step 6's; the two answers are
+/// deliberately separate rows so neither can be read as the other.
 ///
 /// §8's remaining HDR rows — the mastering-display and `MaxCLL`/`MaxFALL`
 /// metadata of §2.4, and the primaries-conversion stage's own report — are
@@ -1327,10 +1333,12 @@ fn hdr_interpretation(profile: ColorSourceProfile) -> Value {
             "bit_depth": CC8_HDR_DEPTH_ALLOWED,
         },
         "managed_decode": {
-            "available": false,
-            "reason": "CC8 §10 step 3 lands the source profile and the §3.3 transfer-decode \
-                       stages; the primaries conversion and the BT.2020 NCL source matrix \
-                       decode are §10 step 4",
+            "available": true,
+            "reason": "CC8 §10 step 4 lands §3.3's primaries conversion to working BT.709 D65 \
+                       and carries the BT.2020 NCL source matrix into the managed YCbCr decode, \
+                       so every stage listed above runs on a decoded frame. Managed *export* of \
+                       an HDR source stays blocked by §7 item 2 until §10 step 6 lands §5.1's \
+                       delivery lane.",
         },
         "monitoring": {
             "calibrated_hdr": false,
@@ -5817,7 +5825,22 @@ mod tests {
         );
         // §4: no calibrated monitoring claim, anywhere, in any form.
         assert_eq!(hdr["monitoring"]["calibrated_hdr"], false);
-        assert_eq!(hdr["managed_decode"]["available"], false);
+        // CC8 §10 step 4: the row now says the executed path runs every stage
+        // listed above, because it does. The reason names the step that made it
+        // true and the export block that is still §10 step 6's, so a reader
+        // cannot take a decodable HDR frame for a deliverable one.
+        assert_eq!(hdr["managed_decode"]["available"], true);
+        let managed_decode_reason = hdr["managed_decode"]["reason"]
+            .as_str()
+            .expect("the managed_decode row states its reason");
+        assert!(
+            managed_decode_reason.contains("§10 step 4"),
+            "{managed_decode_reason}"
+        );
+        assert!(
+            managed_decode_reason.contains("§10 step 6"),
+            "the row must still name the delivery lane as deferred: {managed_decode_reason}"
+        );
 
         // The PQ profile's rows differ where §2.2 says they differ: no OOTF
         // stage, and the PQ peak in place of HLG's nominal peak and gamma.
