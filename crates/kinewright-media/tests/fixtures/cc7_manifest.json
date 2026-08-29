@@ -857,6 +857,7 @@
     "cc7_c2_skin_in_band_reported_basis_points": 10000,
     "cc7_c2_over_range_pixels_reported": 672,
     "cc7_c2_over_range_basis_points_reported": 116,
+    "cc7_c2_max_over_excursion_millionths": 41538,
     "cc7_warm_whole_raster_out_of_gamut_pixels_reported": 1480,
     "cc7_warm_whole_raster_out_of_gamut_basis_points": 256,
     "cc7_log_black_patch_reported_code": 4,
@@ -1678,7 +1679,7 @@
     },
     "reported_not_gated": {
       "c2_residual_spread_code": 19,
-          "c2_over_range_pixels": 672,
+      "c2_over_range_pixels": 672,
       "c2_over_range_basis_points": 116,
       "c2_blue_maximum_over_excursion_millionths": 41538,
       "warm_whole_raster_out_of_gamut_pixels": 1480,
@@ -1796,18 +1797,24 @@
     "blind_id_derivation": "the artefact digest's first twelve hex characters",
     "blind_form_keys": [
       "blind_id",
-      "scenario",
       "questions",
-      "dimensions",
+      "ratings",
+      "not_applicable",
+      "accepted",
       "notes"
     ],
+    "blind_form_keys_owner": "BlindReviewEntry (crates/kinewright-agent/src/eval.rs), asserted by cc7_the_manifest_review_keys_match_the_blind_form",
     "blind_key_location": "run_root",
     "not_blinded": [
       "scenario_identity"
     ],
     "not_applicable_dimensions": [
-      "caption_safe_area"
+      "story",
+      "pacing",
+      "audio_finish",
+      "captions"
     ],
+    "not_applicable_dimensions_owner": "COLOR_WORKFLOW_NOT_APPLICABLE (crates/kinewright-agent/src/eval.rs)",
     "leak_test_needles": {
       "task_ids": [
         "c1",
@@ -1868,7 +1875,17 @@
       "c": null,
       "d": "Does attention remain on the intended subject?",
       "e": "Does the look support the story?",
-      "f": "Are any visible corrections distracting?"
+      "f": "Are any visible corrections distracting?",
+      "g": "Is the codec limitation's visible trade-off acceptable?"
+    },
+    "conditional_questions": {
+      "g": {
+        "condition": "the delivery verification's exceptions contain a Warning-severity code (in practice decoded_range_excursion); the allowed Info delivery_tag_not_representable that every conforming H.264 export carries is not one",
+        "measurement": "delivery verification warnings",
+        "registered_by": "run_review_questions (crates/kinewright-agent/src/bin/kinewright-eval.rs)",
+        "asserted_by": "cc7_g_a_clean_encode_contributes_no_review_task",
+        "matrix_row": "docs/ROADMAP-AND-WORKFLOWS.md:538 states the row as a condition, not as a question; CC7_DELIVERY_HUMAN_QUESTION is that condition put as the yes/no the reviewer answers"
+      }
     },
     "human_gate": "M40's wording: the reviewer answers only the five creative questions; every objective claim is discharged by cargo test."
   },
@@ -1887,8 +1904,10 @@
       "c": 0,
       "d": 1,
       "e": 1,
-      "f": 1
+      "f": 1,
+      "g": 0
     },
+    "human_question_count_note": "the (g) row is conditional and measures 0 on every canonical CC7 encode: no verified export raises a Warning-severity exception, so no run of this suite asks the delivery question",
     "person_agent_parity": "5 of 6 scenarios have a person path; (f) is person-N/A by construction",
     "generalization_matrix": "six scenarios x three execution paths (media fixture, scripted agent, person builders)"
   },
@@ -2031,6 +2050,11 @@
     {
       "item": "15",
       "test": "cc7_log_source_is_not_the_base_scene",
+      "owner": "media/cc7_sources"
+    },
+    {
+      "item": "15b",
+      "test": "cc7_c_the_base_scene_does_not_read_as_log",
       "owner": "media/cc7_sources"
     },
     {
@@ -2239,6 +2263,11 @@
       "owner": "agent/mcp_server"
     },
     {
+      "item": "30f",
+      "test": "cc7_f_observation_gate_rejects_a_doubled_offset",
+      "owner": "agent"
+    },
+    {
       "item": "30h",
       "test": "cc7_f2_the_default_floor_does_not_refuse",
       "owner": "agent/mcp_server"
@@ -2404,6 +2433,21 @@
       "owner": "agent/kinewright-eval"
     },
     {
+      "item": "32y2",
+      "test": "cc7_g_a_clean_encode_contributes_no_review_task",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32y3",
+      "test": "cc7_the_manifest_needle_sets_equal_the_leak_needles",
+      "owner": "agent/kinewright-eval"
+    },
+    {
+      "item": "32y4",
+      "test": "cc7_the_manifest_review_keys_match_the_blind_form",
+      "owner": "agent/kinewright-eval"
+    },
+    {
       "item": "32z",
       "test": "cc7_every_color_fixture_builds_a_valid_document",
       "owner": "agent/kinewright-eval"
@@ -2431,7 +2475,7 @@
   ],
   "inventory": {
     "asserted_by": "cc7_declared_test_names_exist_in_their_source_files",
-    "declared_test_count": 96,
+    "declared_test_count": 101,
     "arrays": {
       "CC7_MEDIA_TESTS": [
         "cc7_mixed_camera_match_meets_the_neutral_spread_and_luma_budgets",
@@ -2471,6 +2515,7 @@
         "cc7_the_chart_band_is_achromatic_and_the_primaries_band_has_no_red",
         "cc7_camera_sources_differ_from_the_reference_at_every_neutral_patch",
         "cc7_log_source_is_not_the_base_scene",
+        "cc7_c_the_base_scene_does_not_read_as_log",
         "cc7_tracked_source_moves_and_occludes",
         "cc7_tracked_square_never_covers_the_static_patch_row",
         "cc7_ffv1_round_trip_is_byte_exact",
@@ -2497,6 +2542,7 @@
         "cc7_c_log_like_input_is_normalised_by_an_imported_technical_lut",
         "cc7_d_product_qualifier_selects_its_patch_and_leaves_skin_alone",
         "cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut",
+        "cc7_f_observation_gate_rejects_a_doubled_offset",
         "cc7_f_tracked_secondary_drops_only_the_occluded_samples",
         "cc7_f2_the_default_floor_does_not_refuse"
       ],
@@ -2536,6 +2582,9 @@
         "cc7_every_color_task_carries_a_color_eval_request",
         "cc7_every_color_assertion_threshold_is_a_cc7_scenarios_constant",
         "cc7_the_color_review_template_asks_only_the_matrix_question",
+        "cc7_g_a_clean_encode_contributes_no_review_task",
+        "cc7_the_manifest_needle_sets_equal_the_leak_needles",
+        "cc7_the_manifest_review_keys_match_the_blind_form",
         "cc7_every_color_fixture_builds_a_valid_document",
         "published_v6_manifest_tracks_the_color_workflow_suite"
       ],

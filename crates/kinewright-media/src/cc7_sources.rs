@@ -1246,10 +1246,32 @@ mod tests {
         assert!(carrier_first >= CC7_LOG_FIRST_PERCENTILE_MIN_CODE16);
         assert!(carrier_p99 <= CC7_LOG_P99_MAX_CODE16);
 
-        // Failing direction: cam A fails both bounds. Its authored-raster p1
-        // is **11** (16-bit 2 827) rather than the 10 (2 570) probe-3 measured
-        // through the managed decode — the one-code decode round trip §2.4.1
-        // records — and it fails the floor either way.
+        // The failing direction — cam A fails both bounds — is
+        // `cc7_c_the_base_scene_does_not_read_as_log`, §4(c)(1)'s own name for
+        // it, below.
+    }
+
+    /// CC7 §4(c)(1)'s failing direction, under the contract's own name.
+    ///
+    /// Cam A fails **both** signature bounds, `2 827 < 5 140` and
+    /// `62 194 > 51 400`, so the carrier's signature is a measurement of the
+    /// carrier and not a property every source has. §4.2's `log signature`
+    /// row names this fixture.
+    ///
+    /// It is a `#[test]` of its own rather than a paragraph inside
+    /// `cc7_log_source_is_not_the_base_scene` (which carries §11.2.15's
+    /// *other* failing direction, the `LogLike`-resolves-to-the-identity one):
+    /// the claim is a pure histogram over the authored raster, so a named
+    /// fixture costs nothing and §4.2's row now resolves to a test rather
+    /// than to a comment inside one.
+    ///
+    /// Cam A's **authored-raster** p1 is `11` (16-bit `2 827`) rather than
+    /// the `10` (`2 570`) probe-3 measured through the managed decode — the
+    /// one-code decode round trip §2.4.1 records — and it fails the floor
+    /// either way, which is why the gate is stated as an inequality against
+    /// the constant rather than as an equality against a decoded number.
+    #[test]
+    fn cc7_c_the_base_scene_does_not_read_as_log() {
         let reference = luma_histogram(cc7_base_scene_rgb);
         let reference_first = percentile_code16(&reference, 1);
         let reference_p99 = percentile_code16(&reference, 99);
@@ -1262,6 +1284,13 @@ mod tests {
             reference_p99 > CC7_LOG_P99_MAX_CODE16,
             "cam A must fail the 99th-percentile ceiling"
         );
+
+        // Non-vacuity, in the same terms: the carrier passes both bounds the
+        // base scene fails, so the two sources are separated by the gate and
+        // not by the fixture's choice of assertion.
+        let carrier = luma_histogram(cc7_log_scene_rgb);
+        assert!(percentile_code16(&carrier, 1) >= CC7_LOG_FIRST_PERCENTILE_MIN_CODE16);
+        assert!(percentile_code16(&carrier, 99) <= CC7_LOG_P99_MAX_CODE16);
     }
 
     // -----------------------------------------------------------------------

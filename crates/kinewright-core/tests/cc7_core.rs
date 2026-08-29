@@ -17,22 +17,23 @@ use kinewright_core::{
     LutAssetSource, MediaAsset, MediaKind, NormalizedRoi, Operation, ParamValue, Rational,
     TimeCode, Track, TrackId, TrackKind, apply_batch,
     cc7_scenarios::{
-        CC7_B1_RESIDUAL_SPREAD_MAX_CODE, CC7_BUDGETS, CC7_CAM_A_LUMA_PERCENTILES_CODE8,
-        CC7_CAM_A_LUMA_PERCENTILES_CODE16, CC7_CAMERA_ORDER, CC7_CAMERA_PATCH_CODES,
-        CC7_CHART_BAND_ROI, CC7_CHART_LINEAR_MILLIONTHS, CC7_CHART_PATCH_COUNT, CC7_CHART_PATCHES,
-        CC7_D2_CONTINUOUS_AREA_WRONG_MODEL_PIXELS_TENTHS, CC7_D2_FEATHER_COUNTS_PIXELS,
-        CC7_D2_WINDOW_CENTRE_BASIS_POINTS, CC7_D2_WINDOW_HALF_EXTENTS_BASIS_POINTS,
-        CC7_DEEP_SHADOW_ROI, CC7_DELIVERY_ALLOWED_INFO_CODES,
-        CC7_DELIVERY_LEG_BUDGET_SECONDS_LINUX, CC7_DELIVERY_TEN_PSNR_MEASURED_HUNDREDTHS,
-        CC7_FEATHER_BASIS_POINTS, CC7_FEATHER_PARTIAL_TOLERANCE_PIXELS,
-        CC7_LOG_BLACK_PATCH_REPORTED_CODE, CC7_LOG_CARRIER_LUMA_PERCENTILES_CODE8,
-        CC7_LOG_CARRIER_LUMA_PERCENTILES_CODE16, CC7_LOG_CHART_CODES, CC7_LOG_CHART_INVERSE_CODES,
-        CC7_LOG_CHART_INVERSE_ERROR_CODES, CC7_LOG_CUBE_SIZE, CC7_LOG_CUBE_SIZE_LADDER,
-        CC7_LOG_FIRST_PERCENTILE_MIN_CODE8_PROSE, CC7_LOG_FIRST_PERCENTILE_MIN_CODE16,
-        CC7_LOG_INVERSE_MAX_CODE, CC7_LOG_MID_GREY_ANCHOR_CODE, CC7_LOG_MID_GREY_ANCHOR_MILLIONTHS,
-        CC7_LOG_OFFSET_STOPS, CC7_LOG_P99_MAX_CODE8_PROSE, CC7_LOG_P99_MAX_CODE16,
-        CC7_LOG_ROW_CODES, CC7_LOG_SPAN_STOPS, CC7_LOG_SURROUND_CODE, CC7_LOG_UNITY_ANCHOR_CODE,
-        CC7_LOG_UNITY_ANCHOR_MILLIONTHS, CC7_LOOK_DEEP_SHADOW_OUT_OF_GAMUT_PIXELS,
+        CC7_B1_RESIDUAL_SPREAD_MAX_CODE, CC7_BUDGETS, CC7_C2_MAX_OVER_EXCURSION_MILLIONTHS,
+        CC7_CAM_A_LUMA_PERCENTILES_CODE8, CC7_CAM_A_LUMA_PERCENTILES_CODE16, CC7_CAMERA_ORDER,
+        CC7_CAMERA_PATCH_CODES, CC7_CHART_BAND_ROI, CC7_CHART_LINEAR_MILLIONTHS,
+        CC7_CHART_PATCH_COUNT, CC7_CHART_PATCHES, CC7_D2_CONTINUOUS_AREA_WRONG_MODEL_PIXELS_TENTHS,
+        CC7_D2_FEATHER_COUNTS_PIXELS, CC7_D2_WINDOW_CENTRE_BASIS_POINTS,
+        CC7_D2_WINDOW_HALF_EXTENTS_BASIS_POINTS, CC7_DEEP_SHADOW_ROI,
+        CC7_DELIVERY_ALLOWED_INFO_CODES, CC7_DELIVERY_LEG_BUDGET_SECONDS_LINUX,
+        CC7_DELIVERY_TEN_PSNR_MEASURED_HUNDREDTHS, CC7_FEATHER_BASIS_POINTS,
+        CC7_FEATHER_PARTIAL_TOLERANCE_PIXELS, CC7_LOG_BLACK_PATCH_REPORTED_CODE,
+        CC7_LOG_CARRIER_LUMA_PERCENTILES_CODE8, CC7_LOG_CARRIER_LUMA_PERCENTILES_CODE16,
+        CC7_LOG_CHART_CODES, CC7_LOG_CHART_INVERSE_CODES, CC7_LOG_CHART_INVERSE_ERROR_CODES,
+        CC7_LOG_CUBE_SIZE, CC7_LOG_CUBE_SIZE_LADDER, CC7_LOG_FIRST_PERCENTILE_MIN_CODE8_PROSE,
+        CC7_LOG_FIRST_PERCENTILE_MIN_CODE16, CC7_LOG_INVERSE_MAX_CODE,
+        CC7_LOG_MID_GREY_ANCHOR_CODE, CC7_LOG_MID_GREY_ANCHOR_MILLIONTHS, CC7_LOG_OFFSET_STOPS,
+        CC7_LOG_P99_MAX_CODE8_PROSE, CC7_LOG_P99_MAX_CODE16, CC7_LOG_ROW_CODES, CC7_LOG_SPAN_STOPS,
+        CC7_LOG_SURROUND_CODE, CC7_LOG_UNITY_ANCHOR_CODE, CC7_LOG_UNITY_ANCHOR_MILLIONTHS,
+        CC7_LOOK_BLUE_ZERO_CROSSING_LINEAR_MILLIONTHS, CC7_LOOK_DEEP_SHADOW_OUT_OF_GAMUT_PIXELS,
         CC7_MATCH_LUMA_MEAN_MAX_CODE_MILLIONTHS, CC7_MATCH_NEUTRAL_SPREAD_MAX_CODE,
         CC7_MATCH_PROPOSAL_C1, CC7_MATTE_OUTSIDE_CHANGED_PIXELS_MAX, CC7_MEASURED_DELIVERY_EIGHT,
         CC7_MEASURED_DELIVERY_TEN, CC7_MEASURED_UNMATCHED_B_SPREAD_CODE, CC7_PATCH_COUNT,
@@ -1113,7 +1114,7 @@ fn cc7_budgets_are_distinct_from_every_neighbouring_constant() {
     // substituted for" is the contract's own test (CC7 §2.6), and a pixel
     // count cannot be substituted for an 8-bit code tolerance: the two
     // coincidences below are recorded rather than asserted away.
-    let cc7: [(&str, &str, i64); 11] = [
+    let cc7: [(&str, &str, i64); 12] = [
         (
             "CC7_MATCH_NEUTRAL_SPREAD_MAX_CODE",
             "code",
@@ -1160,6 +1161,15 @@ fn cc7_budgets_are_distinct_from_every_neighbouring_constant() {
             "CC7_DELIVERY_LEG_BUDGET_SECONDS_LINUX",
             "seconds",
             CC7_DELIVERY_LEG_BUDGET_SECONDS_LINUX,
+        ),
+        // §4(b)(3)'s excursion depth. It is reported rather than gated, but it
+        // is asserted *exactly* by two fixtures, so a collision with a
+        // neighbouring constant would be as silent a substitution as a
+        // budget's.
+        (
+            "CC7_C2_MAX_OVER_EXCURSION_MILLIONTHS",
+            "linear_millionths",
+            CC7_C2_MAX_OVER_EXCURSION_MILLIONTHS,
         ),
     ];
     let neighbours: [(&str, &str, i64); 12] = [
@@ -1293,6 +1303,22 @@ fn cc7_budgets_are_distinct_from_every_neighbouring_constant() {
         CC7_MEASURED_UNMATCHED_B_SPREAD_CODE, CC7_B1_RESIDUAL_SPREAD_MAX_CODE,
         "a shared budget of 6 would have admitted (a)'s own failing direction"
     );
+    // The excursion depth is the one **linear**-millionths quantity in the
+    // list, and the two constants it could be mistaken for are the look's
+    // blue zero crossing (the other linear-millionths figure in
+    // `cc7_scenarios`) and the chart luma mean budget, which is code
+    // millionths and not linear at all. Both are asserted by name, because a
+    // reader who drops "linear" from the unit is exactly the reader who would
+    // substitute one for the other.
+    assert_ne!(
+        CC7_C2_MAX_OVER_EXCURSION_MILLIONTHS, CC7_LOOK_BLUE_ZERO_CROSSING_LINEAR_MILLIONTHS,
+        "the two linear-millionths constants must stay distinct"
+    );
+    assert_ne!(
+        CC7_C2_MAX_OVER_EXCURSION_MILLIONTHS, CC7_MATCH_LUMA_MEAN_MAX_CODE_MILLIONTHS,
+        "a linear excursion depth must not equal a code-millionths budget"
+    );
+
     // The dead zone is zero, so CC7 states rather than asserts distinctness.
     assert_eq!(NEIGHBOUR_MATTE_TRACK_DEAD_ZONE_BASIS_POINTS, 0);
     assert!(cc7.iter().all(|(_, _, value)| *value != 0));

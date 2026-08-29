@@ -1229,6 +1229,21 @@ pub const CC7_C2_SKIN_IN_BAND_REPORTED_BASIS_POINTS: i64 = 10_000;
 pub const CC7_C2_OVER_RANGE_PIXELS_REPORTED: i64 = 672;
 /// The same, as a rate over the raster (A16; was 22 on the pre-A1 scene).
 pub const CC7_C2_OVER_RANGE_BASIS_POINTS_REPORTED: i64 = 116;
+/// How far the deepest corrected-C2 over-range pixel sits above legal white,
+/// in **linear millionths** (§4(b)(3)).
+///
+/// `ColorRangeChannel::maximum_over_excursion_millionths`
+/// (`crates/kinewright-core/src/color_qc.rs:301`, produced at `:1311`) is the
+/// depth of the excursion the population counts, and §4(b)(3) states it in
+/// prose beside the 672-pixel population. It had no constant, so the two
+/// places that read it — the media (b) exit gate and the (b) agent script —
+/// could only assert that *some* depth was published on blue and none on red
+/// or green. Both now gate the number itself.
+///
+/// **Reported, never gated as a budget**: the excursion is the compromise the
+/// human is asked about, not a bound the slice defends. It is asserted
+/// **exactly**, in the same way as the population beside it.
+pub const CC7_C2_MAX_OVER_EXCURSION_MILLIONTHS: i64 = 41_538;
 /// The `warm` look's whole-raster out-of-gamut count (A19; 1 608 pre-A1 — the
 /// 128-pixel difference is exactly the removed pure-red patch).
 pub const CC7_WARM_WHOLE_RASTER_OUT_OF_GAMUT_PIXELS_REPORTED: i64 = 1_480;
@@ -1300,6 +1315,28 @@ pub const CC7_MATTE_OUTSIDE_CHANGED_PIXELS_MAX: i64 = 0;
 /// (g)(1): the one exception code a conforming H.264 export always carries,
 /// because the format has no white-point field (A6).
 pub const CC7_DELIVERY_ALLOWED_INFO_CODES: [&str; 1] = ["delivery_tag_not_representable"];
+/// (g)(3): the question id the encoded-delivery review entry carries.
+///
+/// The six scenarios answer to `a`..`f` through
+/// [`Cc7ScenarioSpec::human_question`]; (g) is not a scenario — it is a
+/// condition that can attach to any of them — so its entry is keyed `g` and
+/// derives from here rather than from a spec row.
+pub const CC7_DELIVERY_QUESTION_ID: &str = "g";
+/// (g)(3): the question the reviewer is asked when, and only when, a verified
+/// encode raises a `Warning`-severity exception.
+///
+/// The roadmap's colour matrix states the (g) row as a **condition** —
+/// "Only if a codec limitation creates a visible trade-off"
+/// (`docs/ROADMAP-AND-WORKFLOWS.md:538`) — not as a question a reviewer can
+/// answer. This is that condition put as the yes/no the reviewer actually
+/// answers, in the shape of (b2)'s "Is the proposed compromise acceptable?":
+/// the machine has already decided the encode conforms, and the only thing
+/// left is whether the trade-off it made is acceptable.
+///
+/// An encode whose only exception is the allowed Info code contributes **no**
+/// entry at all, because there is no trade-off to judge (§4(g)(3)).
+pub const CC7_DELIVERY_HUMAN_QUESTION: &str =
+    "Is the codec limitation's visible trade-off acceptable?";
 /// (g): the CI delivery leg's Linux budget, in seconds (A10).
 pub const CC7_DELIVERY_LEG_BUDGET_SECONDS_LINUX: i64 = 90;
 

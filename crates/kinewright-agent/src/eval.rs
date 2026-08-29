@@ -4198,7 +4198,37 @@ fn ungated_color_measurements(outcome: &EvalOutcome) -> Vec<EvalMeasurement> {
             passed: true,
         });
     }
+    if let Some(verification) = color.verification.as_ref() {
+        measurements.push(EvalMeasurement {
+            name: DELIVERY_WARNING_MEASUREMENT_NAME.to_owned(),
+            observed: delivery_warning_count(verification),
+            budget: 0,
+            unit: "exceptions".to_owned(),
+            passed: true,
+        });
+    }
     measurements
+}
+
+/// CC7 §4(g)(3): how many `Warning`-severity exceptions a verified encode
+/// raised.
+///
+/// A conforming H.264 export always carries one **Info**
+/// `delivery_tag_not_representable`, because the format has no white-point
+/// field (A6), so "any exception" is the wrong count and "no exceptions"
+/// would fail a perfectly good encode. A `Warning` — in practice
+/// `decoded_range_excursion` — is the codec limitation that creates a visible
+/// trade-off, and it is the only thing that puts a `(g)` question to a human.
+#[must_use]
+pub fn delivery_warning_count(verification: &DeliveryVerification) -> i64 {
+    i64::try_from(
+        verification
+            .exceptions
+            .iter()
+            .filter(|exception| exception.severity == kinewright_core::QaSeverity::Warning)
+            .count(),
+    )
+    .unwrap_or(i64::MAX)
 }
 
 /// The name the chart luma delta reaches `results.jsonl` under.
@@ -4206,6 +4236,16 @@ pub const CHART_LUMA_MEASUREMENT_NAME: &str = "chart luma mean delta";
 
 /// The name the deep-shadow gamut population reaches `results.jsonl` under.
 pub const GAMUT_MEASUREMENT_NAME: &str = "deep shadow out-of-gamut pixels";
+
+/// The name the delivery verification's `Warning` count reaches
+/// `results.jsonl` under.
+///
+/// It is the **only** channel §4(g)(3)'s conditional review entry has:
+/// `write_review_package` sees `EvalResult`s, not the `ColorEvalEvidence` the
+/// runner measured, so the count has to travel as a measurement or not at
+/// all. A clean encode records `0` rather than nothing, so "no Warning" is on
+/// the record as a measurement and never as a missing one.
+pub const DELIVERY_WARNING_MEASUREMENT_NAME: &str = "delivery verification warnings";
 
 fn color_outcome(
     name: &str,

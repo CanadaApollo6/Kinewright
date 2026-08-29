@@ -114,12 +114,13 @@ use kinewright_core::{
         cc7_lut_backed_canonical_operations, cc7_spec, cc7_track_keyframe_centres,
     },
     cc7_scenarios::{
-        CC7_B1_RESIDUAL_SPREAD_MAX_CODE, CC7_C2_OVER_RANGE_BASIS_POINTS_REPORTED,
-        CC7_C2_OVER_RANGE_PIXELS_REPORTED, CC7_LOG_BLACK_PATCH_REPORTED_CODE,
-        CC7_LOG_PRIMARY_REPORTED_CODE, CC7_LOOK_BLUE_ZERO_CROSSING_DISPLAY709_MILLIONTHS,
-        CC7_LOOK_MIX_BASIS_POINTS, CC7_MEASURED_B1_RESIDUAL_SPREAD_CODE,
-        CC7_MEASURED_LOG_INVERSE_CODE, CC7_MEASURED_UNCORRECTED_C1_SPREAD_CODE,
-        CC7_SECONDARY_SATURATION_PERCENT, CC7_WARM_WHOLE_RASTER_OUT_OF_GAMUT_BASIS_POINTS,
+        CC7_B1_RESIDUAL_SPREAD_MAX_CODE, CC7_C2_MAX_OVER_EXCURSION_MILLIONTHS,
+        CC7_C2_OVER_RANGE_BASIS_POINTS_REPORTED, CC7_C2_OVER_RANGE_PIXELS_REPORTED,
+        CC7_LOG_BLACK_PATCH_REPORTED_CODE, CC7_LOG_PRIMARY_REPORTED_CODE,
+        CC7_LOOK_BLUE_ZERO_CROSSING_DISPLAY709_MILLIONTHS, CC7_LOOK_MIX_BASIS_POINTS,
+        CC7_MEASURED_B1_RESIDUAL_SPREAD_CODE, CC7_MEASURED_LOG_INVERSE_CODE,
+        CC7_MEASURED_UNCORRECTED_C1_SPREAD_CODE, CC7_SECONDARY_SATURATION_PERCENT,
+        CC7_WARM_WHOLE_RASTER_OUT_OF_GAMUT_BASIS_POINTS,
         CC7_WARM_WHOLE_RASTER_OUT_OF_GAMUT_PIXELS_REPORTED,
     },
     matte_coverage_statistics, measure_color_qc, measure_scopes,
@@ -1248,6 +1249,36 @@ fn cc7_wrong_balance_clamps_temperature_and_raises_one_range_warning() {
     assert_eq!(attribution.with_node.range.red.over_pixel_count, 0);
     assert_eq!(attribution.with_node.range.green.over_pixel_count, 0);
     assert_eq!(attribution.with_node.gamut.out_of_gamut_pixel_count, 0);
+    // §4(b)(3)'s third published figure, gated rather than printed: the
+    // *depth* of the excursion, not only its population. It had no constant
+    // when the (b) legs were written, so both of them could say no more than
+    // "some depth on blue, none on red or green"; a run that clipped blue
+    // twice as hard would have passed.
+    assert_eq!(
+        attribution
+            .with_node
+            .range
+            .blue
+            .maximum_over_excursion_millionths,
+        CC7_C2_MAX_OVER_EXCURSION_MILLIONTHS,
+        "§4(b)(3): the deepest blue over-range excursion is pinned, not merely non-zero"
+    );
+    assert_eq!(
+        attribution
+            .with_node
+            .range
+            .red
+            .maximum_over_excursion_millionths,
+        0
+    );
+    assert_eq!(
+        attribution
+            .with_node
+            .range
+            .green
+            .maximum_over_excursion_millionths,
+        0
+    );
 
     let excursions = attribution
         .with_node
@@ -3283,6 +3314,19 @@ fn assert_manifest_i64(parent: &Value, key: &str, expected: i64) {
     );
 }
 
+/// The operating systems Kinewright targets, and therefore the only values
+/// the manifest's **measuring**-OS provenance field may take.
+///
+/// `docs/BUILDING.md` names 64-bit Windows (MSVC) and 64-bit Linux (glibc);
+/// `ci.yml:10, :40` runs the same workspace commands on both. The manifest
+/// records which of the two took the published measurements — §14's "every
+/// CC7 budget is a Linux measurement until that job runs" — so the field is
+/// history, not a gate, and a fixture may not read the running OS off it.
+const CC7_SUPPORTED_MEASUREMENT_OS: [&str; 2] = ["linux", "windows"];
+
+/// The architectures those two lanes are, for the same reason.
+const CC7_SUPPORTED_MEASUREMENT_ARCH: [&str; 1] = ["x86_64"];
+
 /// Every `cc7_scenarios` constant the manifest must declare, paired with the
 /// code constant it is asserted **equal to** (rule 11.0.3: never restated as a
 /// literal).
@@ -3346,6 +3390,10 @@ fn cc7_threshold_constants() -> Vec<(&'static str, i64)> {
         (
             "cc7_c2_over_range_basis_points_reported",
             CC7_C2_OVER_RANGE_BASIS_POINTS_REPORTED,
+        ),
+        (
+            "cc7_c2_max_over_excursion_millionths",
+            spec::CC7_C2_MAX_OVER_EXCURSION_MILLIONTHS,
         ),
         (
             "cc7_warm_whole_raster_out_of_gamut_pixels_reported",
@@ -3895,6 +3943,39 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
         .expect("§4.2's table");
     assert!(failing.len() >= 12, "§4.2 lists at least twelve rows");
 
+    // --- §11.3 reported, never gated ---------------------------------------
+    // Every figure in this block that has a `cc7_scenarios` constant is
+    // asserted equal to it. The block exists to publish numbers no gate
+    // defends, which is exactly the block a stale copy hides in.
+    let reported = &budgets["reported_not_gated"];
+    for (key, expected) in [
+        (
+            "c2_residual_spread_code",
+            CC7_UNRECOVERABLE_RESIDUAL_SPREAD_REPORTED_CODE,
+        ),
+        ("c2_over_range_pixels", CC7_C2_OVER_RANGE_PIXELS_REPORTED),
+        (
+            "c2_over_range_basis_points",
+            CC7_C2_OVER_RANGE_BASIS_POINTS_REPORTED,
+        ),
+        (
+            "c2_blue_maximum_over_excursion_millionths",
+            CC7_C2_MAX_OVER_EXCURSION_MILLIONTHS,
+        ),
+        (
+            "warm_whole_raster_out_of_gamut_pixels",
+            CC7_WARM_WHOLE_RASTER_OUT_OF_GAMUT_PIXELS_REPORTED,
+        ),
+        (
+            "warm_whole_raster_out_of_gamut_basis_points",
+            CC7_WARM_WHOLE_RASTER_OUT_OF_GAMUT_BASIS_POINTS,
+        ),
+        ("log_primary_code", CC7_LOG_PRIMARY_REPORTED_CODE),
+        ("log_black_patch_code", CC7_LOG_BLACK_PATCH_REPORTED_CODE),
+    ] {
+        assert_manifest_i64(reported, key, expected);
+    }
+
     // --- §11.3 measurement provenance --------------------------------------
     let measurement = &budgets["measurement"];
     for key in [
@@ -3916,8 +3997,36 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
             "the measurement provenance block must record {key}"
         );
     }
-    assert_eq!(measurement["os"], std::env::consts::OS);
-    assert_eq!(measurement["arch"], std::env::consts::ARCH);
+    // `os` and `arch` name the machine the published numbers were **measured
+    // on** — §11.3's "a `measurement` provenance block naming OS, lane,
+    // adapter, …" — and not the machine reading them back. Comparing them
+    // against `std::env::consts` made the whole manifest environment-gated:
+    // §4 requires "nothing environment-gated, same gates both OSes", every
+    // CC7 number is a Linux measurement until the Windows job runs (§14), and
+    // R5 forbids a per-OS constant outright, so the very first Windows or
+    // aarch64 run of these fixtures would have failed on a provenance record
+    // that is *correct*. CC1 and CC3-CC6 only ever record the measuring OS;
+    // CC7 follows that precedent and asserts membership of the supported set
+    // instead, which still fails on a typo, an empty string, or a provenance
+    // block copied from a platform this workspace does not target.
+    assert!(
+        CC7_SUPPORTED_MEASUREMENT_OS.contains(
+            &measurement["os"]
+                .as_str()
+                .expect("the measuring OS is a string")
+        ),
+        "the measuring OS {} is not one of {CC7_SUPPORTED_MEASUREMENT_OS:?}",
+        measurement["os"]
+    );
+    assert!(
+        CC7_SUPPORTED_MEASUREMENT_ARCH.contains(
+            &measurement["arch"]
+                .as_str()
+                .expect("the measuring architecture is a string")
+        ),
+        "the measuring architecture {} is not one of {CC7_SUPPORTED_MEASUREMENT_ARCH:?}",
+        measurement["arch"]
+    );
 
     // --- §11.3 review, eval, scorecard, m36, external owners ---------------
     let review = &manifest["review"];
@@ -3949,6 +4058,44 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
             "a value needle shorter than three digits would match anywhere: {needle}"
         );
     }
+    // §8.4's question column, from `cc7_scenarios` rather than from prose.
+    // The `(g)` row is the one entry with no scenario behind it: it is a
+    // property of an encode, so it carries its own constant and its own
+    // condition, and the eval binary asserts the condition's measurement
+    // (`cc7_the_manifest_review_keys_match_the_blind_form`) because the
+    // measurement name lives in a crate media cannot see.
+    for scenario in CC7_SCENARIOS {
+        let spec = cc7_spec(scenario);
+        match spec.human_question {
+            Some(prompt) => assert_eq!(
+                review["questions"][spec.id], prompt,
+                "scenario {} must ask the matrix's question verbatim",
+                spec.id
+            ),
+            None => assert!(
+                review["questions"][spec.id].is_null(),
+                "scenario {} is objective-only and asks nothing",
+                spec.id
+            ),
+        }
+        assert_eq!(
+            manifest["scorecard"]["human_question_count"][spec.id],
+            i64::from(spec.human_question.is_some()),
+            "scenario {}'s human question count must be its question",
+            spec.id
+        );
+    }
+    assert_eq!(
+        review["questions"][kinewright_core::cc7_scenarios::CC7_DELIVERY_QUESTION_ID],
+        kinewright_core::cc7_scenarios::CC7_DELIVERY_HUMAN_QUESTION
+    );
+    assert_eq!(
+        manifest["scorecard"]["human_question_count"]
+            [kinewright_core::cc7_scenarios::CC7_DELIVERY_QUESTION_ID],
+        0,
+        "no canonical CC7 encode raises a Warning, so the conditional row is asked zero times"
+    );
+
     assert_eq!(
         manifest["m36"],
         json!({
@@ -4098,7 +4245,7 @@ const CC7_MEDIA_TEST_SOURCES: [&str; 2] = [
 
 /// Every `cc7_*` test the media crate declares — §11.2 items 12–29, the two
 /// §11.2.33 inventory tests, and the failing directions §4.2 names.
-const CC7_MEDIA_TESTS: [&str; 41] = [
+const CC7_MEDIA_TESTS: [&str; 42] = [
     // cc7_fixtures.rs — §11.2 items 12b and 19–29, plus the inventory pair.
     "cc7_mixed_camera_match_meets_the_neutral_spread_and_luma_budgets",
     "cc7_a_the_unmatched_candidate_exceeds_the_neutral_spread_budget",
@@ -4138,6 +4285,7 @@ const CC7_MEDIA_TESTS: [&str; 41] = [
     "cc7_the_chart_band_is_achromatic_and_the_primaries_band_has_no_red",
     "cc7_camera_sources_differ_from_the_reference_at_every_neutral_patch",
     "cc7_log_source_is_not_the_base_scene",
+    "cc7_c_the_base_scene_does_not_read_as_log",
     "cc7_tracked_source_moves_and_occludes",
     "cc7_tracked_square_never_covers_the_static_patch_row",
     "cc7_ffv1_round_trip_is_byte_exact",
@@ -4170,13 +4318,14 @@ const CC7_AGENT_TEST_SOURCES: [&str; 1] = ["crates/kinewright-agent/tests/mcp_se
 /// Every `cc7_*` test the agent's integration suite declares — §11.2 item 30:
 /// §5.2's six scripts, D-E13's standalone (f2) refusal check, and §5.4's
 /// surface-unchanged pin.
-const CC7_AGENT_TESTS: [&str; 8] = [
+const CC7_AGENT_TESTS: [&str; 9] = [
     "cc7_the_agent_surface_is_unchanged_by_this_slice",
     "cc7_a_mixed_camera_match_retains_the_reference_and_lands_the_canonical_grade",
     "cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning",
     "cc7_c_log_like_input_is_normalised_by_an_imported_technical_lut",
     "cc7_d_product_qualifier_selects_its_patch_and_leaves_skin_alone",
     "cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut",
+    "cc7_f_observation_gate_rejects_a_doubled_offset",
     "cc7_f_tracked_secondary_drops_only_the_occluded_samples",
     "cc7_f2_the_default_floor_does_not_refuse",
 ];
@@ -4218,7 +4367,7 @@ const CC7_EVAL_TEST_SOURCES: [&str; 2] = [
 /// published-benchmark check of §7.7, written where the other published
 /// manifests' checks live, and it is declared here rather than renamed
 /// (§11.3's "or be named explicitly in the inventory").
-const CC7_EVAL_TESTS: [&str; 28] = [
+const CC7_EVAL_TESTS: [&str; 31] = [
     // eval.rs — the shared-runner half.
     "cc7_a_v5_result_serialises_byte_identically_without_measurements",
     "cc7_track_keyframes_match_expected_reads_the_committed_document",
@@ -4249,6 +4398,9 @@ const CC7_EVAL_TESTS: [&str; 28] = [
     "cc7_every_color_task_carries_a_color_eval_request",
     "cc7_every_color_assertion_threshold_is_a_cc7_scenarios_constant",
     "cc7_the_color_review_template_asks_only_the_matrix_question",
+    "cc7_g_a_clean_encode_contributes_no_review_task",
+    "cc7_the_manifest_needle_sets_equal_the_leak_needles",
+    "cc7_the_manifest_review_keys_match_the_blind_form",
     "cc7_every_color_fixture_builds_a_valid_document",
     "published_v6_manifest_tracks_the_color_workflow_suite",
 ];
@@ -4558,8 +4710,8 @@ fn cc7_declared_test_names_exist_in_their_source_files() {
         "a CC7 test name is declared in two inventory arrays"
     );
     assert_eq!(
-        total, 96,
-        "the CC7 slice declares 96 tests across five crates"
+        total, 101,
+        "the CC7 slice declares 101 tests across five crates"
     );
     for name in CC7_EXPLICIT_TEST_NAMES {
         assert!(

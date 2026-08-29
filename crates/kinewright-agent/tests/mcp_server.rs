@@ -2141,18 +2141,19 @@ async fn resolve_plan_confirmation(broker: kinewright_agent::ConfirmationBroker,
 use kinewright_core::{
     NormalizedRoi, Operation, SCOPE_BASIS_POINTS, apply_batch,
     cc7_scenarios::{
-        CC7_C2_OVER_RANGE_BASIS_POINTS_REPORTED, CC7_C2_OVER_RANGE_PIXELS_REPORTED,
-        CC7_CANDIDATE_CLIP_ID, CC7_CHART_BAND_ROI, CC7_DEEP_SHADOW_RECT, CC7_DEEP_SHADOW_ROI,
-        CC7_F_KEYFRAMED_PARAMETERS, CC7_LOG_CUBE_SIZE, CC7_LOG_FIRST_PERCENTILE_MIN_CODE16,
-        CC7_LOG_P99_MAX_CODE16, CC7_LOOK_DEEP_SHADOW_OUT_OF_GAMUT_PIXELS,
-        CC7_LOOK_MIX_BASIS_POINTS, CC7_LUT_ASSET_ID, CC7_MATCH_PROPOSAL_B, CC7_MATCH_PROPOSAL_C1,
-        CC7_MATCH_PROPOSAL_C2, CC7_PRODUCT_PATCH_PIXEL_COUNT, CC7_PRODUCT_RED_ROI,
-        CC7_REFERENCE_CLIP_ID, CC7_SECONDARY_SATURATION_PERCENT, CC7_SINGLE_CLIP_ID,
-        CC7_SKIN_BAND_ROI, CC7_SKIN_IN_BAND_EXACT_BASIS_POINTS,
-        CC7_TRACK_ANALYTIC_CENTRES_BASIS_POINTS, CC7_TRACK_EXPECTED_LOW_CONFIDENCE_FRAMES,
-        CC7_TRACK_F2_SAMPLE_FRAMES, CC7_TRACK_F2_STEP_FRAMES, CC7_TRACK_MAX_WIDTH,
-        CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS, CC7_TRACK_OBSERVED_CENTRES_BASIS_POINTS,
-        CC7_TRACK_OBSERVED_CONFIDENCE_BASIS_POINTS, CC7_TRACK_RANGE_END_LOCAL_FRAME,
+        CC7_C2_MAX_OVER_EXCURSION_MILLIONTHS, CC7_C2_OVER_RANGE_BASIS_POINTS_REPORTED,
+        CC7_C2_OVER_RANGE_PIXELS_REPORTED, CC7_CANDIDATE_CLIP_ID, CC7_CHART_BAND_ROI,
+        CC7_DEEP_SHADOW_RECT, CC7_DEEP_SHADOW_ROI, CC7_F_KEYFRAMED_PARAMETERS, CC7_LOG_CUBE_SIZE,
+        CC7_LOG_FIRST_PERCENTILE_MIN_CODE16, CC7_LOG_P99_MAX_CODE16,
+        CC7_LOOK_DEEP_SHADOW_OUT_OF_GAMUT_PIXELS, CC7_LOOK_MIX_BASIS_POINTS, CC7_LUT_ASSET_ID,
+        CC7_MATCH_PROPOSAL_B, CC7_MATCH_PROPOSAL_C1, CC7_MATCH_PROPOSAL_C2,
+        CC7_PRODUCT_PATCH_PIXEL_COUNT, CC7_PRODUCT_RED_ROI, CC7_REFERENCE_CLIP_ID,
+        CC7_SECONDARY_SATURATION_PERCENT, CC7_SINGLE_CLIP_ID, CC7_SKIN_BAND_ROI,
+        CC7_SKIN_IN_BAND_EXACT_BASIS_POINTS, CC7_TRACK_ANALYTIC_CENTRES_BASIS_POINTS,
+        CC7_TRACK_EXPECTED_LOW_CONFIDENCE_FRAMES, CC7_TRACK_F2_SAMPLE_FRAMES,
+        CC7_TRACK_F2_STEP_FRAMES, CC7_TRACK_MAX_WIDTH, CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS,
+        CC7_TRACK_OBSERVED_CENTRES_BASIS_POINTS, CC7_TRACK_OBSERVED_CONFIDENCE_BASIS_POINTS,
+        CC7_TRACK_OCCLUDED_CONFIDENCE_ON_THE_RECIPE_REPORTED, CC7_TRACK_RANGE_END_LOCAL_FRAME,
         CC7_TRACK_RANGE_START_LOCAL_FRAME, CC7_TRACK_SEARCH_RADIUS_PERCENT,
         CC7_TRACK_SEEDED_WINDOW_CENTRE_BASIS_POINTS,
         CC7_TRACK_SEEDED_WINDOW_HALF_HEIGHT_BASIS_POINTS,
@@ -2504,6 +2505,39 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     server.shutdown();
 }
 
+/// CC7 §4(a)(1)'s failing-direction fixture, under the contract's own name.
+///
+/// The reference may not also be a candidate, so "the reference was retained"
+/// cannot be satisfied by matching it against itself
+/// (`color_scopes.rs:793-796`).
+///
+/// It is a **named function asserted inside** the (a) script rather than a
+/// `#[test]` of its own: reaching `plan_shot_match` needs the two-clip
+/// document, the FFV1 sources and a live MCP endpoint, and a second
+/// `#[tokio::test]` would pay for all three again to make one refused call.
+/// The name resolves, and the assertion runs on every run of the script.
+async fn cc7_a_reference_retention_fails_when_the_reference_is_also_a_candidate(
+    client: &RunningService<RoleClient, ()>,
+    revision: u64,
+) {
+    let self_match = invoke_capability(
+        client,
+        "plan_shot_match",
+        json!({
+            "expected_revision": revision,
+            "reference_clip_id": CC7_REFERENCE_CLIP_ID.0,
+            "candidate_clip_ids": [CC7_REFERENCE_CLIP_ID.0],
+        }),
+    )
+    .await;
+    assert_eq!(self_match.is_error, Some(true));
+    let self_match_body = self_match.structured_content.as_ref().unwrap();
+    assert_eq!(
+        self_match_body["code"], "invalid_request",
+        "{self_match_body}"
+    );
+}
+
 /// CC7 §5.2 (a) — mixed-camera interview.
 ///
 /// `analyze_color_shot` ×2 → `plan_shot_match` → `prepare_edit_plan` →
@@ -2568,25 +2602,7 @@ async fn cc7_a_mixed_camera_match_retains_the_reference_and_lands_the_canonical_
     )
     .await;
 
-    // CC7 §4(a)(1) failing direction: the reference may not also be a
-    // candidate, so "the reference was retained" cannot be satisfied by
-    // matching it against itself.
-    let self_match = invoke_capability(
-        &client,
-        "plan_shot_match",
-        json!({
-            "expected_revision": revision,
-            "reference_clip_id": CC7_REFERENCE_CLIP_ID.0,
-            "candidate_clip_ids": [CC7_REFERENCE_CLIP_ID.0],
-        }),
-    )
-    .await;
-    assert_eq!(self_match.is_error, Some(true));
-    let self_match_body = self_match.structured_content.as_ref().unwrap();
-    assert_eq!(
-        self_match_body["code"], "invalid_request",
-        "{self_match_body}"
-    );
+    cc7_a_reference_retention_fails_when_the_reference_is_also_a_candidate(&client, revision).await;
 
     // The match itself, over CC7 §2.3.3's twelve-patch achromatic chart band.
     let matched = invoke_capability(
@@ -3169,17 +3185,16 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
         assert_eq!(report["range"]["red"]["over_pixel_count"], 0, "{report}");
         assert_eq!(report["range"]["green"]["over_pixel_count"], 0, "{report}");
         // R2 minor 5: §4(b)(3)'s `maximum_over_excursion_millionths` was
-        // printed and never read. The magnitude itself has no constant in
-        // `cc7_scenarios` (recorded as owed in the errata; §4(b)(3) states
-        // 41 538 in prose and §2.1 forbids restating it here), but the
-        // channel it lands on is asserted: the excursion's depth is on blue
-        // alone, so a run that clipped red or green fails here rather than in
-        // a printed line nobody reads.
-        assert!(
+        // printed and never read. The magnitude now has its constant —
+        // `CC7_C2_MAX_OVER_EXCURSION_MILLIONTHS` — so the depth of the
+        // excursion is gated here rather than merely asserted non-zero, and
+        // §2.1's ban on restating a number in the fixture is honoured by
+        // naming the constant.
+        assert_eq!(
             report["range"]["blue"]["maximum_over_excursion_millionths"]
                 .as_i64()
-                .unwrap_or_else(|| panic!("the range report publishes a depth: {report}"))
-                > 0,
+                .unwrap_or_else(|| panic!("the range report publishes a depth: {report}")),
+            CC7_C2_MAX_OVER_EXCURSION_MILLIONTHS,
             "{report}"
         );
         assert_eq!(
@@ -3802,6 +3817,57 @@ async fn cc7_d_product_qualifier_selects_its_patch_and_leaves_skin_alone() {
     server.shutdown();
 }
 
+/// CC7 §4(e)(1)'s failing direction, under the contract's own name, taking the
+/// contract's **pre-authorized fallback**.
+///
+/// §4(e)(1) names the typed refusal `bypass_not_lossless` as the failing
+/// direction, and says in the same breath: "**If no construction is
+/// reachable**, the failing direction is instead the hash-equality check on
+/// the `after` call — `after_rgba8_pixels_sha256 != before_rgba8_pixels_sha256`
+/// — and the contract records that the typed refusal is unreachable rather
+/// than pretending the gate has a failing direction it does not have."
+///
+/// No construction is reachable on the real renderer. The one place the
+/// refusal fires (`server.rs:23300-23336`) reaches it by injecting a fault —
+/// a `NoopMedia` built with `bypass_leaks_pixel: Some(0x7f)`, a stub whose
+/// bypass render deliberately differs from its absent render. `Compositor`
+/// applies a bypassed node by not applying it, so on the production path the
+/// bypass raster and the absent raster are the same bytes by construction and
+/// there is no document, no keyframe and no look node that makes them differ.
+/// CC7 therefore takes the fallback here, and asserts the refusal **absent**
+/// on every proofed variant (the `code == null` check beside this call).
+fn cc7_e_after_does_not_match_absent(body: &serde_json::Value) {
+    assert_ne!(
+        body["hashes"]["before_rgba8_pixels_sha256"], body["hashes"]["after_rgba8_pixels_sha256"],
+        "the warm look must change the picture: {body}"
+    );
+}
+
+/// CC7 §4(e)(4)'s failing direction, under the contract's own name.
+///
+/// The portability check is CC4's bit-identical relocation fixture, cited not
+/// duplicated; CC7 adds exactly one agent-visible claim — after a Save-As
+/// relocation, `list_look_assets` reports the (c) imported asset `verified`
+/// with the same `sha256`. A **bare** relocation — the project path moves and
+/// the store does not — must not report `verified`, or the claim above would
+/// hold whatever the store did.
+///
+/// A named function asserted inside the (e) script, for §5.2's reason: the
+/// claim is about one server whose project path has just moved, and it is not
+/// separable from the session that moved it.
+fn cc7_e_a_bare_relocation_reports_missing(listed: &serde_json::Value, lut_asset_id: u64) {
+    let entry = listed["assets"]
+        .as_array()
+        .expect("the asset list")
+        .iter()
+        .find(|entry| entry["lut_asset_id"] == lut_asset_id)
+        .expect("the imported asset is listed");
+    assert_ne!(
+        entry["availability"]["kind"], "verified",
+        "a bare relocation cannot report verified: {listed}"
+    );
+}
+
 /// CC7 §5.2 (e) — creative look.
 ///
 /// `plan_creative_look` binds the built-in `warm` asset at its neutral mix →
@@ -4002,11 +4068,7 @@ async fn cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut() {
                 "only the bypass cell publishes the claim: {body}"
             );
             if variant == "after" {
-                assert_ne!(
-                    body["hashes"]["before_rgba8_pixels_sha256"],
-                    body["hashes"]["after_rgba8_pixels_sha256"],
-                    "the warm look must change the picture: {body}"
-                );
+                cc7_e_after_does_not_match_absent(body);
             }
         }
     }
@@ -4116,11 +4178,7 @@ async fn cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut() {
     server.set_project_path(Some(relocated.clone()));
     let unrelocated = invoke_capability(&client, "list_look_assets", json!({})).await;
     let unrelocated = unrelocated.structured_content.as_ref().unwrap().clone();
-    assert_ne!(
-        availability(&unrelocated, imported_id)["availability"]["kind"],
-        "verified",
-        "a bare relocation cannot report verified: {unrelocated}"
-    );
+    cc7_e_a_bare_relocation_reports_missing(&unrelocated, imported_id);
 
     // Save As copies the store beside the new project file, and the same
     // sha256 verifies again.
@@ -4155,6 +4213,184 @@ fn cc7_copy_directory(from: &std::path::Path, to: &std::path::Path) {
         } else {
             std::fs::copy(entry.path(), target).unwrap();
         }
+    }
+}
+
+/// One observation that failed CC7 §4(f)(2)'s accuracy gate.
+///
+/// Typed rather than a bare `bool` so the rejection names *which* sample and
+/// *which* axis missed, and by how much: the failing-direction fixture below
+/// asserts the whole record, so a gate that rejected the right sample for the
+/// wrong reason would not satisfy it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cc7ObservationOffTolerance {
+    local_frame: i64,
+    axis: usize,
+    error_basis_points: i64,
+    tolerance_basis_points: i64,
+}
+
+/// CC7 §4(f)(2)'s observation-accuracy gate: every **surviving** raw
+/// observation is within `CC7_TRACK_TOLERANCE_BASIS_POINTS` of §2.3.6's
+/// analytic centre, on both axes.
+///
+/// `Ok(worst)` returns the worst of the two axes' errors, which is what the
+/// script accumulates into its reported figure; `Err(_)` is the typed
+/// rejection. Written as a function so that the gate the live script runs and
+/// the gate `cc7_f_observation_gate_rejects_a_doubled_offset` proves can fail
+/// are the **same** code — a failing direction asserted against a re-typed
+/// copy of the comparison proves nothing about the comparison that ships.
+fn cc7_observation_within_tolerance(
+    local_frame: i64,
+    sample_index: usize,
+    observed_centre: [i64; 2],
+) -> Result<i64, Cc7ObservationOffTolerance> {
+    let analytic = CC7_TRACK_ANALYTIC_CENTRES_BASIS_POINTS[sample_index];
+    let mut worst = 0_i64;
+    for axis in 0..2 {
+        let error = (observed_centre[axis] - analytic[axis]).abs();
+        if error > CC7_TRACK_TOLERANCE_BASIS_POINTS {
+            return Err(Cc7ObservationOffTolerance {
+                local_frame,
+                axis,
+                error_basis_points: error,
+                tolerance_basis_points: CC7_TRACK_TOLERANCE_BASIS_POINTS,
+            });
+        }
+        worst = worst.max(error);
+    }
+    Ok(worst)
+}
+
+/// CC7 §4(f)(2)'s failing direction, and §4.2's `track observation` row.
+///
+/// The gate `cc7_f_tracked_secondary_drops_only_the_occluded_samples` runs
+/// over the live `observations[]` is fed the pinned observed centres with one
+/// centre moved by `2 × CC7_TRACK_TOLERANCE_BASIS_POINTS`, and must reject
+/// it, naming the sample, the axis and the error. Both directions are
+/// asserted over **every** surviving sample, so neither the acceptance nor
+/// the rejection can be an accident of which row was picked.
+///
+/// It needs no MCP session: the gate is a pure comparison against §2.3.6's
+/// analytic table, and the live tracker's own numbers are the pinned
+/// `CC7_TRACK_OBSERVED_CENTRES_BASIS_POINTS`, taken against the shipped
+/// tracker by the script itself.
+#[test]
+fn cc7_f_observation_gate_rejects_a_doubled_offset() {
+    let doubled = 2 * CC7_TRACK_TOLERANCE_BASIS_POINTS;
+    for (index, frame) in CC7_TRACK_SURVIVING_SAMPLE_FRAMES.into_iter().enumerate() {
+        let observed = CC7_TRACK_OBSERVED_CENTRES_BASIS_POINTS[index];
+
+        // The passing direction: the shipped tracker's own observation.
+        let worst = cc7_observation_within_tolerance(frame, index, observed)
+            .unwrap_or_else(|rejection| panic!("frame {frame} must pass the gate: {rejection:?}"));
+        assert!(worst <= CC7_TRACK_TOLERANCE_BASIS_POINTS);
+
+        // The failing direction, one axis at a time. A doubled offset is
+        // `2 × 200 = 400` bp from the analytic centre before the observation's
+        // own error is counted, so the reported error is at least the doubled
+        // offset less that error — and always over the tolerance.
+        for axis in 0..2 {
+            let mut offset = observed;
+            offset[axis] += doubled;
+            let rejection = cc7_observation_within_tolerance(frame, index, offset)
+                .expect_err("a centre offset by twice the tolerance must be rejected");
+            assert_eq!(rejection.local_frame, frame);
+            assert_eq!(rejection.axis, axis);
+            assert_eq!(
+                rejection.tolerance_basis_points,
+                CC7_TRACK_TOLERANCE_BASIS_POINTS
+            );
+            assert!(
+                rejection.error_basis_points > CC7_TRACK_TOLERANCE_BASIS_POINTS,
+                "frame {frame} axis {axis}: {rejection:?}"
+            );
+            // The offset is signed: moving the other way is rejected too, so
+            // the gate is a two-sided bound and not a ceiling.
+            let mut below = observed;
+            below[axis] -= doubled;
+            assert!(cc7_observation_within_tolerance(frame, index, below).is_err());
+        }
+    }
+    // Non-vacuity: the tolerance is not zero, so "rejects a doubled offset" is
+    // not "rejects everything".
+    const {
+        assert!(CC7_TRACK_TOLERANCE_BASIS_POINTS > 0);
+    }
+    assert_eq!(
+        CC7_TRACK_SURVIVING_SAMPLE_FRAMES.len(),
+        CC7_TRACK_OBSERVED_CENTRES_BASIS_POINTS.len() - 1,
+        "the occluded sample is dropped before the accuracy gate sees it"
+    );
+}
+
+/// CC7 §4(f)(1)'s failing direction, under the contract's own name.
+///
+/// The identical call at the tool's own
+/// `DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS = 5 000` returns an
+/// **empty** `low_confidence_samples`, so `CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS`
+/// is what dropped sample 47 and not the recipe: a floor the default would
+/// have produced anyway is decoration.
+///
+/// §4.2's row states the claim "at 5 000 **and** at 7 000". The second floor
+/// here is `CC7_TRACK_OCCLUDED_CONFIDENCE_ON_THE_RECIPE_REPORTED − 1`
+/// (**7 348**) rather than a fresh `7_000` literal: it is derived from a
+/// pinned constant instead of introducing an ungated number into a gate
+/// (rule 11.0.1), and it is the **tightest** floor that still drops nothing,
+/// so it implies the contract's round figure rather than merely matching it.
+///
+/// A named function asserted inside the (f) script: the call it makes is the
+/// *identical* one the script has just made, against the same seeded window
+/// on the same server, and "identical but for the floor" is a claim a second
+/// session cannot make.
+async fn cc7_f_the_default_floor_drops_no_sample<F>(
+    client: &RunningService<RoleClient, ()>,
+    track_arguments: &F,
+) where
+    F: Fn(i64, i64) -> serde_json::Value,
+{
+    let tightest_floor_that_drops_nothing =
+        CC7_TRACK_OCCLUDED_CONFIDENCE_ON_THE_RECIPE_REPORTED - 1;
+    for floor in [
+        CC7_DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS,
+        tightest_floor_that_drops_nothing,
+    ] {
+        assert!(
+            floor < CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS,
+            "a floor at or above the CC7 one is not a failing direction"
+        );
+        let defaulted = invoke_capability(
+            client,
+            "track_matte_window",
+            track_arguments(floor, CC7_TRACK_STEP_FRAMES),
+        )
+        .await;
+        let defaulted_body = defaulted.structured_content.as_ref().unwrap();
+        assert_eq!(defaulted.is_error, Some(false), "{defaulted_body}");
+        assert!(
+            defaulted_body["low_confidence_samples"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "a floor of {floor} drops nothing: {defaulted_body}"
+        );
+        assert_eq!(
+            defaulted_body["observations"].as_array().unwrap().len(),
+            cc7_tracking_sample_frames().len(),
+            "every sample survives at {floor}: {defaulted_body}"
+        );
+    }
+    assert_ne!(
+        CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS,
+        CC7_DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS
+    );
+    // The two floors bracket the occluded sample's confidence, which is the
+    // whole reason the CC7 floor exists.
+    const {
+        assert!(
+            CC7_TRACK_OCCLUDED_CONFIDENCE_ON_THE_RECIPE_REPORTED
+                < CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS
+        );
     }
 }
 
@@ -4383,18 +4619,19 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
             .iter()
             .position(|candidate| *candidate == frame)
             .expect("every observation is a contract sample frame");
-        let analytic = CC7_TRACK_ANALYTIC_CENTRES_BASIS_POINTS[index];
-        for (axis, key) in ["center_x_basis_points", "center_y_basis_points"]
-            .into_iter()
-            .enumerate()
-        {
-            let error = (sample[key].as_i64().unwrap() - analytic[axis]).abs();
-            worst = worst.max(error);
-            assert!(
-                error <= CC7_TRACK_TOLERANCE_BASIS_POINTS,
-                "frame {frame} axis {axis} is {error} bp off the analytic centre: {sample}"
-            );
-        }
+        let observed = [
+            sample["center_x_basis_points"].as_i64().unwrap(),
+            sample["center_y_basis_points"].as_i64().unwrap(),
+        ];
+        // The gate itself is `cc7_observation_within_tolerance`, so that
+        // §4(f)(2)'s failing direction —
+        // `cc7_f_observation_gate_rejects_a_doubled_offset` — drives this
+        // code path and not a second copy of it.
+        worst = worst.max(
+            cc7_observation_within_tolerance(frame, index, observed).unwrap_or_else(|rejection| {
+                panic!("CC7 §4(f)(2): {rejection:?}: {sample}");
+            }),
+        );
         assert!(
             sample["confidence_basis_points"].as_i64().unwrap()
                 >= CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS
@@ -4448,30 +4685,7 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
         low[0]
     );
 
-    // CC7 §4(f)(1) failing direction: the tool's own default drops nothing, so
-    // `CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS` is load-bearing.
-    let defaulted = invoke_capability(
-        &client,
-        "track_matte_window",
-        track_arguments(
-            CC7_DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS,
-            CC7_TRACK_STEP_FRAMES,
-        ),
-    )
-    .await;
-    let defaulted_body = defaulted.structured_content.as_ref().unwrap();
-    assert_eq!(defaulted.is_error, Some(false), "{defaulted_body}");
-    assert!(
-        defaulted_body["low_confidence_samples"]
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "the 5000 default drops nothing: {defaulted_body}"
-    );
-    assert_ne!(
-        CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS,
-        CC7_DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS
-    );
+    cc7_f_the_default_floor_drops_no_sample(&client, &track_arguments).await;
 
     // Commit the tracker's own prepared plan: `track_matte_window` publishes a
     // `prepared_edit_plan`, not a bare operation list.

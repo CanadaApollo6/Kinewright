@@ -15,10 +15,10 @@ use kinewright_agent::{
     eval::{
         BLIND_DIRECTORY_NAME, BLIND_FORM_FILE_NAME, BLIND_KEY_FILE_NAME, BLIND_SCHEMA_VERSION,
         BlindKeyEntry, BlindKeyFile, BlindReviewForm, COLOR_WORKFLOW_BENCHMARK_ID,
-        ColorEvalRequest, EnvironmentStamp, EvalAssertion, EvalAudioTailSpec, EvalBudgets,
-        EvalDefinition, EvalDeliverableSpec, EvalError, EvalLoudnessSpec, EvalResult,
-        ExpectedSourceClip, ExpectedTimelineClip, FixtureContext, HumanQuestion, HumanReviewFile,
-        PreparedFixture, SourceRangeExclusion, blind_review_form,
+        ColorEvalRequest, DELIVERY_WARNING_MEASUREMENT_NAME, EnvironmentStamp, EvalAssertion,
+        EvalAudioTailSpec, EvalBudgets, EvalDefinition, EvalDeliverableSpec, EvalError,
+        EvalLoudnessSpec, EvalResult, ExpectedSourceClip, ExpectedTimelineClip, FixtureContext,
+        HumanQuestion, HumanReviewFile, PreparedFixture, SourceRangeExclusion, blind_review_form,
         human_review_template_with_questions, maximum_duration_after_expected_silence_cuts,
         render_jsonl, render_saved_deliverable, render_scoreboard, result_path, run_eval,
         run_eval_with_artifacts, summarize_human_review,
@@ -34,7 +34,8 @@ use kinewright_core::{
     TranscriptWord,
     cc7_scenarios::{
         CC7_C2_SKIN_IN_BAND_REPORTED_BASIS_POINTS, CC7_CANDIDATE_CLIP_ID, CC7_CHART_BAND_ROI,
-        CC7_CHART_PATCHES, CC7_DEEP_SHADOW_ROI, CC7_F_KEYFRAMED_PARAMETERS, CC7_LOG_CUBE_SIZE,
+        CC7_CHART_PATCHES, CC7_DEEP_SHADOW_ROI, CC7_DELIVERY_HUMAN_QUESTION,
+        CC7_DELIVERY_QUESTION_ID, CC7_F_KEYFRAMED_PARAMETERS, CC7_LOG_CUBE_SIZE,
         CC7_MATCH_NEUTRAL_SPREAD_MAX_CODE, CC7_MATTE_OUTSIDE_CHANGED_PIXELS_MAX,
         CC7_NODE_EFFECT_ID, CC7_PRODUCT_PATCH_PIXEL_COUNT, CC7_PRODUCT_RED_ROI,
         CC7_REFERENCE_CLIP_ID, CC7_SCENARIOS, CC7_SINGLE_CLIP_ID, CC7_SKIN_BAND_ROI,
@@ -322,7 +323,7 @@ fn write_review_package(
         benchmark_id,
         run_id,
         results,
-        &review_questions(benchmark_id),
+        &run_review_questions(benchmark_id, results),
     );
     let review_path = run_directory.join("human-review.json");
     let review_json =
@@ -386,6 +387,69 @@ fn review_questions(benchmark_id: &str) -> BTreeMap<String, Vec<HumanQuestion>> 
         );
     }
     questions
+}
+
+/// The questions **this run** puts to a reviewer: the scenarios' fixed ones,
+/// plus CC7 §4(g)(3)'s conditional encoded-delivery entry.
+///
+/// §8.4's table is fixed for (a), (b), (d), (e) and (f), empty for (c), and
+/// conditional for (g): the encode enters the package **only** when its
+/// delivery verification raised a `Warning`-severity exception — the codec
+/// limitation that created a visible trade-off. An encode whose only
+/// exception is the allowed Info `delivery_tag_not_representable` is not
+/// reviewed at all, because there is nothing to judge; a conforming export
+/// always carries that one (A6), so "any exception" would have asked the
+/// question on every run and "no exceptions" would never have asked it.
+///
+/// The condition is read off the run's own record — the
+/// `DELIVERY_WARNING_MEASUREMENT_NAME` row `run_eval_with_artifacts` writes
+/// beside the gated numbers — and is keyed by **base** task id, exactly as
+/// `human_review_template_with_questions` keys everything else, so every
+/// sample of a warned task carries the entry and no sample of a clean one
+/// does.
+fn run_review_questions(
+    benchmark_id: &str,
+    results: &[EvalResult],
+) -> BTreeMap<String, Vec<HumanQuestion>> {
+    let mut questions = review_questions(benchmark_id);
+    if benchmark_id != COLOR_WORKFLOW_BENCHMARK_ID {
+        return questions;
+    }
+    for result in results {
+        if !delivery_raised_a_warning(result) {
+            continue;
+        }
+        let base_task_id = result
+            .name
+            .split_whitespace()
+            .next()
+            .unwrap_or(&result.name)
+            .to_owned();
+        let asked = questions.entry(base_task_id).or_default();
+        if asked
+            .iter()
+            .any(|question| question.id == CC7_DELIVERY_QUESTION_ID)
+        {
+            continue;
+        }
+        asked.push(HumanQuestion {
+            id: CC7_DELIVERY_QUESTION_ID.to_owned(),
+            prompt: CC7_DELIVERY_HUMAN_QUESTION.to_owned(),
+            answer: None,
+            notes: None,
+        });
+    }
+    questions
+}
+
+/// Whether one result's delivery verification raised a `Warning`.
+///
+/// A result with **no** delivery-warning measurement did not verify a
+/// delivery at all, which is not a trade-off to review either.
+fn delivery_raised_a_warning(result: &EvalResult) -> bool {
+    result.measurements.iter().any(|measurement| {
+        measurement.name == DELIVERY_WARNING_MEASUREMENT_NAME && measurement.observed > 0
+    })
 }
 
 /// One packaged result, paired with the task id the review template gives it.
@@ -4786,7 +4850,8 @@ fn render_evals_document(
 #[cfg(test)]
 mod tests {
     use kinewright_agent::eval::{
-        BlindReviewForm, COLOR_WORKFLOW_NOT_APPLICABLE, EvalDeliverableResult, HumanRatings,
+        BlindReviewEntry, BlindReviewForm, COLOR_WORKFLOW_NOT_APPLICABLE, EvalDeliverableResult,
+        EvalMeasurement, HumanRatings,
     };
     use kinewright_core::{
         apply_batch,
@@ -6424,6 +6489,188 @@ mod tests {
         format!("{prefix}{}", "0".repeat(52))
     }
 
+    /// CC7 §11.3's manifest, read from the media crate's fixture directory.
+    ///
+    /// `include_str!` and not a runtime read, for §11.3's reason: the check is
+    /// a **compile-time** dependency, so a manifest edited without rebuilding
+    /// this binary is not a thing that can happen. The media crate owns the
+    /// file and asserts everything it can see from there; the three keys
+    /// below name types and functions that live **only** in
+    /// `kinewright-agent`, which `kinewright-media` does not depend on, so
+    /// they can only be asserted from this side.
+    fn cc7_manifest() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../kinewright-media/tests/fixtures/cc7_manifest.json"
+        ))
+        .expect("the CC7 manifest is valid JSON")
+    }
+
+    fn cc7_manifest_strings(value: &serde_json::Value) -> Vec<String> {
+        value
+            .as_array()
+            .expect("a manifest string array")
+            .iter()
+            .map(|entry| entry.as_str().expect("a manifest string entry").to_owned())
+            .collect()
+    }
+
+    /// CC7 §0.3 C-E16: the manifest's needle sets **are** the leak test's, byte
+    /// for byte.
+    ///
+    /// C-E16 recorded the byte-equality assertion as owed to step 9b and left
+    /// it unwritten, because the media crate cannot see this binary. The
+    /// manifest published four resolved lists that nothing outside
+    /// `cc7_fixtures.rs` ever compared against the functions that produce
+    /// them, so `cc7_the_blind_package_discloses_no_machine_provenance` could
+    /// have scanned for a set the manifest no longer describes — the failure
+    /// mode where the *record* of what was checked drifts away from what was
+    /// checked.
+    ///
+    /// The concatenation order is `cc7_leak_needles`' own: the suite's task
+    /// ids, the run and benchmark ids the caller supplies, the machine
+    /// provenance words, then every canonical parameter name.
+    #[test]
+    fn cc7_the_manifest_needle_sets_equal_the_leak_needles() {
+        let manifest = cc7_manifest();
+        let needles = &manifest["review"]["leak_test_needles"];
+        let run_id = "kinewright-eval-20260101t000000z-claude-code";
+        let benchmark_id = COLOR_WORKFLOW_BENCHMARK_ID;
+
+        let mut expected = cc7_manifest_strings(&needles["task_ids"]);
+        expected.push(run_id.to_owned());
+        expected.push(benchmark_id.to_ascii_lowercase());
+        expected.extend(cc7_manifest_strings(&needles["machine_provenance"]));
+        expected.extend(cc7_manifest_strings(&needles["canonical_parameter_names"]));
+        assert_eq!(
+            expected,
+            cc7_leak_needles(run_id, benchmark_id),
+            "the manifest's recorded needle sets are not the ones the leak test scans for"
+        );
+        assert_eq!(
+            cc7_manifest_strings(&needles["value_needles"]),
+            cc7_leak_value_needles(),
+            "the manifest's value needles are not the ones the leak test scans for"
+        );
+
+        // Non-vacuity: the four lists are the real, non-empty ones, and the
+        // parameter names are the sorted, de-duplicated set the derivation
+        // produces rather than a hand-kept list that happens to concatenate.
+        let names = cc7_manifest_strings(&needles["canonical_parameter_names"]);
+        assert!(names.len() >= 20, "{names:?}");
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted, names, "the parameter names are a derived set");
+        assert!(!cc7_manifest_strings(&needles["value_needles"]).is_empty());
+        assert_eq!(
+            cc7_manifest_strings(&needles["machine_provenance"]),
+            CC7_MACHINE_PROVENANCE_NEEDLES.to_vec()
+        );
+    }
+
+    /// CC7 §11.3's `review` block names types this crate owns, so this crate
+    /// asserts it.
+    ///
+    /// `blind_form_keys` is "the exact key set of `blind/review-form.json`"
+    /// and had recorded `scenario` and `dimensions`, neither of which
+    /// `BlindReviewEntry` has ever had; `not_applicable_dimensions` had
+    /// recorded `caption_safe_area`, which is not a `HumanRatingDimension` at
+    /// all, while the template marks `COLOR_WORKFLOW_NOT_APPLICABLE`'s four.
+    /// Both were wrong **and** unasserted — the two together are how a
+    /// manifest key rots. The key set is derived by serializing an entry
+    /// rather than transcribed, so a field added to the form fails here.
+    ///
+    /// `questions` and the `(g)` conditional are asserted here too: the media
+    /// crate can read the six scenarios' prompts out of `cc7_scenarios`, but
+    /// only this crate knows which measurement carries §4(g)(3)'s condition.
+    #[test]
+    fn cc7_the_manifest_review_keys_match_the_blind_form() {
+        let manifest = cc7_manifest();
+        let review = &manifest["review"];
+
+        // The form's key set, derived. `questions` is
+        // `skip_serializing_if = "Vec::is_empty"`, so the sample entry carries
+        // one — a form entry with no question would legitimately omit the key
+        // and is not what the manifest describes.
+        let entry = BlindReviewEntry {
+            blind_id: cc7_blind_hash("0f3a1d2e4b5a")[..12].to_owned(),
+            questions: vec![HumanQuestion {
+                id: CC7_DELIVERY_QUESTION_ID.to_owned(),
+                prompt: CC7_DELIVERY_HUMAN_QUESTION.to_owned(),
+                answer: None,
+                notes: None,
+            }],
+            ratings: HumanRatings::default(),
+            not_applicable: COLOR_WORKFLOW_NOT_APPLICABLE.to_vec(),
+            accepted: None,
+            notes: None,
+        };
+        let serialized = serde_json::to_value(&entry).expect("a serializable entry");
+        let mut actual = serialized
+            .as_object()
+            .expect("the entry is an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        actual.sort();
+        let mut declared = cc7_manifest_strings(&review["blind_form_keys"]);
+        declared.sort();
+        assert_eq!(
+            declared, actual,
+            "the manifest's blind_form_keys are not `BlindReviewEntry`'s fields"
+        );
+        // The two names the manifest used to carry are not fields at all, so
+        // the correction cannot be undone by adding them back beside the real
+        // ones.
+        for absent in ["scenario", "dimensions"] {
+            assert!(
+                !actual.iter().any(|key| key == absent),
+                "{absent} is not a blind form key"
+            );
+        }
+
+        assert_eq!(
+            review["not_applicable_dimensions"],
+            serde_json::to_value(COLOR_WORKFLOW_NOT_APPLICABLE)
+                .expect("the marked dimensions serialize"),
+            "the manifest must record the dimensions the colour template actually marks"
+        );
+
+        // §8.4's question column, including the `(g)` row's condition.
+        let questions = &review["questions"];
+        for scenario in CC7_SCENARIOS {
+            let spec = cc7_spec(scenario);
+            match spec.human_question {
+                Some(prompt) => assert_eq!(questions[spec.id], prompt, "scenario {}", spec.id),
+                None => assert!(
+                    questions[spec.id].is_null(),
+                    "scenario {} is objective-only",
+                    spec.id
+                ),
+            }
+        }
+        assert_eq!(
+            questions[CC7_DELIVERY_QUESTION_ID],
+            CC7_DELIVERY_HUMAN_QUESTION
+        );
+        let conditional = &review["conditional_questions"][CC7_DELIVERY_QUESTION_ID];
+        assert_eq!(
+            conditional["measurement"], DELIVERY_WARNING_MEASUREMENT_NAME,
+            "the manifest must name the measurement the condition is read from"
+        );
+        assert_eq!(
+            conditional["asserted_by"],
+            "cc7_g_a_clean_encode_contributes_no_review_task"
+        );
+        assert!(
+            conditional["condition"]
+                .as_str()
+                .expect("the condition is prose")
+                .contains("Warning"),
+            "the condition is a Warning, not any exception: {conditional}"
+        );
+    }
+
     fn cc7_packaged_result(name: &str, directory: &Path, hash: &str) -> EvalResult {
         let artifacts = directory.join("artifacts").join(
             name.split_whitespace()
@@ -7554,6 +7801,123 @@ mod tests {
         assert!(
             review.tasks[1].questions.is_empty(),
             "scenario (c) is objective-only and contributes no question"
+        );
+    }
+
+    /// CC7 §4(g)(3) and §8.4's `(g)` row: the encoded-delivery question is
+    /// **conditional**, and the condition is a `Warning`.
+    ///
+    /// Every conforming H.264 export carries one **Info**
+    /// `delivery_tag_not_representable` (A6), so a clean encode is not the
+    /// absence of exceptions — it is the absence of a `Warning`. A clean
+    /// encode therefore contributes **no** `(g)` entry, asserted by count,
+    /// and a warned one contributes exactly one. Both directions run through
+    /// the same `run_review_questions` the packager calls, so this cannot
+    /// pass by testing a second implementation of the rule.
+    #[test]
+    fn cc7_g_a_clean_encode_contributes_no_review_task() {
+        fn warnings(observed: i64) -> EvalMeasurement {
+            EvalMeasurement {
+                name: DELIVERY_WARNING_MEASUREMENT_NAME.to_owned(),
+                observed,
+                budget: 0,
+                unit: "exceptions".to_owned(),
+                passed: true,
+            }
+        }
+
+        let temporary = TempDirectory::new("cc7-g-conditional-review");
+        let mut clean = cc7_packaged_result(
+            "c5 Creative look",
+            temporary.root(),
+            &cc7_blind_hash("0a1b2c3d4e5f"),
+        );
+        clean.measurements.push(warnings(0));
+
+        let asked = run_review_questions(COLOR_WORKFLOW_BENCHMARK_ID, &[clean.clone()]);
+        let clean_questions = asked.get("c5").expect("(e) always asks its own question");
+        assert_eq!(
+            clean_questions
+                .iter()
+                .filter(|question| question.id == CC7_DELIVERY_QUESTION_ID)
+                .count(),
+            0,
+            "a clean encode contributes no (g) entry: {clean_questions:?}"
+        );
+        assert_eq!(
+            clean_questions.len(),
+            1,
+            "the scenario's own question is untouched: {clean_questions:?}"
+        );
+
+        // The other direction, through the same call: one `Warning` and the
+        // entry appears, with the matrix's condition put as the question the
+        // reviewer answers.
+        let mut warned = clean.clone();
+        warned.measurements = vec![warnings(1)];
+        let asked = run_review_questions(COLOR_WORKFLOW_BENCHMARK_ID, &[warned.clone()]);
+        let warned_questions = asked.get("c5").expect("the warned task still asks (e)");
+        assert_eq!(warned_questions.len(), 2, "{warned_questions:?}");
+        assert_eq!(warned_questions[1].id, CC7_DELIVERY_QUESTION_ID);
+        assert_eq!(warned_questions[1].prompt, CC7_DELIVERY_HUMAN_QUESTION);
+        assert_eq!(warned_questions[1].answer, None);
+
+        // A result that verified no delivery at all records no measurement,
+        // and is not a trade-off to review either.
+        let mut unverified = clean.clone();
+        unverified.measurements.clear();
+        let asked = run_review_questions(COLOR_WORKFLOW_BENCHMARK_ID, &[unverified]);
+        assert_eq!(asked["c5"].len(), 1);
+
+        // §4(c)(7) makes the *log-like input* row objective-only; it does not
+        // exempt (c)'s encode from §4(g)(3), which is a property of the file
+        // and not of the scenario. A warned c3 therefore carries the `(g)`
+        // entry and nothing else.
+        let mut warned_c3 = cc7_packaged_result(
+            "c3 Log-like input",
+            temporary.root(),
+            &cc7_blind_hash("9e8d7b6a5f40"),
+        );
+        warned_c3.measurements.push(warnings(1));
+        let asked = run_review_questions(COLOR_WORKFLOW_BENCHMARK_ID, &[warned_c3.clone()]);
+        assert_eq!(asked["c3"].len(), 1);
+        assert_eq!(asked["c3"][0].id, CC7_DELIVERY_QUESTION_ID);
+
+        // And the whole way through the template a reviewer actually reads:
+        // the clean task's form entry carries one question, the warned one
+        // two, counted rather than described.
+        let questions =
+            run_review_questions(COLOR_WORKFLOW_BENCHMARK_ID, std::slice::from_ref(&clean));
+        let review = human_review_template_with_questions(
+            COLOR_WORKFLOW_BENCHMARK_ID,
+            "kinewright-eval-20260101T000000Z-claude-code",
+            std::slice::from_ref(&clean),
+            &questions,
+        );
+        assert_eq!(review.tasks.len(), 1);
+        assert_eq!(
+            review.tasks[0]
+                .questions
+                .iter()
+                .filter(|question| question.id == CC7_DELIVERY_QUESTION_ID)
+                .count(),
+            0
+        );
+        let questions =
+            run_review_questions(COLOR_WORKFLOW_BENCHMARK_ID, std::slice::from_ref(&warned));
+        let review = human_review_template_with_questions(
+            COLOR_WORKFLOW_BENCHMARK_ID,
+            "kinewright-eval-20260101T000000Z-claude-code",
+            std::slice::from_ref(&warned),
+            &questions,
+        );
+        assert_eq!(review.tasks[0].questions.len(), 2);
+
+        // Every other benchmark is untouched: no suite but the colour one has
+        // a (g) row to make conditional.
+        assert!(
+            run_review_questions("kinewright-generalization-v5", &[warned]).is_empty(),
+            "only the colour benchmark asks a conditional delivery question"
         );
     }
 
