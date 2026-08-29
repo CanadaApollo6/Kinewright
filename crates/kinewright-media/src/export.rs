@@ -7,8 +7,9 @@ use std::{
 
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
-    ColorDescription, DELIVERY_BIT_DEPTH_ALLOWED, DeliveryColorError, DeliveryColorMismatch,
-    DeliveryEncodeDepth, Document, ExportProgress, ExportSettings, FrameRounding, MediaError,
+    CC8_HDR_DELIVERY_X264_PARAMS, CC8_SDR_DELIVERY_X264_PARAMS, ColorDescription, ColorMatrix,
+    DELIVERY_BIT_DEPTH_ALLOWED, DeliveryColorError, DeliveryColorMismatch, DeliveryEncodeDepth,
+    DeliveryLane, Document, ExportProgress, ExportSettings, FrameRounding, MediaError,
     ProgressSink, TimeCode, TrackId, delivery_color_mismatches, map_frames_with_rounding,
 };
 
@@ -339,12 +340,15 @@ fn export_to_temporary(
     if global_header {
         video_encoder.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
     }
-    // The current exporter is an explicit Rec.709 SDR metadata path. The
-    // validation above rejects other delivery descriptions before any output
-    // is created; this assignment therefore cannot silently mislabel another
-    // target. Pixel transforms remain a CC1 concern.
-    video_encoder.set_colorspace(ffmpeg::color::Space::BT709);
-    video_encoder.set_color_range(ffmpeg::color::Range::MPEG);
+    // CC8 §5.2 clause 1: "The encoder colourspace and range **must** be
+    // selected from the delivery `ColorDescription`, never from a literal."
+    // `validate_settings` has already refused every description outside the two
+    // lanes, so these two assignments cannot mislabel a target; what changed is
+    // that the values are now the lane's rather than BT.709's unconditionally
+    // (§0.4 item 3). Pixel transforms remain a CC1 concern.
+    let delivery_lane = DeliveryLane::for_description(&settings.delivery_color);
+    video_encoder.set_colorspace(encoder_color_space(delivery_lane));
+    video_encoder.set_color_range(encoder_color_range(delivery_lane));
     let mut video_options = ffmpeg::Dictionary::new();
     if settings.video_codec == DELIVERY_VIDEO_CODEC {
         video_options.set("preset", "medium");
@@ -352,11 +356,14 @@ fn export_to_temporary(
         // primaries and transfer through libx264's SPS. These x264 options
         // are required for the tags to survive a post-export re-probe.
         //
-        // Identical on both delivery lanes (CC6 4.3). `range=tv` is *not* an
-        // x264 parameter in x264 core 165 -- it is parsed and discarded -- and
-        // `profile=high10` is not set either: the pixel format selects High 10,
-        // measured byte-identical with and without it on the pinned build.
-        video_options.set("x264-params", DELIVERY_X264_PARAMS);
+        // CC8 §5.2 item 2 makes the string a function of the lane; it is
+        // identical at 8 and 10 bits on the SDR lane (CC6 4.3) and is the
+        // BT.2020/HLG string §10 step 1's precondition proved on the HDR lane.
+        // `range=tv` is *not* an x264 parameter in x264 core 165 -- it is
+        // parsed and discarded -- and `profile=high10` is not set either: the
+        // pixel format selects High 10, measured byte-identical with and
+        // without it on the pinned build.
+        video_options.set("x264-params", delivery_x264_params(delivery_lane));
     }
     // Observed, not recomputed (CC8 §9.1 fixture 6): the dictionary is disowned
     // by `open_as_with`, so the terms are read out of it here, immediately
@@ -423,7 +430,8 @@ fn export_to_temporary(
 
     let mut renderer = FrameRenderer::new(gpu);
     renderer.set_lut_library(library);
-    let mut delivery_filter = delivery_filter_graph(settings.resolution, delivery_depth)?;
+    let mut delivery_filter =
+        delivery_filter_graph(settings.resolution, delivery_depth, delivery_lane)?;
     let mut intermediate_frame_terms: Option<FrameColorTerms> = None;
     let mut delivery_frame_terms: Option<FrameColorTerms> = None;
     for output_frame in 0..total_frames {
@@ -450,13 +458,13 @@ fn export_to_temporary(
             settings.resolution.0,
             settings.resolution.1,
         );
-        stamp_rgba_color(&mut rgba);
+        stamp_rgba_color(&mut rgba, delivery_lane);
         if intermediate_frame_terms.is_none() {
             intermediate_frame_terms = Some(FrameColorTerms::of(&rgba));
         }
         copy_rgba64_to_frame(&composed.rgba64le, &mut rgba)?;
         let mut yuv = delivery_filter.run(&rgba)?;
-        stamp_delivery_yuv_color(&mut yuv);
+        stamp_delivery_yuv_color(&mut yuv, delivery_lane);
         if delivery_frame_terms.is_none() {
             delivery_frame_terms = Some(FrameColorTerms::of(&yuv));
         }
@@ -574,6 +582,7 @@ impl DeliveryFilter {
 fn delivery_filter_graph(
     resolution: (u32, u32),
     depth: DeliveryEncodeDepth,
+    lane: DeliveryLane,
 ) -> Result<DeliveryFilter, MediaError> {
     let source_filter = ffmpeg::filter::find("buffer")
         .ok_or_else(|| MediaError::Backend("FFmpeg buffer filter is unavailable".to_owned()))?;
@@ -593,9 +602,19 @@ fn delivery_filter_graph(
         .map_err(|error| {
             MediaError::Backend(format!("could not configure delivery source: {error}"))
         })?;
+    // CC8 §5.2 clause 3 / §0.4 item 6: `out_color_matrix` is lane-derived from
+    // the same single source of truth as the encoder's colourspace, so the
+    // codec context and the filter graph cannot claim different matrices. The
+    // spelling is `vf_scale`'s own vocabulary and not `buffersrc`'s -- `bt2020`
+    // there is `AVCOL_SPC_BT2020_NCL` -- which is why `decode.rs`'s
+    // `managed_scale_color_matrix` is the one place that names it. Nothing else
+    // in this string moves: `DELIVERY_SCALER_FLAGS` and the two range terms are
+    // §5.1's "unchanged and not re-measured".
     let scale_args = format!(
-        "w={}:h={}:flags={DELIVERY_SCALER_FLAGS}:in_range=jpeg:out_range=mpeg:out_color_matrix=bt709",
-        resolution.0, resolution.1
+        "w={}:h={}:flags={DELIVERY_SCALER_FLAGS}:in_range=jpeg:out_range=mpeg:out_color_matrix={}",
+        resolution.0,
+        resolution.1,
+        delivery_scale_color_matrix(lane),
     );
     let mut scale_context = graph
         .add(&scale_filter, "scale", &scale_args)
@@ -696,12 +715,93 @@ const DELIVERY_INTERMEDIATE_BYTES_PER_PIXEL: usize = 8;
 /// The only video encoder that may carry the managed delivery tags.
 const DELIVERY_VIDEO_CODEC: &str = "libx264";
 
-/// The x264 parameter string both delivery lanes encode with (CC6 4.3).
+/// The x264 parameter string one delivery lane encodes with.
 ///
-/// Identical at 8 and 10 bits. `range=tv` is deliberately absent: it is not an
-/// x264 parameter in x264 core 165, and `set_color_range(Range::MPEG)` on the
-/// codec context is measured to reach the SPS on its own.
-const DELIVERY_X264_PARAMS: &str = "colorprim=bt709:transfer=bt709:colormatrix=bt709";
+/// CC8 §5.2 item 2: "`DELIVERY_X264_PARAMS` becomes a function of the lane. For
+/// this lane: `colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc`.
+/// The SDR lanes' string is **byte-identical to today's**, and a fixture
+/// asserts that." Both strings are the authority module's
+/// ([`CC8_SDR_DELIVERY_X264_PARAMS`], [`CC8_HDR_DELIVERY_X264_PARAMS`]) rather
+/// than literals here, so §10 step 1's proven HDR string and the string this
+/// export hands libx264 are the same object.
+///
+/// The SDR string stays identical at 8 and 10 bits (CC6 4.3). `range=tv` is
+/// deliberately absent on both lanes: it is not an x264 parameter in x264 core
+/// 165, and `set_color_range(Range::MPEG)` on the codec context is measured to
+/// reach the SPS on its own.
+const fn delivery_x264_params(lane: DeliveryLane) -> &'static str {
+    match lane {
+        DeliveryLane::SdrRec709 => CC8_SDR_DELIVERY_X264_PARAMS,
+        DeliveryLane::HdrHlgRec2020 => CC8_HDR_DELIVERY_X264_PARAMS,
+    }
+}
+
+/// The encoder colourspace one delivery lane declares -- CC8 §0.4 item 3's
+/// first `set_colorspace`, now lane-derived (§5.2 clause 1).
+const fn encoder_color_space(lane: DeliveryLane) -> ffmpeg::color::Space {
+    match lane {
+        DeliveryLane::SdrRec709 => ffmpeg::color::Space::BT709,
+        DeliveryLane::HdrHlgRec2020 => ffmpeg::color::Space::BT2020NCL,
+    }
+}
+
+/// The encoder colour range one delivery lane declares -- CC8 §0.4 item 3's
+/// `set_color_range`.
+///
+/// Both lanes are limited range: §5.1's `Range | limited` row, and "**Full-range
+/// HDR delivery is rejected** with a typed reason, as full-range SDR already
+/// is." It is still written as a function of the lane rather than as the
+/// literal it was, because §5.2 clause 1 requires the *selection* to come from
+/// the description -- a later lane that differed here would otherwise inherit
+/// a value nobody chose for it.
+const fn encoder_color_range(lane: DeliveryLane) -> ffmpeg::color::Range {
+    match lane {
+        DeliveryLane::SdrRec709 | DeliveryLane::HdrHlgRec2020 => ffmpeg::color::Range::MPEG,
+    }
+}
+
+/// The `scale` filter's `out_color_matrix` for one delivery lane -- CC8 §0.4
+/// item 6, at the pre-CC8 `export.rs:425`.
+///
+/// Derived through `decode::managed_scale_color_matrix` from the lane's own
+/// `ColorMatrix`, so the export side and the decode side cannot spell the same
+/// matrix two ways; that function's doc comment records why `vf_scale`'s
+/// vocabulary differs from `buffersrc`'s.
+fn delivery_scale_color_matrix(lane: DeliveryLane) -> &'static str {
+    crate::decode::managed_scale_color_matrix(&ColorDescription {
+        matrix: delivery_lane_color_matrix(lane),
+        ..ColorDescription::default()
+    })
+}
+
+/// The `ColorMatrix` of one delivery lane.
+const fn delivery_lane_color_matrix(lane: DeliveryLane) -> ColorMatrix {
+    match lane {
+        DeliveryLane::SdrRec709 => ColorMatrix::Bt709,
+        DeliveryLane::HdrHlgRec2020 => ColorMatrix::Bt2020Ncl,
+    }
+}
+
+/// The `FFmpeg` colour terms one delivery lane stamps on its frames -- CC8 §0.4
+/// item 8's two `set_color_primaries` call sites, and the space and transfer
+/// that travel with them.
+const fn delivery_lane_frame_terms(
+    lane: DeliveryLane,
+) -> (
+    ffmpeg::color::Primaries,
+    ffmpeg::color::TransferCharacteristic,
+) {
+    match lane {
+        DeliveryLane::SdrRec709 => (
+            ffmpeg::color::Primaries::BT709,
+            ffmpeg::color::TransferCharacteristic::BT709,
+        ),
+        DeliveryLane::HdrHlgRec2020 => (
+            ffmpeg::color::Primaries::BT2020,
+            ffmpeg::color::TransferCharacteristic::ARIB_STD_B67,
+        ),
+    }
+}
 
 /// The `libswscale` flags the delivery scaler runs with (CC6 5.3).
 ///
@@ -792,26 +892,36 @@ fn checked_delivery_pixel_format(
     Ok(requested)
 }
 
-/// Stamp the full-range RGB intermediate produced by the compositor. RGB has
-/// identity matrix coefficients and full-range samples; its primaries and
-/// transfer still describe the explicit Rec.709 SDR working/display contract.
-fn stamp_rgba_color(frame: &mut ffmpeg::frame::Video) {
+/// Stamp the full-range RGB intermediate produced by the compositor -- CC8 §0.4
+/// item 8's first `set_color_primaries`, now lane-derived (§5.2 clause 3).
+///
+/// RGB has identity matrix coefficients and full-range samples on every lane,
+/// so the space and range are constant. The primaries and transfer are the
+/// **lane's**, because that is what the samples in this buffer actually are:
+/// the compositor has already applied the lane's delivery encode, so an SDR
+/// export hands `libavfilter` BT.709-coded BT.709-primaried values and an HDR
+/// export hands it HLG-coded Rec.2020-primaried ones. Stamping BT.709 on the
+/// second would describe the buffer wrongly.
+fn stamp_rgba_color(frame: &mut ffmpeg::frame::Video, lane: DeliveryLane) {
+    let (primaries, transfer) = delivery_lane_frame_terms(lane);
     frame.set_color_space(ffmpeg::color::Space::RGB);
     frame.set_color_range(ffmpeg::color::Range::JPEG);
-    frame.set_color_primaries(ffmpeg::color::Primaries::BT709);
-    frame.set_color_transfer_characteristic(ffmpeg::color::TransferCharacteristic::BT709);
+    frame.set_color_primaries(primaries);
+    frame.set_color_transfer_characteristic(transfer);
 }
 
-/// Stamp the limited-range `Y'CbCr` delivery frame with the exact metadata
-/// emitted by the current H.264 path.
+/// Stamp the limited-range `Y'CbCr` delivery frame -- CC8 §0.4 item 8's second
+/// `set_color_primaries`, now lane-derived (§5.2 clause 3).
 ///
-/// Identical on both delivery lanes: the lane changes the frame's pixel format
-/// (`yuv420p` or `yuv420p10le`), never its colour description (CC6 4.3).
-fn stamp_delivery_yuv_color(frame: &mut ffmpeg::frame::Video) {
-    frame.set_color_space(ffmpeg::color::Space::BT709);
-    frame.set_color_range(ffmpeg::color::Range::MPEG);
-    frame.set_color_primaries(ffmpeg::color::Primaries::BT709);
-    frame.set_color_transfer_characteristic(ffmpeg::color::TransferCharacteristic::BT709);
+/// Within the SDR lane this is still identical at both depths: the *depth*
+/// changes the frame's pixel format (`yuv420p` or `yuv420p10le`), never its
+/// colour description (CC6 4.3). What changes it is the **lane**.
+fn stamp_delivery_yuv_color(frame: &mut ffmpeg::frame::Video, lane: DeliveryLane) {
+    let (primaries, transfer) = delivery_lane_frame_terms(lane);
+    frame.set_color_space(encoder_color_space(lane));
+    frame.set_color_range(encoder_color_range(lane));
+    frame.set_color_primaries(primaries);
+    frame.set_color_transfer_characteristic(transfer);
 }
 
 /// How long one coded video picture lasts, as muxed.
@@ -1058,17 +1168,23 @@ fn validate_settings(
     Ok(())
 }
 
-/// The current encoder/scaler path supports one explicit delivery contract:
-/// **8-bit or 10-bit SDR Rec.709** (BT.709 primaries, transfer, and matrix;
-/// limited range; D65; nonzero confidence; `application_default` or
-/// `user_override` provenance) in limited-range YUV420P/YUV420P10LE. Keep this
-/// gate in front of encoder setup so an unknown or future colour description
-/// cannot be mislabeled with today's tags.
+/// The current encoder/scaler path supports exactly two explicit delivery
+/// contracts, one per [`DeliveryLane`]:
+///
+/// * **8-bit or 10-bit SDR Rec.709** (BT.709 primaries, transfer, and matrix;
+///   limited range; D65) in limited-range YUV420P/YUV420P10LE; and
+/// * **CC8 §5.1's HDR lane** — `bt2020` primaries, `arib_std_b67` transfer,
+///   `bt2020_ncl` matrix, limited range, D65, 10-bit — in YUV420P10LE.
+///
+/// Both additionally require nonzero confidence and `application_default` or
+/// `user_override` provenance. Keep this gate in front of encoder setup so an
+/// unknown or future colour description cannot be mislabeled with either lane's
+/// tags.
 ///
 /// Rejections are typed (CC6 4.2): every one carries `code`, `field`,
 /// `observed`, `allowed`, and a recovery action, so an agent or a UI never has
 /// to parse a sentence to learn which field was wrong.
-fn validate_delivery_color(settings: &ExportSettings) -> Result<(), MediaError> {
+pub(crate) fn validate_delivery_color(settings: &ExportSettings) -> Result<(), MediaError> {
     if settings.video_codec != DELIVERY_VIDEO_CODEC {
         return Err(DeliveryColorError::UnsupportedCodec {
             observed: settings.video_codec.clone(),
@@ -1079,8 +1195,8 @@ fn validate_delivery_color(settings: &ExportSettings) -> Result<(), MediaError> 
     validate_delivery_description(&settings.delivery_color)
 }
 
-/// Gate one delivery colour description against the **8-bit or 10-bit SDR
-/// Rec.709** delivery contract.
+/// Gate one delivery colour description against the lane it selects (CC8 §5.2
+/// clause 1, §5.3).
 ///
 /// The accepted set is Core's, never a second transcription of it: the fields
 /// and their allowed values come from `delivery_color_mismatches`, so this gate
@@ -1090,7 +1206,7 @@ fn validate_delivery_color(settings: &ExportSettings) -> Result<(), MediaError> 
 ///
 /// The first mismatch in Core's fixed check order is the reported one; a caller
 /// that wants all of them calls `delivery_color_mismatches` directly.
-fn validate_delivery_description(color: &ColorDescription) -> Result<(), MediaError> {
+pub(crate) fn validate_delivery_description(color: &ColorDescription) -> Result<(), MediaError> {
     match delivery_color_mismatches(color).into_iter().next() {
         Some(mismatch) => Err(DeliveryColorError::UnsupportedField(mismatch).into()),
         None => Ok(()),
@@ -1280,7 +1396,8 @@ mod tests {
         depth: DeliveryEncodeDepth,
     ) -> ffmpeg::frame::Video {
         crate::initialize_ffmpeg().expect("FFmpeg initializes");
-        let mut filter = delivery_filter_graph(resolution, depth).expect("delivery filter graph");
+        let mut filter = delivery_filter_graph(resolution, depth, DeliveryLane::SdrRec709)
+            .expect("delivery filter graph");
         let count = usize::try_from(resolution.0 * resolution.1).expect("raster size");
         let pixels = std::iter::repeat_n(code, count)
             .flatten()
@@ -1288,7 +1405,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut rgba =
             ffmpeg::frame::Video::new(DELIVERY_INTERMEDIATE_PIXEL, resolution.0, resolution.1);
-        stamp_rgba_color(&mut rgba);
+        stamp_rgba_color(&mut rgba, DeliveryLane::SdrRec709);
         copy_rgba64_to_frame(&pixels, &mut rgba).expect("RGBA64LE frame copy");
         let yuv = filter
             .run(&rgba)
@@ -1777,8 +1894,15 @@ mod tests {
             );
         }
         assert_eq!(
-            DELIVERY_X264_PARAMS, "colorprim=bt709:transfer=bt709:colormatrix=bt709",
-            "the x264 parameter string is identical on both lanes and carries no range= key"
+            delivery_x264_params(DeliveryLane::SdrRec709),
+            "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+            "the SDR x264 parameter string is identical at both depths and carries no range= key"
+        );
+        // CC8 §5.2 item 2: the HDR lane's string is the other value the same
+        // function returns, and it is the string §10 step 1 proved.
+        assert_eq!(
+            delivery_x264_params(DeliveryLane::HdrHlgRec2020),
+            "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
         );
         assert_eq!(DELIVERY_SCALER_FLAGS, "bicubic");
     }
@@ -1881,7 +2005,7 @@ mod tests {
     #[test]
     fn stamps_rgb_and_yuv_frames_with_their_explicit_ranges() {
         let mut rgba = ffmpeg::frame::Video::new(DELIVERY_INTERMEDIATE_PIXEL, 2, 2);
-        stamp_rgba_color(&mut rgba);
+        stamp_rgba_color(&mut rgba, DeliveryLane::SdrRec709);
         assert_eq!(rgba.color_space(), ffmpeg::color::Space::RGB);
         assert_eq!(rgba.color_range(), ffmpeg::color::Range::JPEG);
         assert_eq!(rgba.color_primaries(), ffmpeg::color::Primaries::BT709);
@@ -1894,7 +2018,7 @@ mod tests {
         // frame's pixel format differs (CC6 4.3).
         for depth in DeliveryEncodeDepth::ALL {
             let mut yuv = ffmpeg::frame::Video::new(delivery_lane_pixel_format(depth), 2, 2);
-            stamp_delivery_yuv_color(&mut yuv);
+            stamp_delivery_yuv_color(&mut yuv, DeliveryLane::SdrRec709);
             assert_eq!(pixel_format_name(yuv.format()), depth.pixel_format());
             assert_eq!(yuv.color_space(), ffmpeg::color::Space::BT709);
             assert_eq!(yuv.color_range(), ffmpeg::color::Range::MPEG);
@@ -2089,11 +2213,15 @@ mod tests {
         );
 
         crate::initialize_ffmpeg().expect("FFmpeg initializes");
-        let mut filter = delivery_filter_graph(resolution, DeliveryEncodeDepth::Eight)
-            .expect("delivery filter graph");
+        let mut filter = delivery_filter_graph(
+            resolution,
+            DeliveryEncodeDepth::Eight,
+            DeliveryLane::SdrRec709,
+        )
+        .expect("delivery filter graph");
         let mut rgba =
             ffmpeg::frame::Video::new(DELIVERY_INTERMEDIATE_PIXEL, resolution.0, resolution.1);
-        stamp_rgba_color(&mut rgba);
+        stamp_rgba_color(&mut rgba, DeliveryLane::SdrRec709);
         copy_rgba64_to_frame(&composed.rgba64le, &mut rgba).expect("RGBA64LE frame copy");
         let yuv = filter.run(&rgba).expect("delivery conversion");
         assert_eq!(
@@ -2105,11 +2233,15 @@ mod tests {
         // The same rendered raster on the 10-bit lane: legal white 940. The
         // buffer source consumed the frame above, so submit a fresh copy of
         // the same readback rather than the same buffer twice.
-        let mut filter = delivery_filter_graph(resolution, DeliveryEncodeDepth::Ten)
-            .expect("10-bit delivery filter graph");
+        let mut filter = delivery_filter_graph(
+            resolution,
+            DeliveryEncodeDepth::Ten,
+            DeliveryLane::SdrRec709,
+        )
+        .expect("10-bit delivery filter graph");
         let mut rgba =
             ffmpeg::frame::Video::new(DELIVERY_INTERMEDIATE_PIXEL, resolution.0, resolution.1);
-        stamp_rgba_color(&mut rgba);
+        stamp_rgba_color(&mut rgba, DeliveryLane::SdrRec709);
         copy_rgba64_to_frame(&composed.rgba64le, &mut rgba).expect("RGBA64LE frame copy");
         let yuv = filter.run(&rgba).expect("10-bit delivery conversion");
         assert_eq!(

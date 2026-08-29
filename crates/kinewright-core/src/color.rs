@@ -1199,6 +1199,40 @@ impl ColorContext {
         color_description_matches_managed(&self.delivery, &Self::sdr_rec709().delivery)
     }
 
+    /// Whether the delivery description is **CC8 §5.1's HDR lane**, in full.
+    ///
+    /// The check is [`crate::delivery_color_mismatches`]'s, not a second
+    /// transcription of §5.1's table: a description that would be refused at
+    /// the export gate must not be reported as an executable delivery target
+    /// here, and the two answers come from one function so they cannot drift.
+    #[must_use]
+    pub fn delivery_matches_cc8_hdr_lane(&self) -> bool {
+        color_description_is_cc8_hdr(&self.delivery)
+            && crate::delivery_color_mismatches(&self.delivery).is_empty()
+    }
+
+    /// Whether this context selects a managed pipeline the renderer can
+    /// execute: CC1's working and monitoring descriptions with **either** CC1's
+    /// SDR delivery description or CC8 §5.1's HDR lane.
+    ///
+    /// CC8 §3.1 is why the widening is on the delivery side only: "`working`
+    /// stays BT.709 primaries, `linear` transfer, `rgb` matrix, full range,
+    /// D65, `Rgba16Float` — byte-identical to CC1 §2", and §4 gives CC8 no
+    /// calibrated HDR monitoring path, so the monitoring description does not
+    /// move either. What CC8 adds is one delivery target.
+    ///
+    /// [`Self::is_managed_sdr_compatible`] is deliberately left alone: it is
+    /// the question "is this the CC1 managed **SDR** context?", and surfaces
+    /// that ask it — CC1's own fixtures, the migration checks — must keep
+    /// getting `false` for an HDR delivery target.
+    #[must_use]
+    pub fn is_managed_compatible(&self) -> bool {
+        matches!(self.pipeline_state, ColorPipelineState::ManagedSdrV1)
+            && self.working_matches_managed_sdr()
+            && self.monitoring_matches_managed_sdr()
+            && (self.delivery_matches_managed_sdr() || self.delivery_matches_cc8_hdr_lane())
+    }
+
     fn working_matches_cc0_placeholder(&self) -> bool {
         self.working == ColorDescription::application_default(ColorMatrix::Rgb, ColorRange::Full)
     }

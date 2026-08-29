@@ -39,14 +39,19 @@
 //! latter carries §3.3's HLG working-linear determination; read its doc comment
 //! before changing it.
 //!
+//! # What §10 step 6 added
+//!
+//! §10 step 6 ("delivery lane, tags, typed rejection") landed §5.1's lane table
+//! — [`CC8_HDR_DELIVERY_LANE`] — and §5.2's proven `x264-params` string,
+//! [`CC8_HDR_DELIVERY_X264_PARAMS`], together with the per-field allowed-value
+//! phrases and recovery actions §5.3's typed rejection reports against.
+//!
 //! # What §10 step 2 deliberately leaves to a later step
 //!
 //! §10 step 2 carries "transfer constants, matrices, the anchor, budgets".
-//! Three things that a reader might expect to find here are **not** here, each
+//! Two things that a reader might expect to find here are **not** here, each
 //! because the contract puts them in a later step:
 //!
-//! - **§5.1's delivery-lane table and §5.2's `x264-params` string** are §10
-//!   step 6's, after §10 step 5's SDR byte-equality gate.
 //! - **§2.4's mastering-display and `MaxCLL`/`MaxFALL` modelling** is probe and
 //!   QC work (§10 steps 3 and 7); this module pins no metadata shape.
 //! - **§4's tone-mapping parameters**, which §4 item 2 requires to be "pinned
@@ -371,13 +376,14 @@ pub const CC8_HDR_DEPTH_ALLOWED: &str = "integer depth 10..=16 for a CC8 HDR sou
 /// What a *delivery* description must be before a CC8 HDR source can be
 /// exported, as one phrase for CC8 §7 item 2's typed block.
 ///
-/// §5.1's exact lane table — codec, pixel format, and the single
-/// `arib_std_b67` transfer §0.2 Q1 chose — is §10 step 6's and is deliberately
-/// not pinned here yet, so this phrase names the *shape* §2.1 already fixes
-/// rather than a lane that does not exist. §11 records that PQ / HDR10
-/// delivery is deferred, which is why the phrase names the deferral.
+/// This is the *shape* question §7 item 2 asks — "is this project's delivery
+/// description an HDR one at all?" — and it is deliberately broader than
+/// [`CC8_HDR_DELIVERY_LANE`], which §10 step 6 pinned as the one lane an export
+/// may actually take. A project whose delivery is `bt2020` + `smpte2084`
+/// answers item 2's question (its HDR source is not being tone-mapped) and is
+/// still refused at the export gate by §5.3, with §11's PQ deferral named.
 pub const CC8_HDR_DELIVERY_ALLOWED: &str = "a CC8 HDR delivery description (bt2020 primaries with smpte2084 or arib_std_b67); \
-     §5.1's single HLG delivery lane lands with §10 step 6, and §11 defers PQ/HDR10 delivery";
+     §5.1's single delivery lane is the HLG one, and §11 defers PQ/HDR10 delivery";
 
 /// The recovery action for a tuple refused by §2.1's HDR rules.
 ///
@@ -1100,6 +1106,162 @@ pub fn cc8_narrow_matrix(matrix: [[f64; 3]; 3]) -> [[f32; 3]; 3] {
     }
     narrowed
 }
+
+// ===========================================================================
+// CC8 §5.1 / §5.2: the one HDR delivery lane (§10 step 6).
+// ===========================================================================
+
+/// CC8 §5.1's lane table, one row per field.
+///
+/// §5.1 opens "Exactly one, per §0.2 Q1/Q2", and every field below is that
+/// table's own cell. The colour fields are stored in the **wire spelling** the
+/// project schema serialises, exactly as [`Cc8SourceProfile`] stores §2.1's,
+/// so `color.rs`'s `color_tag!` forms and this table are held together by a
+/// test rather than by two hand-maintained copies.
+///
+/// The codec and pixel-format cells are §5.1's own words too — "H.264 High 10
+/// (`libx264`, the existing `DELIVERY_VIDEO_CODEC`)" and `yuv420p10le` — and
+/// they are the *existing* CC6 §4.1 ten-bit lane restated, not a new one:
+/// "This reuses CC6 §4.1's `DeliveryEncodeDepth::Ten` lane. It adds a *colour
+/// description*, not a codec path, so `DELIVERY_SCALER_FLAGS = "bicubic"`, the
+/// `DELIVERY_INTERMEDIATE_WHITE = 65_280` convention, and the single-pass
+/// filter graph are unchanged and are not re-measured."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cc8DeliveryLane {
+    /// A stable identifier for the lane, for status and evidence surfaces.
+    pub id: &'static str,
+    /// §5.1's `Codec` row.
+    pub codec: &'static str,
+    /// §5.1's `Pixel format` row.
+    pub pixel_format: &'static str,
+    /// §5.1's `Primaries` row.
+    pub primaries: &'static str,
+    /// §5.1's `Transfer` row.
+    pub transfer: &'static str,
+    /// §5.1's `Matrix` row.
+    pub matrix: &'static str,
+    /// §5.1's `Range` row.
+    pub range: &'static str,
+    /// §5.1's `White point` row.
+    pub white_point: &'static str,
+    /// §5.1's `Bit depth` row, in bits.
+    pub bit_depth_bits: u8,
+    /// §5.2 item 2's `x264-params` string for this lane.
+    pub x264_params: &'static str,
+}
+
+/// CC8 §5.1's lane, the only one CC8 delivers.
+///
+/// §5.1's closing sentence governs any second: "CC6 §13's rule governs any
+/// second lane: 'the second lane is a slice, not a flag.'"
+pub const CC8_HDR_DELIVERY_LANE: Cc8DeliveryLane = Cc8DeliveryLane {
+    id: "hlg_rec2020_h264_high10",
+    codec: "libx264",
+    pixel_format: "yuv420p10le",
+    primaries: "bt2020",
+    transfer: "arib_std_b67",
+    matrix: "bt2020_ncl",
+    range: "limited",
+    white_point: "d65",
+    bit_depth_bits: 10,
+    x264_params: CC8_HDR_DELIVERY_X264_PARAMS,
+};
+
+/// CC8 §5.2 item 2's `x264-params` string for [`CC8_HDR_DELIVERY_LANE`].
+///
+/// §5.2 item 2 writes it out: "`DELIVERY_X264_PARAMS` becomes a function of the
+/// lane. For this lane: `colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc`."
+///
+/// It is **character-identical to the string §10 step 1's precondition proved**
+/// — `cc8_precondition_libx264_carries_hlg_hdr_tags_through_encode_and_reprobe`
+/// encodes with exactly these three terms and re-probes them back — which is
+/// what makes step 1's green build evidence about *this* constant rather than
+/// about a similar one. `cc8_hdr_delivery_x264_params_is_the_proven_precondition_string`
+/// asserts the two have not drifted apart.
+///
+/// x264's own spellings are **not** the project's wire spellings: x264 writes
+/// `arib-std-b67` where the schema writes `arib_std_b67`, and `bt2020nc` where
+/// the schema writes `bt2020_ncl`. That is why the string is pinned whole
+/// rather than formatted from [`CC8_HDR_DELIVERY_LANE`]'s cells — a formatter
+/// would have to carry a second vocabulary, and §0.3(b) makes this string the
+/// **only** channel the tags travel on.
+pub const CC8_HDR_DELIVERY_X264_PARAMS: &str =
+    "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc";
+
+/// The `x264-params` string the SDR lanes encode with, frozen by §5.2 item 2.
+///
+/// §5.2 item 2: "The SDR lanes' string is **byte-identical to today's**, and a
+/// fixture asserts that." It is pinned here beside the HDR lane's so that
+/// "a function of the lane" is a lookup over two named constants rather than a
+/// conditional over a literal, and §9.1 fixture 6 holds it to today's bytes.
+pub const CC8_SDR_DELIVERY_X264_PARAMS: &str = "colorprim=bt709:transfer=bt709:colormatrix=bt709";
+
+/// §5.3's allowed-value phrase for `primaries` on [`CC8_HDR_DELIVERY_LANE`].
+///
+/// The six phrases below name the lane as well as the value, for two reasons.
+/// They are what an agent or a UI reads back, and "bt2020" alone does not say
+/// *which* contract wanted it; and they are the key
+/// [`DeliveryColorError::recovery_action`](crate::DeliveryColorError::recovery_action)
+/// uses to tell an HDR-lane refusal from an SDR-lane one, so each must be
+/// distinct from every SDR phrase and from each other.
+pub const CC8_HDR_DELIVERY_PRIMARIES_ALLOWED: &str = "bt2020 on CC8 §5.1's HDR delivery lane";
+/// §5.3's allowed-value phrase for `transfer` on [`CC8_HDR_DELIVERY_LANE`].
+pub const CC8_HDR_DELIVERY_TRANSFER_ALLOWED: &str =
+    "arib_std_b67 on CC8 §5.1's HDR delivery lane (§11 defers PQ/HDR10 delivery)";
+/// §5.3's allowed-value phrase for `matrix` on [`CC8_HDR_DELIVERY_LANE`].
+pub const CC8_HDR_DELIVERY_MATRIX_ALLOWED: &str = "bt2020_ncl on CC8 §5.1's HDR delivery lane";
+/// §5.3's allowed-value phrase for `range` on [`CC8_HDR_DELIVERY_LANE`].
+pub const CC8_HDR_DELIVERY_RANGE_ALLOWED: &str = "limited on CC8 §5.1's HDR delivery lane";
+/// §5.3's allowed-value phrase for `white_point` on [`CC8_HDR_DELIVERY_LANE`].
+pub const CC8_HDR_DELIVERY_WHITE_POINT_ALLOWED: &str = "d65 on CC8 §5.1's HDR delivery lane";
+/// §5.3's allowed-value phrase for `bit_depth` on [`CC8_HDR_DELIVERY_LANE`].
+///
+/// §2.1's 10-bit floor and §5.1's `Bit depth | Ten` row are the same number
+/// seen from the source and the delivery sides, and the phrase says so because
+/// §5.3 requires "HLG or PQ at 8-bit depth" to be refused with the depth named.
+pub const CC8_HDR_DELIVERY_DEPTH_ALLOWED: &str =
+    "10 (ten) on CC8 §5.1's HDR delivery lane; 8-bit HLG or PQ is banding by construction (§2.1)";
+
+/// Every §5.3 allowed-value phrase [`CC8_HDR_DELIVERY_LANE`] can report.
+///
+/// The recovery-action lookup reads this table rather than a hand-written list,
+/// so a phrase added to the lane cannot quietly acquire the SDR recovery.
+pub const CC8_HDR_DELIVERY_ALLOWED_PHRASES: [&str; 6] = [
+    CC8_HDR_DELIVERY_PRIMARIES_ALLOWED,
+    CC8_HDR_DELIVERY_TRANSFER_ALLOWED,
+    CC8_HDR_DELIVERY_MATRIX_ALLOWED,
+    CC8_HDR_DELIVERY_RANGE_ALLOWED,
+    CC8_HDR_DELIVERY_WHITE_POINT_ALLOWED,
+    CC8_HDR_DELIVERY_DEPTH_ALLOWED,
+];
+
+/// The recovery action for a description refused against §5.1's lane table.
+///
+/// It covers **both** directions of §5.3's first bullet, because both are
+/// cleared the same way and neither is cleared by a conversion: an HDR
+/// description that is not §5.1's lane is completed or returned to SDR, and an
+/// SDR description put on the HDR lane is exported on the SDR lane it actually
+/// describes or replaced in full. §0.2 Q6 refuses HDR-from-SDR permanently and
+/// defers tone-mapped SDR-from-HDR delivery, so nothing here turns one into the
+/// other and the phrase says so.
+pub const CC8_HDR_DELIVERY_RECOVERY_ACTION: &str = "Set the delivery description to CC8 §5.1's lane exactly — bt2020 primaries, \
+     arib_std_b67 transfer, bt2020_ncl matrix, limited range, d65, 10-bit — or export on the \
+     SDR Rec.709 lane the description actually names. CC8 §0.2 Q6 refuses HDR-from-SDR \
+     permanently and defers tone-mapped SDR-from-HDR delivery, so nothing converts one into \
+     the other. §5.1 has exactly one HDR lane and CC6 §13's rule governs a second: the second \
+     lane is a slice, not a flag.";
+
+/// The recovery action for PQ on the HLG lane (§5.3's last bullet).
+///
+/// §5.3 requires this one by name: "PQ on the HLG lane, with a recovery action
+/// **naming the deferral rather than implying a conversion exists**." So it
+/// says what is deferred and what does not exist, and it does not offer a
+/// conversion — §0.2 Q6 refuses tone mapping as a deliverable and CC8 has no
+/// PQ-to-HLG stage at all.
+pub const CC8_PQ_DELIVERY_RECOVERY_ACTION: &str = "CC8 §0.2 Q1 chose HLG (ARIB STD-B67) as the one HDR delivery transfer, and §11 defers \
+     PQ / HDR10 delivery together with mastering-display provenance and gated MaxCLL/MaxFALL. \
+     No PQ-to-HLG conversion exists in CC8 and none is implied. Set the delivery transfer to \
+     arib_std_b67, or keep the PQ target and wait for the deferred PQ slice.";
 
 // ===========================================================================
 // CC8 §9.2: the gate table, with its measurements deliberately absent.
@@ -2028,5 +2190,94 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), 6);
+    }
+
+    // -----------------------------------------------------------------------
+    // CC8 §5.1 / §5.2 — §10 step 6's lane.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cc8_hdr_delivery_lane_is_section_5_1s_table() {
+        let lane = CC8_HDR_DELIVERY_LANE;
+        assert_eq!(lane.codec, "libx264");
+        assert_eq!(lane.pixel_format, "yuv420p10le");
+        assert_eq!(lane.primaries, "bt2020");
+        assert_eq!(lane.transfer, "arib_std_b67");
+        assert_eq!(lane.matrix, "bt2020_ncl");
+        assert_eq!(lane.range, "limited");
+        assert_eq!(lane.white_point, "d65");
+        assert_eq!(lane.bit_depth_bits, 10);
+        // §5.1's lane is HLG, and its own §2.1 source row is the HLG one: a
+        // lane whose transfer had drifted to PQ would still read plausibly.
+        let profile = cc8_source_profile_for_primaries_and_transfer(lane.primaries, lane.transfer)
+            .expect("§5.1's lane must be one of §2.1's two profile shapes");
+        assert_eq!(profile.id, "hlg_rec2020");
+        // §2.1's floor and §5.1's `Bit depth | Ten` row are the same number.
+        assert_eq!(lane.bit_depth_bits, CC8_HDR_MIN_INTEGER_DEPTH_BITS);
+        assert!(profile.accepts_integer_depth(lane.bit_depth_bits));
+        assert!(profile.accepts_matrix(lane.matrix));
+        assert!(profile.accepts_range(lane.range));
+        assert!(profile.accepts_white_point(lane.white_point));
+    }
+
+    #[test]
+    fn cc8_hdr_delivery_x264_params_carry_section_5_2s_three_terms() {
+        // §5.2 item 2's string, term by term, in x264's own vocabulary — which
+        // is deliberately not the schema's (`arib-std-b67`, `bt2020nc`).
+        let terms: Vec<&str> = CC8_HDR_DELIVERY_X264_PARAMS.split(':').collect();
+        assert_eq!(
+            terms,
+            vec![
+                "colorprim=bt2020",
+                "transfer=arib-std-b67",
+                "colormatrix=bt2020nc",
+            ],
+        );
+        assert_eq!(
+            CC8_HDR_DELIVERY_LANE.x264_params,
+            CC8_HDR_DELIVERY_X264_PARAMS
+        );
+        // The SDR string is frozen at today's bytes (§5.2 item 2, §9.1 fixture 6).
+        assert_eq!(
+            CC8_SDR_DELIVERY_X264_PARAMS,
+            "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+        );
+        assert_ne!(CC8_HDR_DELIVERY_X264_PARAMS, CC8_SDR_DELIVERY_X264_PARAMS);
+    }
+
+    #[test]
+    fn cc8_hdr_delivery_allowed_phrases_are_six_distinct_lane_named_strings() {
+        let mut phrases = CC8_HDR_DELIVERY_ALLOWED_PHRASES.to_vec();
+        phrases.sort_unstable();
+        phrases.dedup();
+        assert_eq!(
+            phrases.len(),
+            CC8_HDR_DELIVERY_ALLOWED_PHRASES.len(),
+            "the recovery lookup keys on these phrases, so two equal ones would \
+             make one field's refusal unreadable",
+        );
+        for phrase in CC8_HDR_DELIVERY_ALLOWED_PHRASES {
+            assert!(
+                phrase.contains("CC8 §5.1"),
+                "an HDR-lane allowed phrase must name the lane: {phrase}",
+            );
+            // Distinct from every §2.1 *source* phrase, which reads the same
+            // fields on the other side of the pipeline.
+            for source_phrase in [
+                CC8_HDR_PRIMARIES_ALLOWED,
+                CC8_HDR_MATRIX_ALLOWED,
+                CC8_HDR_RANGE_ALLOWED,
+                CC8_HDR_WHITE_POINT_ALLOWED,
+                CC8_HDR_DEPTH_ALLOWED,
+            ] {
+                assert_ne!(phrase, source_phrase);
+            }
+        }
+        // §5.3's PQ bullet: the recovery names the deferral and offers no
+        // conversion.
+        assert!(CC8_PQ_DELIVERY_RECOVERY_ACTION.contains("§11"));
+        assert!(CC8_PQ_DELIVERY_RECOVERY_ACTION.contains("No PQ-to-HLG conversion exists"));
+        assert!(CC8_HDR_DELIVERY_RECOVERY_ACTION.contains("HDR-from-SDR"));
+        assert!(CC8_HDR_DELIVERY_RECOVERY_ACTION.contains("second lane is a slice, not a flag"));
     }
 }

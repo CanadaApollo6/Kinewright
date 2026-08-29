@@ -37,9 +37,9 @@ use kinewright_core::{
     DeliveryVerification, DeliveryVerificationError, DeliveryVerificationRequest, Document,
     ExportSettings, FrameRounding, MediaError, PlaneLegalExcursion, QaSeverity, Rational, TimeCode,
     YCBCR_CHROMA_LEGAL_HIGH, YCBCR_LUMA_LEGAL_HIGH, YCBCR_LUMA_OFFSET, YCbCrLegalReport,
-    YCbCrLegalSource, bt709_limited_ycbcr, delivery_tag_check, map_frames_with_rounding,
+    YCbCrLegalSource, delivery_limited_ycbcr, delivery_tag_check, map_frames_with_rounding,
 };
-use kinewright_core::{ColorQcException, DeliveryColorMismatch};
+use kinewright_core::{ColorQcException, DeliveryColorMismatch, DeliveryLane};
 
 use crate::{
     color_pipeline::DELIVERY_INTERMEDIATE_WHITE,
@@ -967,7 +967,10 @@ fn requested_lane(
 ) -> Result<DeliveryEncodeDepth, MediaError> {
     request.validate().map_err(MediaError::from)?;
     let depth = delivery_depth_for(&settings.delivery_color)?;
-    let lane_budgets = DeliveryBudgets::for_depth(depth);
+    // CC8 §9.2: the HDR lane has its own measured budgets and may not inherit
+    // the SDR lane's. `for_delivery` answers `for_depth` for every SDR
+    // description, so no SDR request changes.
+    let lane_budgets = DeliveryBudgets::for_delivery(depth, &settings.delivery_color);
     if request.budgets != lane_budgets {
         return Err(MediaError::from(
             DeliveryVerificationError::BudgetLaneMismatch {
@@ -1051,6 +1054,11 @@ fn measure_samples(
     bits: u8,
     samples: &[u64],
 ) -> Result<SampleMeasurements, MediaError> {
+    // CC8 §5.2 clause 1: every lane-derived term comes from the delivery
+    // description and from nothing else. The reference `Y'` matrix is one of
+    // them (§6 item 1), so it is selected here, once, from the same field the
+    // export selected its encoder colourspace from.
+    let lane = DeliveryLane::for_description(&settings.delivery_color);
     let scale = code_scale(bits);
     let ceiling = code_ceiling(bits);
     let luma_low = i64::from(YCBCR_LUMA_OFFSET) * scale;
@@ -1125,7 +1133,7 @@ fn measure_samples(
             )));
         }
 
-        accumulate_frame(&reference, &sample, bits, ceiling, &mut measured);
+        accumulate_frame(&reference, &sample, lane, bits, ceiling, &mut measured);
         for code in &sample.native.luma {
             measured.luma_legal.push(i64::from(*code));
         }
@@ -1184,6 +1192,7 @@ fn delivery_reference(
 fn accumulate_frame(
     reference: &DeliveryFrame,
     sample: &DecodedSample,
+    lane: DeliveryLane,
     bits: u8,
     ceiling: i64,
     measured: &mut SampleMeasurements,
@@ -1221,7 +1230,13 @@ fn accumulate_frame(
             // lane depth, against the decoded *native* Y plane. This term
             // carries no chroma decimation error at all, which is why it — and
             // not the RGB maximum — is the gate.
-            let reference_luma = bt709_limited_ycbcr(
+            // CC8 §6 item 1: the reference `Y'` goes through **the lane's own
+            // matrix**. On the SDR lanes that is CC6 §3.4's BT.709 reference,
+            // unchanged; on §5.1's HDR lane it is the BT.2020 NCL sibling,
+            // because reusing BT.709 on a BT.2020 file "would be a wrong
+            // number, not an approximate one".
+            let reference_luma = delivery_limited_ycbcr(
+                lane,
                 [
                     encoded[0].clamp(0.0, 1.0),
                     encoded[1].clamp(0.0, 1.0),

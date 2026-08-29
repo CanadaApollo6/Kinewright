@@ -1048,9 +1048,17 @@ fn cc6_delivery_tag_check_covers_both_modes_and_marks_white_point_not_representa
 
     // Four wrong fields produce four mismatches in the fixed check order,
     // while `delivery_color_mismatch` still returns exactly the first.
+    //
+    // The transfer is `Bt1886` rather than `Smpte2084` because CC8 §5.3 makes
+    // the accepted set a function of the **lane**, and `Bt2020` + `Smpte2084`
+    // is one of CC8 §2.1's HDR pairs — that tuple now selects §5.1's HDR lane,
+    // where `primaries=bt2020` is *correct*. `Bt2020` + `Bt1886` is a
+    // mismatched pair (§5.3's third bullet), stays on the SDR lane, and leaves
+    // this clause's claim about the fixed order exactly as CC6 wrote it. The
+    // HDR lane's own fixed order is asserted immediately below.
     let mut wrong = ColorContext::sdr_rec709().delivery;
     wrong.primaries = ColorPrimaries::Bt2020;
-    wrong.transfer = ColorTransfer::Smpte2084;
+    wrong.transfer = ColorTransfer::Bt1886;
     wrong.matrix = ColorMatrix::Rgb;
     wrong.range = ColorRange::Full;
     let mismatches = delivery_color_mismatches(&wrong);
@@ -1070,6 +1078,24 @@ fn cc6_delivery_tag_check_covers_both_modes_and_marks_white_point_not_representa
     );
     assert_eq!(check.mismatches.len(), 4);
     assert!(!check.conforming);
+
+    // CC8 §5.3: the same fixed check order on §5.1's HDR lane, which the
+    // primaries/transfer pair selects. Four wrong fields again, and the first
+    // one reported is still the first of the order the lane disagrees about.
+    let mut wrong_hdr = ColorContext::sdr_rec709().delivery;
+    wrong_hdr.primaries = ColorPrimaries::Bt2020;
+    wrong_hdr.transfer = ColorTransfer::Smpte2084;
+    wrong_hdr.matrix = ColorMatrix::Rgb;
+    wrong_hdr.range = ColorRange::Full;
+    let hdr_fields: Vec<String> = delivery_color_mismatches(&wrong_hdr)
+        .into_iter()
+        .map(|mismatch| mismatch.field)
+        .collect();
+    assert_eq!(
+        hdr_fields,
+        vec!["transfer", "matrix", "range", "bit_depth"],
+        "§5.3 keeps the fixed check order and widens only the allowed set",
+    );
 
     // Post-export mode: a probed description produces zero mismatches and
     // exactly one not-representable entry, for both lanes.

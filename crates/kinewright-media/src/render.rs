@@ -723,7 +723,12 @@ fn contextual_managed_decode_error(
 }
 
 fn validate_managed_context(document: &Document) -> Result<(), MediaError> {
-    if document.color_context.is_managed_sdr_compatible() {
+    // CC8 §5.1: the renderer executes CC1's managed context **or** the same
+    // context with §5.1's HDR delivery lane. §3.1 keeps the working and
+    // monitoring descriptions byte-identical to CC1's, so the widening is on
+    // the delivery side only, and `is_managed_compatible` is the one function
+    // that says so.
+    if document.color_context.is_managed_compatible() {
         return Ok(());
     }
 

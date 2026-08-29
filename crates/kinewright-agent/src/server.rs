@@ -2528,7 +2528,12 @@ impl KinewrightMcp {
             }
         };
         let look_comparison = args.look_comparison.unwrap_or(LookComparison::After);
-        if !document.color_context.is_managed_sdr_compatible() {
+        // CC8 §5.1/§3.1: the proof is a measurement of the **working** space,
+        // which CC8 leaves byte-identical to CC1's, so a project delivering on
+        // §5.1's HDR lane is proof-able. `is_managed_compatible` is the widened
+        // question, and the reason string below already names only the three
+        // fields this gate is about.
+        if !document.color_context.is_managed_compatible() {
             return Ok(color_proof_error_result(
                 ColorProofError::PipelineIncompatible {
                     reason: format!(

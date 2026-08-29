@@ -8,7 +8,7 @@ use std::{
 use eframe::egui;
 use kinewright_core::{
     CaptionCue, ColorDescription, DELIVERY_VERIFICATION_FRAME_COUNT, DeliveryAspect,
-    DeliveryBudgets, DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile,
+    DeliveryBudgets, DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryLane, DeliveryProfile,
     DeliveryVariant, DeliveryVariantError, DeliveryVerification, DeliveryVerificationRequest,
     Document, ExportCancellation, ExportLutPreflightReport, ExportMediaPreflightReport,
     ExportProgress, ExportSettings, LutAsset, LutAssetSource, LutAvailabilityKind,
@@ -240,6 +240,24 @@ fn export_conformance(
         focus_y_percent,
     )
     .map(|report| ExportConformance::from_report(&report))
+}
+
+/// The radio label for one delivery depth on one delivery lane (CC8 §8).
+///
+/// The SDR labels are unchanged. The HDR label names the lane it actually is —
+/// §5.1's HLG Rec.2020 High 10 — and deliberately says nothing about how it
+/// will look: §0.2 Q4 and §4 forbid any monitoring claim, and CC8 has no
+/// calibrated HDR display path.
+#[must_use]
+pub(crate) const fn delivery_lane_depth_label(
+    lane: DeliveryLane,
+    depth: DeliveryEncodeDepth,
+) -> &'static str {
+    match (lane, depth) {
+        (DeliveryLane::SdrRec709, DeliveryEncodeDepth::Eight) => "8-bit H.264",
+        (DeliveryLane::SdrRec709, DeliveryEncodeDepth::Ten) => "10-bit H.264",
+        (DeliveryLane::HdrHlgRec2020, _) => "10-bit H.264 · HLG Rec.2020 (HDR)",
+    }
 }
 
 /// The delivery colour description this dialog's inline `ExportSettings`
@@ -1223,6 +1241,21 @@ impl KinewrightApp {
         let caption_cues = self.timeline_caption_cues();
         let mut caption_format = None;
         let project_color_pipeline = color_pipeline_summary(&self.focused().document.color_context);
+        // CC8 §8: "The export dialog offers the HDR lane only when the
+        // document's delivery description selects it." The lane is a function
+        // of that description and of nothing else (§5.2 clause 1), and §5.1's
+        // `Bit depth | Ten` row gives the HDR lane exactly one depth, so the
+        // radio group below offers what the lane admits rather than a fixed
+        // pair. A selection the lane does not admit is corrected here, before
+        // the gate runs, so the cache key and the encoder see the same lane.
+        let delivery_lane =
+            DeliveryLane::for_description(&self.focused().document.color_context.delivery);
+        let offered_depths = delivery_lane.encode_depths();
+        if !offered_depths.contains(&self.export_dialog.delivery_bit_depth)
+            && let Some(depth) = offered_depths.first()
+        {
+            self.export_dialog.delivery_bit_depth = *depth;
+        }
         let color_pipeline_reset_needed =
             managed_sdr_reset_needed(&self.focused().document.color_context);
         // Applied before the gate runs so the cache key, the displayed frame
@@ -1379,19 +1412,22 @@ impl KinewrightApp {
                 // untouched, and `get_color_context` keeps reporting it.
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Delivery depth");
-                    for depth in DeliveryEncodeDepth::ALL {
+                    for depth in offered_depths {
                         ui.radio_value(
                             &mut self.export_dialog.delivery_bit_depth,
-                            depth,
-                            match depth {
-                                DeliveryEncodeDepth::Eight => "8-bit H.264",
-                                DeliveryEncodeDepth::Ten => "10-bit H.264",
-                            },
+                            *depth,
+                            delivery_lane_depth_label(delivery_lane, *depth),
                         );
                     }
                     ui.colored_label(
                         color::TEXT_MUTED,
-                        "a job parameter, not a document edit",
+                        if delivery_lane.is_hdr() {
+                            // §4: nothing in CC8's UI may imply a monitoring
+                            // claim, so this says what the lane *is* and stops.
+                            "CC8 §5.1's HDR lane, selected by the project's delivery description"
+                        } else {
+                            "a job parameter, not a document edit"
+                        },
                     );
                 });
                 ui.add_space(space::TWO);

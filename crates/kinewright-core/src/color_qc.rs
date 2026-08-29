@@ -35,6 +35,10 @@ use thiserror::Error;
 use crate::{
     ClipId, DeliveryEncodeDepth, DeliveryTagCheck, EffectId, MatteRegionDescription, MediaError,
     NormalizedRoi, PixelRoi, QaSeverity, RgbaImage, SCOPE_BASIS_POINTS, WorkingProof,
+    cc8_hdr::{
+        CC8_BT2020_CB_DENOMINATOR, CC8_BT2020_CR_DENOMINATOR, CC8_BT2020_KB, CC8_BT2020_KG,
+        CC8_BT2020_KR,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -136,6 +140,73 @@ pub fn bt709_limited_ycbcr(encoded_rgb: [f64; 3], bits: u8) -> [f64; 3] {
         f64::from(YCBCR_CHROMA_OFFSET).mul_add(scale, f64::from(YCBCR_CHROMA_SPAN) * scale * cb),
         f64::from(YCBCR_CHROMA_OFFSET).mul_add(scale, f64::from(YCBCR_CHROMA_SPAN) * scale * cr),
     ]
+}
+
+/// Encode display-referred `R'G'B'` as BT.2020 **non-constant-luminance**
+/// limited-range `Y'CbCr` codes — CC8 §6 item 1's sibling of
+/// [`bt709_limited_ycbcr`].
+///
+/// §6 item 1, verbatim: "`bt709_limited_ycbcr` (`color_qc.rs:120-132`) gets a
+/// BT.2020 sibling with `KR = 0.2627`, `KB = 0.0593` and the corresponding
+/// denominators, pinned in the authority module. Legality (EBU R 103-shaped, as
+/// CC6 §6.4) is measured against **the lane's own matrix**. Reusing the BT.709
+/// reference on a BT.2020 file would be a wrong number, not an approximate
+/// one."
+///
+/// The three coefficients and the two denominators come from
+/// [`crate::cc8_hdr`] — [`CC8_BT2020_KR`], [`CC8_BT2020_KG`],
+/// [`CC8_BT2020_KB`], [`CC8_BT2020_CB_DENOMINATOR`] and
+/// [`CC8_BT2020_CR_DENOMINATOR`] — never restated here, so a mis-transcribed
+/// coefficient fails the authority module's own test rather than agreeing with
+/// itself in two places.
+///
+/// Everything else is [`bt709_limited_ycbcr`]'s, unchanged: the same limited
+/// offsets and spans, the same `s = 2^(bits − 8)` scale, and the same
+/// **unclamped and unrounded** result, so an out-of-legal input produces an
+/// out-of-legal code rather than a silently corrected one.
+///
+/// **Why this arrives with §10 step 6 rather than step 7.** §6's report-level
+/// work — the lane-aware gamut report, the ungated `MaxCLL`/`MaxFALL` rows, and
+/// the withheld skin reason — is §10 step 7's. This one function is not: §9.1
+/// fixture 8, which step 6 owns, gates on "decoded native-plane BT.2020
+/// legality" and on "difference budgets against the re-rendered delivery
+/// reference", and both are measured through the lane's matrix. Landing the
+/// fixture with the BT.709 reference would be gating the HDR lane on the wrong
+/// number, which §6 item 1 names as the mistake it exists to prevent.
+#[must_use]
+pub fn bt2020_ncl_limited_ycbcr(encoded_rgb: [f64; 3], bits: u8) -> [f64; 3] {
+    debug_assert!(
+        matches!(bits, 8 | 10),
+        "bt2020_ncl_limited_ycbcr takes an 8-bit or 10-bit delivery depth, got {bits}"
+    );
+    let [red, green, blue] = encoded_rgb;
+    let luma = CC8_BT2020_KR * red + CC8_BT2020_KG * green + CC8_BT2020_KB * blue;
+    let cb = (blue - luma) / CC8_BT2020_CB_DENOMINATOR;
+    let cr = (red - luma) / CC8_BT2020_CR_DENOMINATOR;
+    let scale = ycbcr_scale(bits);
+    [
+        f64::from(YCBCR_LUMA_OFFSET).mul_add(scale, f64::from(YCBCR_LUMA_SPAN) * scale * luma),
+        f64::from(YCBCR_CHROMA_OFFSET).mul_add(scale, f64::from(YCBCR_CHROMA_SPAN) * scale * cb),
+        f64::from(YCBCR_CHROMA_OFFSET).mul_add(scale, f64::from(YCBCR_CHROMA_SPAN) * scale * cr),
+    ]
+}
+
+/// The limited-range `Y'CbCr` reference of one delivery lane (CC8 §6 item 1).
+///
+/// One call site, one lane, one matrix: this is what keeps the verification's
+/// reference luma from being a BT.709 assumption on a BT.2020 file. The lane
+/// comes from the delivery description, which CC8 §5.2 clause 1 makes the
+/// single source of truth for every lane-derived term.
+#[must_use]
+pub fn delivery_limited_ycbcr(
+    lane: crate::DeliveryLane,
+    encoded_rgb: [f64; 3],
+    bits: u8,
+) -> [f64; 3] {
+    match lane {
+        crate::DeliveryLane::SdrRec709 => bt709_limited_ycbcr(encoded_rgb, bits),
+        crate::DeliveryLane::HdrHlgRec2020 => bt2020_ncl_limited_ycbcr(encoded_rgb, bits),
+    }
 }
 
 /// `s = 2^(bits − 8)`, the delivery code scale.

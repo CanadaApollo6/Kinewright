@@ -2497,9 +2497,18 @@ mod tests {
     #[test]
     fn every_pre_export_mismatch_field_is_coloured_in_the_grid() {
         // One description that trips every check in the fixed order.
+        //
+        // The transfer is `Bt1886` rather than `Smpte2084` because CC8 §5.3
+        // makes the accepted set a function of the delivery **lane**:
+        // `Bt2020` + `Smpte2084` is one of §2.1's HDR pairs and selects §5.1's
+        // HDR lane, where `primaries=bt2020` is correct and only seven checks
+        // trip. `Bt2020` + `Bt1886` is a mismatched pair (§5.3's third
+        // bullet), stays on the SDR lane, and still trips all eight. The grid
+        // colours by *field name* and both lanes report the same eight field
+        // names, so this fixture covers the HDR lane too.
         let broken = kinewright_core::ColorDescription {
             primaries: kinewright_core::ColorPrimaries::Bt2020,
-            transfer: kinewright_core::ColorTransfer::Smpte2084,
+            transfer: kinewright_core::ColorTransfer::Bt1886,
             matrix: kinewright_core::ColorMatrix::Smpte170M,
             range: kinewright_core::ColorRange::Full,
             white_point: kinewright_core::ColorWhitePoint::Unknown,

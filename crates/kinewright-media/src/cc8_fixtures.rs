@@ -73,18 +73,24 @@ use ffmpeg_next as ffmpeg;
 use half::f16;
 use kinewright_core::{
     Analysis, AssetId, CC8_BT709_TO_REC2020, CC8_BT2020_CB_DENOMINATOR, CC8_BT2020_CR_DENOMINATOR,
-    CC8_BT2020_KB, CC8_BT2020_KG, CC8_BT2020_KR, CC8_HLG_NOMINAL_PEAK_NITS,
+    CC8_BT2020_KB, CC8_BT2020_KG, CC8_BT2020_KR, CC8_HDR_DELIVERY_DEPTH_ALLOWED,
+    CC8_HDR_DELIVERY_LANE, CC8_HDR_DELIVERY_MATRIX_ALLOWED, CC8_HDR_DELIVERY_PRIMARIES_ALLOWED,
+    CC8_HDR_DELIVERY_RANGE_ALLOWED, CC8_HDR_DELIVERY_RECOVERY_ACTION,
+    CC8_HDR_DELIVERY_TRANSFER_ALLOWED, CC8_HDR_DELIVERY_WHITE_POINT_ALLOWED,
+    CC8_HDR_DELIVERY_X264_PARAMS, CC8_HLG_NOMINAL_PEAK_NITS,
     CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT, CC8_HLG_SCENE_BREAKPOINT, CC8_HLG_SIGNAL_BREAKPOINT,
-    CC8_PQ_C1, CC8_PQ_C2, CC8_PQ_C3, CC8_PQ_M2, CC8_PQ_PEAK_NITS, CC8_REFERENCE_WHITE_NITS,
-    CC8_REJECTED_HDR_ADJACENT, CC8_SOURCE_PROFILES, ColorBitDepth, ColorDescription, ColorMatrix,
-    ColorPrimaries, ColorProvenance, ColorRange, ColorSourceError, ColorSourceProfile,
-    ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, DeliveryColorError,
-    DeliveryColorMismatch, DeliveryEncodeDepth, DeliveryProfile, DeliveryVerificationRequest,
-    Document, Effect, EffectId, ExportSettings, HDR_SOURCE_ON_SDR_DELIVERY, ParamValue, QaSeverity,
-    Rational, TimeCode, cc8_apply_matrix, cc8_hlg_decode_working_linear,
-    cc8_hlg_encode_working_linear, cc8_hlg_inverse_oetf, cc8_hlg_oetf,
-    cc8_pq_decode_working_linear, cc8_pq_encode_working_linear, cc8_pq_eotf_nits,
-    cc8_pq_inverse_eotf, classify_source, classify_source_with_assumption, delivery_conformance,
+    CC8_PQ_C1, CC8_PQ_C2, CC8_PQ_C3, CC8_PQ_DELIVERY_RECOVERY_ACTION, CC8_PQ_M2, CC8_PQ_PEAK_NITS,
+    CC8_REFERENCE_WHITE_NITS, CC8_REJECTED_HDR_ADJACENT, CC8_SOURCE_PROFILES, ColorBitDepth,
+    ColorContext, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange,
+    ColorSourceError, ColorSourceProfile, ColorSourceProfileAssumption, ColorTransfer,
+    ColorWhitePoint, DeliveryColorError, DeliveryColorMismatch, DeliveryEncodeDepth, DeliveryLane,
+    DeliveryProfile, DeliveryVerificationRequest, Document, Effect, EffectId, ExportSettings,
+    HDR_SOURCE_ON_SDR_DELIVERY, MediaError, ParamValue, QaSeverity, Rational, TimeCode,
+    cc8_apply_matrix, cc8_hlg_decode_working_linear, cc8_hlg_encode_working_linear,
+    cc8_hlg_inverse_oetf, cc8_hlg_oetf, cc8_pq_decode_working_linear, cc8_pq_encode_working_linear,
+    cc8_pq_eotf_nits, cc8_pq_inverse_eotf, classify_source, classify_source_with_assumption,
+    delivery_color_mismatches, delivery_color_mismatches_for_lane, delivery_conformance,
+    delivery_field_recovery_action,
 };
 
 use crate::{
@@ -3485,4 +3491,1288 @@ fn cc8_assert_equivalent_spellings_export_the_same_bytes(
         );
     }
     count
+}
+
+// ===========================================================================
+// CC8 §10 step 6 — §9.1 fixtures 7 and 8.
+// ===========================================================================
+//
+// Step 6 is "Delivery lane, tags, typed rejection: fixtures 7 and 8." Four
+// things land with it, and each has its gate below:
+//
+//  * **§5.1's lane**, pinned in the authority module as
+//    `kinewright_core::CC8_HDR_DELIVERY_LANE` and selected from the delivery
+//    `ColorDescription` alone (§5.2 clause 1) by `DeliveryLane`;
+//  * **the six §0.4 export-side literals made lane-derived** — the encoder's
+//    colourspace and range (§0.4 item 3), `DELIVERY_X264_PARAMS` (item 4), the
+//    scaler's `out_color_matrix` (item 6), and the two frame stamps (item 8) —
+//    with §9.1 fixture 6 standing guard over the SDR answers;
+//  * **the delivery-side colour transform**,
+//    `color_pipeline::encode_delivery_hlg_rec2020_rgba16`, which is §3.3's
+//    delivery line: primaries conversion to Rec.2020, then the HLG OOTF+OETF
+//    pair in the encode direction, then the single clamp and quantization on
+//    the unchanged `DELIVERY_INTERMEDIATE_WHITE` scale (§5.1); and
+//  * **§5.3's typed rejection**, lane-derived rather than global.
+//
+// **What step 6 does not take.** §6's report-level QC — the lane-aware gamut
+// report, the ungated MaxCLL/MaxFALL rows, the withheld skin reason — is §10
+// step 7's and is not started here. The one piece of §6 that *is* here is item
+// 1's BT.2020 NCL `Y'CbCr` reference, `kinewright_core::bt2020_ncl_limited_ycbcr`,
+// because §9.1 fixture 8 gates on "decoded native-plane BT.2020 legality" and
+// on difference budgets whose reference luma goes through the lane's matrix;
+// landing fixture 8 against the BT.709 reference would be gating the HDR lane
+// on "a wrong number, not an approximate one" (§6 item 1's own words). §4's
+// tone-mapped preview is §10 step 8's, §7 items 1/2/4's `managed_hdr_v1` state
+// and migration are §10 step 9's, and §9.2's measured gate table plus
+// `cc8_manifest.json` are §10 step 10's.
+
+// ---------------------------------------------------------------------------
+// §9.1 fixture 7 — "Delivery rejection. One failing direction per §5.3 bullet,
+// each named."
+// ---------------------------------------------------------------------------
+
+/// §5.1's lane as a `ColorDescription`, built from the authority module's own
+/// wire spellings rather than from repeated enum literals.
+///
+/// Every field is checked against [`CC8_HDR_DELIVERY_LANE`]'s cell, so a lane
+/// table edited in `cc8_hdr.rs` fails here rather than silently leaving these
+/// fixtures testing the old lane.
+fn cc8_hdr_delivery_description() -> ColorDescription {
+    let description = ColorDescription {
+        primaries: ColorPrimaries::Bt2020,
+        transfer: ColorTransfer::AribStdB67,
+        matrix: ColorMatrix::Bt2020Ncl,
+        range: ColorRange::Limited,
+        white_point: ColorWhitePoint::D65,
+        bit_depth: ColorBitDepth::Ten,
+        confidence_basis_points: 10_000,
+        provenance: ColorProvenance::UserOverride,
+    };
+    let lane = CC8_HDR_DELIVERY_LANE;
+    assert_eq!(description.primaries.wire(), lane.primaries);
+    assert_eq!(description.transfer.wire(), lane.transfer);
+    assert_eq!(description.matrix.wire(), lane.matrix);
+    assert_eq!(description.range.wire(), lane.range);
+    assert_eq!(description.white_point.wire(), lane.white_point);
+    assert_eq!(
+        description.bit_depth,
+        DeliveryEncodeDepth::Ten.color_bit_depth(),
+    );
+    assert_eq!(DeliveryEncodeDepth::Ten.bits(), lane.bit_depth_bits);
+    // The passing direction, asserted once here so every failing direction
+    // below is a mutation of something that conforms.
+    assert!(
+        delivery_color_mismatches(&description).is_empty(),
+        "§5.1's own lane must be accepted: {:?}",
+        delivery_color_mismatches(&description),
+    );
+    assert_eq!(
+        DeliveryLane::for_description(&description),
+        DeliveryLane::HdrHlgRec2020,
+    );
+    description
+}
+
+/// The SDR Rec.709 delivery description at one depth, for the failing
+/// directions that put an SDR description on the HDR lane.
+fn cc8_sdr_delivery_description(depth: DeliveryEncodeDepth) -> ColorDescription {
+    let description = ColorDescription {
+        bit_depth: depth.color_bit_depth(),
+        ..ColorContext::sdr_rec709().delivery
+    };
+    assert!(delivery_color_mismatches(&description).is_empty());
+    assert_eq!(
+        DeliveryLane::for_description(&description),
+        DeliveryLane::SdrRec709,
+    );
+    description
+}
+
+/// Assert one §5.3 refusal, in the four structured facts CC6 §4.2 fixed, and
+/// return them for the evidence line.
+///
+/// Every refusal is asserted **twice**: once against the core mismatch list,
+/// which is where §5.3 lives, and once against the production export gate,
+/// which is what actually stops a file being written. A rejection that existed
+/// only in core would let the exporter tag a file CC8 refuses.
+fn cc8_assert_delivery_refused(
+    label: &str,
+    color: &ColorDescription,
+    lane: DeliveryLane,
+    field: &str,
+    observed: &str,
+    allowed: &str,
+    recovery: &str,
+) {
+    let mismatch = delivery_color_mismatches_for_lane(color, lane)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{label}: §5.3 must refuse this description on {lane:?}"));
+    assert_eq!(mismatch.field, field, "{label}: field of {mismatch:?}");
+    assert_eq!(mismatch.observed, observed, "{label}: observed");
+    assert_eq!(mismatch.allowed, allowed, "{label}: allowed");
+    assert_eq!(
+        delivery_field_recovery_action(&mismatch),
+        recovery,
+        "{label}: recovery action",
+    );
+    // The same refusal at the production export gate, where the lane is
+    // derived from the description (§5.2 clause 1) rather than passed in.
+    if DeliveryLane::for_description(color) == lane {
+        let error = crate::export::validate_delivery_description(color)
+            .expect_err("the production export gate must refuse it too");
+        let typed = match &error {
+            MediaError::DeliveryColor(typed) => typed,
+            other => panic!("{label}: delivery rejections must be typed: {other}"),
+        };
+        assert_eq!(typed.code(), "unsupported_delivery_color", "{label}");
+        assert_eq!(typed.field(), field, "{label}");
+        assert_eq!(typed.observed(), observed, "{label}");
+        assert_eq!(typed.allowed_values(), allowed, "{label}");
+        assert_eq!(typed.recovery_action(), recovery, "{label}");
+        assert_eq!(error.recovery_code(), Some("unsupported_delivery_color"));
+    }
+}
+
+/// **§9.1 fixture 7, §5.3 bullet 1.** An HDR description on an SDR lane, and an
+/// SDR description on the HDR lane.
+///
+/// Production never puts a description on the wrong lane —
+/// `DeliveryLane::for_description` derives it — so both directions are asked of
+/// `delivery_color_mismatches_for_lane`, which is the surface that exists for
+/// exactly this bullet. The *derived* answers are asserted alongside, so the
+/// fixture also states that production keeps deriving the lane it should.
+#[test]
+fn cc8_delivery_rejects_an_hdr_description_on_an_sdr_lane_and_an_sdr_one_on_the_hdr_lane() {
+    let hdr = cc8_hdr_delivery_description();
+    // (a) §5.1's HDR lane description, checked against the SDR lane: refused on
+    // `primaries`, in CC6's own phrase, because that is the first field of the
+    // fixed check order that an SDR lane disagrees about.
+    cc8_assert_delivery_refused(
+        "hdr description on the SDR lane",
+        &hdr,
+        DeliveryLane::SdrRec709,
+        "primaries",
+        "Bt2020",
+        "bt709",
+        "Reset the delivery colour target explicitly, or choose a supported delivery depth.",
+    );
+    // (b) The SDR Rec.709 description, at both managed depths, checked against
+    // §5.1's HDR lane: refused on `primaries` with the HDR phrase and the HDR
+    // recovery, which names §0.2 Q6's permanent refusal of HDR-from-SDR.
+    for depth in DeliveryEncodeDepth::ALL {
+        let sdr = cc8_sdr_delivery_description(depth);
+        cc8_assert_delivery_refused(
+            &format!("sdr description on the HDR lane at {}", depth.as_str()),
+            &sdr,
+            DeliveryLane::HdrHlgRec2020,
+            "primaries",
+            "Bt709",
+            CC8_HDR_DELIVERY_PRIMARIES_ALLOWED,
+            CC8_HDR_DELIVERY_RECOVERY_ACTION,
+        );
+    }
+    // Non-vacuity: each description conforms on the lane it selects, so the two
+    // refusals above are about the lane and not about the description.
+    assert!(delivery_color_mismatches(&hdr).is_empty());
+    assert!(
+        delivery_color_mismatches(&cc8_sdr_delivery_description(DeliveryEncodeDepth::Eight))
+            .is_empty()
+    );
+    println!(
+        "CC8_MEASURED fixture=7 bullet=lane_crossing hdr_lane={} sdr_lane={}",
+        DeliveryLane::HdrHlgRec2020.as_str(),
+        DeliveryLane::SdrRec709.as_str(),
+    );
+}
+
+/// **§9.1 fixture 7, §5.3 bullet 2.** HLG or PQ at 8-bit depth.
+///
+/// §2.1's 10-bit floor and §5.1's `Bit depth | Ten` row are the same number on
+/// the source and delivery sides, and §2.1 is explicit that this is a typed
+/// rejection naming the depth rather than a warning.
+#[test]
+fn cc8_delivery_rejects_hlg_and_pq_at_eight_bit_depth() {
+    let mut refused = 0_usize;
+    for transfer in [ColorTransfer::AribStdB67, ColorTransfer::Smpte2084] {
+        for (spelling, bit_depth) in [
+            ("named", ColorBitDepth::Eight),
+            ("integer", ColorBitDepth::Integer(8)),
+        ] {
+            let color = ColorDescription {
+                transfer: transfer.clone(),
+                bit_depth,
+                ..cc8_hdr_delivery_description()
+            };
+            // PQ is refused on its own field first (bullet 6), so the depth
+            // bullet is asserted on the HLG rows and the PQ rows are asserted
+            // to be refused *at all* — the two bullets must not mask each
+            // other into a single check.
+            let mismatches =
+                delivery_color_mismatches_for_lane(&color, DeliveryLane::HdrHlgRec2020);
+            assert!(
+                !mismatches.is_empty(),
+                "8-bit {transfer:?} ({spelling}) must be refused",
+            );
+            let depth_mismatch = mismatches
+                .iter()
+                .find(|mismatch| mismatch.field == "bit_depth")
+                .unwrap_or_else(|| {
+                    panic!("8-bit {transfer:?} ({spelling}) must be refused on bit_depth")
+                });
+            assert_eq!(depth_mismatch.allowed, CC8_HDR_DELIVERY_DEPTH_ALLOWED);
+            assert_eq!(depth_mismatch.observed, format!("{:?}", color.bit_depth));
+            assert_eq!(
+                delivery_field_recovery_action(depth_mismatch),
+                CC8_HDR_DELIVERY_RECOVERY_ACTION,
+            );
+            refused += 1;
+        }
+    }
+    // The one 8-bit HLG description that reaches the export gate first, so the
+    // depth refusal is proven on the production surface too.
+    let eight_bit_hlg = ColorDescription {
+        bit_depth: ColorBitDepth::Eight,
+        ..cc8_hdr_delivery_description()
+    };
+    cc8_assert_delivery_refused(
+        "8-bit HLG on the HDR lane",
+        &eight_bit_hlg,
+        DeliveryLane::HdrHlgRec2020,
+        "bit_depth",
+        "Eight",
+        CC8_HDR_DELIVERY_DEPTH_ALLOWED,
+        CC8_HDR_DELIVERY_RECOVERY_ACTION,
+    );
+    // Non-vacuity: 10 bits is the depth that passes, in both spellings.
+    for bit_depth in [ColorBitDepth::Ten, ColorBitDepth::Integer(10)] {
+        let ten = ColorDescription {
+            bit_depth,
+            ..cc8_hdr_delivery_description()
+        };
+        assert!(delivery_color_mismatches(&ten).is_empty(), "{ten:?}");
+    }
+    assert_eq!(refused, 4);
+    println!(
+        "CC8_MEASURED fixture=7 bullet=eight_bit_hdr refused={refused} \
+         floor_bits={} lane_bits={}",
+        kinewright_core::CC8_HDR_MIN_INTEGER_DEPTH_BITS,
+        CC8_HDR_DELIVERY_LANE.bit_depth_bits,
+    );
+}
+
+/// **§9.1 fixture 7, §5.3 bullet 3.** Mismatched primaries/transfer pairs:
+/// Rec.2020 primaries with a BT.709 transfer, and BT.709 primaries with an HLG
+/// or PQ transfer.
+///
+/// §5.3 says these are "rejected on the *combination*", and the combination is
+/// what the lane selector reads: neither pair is one of §2.1's two rows, so
+/// neither selects §5.1's HDR lane, and each is refused against the SDR lane on
+/// the first field of the fixed check order it disagrees about. The bullet is
+/// about the pair reaching **no** lane, not about a seventh field being added
+/// to §5.3's fixed order.
+#[test]
+fn cc8_delivery_rejects_mismatched_primaries_and_transfer_pairs() {
+    let cases: [(&str, ColorPrimaries, ColorTransfer, &str, &str); 3] = [
+        (
+            "rec2020 primaries with a bt709 transfer",
+            ColorPrimaries::Bt2020,
+            ColorTransfer::Bt709,
+            "primaries",
+            "Bt2020",
+        ),
+        (
+            "bt709 primaries with an HLG transfer",
+            ColorPrimaries::Bt709,
+            ColorTransfer::AribStdB67,
+            "transfer",
+            "AribStdB67",
+        ),
+        (
+            "bt709 primaries with a PQ transfer",
+            ColorPrimaries::Bt709,
+            ColorTransfer::Smpte2084,
+            "transfer",
+            "Smpte2084",
+        ),
+    ];
+    let case_count = cases.len();
+    for (label, primaries, transfer, field, observed) in cases {
+        let color = ColorDescription {
+            primaries: primaries.clone(),
+            transfer: transfer.clone(),
+            ..cc8_sdr_delivery_description(DeliveryEncodeDepth::Ten)
+        };
+        // The combination reaches no HDR row, so the lane it selects is the
+        // SDR one — asserted, because that is the whole mechanism of the
+        // bullet and an accidental HDR classification would change the
+        // refusal's field.
+        assert!(
+            !kinewright_core::color_description_is_cc8_hdr(&color),
+            "{label}: a mismatched pair must not select the HDR lane",
+        );
+        assert_eq!(
+            DeliveryLane::for_description(&color),
+            DeliveryLane::SdrRec709,
+        );
+        cc8_assert_delivery_refused(
+            label,
+            &color,
+            DeliveryLane::SdrRec709,
+            field,
+            observed,
+            "bt709",
+            "Reset the delivery colour target explicitly, or choose a supported delivery depth.",
+        );
+    }
+    println!("CC8_MEASURED fixture=7 bullet=mismatched_pairs cases={case_count}");
+}
+
+/// **§9.1 fixture 7, §5.3 bullet 4.** `bt2020_cl`, `ictcp`, and every matrix
+/// outside the lane table.
+///
+/// Enumerated from `ColorMatrix`'s own set rather than from a list written
+/// here, so a matrix added to the schema is refused or accepted by this fixture
+/// on the day it appears instead of being silently unexercised.
+#[test]
+fn cc8_delivery_rejects_every_matrix_outside_the_hdr_lane_table() {
+    let every_matrix = [
+        ColorMatrix::Unknown,
+        ColorMatrix::Identity,
+        ColorMatrix::Rgb,
+        ColorMatrix::Bt709,
+        ColorMatrix::Bt2020Ncl,
+        ColorMatrix::Bt2020Cl,
+        ColorMatrix::Smpte170M,
+        ColorMatrix::Smpte240M,
+        ColorMatrix::Ycgco,
+        ColorMatrix::ChromaDerivedNcl,
+        ColorMatrix::ChromaDerivedCl,
+        ColorMatrix::Ictcp,
+    ];
+    let matrix_count = every_matrix.len();
+    let has_bt2020_cl = every_matrix.iter().any(|m| m.wire() == "bt2020_cl");
+    let has_ictcp = every_matrix.iter().any(|m| m.wire() == "ictcp");
+    let mut accepted = Vec::new();
+    let mut refused = 0_usize;
+    for matrix in &every_matrix {
+        let color = ColorDescription {
+            matrix: matrix.clone(),
+            ..cc8_hdr_delivery_description()
+        };
+        if matrix.wire() == CC8_HDR_DELIVERY_LANE.matrix {
+            assert!(delivery_color_mismatches(&color).is_empty(), "{color:?}");
+            accepted.push(matrix.wire());
+            continue;
+        }
+        cc8_assert_delivery_refused(
+            &format!("{} on the HDR lane", matrix.wire()),
+            &color,
+            DeliveryLane::HdrHlgRec2020,
+            "matrix",
+            &format!("{matrix:?}"),
+            CC8_HDR_DELIVERY_MATRIX_ALLOWED,
+            CC8_HDR_DELIVERY_RECOVERY_ACTION,
+        );
+        refused += 1;
+    }
+    assert_eq!(
+        accepted,
+        vec!["bt2020_ncl"],
+        "§5.1's `Matrix | bt2020_ncl` row is the whole accepted set on this lane",
+    );
+    assert_eq!(refused, matrix_count - 1);
+    // §1's two named non-deliverables must be among the refusals, by name.
+    assert!(has_bt2020_cl);
+    assert!(has_ictcp);
+    println!("CC8_MEASURED fixture=7 bullet=matrix refused={refused} accepted={accepted:?}");
+}
+
+/// **§9.1 fixture 7, §5.3 bullet 5.** Full range on the HDR lane.
+///
+/// §5.1: "**Full-range HDR delivery is rejected** with a typed reason, as
+/// full-range SDR already is." The SDR half is asserted here too, so the
+/// sentence's "as ... already is" is a measurement rather than a claim.
+#[test]
+fn cc8_delivery_rejects_full_range_on_the_hdr_lane() {
+    for range in [ColorRange::Full, ColorRange::Unknown] {
+        let hdr = ColorDescription {
+            range: range.clone(),
+            ..cc8_hdr_delivery_description()
+        };
+        cc8_assert_delivery_refused(
+            &format!("{} range on the HDR lane", range.wire()),
+            &hdr,
+            DeliveryLane::HdrHlgRec2020,
+            "range",
+            &format!("{range:?}"),
+            CC8_HDR_DELIVERY_RANGE_ALLOWED,
+            CC8_HDR_DELIVERY_RECOVERY_ACTION,
+        );
+        let sdr = ColorDescription {
+            range: range.clone(),
+            ..cc8_sdr_delivery_description(DeliveryEncodeDepth::Ten)
+        };
+        cc8_assert_delivery_refused(
+            &format!("{} range on the SDR lane", range.wire()),
+            &sdr,
+            DeliveryLane::SdrRec709,
+            "range",
+            &format!("{range:?}"),
+            "limited",
+            "Reset the delivery colour target explicitly, or choose a supported delivery depth.",
+        );
+    }
+    // The same for the white point, which §5.1's table also fixes.
+    let no_white_point = ColorDescription {
+        white_point: ColorWhitePoint::Unknown,
+        ..cc8_hdr_delivery_description()
+    };
+    cc8_assert_delivery_refused(
+        "unknown white point on the HDR lane",
+        &no_white_point,
+        DeliveryLane::HdrHlgRec2020,
+        "white_point",
+        "Unknown",
+        CC8_HDR_DELIVERY_WHITE_POINT_ALLOWED,
+        CC8_HDR_DELIVERY_RECOVERY_ACTION,
+    );
+    println!(
+        "CC8_MEASURED fixture=7 bullet=range lane_range={} refused=full,unknown",
+        CC8_HDR_DELIVERY_LANE.range,
+    );
+}
+
+/// **§9.1 fixture 7, §5.3 bullet 6.** PQ on the HLG lane, with a recovery
+/// action naming the deferral rather than implying a conversion exists.
+///
+/// This is the one bullet §5.3 states the recovery text for, so the text is
+/// asserted rather than merely asserted to be non-empty: it must name §11's
+/// deferral and must say that no conversion exists, because a recovery that
+/// said "convert to HLG" would advertise a stage CC8 does not have and §0.2 Q6
+/// refuses to add.
+#[test]
+fn cc8_delivery_rejects_pq_on_the_hlg_lane_and_names_the_deferral() {
+    let pq = ColorDescription {
+        transfer: ColorTransfer::Smpte2084,
+        ..cc8_hdr_delivery_description()
+    };
+    // A PQ delivery description is still an HDR *pair*, so it selects §5.1's
+    // lane and is refused there — not silently reclassified as SDR, which
+    // would report the wrong field.
+    assert!(kinewright_core::color_description_is_cc8_hdr(&pq));
+    assert_eq!(
+        DeliveryLane::for_description(&pq),
+        DeliveryLane::HdrHlgRec2020,
+    );
+    cc8_assert_delivery_refused(
+        "PQ on the HLG lane",
+        &pq,
+        DeliveryLane::HdrHlgRec2020,
+        "transfer",
+        "Smpte2084",
+        CC8_HDR_DELIVERY_TRANSFER_ALLOWED,
+        CC8_PQ_DELIVERY_RECOVERY_ACTION,
+    );
+    let recovery = CC8_PQ_DELIVERY_RECOVERY_ACTION;
+    assert!(recovery.contains("§11"), "the deferral must be named");
+    assert!(
+        recovery.contains("No PQ-to-HLG conversion exists"),
+        "the recovery must not imply a conversion exists: {recovery}",
+    );
+    assert!(
+        !recovery.to_lowercase().contains("tone map"),
+        "§0.2 Q6 refuses tone-mapped delivery; the recovery must not offer one: {recovery}",
+    );
+    // The delivery-side colour transform refuses PQ as well, so a PQ
+    // description cannot reach the encoder even if a caller bypassed the gate:
+    // the compositor's own encode is the second refusal.
+    let error = crate::color_pipeline::encode_delivery_for_description([1.0, 1.0, 1.0, 1.0], &pq)
+        .expect_err("the delivery encode must refuse a PQ description");
+    assert!(
+        format!("{error}").contains("Smpte2084"),
+        "the delivery encode's refusal must name the transfer: {error}",
+    );
+    println!(
+        "CC8_MEASURED fixture=7 bullet=pq_on_hlg_lane recovery_bytes={}",
+        recovery.len()
+    );
+}
+
+/// **§9.1 fixture 7, the standing block.** §10 step 3's
+/// `hdr_source_on_sdr_delivery` still blocks, and lifts only when the delivery
+/// description is §5.1's lane.
+///
+/// §7 item 2 is a *permanent* rule, not scaffolding: §0.2 Q6 refuses
+/// tone-mapped SDR delivery from an HDR timeline for good. What §10 step 6
+/// changes is only which delivery descriptions satisfy
+/// `color_description_is_cc8_hdr` **in practice**, so both directions are
+/// asserted here — the block is still raised against an SDR delivery target,
+/// and it is not raised once the project's delivery description is the HDR
+/// lane. Without the second half, step 6 could have left the HDR lane
+/// unreachable and every fixture would still have passed.
+#[test]
+fn cc8_delivery_hdr_source_block_stands_and_lifts_only_on_the_hdr_lane() {
+    let hdr_source = ColorDescription {
+        white_point: ColorWhitePoint::D65,
+        ..cc8_hdr_delivery_description()
+    };
+    assert_eq!(
+        classify_source(&hdr_source),
+        Ok(ColorSourceProfile::HlgRec2020),
+    );
+    let mut asset = kinewright_core::MediaAsset {
+        id: AssetId(1),
+        path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+        name: "cc8-hdr-source".to_owned(),
+        duration: TimeCode(6),
+        fps: Rational::new(25, 1).expect("25 fps"),
+        kind: kinewright_core::MediaKind::Video,
+        resolution: Some(CC8_PRECONDITION_SIZE),
+        source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+        color_description: hdr_source.clone(),
+    };
+    asset.color_description = hdr_source;
+    let mut document = single_clip_document(asset);
+    document.color_context = ColorContext::sdr_rec709();
+
+    let blocked = delivery_conformance(
+        &document,
+        DeliveryProfile::SourceMaster,
+        DeliveryEncodeDepth::Ten,
+        50,
+        50,
+    )
+    .expect("an HDR source is reported, not returned as an error");
+    let issue = blocked
+        .issues
+        .iter()
+        .find(|issue| issue.code == HDR_SOURCE_ON_SDR_DELIVERY)
+        .expect("§7 item 2's block must still be raised on an SDR delivery target");
+    assert_eq!(issue.severity, QaSeverity::Error);
+    assert!(!blocked.export_ready());
+
+    // The same project with §5.1's delivery description: the block lifts, and
+    // it lifts *because* the delivery is HDR rather than because the source
+    // stopped being HDR.
+    document.color_context.delivery = cc8_hdr_delivery_description();
+    let allowed = delivery_conformance(
+        &document,
+        DeliveryProfile::SourceMaster,
+        DeliveryEncodeDepth::Ten,
+        50,
+        50,
+    )
+    .expect("the HDR-delivery project is reported too");
+    assert!(
+        !allowed
+            .issues
+            .iter()
+            .any(|issue| issue.code == HDR_SOURCE_ON_SDR_DELIVERY),
+        "§5.1's lane must lift §7 item 2's block: {:?}",
+        allowed.issues,
+    );
+    assert!(
+        !allowed
+            .issues
+            .iter()
+            .any(|issue| issue.code == "unsupported_delivery_color"),
+        "§5.1's lane must not be reported as an unsupported delivery colour: {:?}",
+        allowed.issues,
+    );
+    println!(
+        "CC8_MEASURED fixture=7 bullet=hdr_source_block sdr_delivery_blocked=true \
+         hdr_delivery_blocked=false"
+    );
+}
+
+/// **§9.1 fixture 7 / §7 item 3.** Setting an HDR delivery description is
+/// validated against §5.1's table by the ordinary operation.
+///
+/// §7 item 3: "Setting an HDR delivery description is an ordinary undoable,
+/// revision-gated, journalled operation, validated against §5.1's table."
+/// `Operation::SetColorContext` is that operation and CC1's own fixtures cover
+/// its undo, revision gating, and journalling; what this asserts is the clause
+/// step 6 added — the validation — and that an SDR context still applies
+/// unchanged, which is the direction §9.1 fixture 6 would not see because it
+/// never edits a colour context.
+#[test]
+fn cc8_setting_an_hdr_delivery_description_is_validated_against_the_lane_table() {
+    let mut document = Document {
+        color_context: ColorContext::sdr_rec709(),
+        ..Document::default()
+    };
+    // The passing direction: §5.1's lane applies.
+    let mut context = ColorContext::sdr_rec709();
+    context.delivery = cc8_hdr_delivery_description();
+    kinewright_core::apply_batch(
+        &mut document,
+        &[kinewright_core::Operation::SetColorContext {
+            color_context: context.clone(),
+        }],
+    )
+    .expect("§5.1's lane must be settable");
+    assert_eq!(document.color_context.delivery, context.delivery);
+
+    // Every failing direction: an HDR *pair* whose remaining fields are not
+    // §5.1's row cannot be stored, so the colour status can never show a
+    // half-formed HDR lane that only fails at the encoder.
+    for (label, delivery) in [
+        (
+            "PQ",
+            ColorDescription {
+                transfer: ColorTransfer::Smpte2084,
+                ..cc8_hdr_delivery_description()
+            },
+        ),
+        (
+            "bt709 matrix",
+            ColorDescription {
+                matrix: ColorMatrix::Bt709,
+                ..cc8_hdr_delivery_description()
+            },
+        ),
+        (
+            "full range",
+            ColorDescription {
+                range: ColorRange::Full,
+                ..cc8_hdr_delivery_description()
+            },
+        ),
+        (
+            "8-bit",
+            ColorDescription {
+                bit_depth: ColorBitDepth::Eight,
+                ..cc8_hdr_delivery_description()
+            },
+        ),
+    ] {
+        let mut broken = ColorContext::sdr_rec709();
+        broken.delivery = delivery;
+        let error = kinewright_core::apply_batch(
+            &mut document.clone(),
+            &[kinewright_core::Operation::SetColorContext {
+                color_context: broken,
+            }],
+        )
+        .expect_err(&format!("{label}: §7 item 3 must refuse this description"));
+        let message = format!("{error}");
+        assert!(
+            message.contains("unsupported CC8 HDR delivery description"),
+            "{label}: the refusal must be the typed §7 item 3 one: {message}",
+        );
+    }
+
+    // An SDR context still applies, unchanged, through the same operation.
+    kinewright_core::apply_batch(
+        &mut document,
+        &[kinewright_core::Operation::SetColorContext {
+            color_context: ColorContext::sdr_rec709(),
+        }],
+    )
+    .expect("an SDR colour context must still apply");
+    assert_eq!(
+        document.color_context.delivery,
+        ColorContext::sdr_rec709().delivery,
+    );
+    println!("CC8_MEASURED fixture=7 bullet=set_color_context validated_against=§5.1");
+}
+
+// ---------------------------------------------------------------------------
+// §9.1 fixture 8 — "The cross-platform encoded HDR fixture", the central gate.
+// ---------------------------------------------------------------------------
+//
+// §9.1, verbatim: "A synthetic HDR source is exported through the production
+// path, re-probed, decoded, and gated on: probed tags exactly `bt2020` /
+// `arib_std_b67` / `bt2020_ncl` / `tv` / `yuv420p10le` / High 10; decoded
+// native-plane BT.2020 legality; and difference budgets against the re-rendered
+// delivery reference. **In the default lane on both CI operating systems.**"
+//
+// The last sentence is why nothing here is `cfg`-gated, why no measurement is
+// compared for equality against one build's decode, and why every budget below
+// is a **constant** asserted against a recorded measurement rather than the
+// live figure (§9.2's first rule, CC7 §0.3 PM-E12). The per-build measured
+// numbers are printed under `CC8_MEASURED` and are reported, never gated.
+
+/// The starved bitrate for §9.2's second rule, matching CC6 §11.2.13's: an
+/// encode that still succeeds and still produces a valid deliverable.
+const CC8_STARVED_VIDEO_BITRATE: u64 = 100_000;
+
+/// Fill one `yuv420p10le` picture with [`CC8_SOURCE_BARS`] **rotated by the
+/// frame index**.
+///
+/// [`fill_hdr_bars`] is deliberately static, because §10 step 4's fixtures read
+/// frame zero and a moving picture would only cost them a motion-compensated
+/// decode. Fixture 8 is the opposite case: it exports six pictures through
+/// libx264 and measures decoded differences on five of them, and a still would
+/// make the encode a single intra picture repeated — the B-frame reordering,
+/// the rate control, and the per-frame sampling would all measure nothing. So
+/// the bars rotate by one position per frame, which keeps every sampled frame's
+/// content a permutation of the same eight known bars while making consecutive
+/// pictures genuinely differ.
+fn fill_hdr_delivery_bars(frame: &mut ffmpeg::frame::Video, frame_index: i64) {
+    let width = CC8_PRECONDITION_SIZE.0 as usize;
+    let height = CC8_PRECONDITION_SIZE.1 as usize;
+    let bars = CC8_SOURCE_BARS.len();
+    let rotation = usize::try_from(
+        frame_index.rem_euclid(i64::try_from(bars).expect("the bar count fits an i64")),
+    )
+    .expect("a non-negative rotation fits a usize");
+    let bar_at = |column: usize| CC8_SOURCE_BARS[(column / CC8_BAR_WIDTH + rotation) % bars];
+
+    let luma_stride = frame.stride(0);
+    let luma = frame.data_mut(0);
+    for row in 0..height {
+        for column in 0..width {
+            let at = row * luma_stride + column * 2;
+            luma[at..at + 2].copy_from_slice(&bar_at(column).luma.to_le_bytes());
+        }
+    }
+    for (plane, chroma) in [(1_usize, false), (2_usize, true)] {
+        let stride = frame.stride(plane);
+        let data = frame.data_mut(plane);
+        for row in 0..height / 2 {
+            for column in 0..width / 2 {
+                let bar = bar_at(column * 2);
+                let value = if chroma { bar.cr } else { bar.cb };
+                let at = row * stride + column * 2;
+                data[at..at + 2].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+}
+
+/// One `ffprobe` field of the first video stream of a written file.
+///
+/// An **independent** reader, in the manner `export.rs`'s own
+/// `ffprobe_video_field` is: §9.1 fixture 8 asks for the H.264 *profile*, which
+/// `probe_path` does not model, and asking the pinned CLI means the crate's own
+/// probe and the CLI must agree about the file rather than the crate agreeing
+/// with itself.
+fn cc8_ffprobe_video_field(path: &Path, entry: &str) -> String {
+    let output = std::process::Command::new(crate::test_support::ffprobe_executable())
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            &format!("stream={entry}"),
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .expect("the provisioned ffprobe should run");
+    assert!(
+        output.status.success(),
+        "ffprobe failed for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// §9.1 fixture 8's synthetic HDR project: the moving-bar HLG clip, and a
+/// document whose delivery description is §5.1's lane.
+///
+/// The clip is written by §10 step 1's own encoder helper, so a change to the
+/// encoder construction cannot move for one CC8 fixture and not another, and it
+/// is encoded losslessly (`qp=0`) so the *source* contributes no codec error to
+/// the measurement — every difference the fixture reports belongs to the
+/// delivery encode it is measuring.
+fn cc8_hdr_delivery_project(directory: &TempDirectory) -> (Document, ColorDescription) {
+    initialize_ffmpeg().expect("FFmpeg must initialize for the CC8 §9.1 fixture 8 source");
+    let path = directory.path("cc8-fixture8-hlg-source.mp4");
+    let source_params = encode_hdr_clip(
+        &path,
+        CC8_PRECONDITION_HLG_TRANSFER_PARAM,
+        "fixture8",
+        Some("qp=0"),
+        fill_hdr_delivery_bars,
+    );
+    let mut asset = probe_path(&path, AssetId(1)).expect("the fixture 8 HDR source must probe");
+    // §2.1's D65 rule: a probed H.264 stream carries no white point, and the
+    // explicit assumption is applied to the *working copy* of the description,
+    // never to the raw metadata.
+    assert_eq!(
+        asset.color_description.white_point,
+        ColorWhitePoint::Unknown
+    );
+    let source_description = cc8_hlg_source_description(&asset.color_description);
+    assert_eq!(
+        classify_source_with_assumption(
+            &source_description,
+            Some(ColorSourceProfileAssumption::D65)
+        ),
+        Ok(ColorSourceProfile::HlgRec2020),
+        "the passing direction: fixture 8's source must be a CC8 §2.1 HDR profile",
+    );
+    asset.color_description = source_description;
+    assert_eq!(asset.duration, TimeCode(CC8_PRECONDITION_FRAMES));
+    assert_eq!(asset.resolution, Some(CC8_PRECONDITION_SIZE));
+
+    let mut document = single_clip_document(asset);
+    document.color_context = ColorContext::sdr_rec709();
+    // §3.1: the working and monitoring descriptions are unchanged — CC8 changes
+    // the *delivery* description and nothing else about the colour context.
+    document.color_context.delivery = cc8_hdr_delivery_description();
+    document
+        .validate()
+        .expect("the fixture 8 HDR document should validate");
+    println!(
+        "CC8_MEASURED fixture=8 source x264_params=\"{source_params}\" bars={} \
+         raster={}x{} frames={CC8_PRECONDITION_FRAMES}",
+        CC8_SOURCE_BARS.len(),
+        CC8_PRECONDITION_SIZE.0,
+        CC8_PRECONDITION_SIZE.1,
+    );
+    (document, cc8_hdr_delivery_description())
+}
+
+/// Assert §5.2's lane-derived terms on the record the production export
+/// actually handed `FFmpeg`.
+///
+/// The same [`DeliveryLaneTerms`] observation seam §9.1 fixture 6 reads, on the
+/// other lane: every field is read back from the object that received the term,
+/// so this is what the encode used and not a second transcription of it. §0.4's
+/// site numbering is carried in the failure messages so a red run names the
+/// literal that moved.
+fn cc8_assert_hdr_lane_terms(terms: &DeliveryLaneTerms) {
+    assert_eq!(
+        terms.encoder_pixel_format, "yuv420p10le",
+        "§5.1's `Pixel format` row",
+    );
+    assert_eq!(
+        terms.encoder_colorspace, "bt2020nc",
+        "§0.4 item 3 (export.rs:216) set_colorspace must be the lane's",
+    );
+    assert_eq!(
+        terms.encoder_color_range, "tv",
+        "§0.4 item 3 (export.rs:217) set_color_range must be the lane's",
+    );
+    assert_eq!(
+        terms.encoder_options.get("x264-params").map(String::as_str),
+        Some(CC8_HDR_DELIVERY_X264_PARAMS),
+        "§0.4 item 4 (export.rs:529): the HDR lane's x264-params must be §5.2 item 2's string",
+    );
+    assert_eq!(
+        terms.encoder_options.get("preset").map(String::as_str),
+        Some("medium"),
+        "the preset rides the same dictionary and §5.1 does not move it",
+    );
+    // §5.2 item 2's proven string, character for character: this is the exact
+    // parameter §10 step 1's precondition encoded and re-probed, so a green
+    // precondition is evidence about this export.
+    assert_eq!(
+        CC8_HDR_DELIVERY_X264_PARAMS,
+        format!(
+            "{CC8_PRECONDITION_PRIMARIES_PARAM}:{CC8_PRECONDITION_HLG_TRANSFER_PARAM}:\
+             {CC8_PRECONDITION_MATRIX_PARAM}"
+        ),
+        "the lane's x264-params must be the string §10 step 1 proved on this build",
+    );
+    assert_eq!(
+        terms.scale_args,
+        format!(
+            "w={}:h={}:flags=bicubic:in_range=jpeg:out_range=mpeg:out_color_matrix=bt2020",
+            CC8_PRECONDITION_SIZE.0, CC8_PRECONDITION_SIZE.1,
+        ),
+        "§0.4 item 6 (export.rs:425): out_color_matrix must be the lane's, and \
+         DELIVERY_SCALER_FLAGS and the two range terms must not move (§5.1)",
+    );
+    assert_eq!(
+        terms.buffer_args,
+        format!(
+            "video_size={}x{}:pix_fmt=rgba64le:time_base=1/1:pixel_aspect=1/1:\
+             colorspace=gbr:range=jpeg",
+            CC8_PRECONDITION_SIZE.0, CC8_PRECONDITION_SIZE.1,
+        ),
+        "the buffer source describes an RGB intermediate on every lane; §5.1 leaves the \
+         single-pass filter graph unchanged",
+    );
+    assert_eq!(terms.format_args, "pix_fmts=yuv420p10le");
+    assert_eq!(terms.graph_pixel_format, "yuv420p10le");
+    assert_eq!(
+        terms.intermediate_frame,
+        FrameColorTerms {
+            pixel_format: "rgba64le".to_owned(),
+            space: "gbr".to_owned(),
+            range: "pc".to_owned(),
+            primaries: "bt2020".to_owned(),
+            transfer: "arib-std-b67".to_owned(),
+        },
+        "§0.4 item 8 (export.rs:626): the RGBA intermediate carries the lane's primaries and \
+         transfer, because those are what its samples are",
+    );
+    assert_eq!(
+        terms.delivery_frame,
+        FrameColorTerms {
+            pixel_format: "yuv420p10le".to_owned(),
+            space: "bt2020nc".to_owned(),
+            range: "tv".to_owned(),
+            primaries: "bt2020".to_owned(),
+            transfer: "arib-std-b67".to_owned(),
+        },
+        "§0.4 item 8 (export.rs:638): the delivery Y'CbCr stamp must be the lane's",
+    );
+}
+
+/// **§9.1 fixture 8.** The cross-platform encoded HDR fixture.
+///
+/// One synthetic HLG Rec.2020 source, exported through the **production** path
+/// (`export_document_capturing_delivery_terms`, which is
+/// `export_document_with_luts` with §9.1 fixture 6's observation seam left on),
+/// then re-probed and decoded through CC6's own `verify_delivery_output`.
+///
+/// Four claims:
+///
+/// 1. **The lane terms** §5.2 makes lane-derived, read back from the objects
+///    that received them.
+/// 2. **The probed tags**, exactly `bt2020` / `arib_std_b67` / `bt2020_ncl` /
+///    `tv` / `yuv420p10le` / High 10 — asserted from *two* independent readers,
+///    the crate's `probe_path` and the pinned `ffprobe`, because §5.2 clause 4
+///    makes a tag that does not survive a failure and one reader agreeing with
+///    itself is not a re-probe.
+/// 3. **Decoded native-plane BT.2020 legality**, from CC6's own decoded-plane
+///    report, which measures the actual Y, Cb and Cr planes of the written file.
+/// 4. **Difference budgets** against the re-rendered delivery reference, whose
+///    reference luma goes through §6 item 1's BT.2020 NCL matrix rather than
+///    BT.709's.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cc8_encoded_hdr_delivery_fixture() {
+    // Rule 11.0.6: the panicking acquisition, never the skipping one.
+    let gpu = fallback_gpu();
+    let directory = TempDirectory::new("cc8-encoded-hdr-delivery");
+    let (document, delivery) = cc8_hdr_delivery_project(&directory);
+    let document = Arc::new(document);
+
+    let settings = DeliveryProfile::SourceMaster.export_settings(
+        document.as_ref(),
+        DeliveryEncodeDepth::Ten,
+        kinewright_core::ExportCancellation::default(),
+    );
+    assert_eq!(settings.video_codec, CC8_PRECONDITION_CODEC);
+    assert_eq!(settings.delivery_color, delivery);
+    assert_eq!(
+        DeliveryLane::for_description(&settings.delivery_color),
+        DeliveryLane::HdrHlgRec2020,
+    );
+
+    // --- claim 1: the lane terms, from the production export ---------------
+    let output = directory.path("cc8-fixture8-hdr-delivery.mp4");
+    let (progress_tx, _progress_rx) = crossbeam_channel::unbounded();
+    let terms = crate::export::export_document_capturing_delivery_terms(
+        document.as_ref(),
+        &output,
+        &settings,
+        &progress_tx,
+        gpu.context(),
+    )
+    .expect("the production export must write CC8 §5.1's HDR lane");
+    cc8_assert_hdr_lane_terms(&terms);
+
+    // --- claim 2: the probed tags, from two independent readers -------------
+    let probed = probe_path(&output, AssetId(9))
+        .expect("§5.2 clause 4: the written HDR file must re-probe")
+        .color_description;
+    assert_eq!(probed.primaries, ColorPrimaries::Bt2020);
+    assert_eq!(probed.transfer, ColorTransfer::AribStdB67);
+    assert_eq!(probed.matrix, ColorMatrix::Bt2020Ncl);
+    assert_eq!(probed.range, ColorRange::Limited);
+    assert_eq!(probed.bit_depth, ColorBitDepth::Ten);
+    assert_eq!(
+        probed.provenance,
+        ColorProvenance::StreamMetadata,
+        "the tags must be read from the stream, not inferred: an inferred description would \
+         make every tag assertion above vacuous",
+    );
+    let ffprobe_profile = cc8_ffprobe_video_field(&output, "profile");
+    let ffprobe_pixel_format = cc8_ffprobe_video_field(&output, "pix_fmt");
+    assert_eq!(
+        ffprobe_profile, "High 10",
+        "§9.1 fixture 8 requires High 10; the pixel format alone selects it",
+    );
+    assert_eq!(ffprobe_pixel_format, "yuv420p10le");
+    assert_eq!(cc8_ffprobe_video_field(&output, "color_range"), "tv");
+    assert_eq!(cc8_ffprobe_video_field(&output, "color_space"), "bt2020nc");
+    assert_eq!(
+        cc8_ffprobe_video_field(&output, "color_transfer"),
+        "arib-std-b67",
+    );
+    assert_eq!(
+        cc8_ffprobe_video_field(&output, "color_primaries"),
+        "bt2020",
+    );
+
+    // --- claims 3 and 4: decode, legality, and the budgets ------------------
+    let request = DeliveryVerificationRequest::new(DeliveryEncodeDepth::Ten, delivery.clone());
+    assert_eq!(
+        request.budgets,
+        kinewright_core::DeliveryBudgets::for_hdr_delivery_lane(),
+        "§9.2 forbids inheriting another lane's budgets, so the HDR request must carry the \
+         HDR set",
+    );
+    assert_ne!(
+        request.budgets,
+        kinewright_core::DeliveryBudgets::for_depth(DeliveryEncodeDepth::Ten),
+        "and the HDR set must actually differ from the 10-bit SDR one, or 'its own budgets' \
+         is a claim nothing measured",
+    );
+    // CC6 §6.3's distinctness rule, applied to CC8's lane: a codec budget and a
+    // compositor tolerance must never be silently substitutable for one
+    // another, because CC1's are flat-field numbers that would fail instantly
+    // on any raster carrying a saturated edge.
+    assert_ne!(
+        request.budgets.luma_max_code,
+        u32::from(crate::cc1_fixtures::MONITOR_CPU_GPU_MAX),
+    );
+    assert_ne!(request.budgets.luma_p99_code_millionths, 1_000_000);
+    assert_ne!(request.budgets.luma_mean_code_millionths, 500_000);
+    let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
+        .expect("the production media engine should start");
+    let verification = engine
+        .verify_delivery_output(Arc::clone(&document), &output, &settings, request.clone())
+        .expect("the written HDR export must verify");
+    let comparison = &verification.comparison;
+
+    println!(
+        "CC8_MEASURED fixture=8 gate=\"Decoded HDR delivery\" lane={} gpu_lane={} \
+         luma_max={} luma_p99_millionths={} luma_mean_millionths={} \
+         rgb_mean_millionths_8bit_equiv={} psnr_hundredths={:?} rgb_max={} rgb_p99_millionths={} \
+         budgets={:?}",
+        DeliveryLane::HdrHlgRec2020.as_str(),
+        gpu.lane.id(),
+        comparison.luma.maximum_code_diff,
+        comparison.luma.p99_code_diff_millionths,
+        comparison.luma.mean_code_diff_millionths,
+        comparison.combined.mean_code_diff_millionths,
+        comparison.psnr_db_hundredths,
+        comparison.combined.maximum_code_diff,
+        comparison.combined.p99_code_diff_millionths,
+        comparison.budgets,
+    );
+    println!(
+        "CC8_MEASURED fixture=8 legality bit_depth={} luma_below={} luma_above={} \
+         cb_below={} cb_above={} cr_below={} cr_above={} luma_min_hundredths={} \
+         luma_max_hundredths={}",
+        comparison.decoded_ycbcr.bit_depth,
+        comparison.decoded_ycbcr.luma.below_count,
+        comparison.decoded_ycbcr.luma.above_count,
+        comparison.decoded_ycbcr.cb.below_count,
+        comparison.decoded_ycbcr.cb.above_count,
+        comparison.decoded_ycbcr.cr.below_count,
+        comparison.decoded_ycbcr.cr.above_count,
+        comparison.decoded_ycbcr.luma.minimum_code_hundredths,
+        comparison.decoded_ycbcr.luma.maximum_code_hundredths,
+    );
+
+    assert!(
+        verification.technical_pass,
+        "the HDR export must pass verification: {:?}",
+        verification.exceptions,
+    );
+    assert_eq!(verification.delivery_bit_depth, DeliveryEncodeDepth::Ten);
+    assert_eq!(verification.decoded_pixel_format, "yuv420p10le");
+    assert!(
+        verification.tags.conforming,
+        "§5.2 clause 4: a tag that does not survive is a failure: {:?}",
+        verification.tags,
+    );
+    assert_eq!(verification.probed.primaries, ColorPrimaries::Bt2020);
+    assert_eq!(verification.probed.transfer, ColorTransfer::AribStdB67);
+    assert_eq!(verification.probed.matrix, ColorMatrix::Bt2020Ncl);
+    assert_eq!(verification.probed.range, ColorRange::Limited);
+    assert!(comparison.within_budgets, "{comparison:?}");
+    // Claim 3, stated as its own assertion: the decoded planes were measured
+    // from the file, at the lane depth, and the report is the decoded-plane one
+    // rather than a prediction.
+    assert_eq!(
+        comparison.decoded_ycbcr.source,
+        kinewright_core::YCbCrLegalSource::DecodedNativePlanes,
+    );
+    assert_eq!(comparison.decoded_ycbcr.bit_depth, 10);
+    assert!(
+        comparison.decoded_ycbcr.luma.samples_seen()
+            && comparison.decoded_ycbcr.cb.samples_seen()
+            && comparison.decoded_ycbcr.cr.samples_seen(),
+        "a legality report over no samples proves nothing: {:?}",
+        comparison.decoded_ycbcr,
+    );
+    assert_eq!(
+        comparison.frames.len(),
+        usize::from(kinewright_core::DELIVERY_VERIFICATION_FRAME_COUNT),
+        "the sample must be CC6 §6.2's, not a shortened one",
+    );
+
+    // §9.2's second rule, on the two terms that measure zero or one code on the
+    // passing source: a deliberately starved encode of the same project must
+    // break the same budgets, so the constants are reachable rather than
+    // decorative. Nothing about the starved run is gated as a *number*; what is
+    // gated is that it does not fit.
+    let starved_output = directory.path("cc8-fixture8-hdr-starved.mp4");
+    let mut starved_settings = settings.clone();
+    starved_settings.video_bitrate = CC8_STARVED_VIDEO_BITRATE;
+    crate::export::export_document_capturing_delivery_terms(
+        document.as_ref(),
+        &starved_output,
+        &starved_settings,
+        &progress_tx,
+        gpu.context(),
+    )
+    .expect("the starved HDR export must still write a valid deliverable");
+    let starved = engine
+        .verify_delivery_output(
+            Arc::clone(&document),
+            &starved_output,
+            &starved_settings,
+            request,
+        )
+        .expect("the starved HDR export must still verify");
+    println!(
+        "CC8_MEASURED fixture=8 starved bitrate={CC8_STARVED_VIDEO_BITRATE} luma_max={} \
+         luma_p99_millionths={} luma_mean_millionths={} rgb_mean_millionths_8bit_equiv={} \
+         psnr_hundredths={:?}",
+        starved.comparison.luma.maximum_code_diff,
+        starved.comparison.luma.p99_code_diff_millionths,
+        starved.comparison.luma.mean_code_diff_millionths,
+        starved.comparison.combined.mean_code_diff_millionths,
+        starved.comparison.psnr_db_hundredths,
+    );
+    assert!(
+        !starved.comparison.within_budgets,
+        "a {CC8_STARVED_VIDEO_BITRATE} b/s encode of this HDR source must not fit §5.1's lane \
+         budgets, or the budgets bound nothing: {:?}",
+        starved.comparison,
+    );
+    assert!(!starved.technical_pass);
+    // A difference failure, not a tag failure: the two are reported separately,
+    // and the starved file's tags are still the lane's.
+    assert!(starved.tags.conforming, "{:?}", starved.tags);
+    let tripped: Vec<String> = starved
+        .exceptions
+        .iter()
+        .filter(|exception| exception.code == "decoded_difference_over_budget")
+        .filter_map(|exception| exception.field.clone())
+        .collect();
+    assert!(
+        !tripped.is_empty(),
+        "a starved encode reports the budget it broke: {:?}",
+        starved.exceptions,
+    );
+    println!("CC8_MEASURED fixture=8 starved_tripped={tripped:?}");
+
+    // The measurement never moves the file it measured.
+    assert_eq!(verification.output_path, output);
+    assert!(output.is_file());
+}
+
+/// **§9.1 fixture 8's intermediate-white determination**, asserted on its own
+/// so it has its own name in a backtrace and its own line in the evidence.
+///
+/// CC6's `DELIVERY_INTERMEDIATE_WHITE = 65_280` convention is one of the three
+/// things §5.1 names as "unchanged and ... not re-measured" on the HDR lane, so
+/// the question step 6 has to answer is not *what the number is* but **what
+/// white means on the HDR intermediate**. The contract settles it: the
+/// intermediate carries the lane's transfer-coded signal, and `65_280` is
+/// `libswscale`'s nominal 16-bit RGB white, so what lands on `65_280` is the
+/// **HLG signal peak** `E' = 1.0` — not the working diffuse white.
+///
+/// The consequence is the relation the source side already carries, run
+/// backwards: working `1.0` is BT.2408's HLG diffuse white, which is
+/// [`CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT`] of the signal range, so it
+/// encodes to `E' = 0.75`, intermediate code `48_960`, and 10-bit limited luma
+/// 721 — the same code `CC8_SOURCE_BARS`' `hlg_reference_white_75` bar is
+/// written with. Guessing the other way — putting working `1.0` on `65_280` —
+/// would have delivered every HDR project 1.92 stops hot and would have made
+/// the specular range unrepresentable.
+#[test]
+fn cc8_hdr_delivery_intermediate_white_is_the_hlg_signal_peak() {
+    use crate::color_pipeline::{DELIVERY_INTERMEDIATE_WHITE, encode_delivery_hlg_rec2020_rgba16};
+
+    // The slack is CC8 §2.2's own half-nit argument, carried into codes rather
+    // than invented here. `cc8_hlg_reference_white_signal_lands_on_the_anchor`
+    // bounds the 75 % relation at **half a nit**, because 203 is BT.2408's own
+    // figure rounded to integer cd/m²; the delivery direction inherits that
+    // rounding through the same two stages. Half a nit at the anchor is
+    // `0.5 / (peak * gamma * Y_S^(gamma-1)) = 0.5 / 918.5 = 5.44e-4` of scene
+    // linear, and the OETF's slope there — `12a / (12E - b) = 0.741` — carries
+    // it to `4.03e-4` of signal, which is `26.3` intermediate codes. Rounded up
+    // to the next power of two: **32**. The observed deviation is 8 codes
+    // (0.15 nits), a 4.0x margin, and it is printed below.
+    const DIFFUSE_WHITE_CODE_BOUND: u16 = 32;
+
+    assert_eq!(
+        DELIVERY_INTERMEDIATE_WHITE, 65_280,
+        "§5.1 keeps CC6's convention unchanged and does not re-measure it",
+    );
+
+    // (a) The HLG signal peak lands on nominal white. The working value that
+    // produces it is the nominal peak over the anchor — a quotient of two
+    // pinned constants, never a literal.
+    let peak_working = cc8_nits(CC8_HLG_NOMINAL_PEAK_NITS) / cc8_nits(CC8_REFERENCE_WHITE_NITS);
+    let peak_codes =
+        encode_delivery_hlg_rec2020_rgba16([peak_working, peak_working, peak_working, 1.0]);
+    for channel in 0..3 {
+        assert_eq!(
+            peak_codes[channel], DELIVERY_INTERMEDIATE_WHITE,
+            "the HLG signal peak must land on nominal white: {peak_codes:?}",
+        );
+    }
+
+    // (b) Working diffuse white lands on BT.2408's 75 % signal, not on nominal
+    // white — the determination itself.
+    let white_codes = encode_delivery_hlg_rec2020_rgba16([1.0, 1.0, 1.0, 1.0]);
+    let expected_signal = cc8_nits(CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT) / 100.0;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let expected_code = (expected_signal * f32::from(DELIVERY_INTERMEDIATE_WHITE)).round() as u16;
+    for channel in 0..3 {
+        assert!(
+            white_codes[channel].abs_diff(expected_code) <= DIFFUSE_WHITE_CODE_BOUND,
+            "working diffuse white must land on the 75 % HLG signal ({expected_code}), not on \
+             nominal white: {white_codes:?}",
+        );
+        assert!(
+            white_codes[channel] < DELIVERY_INTERMEDIATE_WHITE,
+            "diffuse white must leave headroom for the specular range: {white_codes:?}",
+        );
+    }
+
+    // (c) The delivery encode is the exact inverse of the decode chain: the
+    // signal that comes back out is the signal the source-side stages would
+    // have consumed. This is what makes §3.3's two lines mirror images rather
+    // than two independently plausible orders.
+    for signal in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+        let working = cc8_hlg_decode_working_linear([signal; 3]);
+        let bt709 = cc8_apply_matrix(kinewright_core::CC8_REC2020_TO_BT709, working);
+        let codes = encode_delivery_hlg_rec2020_rgba16([bt709[0], bt709[1], bt709[2], 1.0]);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let expected = (signal * f32::from(DELIVERY_INTERMEDIATE_WHITE)).round() as u16;
+        for channel in 0..3 {
+            assert!(
+                codes[channel].abs_diff(expected) <= 8,
+                "the delivery chain must invert the decode chain at signal {signal}: \
+                 {codes:?} vs {expected}",
+            );
+        }
+    }
+
+    // (d) Alpha keeps the SDR convention: no transfer, the same scale.
+    assert_eq!(
+        encode_delivery_hlg_rec2020_rgba16([0.0, 0.0, 0.0, 1.0])[3],
+        DELIVERY_INTERMEDIATE_WHITE,
+    );
+
+    println!(
+        "CC8_MEASURED fixture=8 intermediate_white={DELIVERY_INTERMEDIATE_WHITE} \
+         hlg_signal_peak_code={} diffuse_white_code={} diffuse_white_expected_code={} \
+         diffuse_white_code_delta={} diffuse_white_code_bound={DIFFUSE_WHITE_CODE_BOUND} \
+         diffuse_white_signal_percent={}",
+        peak_codes[0],
+        white_codes[0],
+        expected_code,
+        white_codes[0].abs_diff(expected_code),
+        CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT,
+    );
 }

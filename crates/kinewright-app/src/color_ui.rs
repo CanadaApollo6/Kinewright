@@ -100,9 +100,16 @@ pub(crate) fn color_pipeline_summary(context: &ColorContext) -> [String; 4] {
     ]
 }
 
+/// Whether the project's colour context is one the managed renderer refuses.
+///
+/// CC8 §5.1 widened that set by one delivery target, so this asks
+/// `is_managed_compatible` rather than `is_managed_sdr_compatible`: a project
+/// whose delivery description is §5.1's HDR lane is executable, and telling its
+/// operator to "reset to Managed SDR" would be an instruction to undo the lane
+/// §8 says the export dialog should be offering them.
 #[must_use]
 pub(crate) fn managed_sdr_reset_needed(context: &ColorContext) -> bool {
-    !context.is_managed_sdr_compatible()
+    !context.is_managed_compatible()
 }
 
 fn color_pipeline_state_label(state: &ColorPipelineState) -> String {

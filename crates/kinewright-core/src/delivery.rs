@@ -9,8 +9,15 @@ use crate::{
     ColorProvenance, ColorRange, ColorSourceError, ColorSourceProfile,
     ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Document, Effect, EffectId,
     ExportCancellation, ExportSettings, MediaAsset, MediaKind, OpError, ParamValue, QaIssue,
-    QaSeverity, TrackKind, cc8_hdr::CC8_HDR_DELIVERY_ALLOWED, classify_source,
-    classify_source_with_assumption, color_description_is_cc8_hdr, qa_document,
+    QaSeverity, TrackKind,
+    cc8_hdr::{
+        CC8_HDR_DELIVERY_ALLOWED, CC8_HDR_DELIVERY_ALLOWED_PHRASES, CC8_HDR_DELIVERY_DEPTH_ALLOWED,
+        CC8_HDR_DELIVERY_LANE, CC8_HDR_DELIVERY_MATRIX_ALLOWED, CC8_HDR_DELIVERY_PRIMARIES_ALLOWED,
+        CC8_HDR_DELIVERY_RANGE_ALLOWED, CC8_HDR_DELIVERY_RECOVERY_ACTION,
+        CC8_HDR_DELIVERY_TRANSFER_ALLOWED, CC8_HDR_DELIVERY_WHITE_POINT_ALLOWED,
+        CC8_PQ_DELIVERY_RECOVERY_ACTION,
+    },
+    classify_source, classify_source_with_assumption, color_description_is_cc8_hdr, qa_document,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -354,12 +361,27 @@ pub fn delivery_conformance(
         });
     }
     if let Some(mismatch) = delivery_color_mismatch(&settings.delivery_color) {
+        // The lane is named because CC8 §5.3 made the allowed set a function of
+        // it: "8-bit or 10-bit SDR Rec.709" is still the whole story on the SDR
+        // lane and is no longer the whole story on §5.1's HDR one, and a
+        // message that said otherwise would send an operator to fix the wrong
+        // field. The three structured facts and the recovery action are the
+        // same ones `DeliveryColorError` carries, from the same functions.
+        let lane = DeliveryLane::for_description(&settings.delivery_color);
+        let contract = match lane {
+            DeliveryLane::SdrRec709 => "explicit 8-bit or 10-bit SDR Rec.709",
+            DeliveryLane::HdrHlgRec2020 => "CC8 §5.1's 10-bit HLG Rec.2020 HDR",
+        };
         issues.push(QaIssue {
             severity: QaSeverity::Error,
             code: "unsupported_delivery_color".to_owned(),
             message: format!(
-                "Current libx264 export requires explicit 8-bit or 10-bit SDR Rec.709 delivery colour metadata: field={}, observed={}, allowed={}. Reset the delivery colour target explicitly.",
-                mismatch.field, mismatch.observed, mismatch.allowed,
+                "Current libx264 export requires {contract} delivery colour metadata on the {} lane: field={}, observed={}, allowed={}. {}",
+                lane.as_str(),
+                mismatch.field,
+                mismatch.observed,
+                mismatch.allowed,
+                delivery_field_recovery_action(&mismatch),
             ),
             asset: None,
             track: None,
@@ -578,37 +600,164 @@ pub struct DeliveryColorMismatch {
     pub allowed: String,
 }
 
+/// The managed delivery lane one delivery description belongs to (CC8 §5.1).
+///
+/// CC6 had one lane in two depths and could leave it implicit. CC8 §5.3 makes
+/// the accepted set "**a function of the selected lane**", so the lane becomes
+/// a named thing rather than an assumption, and §5.2 clause 1 says what selects
+/// it: "The encoder colourspace and range **must** be selected from the
+/// delivery `ColorDescription`, never from a literal." So the description is
+/// the selector, and [`Self::for_description`] is the only place that reads it.
+///
+/// The lane is keyed on the **primaries/transfer pair** for the reason
+/// `color::cc8_hdr_row` states: no other field can make a tuple HDR that the
+/// pair does not, and a description whose pair is not one of §2.1's two rows is
+/// diagnosed entirely by the SDR field rules — which is what keeps a
+/// Rec.2020/BT.709 or BT.709/HLG *mismatched pair* (§5.3's third bullet)
+/// reported against the field CC6 already names it by, rather than silently
+/// becoming a half-HDR description.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryLane {
+    /// CC1/CC6's SDR Rec.709 lane, at either managed depth. Unchanged by CC8.
+    SdrRec709,
+    /// CC8 §5.1's lane: HLG, Rec.2020, BT.2020 NCL, limited, D65, 10-bit
+    /// H.264 High 10.
+    HdrHlgRec2020,
+}
+
+impl DeliveryLane {
+    /// Both lanes, SDR first — the order §5.3's first bullet names them in.
+    pub const ALL: [Self; 2] = [Self::SdrRec709, Self::HdrHlgRec2020];
+
+    /// The lane a delivery description selects (CC8 §5.2 clause 1).
+    #[must_use]
+    pub fn for_description(color: &ColorDescription) -> Self {
+        if color_description_is_cc8_hdr(color) {
+            Self::HdrHlgRec2020
+        } else {
+            Self::SdrRec709
+        }
+    }
+
+    /// Stable wire identifier used by agent, app, and evidence surfaces.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SdrRec709 => "sdr_rec709",
+            Self::HdrHlgRec2020 => CC8_HDR_DELIVERY_LANE.id,
+        }
+    }
+
+    /// Whether this is CC8 §5.1's HDR lane.
+    #[must_use]
+    pub const fn is_hdr(self) -> bool {
+        matches!(self, Self::HdrHlgRec2020)
+    }
+
+    /// The encode depths this lane admits.
+    ///
+    /// The SDR lane keeps CC6 §4.1's two; §5.1's `Bit depth | Ten` row gives
+    /// the HDR lane exactly one, which is also §2.1's 10-bit floor seen from
+    /// the delivery side.
+    #[must_use]
+    pub const fn encode_depths(self) -> &'static [DeliveryEncodeDepth] {
+        match self {
+            Self::SdrRec709 => &DeliveryEncodeDepth::ALL,
+            Self::HdrHlgRec2020 => &[DeliveryEncodeDepth::Ten],
+        }
+    }
+}
+
 /// Every delivery-colour field the current export contract rejects, in the
-/// fixed check order.
+/// fixed check order, against the lane the description itself selects.
 ///
 /// The order is `primaries → transfer → matrix → range → white_point →
 /// bit_depth → provenance → confidence`. An empty vector means the
 /// description conforms.
+///
+/// CC8 §5.3 changed the *allowed set* and nothing else: the check order, the
+/// [`DeliveryColorMismatch`] shape, the [`DeliveryColorError`] vocabulary, and
+/// the rule that this is never applied to a probed description all stand. An
+/// SDR description is checked exactly as CC6 checked it, character for
+/// character — §9.1 fixture 6 gates that — and an HDR-shaped one is checked
+/// against §5.1's lane table.
 #[must_use]
 pub fn delivery_color_mismatches(color: &ColorDescription) -> Vec<DeliveryColorMismatch> {
-    let mut mismatches = Vec::new();
-    let mut push = |field: &str, observed: String, allowed: &str| {
-        mismatches.push(DeliveryColorMismatch {
-            field: field.to_owned(),
-            observed,
-            allowed: allowed.to_owned(),
-        });
-    };
+    delivery_color_mismatches_for_lane(color, DeliveryLane::for_description(color))
+}
 
+/// Every field of `color` that `lane` rejects, in the same fixed check order.
+///
+/// This is the surface §5.3's **first** bullet needs — "an HDR description on
+/// an SDR lane, and an SDR description on the HDR lane" — because those two
+/// directions cannot be asked of [`delivery_color_mismatches`], which derives
+/// the lane from the description and therefore never puts a description on the
+/// wrong one. Production always goes through the deriving form; this one exists
+/// so both failing directions are reachable and testable rather than argued.
+#[must_use]
+pub fn delivery_color_mismatches_for_lane(
+    color: &ColorDescription,
+    lane: DeliveryLane,
+) -> Vec<DeliveryColorMismatch> {
+    let mut mismatches = match lane {
+        DeliveryLane::SdrRec709 => sdr_rec709_lane_mismatches(color),
+        DeliveryLane::HdrHlgRec2020 => cc8_hdr_lane_mismatches(color),
+    };
+    push_lane_independent_mismatches(color, &mut mismatches);
+    mismatches
+}
+
+/// One mismatch, in [`DeliveryColorMismatch`]'s three-fact shape.
+fn delivery_mismatch(field: &str, observed: String, allowed: &str) -> DeliveryColorMismatch {
+    DeliveryColorMismatch {
+        field: field.to_owned(),
+        observed,
+        allowed: allowed.to_owned(),
+    }
+}
+
+/// The SDR Rec.709 lane's colour fields, in the fixed check order.
+///
+/// Byte-for-byte the checks and the allowed phrases CC6 wrote; CC8 moved them
+/// into a named function and changed nothing else about them, which is what
+/// §9.1 fixture 6's frozen terms and exported bytes hold it to.
+fn sdr_rec709_lane_mismatches(color: &ColorDescription) -> Vec<DeliveryColorMismatch> {
+    let mut mismatches = Vec::new();
     if !matches!(&color.primaries, ColorPrimaries::Bt709) {
-        push("primaries", format!("{:?}", color.primaries), "bt709");
+        mismatches.push(delivery_mismatch(
+            "primaries",
+            format!("{:?}", color.primaries),
+            "bt709",
+        ));
     }
     if !matches!(&color.transfer, ColorTransfer::Bt709) {
-        push("transfer", format!("{:?}", color.transfer), "bt709");
+        mismatches.push(delivery_mismatch(
+            "transfer",
+            format!("{:?}", color.transfer),
+            "bt709",
+        ));
     }
     if !matches!(&color.matrix, ColorMatrix::Bt709) {
-        push("matrix", format!("{:?}", color.matrix), "bt709");
+        mismatches.push(delivery_mismatch(
+            "matrix",
+            format!("{:?}", color.matrix),
+            "bt709",
+        ));
     }
     if !matches!(&color.range, ColorRange::Limited) {
-        push("range", format!("{:?}", color.range), "limited");
+        mismatches.push(delivery_mismatch(
+            "range",
+            format!("{:?}", color.range),
+            "limited",
+        ));
     }
     if !matches!(&color.white_point, ColorWhitePoint::D65) {
-        push("white_point", format!("{:?}", color.white_point), "d65");
+        mismatches.push(delivery_mismatch(
+            "white_point",
+            format!("{:?}", color.white_point),
+            "d65",
+        ));
     }
     // CC1 §2.1 makes `Integer(8)` and `Eight` the same declared depth, and CC6
     // §4.1 widens the accepted set to the two managed lanes; every other depth
@@ -617,30 +766,102 @@ pub fn delivery_color_mismatches(color: &ColorDescription) -> Vec<DeliveryColorM
         .iter()
         .any(|depth| color.bit_depth == depth.color_bit_depth())
     {
-        push(
+        mismatches.push(delivery_mismatch(
             "bit_depth",
             format!("{:?}", color.bit_depth),
             DELIVERY_BIT_DEPTH_ALLOWED,
-        );
+        ));
     }
+    mismatches
+}
+
+/// CC8 §5.1's lane table, in the same fixed check order.
+///
+/// Every accepted value is read from [`CC8_HDR_DELIVERY_LANE`]'s own cell in
+/// the wire spelling the schema serialises, so §5.1's table and this check are
+/// one definition rather than two.
+fn cc8_hdr_lane_mismatches(color: &ColorDescription) -> Vec<DeliveryColorMismatch> {
+    let lane = CC8_HDR_DELIVERY_LANE;
+    let mut mismatches = Vec::new();
+    if color.primaries.wire() != lane.primaries {
+        mismatches.push(delivery_mismatch(
+            "primaries",
+            format!("{:?}", color.primaries),
+            CC8_HDR_DELIVERY_PRIMARIES_ALLOWED,
+        ));
+    }
+    if color.transfer.wire() != lane.transfer {
+        mismatches.push(delivery_mismatch(
+            "transfer",
+            format!("{:?}", color.transfer),
+            CC8_HDR_DELIVERY_TRANSFER_ALLOWED,
+        ));
+    }
+    if color.matrix.wire() != lane.matrix {
+        mismatches.push(delivery_mismatch(
+            "matrix",
+            format!("{:?}", color.matrix),
+            CC8_HDR_DELIVERY_MATRIX_ALLOWED,
+        ));
+    }
+    if color.range.wire() != lane.range {
+        mismatches.push(delivery_mismatch(
+            "range",
+            format!("{:?}", color.range),
+            CC8_HDR_DELIVERY_RANGE_ALLOWED,
+        ));
+    }
+    if color.white_point.wire() != lane.white_point {
+        mismatches.push(delivery_mismatch(
+            "white_point",
+            format!("{:?}", color.white_point),
+            CC8_HDR_DELIVERY_WHITE_POINT_ALLOWED,
+        ));
+    }
+    // §5.1's `Bit depth | Ten` row is the whole accepted set here, so 8-bit HLG
+    // or PQ is refused with the depth named (§5.3's second bullet).
+    // `Integer(10)` is the same declared depth as `Ten` by CC1 §2.1's canonical
+    // equality, exactly as on the SDR lanes.
+    if !DeliveryLane::HdrHlgRec2020
+        .encode_depths()
+        .iter()
+        .any(|depth| color.bit_depth == depth.color_bit_depth())
+    {
+        mismatches.push(delivery_mismatch(
+            "bit_depth",
+            format!("{:?}", color.bit_depth),
+            CC8_HDR_DELIVERY_DEPTH_ALLOWED,
+        ));
+    }
+    mismatches
+}
+
+/// The two checks that are the same on every lane.
+///
+/// Provenance and confidence are properties of *how the description was
+/// obtained*, not of the lane, so CC8 §5.3's "keeps everything else" applies
+/// literally: both lanes ask the same question with the same phrases.
+fn push_lane_independent_mismatches(
+    color: &ColorDescription,
+    mismatches: &mut Vec<DeliveryColorMismatch>,
+) {
     if !matches!(
         &color.provenance,
         ColorProvenance::ApplicationDefault | ColorProvenance::UserOverride
     ) {
-        push(
+        mismatches.push(delivery_mismatch(
             "provenance",
             format!("{:?}", color.provenance),
             "application_default or user_override",
-        );
+        ));
     }
     if !color.confidence_is_valid() || color.confidence_basis_points == 0 {
-        push(
+        mismatches.push(delivery_mismatch(
             "confidence_basis_points",
             color.confidence_basis_points.to_string(),
             "1..=10000",
-        );
+        ));
     }
-    mismatches
 }
 
 /// The allowed delivery depths, as one stable phrase.
@@ -835,15 +1056,22 @@ impl DeliveryColorError {
     }
 
     /// Recovery action suitable for a visible status or agent response.
+    ///
+    /// CC8 §5.3 keeps "the `DeliveryColorError` code/recovery vocabulary" and
+    /// widens the *allowed set* by lane, and it requires one recovery in
+    /// particular to be lane-aware: "PQ on the HLG lane, with a recovery action
+    /// naming the deferral rather than implying a conversion exists." So an
+    /// [`Self::UnsupportedField`] refusal reads its recovery from the mismatch
+    /// it carries — see [`delivery_field_recovery_action`] — rather than from a
+    /// single sentence that would have to be true of both lanes at once. No
+    /// code is added and no variant is added; only this one arm varies.
     #[must_use]
-    pub const fn recovery_action(&self) -> &'static str {
+    pub fn recovery_action(&self) -> &'static str {
         match self {
             Self::UnsupportedCodec { .. } => {
                 "Select the managed libx264 delivery lane before exporting."
             }
-            Self::UnsupportedField(_) => {
-                "Reset the delivery colour target explicitly, or choose a supported delivery depth."
-            }
+            Self::UnsupportedField(mismatch) => delivery_field_recovery_action(mismatch),
             Self::PixelFormatDepthMismatch { .. } => {
                 "Re-materialize the export settings so the declared delivery depth and the encoder pixel format come from one source."
             }
@@ -866,6 +1094,31 @@ impl DeliveryColorError {
             self.recovery_action()
         )
     }
+}
+
+/// The recovery action one `unsupported_delivery_color` mismatch reports.
+///
+/// The lane is not carried on [`DeliveryColorError`] — the error is a fact
+/// about one field, and adding a lane field would change the type CC6 §4.2
+/// fixed — so the lane is recovered from the mismatch's `allowed` phrase, which
+/// [`CC8_HDR_DELIVERY_ALLOWED_PHRASES`] enumerates. That is why every HDR-lane
+/// phrase names the lane and is distinct from every SDR one, and why
+/// `cc8_hdr_delivery_allowed_phrases_are_six_distinct_lane_named_strings`
+/// asserts it: a duplicated phrase would silently give one field the other
+/// lane's recovery.
+///
+/// The transfer arm is §5.3's own requirement, taken first because it is the
+/// most specific: PQ on the HLG lane must name §11's deferral rather than imply
+/// a conversion exists.
+#[must_use]
+pub fn delivery_field_recovery_action(mismatch: &DeliveryColorMismatch) -> &'static str {
+    if mismatch.allowed == CC8_HDR_DELIVERY_TRANSFER_ALLOWED {
+        return CC8_PQ_DELIVERY_RECOVERY_ACTION;
+    }
+    if CC8_HDR_DELIVERY_ALLOWED_PHRASES.contains(&mismatch.allowed.as_str()) {
+        return CC8_HDR_DELIVERY_RECOVERY_ACTION;
+    }
+    "Reset the delivery colour target explicitly, or choose a supported delivery depth."
 }
 
 /// Post-export delivery verification could not produce an honest measurement.
@@ -1269,6 +1522,103 @@ pub const DELIVERY_RGB_MEAN_CODE_10BIT_MILLIONTHS: i64 = 1_000_000;
 /// 10-bit lane buys ~9 dB on flat fields and nothing at all on a 4:2:0 edge.
 pub const DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_10BIT: i32 = 3_300;
 
+// ---------------------------------------------------------------------------
+// CC8 §9.2's "Decoded HDR delivery" row, measured at §10 step 6.
+// ---------------------------------------------------------------------------
+//
+// §9.2 is explicit that these may not be borrowed: "None may be invented,
+// scaled, or **inherited from another lane**." The 10-bit SDR constants above
+// describe a BT.709-coded population and this lane's population is HLG-coded
+// Rec.2020, so reusing them would be a number nothing measured. Every value
+// below was taken from `cc8_fixtures::cc8_encoded_hdr_delivery_fixture` on the
+// pinned Linux build, and every one of them is derived by one rule:
+//
+//   bound = max(next_power_of_two(measured), granularity_floor) x 4
+//
+// which is `cc8_fixtures::cc8_next_power_of_two_bound` times
+// `CC8_MEASURED_BOUND_HEADROOM`, the rule §10 steps 3 and 4 already use, with
+// §9.2's second rule supplying the floor for a term that **measured zero**:
+// "where a term measures zero on the passing source, a deliberately starved
+// fixture bounds the constant from above." The starved figures below are that
+// fixture's, at 100 000 b/s on the same project, and each constant is stated
+// with its distance from both ends.
+//
+// The **granularity floor** is not invented either: it is the smallest
+// difference the decoded plane can express — one delivery code — in the unit
+// the term is reported in. A mean has no such floor (a mean of one code means
+// every sample moved, which is not a granularity event), so §9.2's starved
+// bound is what fixes the two mean terms.
+//
+// §9.2's two carried-forward rules are honoured the same way CC6's were: no
+// value here is an equality against one FFmpeg build's decode — each is a
+// constant with the live and recorded measurements inside it — and the
+// per-build measured figures are printed under `CC8_MEASURED`, reported and
+// never gated. No `cfg(windows)`, no per-OS constant.
+
+/// Gated luma-plane maximum absolute difference on CC8 §5.1's lane, in 10-bit
+/// delivery code units.
+///
+/// **Measured 0** on the passing source: the HLG lane's luma plane reproduces
+/// the reference exactly at 20 Mb/s. Zero has no next power of two, so the
+/// bound is the granularity floor — one delivery code, the smallest difference
+/// a decoded integer plane can show on any build — times the x4 headroom:
+/// **4 codes**. The starved control measures **10 codes**, so the constant is
+/// reachable with a 2.5x margin from above; below it, a build whose luma
+/// disagreed by a single code would still pass, which is the cross-platform
+/// room CC7 §0.3 PM-E12 requires.
+pub const CC8_HDR_DELIVERY_LUMA_MAX_CODE: u32 = 4;
+/// Gated luma-plane P99 absolute difference on CC8 §5.1's lane, code
+/// millionths.
+///
+/// **Measured 0**; same derivation as [`CC8_HDR_DELIVERY_LUMA_MAX_CODE`], in
+/// millionths: one delivery code is `1 000 000`, times x4 is **4 000 000**. A
+/// P99 can never exceed the maximum, so binding both at four codes is one
+/// claim stated in the two units §6.3 reports them in. The starved control
+/// measures **10 000 000** (10 codes), a 2.5x margin from above.
+pub const CC8_HDR_DELIVERY_LUMA_P99_CODE_MILLIONTHS: i64 = 4_000_000;
+/// Gated luma-plane mean absolute difference on CC8 §5.1's lane, code
+/// millionths.
+///
+/// **Measured 0**, and a mean has no granularity floor: one whole code of mean
+/// is not a rounding event but every sample moving. So §9.2's second rule is
+/// the whole derivation here — the starved control bounds it from above, and it
+/// measures **2 420 703** (2.42 codes). The constant is **1 000 000**, one
+/// delivery code as a mean, which sits **2.42x** under the starved figure and
+/// is the largest round value that keeps the gate reachable.
+pub const CC8_HDR_DELIVERY_LUMA_MEAN_CODE_MILLIONTHS: i64 = 1_000_000;
+/// Gated whole-raster RGB mean absolute difference on CC8 §5.1's lane, in
+/// **8-bit-equivalent** code millionths.
+///
+/// **Measured 10 417** (0.0104 8-bit-equivalent codes).
+/// `next_power_of_two(10 417) x 4 = 65 536`, but the granularity floor is
+/// larger and therefore binds: one 10-bit delivery code is a quarter of an
+/// 8-bit-equivalent code, **250 000** millionths, which is the smallest
+/// per-sample difference this term can report at all. So the constant is
+/// **250 000** — 24.0x above the measurement and **6.15x** under the starved
+/// control's 1 537 720.
+///
+/// Taking the raw `65 536` instead would have been a bound below the decoded
+/// plane's own granularity, and CC6 §0.4 records that the MSVC build's swscale
+/// rounds chroma differently from the Linux one; a gate under one code would be
+/// an equality against this build's decode in all but name.
+///
+/// Like CC6's, this is a whole-raster **sanity floor**, not a codec gate: it is
+/// dominated by 4:2:0 chroma decimation at the saturated edges of the synthetic
+/// HDR source. The luma plane above is the codec-only gate.
+pub const CC8_HDR_DELIVERY_RGB_MEAN_CODE_MILLIONTHS: i64 = 250_000;
+/// Gated PSNR floor on CC8 §5.1's lane, hundredths of a dB on the
+/// 8-bit-equivalent MSE.
+///
+/// A **floor**, so the next-power-of-two rule does not apply — it bounds from
+/// below, not above — and §9.2's "a margin nothing approaches proves nothing"
+/// is satisfied from both ends instead. **Measured 7 397** (73.97 dB) on the
+/// passing source and **4 008** (40.08 dB) on the starved control, so the floor
+/// is placed between them at **4 500** (45.00 dB): **28.97 dB** of headroom
+/// below the measurement, and **4.92 dB** above the starved encode, which
+/// therefore trips it. A floor below 40.08 dB would have been unreachable and a
+/// floor near 73.97 dB would have been an equality against this build's decode.
+pub const CC8_HDR_DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS: i32 = 4_500;
+
 /// Strict-legal-box excursion rate at which a decoded plane raises
 /// `decoded_range_excursion` (1 %, CC6 §6.4).
 pub const DECODED_RANGE_EXCEPTION_BASIS_POINTS: u32 = 100;
@@ -1294,7 +1644,34 @@ pub struct DeliveryBudgets {
 }
 
 impl DeliveryBudgets {
-    /// The named constants for one delivery lane.
+    /// CC8 §9.2's "Decoded HDR delivery" row: the named constants for
+    /// [`DeliveryLane::HdrHlgRec2020`].
+    #[must_use]
+    pub const fn for_hdr_delivery_lane() -> Self {
+        Self {
+            luma_max_code: CC8_HDR_DELIVERY_LUMA_MAX_CODE,
+            luma_p99_code_millionths: CC8_HDR_DELIVERY_LUMA_P99_CODE_MILLIONTHS,
+            luma_mean_code_millionths: CC8_HDR_DELIVERY_LUMA_MEAN_CODE_MILLIONTHS,
+            rgb_mean_code_millionths: CC8_HDR_DELIVERY_RGB_MEAN_CODE_MILLIONTHS,
+            psnr_floor_db_hundredths: CC8_HDR_DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS,
+        }
+    }
+
+    /// The budgets one delivery description and encode depth select.
+    ///
+    /// CC8 §9.2 forbids inheriting a budget from another lane, so the HDR lane
+    /// gets its own measured set and the SDR lanes keep CC6's untouched — the
+    /// SDR arm is [`Self::for_depth`] called with the same argument, so no SDR
+    /// number moves.
+    #[must_use]
+    pub fn for_delivery(depth: DeliveryEncodeDepth, color: &ColorDescription) -> Self {
+        match DeliveryLane::for_description(color) {
+            DeliveryLane::SdrRec709 => Self::for_depth(depth),
+            DeliveryLane::HdrHlgRec2020 => Self::for_hdr_delivery_lane(),
+        }
+    }
+
+    /// The named constants for one SDR delivery lane.
     #[must_use]
     pub const fn for_depth(depth: DeliveryEncodeDepth) -> Self {
         match depth {
@@ -1329,11 +1706,15 @@ pub struct DeliveryVerificationRequest {
 
 impl DeliveryVerificationRequest {
     /// A default-sampled request for one lane and one expected description.
+    ///
+    /// The budgets are [`DeliveryBudgets::for_delivery`]'s, so an HDR expected
+    /// description carries CC8 §9.2's measured HDR set and an SDR one carries
+    /// CC6's, unchanged.
     #[must_use]
     pub fn new(depth: DeliveryEncodeDepth, expected_delivery: ColorDescription) -> Self {
         Self {
             frame_count: DELIVERY_VERIFICATION_FRAME_COUNT,
-            budgets: DeliveryBudgets::for_depth(depth),
+            budgets: DeliveryBudgets::for_delivery(depth, &expected_delivery),
             expected_delivery,
         }
     }
@@ -2377,9 +2758,21 @@ mod tests {
 
     #[test]
     fn unsupported_delivery_color_reports_only_the_first_mismatching_field() {
+        // Two mismatching fields on the SDR lane, so the fixed check order's
+        // first one is the reported one.
+        //
+        // The transfer here is `Bt1886` rather than `Smpte2084` because CC8
+        // §5.3 makes the accepted set a function of the **lane** and
+        // `Bt2020` + `Smpte2084` is one of §2.1's HDR *pairs*: that tuple now
+        // selects §5.1's HDR lane, where `primaries=bt2020` is correct and the
+        // first mismatch is the transfer. `Bt2020` + `Bt1886` is not an HDR
+        // pair — §5.3's third bullet, a mismatched primaries/transfer
+        // combination — so it stays on the SDR lane and this test's claim is
+        // unchanged. The HDR-lane half of the same claim is
+        // `cc8_fixtures::cc8_delivery_rejects_pq_on_the_hlg_lane_and_names_the_deferral`.
         let report = report_for_delivery_color(|color| {
             color.primaries = ColorPrimaries::Bt2020;
-            color.transfer = ColorTransfer::Smpte2084;
+            color.transfer = ColorTransfer::Bt1886;
         });
         let issue = report
             .issues
@@ -2389,6 +2782,25 @@ mod tests {
 
         assert!(issue.message.contains("field=primaries"));
         assert!(!issue.message.contains("field=transfer"));
+
+        // The same rule on CC8 §5.1's lane: a PQ description whose depth is
+        // also wrong reports the transfer, which is the first field of the same
+        // fixed order that the HDR lane disagrees about.
+        let hdr = report_for_delivery_color(|color| {
+            color.primaries = ColorPrimaries::Bt2020;
+            color.transfer = ColorTransfer::Smpte2084;
+            color.bit_depth = ColorBitDepth::Eight;
+        });
+        let hdr_issue = hdr
+            .issues
+            .iter()
+            .find(|issue| issue.code == "unsupported_delivery_color")
+            .expect("an HDR description outside §5.1's lane must still block");
+        assert!(
+            hdr_issue.message.contains("field=transfer"),
+            "{hdr_issue:?}"
+        );
+        assert!(!hdr_issue.message.contains("field=bit_depth"));
     }
 
     #[test]

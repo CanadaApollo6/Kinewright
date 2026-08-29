@@ -607,6 +607,22 @@ pub enum OpError {
     RelinkRequiresExplicitUnverifiedSource { asset: AssetId },
     #[error("color confidence is {actual}, outside the inclusive range 0..=10000 basis points")]
     ColorConfidenceOutOfRange { actual: u16 },
+    /// CC8 §7 item 3: an HDR delivery description that is not §5.1's lane.
+    ///
+    /// It carries §5.3's own three facts — `field` / `observed` / `allowed` —
+    /// plus the recovery action, so the refusal is data rather than one opaque
+    /// sentence, exactly as `DeliveryColorError` is at the export gate. The two
+    /// read the same allowed phrases from the authority module, so a document
+    /// cannot be refused here for one reason and there for another.
+    #[error(
+        "unsupported CC8 HDR delivery description: field={field}, observed={observed}, allowed={allowed}. {recovery}"
+    )]
+    UnsupportedHdrDeliveryDescription {
+        field: String,
+        observed: String,
+        allowed: String,
+        recovery: &'static str,
+    },
     #[error("asset {asset} color override must have positive confidence")]
     ZeroConfidenceColorOverride { asset: AssetId },
     #[error("asset {asset} color override requires user_override provenance, got {actual:?}")]
@@ -1208,8 +1224,49 @@ fn set_color_context(doc: &mut Document, color_context: ColorContext) -> Result<
     ] {
         validate_color_description(description)?;
     }
+    validate_hdr_delivery_description(&color_context.delivery)?;
     doc.color_context = color_context;
     Ok(())
+}
+
+/// CC8 §7 item 3: an HDR delivery description is validated against §5.1's
+/// table when it is **set**, not only when it is exported.
+///
+/// §7 item 3, verbatim: "Setting an HDR delivery description is an ordinary
+/// undoable, revision-gated, journalled operation, validated against §5.1's
+/// table." [`Operation::SetColorContext`] is already that operation — ordinary,
+/// undoable, revision-gated and journalled like every other — so what CC8 adds
+/// is the clause after the comma, and it adds it here rather than inventing a
+/// second operation for one field.
+///
+/// Only an **HDR-shaped** description is checked, and it is checked against
+/// §5.1's lane alone. An SDR description takes the path it always took: the
+/// project's delivery contract is not a delivery *gate*, and CC6 deliberately
+/// lets a document hold a description the export refuses so that
+/// `unsupported_delivery_color` can report it. What §7 item 3 changes is that
+/// an HDR description cannot be stored half-formed — `bt2020` + `arib_std_b67`
+/// with a BT.709 matrix would look like §5.1's lane in the colour status and
+/// would only fail much later, at the encoder.
+///
+/// §11's PQ deferral reaches the document through the same check: `bt2020` +
+/// `smpte2084` is an HDR pair, is not §5.1's lane, and is refused with §5.3's
+/// own three facts and the deferral named.
+fn validate_hdr_delivery_description(delivery: &ColorDescription) -> Result<(), OpError> {
+    if !crate::color_description_is_cc8_hdr(delivery) {
+        return Ok(());
+    }
+    match crate::delivery_color_mismatches_for_lane(delivery, crate::DeliveryLane::HdrHlgRec2020)
+        .into_iter()
+        .next()
+    {
+        None => Ok(()),
+        Some(mismatch) => Err(OpError::UnsupportedHdrDeliveryDescription {
+            field: mismatch.field.clone(),
+            observed: mismatch.observed.clone(),
+            allowed: mismatch.allowed.clone(),
+            recovery: crate::delivery_field_recovery_action(&mismatch),
+        }),
+    }
 }
 
 fn upsert_bin(doc: &mut Document, bin: MediaBin) {

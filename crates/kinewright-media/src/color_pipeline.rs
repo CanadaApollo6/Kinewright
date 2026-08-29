@@ -11,12 +11,13 @@ use std::fmt;
 use std::sync::Arc;
 
 use kinewright_core::{
-    CC8_REC2020_TO_BT709, COLOR_CURVE_MIN_POINTS, COLOR_NODE_LIMIT_PER_LAYER, ColorBitDepth,
-    ColorCurveChannel, ColorDescription, ColorMatrix, ColorNodeKind, ColorPrimaries, ColorRange,
-    ColorTransfer, ColorWheelsParams, ColorWhitePoint, CurvePoints, Effect, LutAssetId,
-    LutNodeParams, MatteParams, MatteQualifierParams, MatteWindowParams, ParamValue,
-    ResolvedCurves, active_color_nodes, cc8_apply_matrix, cc8_hlg_decode_working_linear,
-    cc8_pq_decode_working_linear, effect_descriptor, is_matte_parameter, managed_color_node_count,
+    CC8_BT709_TO_REC2020, CC8_REC2020_TO_BT709, COLOR_CURVE_MIN_POINTS, COLOR_NODE_LIMIT_PER_LAYER,
+    ColorBitDepth, ColorCurveChannel, ColorDescription, ColorMatrix, ColorNodeKind, ColorPrimaries,
+    ColorRange, ColorTransfer, ColorWheelsParams, ColorWhitePoint, CurvePoints, DeliveryLane,
+    Effect, LutAssetId, LutNodeParams, MatteParams, MatteQualifierParams, MatteWindowParams,
+    ParamValue, ResolvedCurves, active_color_nodes, cc8_apply_matrix,
+    cc8_hlg_decode_working_linear, cc8_hlg_encode_working_linear, cc8_pq_decode_working_linear,
+    effect_descriptor, is_matte_parameter, managed_color_node_count,
 };
 
 use crate::lut::CubeLut;
@@ -2644,27 +2645,105 @@ pub fn encode_delivery_rgba16(linear_rgba: [f32; 4]) -> [u16; 4] {
     ]
 }
 
+/// CC8 §3.3's **delivery** direction for §5.1's HDR lane: working BT.709 D65
+/// scene-linear to the 16-bit HLG-coded Rec.2020 delivery intermediate.
+///
+/// §3.3's pipeline listing gives the encode side in two stages, in this order:
+///
+/// ```text
+/// delivery:   primaries conversion to Rec.2020 -> HLG OOTF+OETF -> §5
+///   -> final clamp, quantization, and display/codec packing
+/// ```
+///
+/// so:
+///
+/// 1. **Primaries conversion to Rec.2020.**
+///    [`kinewright_core::CC8_BT709_TO_REC2020`] through
+///    [`kinewright_core::cc8_apply_matrix`] — the exact inverse of the decode
+///    side's [`source_primaries_to_working_linear`], and §2.3's own words: "The
+///    inverse matrix at delivery restores them exactly." Unclamped, so an
+///    out-of-Rec.709 colour that survived the working space as **negative**
+///    BT.709 components comes back as the positive Rec.2020 value it started
+///    as (CC1 §2.2 invariant 5, restated by §2.3).
+/// 2. **HLG OOTF+OETF**, which is [`kinewright_core::cc8_hlg_encode_working_linear`]:
+///    the anchor scale to cd/m², then the BT.2100 **inverse** OOTF, then the
+///    ARIB STD-B67 OETF. §3.3 names the stage by its OETF/OOTF pair rather than
+///    by direction — `cc8_hlg_decode_working_linear`'s doc comment records that
+///    reading and its mirror image on the decode line — and the function whose
+///    signature matches the direction it is used in is the one that realizes
+///    it. This composition is the exact inverse of the decode chain, which is
+///    what makes §9.1 fixture 8's round trip a measurement rather than a hope.
+/// 3. **Final clamp and quantization**, [`quantize_delivery16`]: the single
+///    clamp and the single rounding CC1 §2.2 invariant 5 allows, on the
+///    [`DELIVERY_INTERMEDIATE_WHITE`] scale.
+///
+/// **What white means on this intermediate.** §5.1 settles it rather than
+/// leaving it to be guessed: the HDR lane "adds a *colour description*, not a
+/// codec path, so `DELIVERY_SCALER_FLAGS = "bicubic"`, the
+/// `DELIVERY_INTERMEDIATE_WHITE = 65_280` convention, and the single-pass
+/// filter graph are unchanged and are not re-measured." So `65_280` is
+/// `libswscale`'s nominal 16-bit RGB white here exactly as on the SDR lane, and
+/// what lands on it is the **HLG signal** `E' = 1.0` — the top of the HLG
+/// signal range — which swscale's full-to-limited conversion then writes as
+/// 10-bit legal white 940. It is *not* the working diffuse white: BT.2408 puts
+/// HLG diffuse white at [`kinewright_core::CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT`]
+/// of the signal range, so working `1.0` encodes to `E' = 0.75`, code
+/// `48_960`, and 10-bit luma 721. That is the same relation the decode side
+/// already carries, seen from the other end, and §9.1 fixture 8 measures it.
+///
+/// Alpha is a real 16-bit destination channel and is quantized without a
+/// transfer, on the same scale as RGB, exactly as [`encode_delivery_rgba16`]
+/// does — the lane changes the colour stages, not the alpha convention.
+#[must_use]
+pub fn encode_delivery_hlg_rec2020_rgba16(linear_rgba: [f32; 4]) -> [u16; 4] {
+    let working = [linear_rgba[0], linear_rgba[1], linear_rgba[2]];
+    let rec2020_linear = cc8_apply_matrix(CC8_BT709_TO_REC2020, working);
+    let hlg_signal = cc8_hlg_encode_working_linear(rec2020_linear);
+    [
+        quantize_delivery16(hlg_signal[0]),
+        quantize_delivery16(hlg_signal[1]),
+        quantize_delivery16(hlg_signal[2]),
+        quantize_delivery16(linear_rgba[3]),
+    ]
+}
+
 /// Encode a linear RGBA value using the requested delivery description.
 ///
-/// CC1 delivers Rec.709 only. The description is checked so the delivery
-/// target can never be a `libavfilter` or codec default, and the result is the
-/// 16-bit [`DELIVERY_INTERMEDIATE_WHITE`] intermediate so the only 8-bit
-/// quantization in the export path is the YUV420P conversion itself.
+/// The **delivery lane** selects the encode, and the lane is a function of the
+/// delivery description alone (CC8 §5.2 clause 1). The description is still
+/// checked so the delivery target can never be a `libavfilter` or codec
+/// default, and the result is still the 16-bit [`DELIVERY_INTERMEDIATE_WHITE`]
+/// intermediate so the only depth quantization in the export path is the
+/// YUV420P/YUV420P10LE conversion itself.
+///
+/// The HDR arm accepts §5.1's transfer only. A `bt2020` + `smpte2084`
+/// description selects the HDR lane by its pair but is not §5.1's lane, so it
+/// is refused here as well as at the export gate — §11 defers PQ delivery, and
+/// a silent HLG encode under a PQ tag would be exactly the mislabelling §5.2
+/// exists to prevent.
 ///
 /// # Errors
 ///
-/// Returns an error when the delivery transfer is unknown or not the CC1
-/// BT.709 transfer.
+/// Returns an error when the delivery transfer is unknown, or is not the lane's
+/// transfer: BT.709 on the SDR lane, ARIB STD-B67 on CC8 §5.1's HDR lane.
 pub fn encode_delivery_for_description(
     linear_rgba: [f32; 4],
     delivery: &ColorDescription,
 ) -> Result<[u16; 4], ColorPipelineError> {
-    match &delivery.transfer {
-        ColorTransfer::Bt709 => Ok(encode_delivery_rgba16(linear_rgba)),
-        ColorTransfer::Unknown => Err(ColorPipelineError::UnknownTransfer),
-        value => Err(ColorPipelineError::UnsupportedDeliveryTransfer(
-            value.clone(),
-        )),
+    match DeliveryLane::for_description(delivery) {
+        DeliveryLane::SdrRec709 => match &delivery.transfer {
+            ColorTransfer::Bt709 => Ok(encode_delivery_rgba16(linear_rgba)),
+            ColorTransfer::Unknown => Err(ColorPipelineError::UnknownTransfer),
+            value => Err(ColorPipelineError::UnsupportedDeliveryTransfer(
+                value.clone(),
+            )),
+        },
+        DeliveryLane::HdrHlgRec2020 => match &delivery.transfer {
+            ColorTransfer::AribStdB67 => Ok(encode_delivery_hlg_rec2020_rgba16(linear_rgba)),
+            value => Err(ColorPipelineError::UnsupportedDeliveryTransfer(
+                value.clone(),
+            )),
+        },
     }
 }
 
