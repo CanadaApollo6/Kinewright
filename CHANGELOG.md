@@ -9,6 +9,62 @@ All notable changes to Kinewright are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Fixed
+- CI reported both jobs green while `cargo test --workspace` failed on both.
+  Sourcing `scripts/setup-ffmpeg.sh` disabled the caller's `errexit`: the
+  option snapshot ran inside a command substitution, which bash does not
+  propagate `errexit` into, so the restore always switched `-e` off and a
+  failing test stopped failing the Linux step; the Windows `pwsh` step ran
+  every command regardless of failure and reported only the last one's exit
+  code. Three real failures were hidden — a circular-median wall-clock
+  deadline on both operating systems, plus two export-queue path
+  expectations on Windows — and only 15 of the 96 CC7 tests declared at that
+  commit executed at all in that run. The snapshot now reads the three
+  options it changes with `[[ -o ... ]]` in the caller's own shell and
+  restores them on the failure path too, the Linux step runs under
+  `shell: bash` with `pipefail` so the `readelf` ABI pipeline can fail the
+  job, and the Windows step stops on terminating native errors and checks
+  each command's exit code. The three failures are fixed rather than
+  re-hidden: the median sweep asserts its `O(n log n)` claim as growth
+  between 500 k and 2 M samples instead of a wall clock a slow runner
+  flakes on, and the export-queue tests canonicalize their scratch
+  directory so expectations share the queue's own path spelling (Windows
+  8.3 short names, verbatim prefixes) instead of coincidentally matching on
+  Linux only. The first honest Windows run then exposed a fourth latent
+  defect: the runner's machine-level `core.autocrlf=true` checked text out
+  CRLF, failing the byte-equality contract tests that compare a checked-in
+  generated file against its generator's bytes; a repository
+  `.gitattributes` now pins text checkouts to LF on every platform
+  (every tracked file was already LF, so nothing renormalized).
+- CC7's manifest asserted the *reading* machine's OS and architecture
+  against `budgets.measurement.os` / `.arch`, which record the machine the
+  published numbers were **measured on**: the first Windows or aarch64 run
+  would have failed on a provenance record that is correct, against the
+  slice's own "nothing environment-gated, same gates both operating
+  systems" rule. The fixture now asserts membership in the two supported
+  sets and the manifest keeps `linux` / `x86_64`, with no per-OS constant.
+  Five further gaps between the contract and the tree close with it. The
+  §4(f)(2) observation gate's failing direction is a real test driving the
+  same `cc7_observation_within_tolerance` the live tracking script runs,
+  over every surviving sample, both axes and both signs of the offset.
+  §4(g)(3)'s conditional encoded-delivery review question exists: pinned
+  prompt, keyed `g`, conditional on at least one `Warning`-severity
+  exception rather than on the Info code every conforming H.264 export
+  carries, travelling runner to packager as an ungated "delivery
+  verification warnings" measurement that a clean encode records as `0`
+  rather than as nothing. The owed
+  `CC7_C2_MAX_OVER_EXCURSION_MILLIONTHS = 41 538` is pinned and asserted
+  exactly in both white-balance legs, replacing a `> 0` check that a run
+  clipping blue twice as hard would have passed. The manifest's leak-test
+  needle sets are asserted byte-equal to the needles the leak test actually
+  scans for, closing an assertion recorded as owed. And
+  `review.blind_form_keys` / `review.not_applicable_dimensions` are
+  corrected to `BlindReviewEntry`'s real six fields and to the four
+  dimensions the colour template marks — both were wrong *and* unasserted,
+  and the key set is now derived by serializing an entry. Five failing
+  directions the contract names by test name now resolve: one promoted to
+  its own test, four recorded as named functions inside the scripts whose
+  live session they need. Declared CC7 tests 96 → 101; asserted manifest
+  threshold keys 84 → 85.
 - Every H.264 export lost its last frame on playback: video packets were
   muxed without a duration, so the MP4 muxer computed a track duration one
   frame short and wrote an edit list that hid the final coded picture
