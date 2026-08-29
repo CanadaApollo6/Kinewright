@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -77,6 +77,42 @@ pub(crate) fn export_document_with_luts(
         library,
         VideoPacketDuration::OneFrame,
     )
+    .map(|_terms| ())
+}
+
+/// Re-run the production export and report the delivery lane terms it used
+/// (test-only, CC8 §9.1 fixture 6).
+///
+/// The same call [`export_document_with_luts`] makes, with the same arguments
+/// and the same [`VideoPacketDuration::OneFrame`]: the only difference is that
+/// the [`DeliveryLaneTerms`] the production path always builds is returned here
+/// instead of discarded. It changes no encoder option, no filter-graph string,
+/// and no written byte -- `cc8_sdr_regression_byte_equality_gate` exports
+/// through *both* arities and asserts the two files are byte-identical, which
+/// is what makes that claim a measurement rather than a comment.
+///
+/// The seam is observational, in the manner of
+/// [`export_document_with_zero_packet_durations`] above and of
+/// `Analysis::working_proof_for_document`: the fixture reads what production
+/// did rather than re-deriving it, so a term it asserts is the term `FFmpeg`
+/// received.
+#[cfg(test)]
+pub(crate) fn export_document_capturing_delivery_terms(
+    document: &Document,
+    out: &Path,
+    settings: &ExportSettings,
+    progress: &ProgressSink,
+    gpu: GpuContext,
+) -> Result<DeliveryLaneTerms, MediaError> {
+    export_document_inner(
+        document,
+        out,
+        settings,
+        progress,
+        gpu,
+        Arc::new(LutLibrary::default()),
+        VideoPacketDuration::OneFrame,
+    )
 }
 
 /// Re-run the production export with the pre-CC6 packet timing (test-only).
@@ -103,6 +139,7 @@ pub(crate) fn export_document_with_zero_packet_durations(
         Arc::new(LutLibrary::default()),
         VideoPacketDuration::Zero,
     )
+    .map(|_terms| ())
 }
 
 fn export_document_inner(
@@ -113,7 +150,7 @@ fn export_document_inner(
     gpu: GpuContext,
     library: Arc<LutLibrary>,
     packet_duration: VideoPacketDuration,
-) -> Result<(), MediaError> {
+) -> Result<DeliveryLaneTerms, MediaError> {
     validate_settings(document, out, settings)?;
     let temporary = temporary_output(out);
     if temporary.exists() {
@@ -128,11 +165,104 @@ fn export_document_inner(
         library,
         packet_duration,
     );
-    if let Err(error) = result {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
+    let terms = match result {
+        Ok(terms) => terms,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+    };
+    replace_output(&temporary, out)?;
+    Ok(terms)
+}
+
+/// The colour terms of one `FFmpeg` frame, as `FFmpeg` itself names them.
+///
+/// Read back from the frame after it is stamped, never recomputed from the
+/// stamping function's arguments, so this records what the frame carried into
+/// the filter graph and the encoder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FrameColorTerms {
+    pub(crate) pixel_format: String,
+    pub(crate) space: String,
+    pub(crate) range: String,
+    pub(crate) primaries: String,
+    pub(crate) transfer: String,
+}
+
+impl FrameColorTerms {
+    fn of(frame: &ffmpeg::frame::Video) -> Self {
+        Self {
+            pixel_format: pixel_format_name(frame.format()).to_owned(),
+            space: frame
+                .color_space()
+                .name()
+                .unwrap_or("unspecified")
+                .to_owned(),
+            range: frame
+                .color_range()
+                .name()
+                .unwrap_or("unspecified")
+                .to_owned(),
+            primaries: frame
+                .color_primaries()
+                .name()
+                .unwrap_or("unspecified")
+                .to_owned(),
+            transfer: frame
+                .color_transfer_characteristic()
+                .name()
+                .unwrap_or("unspecified")
+                .to_owned(),
+        }
     }
-    replace_output(&temporary, out)
+}
+
+/// Every delivery colour term one export actually handed to `FFmpeg`.
+///
+/// CC8 §0.4 surveys six hard-coded BT.709 literals on the export path -- items
+/// 3, 4, 6 and 8, at the pre-CC8 `export.rs:216-217`, `:425`, `:529`, `:626`
+/// and `:638` -- that §5.2 turns into lane-derived values, and §12 names the
+/// danger: "a lane-derivation bug is invisible on the HDR lane and catastrophic
+/// on the SDR one." This record is
+/// what makes that bug visible on the SDR lane *by construction*: every field
+/// is read back from the object that received the term -- the opened encoder,
+/// the options dictionary handed to `open_as_with`, the configured filter
+/// graph, and the two stamped frames -- so the value recorded here is the value
+/// the encode used, not a second transcription of it that could stay right
+/// while production went wrong.
+///
+/// Building it is pure observation: no field is consulted by any production
+/// decision, and [`export_document_with_luts`] discards the record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DeliveryLaneTerms {
+    /// `AVCodecContext.pix_fmt` of the opened encoder.
+    pub(crate) encoder_pixel_format: String,
+    /// `AVCodecContext.colorspace` of the opened encoder -- §0.4 item 3's
+    /// `set_colorspace`.
+    pub(crate) encoder_colorspace: String,
+    /// `AVCodecContext.color_range` of the opened encoder -- §0.4 item 3's
+    /// `set_color_range`.
+    pub(crate) encoder_color_range: String,
+    /// Every private encoder option, including `x264-params` (§0.4 item 4's
+    /// [`DELIVERY_X264_PARAMS`]) and `preset`, as the dictionary held them at
+    /// `open_as_with`.
+    pub(crate) encoder_options: BTreeMap<String, String>,
+    /// The `buffer` source's argument string.
+    pub(crate) buffer_args: String,
+    /// The `scale` filter's argument string, which carries
+    /// [`DELIVERY_SCALER_FLAGS`] and §0.4 item 6's `out_color_matrix`.
+    pub(crate) scale_args: String,
+    /// The `format` node's argument string.
+    pub(crate) format_args: String,
+    /// The pixel format the graph is required to produce.
+    pub(crate) graph_pixel_format: String,
+    /// The stamped RGBA64LE delivery intermediate -- §0.4 item 8's first
+    /// `set_color_primaries`, in [`stamp_rgba_color`].
+    pub(crate) intermediate_frame: FrameColorTerms,
+    /// The stamped `Y'CbCr` delivery frame -- §0.4 item 8's second
+    /// `set_color_primaries`, in [`stamp_delivery_yuv_color`].
+    pub(crate) delivery_frame: FrameColorTerms,
 }
 
 // Encoder and muxer setup must stay in one ownership scope through trailer finalization.
@@ -145,7 +275,7 @@ fn export_to_temporary(
     gpu: GpuContext,
     library: Arc<LutLibrary>,
     packet_duration: VideoPacketDuration,
-) -> Result<(), MediaError> {
+) -> Result<DeliveryLaneTerms, MediaError> {
     check_cancelled(settings)?;
     let total_frames = map_frames_with_rounding(
         document.duration,
@@ -228,6 +358,13 @@ fn export_to_temporary(
         // measured byte-identical with and without it on the pinned build.
         video_options.set("x264-params", DELIVERY_X264_PARAMS);
     }
+    // Observed, not recomputed (CC8 §9.1 fixture 6): the dictionary is disowned
+    // by `open_as_with`, so the terms are read out of it here, immediately
+    // before libavcodec receives exactly these entries.
+    let encoder_options = video_options
+        .iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect::<BTreeMap<String, String>>();
     let mut video_encoder = video_encoder
         .open_as_with(video_codec, video_options)
         .map_err(backend)?;
@@ -287,6 +424,8 @@ fn export_to_temporary(
     let mut renderer = FrameRenderer::new(gpu);
     renderer.set_lut_library(library);
     let mut delivery_filter = delivery_filter_graph(settings.resolution, delivery_depth)?;
+    let mut intermediate_frame_terms: Option<FrameColorTerms> = None;
+    let mut delivery_frame_terms: Option<FrameColorTerms> = None;
     for output_frame in 0..total_frames {
         check_cancelled(settings)?;
         let output_at = TimeCode(i64::try_from(output_frame).unwrap_or(i64::MAX));
@@ -312,9 +451,15 @@ fn export_to_temporary(
             settings.resolution.1,
         );
         stamp_rgba_color(&mut rgba);
+        if intermediate_frame_terms.is_none() {
+            intermediate_frame_terms = Some(FrameColorTerms::of(&rgba));
+        }
         copy_rgba64_to_frame(&composed.rgba64le, &mut rgba)?;
         let mut yuv = delivery_filter.run(&rgba)?;
         stamp_delivery_yuv_color(&mut yuv);
+        if delivery_frame_terms.is_none() {
+            delivery_frame_terms = Some(FrameColorTerms::of(&yuv));
+        }
         yuv.set_pts(Some(i64::try_from(output_frame).unwrap_or(i64::MAX)));
         video_encoder.send_frame(&yuv).map_err(backend)?;
         drain_packets(
@@ -348,13 +493,40 @@ fn export_to_temporary(
     )?;
     muxer.write_trailer().map_err(backend)?;
     send_progress(progress, total_frames, total_frames);
-    Ok(())
+    let missing_frame_terms =
+        || MediaError::Backend("export wrote no video frame to observe".to_owned());
+    Ok(DeliveryLaneTerms {
+        encoder_pixel_format: pixel_format_name(video_encoder.format()).to_owned(),
+        encoder_colorspace: video_encoder
+            .colorspace()
+            .name()
+            .unwrap_or("unspecified")
+            .to_owned(),
+        encoder_color_range: video_encoder
+            .color_range()
+            .name()
+            .unwrap_or("unspecified")
+            .to_owned(),
+        encoder_options,
+        buffer_args: delivery_filter.buffer_args.clone(),
+        scale_args: delivery_filter.scale_args.clone(),
+        format_args: delivery_filter.format_args.clone(),
+        graph_pixel_format: pixel_format_name(delivery_filter.pixel_format).to_owned(),
+        intermediate_frame: intermediate_frame_terms.ok_or_else(missing_frame_terms)?,
+        delivery_frame: delivery_frame_terms.ok_or_else(missing_frame_terms)?,
+    })
 }
 
 struct DeliveryFilter {
     graph: ffmpeg::filter::Graph,
     /// The lane's pixel format, asserted on every frame the graph produces.
     pixel_format: ffmpeg::format::Pixel,
+    /// The three argument strings this graph was configured with, kept
+    /// verbatim so [`DeliveryLaneTerms`] reports the strings `libavfilter`
+    /// parsed rather than a second formatting of the same fields.
+    buffer_args: String,
+    scale_args: String,
+    format_args: String,
 }
 
 impl DeliveryFilter {
@@ -457,6 +629,9 @@ fn delivery_filter_graph(
     Ok(DeliveryFilter {
         graph,
         pixel_format,
+        buffer_args: args,
+        scale_args,
+        format_args,
     })
 }
 

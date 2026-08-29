@@ -67,22 +67,23 @@
 //! `decode.rs:240-286` fails here too. §0.3(f)'s claim that the probe side
 //! needs no production change is confirmed by this file passing with none.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use ffmpeg_next as ffmpeg;
 use half::f16;
 use kinewright_core::{
-    AssetId, CC8_BT709_TO_REC2020, CC8_BT2020_CB_DENOMINATOR, CC8_BT2020_CR_DENOMINATOR,
+    Analysis, AssetId, CC8_BT709_TO_REC2020, CC8_BT2020_CB_DENOMINATOR, CC8_BT2020_CR_DENOMINATOR,
     CC8_BT2020_KB, CC8_BT2020_KG, CC8_BT2020_KR, CC8_HLG_NOMINAL_PEAK_NITS,
     CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT, CC8_HLG_SCENE_BREAKPOINT, CC8_HLG_SIGNAL_BREAKPOINT,
     CC8_PQ_C1, CC8_PQ_C2, CC8_PQ_C3, CC8_PQ_M2, CC8_PQ_PEAK_NITS, CC8_REFERENCE_WHITE_NITS,
     CC8_REJECTED_HDR_ADJACENT, CC8_SOURCE_PROFILES, ColorBitDepth, ColorDescription, ColorMatrix,
     ColorPrimaries, ColorProvenance, ColorRange, ColorSourceError, ColorSourceProfile,
     ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, DeliveryColorError,
-    DeliveryColorMismatch, DeliveryEncodeDepth, DeliveryProfile, Effect, EffectId,
-    HDR_SOURCE_ON_SDR_DELIVERY, ParamValue, QaSeverity, Rational, cc8_apply_matrix,
-    cc8_hlg_decode_working_linear, cc8_hlg_encode_working_linear, cc8_hlg_inverse_oetf,
-    cc8_hlg_oetf, cc8_pq_decode_working_linear, cc8_pq_encode_working_linear, cc8_pq_eotf_nits,
+    DeliveryColorMismatch, DeliveryEncodeDepth, DeliveryProfile, DeliveryVerificationRequest,
+    Document, Effect, EffectId, ExportSettings, HDR_SOURCE_ON_SDR_DELIVERY, ParamValue, QaSeverity,
+    Rational, TimeCode, cc8_apply_matrix, cc8_hlg_decode_working_linear,
+    cc8_hlg_encode_working_linear, cc8_hlg_inverse_oetf, cc8_hlg_oetf,
+    cc8_pq_decode_working_linear, cc8_pq_encode_working_linear, cc8_pq_eotf_nits,
     cc8_pq_inverse_eotf, classify_source, classify_source_with_assumption, delivery_conformance,
 };
 
@@ -91,6 +92,9 @@ use crate::{
     cc1_fixtures::{
         LINEAR_CPU_GPU_MAX, LINEAR_CPU_GPU_MEAN, LINEAR_CPU_GPU_P99, LINEAR_OVER_RANGE_MEAN,
         LINEAR_OVER_RANGE_P99, decode_managed_working_frame, fallback_gpu, working_frame,
+    },
+    cc6_fixtures::{
+        CC6_DELIVERY_SOURCE_SIZE, cc6_delivery_document, cc6_delivery_settings, cc6_delivery_source,
     },
     color_pipeline::{
         PrimaryCorrection, PrimaryParameter, apply_primary_corrections,
@@ -101,6 +105,7 @@ use crate::{
         VideoDecoder, managed_filter_matrix, managed_filter_range, managed_scale_color_matrix,
         probe_path,
     },
+    export::{DeliveryLaneTerms, FrameColorTerms},
     frame::WorkingFrame,
     initialize_ffmpeg,
     test_support::{TempDirectory, single_clip_document},
@@ -2825,4 +2830,659 @@ fn cc8_sdr_managed_filter_graph_terms_are_unchanged_by_the_hdr_lane() {
         "CC8_MEASURED fixture=sdr_unchanged cc1_tuples={checked} \
          hdr_source_matrix=bt2020nc hdr_scale_matrix=bt2020"
     );
+}
+
+// ---------------------------------------------------------------------------
+// §9.1 fixture 6 — "SDR regression — the byte-equality gate" (§10 step 5).
+// ---------------------------------------------------------------------------
+//
+// The contract's words, verbatim:
+//
+// > **SDR regression — the byte-equality gate.** Every CC1–CC7 fixture passes
+// > with every pinned constant unmoved, and the SDR `x264-params` string,
+// > scaler flags, and exported bytes for a fixed SDR project are **unchanged**.
+// > This is the fixture the acceptance of CC8 rests on, and §10 step 5 lands it
+// > before any export change.
+//
+// and §12's fourth risk bullet, which says what it is for:
+//
+// > **The SDR regression gate is the one that must not be weakened.** Every
+// > hard block in §0.4 is a literal that CC8 makes lane-derived, and a
+// > lane-derivation bug is invisible on the HDR lane and catastrophic on the
+// > SDR one. *Mitigation:* §9.1 fixture 6 lands before any export change (§10
+// > step 5) and asserts exported bytes, not just tags.
+//
+// **What "unchanged" is here, and why.** "Unchanged" has to mean *unchanged by
+// CC8*, and the only honest anchor for that is this tree's own pre-CC8
+// behaviour. It may **not** be a checked-in content hash of one build's H.264
+// output: §9.2's first rule — "No gate may be an equality against one FFmpeg
+// build's decode output", CC7 §0.3 PM-E12 — forbids exactly that, and CC6 §0.4
+// already traced the two CI builds' swscale to different chroma. So the gate is
+// built from three claims, each of which is a measurement on whatever build
+// runs it:
+//
+// 1. **Terms.** Every delivery colour term the export handed `FFmpeg` equals
+//    the frozen pre-CC8 SDR literal, character for character, on **both** SDR
+//    lanes. The terms are not recomputed by this fixture: `export.rs`'s
+//    [`DeliveryLaneTerms`] reads each one back out of the object that received
+//    it — the opened encoder, the options dictionary, the configured filter
+//    graph, and the two stamped frames — so what is compared is what the encode
+//    used. This is the clause that catches a lane-derivation bug *by
+//    construction*: §0.4's six export-side literals are the six values recorded
+//    here, and step 6 cannot move one on an SDR lane without this going red.
+// 2. **Bytes.** Two independent exports of the same fixed SDR project, at the
+//    same lane, in the same run, are **byte-identical files** — and so are
+//    exports whose delivery description is spelled differently but denotes the
+//    same lane (`ColorBitDepth::Integer(8)` for `Eight`, `ApplicationDefault`
+//    for `UserOverride`). The first is what makes "exported bytes" a claim at
+//    all: an export that is not a function of (tree, document, settings, build)
+//    has no bytes to be unchanged. The second is the failing direction that
+//    catches a step-6 derivation keyed on a field the lane does not depend on.
+//    Both are byte comparisons of real H.264 files, never of a pinned digest.
+// 3. **Content.** The 16-bit RGBA delivery intermediate — the deterministic
+//    frames handed to the filter graph, upstream of all six literals — is
+//    byte-identical across two independent renders, and the written file passes
+//    CC6's own `verify_delivery_output` at the lane's production budgets with
+//    the probed tags asserted. A lane-derivation bug that survived clause 1
+//    would still have to move pixels past CC6's decoded-difference budgets.
+//
+// **What this fixture cannot assert, and where that clause lives.** "Every
+// CC1–CC7 fixture passes" is a statement about the suite, not about one test;
+// it is discharged by `cargo test -p kinewright-media` and `-p kinewright-core`
+// staying green, which is the same way CC6 §11.0 and CC7 §11.0 discharge it.
+// What *is* assertable here is the other half of that sentence — "with every
+// pinned constant unmoved" — so the pinned delivery constants CC1, CC6 and CC7
+// measured are restated below and asserted, and a moved constant fails here
+// rather than only in whichever downstream fixture happened to notice.
+//
+// **The §0.4 survey, item by item, against what this gate covers.** Item 3
+// (`export.rs:216-217`), item 4 (`:529`), item 6 (`:425`) and item 8 (`:626`,
+// `:638`) are the five production sites, and all five are recorded terms here.
+// Item 5 (`DELIVERY_VIDEO_CODEC`) is unchanged under §0.2 Q2 and is asserted as
+// `settings.video_codec`. Item 7 (`:1187`) is the odd one out and is recorded
+// as a finding rather than covered: that `setparams=...:colorspace=bt709` is
+// **not** on the delivery path at all — it is the `-vf` argument of
+// `generate_timing_source`, a `#[cfg(test)]` helper inside `export.rs`'s own
+// test module that writes the *source* clip for CC6's presented-frame fixture.
+// It tags an input, not an output, and step 6 has nothing to derive there.
+
+/// The fixed SDR project's raster. CC6 §11.1's delivery source size, reused
+/// rather than re-invented: it is the raster CC6 measured its budgets on, so
+/// the verification clause below runs against the population those budgets
+/// describe.
+const CC8_SDR_REGRESSION_SIZE: (u32, u32) = CC6_DELIVERY_SOURCE_SIZE;
+
+/// Frames in the fixed SDR project.
+///
+/// Fewer than CC6's 60 because this gate exports the project **six** times
+/// (three per lane), and more than one GOP's worth of B-frame reordering
+/// because the byte-equality clause is exactly the claim that libx264's
+/// lookahead and rate control are a function of the input and not of the run:
+/// a single-picture export would make clause 2 vacuous.
+const CC8_SDR_REGRESSION_FRAMES: u32 = 20;
+
+/// The pre-CC8 `DELIVERY_X264_PARAMS` — §0.4 item 4, at `export.rs:529` in the
+/// survey's numbering — frozen here.
+///
+/// §5.2 item 2: "The SDR lanes' string is **byte-identical to today's**, and a
+/// fixture asserts that." This is that assertion's constant, and it is
+/// deliberately a literal in the *fixture* rather than an import of the
+/// production constant: step 6 turns that constant into a function of the lane,
+/// and a gate that imported it would follow the refactor wherever it went.
+const CC8_SDR_FROZEN_X264_PARAMS: &str = "colorprim=bt709:transfer=bt709:colormatrix=bt709";
+
+/// The pre-CC8 encoder preset. Not a colour term, but it rides the same
+/// dictionary and a step-6 edit that rebuilt the options would move it.
+const CC8_SDR_FROZEN_PRESET: &str = "medium";
+
+/// `DELIVERY_SCALER_FLAGS`, the "scaler flags" fixture 6 names. §5.1 keeps it
+/// unchanged and does not re-measure it.
+const CC8_SDR_FROZEN_SCALER_FLAGS: &str = "bicubic";
+
+/// §0.4 item 3 (`export.rs:216-217`) — the encoder's colourspace and range, as
+/// `FFmpeg` names them (`av_color_space_name` / `av_color_range_name`).
+const CC8_SDR_FROZEN_ENCODER_COLORSPACE: &str = "bt709";
+const CC8_SDR_FROZEN_ENCODER_COLOR_RANGE: &str = "tv";
+
+/// One lane's frozen delivery terms, in the shape `export.rs` reports them.
+struct Cc8FrozenLaneTerms {
+    depth: DeliveryEncodeDepth,
+    pixel_format: &'static str,
+}
+
+/// The frozen `buffer` source arguments of `delivery_filter_graph`.
+fn cc8_frozen_buffer_args(resolution: (u32, u32)) -> String {
+    format!(
+        "video_size={}x{}:pix_fmt=rgba64le:time_base=1/1:pixel_aspect=1/1:colorspace=gbr:range=jpeg",
+        resolution.0, resolution.1
+    )
+}
+
+/// The frozen `scale` arguments, carrying both the scaler flags and
+/// `out_color_matrix=bt709` — §0.4 item 6, at `export.rs:425`.
+fn cc8_frozen_scale_args(resolution: (u32, u32)) -> String {
+    format!(
+        "w={}:h={}:flags={CC8_SDR_FROZEN_SCALER_FLAGS}:in_range=jpeg:out_range=mpeg:\
+         out_color_matrix=bt709",
+        resolution.0, resolution.1
+    )
+}
+
+/// The frozen stamp of the RGBA64LE delivery intermediate — §0.4 item 8's first
+/// `set_color_primaries` call, at `export.rs:626`.
+fn cc8_frozen_intermediate_frame() -> FrameColorTerms {
+    FrameColorTerms {
+        pixel_format: "rgba64le".to_owned(),
+        space: "gbr".to_owned(),
+        range: "pc".to_owned(),
+        primaries: "bt709".to_owned(),
+        transfer: "bt709".to_owned(),
+    }
+}
+
+/// The frozen stamp of the delivery `Y'CbCr` frame — §0.4 item 8's second
+/// `set_color_primaries` call, at `export.rs:638`.
+fn cc8_frozen_delivery_frame(pixel_format: &str) -> FrameColorTerms {
+    FrameColorTerms {
+        pixel_format: pixel_format.to_owned(),
+        space: "bt709".to_owned(),
+        range: "tv".to_owned(),
+        primaries: "bt709".to_owned(),
+        transfer: "bt709".to_owned(),
+    }
+}
+
+/// Every frozen term of one SDR lane, assembled.
+fn cc8_frozen_lane_terms(lane: &Cc8FrozenLaneTerms, resolution: (u32, u32)) -> DeliveryLaneTerms {
+    DeliveryLaneTerms {
+        encoder_pixel_format: lane.pixel_format.to_owned(),
+        encoder_colorspace: CC8_SDR_FROZEN_ENCODER_COLORSPACE.to_owned(),
+        encoder_color_range: CC8_SDR_FROZEN_ENCODER_COLOR_RANGE.to_owned(),
+        encoder_options: BTreeMap::from([
+            ("preset".to_owned(), CC8_SDR_FROZEN_PRESET.to_owned()),
+            (
+                "x264-params".to_owned(),
+                CC8_SDR_FROZEN_X264_PARAMS.to_owned(),
+            ),
+        ]),
+        buffer_args: cc8_frozen_buffer_args(resolution),
+        scale_args: cc8_frozen_scale_args(resolution),
+        format_args: format!("pix_fmts={}", lane.pixel_format),
+        graph_pixel_format: lane.pixel_format.to_owned(),
+        intermediate_frame: cc8_frozen_intermediate_frame(),
+        delivery_frame: cc8_frozen_delivery_frame(lane.pixel_format),
+    }
+}
+
+/// Assert one recorded set of lane terms field by field, so a red run names the
+/// §0.4 site that moved rather than printing two large structs.
+fn cc8_assert_frozen_lane_terms(
+    observed: &DeliveryLaneTerms,
+    expected: &DeliveryLaneTerms,
+    label: &str,
+) {
+    for (site, observed, expected) in [
+        (
+            "§0.4 item 3 (export.rs:216) set_colorspace",
+            observed.encoder_colorspace.as_str(),
+            expected.encoder_colorspace.as_str(),
+        ),
+        (
+            "§0.4 item 3 (export.rs:217) set_color_range",
+            observed.encoder_color_range.as_str(),
+            expected.encoder_color_range.as_str(),
+        ),
+        (
+            "video_encoder.set_format, the lane pixel format",
+            observed.encoder_pixel_format.as_str(),
+            expected.encoder_pixel_format.as_str(),
+        ),
+        (
+            "delivery_filter_graph buffer args",
+            observed.buffer_args.as_str(),
+            expected.buffer_args.as_str(),
+        ),
+        (
+            "§0.4 item 6 (export.rs:425) scale args: DELIVERY_SCALER_FLAGS + out_color_matrix",
+            observed.scale_args.as_str(),
+            expected.scale_args.as_str(),
+        ),
+        (
+            "delivery_filter_graph format args",
+            observed.format_args.as_str(),
+            expected.format_args.as_str(),
+        ),
+        (
+            "delivery_filter_graph output pixel format",
+            observed.graph_pixel_format.as_str(),
+            expected.graph_pixel_format.as_str(),
+        ),
+    ] {
+        assert_eq!(
+            observed, expected,
+            "{label}: the SDR lane term at {site} moved; §9.1 fixture 6 forbids it",
+        );
+    }
+    assert_eq!(
+        observed.encoder_options, expected.encoder_options,
+        "{label}: the encoder options moved (§0.4 item 4, export.rs:529, \
+         DELIVERY_X264_PARAMS)",
+    );
+    assert_eq!(
+        observed
+            .encoder_options
+            .get("x264-params")
+            .map(String::as_str),
+        Some(CC8_SDR_FROZEN_X264_PARAMS),
+        "{label}: §5.2 item 2 requires the SDR lanes' x264-params string to stay \
+         byte-identical to today's",
+    );
+    assert_eq!(
+        observed.intermediate_frame, expected.intermediate_frame,
+        "{label}: the RGBA intermediate stamp moved (§0.4 item 8, export.rs:626)",
+    );
+    assert_eq!(
+        observed.delivery_frame, expected.delivery_frame,
+        "{label}: the delivery Y'CbCr stamp moved (§0.4 item 8, export.rs:638)",
+    );
+    // Belt and braces: the whole record, so a field added to `DeliveryLaneTerms`
+    // by a later step is covered without this list being edited.
+    assert_eq!(observed, expected, "{label}: the recorded lane terms moved");
+}
+
+/// The SHA-256 of the delivery intermediate at one frame, rendered through the
+/// production renderer — the same call `export.rs:302` makes.
+fn cc8_delivery_intermediate_hash(
+    renderer: &mut crate::render::FrameRenderer,
+    document: &Document,
+    resolution: (u32, u32),
+    frame: u64,
+) -> (String, usize) {
+    let delivery = renderer
+        .render_delivery(
+            document,
+            TimeCode(i64::try_from(frame).expect("sampled frame index")),
+            resolution,
+            crate::render::RenderScale::FullResolution,
+            crate::render::DecodeStrategy::Seek,
+        )
+        .unwrap_or_else(|error| panic!("delivery intermediate render at {frame} failed: {error}"));
+    assert_eq!((delivery.width, delivery.height), resolution);
+    assert_eq!(
+        delivery.rgba64le.len(),
+        (resolution.0 as usize) * (resolution.1 as usize) * 8,
+        "the delivery intermediate must be RGBA64LE",
+    );
+    (
+        crate::sha256::sha256_bytes(&delivery.rgba64le),
+        delivery.rgba64le.len(),
+    )
+}
+
+/// Fixture 6's "with every pinned constant unmoved" clause.
+///
+/// The delivery constants CC1, CC6 and CC7 measured, restated here and
+/// asserted, so a moved constant fails in the SDR regression gate itself rather
+/// than only in whichever downstream fixture happened to notice. The sentence's
+/// other half — "every CC1–CC7 fixture passes" — is a statement about the suite
+/// and is discharged by `cargo test -p kinewright-media` / `-p kinewright-core`
+/// staying green, exactly as CC6 §11.0 and CC7 §11.0 discharge it.
+fn cc8_assert_pinned_delivery_constants_unmoved() {
+    assert_eq!(
+        crate::color_pipeline::DELIVERY_INTERMEDIATE_WHITE,
+        65_280,
+        "CC6 §5.1's delivery intermediate white is a CC8 §5.1 'unchanged and not re-measured' term",
+    );
+    assert_eq!(DeliveryEncodeDepth::Eight.pixel_format(), "yuv420p");
+    assert_eq!(DeliveryEncodeDepth::Ten.pixel_format(), "yuv420p10le");
+    assert_eq!(kinewright_core::DELIVERY_VERIFICATION_FRAME_COUNT, 5);
+    assert_eq!(kinewright_core::DELIVERY_LUMA_MAX_CODE_8BIT, 8);
+    assert_eq!(
+        kinewright_core::DELIVERY_LUMA_P99_CODE_8BIT_MILLIONTHS,
+        3_000_000
+    );
+    assert_eq!(
+        kinewright_core::DELIVERY_LUMA_MEAN_CODE_8BIT_MILLIONTHS,
+        400_000
+    );
+    assert_eq!(
+        kinewright_core::DELIVERY_RGB_MEAN_CODE_8BIT_MILLIONTHS,
+        1_750_000
+    );
+    assert_eq!(
+        kinewright_core::DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_8BIT,
+        3_300
+    );
+    assert_eq!(kinewright_core::DELIVERY_LUMA_MAX_CODE_10BIT, 16);
+    assert_eq!(
+        kinewright_core::DELIVERY_LUMA_P99_CODE_10BIT_MILLIONTHS,
+        4_000_000
+    );
+    assert_eq!(
+        kinewright_core::DELIVERY_LUMA_MEAN_CODE_10BIT_MILLIONTHS,
+        1_000_000
+    );
+    assert_eq!(
+        kinewright_core::DELIVERY_RGB_MEAN_CODE_10BIT_MILLIONTHS,
+        1_000_000
+    );
+    assert_eq!(
+        kinewright_core::DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_10BIT,
+        3_300
+    );
+    assert_eq!(crate::cc1_fixtures::MONITOR_CPU_GPU_MAX, 2);
+    // Compared by bit pattern: the claim is that the pinned literal is the same
+    // literal, which is exactly what `float_cmp` warns is *not* what `==` means
+    // for a computed float. Nothing here is computed.
+    assert_eq!(
+        crate::cc1_fixtures::LINEAR_CPU_GPU_MAX.to_bits(),
+        1.5e-3_f32.to_bits(),
+        "CC1 §6.2's linear CPU/GPU maximum is a pinned constant",
+    );
+}
+
+/// **§9.1 fixture 6.** The SDR regression gate, landed before any export change
+/// (§10 step 5) so that §10 step 6 finds it already green.
+///
+/// One fixed SDR project, both SDR lanes, and three claims per lane — the
+/// frozen terms, byte-identical files, and CC6's own decoded verification. See
+/// the block comment above for what each claim is and why "unchanged" is scoped
+/// the way it is.
+#[test]
+fn cc8_sdr_regression_byte_equality_gate() {
+    // Rule 11.0.6: the panicking acquisition, never the skipping one.
+    let gpu = fallback_gpu();
+    initialize_ffmpeg().expect("FFmpeg initializes");
+    let directory = TempDirectory::new("cc8-sdr-regression-byte-equality");
+    cc8_assert_pinned_delivery_constants_unmoved();
+
+    // --- the fixed SDR project --------------------------------------------
+    let source = cc6_delivery_source(
+        &directory,
+        CC8_SDR_REGRESSION_SIZE,
+        CC8_SDR_REGRESSION_FRAMES,
+    );
+    let document = Arc::new(cc6_delivery_document(
+        &source,
+        CC8_SDR_REGRESSION_SIZE,
+        CC8_SDR_REGRESSION_FRAMES,
+    ));
+    // The project is SDR by classification, not by assertion-free assumption:
+    // a source that classified as an HDR profile would make every claim below
+    // a statement about the wrong lane.
+    let source_profile = classify_source_with_assumption(
+        &document.media_pool[0].color_description,
+        Some(ColorSourceProfileAssumption::D65),
+    )
+    .expect("the fixed SDR project's source must classify");
+    assert!(
+        !source_profile.is_hdr(),
+        "the SDR regression gate's project must be an SDR project: {source_profile:?}",
+    );
+
+    let lanes = [
+        Cc8FrozenLaneTerms {
+            depth: DeliveryEncodeDepth::Eight,
+            pixel_format: "yuv420p",
+        },
+        Cc8FrozenLaneTerms {
+            depth: DeliveryEncodeDepth::Ten,
+            pixel_format: "yuv420p10le",
+        },
+    ];
+    assert_eq!(lanes.len(), DeliveryEncodeDepth::ALL.len());
+
+    for lane in &lanes {
+        cc8_assert_sdr_lane_regression(&gpu, &directory, &document, lane);
+    }
+}
+
+/// One SDR lane's three claims. Split out of the gate above so each claim keeps
+/// its own name in a backtrace, and so the gate itself reads as the list of
+/// claims the contract makes.
+fn cc8_assert_sdr_lane_regression(
+    gpu: &crate::cc1_fixtures::FixtureGpu,
+    directory: &TempDirectory,
+    document: &Arc<Document>,
+    lane: &Cc8FrozenLaneTerms,
+) {
+    let label = lane.pixel_format;
+    let settings = cc6_delivery_settings(document, lane.depth);
+    assert_eq!(settings.video_codec, "libx264");
+    assert_eq!(settings.resolution, CC8_SDR_REGRESSION_SIZE);
+    // The delivery description this gate is about: SDR Rec.709, both lanes.
+    let delivery = settings.delivery_color.clone();
+    assert_eq!(delivery.primaries, ColorPrimaries::Bt709);
+    assert_eq!(delivery.transfer, ColorTransfer::Bt709);
+    assert_eq!(delivery.matrix, ColorMatrix::Bt709);
+    assert_eq!(delivery.range, ColorRange::Limited);
+    assert_eq!(delivery.white_point, ColorWhitePoint::D65);
+    assert_eq!(delivery.bit_depth, lane.depth.color_bit_depth());
+
+    let request = DeliveryVerificationRequest::new(lane.depth, delivery.clone());
+    let sampled = request.sample_frames(u64::from(CC8_SDR_REGRESSION_FRAMES));
+    let intermediate_bytes =
+        cc8_assert_delivery_intermediate_is_reproducible(gpu, document, &sampled, label);
+
+    // --- claim 1: the frozen lane terms, read back from the export -----
+    let observed_path = directory.path(&format!("cc8-sdr-regression-{label}-a.mp4"));
+    let (progress_tx, _progress_rx) = crossbeam_channel::unbounded();
+    let terms = crate::export::export_document_capturing_delivery_terms(
+        document.as_ref(),
+        &observed_path,
+        &settings,
+        &progress_tx,
+        gpu.context(),
+    )
+    .expect("the production export must write the SDR lane");
+    let frozen = cc8_frozen_lane_terms(lane, CC8_SDR_REGRESSION_SIZE);
+    cc8_assert_frozen_lane_terms(&terms, &frozen, label);
+
+    // --- claim 2: exported bytes ---------------------------------------
+    //
+    // (a) The same project, the same lane, exported again through the
+    //     *production* arity — so this also proves the observational seam
+    //     used by claim 1 writes no different byte.
+    let repeat_path = directory.path(&format!("cc8-sdr-regression-{label}-b.mp4"));
+    crate::export::export_document(
+        document.as_ref(),
+        &repeat_path,
+        &settings,
+        &progress_tx,
+        gpu.context(),
+    )
+    .expect("the production export must write the SDR lane again");
+    let observed_bytes = std::fs::read(&observed_path).expect("the first export must read");
+    let repeat_bytes = std::fs::read(&repeat_path).expect("the second export must read");
+    assert!(
+        observed_bytes.len() > 1_024,
+        "{label}: a {} byte export is not a delivery",
+        observed_bytes.len(),
+    );
+    assert_eq!(
+        observed_bytes.len(),
+        repeat_bytes.len(),
+        "{label}: two exports of the same project differed in length",
+    );
+    assert!(
+        observed_bytes == repeat_bytes,
+        "{label}: two exports of the same fixed SDR project were not byte-identical; \
+         'exported bytes are unchanged' has no meaning on a non-deterministic export path",
+    );
+    let observed_hash = crate::sha256::sha256_bytes(&observed_bytes);
+
+    let spellings = cc8_assert_equivalent_spellings_export_the_same_bytes(
+        gpu,
+        directory,
+        document,
+        &settings,
+        lane,
+        &frozen,
+        &observed_bytes,
+    );
+
+    // --- claim 3b: CC6's decoded verification of the written file ------
+    let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
+        .expect("the production media engine should start");
+    let verification = engine
+        .verify_delivery_output(
+            Arc::clone(document),
+            &observed_path,
+            &settings,
+            request.clone(),
+        )
+        .expect("the written SDR export must verify");
+    assert!(
+        verification.technical_pass,
+        "{label}: the SDR export must still pass CC6's verification: {:?}",
+        verification.exceptions,
+    );
+    assert_eq!(verification.decoded_pixel_format, lane.pixel_format);
+    assert_eq!(verification.probed.primaries, ColorPrimaries::Bt709);
+    assert_eq!(verification.probed.transfer, ColorTransfer::Bt709);
+    assert_eq!(verification.probed.matrix, ColorMatrix::Bt709);
+    assert_eq!(verification.probed.range, ColorRange::Limited);
+    assert_eq!(verification.probed.bit_depth, lane.depth.color_bit_depth());
+
+    println!(
+        "CC8_MEASURED fixture=6 lane={label} raster={}x{} frames={CC8_SDR_REGRESSION_FRAMES} \
+         x264_params=\"{CC8_SDR_FROZEN_X264_PARAMS}\" scaler_flags={CC8_SDR_FROZEN_SCALER_FLAGS} \
+         scale_args=\"{}\" export_bytes={} export_sha256={observed_hash} \
+         intermediate_frame_bytes={intermediate_bytes} two_exports_byte_identical=true \
+         equivalent_spellings={spellings} gpu_lane={}",
+        CC8_SDR_REGRESSION_SIZE.0,
+        CC8_SDR_REGRESSION_SIZE.1,
+        terms.scale_args,
+        observed_bytes.len(),
+        gpu.lane.id(),
+    );
+}
+
+/// Fixture 6's claim 3a: the 16-bit RGBA delivery intermediate is a function of
+/// the project, not of the run.
+///
+/// It sits upstream of all six of §0.4's export-side literals and is
+/// deterministic CPU/GPU math, so pinning it is what lets a byte difference
+/// between two exports be attributed to the lane terms rather than to the
+/// content. Returns the intermediate's per-frame byte count, for the
+/// `CC8_MEASURED` line.
+fn cc8_assert_delivery_intermediate_is_reproducible(
+    gpu: &crate::cc1_fixtures::FixtureGpu,
+    document: &Arc<Document>,
+    sampled: &[u64],
+    label: &str,
+) -> usize {
+    assert_eq!(
+        sampled.len(),
+        usize::from(kinewright_core::DELIVERY_VERIFICATION_FRAME_COUNT),
+        "the sample must be CC6 §6.2's, not a shortened one",
+    );
+    let mut passes = Vec::new();
+    let mut intermediate_bytes = 0_usize;
+    for pass in 0..2 {
+        let mut renderer = crate::render::FrameRenderer::new(gpu.context());
+        let mut hashes = Vec::new();
+        for frame in sampled {
+            let (hash, len) = cc8_delivery_intermediate_hash(
+                &mut renderer,
+                document,
+                CC8_SDR_REGRESSION_SIZE,
+                *frame,
+            );
+            intermediate_bytes = len;
+            hashes.push(hash);
+        }
+        assert_eq!(hashes.len(), sampled.len(), "pass {pass}");
+        passes.push(hashes);
+    }
+    assert_eq!(
+        passes[0], passes[1],
+        "{label}: the 16-bit RGBA delivery intermediate must be byte-identical across two \
+         independent renders of the same project",
+    );
+    // Non-vacuity: the sampled frames must not all be the same raster, or the
+    // equality above would hold for a renderer that ignored `at`.
+    assert!(
+        passes[0]
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            > 1,
+        "{label}: every sampled delivery intermediate hashed the same; the sample does not \
+         distinguish frames: {:?}",
+        passes[0],
+    );
+    intermediate_bytes
+}
+
+/// Fixture 6's claim 2(b): the failing direction for a §10 step 6 lane
+/// derivation keyed on a field the SDR lane does not depend on.
+///
+/// Each spelling below denotes the *same* SDR delivery description and is
+/// already accepted by `delivery_color_mismatches` — `ColorBitDepth::Integer(8)`
+/// is CC1 §2.1's canonical equal of `Eight`, and both project provenances are
+/// accepted by CC6 §4.2. A derivation that read one of them would change the
+/// written file without changing any recorded colour term, which is precisely
+/// the bug the terms clause alone cannot see. Returns the number of spellings
+/// exercised.
+fn cc8_assert_equivalent_spellings_export_the_same_bytes(
+    gpu: &crate::cc1_fixtures::FixtureGpu,
+    directory: &TempDirectory,
+    document: &Arc<Document>,
+    settings: &ExportSettings,
+    lane: &Cc8FrozenLaneTerms,
+    frozen: &DeliveryLaneTerms,
+    observed_bytes: &[u8],
+) -> usize {
+    let label = lane.pixel_format;
+    let delivery = settings.delivery_color.clone();
+    let equivalent = [
+        (
+            "integer bit depth",
+            ColorDescription {
+                bit_depth: ColorBitDepth::Integer(u16::from(lane.depth.bits())),
+                ..delivery.clone()
+            },
+        ),
+        (
+            "application-default provenance",
+            ColorDescription {
+                provenance: ColorProvenance::ApplicationDefault,
+                ..delivery.clone()
+            },
+        ),
+        (
+            "user-override provenance",
+            ColorDescription {
+                provenance: ColorProvenance::UserOverride,
+                ..delivery
+            },
+        ),
+    ];
+    let count = equivalent.len();
+    let (progress_tx, _progress_rx) = crossbeam_channel::unbounded();
+    for (spelling, description) in equivalent {
+        let mut spelled = settings.clone();
+        spelled.delivery_color = description;
+        let spelled_path = directory.path(&format!(
+            "cc8-sdr-regression-{label}-{}.mp4",
+            spelling.replace(' ', "-"),
+        ));
+        let spelled_terms = crate::export::export_document_capturing_delivery_terms(
+            document.as_ref(),
+            &spelled_path,
+            &spelled,
+            &progress_tx,
+            gpu.context(),
+        )
+        .expect("an equivalent SDR delivery spelling must still export");
+        cc8_assert_frozen_lane_terms(&spelled_terms, frozen, &format!("{label}/{spelling}"));
+        let spelled_bytes = std::fs::read(&spelled_path).expect("the export must read");
+        assert!(
+            spelled_bytes == observed_bytes,
+            "{label}: spelling the same SDR delivery description as '{spelling}' changed the \
+             exported bytes; the lane derivation is reading a field the lane does not depend on",
+        );
+    }
+    count
 }
