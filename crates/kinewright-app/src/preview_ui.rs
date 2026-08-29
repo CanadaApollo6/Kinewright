@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use eframe::egui;
 use kinewright_core::{
-    Clip, EffectUniform, MatteParams, MediaKind, ThreePointMode, TimeCode, TrackId, TrackKind,
+    CC8_PREVIEW_BADGE, CC8_PREVIEW_LABEL, Clip, DeliveryLane, EffectUniform, MatteParams,
+    MediaKind, MonitorPreview, ThreePointMode, TimeCode, TrackId, TrackKind,
 };
 
 use crate::{
@@ -143,6 +144,46 @@ pub(crate) enum QcMaskView {
     Clipping,
 }
 
+/// CC8 §4 item 3's label for one preview arm, or `None` when CC1's monitor
+/// transform ran unchanged.
+///
+/// §4 item 3: "Every UI surface showing it is labelled as a non-calibrated
+/// preview of HDR content." This is the one place the Program viewer asks, and
+/// the strings are the authority module's — `CC8_PREVIEW_BADGE` for the badge
+/// painted over the picture, `CC8_PREVIEW_LABEL` for the sentence under it —
+/// so the viewer, the Colour QC window, and `get_color_context` cannot word the
+/// same claim three ways.
+///
+/// **`None` is a claim too.** An SDR project must not acquire a label for a
+/// stage that did not run, which is why this is a total function of the arm
+/// rather than a conditional at the paint site.
+///
+/// **Which surfaces this reaches.** Two, and they are the two that show what
+/// the monitoring branch produced:
+///
+/// * the **Program viewer**, whose picture is `FrameRenderer::render`'s output
+///   — the function where `document_monitor_preview` selects the arm; and
+/// * the **Colour Scopes panel**, whose numbers are measured on the full
+///   resolution *monitor proof*, which is the same render. A waveform of a
+///   non-calibrated preview would otherwise read as a monitoring measurement,
+///   so its stage line carries the badge too.
+///
+/// Everything else in the viewer is outside §4's stage and deliberately
+/// unlabelled: the Source viewer shows `decode::thumbnail`'s unmanaged
+/// `libswscale` display frame and never runs CC1's monitor transform at all,
+/// the Matte view is a coverage scalar with no transfer, and the QC mask
+/// replaces the picture with the *delivery* clipping mask, which carries its
+/// own lane-named legend below. §4 item 1's remaining surface is the colour
+/// status, where `get_color_context` reports the stage, its pinned parameter,
+/// and this same label.
+#[must_use]
+pub(crate) const fn preview_label(preview: MonitorPreview) -> Option<(&'static str, &'static str)> {
+    match preview {
+        MonitorPreview::Direct => None,
+        MonitorPreview::Cc8ToneMappedHdr => Some((CC8_PREVIEW_BADGE, CC8_PREVIEW_LABEL)),
+    }
+}
+
 /// Any linear channel below zero: out of the Rec.709 gamut, clamped to black.
 pub(crate) const QC_MASK_UNDER_RANGE_COLOR: [u8; 4] = [32, 64, 255, 255];
 /// Any encoded channel above one: clamped to white by the delivery encode.
@@ -152,9 +193,34 @@ pub(crate) const QC_MASK_OVER_RANGE_COLOR: [u8; 4] = [255, 32, 32, 255];
 pub(crate) const QC_MASK_PAUSED_ONLY: &str =
     "Paused only — the mask renders one full-resolution working proof per frame; pause to see it.";
 
-/// The legend, always visible while the mask is on.
+/// The legend, always visible while the mask is on: the SDR lane's.
+///
+/// **Unchanged by CC8, character for character.** §9.1 fixture 6 makes every
+/// CC1-CC7 pinned string unmoved a condition of accepting CC8, and CC6's own
+/// fixtures assert this one verbatim; §5.1's HDR lane gets its own prose in
+/// [`QC_MASK_LEGEND_HDR`] rather than editing this.
 pub(crate) const QC_MASK_LEGEND: &str = "blue = a negative linear channel — out of the Rec.709 gamut and clamped to black; \
 red = an encoded value above 1.0 — clamped to white.";
+
+/// The legend on CC8 §5.1's HDR delivery lane.
+///
+/// [`QC_MASK_LEGEND`]'s statement re-derived for the lane the mask is now
+/// measured on, in the manner `color_qc::GAMUT_DEFINITION_REC2020` re-derives
+/// `GAMUT_DEFINITION`: the gamut it names is Rec.2020's, because the negative
+/// components it flags are the ones §2.3's matrix produces, and the clamp it
+/// predicts is the HLG signal's rather than BT.709's.
+pub(crate) const QC_MASK_LEGEND_HDR: &str = "blue = a negative Rec.2020 linear channel after CC8 §2.3's conversion — out of the \
+Rec.2020 gamut the HDR lane can carry, and clamped to black; red = an HLG signal above 1.0 — \
+above the nominal peak and clamped to white by the delivery encode.";
+
+/// The legend for one delivery lane (CC6 §8.2, CC8 §6 item 1).
+#[must_use]
+pub(crate) const fn qc_mask_legend(lane: DeliveryLane) -> &'static str {
+    match lane {
+        DeliveryLane::SdrRec709 => QC_MASK_LEGEND,
+        DeliveryLane::HdrHlgRec2020 => QC_MASK_LEGEND_HDR,
+    }
+}
 
 /// Build the clipping mask from one scene-linear working proof.
 ///
@@ -176,26 +242,41 @@ red = an encoded value above 1.0 — clamped to white.";
 /// division, so the picture stays readable underneath the two flags without
 /// ever being mistaken for one of them.
 ///
-/// **CC8: this mask stays BT.709-shaped, and that is a named deferral.** CC8
-/// §6 item 1 makes the Colour QC window's range report lane-aware, so on §5.1's
-/// HDR lane the counted basis points are taken through Rec.2020 primaries and
-/// the HLG OETF while the red flag here is still `encode_bt709_delivery`'s. The
-/// two therefore disagree on an HDR project, in the direction that over-reports
-/// clipping: an HLG signal reaches `1.0` at the nominal peak, which is `4.93` in
-/// working units, so every specular highlight above diffuse white paints red
-/// here and is legal there.
+/// **CC8 §10 step 8: the mask is lane-aware, and this is where step 7's
+/// deferral is discharged.** Step 7 left it BT.709-shaped and recorded why: §6
+/// item 1 had made the Colour QC window's range report lane-aware, so on §5.1's
+/// HDR lane the counted basis points were taken through Rec.2020 primaries and
+/// the HLG OETF while the red flag here was still `encode_bt709_delivery`'s, and
+/// the two disagreed on an HDR project in the direction that over-reports
+/// clipping — an HLG signal reaches `1.0` at the nominal peak, which is `4.93`
+/// in working units, so every specular highlight above diffuse white painted
+/// red here and was legal there.
 ///
-/// It is not fixed in §10 step 7, because §6 and §8 assign the lane-aware
-/// numbers to the QC engine, `get_color_qc`, and the Colour QC window, and this
-/// overlay is CC6 §8.2's viewer surface — a *preview* of clipping, which is
-/// §10 step 8's slice together with §4's tone-mapped preview and §3.2's node
-/// limitations. Making it lane-aware needs the mask to be handed the delivery
-/// description it currently does not receive, and its legend
-/// ([`QC_MASK_LEGEND`], which names the Rec.709 gamut in so many words) is part
-/// of that change rather than separable from it.
+/// Step 8 makes the flags read `color_qc::encode_delivery_for_lane`, the same
+/// single function §6 item 1 gave the QC engine, so the mask and the counted
+/// basis points cannot disagree about which pixels clip on either lane. The
+/// legend moves with it ([`qc_mask_legend`]), because [`QC_MASK_LEGEND`] names
+/// the Rec.709 gamut in so many words and would be a wrong sentence beside a
+/// Rec.2020 flag.
+///
+/// On [`DeliveryLane::SdrRec709`] every statement below is the one that ran
+/// before: `encode_delivery_for_lane`'s SDR arm is `encode_bt709_delivery` per
+/// channel in the same channel order, and the grey keeps CC1's BT.709 luma
+/// coefficients and the same transfer. The HDR arm takes BT.2020's luma, for
+/// `GAMUT_DEFINITION_REC2020`'s reason: the components it is a luma *of* are
+/// Rec.2020's.
+///
+/// **What is still not lane-aware, and why.** The mask is a preview of the
+/// *delivery* clamp, so it is keyed on the delivery lane and not on §4's
+/// preview arm: the tone map is not reachable from the delivery path (§4
+/// item 5), so tone-mapping the mask would draw a clip no export applies. A
+/// project whose source is HDR and whose delivery is SDR therefore paints the
+/// SDR flags — which is the honest picture of the export that is being blocked
+/// (§7 item 2).
 #[must_use]
 pub(crate) fn qc_mask_image(
     image: &kinewright_core::LinearRgbaImage,
+    lane: DeliveryLane,
 ) -> kinewright_core::RgbaImage {
     let pixel_count = (image.width as usize).saturating_mul(image.height as usize);
     let mut pixels = Vec::with_capacity(pixel_count.saturating_mul(4));
@@ -210,7 +291,7 @@ pub(crate) fn qc_mask_image(
             continue;
         };
         let linear = [pixel[0], pixel[1], pixel[2]];
-        let encoded = linear.map(kinewright_core::encode_bt709_delivery);
+        let encoded = kinewright_core::encode_delivery_for_lane(lane, linear);
         if linear
             .iter()
             .chain(&encoded)
@@ -235,9 +316,26 @@ pub(crate) fn qc_mask_image(
         } else {
             // CC1's linear luma coefficients in the proof's own `f32`,
             // encoded through the same transfer as the flags so the grey is
-            // the delivery's own value rather than a second opinion.
-            let luma = 0.2126_f32 * linear[0] + 0.7152_f32 * linear[1] + 0.0722_f32 * linear[2];
-            let encoded_luma = kinewright_core::encode_bt709_delivery(luma);
+            // the delivery's own value rather than a second opinion. On the
+            // HDR lane both halves move together: the luma is BT.2020's,
+            // because the components it weighs are the Rec.2020 ones the lane's
+            // matrix consumes, and it is encoded by the same
+            // `encode_delivery_for_lane` the flags used.
+            let encoded_luma = match lane {
+                DeliveryLane::SdrRec709 => {
+                    let luma =
+                        0.2126_f32 * linear[0] + 0.7152_f32 * linear[1] + 0.0722_f32 * linear[2];
+                    kinewright_core::encode_bt709_delivery(luma)
+                }
+                DeliveryLane::HdrHlgRec2020 => {
+                    let rec2020 = kinewright_core::cc8_apply_matrix(
+                        kinewright_core::CC8_BT709_TO_REC2020,
+                        linear,
+                    );
+                    let luma = kinewright_core::cc8_bt2020_luma(rec2020);
+                    kinewright_core::cc8_hlg_encode_working_linear([luma; 3])[0]
+                }
+            };
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let code = (255.0 * f64::from(encoded_luma).clamp(0.0, 1.0)).round() as u8;
             let grey = code / 2;
@@ -650,10 +748,18 @@ impl QcMaskState {
                     completion.delivered = true;
                     return;
                 }
+                // CC6 §8.2's mask is a preview of the *delivery* clamp, so
+                // the lane comes from the same delivery description the export
+                // gate reads (CC8 §5.2 clause 1). It is derived inside the
+                // worker rather than carried on `QcMaskRequest` so there is one
+                // reading of one description; `QcMaskKey`'s revision changes
+                // whenever that description does, which is what retires a mask
+                // rendered on the other lane.
+                let lane = DeliveryLane::for_description(&document.color_context.delivery);
                 completion.deliver(
                     cache
                         .proof(source.as_ref(), document, key.proof_key())
-                        .map(|proof| qc_mask_image(&proof.image)),
+                        .map(|proof| qc_mask_image(&proof.image, lane)),
                 );
             });
         let Ok(handle) = spawn_result else {
@@ -903,6 +1009,20 @@ impl KinewrightApp {
             scrubbing: self.qc_mask.is_scrubbing(),
         };
         let qc_mask_texture = self.qc_mask_texture(ui.ctx(), qc_mask_conditions);
+        // CC8 §4 item 3. The arm comes from core's one classifier, so this
+        // label and the frame in `self.texture` were decided by the same
+        // function: `FrameRenderer::render` calls `document_monitor_preview` on
+        // the same document to choose the monitoring transform.
+        let preview = kinewright_core::document_monitor_preview(&self.focused().document);
+        // The label belongs to the *picture*, so it is withheld exactly when
+        // the picture is: a whole-picture replacement (the Matte view, the QC
+        // mask) is not §4's stage, and a blocked source shows no picture at
+        // all. Labelling a coverage matte as a tone-mapped HDR preview would be
+        // the false claim §4 exists to prevent, in the other direction.
+        let shows_preview_picture = !blocked
+            && matte_texture.is_none()
+            && qc_mask_texture.is_none()
+            && self.texture.is_some();
         let texture = self.texture.clone();
         let picture = viewer_picture(
             blocked,
@@ -927,6 +1047,26 @@ impl KinewrightApp {
             },
             viewer_sense(overlay.is_some()),
         );
+        if shows_preview_picture && let Some((badge, label)) = preview_label(preview) {
+            theme::paint_caps(
+                &ui.painter_at(frame.response.rect),
+                frame.response.rect.right_top() + egui::vec2(-space::TWO, space::TWO),
+                egui::Align2::RIGHT_TOP,
+                badge,
+                color::STATUS_WARNING,
+            );
+            // Painted text carries no hover, so the same claim is repeated as a
+            // real widget under the frame with §4's full wording behind it.
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(badge)
+                        .font(theme::semibold(type_size::CAPTION))
+                        .color(color::STATUS_WARNING),
+                )
+                .wrap(),
+            )
+            .on_hover_text(label);
+        }
         if let Some(context) = overlay {
             if let Some(image_rect) = frame.image_rect {
                 paint_matte_overlay(
@@ -945,6 +1085,10 @@ impl KinewrightApp {
     /// The CC6 §8.2 QC mask toggle, its status, and its legend.
     fn qc_mask_controls(&mut self, ui: &mut egui::Ui, conditions: QcMaskConditions) {
         let key = self.qc_mask_key();
+        // CC8 §6 item 1: the legend names the lane the flags were measured on,
+        // read from the same delivery description the worker hands
+        // `qc_mask_image`.
+        let lane = DeliveryLane::for_description(&self.focused().document.color_context.delivery);
         let mut on = self.qc_mask.is_on();
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("QC MASK").font(theme::semibold(type_size::CAPTION)));
@@ -1005,8 +1149,10 @@ impl KinewrightApp {
             // Always visible while the view is on: the two colours mean two
             // different unrecoverable things and neither is guessable.
             ui.add(
-                egui::Label::new(egui::RichText::new(QC_MASK_LEGEND).color(color::TEXT_MUTED))
-                    .wrap(),
+                egui::Label::new(
+                    egui::RichText::new(qc_mask_legend(lane)).color(color::TEXT_MUTED),
+                )
+                .wrap(),
             );
         }
     }
@@ -1982,7 +2128,10 @@ mod tests {
             pixels,
         };
 
-        let mask = qc_mask_image(&image);
+        // CC8 §10 step 8 made the mask lane-aware; the SDR lane is the arm
+        // whose flags, grey, and legend are unchanged, and it is what every
+        // CC6 assertion below was measured against.
+        let mask = qc_mask_image(&image, DeliveryLane::SdrRec709);
         assert_eq!((mask.width, mask.height), (6, 1));
         assert_eq!(mask.pixels.len(), 6 * 4, "one RGBA quad per source pixel");
         let pixel = |index: usize| -> [u8; 4] {
@@ -2340,7 +2489,7 @@ mod tests {
             pixels,
         };
 
-        let mask = qc_mask_image(&image);
+        let mask = qc_mask_image(&image, DeliveryLane::SdrRec709);
         let pixel = |index: usize| &mask.pixels[index * 4..index * 4 + 4];
         for index in 0..4 {
             assert_eq!(
@@ -2394,17 +2543,87 @@ mod tests {
         );
     }
 
+    /// CC8 §4 item 3: the label exists exactly when §4's stage ran, and its
+    /// wording is the authority module's.
+    #[test]
+    fn cc8_the_tone_mapped_preview_is_labelled_and_an_sdr_preview_is_not() {
+        assert_eq!(preview_label(MonitorPreview::Direct), None);
+        assert_eq!(
+            preview_label(MonitorPreview::Cc8ToneMappedHdr),
+            Some((CC8_PREVIEW_BADGE, CC8_PREVIEW_LABEL)),
+        );
+        // §4 opens "CC8 provides no calibrated HDR monitoring path and must not
+        // imply one", so the label says so rather than merely naming a stage.
+        let (badge, label) = preview_label(MonitorPreview::Cc8ToneMappedHdr).expect("labelled");
+        assert!(badge.contains("NOT A REFERENCE"));
+        assert!(label.contains("not a monitoring reference"));
+        assert!(label.contains("not calibrated"));
+    }
+
+    /// CC8 §10 step 8 discharging step 7's deferral: the clipping mask is
+    /// measured on the delivery lane, so the flags it paints and the basis
+    /// points the QC engine counts cannot disagree.
+    #[test]
+    fn cc8_the_qc_mask_flags_are_measured_on_the_delivery_lane() {
+        // Working 2.0 neutral is above BT.709 delivery white and *below* the
+        // HLG nominal peak, which is the exact disagreement step 7 recorded:
+        // "every specular highlight above diffuse white paints red here and is
+        // legal there." A neutral negative is out of both triangles.
+        let image = kinewright_core::LinearRgbaImage {
+            width: 3,
+            height: 1,
+            pixels: vec![
+                2.0, 2.0, 2.0, 1.0, // over BT.709 white, inside the HLG range
+                -0.05, -0.05, -0.05, 1.0, // negative in both triangles
+                0.5, 0.5, 0.5, 1.0, // in range on both lanes
+            ],
+        };
+
+        let sdr = qc_mask_image(&image, DeliveryLane::SdrRec709);
+        assert_eq!(&sdr.pixels[0..4], QC_MASK_OVER_RANGE_COLOR);
+        assert_eq!(&sdr.pixels[4..8], QC_MASK_UNDER_RANGE_COLOR);
+
+        let hdr = qc_mask_image(&image, DeliveryLane::HdrHlgRec2020);
+        assert_ne!(
+            &hdr.pixels[0..4],
+            QC_MASK_OVER_RANGE_COLOR,
+            "an HLG signal below the nominal peak is not clipped by the HDR lane's encode",
+        );
+        assert_eq!(
+            &hdr.pixels[4..8],
+            QC_MASK_UNDER_RANGE_COLOR,
+            "a negative Rec.2020 component is still unrepresentable",
+        );
+        // The flag is core's own answer, not a second opinion: the same
+        // function the QC engine's range report uses says the same thing.
+        let encoded =
+            kinewright_core::encode_delivery_for_lane(DeliveryLane::HdrHlgRec2020, [2.0; 3]);
+        assert!(encoded.iter().all(|value| *value <= 1.0), "{encoded:?}");
+
+        // The legend moves with the flags, and the SDR one is unmoved.
+        assert_eq!(qc_mask_legend(DeliveryLane::SdrRec709), QC_MASK_LEGEND);
+        assert_eq!(
+            qc_mask_legend(DeliveryLane::HdrHlgRec2020),
+            QC_MASK_LEGEND_HDR
+        );
+        assert!(QC_MASK_LEGEND.contains("Rec.709"));
+        assert!(QC_MASK_LEGEND_HDR.contains("Rec.2020"));
+    }
+
     /// The mask is uploaded as a texture whose dimensions are asserted against
     /// its buffer, so a truncated readback must not be able to panic the
     /// viewer — and an absent pixel must not be drawn as a clipping flag.
     #[test]
     fn a_truncated_working_proof_still_produces_a_whole_mask() {
-        let mask = qc_mask_image(&kinewright_core::LinearRgbaImage {
-            width: 4,
-            height: 2,
-            // Two pixels of samples for an eight-pixel raster.
-            pixels: vec![1.4, 0.5, 0.5, 1.0, 0.5, 0.5, -0.05, 1.0],
-        });
+        let mask = qc_mask_image(
+            &kinewright_core::LinearRgbaImage {
+                width: 4,
+                height: 2,
+                // Two pixels of samples for an eight-pixel raster.
+                pixels: vec![1.4, 0.5, 0.5, 1.0, 0.5, 0.5, -0.05, 1.0],
+            },
+            DeliveryLane::SdrRec709,
+        );
         assert_eq!(
             mask.pixels.len(),
             4 * 2 * 4,
@@ -2433,11 +2652,14 @@ mod tests {
             let value = value as f32;
             pixels.extend_from_slice(&[value, value, value, 1.0]);
         }
-        let mask = qc_mask_image(&kinewright_core::LinearRgbaImage {
-            width: 64,
-            height: 1,
-            pixels,
-        });
+        let mask = qc_mask_image(
+            &kinewright_core::LinearRgbaImage {
+                width: 64,
+                height: 1,
+                pixels,
+            },
+            DeliveryLane::SdrRec709,
+        );
         for step in 0..64_usize {
             #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
             let value = (step as f64 / 63.0) as f32;

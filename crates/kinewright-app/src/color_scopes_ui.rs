@@ -807,12 +807,25 @@ impl KinewrightApp {
                 }
             }
         });
+        // CC8 §4 item 3. A scope measured at `monitoring / post-composite` is a
+        // measurement of the picture the monitoring branch produced, and on an
+        // HDR-profile source that picture is §4's tone-mapped preview — so the
+        // stage line says which monitoring branch these numbers came from
+        // rather than letting a waveform of a non-calibrated preview read as a
+        // monitoring measurement. The arm is core's, the same one
+        // `FrameRenderer::render` selected for the proof this panel samples.
+        let preview = kinewright_core::document_monitor_preview(&self.focused().document);
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(color::TEXT_MUTED, "Stage:");
             ui.monospace("monitoring / post-composite");
             ui.colored_label(color::TEXT_MUTED, "·");
             ui.colored_label(color::TEXT_MUTED, "full-resolution proof required");
             ui.colored_label(color::TEXT_MUTED, format!("· frame {frame}"));
+            if let Some((badge, label)) = crate::preview_ui::preview_label(preview) {
+                ui.colored_label(color::TEXT_MUTED, "·");
+                ui.colored_label(color::STATUS_WARNING, badge)
+                    .on_hover_text(label);
+            }
         });
         self.scope_roi_controls(ui);
         self.scope_matte_controls(ui);

@@ -8,7 +8,7 @@ use kinewright_core::{
     AssetId, ClipId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
     ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Document, Effect,
     EffectId, FrameTexture, LinearRgbaImage, MatteProofError, MediaError, MediaSourceFingerprint,
-    Rational, TimeCode, Title, classify_source_with_assumption,
+    Rational, TimeCode, Title, classify_source_with_assumption, document_monitor_preview,
 };
 
 use crate::{
@@ -279,6 +279,13 @@ impl FrameRenderer {
     /// monitoring `ColorDescription`, so the document's own description is
     /// handed to the compositor rather than a compositor default.
     ///
+    /// CC8 §4 adds the second half of that selection: the
+    /// [`MonitorPreview`](kinewright_core::MonitorPreview) arm, taken from the
+    /// document's *source* profiles by `document_monitor_preview` — core's one
+    /// classifier, shared with `get_color_qc` and the Colour QC window — so an
+    /// HDR-profile project previews through §4's labelled tone map and an SDR
+    /// project takes `Direct`, which is the transform it always had.
+    ///
     /// # Errors
     ///
     /// Returns a media error when the colour context, decode, or GPU
@@ -294,10 +301,11 @@ impl FrameRenderer {
         let decoded_layers =
             self.decoded_layers(document, project_at, resolution, scale, strategy)?;
         let layers = compositor_layers(&decoded_layers);
-        self.compositor.render_monitor_with_luts(
+        self.compositor.render_monitor_preview_with_luts(
             resolution,
             &layers,
             &document.color_context.monitoring,
+            document_monitor_preview(document),
             Some(&self.lut_library),
         )
     }

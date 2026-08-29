@@ -1,6 +1,7 @@
 //! CC8 fixtures: §10 step 1's encoder precondition, §10 step 3's §9.1
 //! fixtures 1, 2 and 5, §10 step 4's §9.1 fixtures 3, 4 and 10, §10 step 5's
-//! fixture 6, §10 step 6's fixtures 7 and 8, and §10 step 7's fixture 12.
+//! fixture 6, §10 step 6's fixtures 7 and 8, §10 step 7's fixture 12, and §10
+//! step 8's fixture 9.
 //!
 //! §9 fixes the layout: "Constants authority: `kinewright_core::cc8_hdr`, in
 //! the manner of `cc7_scenarios`. Fixtures: `kinewright_media::cc8_fixtures`.
@@ -81,36 +82,41 @@ use kinewright_core::{
     CC8_HDR_DELIVERY_X264_PARAMS, CC8_HLG_NOMINAL_PEAK_NITS,
     CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT, CC8_HLG_SCENE_BREAKPOINT, CC8_HLG_SIGNAL_BREAKPOINT,
     CC8_PQ_C1, CC8_PQ_C2, CC8_PQ_C3, CC8_PQ_DELIVERY_RECOVERY_ACTION, CC8_PQ_M2, CC8_PQ_PEAK_NITS,
-    CC8_REC2020_TO_BT709, CC8_REFERENCE_WHITE_NITS, CC8_REJECTED_HDR_ADJACENT, CC8_SOURCE_PROFILES,
-    ColorBitDepth, ColorContext, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
-    ColorQcCheck, ColorQcRequest, ColorRange, ColorSourceError, ColorSourceProfile,
-    ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, DeliveryColorError,
-    DeliveryColorMismatch, DeliveryEncodeDepth, DeliveryLane, DeliveryProfile,
-    DeliveryVerificationRequest, Document, Effect, EffectId, ExportSettings,
-    HDR_SOURCE_ON_SDR_DELIVERY, LinearRgbaImage, MediaError, MonitorProofMetadata,
+    CC8_PREVIEW_PEAK_NITS, CC8_PREVIEW_STAGE, CC8_REC2020_TO_BT709, CC8_REFERENCE_WHITE_NITS,
+    CC8_REJECTED_HDR_ADJACENT, CC8_SOURCE_PROFILES, ColorBitDepth, ColorContext, ColorDescription,
+    ColorMatrix, ColorPrimaries, ColorProvenance, ColorQcCheck, ColorQcRequest, ColorRange,
+    ColorSourceError, ColorSourceProfile, ColorSourceProfileAssumption, ColorTransfer,
+    ColorWhitePoint, DeliveryColorError, DeliveryColorMismatch, DeliveryEncodeDepth, DeliveryLane,
+    DeliveryProfile, DeliveryVerificationRequest, Document, Effect, EffectId, ExportSettings,
+    HDR_SOURCE_ON_SDR_DELIVERY, LinearRgbaImage, MediaError, MonitorPreview, MonitorProofMetadata,
     MonitorProofRenderKind, ParamValue, QaSeverity, Rational, TimeCode, WORKING_PROOF_ENCODING,
     WORKING_PROOF_STAGE, WorkingProof, WorkingProofMetadata, YCBCR_CHROMA_LEGAL_HIGH,
     YCBCR_CHROMA_OFFSET, YCBCR_CHROMA_SPAN, YCBCR_LUMA_LEGAL_HIGH, YCBCR_LUMA_OFFSET,
     YCBCR_LUMA_SPAN, bt709_limited_ycbcr, cc8_apply_matrix, cc8_hlg_decode_working_linear,
     cc8_hlg_encode_working_linear, cc8_hlg_inverse_oetf, cc8_hlg_oetf,
     cc8_pq_decode_working_linear, cc8_pq_encode_working_linear, cc8_pq_eotf_nits,
-    cc8_pq_inverse_eotf, classify_source, classify_source_with_assumption,
-    delivery_color_mismatches, delivery_color_mismatches_for_lane, delivery_conformance,
-    delivery_field_recovery_action, measure_color_qc,
+    cc8_pq_inverse_eotf, cc8_preview_peak_working_linear, cc8_preview_tone_map_rgb,
+    classify_source, classify_source_with_assumption, delivery_color_mismatches,
+    delivery_color_mismatches_for_lane, delivery_conformance, delivery_field_recovery_action,
+    document_monitor_preview, encode_delivery_for_lane, measure_color_qc,
 };
 
 use crate::{
     Compositor, CompositorLayer,
     cc1_fixtures::{
         LINEAR_CPU_GPU_MAX, LINEAR_CPU_GPU_MEAN, LINEAR_CPU_GPU_P99, LINEAR_OVER_RANGE_MEAN,
-        LINEAR_OVER_RANGE_P99, decode_managed_working_frame, fallback_gpu, working_frame,
+        LINEAR_OVER_RANGE_P99, MONITOR_CPU_GPU_MAX, MONITOR_CPU_GPU_MEAN, MONITOR_CPU_GPU_P99,
+        abs_code_diff_rgb, decode_managed_working_frame, fallback_gpu, working_frame,
     },
     cc6_fixtures::{
         CC6_DELIVERY_SOURCE_SIZE, cc6_delivery_document, cc6_delivery_settings, cc6_delivery_source,
     },
     color_pipeline::{
-        PrimaryCorrection, PrimaryParameter, apply_primary_corrections,
-        decode_hdr_source_working_linear, hdr_source_to_working_bt709_linear,
+        DELIVERY_INTERMEDIATE_WHITE, PrimaryCorrection, PrimaryParameter,
+        apply_primary_corrections, decode_hdr_source_working_linear,
+        encode_delivery_for_description, encode_delivery_hlg_rec2020_rgba16,
+        encode_delivery_rgba16, encode_monitor_for_preview, encode_monitor_rgba8_for_description,
+        encode_monitor_rgba8_for_preview, hdr_source_to_working_bt709_linear,
         rgba64_normalization_max, rgba64_promoted_max, source_primaries_to_working_linear,
     },
     decode::{
@@ -3528,9 +3534,9 @@ fn cc8_assert_equivalent_spellings_export_the_same_bytes(
 // on difference budgets whose reference luma goes through the lane's matrix;
 // landing fixture 8 against the BT.709 reference would be gating the HDR lane
 // on "a wrong number, not an approximate one" (§6 item 1's own words). §4's
-// tone-mapped preview is §10 step 8's, §7 items 1/2/4's `managed_hdr_v1` state
-// and migration are §10 step 9's, and §9.2's measured gate table plus
-// `cc8_manifest.json` are §10 step 10's.
+// tone-mapped preview is §10 step 8's (below), §7 items 1/2/4's
+// `managed_hdr_v1` state and migration are §10 step 9's, and §9.2's measured
+// gate table plus `cc8_manifest.json` are §10 step 10's.
 
 // ---------------------------------------------------------------------------
 // §9.1 fixture 7 — "Delivery rejection. One failing direction per §5.3 bullet,
@@ -5812,5 +5818,712 @@ fn cc8_qc_skin_is_withheld_with_a_named_reason_on_an_hdr_source() {
         sdr.skin_withheld.is_some(),
         hdr_source_sdr_lane.skin_withheld.is_some(),
         raised.severity,
+    );
+}
+
+// ===========================================================================
+// CC8 §10 step 8 — §9.1 fixture 9.
+// ===========================================================================
+//
+// Step 8 is "Preview and UI: fixture 9." Four things land with it, and each
+// has its gate below:
+//
+//  * **§4's tone-mapping stage**, `kinewright_core::cc8_preview_tone_map`,
+//    with its one parameter pinned in the authority module as
+//    `CC8_PREVIEW_PEAK_NITS` (§4 item 2) and named in the colour status as
+//    `CC8_PREVIEW_STAGE` (§4 item 1, §3.3's monitoring branch);
+//  * **the monitoring transform made a function of a named preview arm**,
+//    `kinewright_core::MonitorPreview`, selected from the *source* by
+//    `document_monitor_preview` and threaded through
+//    `Compositor::render_monitor_preview_with_luts` — the same shape §5.2
+//    clause 1 gave the delivery encode, applied to the monitoring branch;
+//  * **§4 item 3's label**, `CC8_PREVIEW_BADGE` / `CC8_PREVIEW_LABEL`, on the
+//    Program viewer and in `get_color_context`; and
+//  * **§3.2 items 1 and 2's two named node limitations**, surfaced at the node
+//    in the inspector (§8, §12) and in the colour status.
+//
+// **What step 8 does not take.** §7's `managed_hdr_v1` state and migration are
+// §10 step 9's, and §9.2's measured gate table plus `cc8_manifest.json` are
+// step 10's — including the "Preview parity" row, which still reads
+// `ToBeMeasuredAtImplementation` in `CC8_GATES`. What this section does now is
+// take that measurement, assert against it with the step-3 rule's stated
+// margin, and print it under `CC8_MEASURED` so step 10 has a recorded figure.
+//
+// **Where the tone map runs.** On the **CPU**, in
+// `compositor::Compositor::readback_for`, which is where CC1's monitor encode
+// has always run: the GPU composites and grades into `Rgba16Float` and the
+// display transform is applied to the mapped readback. There is therefore no
+// WGSL copy of the curve to drift from the Rust one — which is the strongest
+// parity statement available, and is *not* the measurement §4 item 4 asks for.
+// The measurement below is the one that is meaningful: the production
+// software-GPU composite through the production preview readback, against a
+// wholly CPU reference of the same raster and the same correction, in monitor
+// codes.
+
+/// The monitoring description §4's stage encodes into: CC1's, unchanged.
+///
+/// §4: "the managed preview applies a named tone-mapping stage from the working
+/// space to **the existing Rec.709 monitoring description**." So the preview
+/// changes what reaches that description, never the description itself, and
+/// this fixture reads it from `ColorContext` rather than building one.
+fn cc8_preview_monitoring() -> ColorDescription {
+    ColorContext::sdr_rec709().monitoring
+}
+
+/// The single delivery quantization, restated for the delivery-reachability
+/// fixture below.
+///
+/// `color_pipeline::quantize_delivery16` is private, and deliberately: it is
+/// the one clamp-and-round the delivery boundary is allowed. This is its
+/// arithmetic written out so §9.1 fixture 9's failing direction can compare the
+/// production delivery encode against a composition that provably contains no
+/// tone map, rather than against the production encode itself.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn cc8_quantize_delivery16(value: f32) -> u16 {
+    let clamped = if value.is_nan() {
+        0.0
+    } else {
+        value.clamp(0.0, 1.0)
+    };
+    (clamped * f32::from(DELIVERY_INTERMEDIATE_WHITE)).round() as u16
+}
+
+/// A dense working-linear ramp from below black to past §4's peak.
+///
+/// The three populations §9.1 fixture 9's structural clauses need: undershoot
+/// (the out-of-Rec.709 negatives §2.3 produces), the CC1 SDR domain, and HDR
+/// magnitudes up to and beyond `cc8_preview_peak_working_linear`.
+fn cc8_preview_ramp() -> Vec<f32> {
+    const STEPS: i32 = 1_200;
+    (-100..=STEPS)
+        .map(|step| cc8_as_f32_local(step) * 6.0 / cc8_as_f32_local(STEPS))
+        .collect()
+}
+
+/// `i32` to `f32` for this section's ramps. Every value is far inside `2^24`.
+#[allow(clippy::cast_precision_loss)]
+fn cc8_as_f32_local(value: i32) -> f32 {
+    value as f32
+}
+
+/// §9.1 fixture 9, clause 1 — **determinism, monotonicity, and endpoint
+/// behaviour** of §4's stage, measured through the production monitor encode
+/// rather than on the curve alone.
+///
+/// §4 item 4 fixes what may be asserted: "Its fixtures assert determinism,
+/// monotonicity, endpoint behaviour, and CPU/GPU parity — **properties, not
+/// aesthetics**." Nothing here is a judgment about how the picture looks, and
+/// no CC8 exit gate is (§0.2 Q4).
+///
+/// The three clauses, and what each would catch:
+///
+/// 1. **Determinism** is asserted bitwise over the whole ramp, twice, on the
+///    composition `tone map -> BT.709 encode -> clamp -> quantize`. The curve
+///    itself uses only IEEE 754 exact operations, so this would catch a stage
+///    that acquired state or a dependence on evaluation order.
+/// 2. **Monotonicity** is asserted on the *monitor codes*, which is where a
+///    non-monotone tone map would show as banding or inversion, and is
+///    necessarily non-strict because the codes are quantized. Strict
+///    monotonicity of the curve is `cc8_hdr`'s own unit assertion.
+/// 3. **Endpoint behaviour**: zero maps to code 0, §4's pinned peak maps to
+///    code 255, everything past the peak stays at 255 through the existing
+///    display clamp, and — the non-vacuity clause — diffuse white maps
+///    **below** 255 on the tone-mapped arm while the SDR arm clips it to 255.
+///    Without that last one a stage that did nothing at all would pass every
+///    other clause here.
+#[test]
+fn cc8_preview_tone_map_is_deterministic_monotone_and_holds_its_endpoints() {
+    let monitoring = cc8_preview_monitoring();
+    let ramp = cc8_preview_ramp();
+    let encode = |value: f32, preview: MonitorPreview| -> u8 {
+        encode_monitor_for_preview([value; 3], &monitoring, preview).expect("CC1's monitor target")
+            [0]
+    };
+
+    // Clause 1: bitwise determinism over the whole ramp.
+    let first: Vec<u8> = ramp
+        .iter()
+        .map(|value| encode(*value, MonitorPreview::Cc8ToneMappedHdr))
+        .collect();
+    let second: Vec<u8> = ramp
+        .iter()
+        .map(|value| encode(*value, MonitorPreview::Cc8ToneMappedHdr))
+        .collect();
+    assert_eq!(first, second, "§4's stage is not deterministic");
+
+    // Clause 2: monotone monitor codes, and a code range that is actually
+    // exercised — a ramp that produced one code would be monotone vacuously.
+    let mut previous = 0_u8;
+    for (index, code) in first.iter().enumerate() {
+        assert!(
+            *code >= previous,
+            "the tone-mapped monitor code fell at working {}: {previous} then {code}",
+            ramp[index],
+        );
+        previous = *code;
+    }
+    assert_eq!(*first.first().expect("a ramp"), 0);
+    assert_eq!(*first.last().expect("a ramp"), 255);
+
+    // Clause 3: the endpoints, on the pinned peak itself.
+    let peak = cc8_preview_peak_working_linear();
+    assert_eq!(encode(0.0, MonitorPreview::Cc8ToneMappedHdr), 0);
+    assert_eq!(
+        encode(peak, MonitorPreview::Cc8ToneMappedHdr),
+        255,
+        "§4's pinned peak must land on monitor white",
+    );
+    assert_eq!(encode(peak * 2.0, MonitorPreview::Cc8ToneMappedHdr), 255);
+    // Negative working values stay at the clamp's floor, and the stage did not
+    // turn one into a positive code.
+    assert_eq!(encode(-0.5, MonitorPreview::Cc8ToneMappedHdr), 0);
+
+    // Non-vacuity, both directions.
+    let tone_mapped_white = encode(1.0, MonitorPreview::Cc8ToneMappedHdr);
+    assert!(
+        tone_mapped_white < 255,
+        "diffuse white must survive the preview as headroom, not as clipped white",
+    );
+    assert_eq!(
+        encode(1.0, MonitorPreview::Direct),
+        255,
+        "CC1's monitor transform still clips diffuse white to 255",
+    );
+    let mut moved = 0_usize;
+    for value in &ramp {
+        let direct = encode(*value, MonitorPreview::Direct);
+        let mapped = encode(*value, MonitorPreview::Cc8ToneMappedHdr);
+        assert!(
+            mapped <= direct,
+            "the preview brightened working {value}: {direct} then {mapped}",
+        );
+        if mapped != direct {
+            moved += 1;
+        }
+    }
+    assert!(
+        moved * 2 > ramp.len(),
+        "the preview moved only {moved} of {} ramp samples; a proven no-op measures nothing",
+        ramp.len(),
+    );
+
+    println!(
+        "CC8_MEASURED fixture=9 clause=structure stage={CC8_PREVIEW_STAGE} \
+         peak_nits={CC8_PREVIEW_PEAK_NITS} peak_working={peak:.6} samples={} moved={moved} \
+         diffuse_white_code={tone_mapped_white}",
+        ramp.len(),
+    );
+}
+
+/// §9.1 fixture 9, the failing direction — **the preview transform is
+/// unreachable from the delivery path**.
+///
+/// §4 item 5: "It is a *preview* transform. It must not be reachable from the
+/// delivery path (§0.2 Q6), and a fixture asserts that (§9)." §0.2 Q6 is what
+/// makes this a hard direction rather than a preference: SDR-from-HDR ships "as
+/// a preview only, never as a deliverable in CC8", and §11 defers tone-mapped
+/// delivery entirely because it "has no defensible objective pass threshold".
+///
+/// The assertion is an **equality against a composition that provably contains
+/// no tone map**, on both delivery lanes, over a raster where the tone map
+/// demonstrably moves values. A tone map inserted anywhere in the delivery
+/// encode — in `encode_delivery_for_description`, in either lane's arm, or in
+/// the QC engine's `encode_delivery_for_lane` — fails it. The report side is
+/// included deliberately: a QC surface that predicted a tone-mapped clamp would
+/// be reporting a clip no export applies, which is the same error seen from the
+/// evidence side.
+#[test]
+// The array comparisons below are **exact-representation claims**: the delivery
+// encode either is the untone-mapped composition or is not, and a tolerance
+// there would be a window inside which a preview stage could hide.
+#[allow(clippy::float_cmp, clippy::similar_names)]
+fn cc8_preview_transform_is_unreachable_from_the_delivery_path() {
+    let hdr_delivery = cc8_hdr_delivery_description();
+    let sdr_delivery = cc8_sdr_delivery_description(DeliveryEncodeDepth::Ten);
+    let mut moved = 0_usize;
+    let mut samples = 0_usize;
+    let mut separable = 0_usize;
+
+    for step in -20..=120_i32 {
+        let value = cc8_as_f32_local(step) / 20.0;
+        // A chromatic triple as well as a neutral one, so the primaries
+        // conversion inside the HDR lane's encode is exercised rather than
+        // collapsing onto the neutral axis.
+        for working in [[value; 3], [value, value * 0.4, value * 0.9]] {
+            samples += 1;
+            let tone_mapped = cc8_preview_tone_map_rgb(working);
+            if tone_mapped != working {
+                moved += 1;
+            }
+            let rgba = [working[0], working[1], working[2], 1.0];
+
+            // The HDR lane: §3.3's delivery line composed here from the
+            // authority module alone — no tone map anywhere in it.
+            let expected_hdr = encode_delivery_for_lane(DeliveryLane::HdrHlgRec2020, working);
+            let expected_hdr = [
+                cc8_quantize_delivery16(expected_hdr[0]),
+                cc8_quantize_delivery16(expected_hdr[1]),
+                cc8_quantize_delivery16(expected_hdr[2]),
+                cc8_quantize_delivery16(1.0),
+            ];
+            assert_eq!(
+                encode_delivery_hlg_rec2020_rgba16(rgba),
+                expected_hdr,
+                "the HDR delivery encode of {working:?} is not the untone-mapped composition",
+            );
+            assert_eq!(
+                encode_delivery_for_description(rgba, &hdr_delivery).expect("§5.1's lane"),
+                expected_hdr,
+                "the lane-selected delivery encode of {working:?} took a preview stage",
+            );
+
+            // The SDR lane, for the same reason and with the same shape.
+            let expected_sdr = encode_delivery_for_lane(DeliveryLane::SdrRec709, working);
+            let expected_sdr = [
+                cc8_quantize_delivery16(expected_sdr[0]),
+                cc8_quantize_delivery16(expected_sdr[1]),
+                cc8_quantize_delivery16(expected_sdr[2]),
+                cc8_quantize_delivery16(1.0),
+            ];
+            assert_eq!(encode_delivery_rgba16(rgba), expected_sdr);
+            assert_eq!(
+                encode_delivery_for_description(rgba, &sdr_delivery).expect("the SDR lane"),
+                expected_sdr,
+            );
+
+            // And the distinction is real: a delivery encode that *had* taken
+            // the preview would land somewhere else. Asserted only where the
+            // delivery quantizer can *show* a difference — a wholly negative
+            // triple lands on the clamp's floor from both, which is the single
+            // clamp doing its job and not a blind spot this fixture invented.
+            if tone_mapped != working && working.iter().all(|value| *value > 0.0) {
+                let tone_mapped_rgba = [tone_mapped[0], tone_mapped[1], tone_mapped[2], 1.0];
+                assert_ne!(
+                    encode_delivery_hlg_rec2020_rgba16(tone_mapped_rgba),
+                    expected_hdr,
+                    "the HDR delivery encode cannot tell {working:?} from its tone-mapped form, \
+                     so this fixture could not detect a preview stage in the delivery path",
+                );
+                separable += 1;
+            }
+        }
+    }
+
+    assert!(
+        moved * 2 > samples,
+        "the tone map moved only {moved} of {samples} samples; the equality above would hold \
+         against a stage that did nothing",
+    );
+    assert!(
+        separable * 4 > samples,
+        "only {separable} of {samples} samples could distinguish a tone-mapped delivery encode \
+         from an untone-mapped one, so the equality above proves too little",
+    );
+
+    // The two arms are named things, and only one of them names §4's stage —
+    // so a delivery path cannot acquire it by asking for a "preview" it has no
+    // parameter for.
+    assert_eq!(MonitorPreview::Direct.stage(), None);
+    assert_eq!(
+        MonitorPreview::Cc8ToneMappedHdr.stage(),
+        Some(CC8_PREVIEW_STAGE)
+    );
+    assert!(!MonitorPreview::Direct.is_tone_mapped());
+    assert!(MonitorPreview::Cc8ToneMappedHdr.is_tone_mapped());
+
+    println!(
+        "CC8_MEASURED fixture=9 clause=delivery_unreachable samples={samples} moved={moved} \
+         separable={separable} lanes=\"{} {}\"",
+        DeliveryLane::SdrRec709.as_str(),
+        DeliveryLane::HdrHlgRec2020.as_str(),
+    );
+}
+
+/// The SDR-unchanged evidence within §10 step 8's reach, at the monitoring
+/// boundary.
+///
+/// §9.1 fixture 6 — the byte-equality gate — is §10 step 5's and stands
+/// unmoved; this is the one thing step 8 can prove about the *monitor* path,
+/// which fixture 6 does not reach because fixture 6 gates exported bytes.
+///
+/// Step 8 touched exactly three shared monitor-path functions, and each has its
+/// argument asserted here:
+///
+/// 1. **`color_pipeline::encode_monitor_rgba8_for_preview`** and its RGB
+///    sibling are *new*; the `Direct` arm calls
+///    `encode_monitor_rgba8_for_description` verbatim, so the first two claims
+///    below are that the new entry point is the old one on that arm, sample for
+///    sample, including the negatives and over-range values CC1 §6.2 bands.
+/// 2. **`compositor::Compositor::readback_for`** gained a `preview` argument
+///    and now calls the preview form. Every existing caller reaches it through
+///    `render_monitor_with_luts`, which passes `MonitorPreview::Direct`, so the
+///    third claim renders the same layers both ways and asserts byte equality.
+/// 3. **`render::FrameRenderer::render`** now selects the arm from the
+///    document. The fourth claim is that an SDR document selects `Direct`, so
+///    no SDR project can reach §4's stage at all.
+///
+/// `encode_monitor_rgb8`, `encode_monitor_rgba8`, `encode_monitor_for_description`
+/// and `encode_monitor_rgba8_for_description` are **unchanged, character for
+/// character**; they are the functions every CC1–CC7 fixture measures, and step
+/// 8 added callers rather than editing them.
+#[test]
+fn cc8_sdr_monitor_transform_is_unmoved_by_the_preview_arm() {
+    let monitoring = cc8_preview_monitoring();
+    let mut compared = 0_usize;
+    for step in -40..=160_i32 {
+        let value = cc8_as_f32_local(step) / 40.0;
+        let rgba = [value, value * 0.5, value * 1.5 - 0.25, 0.75];
+        let rgb = [rgba[0], rgba[1], rgba[2]];
+        compared += 1;
+        assert_eq!(
+            encode_monitor_rgba8_for_preview(rgba, &monitoring, MonitorPreview::Direct)
+                .expect("CC1's monitor target"),
+            encode_monitor_rgba8_for_description(rgba, &monitoring).expect("CC1's monitor target"),
+            "the Direct arm moved the RGBA monitor encode at {rgba:?}",
+        );
+        assert_eq!(
+            encode_monitor_for_preview(rgb, &monitoring, MonitorPreview::Direct)
+                .expect("CC1's monitor target"),
+            crate::color_pipeline::encode_monitor_rgb8(rgb),
+            "the Direct arm moved the RGB monitor encode at {rgb:?}",
+        );
+    }
+    assert!(compared > 0);
+
+    // Claim 3: the production compositor, both ways, on a raster with the
+    // negatives and over-range values that make the comparison non-trivial.
+    let width = 16_u32;
+    let height = 4_u32;
+    let rgb: Vec<[f32; 3]> = (0..width * height)
+        .map(|index| {
+            let position = cc8_as_f32_local(i32::try_from(index).expect("raster index"));
+            let value =
+                position / cc8_as_f32_local(i32::try_from(width * height).unwrap()) * 3.0 - 0.25;
+            [value, value * 0.6, value * 1.2]
+        })
+        .collect();
+    let frame = working_frame(width, height, &rgb);
+    let gpu = fallback_gpu();
+    let compositor = Compositor::new(gpu.context());
+    let layers = [CompositorLayer {
+        frame: &frame,
+        effects: &[],
+        transition: TransitionRenderParams::default(),
+    }];
+    let unchanged = compositor
+        .render_monitor_with_luts((width, height), &layers, &monitoring, None)
+        .expect("CC1's monitor readback");
+    let direct = compositor
+        .render_monitor_preview_with_luts(
+            (width, height),
+            &layers,
+            &monitoring,
+            MonitorPreview::Direct,
+            None,
+        )
+        .expect("the Direct preview arm");
+    assert_eq!(
+        unchanged.rgba.as_ref(),
+        direct.rgba.as_ref(),
+        "render_monitor_with_luts must be render_monitor_preview_with_luts on the Direct arm",
+    );
+    let tone_mapped = compositor
+        .render_monitor_preview_with_luts(
+            (width, height),
+            &layers,
+            &monitoring,
+            MonitorPreview::Cc8ToneMappedHdr,
+            None,
+        )
+        .expect("the tone-mapped preview arm");
+    assert_ne!(
+        tone_mapped.rgba.as_ref(),
+        direct.rgba.as_ref(),
+        "the two arms must differ on a raster with HDR magnitudes, or the equality above is \
+         evidence about nothing",
+    );
+
+    // Claim 4: an SDR document selects the arm that cannot reach §4's stage,
+    // and an HDR one selects the arm that does — through core's one classifier.
+    let sdr_document = single_clip_document(cc8_qc_asset(
+        "cc8-step8-sdr-source",
+        cc8_sdr_delivery_description(DeliveryEncodeDepth::Ten),
+    ));
+    assert_eq!(
+        document_monitor_preview(&sdr_document),
+        MonitorPreview::Direct,
+    );
+    let hdr_document = single_clip_document(cc8_qc_asset(
+        "cc8-step8-hlg-source",
+        cc8_hlg_source_description(&cc8_hdr_delivery_description()),
+    ));
+    assert_eq!(
+        document_monitor_preview(&hdr_document),
+        MonitorPreview::Cc8ToneMappedHdr,
+    );
+
+    println!(
+        "CC8_MEASURED fixture=9 clause=sdr_monitor_unmoved lane={} samples={compared} \
+         raster={width}x{height} direct_bytes_equal=true arms_differ=true",
+        gpu.lane.id(),
+    );
+}
+
+/// §9.1 fixture 9's measured **preview parity** figures, in monitor codes:
+/// `[max, p99, mean]`.
+///
+/// §9.2's row is "Preview parity | max / P99 / mean, monitor codes", and these
+/// are the numbers this fixture takes, not numbers chosen for it. The fixture's
+/// doc comment carries the population, the adapter, and the date beside them.
+const CC8_FIXTURE9_PARITY_MEASURED: Cc8MeasuredBand = [1.0, 0.0, 2.604_167e-3];
+
+/// The floor the **P99** preview-parity term is bounded by (§9.2's second
+/// rule), because it is the one term that measured exactly zero.
+///
+/// One 8-bit monitor code. `cc8_next_power_of_two_bound` cannot bound a term
+/// that measured zero, and a zero bound is not a gate — it would fail on the
+/// first adapter that rounded one sample differently while measuring nothing
+/// about the pipeline. The storage format's own granularity here is one code,
+/// which is a derived number rather than a chosen one: the same argument
+/// `cc8_half_float_ulp` makes for the linear bands, at the width the monitor
+/// buffer actually stores.
+///
+/// §9.2's rule does not stop at the floor — "where a term measures zero on the
+/// passing source, a **deliberately starved fixture** bounds the constant from
+/// above" — so `cc8_preview_parity_starved_p99` below exceeds it, which is what
+/// makes this bound reachable rather than decorative. The `max` and `mean`
+/// terms measured non-zero and pass `0.0`, so the floor never binds for them.
+const CC8_PREVIEW_PARITY_CODE_FLOOR: f32 = 1.0;
+
+/// The starved control's misreading of §4's pinned peak: **ten percent**.
+///
+/// Deliberately not a gross starve — replacing the stage entirely would exceed
+/// any bound and say nothing about how tight this one is — and deliberately not
+/// smaller, because a smaller one does not reach the floor on this raster and
+/// the measurement says so rather than the constant hiding it: at 1 % the
+/// starved P99 is **0 monitor codes**, because §4's curve differs from itself
+/// at two nearby peaks only through the `x / W²` term, which is `≈ x / 24` in
+/// working units and therefore sub-code below diffuse white, where most of this
+/// raster sits after the parity correction's -1.5 stops.
+///
+/// So what this control establishes is exactly what §9.2 asks and no more: the
+/// one-code floor is **reachable** — a 10 % misreading of the pinned peak
+/// produces a P99 of 2 codes and fails the gate — while a 1 % one is genuinely
+/// below the monitor buffer's own granularity on this raster and is not a
+/// difference the 8-bit display boundary can carry.
+const CC8_PREVIEW_STARVED_PEAK_PERCENT: i32 = 110;
+
+/// §4's curve at an arbitrary peak, for the starved control only.
+///
+/// This is the one place CC8 writes the tone map's arithmetic outside
+/// `kinewright_core::cc8_preview_tone_map`, and it is deliberate: a starved
+/// control has to evaluate a curve the production stage does **not** have.
+/// It is never used as a reference for a passing measurement.
+fn cc8_starved_tone_map(value: f32, peak: f32) -> f32 {
+    let magnitude = value.abs();
+    let mapped = magnitude * (1.0 + magnitude / (peak * peak)) / (1.0 + magnitude);
+    if value < 0.0 { -mapped } else { mapped }
+}
+
+/// §9.1 fixture 9, clause 2 — **CPU/GPU parity of the tone-mapping stage**, in
+/// monitor codes.
+///
+/// §4 item 4 requires it and §9.2 fixes its shape. What is compared:
+///
+/// * the **production** path — `Compositor::render_monitor_preview_with_luts`
+///   on the software GPU lane, which composites and grades in WGSL, reads the
+///   `Rgba16Float` surface back, and applies §4's stage and CC1's display
+///   encode to every mapped pixel; against
+/// * a **CPU reference** of the same raster and the same correction —
+///   `color_pipeline::apply_primary_corrections`, the `f16` storage rounding
+///   CC1 §6.2 names, then `encode_monitor_rgba8_for_preview` on the same arm.
+///
+/// The two sides therefore differ only in the *grading* node, which is exactly
+/// CC1 §6.2's comparison seen through §4's stage — and that is the honest claim
+/// available here, because the tone map is CPU-only on both sides (see this
+/// section's header). The measurement is still worth taking rather than
+/// asserting by construction: §4's curve is applied to values the GPU produced,
+/// and it *amplifies* small differences below diffuse white, where its slope is
+/// steepest, so a shader regression that CC1's monitor gate tolerated could
+/// show here first.
+///
+/// **The gate is this fixture's own measurement**, bounded by the step-3 rule
+/// — `next_power_of_two(recorded) * CC8_MEASURED_BOUND_HEADROOM`, computed from
+/// the recorded figure and never from the live one. CC1 §6.2's monitor
+/// constants are asserted afterwards as a **not-worse cross-check**, not as an
+/// inherited budget: §9.2 forbids inheriting a number from another lane, and
+/// what the cross-check claims is that the preview arm has not made the monitor
+/// path worse on CC1's own terms, which is the SDR-adjacent evidence within
+/// this fixture's reach.
+///
+/// The raster is `cc8_hdr_parity_raster`'s — the decoded HDR bars from real
+/// media, where the out-of-Rec.709 negatives and wide-gamut chromaticities
+/// come from, plus a dense HLG signal ramp — and the correction is
+/// `cc8_parity_correction`, every control non-neutral. Both are §9.1 fixture
+/// 10's, deliberately: the two fixtures measure the same production surface at
+/// two different boundaries, and using one raster keeps them comparable.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cc8_preview_cpu_gpu_parity_in_monitor_codes() {
+    let (_directory, _description, decoded) = cc8_hdr_bar_source("cc8-step8-preview-parity");
+    let (width, height, rgb) = cc8_hdr_parity_raster(&decoded);
+    let frame = working_frame(width, height, &rgb);
+    let correction = cc8_parity_correction();
+    let monitoring = cc8_preview_monitoring();
+    let preview = MonitorPreview::Cc8ToneMappedHdr;
+
+    let gpu = fallback_gpu();
+    let compositor = Compositor::new(gpu.context());
+    let layers = [CompositorLayer {
+        frame: &frame,
+        effects: &[cc8_correction_effect(1, correction)],
+        transition: TransitionRenderParams::default(),
+    }];
+    let actual = compositor
+        .render_monitor_preview_with_luts((width, height), &layers, &monitoring, preview, None)
+        .expect("production GPU preview readback");
+    // §4 item 4's determinism clause at the production boundary: the same
+    // layers rendered twice produce the same bytes.
+    let repeat = compositor
+        .render_monitor_preview_with_luts((width, height), &layers, &monitoring, preview, None)
+        .expect("production GPU preview readback, repeated");
+    assert_eq!(
+        actual.rgba.as_ref(),
+        repeat.rgba.as_ref(),
+        "the production preview render is not deterministic",
+    );
+
+    let mut expected = Vec::with_capacity(rgb.len() * 4);
+    let mut starved = Vec::with_capacity(rgb.len() * 4);
+    let starved_peak = cc8_preview_peak_working_linear()
+        * cc8_as_f32_local(CC8_PREVIEW_STARVED_PEAK_PERCENT)
+        / 100.0;
+    let mut moved_samples = 0_usize;
+    for source in &rgb {
+        let corrected = correction
+            .apply_checked(*source)
+            .expect("the CC8 parity correction");
+        let quantized = corrected.map(|value| f16::from_f32(value).to_f32());
+        if quantized
+            .iter()
+            .zip(source)
+            .any(|(corrected, source)| (corrected - source).abs() > 1.0e-3)
+        {
+            moved_samples += 1;
+        }
+        let alpha = f16::from_f32(1.0).to_f32();
+        expected.extend_from_slice(
+            &encode_monitor_rgba8_for_preview(
+                [quantized[0], quantized[1], quantized[2], alpha],
+                &monitoring,
+                preview,
+            )
+            .expect("CC1's monitor target"),
+        );
+        // The starved reference: the same composition with §4's peak misread
+        // by `CC8_PREVIEW_STARVED_PEAK_PERCENT`.
+        let starved_rgb = quantized.map(|value| cc8_starved_tone_map(value, starved_peak));
+        starved.extend_from_slice(
+            &encode_monitor_rgba8_for_preview(
+                [starved_rgb[0], starved_rgb[1], starved_rgb[2], alpha],
+                &monitoring,
+                MonitorPreview::Direct,
+            )
+            .expect("CC1's monitor target"),
+        );
+    }
+    // Non-vacuity, CC1's `MIN_CHANGED_LINEAR_BASIS_POINTS` rule: a correction
+    // that moved nothing would report a flattering zero.
+    assert!(
+        moved_samples * 2 > rgb.len(),
+        "the CC8 parity correction moved only {moved_samples} of {} pixels; a proven no-op \
+         cannot measure parity",
+        rgb.len(),
+    );
+    // And the arm is live: a raster whose tone-mapped codes equalled its
+    // untone-mapped ones would measure CC1's gate under a new name.
+    let direct: Vec<u8> = rgb
+        .iter()
+        .flat_map(|source| {
+            let corrected = correction
+                .apply_checked(*source)
+                .expect("the CC8 parity correction")
+                .map(|value| f16::from_f32(value).to_f32());
+            encode_monitor_rgba8_for_preview(
+                [
+                    corrected[0],
+                    corrected[1],
+                    corrected[2],
+                    f16::from_f32(1.0).to_f32(),
+                ],
+                &monitoring,
+                MonitorPreview::Direct,
+            )
+            .expect("CC1's monitor target")
+        })
+        .collect();
+    assert_ne!(direct, expected, "the tone-mapped arm did nothing");
+
+    let metric = abs_code_diff_rgb(actual.rgba.as_ref(), &expected);
+    #[allow(clippy::cast_possible_truncation)]
+    let terms = [
+        ("max", f32::from(metric.max)),
+        ("p99", metric.p99 as f32),
+        ("mean", metric.mean as f32),
+    ];
+    for (index, (term, value)) in terms.into_iter().enumerate() {
+        // Only the zero term takes the floor; the other two are bounded by
+        // their own recorded figures, as `cc8_assert_measured` requires.
+        let floor = if CC8_FIXTURE9_PARITY_MEASURED[index] > 0.0 {
+            0.0
+        } else {
+            CC8_PREVIEW_PARITY_CODE_FLOOR
+        };
+        cc8_assert_measured(
+            "9",
+            "Preview parity",
+            term,
+            value,
+            CC8_FIXTURE9_PARITY_MEASURED[index],
+            floor,
+        );
+    }
+
+    // §9.2's second rule for the zero term: the starved control exceeds the
+    // floor, so a bound of one monitor code is reachable and a misread peak is
+    // caught rather than tolerated.
+    let starved_metric = abs_code_diff_rgb(actual.rgba.as_ref(), &starved);
+    #[allow(clippy::cast_possible_truncation)]
+    let starved_p99 = starved_metric.p99 as f32;
+    assert!(
+        starved_p99 > CC8_PREVIEW_PARITY_CODE_FLOOR,
+        "a {CC8_PREVIEW_STARVED_PEAK_PERCENT}% misreading of CC8 §4's pinned peak produced a P99 \
+         of {starved_p99} monitor codes, inside the {CC8_PREVIEW_PARITY_CODE_FLOOR}-code floor \
+         the zero term is bounded by; the floor would then be a bound nothing can reach",
+    );
+
+    // The CC1 §6.2 monitor cross-check: not a gate inherited from another lane,
+    // a claim that the monitor path has not become worse while gaining §4's
+    // stage.
+    assert!(
+        metric.max <= MONITOR_CPU_GPU_MAX
+            && metric.p99 <= MONITOR_CPU_GPU_P99
+            && metric.mean <= MONITOR_CPU_GPU_MEAN,
+        "the CC1 §6.2 monitor gate no longer holds through the preview arm: {metric:?}",
+    );
+
+    println!(
+        "CC8_MEASURED fixture=9 clause=cpu_gpu_parity lane={} raster={width}x{height} \
+         moved_samples={moved_samples} max={} p99={:.6} mean={:.6} \
+         starved_peak_percent={CC8_PREVIEW_STARVED_PEAK_PERCENT} starved_max={} \
+         starved_p99={:.6} \
+         cc1_monitor_gate=\"max {MONITOR_CPU_GPU_MAX} p99 {MONITOR_CPU_GPU_P99} mean \
+         {MONITOR_CPU_GPU_MEAN}\"",
+        gpu.lane.id(),
+        metric.max,
+        metric.p99,
+        metric.mean,
+        starved_metric.max,
+        starved_metric.p99,
     );
 }

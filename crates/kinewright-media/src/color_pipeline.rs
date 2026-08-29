@@ -15,9 +15,9 @@ use kinewright_core::{
     ColorBitDepth, ColorCurveChannel, ColorDescription, ColorMatrix, ColorNodeKind, ColorPrimaries,
     ColorRange, ColorTransfer, ColorWheelsParams, ColorWhitePoint, CurvePoints, DeliveryLane,
     Effect, LutAssetId, LutNodeParams, MatteParams, MatteQualifierParams, MatteWindowParams,
-    ParamValue, ResolvedCurves, active_color_nodes, cc8_apply_matrix,
+    MonitorPreview, ParamValue, ResolvedCurves, active_color_nodes, cc8_apply_matrix,
     cc8_hlg_decode_working_linear, cc8_hlg_encode_working_linear, cc8_pq_decode_working_linear,
-    effect_descriptor, is_matte_parameter, managed_color_node_count,
+    cc8_preview_tone_map_rgb, effect_descriptor, is_matte_parameter, managed_color_node_count,
 };
 
 use crate::lut::CubeLut;
@@ -2597,6 +2597,76 @@ pub fn encode_monitor_rgba8_for_description(
         value => Err(ColorPipelineError::UnsupportedMonitorTransfer(
             value.clone(),
         )),
+    }
+}
+
+/// CC8 §4's tone-mapping stage on the monitoring branch, applied to RGB and
+/// leaving alpha alone.
+///
+/// §3.3 orders it "monitoring: tone-mapped preview (§4) on an SDR display" ->
+/// "final clamp, quantization, and display/codec packing", so this runs in
+/// **linear light**, ahead of the BT.709 display encode, and clamps nothing:
+/// [`encode_monitor_rgb8`] still performs the single display clamp CC1 §2.2
+/// invariant 5 allows. The curve itself is
+/// [`kinewright_core::cc8_preview_tone_map`] in the authority module, where §4
+/// item 2 requires its parameter to be pinned; this function is only the
+/// composition, so the media crate carries no second copy of the arithmetic.
+///
+/// Alpha is untouched for the reason [`encode_delivery_hlg_rec2020_rgba16`]
+/// gives on the other branch: a preview transform changes the colour stages,
+/// not the alpha convention.
+#[must_use]
+pub fn tone_map_preview_rgba(linear_rgba: [f32; 4]) -> [f32; 4] {
+    let mapped = cc8_preview_tone_map_rgb([linear_rgba[0], linear_rgba[1], linear_rgba[2]]);
+    [mapped[0], mapped[1], mapped[2], linear_rgba[3]]
+}
+
+/// Encode a linear RGB value for one monitoring description **and one CC8 §4
+/// preview arm**.
+///
+/// [`MonitorPreview::Direct`] is [`encode_monitor_for_description`], called
+/// unchanged: the SDR monitor transform does not move, and the statement
+/// executed for an SDR project is the one that was executed before CC8 §10
+/// step 8 (§9.1 fixture 6's obligation, taken at the monitoring boundary).
+/// [`MonitorPreview::Cc8ToneMappedHdr`] inserts §4's stage ahead of it and
+/// changes nothing else.
+///
+/// # Errors
+///
+/// Returns an error when the monitoring transfer is unknown or not the CC1
+/// BT.709 transfer, forwarded unchanged from
+/// [`encode_monitor_for_description`].
+pub fn encode_monitor_for_preview(
+    linear_rgb: [f32; 3],
+    monitoring: &ColorDescription,
+    preview: MonitorPreview,
+) -> Result<[u8; 3], ColorPipelineError> {
+    match preview {
+        MonitorPreview::Direct => encode_monitor_for_description(linear_rgb, monitoring),
+        MonitorPreview::Cc8ToneMappedHdr => {
+            encode_monitor_for_description(cc8_preview_tone_map_rgb(linear_rgb), monitoring)
+        }
+    }
+}
+
+/// The RGBA form of [`encode_monitor_for_preview`], used by the production
+/// compositor readback.
+///
+/// # Errors
+///
+/// Returns an error when the monitoring transfer is unknown or not the CC1
+/// BT.709 transfer, forwarded unchanged from
+/// [`encode_monitor_rgba8_for_description`].
+pub fn encode_monitor_rgba8_for_preview(
+    linear_rgba: [f32; 4],
+    monitoring: &ColorDescription,
+    preview: MonitorPreview,
+) -> Result<[u8; 4], ColorPipelineError> {
+    match preview {
+        MonitorPreview::Direct => encode_monitor_rgba8_for_description(linear_rgba, monitoring),
+        MonitorPreview::Cc8ToneMappedHdr => {
+            encode_monitor_rgba8_for_description(tone_map_preview_rgba(linear_rgba), monitoring)
+        }
     }
 }
 

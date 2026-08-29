@@ -47,6 +47,7 @@ pub use cc7_scenarios::{
     cc7_lut_backed_canonical_operations, cc7_spec, cc7_tracking_sample_frames,
 };
 pub use cc8_hdr::{
+    CC8_AUTHORED_DOMAIN_LIMITATION, CC8_AUTHORED_DOMAIN_LIMITATION_CODE,
     CC8_BT709_PRIMARIES_TEN_THOUSANDTHS, CC8_BT709_TO_REC2020, CC8_BT2020_CB_DENOMINATOR,
     CC8_BT2020_CR_DENOMINATOR, CC8_BT2020_KB, CC8_BT2020_KG, CC8_BT2020_KR, CC8_BT2020_LUMA_F32,
     CC8_D65_TEN_THOUSANDTHS, CC8_GATE_MEASUREMENT_STEP, CC8_GATES, CC8_HDR_DELIVERY_ALLOWED,
@@ -60,22 +61,26 @@ pub use cc8_hdr::{
     CC8_HLG_B, CC8_HLG_C, CC8_HLG_NOMINAL_PEAK_NITS, CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT,
     CC8_HLG_SCENE_BREAKPOINT, CC8_HLG_SIGNAL_BREAKPOINT, CC8_HLG_SYSTEM_GAMMA_THOUSANDTHS,
     CC8_PQ_C1, CC8_PQ_C2, CC8_PQ_C3, CC8_PQ_DELIVERY_RECOVERY_ACTION, CC8_PQ_M1, CC8_PQ_M2,
-    CC8_PQ_PEAK_NITS, CC8_REC2020_PRIMARIES_TEN_THOUSANDTHS, CC8_REC2020_TO_BT709,
-    CC8_REFERENCE_WHITE_NITS, CC8_REJECTED_HDR_ADJACENT, CC8_SDR_DELIVERY_X264_PARAMS,
-    CC8_SOURCE_PROFILES, Cc8ChromaticityTenThousandths, Cc8DeliveryLane, Cc8Gate, Cc8GateShape,
-    Cc8GateValue, Cc8RejectedHdrTuple, Cc8SourceProfile, cc8_apply_matrix, cc8_bt2020_luma,
-    cc8_hlg_decode_working_linear, cc8_hlg_encode_working_linear, cc8_hlg_inverse_oetf,
-    cc8_hlg_inverse_ootf, cc8_hlg_inverse_ootf_nominal, cc8_hlg_nominal_peak_nits, cc8_hlg_oetf,
-    cc8_hlg_ootf_nits, cc8_hlg_ootf_nits_nominal, cc8_hlg_system_gamma, cc8_is_hdr_source_pair,
+    CC8_PQ_PEAK_NITS, CC8_PREVIEW_BADGE, CC8_PREVIEW_DELIVERY_BOUNDARY, CC8_PREVIEW_LABEL,
+    CC8_PREVIEW_NOT_CALIBRATED_REASON, CC8_PREVIEW_PEAK_NITS, CC8_PREVIEW_STAGE,
+    CC8_QUALIFIER_LIMITATION, CC8_QUALIFIER_LIMITATION_CODE, CC8_REC2020_PRIMARIES_TEN_THOUSANDTHS,
+    CC8_REC2020_TO_BT709, CC8_REFERENCE_WHITE_NITS, CC8_REJECTED_HDR_ADJACENT,
+    CC8_SDR_DELIVERY_X264_PARAMS, CC8_SOURCE_PROFILES, Cc8ChromaticityTenThousandths,
+    Cc8DeliveryLane, Cc8Gate, Cc8GateShape, Cc8GateValue, Cc8RejectedHdrTuple, Cc8SourceProfile,
+    cc8_apply_matrix, cc8_bt2020_luma, cc8_hlg_decode_working_linear,
+    cc8_hlg_encode_working_linear, cc8_hlg_inverse_oetf, cc8_hlg_inverse_ootf,
+    cc8_hlg_inverse_ootf_nominal, cc8_hlg_nominal_peak_nits, cc8_hlg_oetf, cc8_hlg_ootf_nits,
+    cc8_hlg_ootf_nits_nominal, cc8_hlg_system_gamma, cc8_is_hdr_source_pair,
     cc8_nits_to_working_linear, cc8_pq_decode_working_linear, cc8_pq_encode_working_linear,
-    cc8_pq_eotf_nits, cc8_pq_inverse_eotf, cc8_sign, cc8_source_profile_by_id,
+    cc8_pq_eotf_nits, cc8_pq_inverse_eotf, cc8_preview_peak_working_linear, cc8_preview_tone_map,
+    cc8_preview_tone_map_rgb, cc8_sign, cc8_source_profile_by_id,
     cc8_source_profile_for_primaries_and_transfer, cc8_working_linear_to_nits,
 };
 pub use color::{
     COLOR_CONFIDENCE_MAX_BASIS_POINTS, ColorBitDepth, ColorContext, ColorDescription, ColorMatrix,
     ColorPipelineState, ColorPrimaries, ColorProvenance, ColorRange, ColorSourceError,
     ColorSourceProfile, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint,
-    classify_source, classify_source_with_assumption, color_description_is_cc8_hdr,
+    MonitorPreview, classify_source, classify_source_with_assumption, color_description_is_cc8_hdr,
 };
 pub use color_qc::{
     BT709_CB_DENOMINATOR, BT709_CR_DENOMINATOR, BT709_KB, BT709_KR, COLOR_QC_ENGINE,
@@ -128,7 +133,7 @@ pub use delivery::{
     delivery_color_for_depth, delivery_color_mismatch, delivery_color_mismatches,
     delivery_color_mismatches_for_lane, delivery_conformance, delivery_field_recovery_action,
     delivery_tag_check, document_for_delivery_profile, document_for_delivery_variant,
-    document_hdr_source_profile,
+    document_hdr_source_profile, document_monitor_preview, hdr_source_profile_for_description,
 };
 pub use editorial::ThreePointMode;
 pub use effect::{

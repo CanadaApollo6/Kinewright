@@ -8,8 +8,8 @@ use crate::{
     ClipContent, ColorBitDepth, ColorDescription, ColorMatrix, ColorPipelineState, ColorPrimaries,
     ColorProvenance, ColorRange, ColorSourceError, ColorSourceProfile,
     ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Document, Effect, EffectId,
-    ExportCancellation, ExportSettings, MediaAsset, MediaKind, OpError, ParamValue, QaIssue,
-    QaSeverity, TrackKind,
+    ExportCancellation, ExportSettings, MediaAsset, MediaKind, MonitorPreview, OpError, ParamValue,
+    QaIssue, QaSeverity, TrackKind,
     cc8_hdr::{
         CC8_HDR_DELIVERY_ALLOWED, CC8_HDR_DELIVERY_ALLOWED_PHRASES, CC8_HDR_DELIVERY_DEPTH_ALLOWED,
         CC8_HDR_DELIVERY_LANE, CC8_HDR_DELIVERY_MATRIX_ALLOWED, CC8_HDR_DELIVERY_PRIMARIES_ALLOWED,
@@ -555,19 +555,43 @@ pub fn document_hdr_source_profile(document: &Document) -> Option<ColorSourcePro
         .filter(|clip| matches!(clip.content, ClipContent::Media | ClipContent::Freeze(_)))
         .filter_map(|clip| document.asset(clip.asset))
         .filter(|asset| matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo))
-        .find_map(|asset| {
-            let profile = classify_source(&asset.color_description).or_else(|error| {
-                if matches!(error, ColorSourceError::UnknownWhitePoint) {
-                    classify_source_with_assumption(
-                        &asset.color_description,
-                        Some(ColorSourceProfileAssumption::D65),
-                    )
-                } else {
-                    Err(error)
-                }
-            });
-            profile.ok().filter(|profile| profile.is_hdr())
-        })
+        .find_map(|asset| hdr_source_profile_for_description(&asset.color_description))
+}
+
+/// The CC8 §2.1 HDR source profile one description carries, or `None`.
+///
+/// [`document_hdr_source_profile`]'s per-asset half, extracted so a surface
+/// asking about **one** source — CC8 §3.2 item 2's "whenever a qualifier node
+/// runs on an HDR-profile source" is asked of the clip the node is on, not of
+/// the timeline — classifies it in exactly the same order rather than in a
+/// second copy of it: first with no assumption, then under CC1's normative D65
+/// assumption for an unknown white point, and `None` for a tuple that does not
+/// classify at all.
+#[must_use]
+pub fn hdr_source_profile_for_description(
+    description: &ColorDescription,
+) -> Option<ColorSourceProfile> {
+    let profile = classify_source(description).or_else(|error| {
+        if matches!(error, ColorSourceError::UnknownWhitePoint) {
+            classify_source_with_assumption(description, Some(ColorSourceProfileAssumption::D65))
+        } else {
+            Err(error)
+        }
+    });
+    profile.ok().filter(|profile| profile.is_hdr())
+}
+
+/// The monitoring transform CC8 §4 selects for one document's preview.
+///
+/// One line, and one place: [`document_hdr_source_profile`] is the single
+/// classifier CC8 §6's QC surfaces already share, and §4's preview is the same
+/// question asked at the monitoring boundary instead of the QC one. Deriving it
+/// here rather than in the renderer is what keeps the viewer's label and the
+/// Colour QC window's HDR rows from disagreeing about the frame in front of
+/// them.
+#[must_use]
+pub fn document_monitor_preview(document: &Document) -> MonitorPreview {
+    MonitorPreview::for_source_profile(document_hdr_source_profile(document))
 }
 
 /// CC8 §7 item 2's blocking issue code.

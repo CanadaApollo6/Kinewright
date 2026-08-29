@@ -46,18 +46,23 @@
 //! [`CC8_HDR_DELIVERY_X264_PARAMS`], together with the per-field allowed-value
 //! phrases and recovery actions §5.3's typed rejection reports against.
 //!
+//! # What §10 step 8 added
+//!
+//! §10 step 8 ("preview and UI") landed §4's tone-mapping stage —
+//! [`CC8_PREVIEW_STAGE`], its one pinned parameter [`CC8_PREVIEW_PEAK_NITS`],
+//! the curve [`cc8_preview_tone_map`], and the labels every UI surface showing
+//! it reads ([`CC8_PREVIEW_LABEL`], [`CC8_PREVIEW_BADGE`]) — together with
+//! §3.2 items 1 and 2's two named node limitations,
+//! [`CC8_AUTHORED_DOMAIN_LIMITATION`] and [`CC8_QUALIFIER_LIMITATION`].
+//!
 //! # What §10 step 2 deliberately leaves to a later step
 //!
 //! §10 step 2 carries "transfer constants, matrices, the anchor, budgets".
-//! Two things that a reader might expect to find here are **not** here, each
-//! because the contract puts them in a later step:
+//! One thing a reader might expect to find here is **not** here, because the
+//! contract puts it in a later step:
 //!
 //! - **§2.4's mastering-display and `MaxCLL`/`MaxFALL` modelling** is probe and
 //!   QC work (§10 steps 3 and 7); this module pins no metadata shape.
-//! - **§4's tone-mapping parameters**, which §4 item 2 requires to be "pinned
-//!   integer constants in the authority module", are §10 step 8's. The stage
-//!   they parameterize does not exist yet, and a parameter for an absent stage
-//!   would be an invented number.
 //!
 //! # Why §9.2's table carries no numbers
 //!
@@ -1264,6 +1269,194 @@ pub const CC8_PQ_DELIVERY_RECOVERY_ACTION: &str = "CC8 §0.2 Q1 chose HLG (ARIB 
      arib_std_b67, or keep the PQ target and wait for the deferred PQ slice.";
 
 // ===========================================================================
+// CC8 §4: the labelled tone-mapped preview.
+// ===========================================================================
+
+/// CC8 §3.3's name for §4's monitoring stage.
+///
+/// §4 item 1: "The stage is named, ordered, and reported in the colour status
+/// like any other." §3.3 places it on the monitoring branch —
+/// "monitoring: tone-mapped preview (§4) on an SDR display" — immediately
+/// before "final clamp, quantization, and display/codec packing", which is why
+/// [`cc8_preview_tone_map`] does not clamp: the single display clamp
+/// `kinewright_media::color_pipeline::encode_monitor_rgb8` already performs
+/// stays the only one (CC1 §2.2 invariant 5).
+///
+/// The name says which curve it is, because §4 leaves the curve to the
+/// implementation and a reader of the colour status should not have to open the
+/// source to find out.
+pub const CC8_PREVIEW_STAGE: &str = "tone_map_preview_reinhard_extended";
+
+/// §4 item 2's pinned parameter, and the only one: the absolute luminance the
+/// preview maps to monitor white, in cd/m².
+///
+/// §4 item 2: "Its parameters are pinned integer constants in the authority
+/// module." This is that integer, and it is deliberately **not a new number** —
+/// it is [`CC8_HLG_NOMINAL_PEAK_NITS`], §2.2's own pinned HLG nominal peak, so
+/// the preview's white is the peak the delivery lane's system gamma is stated
+/// against rather than a level chosen for how it looks.
+/// `cc8_preview_peak_is_the_pinned_hlg_nominal_peak` asserts the two have not
+/// drifted apart.
+///
+/// §9.2's measured-tolerance rule does not reach it, for the reason §2.2 gives
+/// about [`CC8_REFERENCE_WHITE_NITS`]: it is a *standards* value carried from
+/// BT.2100's nominal HLG peak, not a measurement, and the numbers §9.2 governs
+/// are the tolerances §9.1 fixture 9 measures **about** this stage.
+pub const CC8_PREVIEW_PEAK_NITS: i32 = CC8_HLG_NOMINAL_PEAK_NITS;
+
+/// [`CC8_PREVIEW_PEAK_NITS`] in working-linear units: `1000 / 203 ≈ 4.926`.
+///
+/// The tone map's white point `W`, derived from the two pinned integers through
+/// §2.2's own [`cc8_nits_to_working_linear`] rather than written down a second
+/// time.
+#[must_use]
+pub fn cc8_preview_peak_working_linear() -> f32 {
+    cc8_nits_to_working_linear(cc8_as_f32(CC8_PREVIEW_PEAK_NITS))
+}
+
+/// CC8 §4's tone map: one working-linear channel to the Rec.709 monitoring
+/// description's linear domain, **extended Reinhard** at
+/// [`cc8_preview_peak_working_linear`].
+///
+/// ```text
+/// W        = CC8_PREVIEW_PEAK_NITS / CC8_REFERENCE_WHITE_NITS
+/// f(x)     = sgn(x) · |x| · (1 + |x| / W²) / (1 + |x|)
+/// ```
+///
+/// # Why this curve
+///
+/// §4 fixes the *properties* and leaves the curve to the implementation, and
+/// §4 item 4 names the properties its fixtures assert: "determinism,
+/// monotonicity, endpoint behaviour, and CPU/GPU parity — properties, not
+/// aesthetics". Extended Reinhard is the shape that has all of them with
+/// **one** parameter, and that parameter is already pinned by §2.2:
+///
+/// 1. **Determinism.** Four multiplications, two additions and one division on
+///    `f32`, all IEEE 754 exact operations — no `powf`, no `exp`, no `ln` — so
+///    the value is bit-identical on both CI operating systems and needs no libm
+///    allowance of the kind [`cc8_pq_eotf_nits`] carries.
+/// 2. **Monotonicity**, everywhere rather than on an interval:
+///    `f'(x) = (1 + (2x + x²)/W²) / (1 + x)²`, which is strictly positive for
+///    every `x ≥ 0`, and the odd extension through `f(0) = 0` carries that to
+///    the whole real line. Out-of-Rec.709 negatives (§2.3) therefore keep their
+///    order as well as their sign.
+/// 3. **Endpoint behaviour**, exactly: `f(0) = 0`, and `f(W) = 1` analytically
+///    — `W(1 + 1/W)/(1 + W) = 1` — so the pinned peak lands on monitor white by
+///    construction rather than by a fitted constant. Above `W` the curve keeps
+///    rising past 1.0 and the existing display clamp takes it; nothing new
+///    clamps, and no value is ever brightened, because `f(x)/x < 1` for every
+///    `x > 0` whenever `W > 1`.
+/// 4. **No rendering intent.** It is applied **per channel**, not as a
+///    luminance-preserving scale. A hue-preserving variant is a creative
+///    decision with a rendering intent, which is exactly what §0.2 Q6 refuses
+///    to ship and what §11 defers; a preview that made one would be claiming to
+///    be the tone-mapped delivery CC8 does not have.
+///
+/// This is a **preview** transform. §4 item 5: "It must not be reachable from
+/// the delivery path", and nothing in `delivery.rs`,
+/// `color_qc::encode_delivery_for_lane`, or
+/// `kinewright_media::color_pipeline::encode_delivery_for_description` calls
+/// it. §9.1 fixture 9 asserts that failing direction.
+#[must_use]
+pub fn cc8_preview_tone_map(working_linear: f32) -> f32 {
+    let magnitude = working_linear.abs();
+    let peak = cc8_preview_peak_working_linear();
+    let mapped = magnitude * (1.0 + magnitude / (peak * peak)) / (1.0 + magnitude);
+    cc8_sign(working_linear) * mapped
+}
+
+/// [`cc8_preview_tone_map`] per channel, which is how §4's stage is applied.
+#[must_use]
+pub fn cc8_preview_tone_map_rgb(working_linear_rgb: [f32; 3]) -> [f32; 3] {
+    working_linear_rgb.map(cc8_preview_tone_map)
+}
+
+/// §4 item 3's short label, for a surface with room for a few words.
+///
+/// §4 item 3: "Every UI surface showing it is labelled as a non-calibrated
+/// preview of HDR content. The specific wording is an implementation decision;
+/// the requirement that it exist is not." Both this and
+/// [`CC8_PREVIEW_LABEL`] are pinned here so that every surface reads **one**
+/// wording — the same reason §5.3's allowed-value phrases are pinned — and so
+/// that a fixture can assert the label is present rather than assert a string a
+/// surface happens to hold.
+pub const CC8_PREVIEW_BADGE: &str = "TONE-MAPPED PREVIEW · NOT A REFERENCE";
+
+/// §4 item 3's full label: what the preview is, and the three things it is not.
+///
+/// §0.2 Q4 decided "a named, explicitly-labelled tone-mapped preview that is
+/// not a monitoring reference and carries no exit gate", and §4 opens "CC8
+/// provides **no calibrated HDR monitoring path** and must not imply one", so
+/// the wording says all of it: not calibrated, not a reference, and not a
+/// deliverable. §4's closing paragraph is here too — on an HDR-capable display
+/// this is still the preview, because CC8 has "no display-capability query, no
+/// HDR swapchain, and no metadata handoff to the compositor".
+pub const CC8_PREVIEW_LABEL: &str = "This picture is a tone-mapped SDR approximation of HDR content, not a monitoring \
+     reference. It is not calibrated, it is not what the HDR deliverable looks like, and no \
+     Kinewright check is a judgment about how it looks. Calibrated HDR monitoring is a separate \
+     later programme: CC8 makes no display-capability query and no HDR handoff, so this preview \
+     is what an HDR-capable display gets too.";
+
+/// The colour-status reason for `monitoring.calibrated_hdr = false` (§4).
+pub const CC8_PREVIEW_NOT_CALIBRATED_REASON: &str = "CC8 §4: no calibrated HDR monitoring path, in any form or claim. What the monitoring \
+     branch runs on an HDR-profile source is §4's labelled tone-mapped preview, which carries no \
+     CC8 exit gate.";
+
+/// §4 item 5's boundary, as one phrase the colour status prints.
+pub const CC8_PREVIEW_DELIVERY_BOUNDARY: &str = "Preview only. CC8 §4 item 5: the tone map must not be reachable from the delivery path, \
+     and §0.2 Q6 refuses tone-mapped SDR delivery from an HDR timeline as a deliverable.";
+
+// ---------------------------------------------------------------------------
+// CC8 §3.2 items 1 and 2: the two named node limitations, surfaced at the node.
+// ---------------------------------------------------------------------------
+
+/// The stable code for §3.2 item 1's condition on curve and wheel nodes.
+pub const CC8_AUTHORED_DOMAIN_LIMITATION_CODE: &str = "cc8_node_input_exceeds_authored_domain";
+
+/// §3.2 item 1's named limitation, for the node that has it.
+///
+/// §3.2 item 1 requires "the colour status to report when a node's input
+/// exceeds its authored domain, so an editor is told rather than surprised",
+/// and §8 puts the same fact on the node: "The inspector reports §3.2's
+/// out-of-authored-domain condition on curve and wheel nodes". §12's mitigation
+/// is why it is at the node and not in a file: "both limitations are surfaced
+/// in the UI at the node that has them, not documented in a file nobody opens."
+///
+/// **What triggers it, stated plainly.** The trigger is the *source profile*,
+/// not a measured per-node input maximum. On either §2.1 profile the decoded
+/// working domain provably exceeds the authored one — §2.2's anchor puts the
+/// HLG nominal peak at [`cc8_preview_peak_working_linear`], `≈ 4.93`, which is
+/// `grade709 ≈ 2.03` and so ≈ 20 300 basis points against
+/// [`COLOR_CURVE_WHITE_BASIS_POINTS`](crate::effect::COLOR_CURVE_WHITE_BASIS_POINTS)'s
+/// 10 000 — so the condition is a property of the profile that the node is
+/// reading. A *measured* per-node input maximum would need a per-node proof
+/// render this build does not have, and inventing one would be worse than
+/// naming the profile; that measurement is left to the CC3 amendment §11 already
+/// defers ("HDR-aware curve and wheel authoring domains").
+pub const CC8_AUTHORED_DOMAIN_LIMITATION: &str = "CC8 §3.2 item 1 — this node is authored on an SDR-shaped domain. Curve and wheel \
+     controls are parameterized in basis points of the grade709 range where 10 000 bp is diffuse \
+     white; an HDR source decodes far above it (the HLG nominal peak is grade709 ~2.03, about \
+     20 300 bp), and the CC4 lattice's add-back rule shifts such a value rather than shaping it. \
+     That is the existing behaviour and CC8 does not change it; widening the authored domain is a \
+     CC3 amendment with its own parity gate (§11).";
+
+/// The stable code for §3.2 item 2's qualifier limitation on matte nodes.
+pub const CC8_QUALIFIER_LIMITATION_CODE: &str = "cc8_hsl_qualifier_domain_clamped";
+
+/// §3.2 item 2's named limitation, for matte inspection.
+///
+/// §3.2 item 2 is the one CC8 marks **must**: the qualifier collapse "**must**
+/// be surfaced as a named limitation in matte inspection whenever a qualifier
+/// node runs on an HDR-profile source, so the matte's behaviour is explained
+/// rather than merely observed." §12 names it as the limitation most likely to
+/// read as a bug.
+pub const CC8_QUALIFIER_LIMITATION: &str = "CC8 §3.2 item 2 — the HSL qualifier is genuinely limited on HDR. It clamps grade709 to \
+     [0, 1] before deriving hue, saturation and luma, so every value above diffuse white produces \
+     the same selector and a specular highlight cannot be qualified apart from a mid-tone. CC8 \
+     does not fix this: an HDR-aware qualifier domain needs its own parity gate and its own \
+     measured band constants, and §11 defers it.";
+
+// ===========================================================================
 // CC8 §9.2: the gate table, with its measurements deliberately absent.
 // ===========================================================================
 
@@ -1406,6 +1599,17 @@ mod tests {
     /// ≈ `46 · 2^-24 ≈ 2^-19`, doubled once for `powf`/`exp`/`ln` accuracy
     /// Rust does not specify. Observed worst is ≈ `2^-20.3`.
     const HLG_ROUND_TRIP_RELATIVE_BOUND: f32 = 1.0 / 262_144.0;
+
+    /// The absolute bound on `f(W) = 1` for CC8 §4's preview curve,
+    /// `8 · f32::EPSILON`.
+    ///
+    /// Derived, not chosen: the composition is four multiplications, two
+    /// additions and one division, each at most `2^-24` relative, on values of
+    /// magnitude at most `1 + W ≈ 5.93`, so the accumulated relative error is
+    /// at most `7 · 2^-24 ≈ 4.2e-7`. Rounded up to the next power of two,
+    /// `8 · f32::EPSILON`. There is no `powf` in this curve, so no libm
+    /// allowance is taken. Observed residual is 0.
+    const PREVIEW_ENDPOINT_BOUND: f32 = 8.0 * f32::EPSILON;
 
     /// The absolute bound on the 3×3 identity residual, `4 · f32::EPSILON`.
     ///
@@ -2279,5 +2483,138 @@ mod tests {
         assert!(CC8_PQ_DELIVERY_RECOVERY_ACTION.contains("No PQ-to-HLG conversion exists"));
         assert!(CC8_HDR_DELIVERY_RECOVERY_ACTION.contains("HDR-from-SDR"));
         assert!(CC8_HDR_DELIVERY_RECOVERY_ACTION.contains("second lane is a slice, not a flag"));
+    }
+
+    // -----------------------------------------------------------------------
+    // CC8 §4: the preview tone map's four properties.
+    // -----------------------------------------------------------------------
+
+    /// §4 item 2's parameter is §2.2's pinned HLG nominal peak, not a second
+    /// number that happens to equal it today.
+    ///
+    /// The equalities here are **exact-representation claims**, not tolerance
+    /// comparisons: the peak is one division of two integers, so the two sides
+    /// are the same arithmetic and must be the same `f32`.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn cc8_preview_peak_is_the_pinned_hlg_nominal_peak() {
+        assert_eq!(CC8_PREVIEW_PEAK_NITS, CC8_HLG_NOMINAL_PEAK_NITS);
+        assert_eq!(
+            cc8_preview_peak_working_linear(),
+            cc8_nits_to_working_linear(cc8_as_f32(CC8_HLG_NOMINAL_PEAK_NITS)),
+        );
+        // The curve only compresses when the peak is above diffuse white, and
+        // `f(W) = 1` only anchors monitor white there for the same reason.
+        assert!(cc8_preview_peak_working_linear() > 1.0);
+    }
+
+    /// §4 item 4's endpoint clause: `f(0) = 0` exactly, `f(W) = 1` to the
+    /// arithmetic's own precision, and `f` never brightens.
+    ///
+    /// `f(0) = 0` is asserted exactly and deliberately — it is what the
+    /// `sgn(0) = 0` convention buys, and an approximate zero there would be a
+    /// different function. `f(W) = 1` carries the derived bound below instead.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn cc8_preview_tone_map_holds_its_endpoints() {
+        assert_eq!(cc8_preview_tone_map(0.0), 0.0);
+        assert_eq!(cc8_preview_tone_map(-0.0), 0.0);
+
+        let peak = cc8_preview_peak_working_linear();
+        assert!(
+            (cc8_preview_tone_map(peak) - 1.0).abs() <= PREVIEW_ENDPOINT_BOUND,
+            "f(W) = {} is not 1.0 within {PREVIEW_ENDPOINT_BOUND:e}",
+            cc8_preview_tone_map(peak),
+        );
+
+        // No value is ever brightened, so nothing legal becomes clipped by the
+        // preview that was not clipped without it.
+        for step in 1..=2_000_u32 {
+            let value = cc8_as_f32(i32::try_from(step).unwrap()) / 100.0;
+            assert!(
+                cc8_preview_tone_map(value) < value,
+                "the tone map brightened {value}",
+            );
+        }
+    }
+
+    /// §4 item 4's monotonicity clause, over the whole real line the working
+    /// space can carry — including the out-of-Rec.709 negatives §2.3 produces.
+    ///
+    /// The odd-extension equality is exact by construction — the negative arm
+    /// is the positive arm's value with its sign flipped — so it is asserted
+    /// exactly rather than within a tolerance that would hide a second
+    /// definition.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn cc8_preview_tone_map_is_strictly_increasing_and_sign_preserving() {
+        let mut previous = f32::NEG_INFINITY;
+        for step in -6_000..=6_000_i32 {
+            let value = cc8_as_f32(step) / 100.0;
+            let mapped = cc8_preview_tone_map(value);
+            assert!(
+                mapped > previous,
+                "the tone map fell at {value}: {previous} then {mapped}",
+            );
+            assert!(mapped.is_finite(), "non-finite tone map at {value}");
+            assert_eq!(
+                mapped.is_sign_negative() && mapped != 0.0,
+                value < 0.0,
+                "the tone map did not preserve the sign at {value}",
+            );
+            // The odd extension is exact, not approximate.
+            assert_eq!(cc8_preview_tone_map(-value), -mapped);
+            previous = mapped;
+        }
+    }
+
+    /// §4 item 4's determinism clause at the arithmetic's own level: the curve
+    /// uses only IEEE 754 exact operations, so repeated evaluation is bitwise
+    /// identical and the RGB form is the scalar form per channel.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn cc8_preview_tone_map_is_bitwise_deterministic_and_per_channel() {
+        for step in -600..=6_000_i32 {
+            let value = cc8_as_f32(step) / 100.0;
+            assert_eq!(
+                cc8_preview_tone_map(value).to_bits(),
+                cc8_preview_tone_map(value).to_bits(),
+            );
+        }
+        let triple = [-0.25_f32, 1.0, 4.5];
+        assert_eq!(
+            cc8_preview_tone_map_rgb(triple),
+            triple.map(cc8_preview_tone_map),
+        );
+    }
+
+    /// §4 item 3's labels exist, name what the preview is not, and are distinct
+    /// from each other; §3.2's two limitations name their own contract clauses.
+    #[test]
+    fn cc8_preview_and_node_limitation_prose_names_its_own_clauses() {
+        assert!(CC8_PREVIEW_BADGE.contains("NOT A REFERENCE"));
+        assert!(CC8_PREVIEW_LABEL.contains("not a monitoring"));
+        assert!(CC8_PREVIEW_LABEL.contains("not calibrated"));
+        assert_ne!(CC8_PREVIEW_BADGE, CC8_PREVIEW_LABEL);
+        assert!(CC8_PREVIEW_NOT_CALIBRATED_REASON.contains("§4"));
+        assert!(CC8_PREVIEW_DELIVERY_BOUNDARY.contains("§4 item 5"));
+        assert!(CC8_PREVIEW_STAGE.starts_with("tone_map_preview"));
+
+        assert!(CC8_AUTHORED_DOMAIN_LIMITATION.contains("§3.2 item 1"));
+        // The prose's authored-domain figure is CC3's own constant, so a CC3
+        // amendment that widened the domain would leave this sentence wrong and
+        // this assertion red.
+        assert!(
+            CC8_AUTHORED_DOMAIN_LIMITATION.contains("10 000 bp"),
+            "the limitation must state CC3's authored-domain top, {}",
+            crate::effect::COLOR_CURVE_WHITE_BASIS_POINTS,
+        );
+        assert_eq!(crate::effect::COLOR_CURVE_WHITE_BASIS_POINTS, 10_000);
+        assert!(CC8_QUALIFIER_LIMITATION.contains("§3.2 item 2"));
+        assert!(CC8_QUALIFIER_LIMITATION.contains("same selector"));
+        assert_ne!(
+            CC8_AUTHORED_DOMAIN_LIMITATION_CODE,
+            CC8_QUALIFIER_LIMITATION_CODE
+        );
     }
 }

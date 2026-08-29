@@ -7,21 +7,25 @@ use std::{
 };
 
 use kinewright_core::{
-    AssetId, CC8_HDR_DEPTH_ALLOWED, CC8_HDR_MATRIX_ALLOWED, CC8_HDR_PRIMARIES_ALLOWED,
+    AssetId, CC8_AUTHORED_DOMAIN_LIMITATION, CC8_AUTHORED_DOMAIN_LIMITATION_CODE,
+    CC8_HDR_DEPTH_ALLOWED, CC8_HDR_MATRIX_ALLOWED, CC8_HDR_PRIMARIES_ALLOWED,
     CC8_HDR_RANGE_ALLOWED, CC8_HDR_WHITE_POINT_ALLOWED, CC8_HLG_NOMINAL_PEAK_NITS,
     CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT, CC8_HLG_SYSTEM_GAMMA_THOUSANDTHS, CC8_PQ_PEAK_NITS,
-    CC8_REFERENCE_WHITE_NITS, COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN,
-    COLOR_CURVE_MAX_POINTS, COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS,
-    COLOR_NODE_BYPASS_PARAMETER, COLOR_NODE_LIMIT_PER_LAYER, Clip, ClipContent, ClipId,
-    ColorCurveChannel, ColorDescription, ColorNodeInactiveReason, ColorNodeKind, ColorSourceError,
-    ColorSourceProfile, ColorSourceProfileAssumption, ColorStage, ColorWheelChannel,
-    ColorWheelControl, ColorWheelsParams, ColorWhitePoint, CurvePoints, Document, Effect,
-    EffectCompatibilityStage, EffectId, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER,
-    LUT_MIX_BASIS_POINTS_MAX, LUT_MIX_PARAMETER, LUT_NODE_LIMIT_PER_LAYER, LutAsset, LutAssetId,
-    LutAssetSource, LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams,
-    MANAGED_COLOR_NODE_NAMES, MATTE_MIX_BASIS_POINTS_MAX, MATTE_WINDOW_LIMIT, MatteParams,
-    MatteWindowParams, MediaAvailabilityStatus, MediaError, MediaKind, Operation, ParamValue,
-    ResolvedCurves, TimeCode, TimelineRevision, TrackKind, apply_batch, classify_color_node,
+    CC8_PREVIEW_BADGE, CC8_PREVIEW_DELIVERY_BOUNDARY, CC8_PREVIEW_LABEL,
+    CC8_PREVIEW_NOT_CALIBRATED_REASON, CC8_PREVIEW_PEAK_NITS, CC8_PREVIEW_STAGE,
+    CC8_QUALIFIER_LIMITATION, CC8_QUALIFIER_LIMITATION_CODE, CC8_REFERENCE_WHITE_NITS,
+    COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN, COLOR_CURVE_MAX_POINTS,
+    COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS, COLOR_NODE_BYPASS_PARAMETER,
+    COLOR_NODE_LIMIT_PER_LAYER, Clip, ClipContent, ClipId, ColorCurveChannel, ColorDescription,
+    ColorNodeInactiveReason, ColorNodeKind, ColorSourceError, ColorSourceProfile,
+    ColorSourceProfileAssumption, ColorStage, ColorWheelChannel, ColorWheelControl,
+    ColorWheelsParams, ColorWhitePoint, CurvePoints, Document, Effect, EffectCompatibilityStage,
+    EffectId, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER, LUT_MIX_BASIS_POINTS_MAX,
+    LUT_MIX_PARAMETER, LUT_NODE_LIMIT_PER_LAYER, LutAsset, LutAssetId, LutAssetSource,
+    LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams, MANAGED_COLOR_NODE_NAMES,
+    MATTE_MIX_BASIS_POINTS_MAX, MATTE_WINDOW_LIMIT, MatteParams, MatteWindowParams,
+    MediaAvailabilityStatus, MediaError, MediaKind, Operation, ParamValue, ResolvedCurves,
+    TimeCode, TimelineRevision, TrackKind, apply_batch, classify_color_node,
     classify_source_with_assumption, effect_compatibility_stage, effect_descriptor, lut_node_count,
     lut_node_may_be_active, managed_color_node_count,
 };
@@ -1285,7 +1289,9 @@ pub(crate) fn legacy_stage_warnings(clip: &Clip) -> Vec<Value> {
 /// in the colour status and proof"). `managed_decode` states plainly which of
 /// them the executed path can run today; §10 step 4 made that answer `true` by
 /// landing the primaries conversion and the BT.2020 NCL source matrix decode,
-/// and §10 step 8 adds §4's preview rows.
+/// and §10 step 8 appended §3.3's monitoring-branch stage,
+/// [`CC8_PREVIEW_STAGE`], with §4's parameters and label under `monitoring`
+/// and §3.2's two named node limitations under `node_limitations`.
 ///
 /// `managed_decode.available` is about the **frame decode**, not about export.
 /// An HDR source still blocks managed export under `HDR_SOURCE_ON_SDR_DELIVERY`
@@ -1332,6 +1338,12 @@ fn hdr_interpretation(profile: ColorSourceProfile) -> Value {
     }
     stages.push("reference_white_normalization");
     stages.push("primaries_conversion_rec2020_to_bt709");
+    // §3.3's monitoring branch, the last stage before the display packing:
+    // "monitoring: tone-mapped preview (§4) on an SDR display". §4 item 1
+    // requires it "named, ordered, and reported in the colour status like any
+    // other", so it is appended to the same ordered list rather than living
+    // only in the `preview` object below.
+    stages.push(CC8_PREVIEW_STAGE);
     json!({
         "profile": row.id,
         "anchor": anchor,
@@ -1353,9 +1365,43 @@ fn hdr_interpretation(profile: ColorSourceProfile) -> Value {
         },
         "monitoring": {
             "calibrated_hdr": false,
-            "reason": "CC8 §4: no calibrated HDR monitoring path, in any form or claim. \
-                       The labelled tone-mapped preview is §10 step 8.",
+            "reason": CC8_PREVIEW_NOT_CALIBRATED_REASON,
+            // §4: "Its parameters are pinned integer constants in the
+            // authority module" — so they are read from `cc8_hdr` here, never
+            // restated, exactly as the anchor above is. §4 item 3's label is
+            // pinned there too, so this row and every UI surface carry one
+            // wording.
+            "preview": {
+                "stage": CC8_PREVIEW_STAGE,
+                "parameters": {
+                    "peak_nits": CC8_PREVIEW_PEAK_NITS,
+                    "reference_white_nits": CC8_REFERENCE_WHITE_NITS,
+                },
+                "badge": CC8_PREVIEW_BADGE,
+                "label": CC8_PREVIEW_LABEL,
+                "calibrated": false,
+                "reachable_from_delivery": false,
+                "delivery_boundary": CC8_PREVIEW_DELIVERY_BOUNDARY,
+            },
         },
+        // §3.2 items 1 and 2, which §8 puts on the inspector and §3.2 item 1
+        // also puts here ("CC8 ... **does** require the colour status to report
+        // when a node's input exceeds its authored domain"). The trigger is the
+        // profile, and each row says so rather than implying a per-node
+        // measurement this build does not take — see
+        // `CC8_AUTHORED_DOMAIN_LIMITATION`'s own doc comment.
+        "node_limitations": [
+            {
+                "code": CC8_AUTHORED_DOMAIN_LIMITATION_CODE,
+                "nodes": ["color_curves", "color_wheels"],
+                "limitation": CC8_AUTHORED_DOMAIN_LIMITATION,
+            },
+            {
+                "code": CC8_QUALIFIER_LIMITATION_CODE,
+                "nodes": MATTE_CAPABLE_NODE_NAMES,
+                "limitation": CC8_QUALIFIER_LIMITATION,
+            },
+        ],
     })
 }
 
@@ -5778,6 +5824,7 @@ mod tests {
     /// CC8 §2.2: "that number **must** be stated, pinned as an integer constant
     /// in the authority module, and **inspectable in the colour status**."
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn status_reports_the_cc8_hdr_profile_its_anchor_and_its_named_stages() {
         let mut document = document();
         document.media_pool[0].color_description = ColorDescription {
@@ -5832,10 +5879,51 @@ mod tests {
                 "hlg_ootf_nominal",
                 "reference_white_normalization",
                 "primaries_conversion_rec2020_to_bt709",
+                CC8_PREVIEW_STAGE,
             ]
         );
         // §4: no calibrated monitoring claim, anywhere, in any form.
         assert_eq!(hdr["monitoring"]["calibrated_hdr"], false);
+        // §10 step 8, §4 items 1-3 and 5: the stage is named and ordered above,
+        // its one pinned parameter is reported from the authority module, the
+        // label exists, and the row says the preview is not reachable from the
+        // delivery path.
+        let preview = &hdr["monitoring"]["preview"];
+        assert_eq!(preview["stage"], CC8_PREVIEW_STAGE);
+        assert_eq!(preview["parameters"]["peak_nits"], CC8_PREVIEW_PEAK_NITS);
+        assert_eq!(
+            preview["parameters"]["reference_white_nits"],
+            CC8_REFERENCE_WHITE_NITS
+        );
+        assert_eq!(preview["badge"], CC8_PREVIEW_BADGE);
+        assert_eq!(preview["label"], CC8_PREVIEW_LABEL);
+        assert_eq!(preview["calibrated"], false);
+        assert_eq!(preview["reachable_from_delivery"], false);
+        // §3.2 items 1 and 2, reported per node kind. §8 puts the same two on
+        // the inspector; this is the agent's half of the pair.
+        let limitations = hdr["node_limitations"]
+            .as_array()
+            .expect("node_limitations is a list");
+        let codes: Vec<&str> = limitations
+            .iter()
+            .map(|row| row["code"].as_str().expect("a limitation code"))
+            .collect();
+        assert_eq!(
+            codes,
+            vec![
+                CC8_AUTHORED_DOMAIN_LIMITATION_CODE,
+                CC8_QUALIFIER_LIMITATION_CODE
+            ],
+        );
+        assert_eq!(limitations[0]["limitation"], CC8_AUTHORED_DOMAIN_LIMITATION);
+        assert_eq!(limitations[1]["limitation"], CC8_QUALIFIER_LIMITATION);
+        assert!(
+            limitations[0]["nodes"]
+                .as_array()
+                .expect("a node list")
+                .iter()
+                .any(|node| node == "color_curves"),
+        );
         // CC8 §10 step 4: the row now says the executed path runs every stage
         // listed above, because it does. The reason names the step that made it
         // true and the export block that is still §10 step 6's, so a reader

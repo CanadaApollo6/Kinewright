@@ -1807,6 +1807,7 @@ fn lut_node_section(
         // CC5 §2.1: a technical input transform normalizes the whole source,
         // so it carries no matte and gets no section.
         if kind == ColorNodeKind::CreativeLook {
+            cc8_node_limitation_lines(ui, clip, kind, looks);
             matte_section(ui, clip, effect, pending);
         }
     });
@@ -2203,6 +2204,7 @@ fn primary_correction_section(
             });
         }
         color_node_clipping_line(ui, clip, effect, looks);
+        cc8_node_limitation_lines(ui, clip, ColorNodeKind::Primary, looks);
         matte_section(ui, clip, effect, pending);
     });
 }
@@ -3193,6 +3195,7 @@ fn color_wheels_section(
             .filter(|name| !is_matte_parameter(name))
             .collect();
         color_node_keyframe_rows(ui, clip.id, effect, &names, pending);
+        cc8_node_limitation_lines(ui, clip, ColorNodeKind::Wheels, looks);
         matte_section(ui, clip, effect, pending);
     });
 }
@@ -3346,6 +3349,7 @@ fn color_curves_section(
         );
 
         color_curve_keyframe_rows(ui, clip.id, effect, pending);
+        cc8_node_limitation_lines(ui, clip, ColorNodeKind::Curves, looks);
         matte_section(ui, clip, effect, pending);
     });
 }
@@ -3802,6 +3806,112 @@ fn color_node_clipping_line(
              not a live reading.",
             );
     }
+}
+
+/// CC8 §3.2's named node limitations, at the node that has them (§8, §12).
+///
+/// §12's mitigation for "HDR content will make the existing SDR-shaped nodes
+/// look broken" is that "both limitations are surfaced in the UI at the node
+/// that has them, not documented in a file nobody opens", and §8 assigns them
+/// to the inspector: "The inspector reports §3.2's out-of-authored-domain
+/// condition on curve and wheel nodes, and the qualifier limitation on matte
+/// nodes."
+///
+/// Two rules govern what is printed:
+///
+/// * **The trigger is the clip's own source**, classified by core's
+///   `hdr_source_profile_for_description` — the per-asset half of the
+///   classifier the QC surfaces and the preview share — so a node on an SDR
+///   clip in a mixed timeline carries no limitation it does not have. §3.2 item
+///   2 says exactly this: "whenever a qualifier node runs on an **HDR-profile
+///   source**".
+/// * **Which limitation** follows §8's own split. The authored-domain
+///   condition is a curve and wheel property, because CC3 parameterizes those
+///   two in basis points of the `grade709` range; the qualifier limitation
+///   belongs to every node that renders a matte section, which is CC5 §2.1's
+///   matte-capable set.
+///
+/// The prose is the authority module's, so this line, the agent's
+/// `hdr_interpretation.node_limitations` rows, and any later surface say the
+/// same thing.
+fn cc8_node_limitation_lines(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    kind: ColorNodeKind,
+    looks: &LookInspectorContext<'_>,
+) {
+    for line in cc8_node_limitations(looks.document, clip, kind) {
+        ui.add(
+            egui::Label::new(egui::RichText::new(line.badge).color(color::STATUS_WARNING)).wrap(),
+        )
+        .on_hover_text(line.limitation);
+    }
+}
+
+/// One CC8 §3.2 limitation as the inspector prints it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Cc8NodeLimitation {
+    /// The stable code the agent's `node_limitations` rows carry, so the two
+    /// surfaces name the same limitation.
+    pub(crate) code: &'static str,
+    /// The short line shown at the node, naming the profile that triggered it.
+    pub(crate) badge: String,
+    /// The authority module's full prose, shown on hover.
+    pub(crate) limitation: &'static str,
+}
+
+/// Which CC8 §3.2 limitations one node on one clip carries, in §3.2's order.
+///
+/// A pure function of the document, the clip, and the node kind, so the
+/// decision is testable without a window — the shape every other inspector
+/// decision in this file takes.
+#[must_use]
+pub(crate) fn cc8_node_limitations(
+    document: &Document,
+    clip: &Clip,
+    kind: ColorNodeKind,
+) -> Vec<Cc8NodeLimitation> {
+    let Some(profile) = clip_hdr_source_profile(document, clip) else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    // §3.2 item 1, and §8's own split: "the out-of-authored-domain condition on
+    // curve and wheel nodes".
+    if matches!(kind, ColorNodeKind::Curves | ColorNodeKind::Wheels) {
+        lines.push(Cc8NodeLimitation {
+            code: kinewright_core::CC8_AUTHORED_DOMAIN_LIMITATION_CODE,
+            badge: format!("SDR-shaped authored domain ({})", profile.id()),
+            limitation: kinewright_core::CC8_AUTHORED_DOMAIN_LIMITATION,
+        });
+    }
+    // §3.2 item 2, "the qualifier limitation on matte nodes" — every node this
+    // function is called for renders a matte section (CC5 §2.1's
+    // matte-capable set), which is where §3.2 item 2 requires it.
+    lines.push(Cc8NodeLimitation {
+        code: kinewright_core::CC8_QUALIFIER_LIMITATION_CODE,
+        badge: format!("HSL qualifier limited on HDR ({})", profile.id()),
+        limitation: kinewright_core::CC8_QUALIFIER_LIMITATION,
+    });
+    lines
+}
+
+/// The CC8 §2.1 HDR profile the clip's own source carries, or `None`.
+///
+/// A title or a gap has no media source, so it has neither limitation; a clip
+/// whose asset is gone is treated the same way, because a limitation about a
+/// source nobody can name is not evidence.
+fn clip_hdr_source_profile(
+    document: &Document,
+    clip: &Clip,
+) -> Option<kinewright_core::ColorSourceProfile> {
+    if !matches!(
+        clip.content,
+        kinewright_core::ClipContent::Media | kinewright_core::ClipContent::Freeze(_)
+    ) {
+        return None;
+    }
+    let asset = document.asset(clip.asset)?;
+    kinewright_core::hdr_source_profile_for_description(&asset.color_description)
 }
 
 /// The stored `bypass` token of a colour node.
@@ -5671,6 +5781,92 @@ mod tests {
         document.tracks[0].clips[0].effects = effects;
         document.lut_assets = assets;
         document
+    }
+
+    /// CC8 §3.2 items 1 and 2, §8, §12: the two limitations are surfaced at
+    /// the node that has them, only on an HDR-profile source, and split the way
+    /// §8 splits them.
+    #[test]
+    fn cc8_node_limitations_appear_only_on_an_hdr_source_and_only_where_section_3_2_puts_them() {
+        let mut document = look_document(
+            vec![
+                colour_effect(1, "color_curves"),
+                colour_effect(2, "color_wheels"),
+                colour_effect(3, "primary_correction"),
+            ],
+            Vec::new(),
+        );
+        let clip = document.tracks[0].clips[0].clone();
+
+        // An SDR clip carries neither limitation, on any node: a node must not
+        // acquire a caveat for a condition it does not have.
+        for kind in [
+            ColorNodeKind::Curves,
+            ColorNodeKind::Wheels,
+            ColorNodeKind::Primary,
+            ColorNodeKind::CreativeLook,
+        ] {
+            assert!(
+                cc8_node_limitations(&document, &clip, kind).is_empty(),
+                "an SDR source must carry no CC8 §3.2 limitation on {kind:?}",
+            );
+        }
+
+        // The same clip on CC8 §2.1's `hlg_rec2020` profile.
+        document.media_pool[0].color_description = kinewright_core::ColorDescription {
+            primaries: kinewright_core::ColorPrimaries::Bt2020,
+            transfer: kinewright_core::ColorTransfer::AribStdB67,
+            matrix: kinewright_core::ColorMatrix::Bt2020Ncl,
+            range: kinewright_core::ColorRange::Limited,
+            white_point: kinewright_core::ColorWhitePoint::D65,
+            bit_depth: kinewright_core::ColorBitDepth::Ten,
+            confidence_basis_points: 10_000,
+            provenance: kinewright_core::ColorProvenance::StreamMetadata,
+        };
+
+        // §8: the authored-domain condition is on curve and wheel nodes, and
+        // the qualifier limitation is on every matte node.
+        for kind in [ColorNodeKind::Curves, ColorNodeKind::Wheels] {
+            let lines = cc8_node_limitations(&document, &clip, kind);
+            let codes: Vec<&str> = lines.iter().map(|line| line.code).collect();
+            assert_eq!(
+                codes,
+                vec![
+                    kinewright_core::CC8_AUTHORED_DOMAIN_LIMITATION_CODE,
+                    kinewright_core::CC8_QUALIFIER_LIMITATION_CODE,
+                ],
+                "{kind:?} carries both §3.2 limitations",
+            );
+            // The prose is the authority module's, not a second wording, and
+            // the badge names the profile that triggered it.
+            assert_eq!(
+                lines[0].limitation,
+                kinewright_core::CC8_AUTHORED_DOMAIN_LIMITATION
+            );
+            assert!(
+                lines[0]
+                    .badge
+                    .contains(kinewright_core::ColorSourceProfile::HlgRec2020.id())
+            );
+        }
+        for kind in [ColorNodeKind::Primary, ColorNodeKind::CreativeLook] {
+            let lines = cc8_node_limitations(&document, &clip, kind);
+            assert_eq!(
+                lines.iter().map(|line| line.code).collect::<Vec<_>>(),
+                vec![kinewright_core::CC8_QUALIFIER_LIMITATION_CODE],
+                "{kind:?} is matte-capable but is not authored on the curve domain",
+            );
+            assert_eq!(
+                lines[0].limitation,
+                kinewright_core::CC8_QUALIFIER_LIMITATION
+            );
+        }
+
+        // A title clip has no media source, so it has neither limitation even
+        // in an HDR project.
+        let mut title = clip.clone();
+        title.content = ClipContent::Title(kinewright_core::Title::default());
+        assert!(cc8_node_limitations(&document, &title, ColorNodeKind::Curves).is_empty());
     }
 
     #[test]

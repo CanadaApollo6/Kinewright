@@ -12,14 +12,14 @@ use kinewright_core::{
     COLOR_NODE_LIMIT_PER_LAYER, ClipId, ColorContext, ColorCurveChannel, ColorDescription,
     ColorNodeKind, ColorWheelChannel, ColorWheelsParams, CurvePoints, Effect, EffectId,
     EffectParameterDescriptor, EffectUniform, FrameTexture, LinearRgbaImage, LutNodeParams,
-    MATTE_WINDOW_LIMIT, MatteParams, MatteProofError, MediaError, MonitorProofMetadata,
-    MonitorProofRenderKind, ParamValue, ResolvedCurves, classify_color_node,
+    MATTE_WINDOW_LIMIT, MatteParams, MatteProofError, MediaError, MonitorPreview,
+    MonitorProofMetadata, MonitorProofRenderKind, ParamValue, ResolvedCurves, classify_color_node,
     color_node_inactive_reason, effect_descriptor, managed_color_node_count,
 };
 
 use crate::{
     color_pipeline::{
-        PrimaryCorrection, encode_delivery_for_description, encode_monitor_rgba8_for_description,
+        PrimaryCorrection, encode_delivery_for_description, encode_monitor_rgba8_for_preview,
     },
     frame::WorkingFrame,
     lut::{CubeLut, parse_cube_lut},
@@ -896,9 +896,45 @@ impl Compositor {
         monitoring: &ColorDescription,
         library: Option<&LutLibrary>,
     ) -> Result<FrameTexture, MediaError> {
+        self.render_monitor_preview_with_luts(
+            resolution,
+            layers,
+            monitoring,
+            MonitorPreview::Direct,
+            library,
+        )
+    }
+
+    /// [`Self::render_monitor_with_luts`] with CC8 §4's preview arm named
+    /// explicitly.
+    ///
+    /// The monitoring transform is now a function of two things — the
+    /// monitoring `ColorDescription` (CC1 §2.2.6) and the
+    /// [`MonitorPreview`] arm the project's *source* selects (CC8 §4) — and
+    /// this is the only entry point that takes both. Everything before the
+    /// readback is the same composite: §4's stage is a display-side transform,
+    /// so no shader, no LUT, and no working-surface value changes with the arm.
+    ///
+    /// [`Self::render_monitor_with_luts`] delegates here with
+    /// [`MonitorPreview::Direct`], which is why every CC1-CC7 caller keeps the
+    /// monitor bytes it had.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error for invalid dimensions, an unsupported
+    /// monitoring transfer, an unresolvable LUT node, or a GPU mapping
+    /// failure.
+    pub fn render_monitor_preview_with_luts<F: CompositorInput>(
+        &self,
+        resolution: (u32, u32),
+        layers: &[CompositorLayer<'_, F>],
+        monitoring: &ColorDescription,
+        preview: MonitorPreview,
+        library: Option<&LutLibrary>,
+    ) -> Result<FrameTexture, MediaError> {
         let (width, height) = resolution;
         let (output, resources, encoder) = self.composite(width, height, layers, library, None)?;
-        let readback = self.readback_for(width, height, &output, encoder, monitoring);
+        let readback = self.readback_for(width, height, &output, encoder, monitoring, preview);
         self.release_layer_textures(resources);
         readback
     }
@@ -1645,6 +1681,7 @@ impl Compositor {
         output: &wgpu::Texture,
         encoder: wgpu::CommandEncoder,
         monitoring: &ColorDescription,
+        preview: MonitorPreview,
     ) -> Result<FrameTexture, MediaError> {
         let mut rgba = Vec::with_capacity(
             usize::try_from(width)
@@ -1653,10 +1690,10 @@ impl Compositor {
                 .saturating_mul(4),
         );
         self.for_each_linear_pixel(width, height, output, encoder, |linear| {
-            let monitor_code =
-                encode_monitor_rgba8_for_description(linear, monitoring).map_err(|error| {
+            let monitor_code = encode_monitor_rgba8_for_preview(linear, monitoring, preview)
+                .map_err(|error| {
                     MediaError::Backend(format!(
-                        "managed monitoring encode rejected (transfer={:?}): {error}",
+                        "managed monitoring encode rejected (transfer={:?}, preview={preview:?}): {error}",
                         monitoring.transfer
                     ))
                 })?;

@@ -260,6 +260,82 @@ impl ColorSourceProfile {
     }
 }
 
+/// Which monitoring transform the managed preview runs (CC8 §4, §3.3).
+///
+/// CC1 §3's monitoring branch had exactly one transform and could leave it
+/// implicit. CC8 §3.3 puts a second stage on that branch — "monitoring:
+/// tone-mapped preview (§4) on an SDR display" — so, exactly as CC8 §5.2
+/// clause 1 made the delivery encode a function of the named
+/// [`DeliveryLane`](crate::DeliveryLane) rather than of a literal, the monitor
+/// encode becomes a function of this named selector.
+///
+/// **What selects it.** The *source*, not the delivery description. §7 item 2
+/// keeps an HDR-source/SDR-delivery project loadable and previewable while
+/// blocking its managed export, so keying the preview off the delivery target
+/// would leave exactly that project showing the clipped garbage §0.2 Q4 exists
+/// to avoid. [`crate::document_monitor_preview`] is the one place a `Document`
+/// answers it, through the same classifier
+/// [`crate::document_hdr_source_profile`] gives the QC surfaces, so the viewer
+/// and the Colour QC window cannot disagree about whether the frame in front of
+/// them is HDR.
+///
+/// **It is one transform per composited frame**, not per layer, because CC1 §3
+/// puts exactly one monitoring transform at the display boundary. A timeline
+/// mixing HDR and SDR sources is previewed through the HDR arm as a whole; such
+/// a project is already blocked from managed export by
+/// [`HDR_SOURCE_ON_SDR_DELIVERY`](crate::HDR_SOURCE_ON_SDR_DELIVERY) or by
+/// §5.3, so this is a preview question and not a gate.
+///
+/// It is **derived, never stored**: no project field, no serialized value, and
+/// therefore nothing for §7 item 1's byte-unchanged obligation to carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MonitorPreview {
+    /// CC1's monitoring transform, unchanged: the BT.709 display encode and the
+    /// single display clamp, with no stage between them. Every SDR project
+    /// takes this arm, which is what makes CC8's monitor path byte-unchanged
+    /// for SDR content.
+    Direct,
+    /// CC8 §4's stage ahead of that transform:
+    /// [`CC8_PREVIEW_STAGE`](crate::CC8_PREVIEW_STAGE), the labelled
+    /// tone-mapped preview, which is **not a monitoring reference**.
+    Cc8ToneMappedHdr,
+}
+
+impl MonitorPreview {
+    /// The arm a classified source profile selects.
+    ///
+    /// `None` — an SDR profile, or a source that does not classify at all —
+    /// is [`Self::Direct`]. A tuple that fails to classify is deliberately not
+    /// HDR here for the reason [`crate::document_hdr_source_profile`] gives:
+    /// guessing HDR for an unclassifiable tuple would be the silent HDR
+    /// treatment §1 forbids, and such a source is already refused as
+    /// `unsupported_source_color`.
+    #[must_use]
+    pub const fn for_source_profile(profile: Option<ColorSourceProfile>) -> Self {
+        match profile {
+            Some(profile) if profile.is_hdr() => Self::Cc8ToneMappedHdr,
+            _ => Self::Direct,
+        }
+    }
+
+    /// Whether §4's tone-mapping stage runs. Every UI surface showing a picture
+    /// rendered under `true` must carry §4 item 3's label.
+    #[must_use]
+    pub const fn is_tone_mapped(self) -> bool {
+        matches!(self, Self::Cc8ToneMappedHdr)
+    }
+
+    /// The §3.3 stage name this arm adds to the monitoring branch, or `None`
+    /// for CC1's unchanged transform.
+    #[must_use]
+    pub const fn stage(self) -> Option<&'static str> {
+        match self {
+            Self::Direct => None,
+            Self::Cc8ToneMappedHdr => Some(crate::CC8_PREVIEW_STAGE),
+        }
+    }
+}
+
 /// An explicit assumption allowed while classifying a source description.
 /// The raw description remains unchanged; callers must record the assumption
 /// in their proof/status surface.
