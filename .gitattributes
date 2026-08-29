@@ -1,0 +1,7 @@
+# Check text out as LF on every platform. The Windows CI runner sets
+# core.autocrlf=true at machine level, which turned checked-in files CRLF at
+# checkout and broke the byte-equality contract tests that compare a
+# checked-in generated file against the string its generator produces
+# (published_v6_manifest_tracks_the_color_workflow_suite). Pinning LF keeps
+# "the checked-in bytes" one set of bytes on both CI operating systems.
+* text=auto eol=lf
