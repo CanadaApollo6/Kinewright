@@ -1292,11 +1292,22 @@ pub(crate) fn legacy_stage_warnings(clip: &Clip) -> Vec<Value> {
 /// (§7 item 2) because §5.1's delivery lane is §10 step 6's; the two answers are
 /// deliberately separate rows so neither can be read as the other.
 ///
-/// §8's remaining HDR rows — the mastering-display and `MaxCLL`/`MaxFALL`
-/// metadata of §2.4, and the primaries-conversion stage's own report — are
-/// deliberately absent: §2.4's probe modelling and §6's QC are §10 step 7's,
-/// and reporting a metadata field this build never reads would be a claim, not
-/// evidence.
+/// §8's remaining HDR row here — "any mastering-display/`MaxCLL` metadata the
+/// source declared — with `Unknown` where the source said nothing" — is
+/// deliberately absent, and **it is not §10 step 7's**. Step 7 delivered §6's
+/// QC extensions and §9.1 fixture 12, whose `MaxCLL`/`MaxFALL` are a *different
+/// number*: §6 item 3 measures them "from the working proof over the sampled
+/// frames", which is what `get_color_qc` now reports as ungated rows, while
+/// §2.4's are what a *container declared* and are read on probe.
+///
+/// §10 assigns §2.4's probe modelling no step of its own; it is source-side
+/// state that lands with step 9's "migration and serialization", because §2.4
+/// requires the values "stored on the source description with provenance" and
+/// that is a `ColorDescription` change §7's byte-unchanged obligation governs.
+/// Until then, reporting a metadata field this build never reads would be a
+/// claim, not evidence. §0.3(f) records that nothing in the repository reads
+/// mastering-display or content-light-level metadata today, and §11 keeps PQ
+/// delivery — the only lane that would consume it — deferred.
 fn hdr_interpretation(profile: ColorSourceProfile) -> Value {
     let Some(row) = profile.cc8_row() else {
         return Value::Null;

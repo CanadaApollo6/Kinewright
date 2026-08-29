@@ -79,18 +79,21 @@ pub use color::{
 };
 pub use color_qc::{
     BT709_CB_DENOMINATOR, BT709_CR_DENOMINATOR, BT709_KB, BT709_KR, COLOR_QC_ENGINE,
-    ChannelRangeExcursion, ColorGamutReport, ColorNodeQcContribution, ColorQcCheck, ColorQcError,
-    ColorQcException, ColorQcNodeContributions, ColorQcProvenance, ColorQcRegion, ColorQcReport,
-    ColorQcRequest, ColorRangeReport, GAMUT_DEFINITION, MAX_QC_NODE_CONTRIBUTIONS,
-    MatteRegionScope, NODE_ATTRIBUTION_REMOVED, PlaneLegalExcursion,
-    QC_GAMUT_EXCEPTION_BASIS_POINTS, QC_RANGE_EXCEPTION_BASIS_POINTS,
-    SKIN_BAND_CENTER_CENTIDEGREES, SKIN_BAND_EXCEPTION_BASIS_POINTS,
-    SKIN_BAND_HALF_WIDTH_CENTIDEGREES, SKIN_DIAGNOSTIC_BOUNDARY, SKIN_MAX_SPREAD_CENTIDEGREES,
-    SKIN_MIN_CHROMA_MILLIONTHS, SKIN_PATCH_HUE_CENTIDEGREES, SkinDiagnostics,
+    ChannelRangeExcursion, ColorGamutReport, ColorLightLevelReport, ColorNodeQcContribution,
+    ColorQcCheck, ColorQcError, ColorQcException, ColorQcNodeContributions, ColorQcProvenance,
+    ColorQcRegion, ColorQcReport, ColorQcRequest, ColorRangeReport, GAMUT_DEFINITION,
+    GAMUT_DEFINITION_REC2020, GAMUT_TRIANGLE_REC709, GAMUT_TRIANGLE_REC2020,
+    GAMUT_TRIANGLE_RELATION, LIGHT_LEVEL_BOUNDARY, MAX_QC_NODE_CONTRIBUTIONS, MatteRegionScope,
+    NODE_ATTRIBUTION_REMOVED, PlaneLegalExcursion, QC_GAMUT_EXCEPTION_BASIS_POINTS,
+    QC_RANGE_EXCEPTION_BASIS_POINTS, SKIN_BAND_CENTER_CENTIDEGREES,
+    SKIN_BAND_EXCEPTION_BASIS_POINTS, SKIN_BAND_HALF_WIDTH_CENTIDEGREES, SKIN_DIAGNOSTIC_BOUNDARY,
+    SKIN_MAX_SPREAD_CENTIDEGREES, SKIN_MIN_CHROMA_MILLIONTHS, SKIN_PATCH_HUE_CENTIDEGREES,
+    SKIN_WITHHELD_CODE, SKIN_WITHHELD_REASON, SkinDiagnostics, SkinWithheldReport,
     YCBCR_CHROMA_LEGAL_HIGH, YCBCR_CHROMA_OFFSET, YCBCR_CHROMA_SPAN, YCBCR_LUMA_LEGAL_HIGH,
     YCBCR_LUMA_OFFSET, YCBCR_LUMA_SPAN, YCbCrLegalReport, YCbCrLegalSource,
     attach_node_contributions, bt709_limited_ycbcr, bt2020_ncl_limited_ycbcr,
-    delivery_limited_ycbcr, encode_bt709_delivery, measure_color_qc, nodes, validate_node_budget,
+    delivery_limited_ycbcr, encode_bt709_delivery, encode_delivery_for_lane, measure_color_qc,
+    nodes, validate_node_budget,
 };
 pub use creator::{
     BeatMontageAnchorRepair, BeatMontageCadenceContract, BeatMontageCadenceSummary,
@@ -125,6 +128,7 @@ pub use delivery::{
     delivery_color_for_depth, delivery_color_mismatch, delivery_color_mismatches,
     delivery_color_mismatches_for_lane, delivery_conformance, delivery_field_recovery_action,
     delivery_tag_check, document_for_delivery_profile, document_for_delivery_variant,
+    document_hdr_source_profile,
 };
 pub use editorial::ThreePointMode;
 pub use effect::{

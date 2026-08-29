@@ -1,5 +1,6 @@
 //! CC8 fixtures: §10 step 1's encoder precondition, §10 step 3's §9.1
-//! fixtures 1, 2 and 5, and §10 step 4's §9.1 fixtures 3, 4 and 10.
+//! fixtures 1, 2 and 5, §10 step 4's §9.1 fixtures 3, 4 and 10, §10 step 5's
+//! fixture 6, §10 step 6's fixtures 7 and 8, and §10 step 7's fixture 12.
 //!
 //! §9 fixes the layout: "Constants authority: `kinewright_core::cc8_hdr`, in
 //! the manner of `cc7_scenarios`. Fixtures: `kinewright_media::cc8_fixtures`.
@@ -80,17 +81,22 @@ use kinewright_core::{
     CC8_HDR_DELIVERY_X264_PARAMS, CC8_HLG_NOMINAL_PEAK_NITS,
     CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT, CC8_HLG_SCENE_BREAKPOINT, CC8_HLG_SIGNAL_BREAKPOINT,
     CC8_PQ_C1, CC8_PQ_C2, CC8_PQ_C3, CC8_PQ_DELIVERY_RECOVERY_ACTION, CC8_PQ_M2, CC8_PQ_PEAK_NITS,
-    CC8_REFERENCE_WHITE_NITS, CC8_REJECTED_HDR_ADJACENT, CC8_SOURCE_PROFILES, ColorBitDepth,
-    ColorContext, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange,
-    ColorSourceError, ColorSourceProfile, ColorSourceProfileAssumption, ColorTransfer,
-    ColorWhitePoint, DeliveryColorError, DeliveryColorMismatch, DeliveryEncodeDepth, DeliveryLane,
-    DeliveryProfile, DeliveryVerificationRequest, Document, Effect, EffectId, ExportSettings,
-    HDR_SOURCE_ON_SDR_DELIVERY, MediaError, ParamValue, QaSeverity, Rational, TimeCode,
-    cc8_apply_matrix, cc8_hlg_decode_working_linear, cc8_hlg_encode_working_linear,
-    cc8_hlg_inverse_oetf, cc8_hlg_oetf, cc8_pq_decode_working_linear, cc8_pq_encode_working_linear,
-    cc8_pq_eotf_nits, cc8_pq_inverse_eotf, classify_source, classify_source_with_assumption,
+    CC8_REC2020_TO_BT709, CC8_REFERENCE_WHITE_NITS, CC8_REJECTED_HDR_ADJACENT, CC8_SOURCE_PROFILES,
+    ColorBitDepth, ColorContext, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
+    ColorQcCheck, ColorQcRequest, ColorRange, ColorSourceError, ColorSourceProfile,
+    ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, DeliveryColorError,
+    DeliveryColorMismatch, DeliveryEncodeDepth, DeliveryLane, DeliveryProfile,
+    DeliveryVerificationRequest, Document, Effect, EffectId, ExportSettings,
+    HDR_SOURCE_ON_SDR_DELIVERY, LinearRgbaImage, MediaError, MonitorProofMetadata,
+    MonitorProofRenderKind, ParamValue, QaSeverity, Rational, TimeCode, WORKING_PROOF_ENCODING,
+    WORKING_PROOF_STAGE, WorkingProof, WorkingProofMetadata, YCBCR_CHROMA_LEGAL_HIGH,
+    YCBCR_CHROMA_OFFSET, YCBCR_CHROMA_SPAN, YCBCR_LUMA_LEGAL_HIGH, YCBCR_LUMA_OFFSET,
+    YCBCR_LUMA_SPAN, bt709_limited_ycbcr, cc8_apply_matrix, cc8_hlg_decode_working_linear,
+    cc8_hlg_encode_working_linear, cc8_hlg_inverse_oetf, cc8_hlg_oetf,
+    cc8_pq_decode_working_linear, cc8_pq_encode_working_linear, cc8_pq_eotf_nits,
+    cc8_pq_inverse_eotf, classify_source, classify_source_with_assumption,
     delivery_color_mismatches, delivery_color_mismatches_for_lane, delivery_conformance,
-    delivery_field_recovery_action,
+    delivery_field_recovery_action, measure_color_qc,
 };
 
 use crate::{
@@ -4774,5 +4780,1037 @@ fn cc8_hdr_delivery_intermediate_white_is_the_hlg_signal_peak() {
         expected_code,
         white_codes[0].abs_diff(expected_code),
         CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §9.1 fixture 12 — QC. §10 step 7's deliverable, and CC8 §6's four extensions.
+// ---------------------------------------------------------------------------
+//
+// §9.1 fixture 12, verbatim: "**QC.** BT.2020 legality against hand-derivable
+// analytic patches; the dual-triangle gamut report on content inside Rec.2020
+// and outside Rec.709; MaxCLL/MaxFALL emitted as ungated rows; the
+// withheld-skin reason asserted present on an HDR source and absent on an SDR
+// one."
+//
+// Every raster below is **authored**, not rendered. §6's four extensions are
+// arithmetic over one working proof, and a codec or a GPU in the path would put
+// its own error between a hand-derived code and the number under test — which
+// is exactly the confusion §6 item 1 exists to prevent. `measure_color_qc` is
+// pure (CC6 §3.0), so an authored proof measures the production engine with
+// nothing else in the way; fixture 8 is where the same engine meets real media.
+//
+// Nothing here is `cfg`-gated, no constant is per-OS, and no assertion is an
+// equality against one build's decode (CC7 §0.3 PM-E12): the reports are
+// compared against constants derived from `cc8_hdr`'s pinned coefficients, and
+// every measured term is bounded by the house rule — `next_power_of_two` of the
+// recorded measurement, times [`CC8_MEASURED_BOUND_HEADROOM`] — and printed
+// under `CC8_MEASURED` for §10 step 10.
+
+/// The delivery depth §5.1's HDR lane admits, as the QC code scale.
+const CC8_QC_DEPTH: DeliveryEncodeDepth = DeliveryEncodeDepth::Ten;
+
+/// `s = 2^(bits − 8)` at [`CC8_QC_DEPTH`], as an `f64` for the longhand code
+/// derivation below.
+const CC8_QC_CODE_SCALE: f64 = 4.0;
+
+/// Wrap an authored row of working BT.709 linear triples as a full-resolution
+/// working proof.
+///
+/// The provenance is honest: [`MonitorProofRenderKind::TestDouble`], with
+/// `gpu_claim: false`, because nothing rendered this raster. `full_resolution`
+/// is `true` because the row **is** the whole raster — a working proof always
+/// binds full resolution (CC6 §2.3), and a proof that claimed otherwise would
+/// be refused before any measurement ran.
+fn cc8_qc_proof(pixels: &[[f32; 3]]) -> WorkingProof {
+    assert!(
+        !pixels.is_empty(),
+        "a QC proof over no pixels proves nothing"
+    );
+    let width = u32::try_from(pixels.len()).expect("the fixture 12 rasters are small");
+    let mut samples = Vec::with_capacity(pixels.len() * 4);
+    for [red, green, blue] in pixels {
+        // §3.1: the working raster is opaque by construction.
+        samples.extend([*red, *green, *blue, 1.0]);
+    }
+    WorkingProof {
+        metadata: WorkingProofMetadata {
+            render: MonitorProofMetadata {
+                render_kind: MonitorProofRenderKind::TestDouble,
+                backend: "test_double".to_owned(),
+                adapter: "test_double".to_owned(),
+                software_fallback: true,
+                gpu_claim: false,
+                full_resolution: true,
+            },
+            stage: WORKING_PROOF_STAGE.to_owned(),
+            encoding: WORKING_PROOF_ENCODING.to_owned(),
+            raster_aspect_millionths: i64::from(width) * 1_000_000,
+        },
+        image: LinearRgbaImage {
+            width,
+            height: 1,
+            pixels: samples,
+        },
+    }
+}
+
+/// A QC request on CC8 §5.1's HDR delivery lane.
+///
+/// The lane is **not** a field: `ColorQcRequest::delivery_lane` derives it from
+/// `expected_delivery`, which is §5.2 clause 1's single source of truth, so
+/// this helper sets the delivery description and the lane follows. The source
+/// profile is the other half — §6 item 4 keys the withheld skin diagnostic on
+/// the *source*, not on the lane.
+fn cc8_hdr_qc_request(
+    checks: Vec<ColorQcCheck>,
+    source_profile: Option<ColorSourceProfile>,
+) -> ColorQcRequest {
+    ColorQcRequest {
+        checks,
+        delivery_bit_depth: CC8_QC_DEPTH,
+        expected_delivery: Some(cc8_hdr_delivery_description()),
+        source_profile,
+        ..ColorQcRequest::default()
+    }
+}
+
+/// A QC request on CC6's SDR Rec.709 lane at the same depth — fixture 12's
+/// control for every "absent on an SDR one" clause.
+fn cc8_sdr_qc_request(checks: Vec<ColorQcCheck>) -> ColorQcRequest {
+    ColorQcRequest {
+        checks,
+        delivery_bit_depth: CC8_QC_DEPTH,
+        expected_delivery: Some(cc8_sdr_delivery_description(CC8_QC_DEPTH)),
+        source_profile: None,
+        ..ColorQcRequest::default()
+    }
+}
+
+/// The working BT.709 linear triple whose HDR-lane delivery encode is exactly
+/// `signal`.
+///
+/// The exact analytic inverse of the encode the QC engine runs — §3.3's
+/// delivery line read backwards — so a patch can be *authored by its signal*
+/// and its `Y'CbCr` codes derived from that signal by hand. Going the other way
+/// (authoring a working triple and reading back whatever signal appeared) would
+/// make every expected code a restatement of the implementation.
+fn cc8_working_for_hlg_signal(signal: [f32; 3]) -> [f32; 3] {
+    cc8_apply_matrix(CC8_REC2020_TO_BT709, cc8_hlg_decode_working_linear(signal))
+}
+
+/// The 10-bit limited-range BT.2020 NCL codes of one HLG signal triple,
+/// derived **longhand** from the authority module's pinned coefficients.
+///
+/// This is CC8 §6 item 1's formula written out where a reader can check it,
+/// deliberately not a call to `bt2020_ncl_limited_ycbcr`: an expected value
+/// computed by the function under test proves only that the function equals
+/// itself.
+///
+/// ```text
+/// Y'      = 0.2627·R' + 0.6780·G' + 0.0593·B'
+/// Cb      = (B' − Y') / 1.8814          ( = 2·(1 − Kb) )
+/// Cr      = (R' − Y') / 1.4746          ( = 2·(1 − Kr) )
+/// Y_code  =  16·4 + 219·4·Y'  =  64 + 876·Y'
+/// Cb_code = 128·4 + 224·4·Cb  = 512 + 896·Cb
+/// Cr_code = 128·4 + 224·4·Cr  = 512 + 896·Cr
+/// ```
+fn cc8_hand_derived_bt2020_codes(signal: [f64; 3]) -> [f64; 3] {
+    let [red, green, blue] = signal;
+    let luma = CC8_BT2020_KR * red + CC8_BT2020_KG * green + CC8_BT2020_KB * blue;
+    let cb = (blue - luma) / CC8_BT2020_CB_DENOMINATOR;
+    let cr = (red - luma) / CC8_BT2020_CR_DENOMINATOR;
+    let luma_offset = f64::from(YCBCR_LUMA_OFFSET) * CC8_QC_CODE_SCALE;
+    let luma_span = f64::from(YCBCR_LUMA_SPAN) * CC8_QC_CODE_SCALE;
+    let chroma_offset = f64::from(YCBCR_CHROMA_OFFSET) * CC8_QC_CODE_SCALE;
+    let chroma_span = f64::from(YCBCR_CHROMA_SPAN) * CC8_QC_CODE_SCALE;
+    [
+        luma_offset + luma_span * luma,
+        chroma_offset + chroma_span * cb,
+        chroma_offset + chroma_span * cr,
+    ]
+}
+
+/// One §9.1 fixture 12 legality patch, authored by its HLG signal.
+#[derive(Debug, Clone, Copy)]
+struct Cc8QcPatch {
+    label: &'static str,
+    signal: [f32; 3],
+    /// Whether every plane of this patch sits inside the strict legal box —
+    /// `[64, 940]` for luma and `[64, 960]` for chroma at 10 bits.
+    legal: bool,
+}
+
+/// §9.1 fixture 12's analytic patch set.
+///
+/// The first four are neutral and land on codes a reader can check without a
+/// calculator, because `Cb = Cr = 0` and `Y_code = 64 + 876·E'`:
+///
+/// ```text
+/// E' = 0.00  ->  Y = 64    ( legal black )
+/// E' = 0.50  ->  Y = 502   ( the HLG OETF's own breakpoint )
+/// E' = 0.75  ->  Y = 721   ( BT.2408's HDR reference white, §2.2 )
+/// E' = 1.00  ->  Y = 940   ( legal white, the HLG nominal peak )
+/// ```
+///
+/// Those four are exactly the neutral bars `CC8_SOURCE_BARS` writes into
+/// fixture 8's synthetic source, which is corroboration and is recorded as
+/// such: the same four numbers arrived from the encoder side there and from the
+/// QC side here.
+///
+/// The three saturated patches land on the chroma extremes the BT.2020
+/// denominators are *defined* to produce — `Cb = 0.5` exactly at the blue
+/// primary because `2·(1 − Kb)` is twice `1 − Kb`, and `Cr = 0.5` exactly at
+/// the red primary for the same reason — so `Cb_code = Cr_code = 960`, sitting
+/// **on** the legal ceiling and therefore not an excursion (CC6's comparisons
+/// are strict).
+///
+/// The last two are the analytic controls §9.2's second rule requires: without
+/// them every excursion count in this fixture measures zero, and a zero count
+/// bounds nothing.
+const CC8_QC_PATCHES: [Cc8QcPatch; 9] = [
+    Cc8QcPatch {
+        label: "neutral_legal_black",
+        signal: [0.0, 0.0, 0.0],
+        legal: true,
+    },
+    Cc8QcPatch {
+        label: "neutral_half_signal",
+        signal: [0.5, 0.5, 0.5],
+        legal: true,
+    },
+    Cc8QcPatch {
+        label: "neutral_reference_white_75",
+        signal: [0.75, 0.75, 0.75],
+        legal: true,
+    },
+    Cc8QcPatch {
+        label: "neutral_legal_white",
+        signal: [1.0, 1.0, 1.0],
+        legal: true,
+    },
+    Cc8QcPatch {
+        label: "rec2020_red_primary",
+        signal: [1.0, 0.0, 0.0],
+        legal: true,
+    },
+    Cc8QcPatch {
+        label: "rec2020_green_primary",
+        signal: [0.0, 1.0, 0.0],
+        legal: true,
+    },
+    Cc8QcPatch {
+        label: "rec2020_blue_primary",
+        signal: [0.0, 0.0, 1.0],
+        legal: true,
+    },
+    Cc8QcPatch {
+        label: "control_above_legal_white",
+        signal: [1.1, 1.1, 1.1],
+        legal: false,
+    },
+    Cc8QcPatch {
+        label: "control_below_legal_black",
+        signal: [-0.05, -0.05, -0.05],
+        legal: false,
+    },
+];
+
+/// §9.1 fixture 12's recorded legality measurement: the largest absolute
+/// deviation, in **delivery code units**, between the engine's predicted
+/// `Y'CbCr` and [`cc8_hand_derived_bt2020_codes`] over [`CC8_QC_PATCHES`].
+///
+/// Taken by this fixture on `mifi/ffmpeg-builds 8.0-1` / rustc stable,
+/// 2026-08-29, over **27 plane samples** (nine patches, three planes each):
+///
+/// ```text
+/// term                      measured      bound (next_pow2 x 4)  margin
+/// predicted_code_deviation  3.853619e-2   2.500000e-1            6.49x
+/// ```
+///
+/// The figure is a round-trip residue and nothing else: the patch is authored
+/// as a signal, carried to working BT.709 linear by the exact analytic inverse
+/// of the encode, and carried back by the encode, all in `f32`, so what is left
+/// is the working width's own error amplified by the `876`/`896` code spans.
+/// The worst plane is the Rec.2020 red primary's `Cb`, at `386.9300` against a
+/// derivation of `386.8915` — four hundredths of one delivery code out of a
+/// 1 024-code range, which is `3.8e-5` of full scale.
+///
+/// It is **not** a per-OS number and is not compared against a decode: nothing
+/// in this fixture's path touches a codec, and the two CI operating systems run
+/// the same `f32` IEEE 754 arithmetic through the same authority-module
+/// constants. The libm half of [`CC8_MEASURED_BOUND_HEADROOM`]'s argument still
+/// applies, because the HLG OETF's `ln`/`exp` branch is on this path.
+const CC8_FIXTURE12_LEGALITY_MEASURED: f32 = 3.853_619e-2;
+
+/// §9.1 fixture 12's recorded `MaxCLL`/`MaxFALL` measurement: the largest
+/// absolute deviation, in **hundredths of a cd/m²**, between the reported row
+/// and the hand-computed value.
+///
+/// Taken on the same build and date, over the three-pixel raster the fixture
+/// documents: **exactly zero**, on both numbers. That is not luck — every value
+/// in the raster is a quotient or product of pinned integers
+/// ([`CC8_REFERENCE_WHITE_NITS`] and [`CC8_HLG_NOMINAL_PEAK_NITS`]), the
+/// conversion back to cd/m² multiplies by the same anchor, and the row is
+/// rounded to hundredths, so the two roundings cancel exactly.
+///
+/// A zero has no next power of two, so §9.2's second rule applies: the bound is
+/// the floor the fixture passes — one hundredth of a cd/m², the row's own unit
+/// — and the fixture's negative control is what makes it reachable.
+const CC8_FIXTURE12_LIGHT_LEVEL_MEASURED: f32 = 0.0;
+
+/// The strict legal box at [`CC8_QC_DEPTH`], as `(low, luma_high, chroma_high)`
+/// code values — CC6 §6.4's box, at this fixture's scale.
+fn cc8_qc_legal_box() -> (f64, f64, f64) {
+    (
+        f64::from(YCBCR_LUMA_OFFSET) * CC8_QC_CODE_SCALE,
+        f64::from(YCBCR_LUMA_LEGAL_HIGH) * CC8_QC_CODE_SCALE,
+        f64::from(YCBCR_CHROMA_LEGAL_HIGH) * CC8_QC_CODE_SCALE,
+    )
+}
+
+/// The single code one plane of a one-pixel measurement reported.
+///
+/// A one-pixel population has one extreme, so `minimum == maximum`; asserting
+/// that here is what makes reading either one honest.
+fn cc8_qc_plane_code(plane: kinewright_core::PlaneLegalExcursion, label: &str) -> f64 {
+    assert!(
+        plane.samples_seen(),
+        "{label}: a plane that saw no sample has no code to report",
+    );
+    assert_eq!(
+        plane.minimum_code_hundredths, plane.maximum_code_hundredths,
+        "{label}: a one-pixel population must report one extreme",
+    );
+    #[allow(clippy::cast_precision_loss)]
+    let code = plane.minimum_code_hundredths as f64 / 100.0;
+    code
+}
+
+/// **§9.1 fixture 12, clause 1.** BT.2020 legality against hand-derivable
+/// analytic patches.
+///
+/// CC8 §6 item 1, verbatim: "Legality (EBU R 103-shaped, as CC6 §6.4) is
+/// measured against **the lane's own matrix**. Reusing the BT.709 reference on
+/// a BT.2020 file would be a wrong number, not an approximate one."
+///
+/// Four claims:
+///
+/// 1. Every patch's predicted `Y'CbCr`, measured through the production
+///    `measure_color_qc` on §5.1's lane, equals the longhand BT.2020 NCL
+///    derivation from its own signal, within the house-rule bound.
+/// 2. The four neutral patches land on the exact integer codes above, and the
+///    two chroma extremes land on exactly `960`.
+/// 3. **The failing direction**: the same patches through CC6's BT.709
+///    reference are a different number — not a nearby one — on every saturated
+///    patch, which is what makes clause 1 a measurement rather than a
+///    coincidence.
+/// 4. The legality counts over the whole patch row are exactly the two control
+///    patches, in the directions they were authored for. Without the controls
+///    every count is zero, and §9.2's second rule refuses a bound nothing
+///    reaches.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cc8_qc_bt2020_legality_measures_the_lanes_own_matrix() {
+    let (low, luma_high, chroma_high) = cc8_qc_legal_box();
+    let mut worst = 0.0_f32;
+    let mut worst_bt709_gap = f64::INFINITY;
+
+    for patch in CC8_QC_PATCHES {
+        let signal = [
+            f64::from(patch.signal[0]),
+            f64::from(patch.signal[1]),
+            f64::from(patch.signal[2]),
+        ];
+        let expected = cc8_hand_derived_bt2020_codes(signal);
+        let working = cc8_working_for_hlg_signal(patch.signal);
+        let report = measure_color_qc(
+            &cc8_qc_proof(&[working]),
+            &cc8_hdr_qc_request(vec![ColorQcCheck::Range, ColorQcCheck::Gamut], None),
+        )
+        .unwrap_or_else(|error| panic!("{}: the patch must measure: {error}", patch.label));
+
+        // The report says which lane produced these codes, so a reader never
+        // has to infer the matrix from the numbers.
+        assert_eq!(report.delivery_lane, DeliveryLane::HdrHlgRec2020.as_str());
+        let predicted = report.range.predicted_ycbcr;
+        assert_eq!(predicted.bit_depth, CC8_QC_DEPTH.bits());
+        assert_eq!(
+            predicted.source,
+            kinewright_core::YCbCrLegalSource::Predicted
+        );
+        let observed = [
+            cc8_qc_plane_code(predicted.luma, patch.label),
+            cc8_qc_plane_code(predicted.cb, patch.label),
+            cc8_qc_plane_code(predicted.cr, patch.label),
+        ];
+        for plane in 0..3 {
+            #[allow(clippy::cast_possible_truncation)]
+            let deviation = (observed[plane] - expected[plane]).abs() as f32;
+            worst = worst.max(deviation);
+        }
+
+        // Claim 3, per patch: CC6's BT.709 reference on the same `R'G'B'`.
+        // On a neutral patch the two references agree exactly — `Cb = Cr = 0`
+        // and `Y' = E'` under any set of coefficients summing to one — so the
+        // gap is taken over the saturated patches, which are the ones a wrong
+        // reference actually mis-states.
+        let bt709 = bt709_limited_ycbcr(signal, CC8_QC_DEPTH.bits());
+        // Bit equality, not a float comparison with a tolerance: the question
+        // is whether this patch was *authored* with three identical channels,
+        // and every one in the table is a literal.
+        let neutral = patch.signal[0].to_bits() == patch.signal[1].to_bits()
+            && patch.signal[1].to_bits() == patch.signal[2].to_bits();
+        if !neutral {
+            let gap = (0..3)
+                .map(|plane| (bt709[plane] - expected[plane]).abs())
+                .fold(0.0_f64, f64::max);
+            worst_bt709_gap = worst_bt709_gap.min(gap);
+        }
+
+        // Claim 4, per patch: the legal box, from the patch's own authored
+        // intent rather than from what happened to be measured.
+        let inside = observed[0] >= low
+            && observed[0] <= luma_high
+            && observed[1] >= low
+            && observed[1] <= chroma_high
+            && observed[2] >= low
+            && observed[2] <= chroma_high;
+        assert_eq!(
+            inside, patch.legal,
+            "{}: authored legal={} but codes {observed:?} against box [{low}, {luma_high}] / \
+             [{low}, {chroma_high}]",
+            patch.label, patch.legal,
+        );
+        println!(
+            "CC8_MEASURED fixture=12 clause=legality patch={} signal={:?} \
+             expected_codes=[{:.4}, {:.4}, {:.4}] observed_codes=[{:.4}, {:.4}, {:.4}] \
+             bt709_reference_codes=[{:.4}, {:.4}, {:.4}] legal={}",
+            patch.label,
+            patch.signal,
+            expected[0],
+            expected[1],
+            expected[2],
+            observed[0],
+            observed[1],
+            observed[2],
+            bt709[0],
+            bt709[1],
+            bt709[2],
+            patch.legal,
+        );
+    }
+
+    // Claim 2: the hand-checkable anchors, as literals. `64 + 876·E'` for the
+    // neutrals, and the two chroma extremes the denominators define.
+    for (signal, expected_luma) in [
+        (0.0_f64, 64.0_f64),
+        (0.5, 502.0),
+        (0.75, 721.0),
+        (1.0, 940.0),
+    ] {
+        let codes = cc8_hand_derived_bt2020_codes([signal; 3]);
+        assert!(
+            (codes[0] - expected_luma).abs() < 1e-9,
+            "neutral signal {signal} must derive luma code {expected_luma}: {codes:?}",
+        );
+        assert!((codes[1] - 512.0).abs() < 1e-9, "{codes:?}");
+        assert!((codes[2] - 512.0).abs() < 1e-9, "{codes:?}");
+    }
+    assert!(
+        (cc8_hand_derived_bt2020_codes([0.0, 0.0, 1.0])[1] - 960.0).abs() < 1e-9,
+        "the Rec.2020 blue primary must land Cb on exactly 960: 2·(1 − Kb) is twice (1 − Kb)",
+    );
+    assert!(
+        (cc8_hand_derived_bt2020_codes([1.0, 0.0, 0.0])[2] - 960.0).abs() < 1e-9,
+        "the Rec.2020 red primary must land Cr on exactly 960: 2·(1 − Kr) is twice (1 − Kr)",
+    );
+
+    // Claim 3, aggregated: the *smallest* gap over the saturated patches, so
+    // one patch that happens to agree cannot carry the claim. The bound is not
+    // a tolerance and is not measured — it is a statement that a wrong matrix
+    // is wrong by whole delivery codes, which is §6 item 1's "a wrong number,
+    // not an approximate one".
+    assert!(
+        worst_bt709_gap > 1.0,
+        "CC6's BT.709 reference must differ from the BT.2020 one by more than a delivery code \
+         on every saturated patch, or clause 1 proves nothing: {worst_bt709_gap}",
+    );
+
+    // Claim 4, aggregated: the whole patch row in one measurement, with the
+    // controls doing the bounding §9.2's second rule asks for.
+    let row: Vec<[f32; 3]> = CC8_QC_PATCHES
+        .iter()
+        .map(|patch| cc8_working_for_hlg_signal(patch.signal))
+        .collect();
+    let report = measure_color_qc(
+        &cc8_qc_proof(&row),
+        &cc8_hdr_qc_request(vec![ColorQcCheck::Range, ColorQcCheck::Gamut], None),
+    )
+    .expect("the patch row must measure");
+    let predicted = report.range.predicted_ycbcr;
+    assert_eq!(
+        predicted.luma.above_count, 1,
+        "exactly the above-white control: {predicted:?}",
+    );
+    assert_eq!(
+        predicted.luma.below_count, 1,
+        "exactly the below-black control: {predicted:?}",
+    );
+    // The two controls are neutral, so no chroma plane should leave the box —
+    // but the Rec.2020 red and blue primaries land `Cr` and `Cb` **exactly on**
+    // the ceiling `960`, and CC6's comparison there is strict. An `f32`
+    // round-trip residue of a thousandth of a code is therefore enough to tip
+    // one of them across, and pretending otherwise would be asserting that the
+    // working width is exact. So the claim is the honest one: at most the two
+    // boundary patches can be counted, and whatever is counted sits within one
+    // delivery code of the ceiling, which is the boundary being measured rather
+    // than an excursion being found.
+    let chroma_excursions = predicted.cb.above_count
+        + predicted.cb.below_count
+        + predicted.cr.above_count
+        + predicted.cr.below_count;
+    assert!(
+        chroma_excursions <= 2,
+        "only the two primaries that touch the chroma ceiling may be counted: {predicted:?}",
+    );
+    for (name, plane) in [("cb", predicted.cb), ("cr", predicted.cr)] {
+        #[allow(clippy::cast_precision_loss)]
+        let maximum = plane.maximum_code_hundredths as f64 / 100.0;
+        #[allow(clippy::cast_precision_loss)]
+        let minimum = plane.minimum_code_hundredths as f64 / 100.0;
+        assert!(
+            (maximum - chroma_high).abs() <= 1.0,
+            "{name}: the highest chroma sample is the ceiling-touching primary, so it must sit \
+             within one code of {chroma_high}: {maximum}",
+        );
+        assert!(minimum >= low, "{name}: {minimum} below {low}");
+    }
+
+    cc8_assert_measured(
+        "12",
+        "BT.2020 legality excursion",
+        "predicted_code_deviation",
+        worst,
+        CC8_FIXTURE12_LEGALITY_MEASURED,
+        // No floor: the term is non-zero, because the report quantizes every
+        // plane code to hundredths and the deviation is dominated by that
+        // rounding rather than by the arithmetic. §9.2's second rule is
+        // answered instead by the two control patches, which are what make the
+        // legality counts above reachable.
+        0.0,
+    );
+    println!(
+        "CC8_MEASURED fixture=12 clause=legality patches={} luma_above={} luma_below={} \
+         chroma_excursions={chroma_excursions} smallest_bt709_gap_codes={worst_bt709_gap:.4}",
+        CC8_QC_PATCHES.len(),
+        predicted.luma.above_count,
+        predicted.luma.below_count,
+    );
+}
+
+/// How far §9.1 fixture 12's dual-triangle raster is pulled toward the neutral
+/// of its own magnitude, as a reciprocal.
+///
+/// A power of two rather than a chosen figure, and it is not a tolerance: it is
+/// how far *inside* the Rec.2020 boundary the raster is authored to sit, so the
+/// "inside Rec.2020" half of §9.1 fixture 12's clause is a construction rather
+/// than a hope. One sixteenth of the distance to neutral is four orders of
+/// magnitude above the `f32` round-trip residue `CC8_FIXTURE3_MEASURED`
+/// records, and it leaves the raster far outside the Rec.709 triangle — which
+/// the fixture asserts rather than assumes.
+const CC8_QC_GAMUT_INSET_RECIPROCAL: f32 = 16.0;
+
+/// Move one Rec.2020 linear triple toward the neutral of its own magnitude.
+///
+/// `fraction` is signed: a positive fraction moves *inside* the triangle and a
+/// negative one moves outside it, which is how the same function produces both
+/// the passing raster and its control.
+fn cc8_toward_neutral(triple: [f32; 3], fraction: f32) -> [f32; 3] {
+    let neutral = triple[0].max(triple[1]).max(triple[2]);
+    triple.map(|channel| fraction.mul_add(neutral - channel, channel))
+}
+
+/// §9.1 fixture 12's dual-triangle raster, in **working BT.709 linear**.
+///
+/// [`cc8_wide_gamut_rec2020_raster`] is fixture 3's Rec.2020 raster, reused
+/// rather than re-authored, moved `fraction` toward neutral and then carried
+/// through §2.3's matrix into the working space — which is exactly the journey
+/// §3.3 puts an HDR source through before any grading node sees it.
+fn cc8_qc_gamut_raster(fraction: f32) -> Vec<[f32; 3]> {
+    cc8_wide_gamut_rec2020_raster()
+        .into_iter()
+        .map(|triple| cc8_apply_matrix(CC8_REC2020_TO_BT709, cc8_toward_neutral(triple, fraction)))
+        .collect()
+}
+
+/// **§9.1 fixture 12, clause 2.** The dual-triangle gamut report.
+///
+/// CC8 §6 item 2, verbatim: "CC8 makes the triangle a property of the report,
+/// names it in `ColorGamutReport.definition`, and reports Rec.2020
+/// representability for HDR-profile content. **Both are reported when they
+/// differ**, because 'outside Rec.709 but inside Rec.2020' is exactly the fact
+/// an editor delivering HDR needs, and collapsing it loses the SDR-compatibility
+/// signal."
+///
+/// §12's third risk supplies the other half and this fixture gates both: "§6
+/// requires both to be reported only where they differ, with the relation
+/// normative and printed as a line."
+///
+/// Five claims, each with its own failing direction:
+///
+/// 1. On content inside Rec.2020 and outside Rec.709, both reports are
+///    published, they are named by triangle, and the Rec.2020 one is empty.
+/// 2. The relation is present as a line, and the one subtraction it sanctions
+///    is the SDR-compatibility signal.
+/// 3. On the same raster with an **SDR** request, there is no second triangle
+///    and no relation line — and the Rec.709 report is byte-identical, so CC8
+///    moved nothing CC6 measured.
+/// 4. On content that is in gamut in **both** triangles the reports agree, so
+///    only one is published. This is the clause §12 asks for, and without it
+///    "reported only where they differ" is untested.
+/// 5. The analytic control for clause 1's zero: content pushed **outside**
+///    Rec.2020 fills the second report and raises its own exception.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cc8_qc_dual_triangle_gamut_reports_both_only_where_they_differ() {
+    let inside = cc8_qc_gamut_raster(1.0 / CC8_QC_GAMUT_INSET_RECIPROCAL);
+    let checks = vec![ColorQcCheck::Range, ColorQcCheck::Gamut];
+    let hdr = measure_color_qc(
+        &cc8_qc_proof(&inside),
+        &cc8_hdr_qc_request(checks.clone(), Some(ColorSourceProfile::HlgRec2020)),
+    )
+    .expect("the wide-gamut raster must measure on the HDR lane");
+
+    // Claim 1.
+    assert_eq!(hdr.gamut.triangle, kinewright_core::GAMUT_TRIANGLE_REC709);
+    assert_eq!(hdr.gamut.definition, kinewright_core::GAMUT_DEFINITION);
+    let rec2020 = hdr
+        .gamut_rec2020
+        .as_ref()
+        .expect("§6 item 2 publishes the second triangle on HDR content that differs");
+    assert_eq!(rec2020.triangle, kinewright_core::GAMUT_TRIANGLE_REC2020);
+    assert_eq!(
+        rec2020.definition,
+        kinewright_core::GAMUT_DEFINITION_REC2020
+    );
+    assert!(
+        hdr.gamut.out_of_gamut_pixel_count > 0,
+        "a raster of saturated Rec.2020 hues must leave the Rec.709 triangle, or clause 1 is \
+         vacuous: {:?}",
+        hdr.gamut,
+    );
+    assert_eq!(
+        rec2020.out_of_gamut_pixel_count, 0,
+        "the raster is authored one sixteenth inside the Rec.2020 boundary, so nothing may be \
+         outside it: {rec2020:?}",
+    );
+    assert_eq!(rec2020.minimum_linear_millionths, 0);
+    assert_eq!(rec2020.below_black_pixel_count, 0);
+
+    // Claim 2. The nesting is a fact about the triangles, so it is asserted as
+    // an inequality and not merely printed.
+    assert!(
+        rec2020.out_of_gamut_pixel_count <= hdr.gamut.out_of_gamut_pixel_count,
+        "out-of-Rec.2020 is a subset of out-of-Rec.709: {rec2020:?} vs {:?}",
+        hdr.gamut,
+    );
+    assert_eq!(
+        hdr.gamut_triangle_relation.as_deref(),
+        Some(kinewright_core::GAMUT_TRIANGLE_RELATION),
+    );
+    let sdr_incompatible = hdr.gamut.out_of_gamut_pixel_count - rec2020.out_of_gamut_pixel_count;
+    assert!(sdr_incompatible > 0);
+
+    // Claim 3.
+    let sdr = measure_color_qc(&cc8_qc_proof(&inside), &cc8_sdr_qc_request(checks.clone()))
+        .expect("the same raster must measure on the SDR lane");
+    assert_eq!(sdr.delivery_lane, DeliveryLane::SdrRec709.as_str());
+    assert!(
+        sdr.gamut_rec2020.is_none(),
+        "an SDR measurement has one triangle: {:?}",
+        sdr.gamut_rec2020,
+    );
+    assert!(sdr.gamut_triangle_relation.is_none());
+    assert_eq!(
+        sdr.gamut, hdr.gamut,
+        "the Rec.709 gamut report is a property of the working raster and not of the lane, so \
+         CC8 must not have moved CC6's number",
+    );
+    assert!(
+        sdr.exceptions
+            .iter()
+            .all(|exception| exception.code != "delivery_gamut_excursion_rec2020"),
+    );
+
+    // Claim 4: agreement collapses to one report. A neutral ramp is in gamut in
+    // both triangles, so the two reports are equal in every measured field.
+    let neutral: Vec<[f32; 3]> = (0..16)
+        .map(|step| {
+            #[allow(clippy::cast_precision_loss)]
+            let magnitude = step as f32 / 4.0;
+            [magnitude; 3]
+        })
+        .collect();
+    let agreeing = measure_color_qc(
+        &cc8_qc_proof(&neutral),
+        &cc8_hdr_qc_request(checks.clone(), Some(ColorSourceProfile::HlgRec2020)),
+    )
+    .expect("the neutral ramp must measure");
+    assert_eq!(agreeing.gamut.out_of_gamut_pixel_count, 0);
+    assert!(
+        agreeing.gamut_rec2020.is_none(),
+        "§12's third risk: both are reported only where they differ, and on in-gamut content \
+         they do not: {:?}",
+        agreeing.gamut_rec2020,
+    );
+    assert!(agreeing.gamut_triangle_relation.is_none());
+
+    // Claim 5: the control. The same raster pushed outside Rec.2020.
+    let outside = cc8_qc_gamut_raster(-1.0);
+    let control = measure_color_qc(
+        &cc8_qc_proof(&outside),
+        &cc8_hdr_qc_request(checks, Some(ColorSourceProfile::HlgRec2020)),
+    )
+    .expect("the control raster must measure");
+    let control_rec2020 = control
+        .gamut_rec2020
+        .as_ref()
+        .expect("the control differs from the Rec.709 report");
+    assert!(
+        control_rec2020.out_of_gamut_pixel_count > 0,
+        "the control must reach the second triangle, or clause 1's zero bounds nothing: \
+         {control_rec2020:?}",
+    );
+    assert!(control_rec2020.minimum_linear_millionths < 0);
+    let raised = control
+        .exceptions
+        .iter()
+        .find(|exception| exception.code == "delivery_gamut_excursion_rec2020")
+        .expect("the second triangle raises its own code, never the Rec.709 one");
+    assert_eq!(raised.severity, QaSeverity::Warning);
+    assert!(raised.message.contains("Rec.2020 chromaticity triangle"));
+    assert!(
+        raised.message.contains("must never be summed"),
+        "the exception carries the relation, so a reader who sees only the exception still \
+         cannot add the two counts: {}",
+        raised.message,
+    );
+    assert!(
+        control.technical_pass,
+        "a gamut excursion is a Warning, never an Error: {:?}",
+        control.exceptions,
+    );
+
+    println!(
+        "CC8_MEASURED fixture=12 clause=dual_triangle pixels={} rec709_out={} rec2020_out={} \
+         sdr_incompatible={sdr_incompatible} control_rec2020_out={} \
+         control_rec2020_min_linear_millionths={} agreeing_second_report={}",
+        inside.len(),
+        hdr.gamut.out_of_gamut_pixel_count,
+        rec2020.out_of_gamut_pixel_count,
+        control_rec2020.out_of_gamut_pixel_count,
+        control_rec2020.minimum_linear_millionths,
+        agreeing.gamut_rec2020.is_some(),
+    );
+}
+
+/// **§9.1 fixture 12, clause 3.** `MaxCLL` and `MaxFALL` as ungated rows.
+///
+/// CC8 §6 item 3, verbatim: "`MaxCLL` and `MaxFALL` measurement — reported,
+/// never gated. Computed from the working proof over the sampled frames, in the CC6
+/// evidence style, with the sampled population and its bounds recorded beside
+/// the number... they are not gated because CC8 does not write them into a file
+/// and a threshold on them would be invented."
+///
+/// The raster is three pixels chosen so both numbers are hand-computable from
+/// §2.2's anchor alone:
+///
+/// ```text
+/// black            working 0                       ->     0 cd/m²
+/// diffuse white    working 1                       ->   203 cd/m²   ( = the anchor )
+/// specular         working 1000/203                ->  1000 cd/m²   ( the HLG nominal peak )
+///
+/// MaxCLL  = max = 1000 cd/m²
+/// MaxFALL = (0 + 203 + 1000) / 3 = 401 cd/m²
+/// ```
+///
+/// Four claims: the two numbers, the recorded population and its bounds, the
+/// absence of any gate, and — the analytic control for a clamp that is not
+/// there — a negative sample reported as a negative light level.
+#[test]
+fn cc8_qc_light_level_is_measured_and_reported_but_never_gated() {
+    let anchor = cc8_nits(CC8_REFERENCE_WHITE_NITS);
+    let specular = cc8_nits(CC8_HLG_NOMINAL_PEAK_NITS) / anchor;
+    let raster = [[0.0_f32; 3], [1.0; 3], [specular; 3]];
+    let report = measure_color_qc(
+        &cc8_qc_proof(&raster),
+        &cc8_hdr_qc_request(
+            vec![ColorQcCheck::Range, ColorQcCheck::Gamut],
+            Some(ColorSourceProfile::HlgRec2020),
+        ),
+    )
+    .expect("the light-level raster must measure");
+    let light = &report.light_level;
+
+    // Claim 1: the two numbers, in hundredths of a cd/m².
+    #[allow(clippy::cast_precision_loss)]
+    let expected_max_cll = f64::from(CC8_HLG_NOMINAL_PEAK_NITS) * 100.0;
+    #[allow(clippy::cast_precision_loss)]
+    let expected_max_fall =
+        (f64::from(CC8_REFERENCE_WHITE_NITS) + f64::from(CC8_HLG_NOMINAL_PEAK_NITS)) / 3.0 * 100.0;
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    let deviation = ((light.max_cll_nits_hundredths as f64 - expected_max_cll)
+        .abs()
+        .max((light.max_fall_nits_hundredths as f64 - expected_max_fall).abs()))
+        as f32;
+
+    // Claim 2: the population and its bounds, recorded beside the number.
+    assert_eq!(light.sampled_frame_count, 1);
+    assert_eq!(light.sampled_pixel_count, raster.len() as u64);
+    assert_eq!(light.sampled_pixel_count, report.visible_pixel_count);
+    assert_eq!(light.project_frame, report.project_frame);
+    assert_eq!(light.reference_white_nits, CC8_REFERENCE_WHITE_NITS);
+    assert_eq!(light.boundary, kinewright_core::LIGHT_LEVEL_BOUNDARY);
+    assert!(
+        light.boundary.contains("lower bound"),
+        "a one-frame MaxCLL must say it is a lower bound on a programme's",
+    );
+
+    // Claim 3: nothing gates it. The raster carries a 1 000-nit highlight,
+    // which is four and a half stops over diffuse white and raises the range
+    // warnings it should — and the measurement still passes, because §6 item 3
+    // and §11 make the un-application deliberate.
+    assert!(!light.gated);
+    assert!(
+        report.technical_pass,
+        "light level gates nothing: {:?}",
+        report.exceptions,
+    );
+    assert!(
+        report.exceptions.iter().all(|exception| {
+            !exception.code.contains("cll")
+                && !exception.code.contains("fall")
+                && !exception.code.contains("light_level")
+                && exception.field.as_deref() != Some("light_level")
+        }),
+        "no exception may be raised from a light-level row: {:?}",
+        report.exceptions,
+    );
+
+    // Claim 4: the control for the clamp that is not there. A pixel below black
+    // reports a negative light level rather than a fabricated zero, which is
+    // the same refusal CC6 makes for an unclamped range excursion.
+    let negative = measure_color_qc(
+        &cc8_qc_proof(&[[-1.0_f32; 3]]),
+        &cc8_hdr_qc_request(vec![ColorQcCheck::Range, ColorQcCheck::Gamut], None),
+    )
+    .expect("the negative control must measure");
+    assert_eq!(
+        negative.light_level.max_cll_nits_hundredths,
+        -i64::from(CC8_REFERENCE_WHITE_NITS) * 100,
+        "a working −1.0 is −203 cd/m², reported and not clamped",
+    );
+    assert_eq!(
+        negative.light_level.max_fall_nits_hundredths,
+        negative.light_level.max_cll_nits_hundredths,
+    );
+
+    cc8_assert_measured(
+        "12",
+        "MaxCLL/MaxFALL",
+        "reported_nits_hundredths_deviation",
+        deviation,
+        CC8_FIXTURE12_LIGHT_LEVEL_MEASURED,
+        // §9.2's second rule again: the term measures zero on this raster
+        // because every value is a product of pinned integers, so the floor is
+        // the row's own unit — one hundredth of a cd/m². The negative control
+        // above bounds the constant from the other side by exercising the same
+        // arithmetic on a sample no clamp would have let through.
+        1.0,
+    );
+    println!(
+        "CC8_MEASURED fixture=12 clause=light_level max_cll_hundredths={} \
+         max_fall_hundredths={} expected_max_cll_hundredths={expected_max_cll:.0} \
+         expected_max_fall_hundredths={expected_max_fall:.0} sampled_pixels={} frames={} \
+         gated={} negative_control_hundredths={}",
+        light.max_cll_nits_hundredths,
+        light.max_fall_nits_hundredths,
+        light.sampled_pixel_count,
+        light.sampled_frame_count,
+        light.gated,
+        negative.light_level.max_cll_nits_hundredths,
+    );
+}
+
+/// A media asset carrying one source colour description and nothing else that
+/// matters here.
+///
+/// Authored rather than probed: clause 4's question is what
+/// `document_hdr_source_profile` says about a description, and fixture 8
+/// already proves that a real HLG file probes to exactly this description.
+fn cc8_qc_asset(
+    name: &'static str,
+    color_description: ColorDescription,
+) -> kinewright_core::MediaAsset {
+    kinewright_core::MediaAsset {
+        id: AssetId(1),
+        path: std::path::PathBuf::from(format!("/cc8/{name}.mp4")),
+        name: name.to_owned(),
+        duration: TimeCode(8),
+        fps: Rational::new(25, 1).expect("25/1 is a valid exact frame rate"),
+        kind: kinewright_core::MediaKind::Video,
+        resolution: Some((320, 180)),
+        source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+        color_description,
+    }
+}
+
+/// **§9.1 fixture 12, clause 4.** The withheld-skin reason.
+///
+/// CC8 §6 item 4, verbatim: "On an HDR-profile source the skin report is
+/// **withheld with a named reason**, not silently computed against the wrong
+/// constants. This is the deferral CC8 is most likely to be asked to reverse,
+/// and it should be reversed by measurement or not at all."
+///
+/// Four claims:
+///
+/// 1. On an HDR source the diagnostic is absent, the named reason is present,
+///    and it names the profile that caused it.
+/// 2. The reason is an Info exception too, so it reaches a surface that reads
+///    only exceptions — §12's "a named limitation is a different support burden
+///    from a mysterious one" — and Info never clears `technical_pass`.
+/// 3. On an SDR source the same raster and the same request publish the
+///    diagnostic and carry no withheld row at all. This is the "absent on an
+///    SDR one" half, and without it clause 1 would pass on a build that
+///    withheld everything.
+/// 4. The surfaces' own resolver agrees: `document_hdr_source_profile` finds
+///    §2.1's profile on an HDR document and nothing on an SDR one, so the agent
+///    and the app cannot disagree with this engine about which is which.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cc8_qc_skin_is_withheld_with_a_named_reason_on_an_hdr_source() {
+    // A saturated warm ramp: a raster the CC6 diagnostic has something to say
+    // about, so "absent" and "present" are both real answers.
+    let raster: Vec<[f32; 3]> = (0..16)
+        .map(|step| {
+            #[allow(clippy::cast_precision_loss)]
+            let magnitude = 0.2 + step as f32 / 32.0;
+            [magnitude, magnitude * 0.6, magnitude * 0.45]
+        })
+        .collect();
+    let checks = vec![ColorQcCheck::Range, ColorQcCheck::Gamut, ColorQcCheck::Skin];
+
+    // Claim 1 and 2.
+    let hdr = measure_color_qc(
+        &cc8_qc_proof(&raster),
+        &cc8_hdr_qc_request(checks.clone(), Some(ColorSourceProfile::HlgRec2020)),
+    )
+    .expect("the HDR skin request must measure");
+    assert!(
+        hdr.skin.is_none(),
+        "§6 item 4 withholds the diagnostic rather than computing it: {:?}",
+        hdr.skin,
+    );
+    let withheld = hdr
+        .skin_withheld
+        .as_ref()
+        .expect("the withheld row is the named reason, and silence is what §6 refuses");
+    assert_eq!(withheld.code, kinewright_core::SKIN_WITHHELD_CODE);
+    assert_eq!(withheld.reason, kinewright_core::SKIN_WITHHELD_REASON);
+    assert_eq!(withheld.boundary, kinewright_core::SKIN_DIAGNOSTIC_BOUNDARY);
+    assert_eq!(
+        withheld.source_profile,
+        ColorSourceProfile::HlgRec2020.id(),
+        "the reason names the profile that caused it",
+    );
+    assert!(
+        withheld.reason.contains("Rec.709 primaries")
+            && withheld.reason.contains("measurement programme"),
+        "the reason must say why the constants do not transfer and what reversing it costs: {}",
+        withheld.reason,
+    );
+    let raised = hdr
+        .exceptions
+        .iter()
+        .find(|exception| exception.code == kinewright_core::SKIN_WITHHELD_CODE)
+        .expect("a named limitation reaches an exceptions-only surface");
+    assert_eq!(raised.severity, QaSeverity::Info);
+    assert_eq!(raised.field.as_deref(), Some("skin"));
+    assert!(hdr.technical_pass, "Info never clears technical_pass");
+
+    // The withholding is a property of the source, not of the lane: an HDR
+    // source delivered on an SDR lane is exactly §7 item 2's blocked project,
+    // and it is the one that most needs to be told.
+    let hdr_source_sdr_lane = measure_color_qc(
+        &cc8_qc_proof(&raster),
+        &ColorQcRequest {
+            source_profile: Some(ColorSourceProfile::PqRec2020),
+            ..cc8_sdr_qc_request(checks.clone())
+        },
+    )
+    .expect("an HDR source on an SDR lane must measure");
+    assert_eq!(
+        hdr_source_sdr_lane.delivery_lane,
+        DeliveryLane::SdrRec709.as_str()
+    );
+    assert!(hdr_source_sdr_lane.skin.is_none());
+    assert_eq!(
+        hdr_source_sdr_lane
+            .skin_withheld
+            .as_ref()
+            .map(|withheld| withheld.source_profile.clone()),
+        Some(ColorSourceProfile::PqRec2020.id().to_owned()),
+    );
+
+    // Claim 3: the SDR direction.
+    let sdr = measure_color_qc(&cc8_qc_proof(&raster), &cc8_sdr_qc_request(checks))
+        .expect("the SDR skin request must measure");
+    let skin = sdr
+        .skin
+        .as_ref()
+        .expect("CC6's diagnostic is unchanged on an SDR source");
+    assert!(skin.considered_pixel_count > 0);
+    assert_eq!(skin.boundary, kinewright_core::SKIN_DIAGNOSTIC_BOUNDARY);
+    assert!(
+        sdr.skin_withheld.is_none(),
+        "nothing is withheld on an SDR source: {:?}",
+        sdr.skin_withheld,
+    );
+    assert!(
+        sdr.exceptions
+            .iter()
+            .all(|exception| exception.code != kinewright_core::SKIN_WITHHELD_CODE),
+    );
+
+    // Claim 4: the resolver both surfaces call.
+    let hdr_document = single_clip_document(cc8_qc_asset(
+        "cc8-hlg-source",
+        cc8_hlg_source_description(&cc8_hdr_delivery_description()),
+    ));
+    assert_eq!(
+        kinewright_core::document_hdr_source_profile(&hdr_document),
+        Some(ColorSourceProfile::HlgRec2020),
+    );
+    let sdr_document = single_clip_document(cc8_qc_asset(
+        "cc8-rec709-source",
+        cc8_sdr_delivery_description(CC8_QC_DEPTH),
+    ));
+    assert_eq!(
+        kinewright_core::document_hdr_source_profile(&sdr_document),
+        None,
+    );
+
+    println!(
+        "CC8_MEASURED fixture=12 clause=withheld_skin hdr_profile={} hdr_skin_present={} \
+         hdr_withheld_present={} sdr_skin_present={} sdr_withheld_present={} \
+         hdr_source_sdr_lane_withheld={} exception_severity={:?}",
+        ColorSourceProfile::HlgRec2020.id(),
+        hdr.skin.is_some(),
+        hdr.skin_withheld.is_some(),
+        sdr.skin.is_some(),
+        sdr.skin_withheld.is_some(),
+        hdr_source_sdr_lane.skin_withheld.is_some(),
+        raised.severity,
     );
 }

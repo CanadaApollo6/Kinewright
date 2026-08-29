@@ -23,8 +23,8 @@ use eframe::egui;
 use kinewright_core::{
     Analysis, ClipId, ColorQcCheck, ColorQcReport, ColorQcRequest, DeliveryEncodeDepth, Document,
     EffectId, MatteRegionDescription, MatteRegionScope, MediaError, QaSeverity, TimeCode,
-    WorkingProof, WorkingProofMetadata, delivery_color_for_depth, matte_coverage_statistics,
-    measure_color_qc,
+    WorkingProof, WorkingProofMetadata, delivery_color_for_depth, document_hdr_source_profile,
+    matte_coverage_statistics, measure_color_qc,
 };
 
 use crate::{
@@ -1076,6 +1076,14 @@ fn millionths(value: i64) -> String {
     )
 }
 
+/// Render a hundredths-of-a-cd/m² integer as cd/m² (CC8 §6 item 3).
+#[must_use]
+fn nits(value: i64) -> String {
+    let sign = if value < 0 { "-" } else { "" };
+    let magnitude = value.unsigned_abs();
+    format!("{sign}{}.{:02} cd/m²", magnitude / 100, magnitude % 100)
+}
+
 /// Render a centidegree integer as degrees.
 #[must_use]
 fn centidegrees(value: i32) -> String {
@@ -1221,6 +1229,12 @@ impl KinewrightApp {
             observed_delivery: None,
             max_nodes: u8::try_from(kinewright_core::MAX_QC_NODE_CONTRIBUTIONS).unwrap_or(16),
             project_frame: frame.0,
+            // CC8 §6 items 2 and 4, through core's one classifier so this
+            // window and the agent's `get_color_qc` cannot disagree about
+            // whether the frame in front of them is HDR. The delivery *lane*
+            // is derived from `expected_delivery` above (§5.2 clause 1) and is
+            // deliberately not a second field here.
+            source_profile: document_hdr_source_profile(&document),
         };
         let analysis = Arc::clone(&self.analysis);
         let cache = Arc::clone(&self.working_proof_cache);
@@ -1247,6 +1261,7 @@ pub(crate) fn color_qc_sections(ui: &mut egui::Ui, measurement: &ColorQcMeasurem
     region_line(ui, report);
     range_section(ui, report);
     gamut_section(ui, report);
+    light_level_section(ui, report);
     // The region the *measurement* was scoped to, not whatever the scopes
     // panel is set to now: a report taken with no region must keep saying so
     // after an ROI is typed, or the prompt describes a measurement nobody has
@@ -1290,6 +1305,18 @@ fn region_line(ui: &mut egui::Ui, report: &ColorQcReport) {
 
 fn range_section(ui: &mut egui::Ui, report: &ColorQcReport) {
     section_heading(ui, "RANGE");
+    // CC8 §6 item 1: which lane's encode and matrix produced every code below.
+    // A reader who cannot see this cannot tell a BT.2020 legality number from a
+    // BT.709 one, and §6 names that confusion as the mistake it exists to
+    // prevent.
+    ui.colored_label(
+        color::TEXT_MUTED,
+        format!(
+            "Encoded and measured through the {} delivery lane's own primaries, transfer, and \
+             Y'CbCr matrix.",
+            report.delivery_lane
+        ),
+    );
     egui::Grid::new("color-qc-range")
         .num_columns(5)
         .striped(true)
@@ -1326,35 +1353,111 @@ fn range_section(ui: &mut egui::Ui, report: &ColorQcReport) {
 
 fn gamut_section(ui: &mut egui::Ui, report: &ColorQcReport) {
     section_heading(ui, "GAMUT");
+    gamut_triangle(ui, &report.gamut);
+    // CC8 §6 item 2: the second triangle, drawn only when it differs, because
+    // "outside Rec.709 but inside Rec.2020" is the SDR-compatibility signal an
+    // editor delivering HDR needs and two identical reports are one fact
+    // printed twice.
+    if let Some(rec2020) = report.gamut_rec2020.as_ref() {
+        gamut_triangle(ui, rec2020);
+    }
+    // CC8 §12's third risk: the relation is normative and printed as a line,
+    // never a tooltip, because two triangles over one pixel set multiply CC6
+    // §14's double-counting invitation.
+    if let Some(relation) = report.gamut_triangle_relation.as_deref() {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(relation)
+                    .color(color::TEXT_MUTED)
+                    .font(theme::semibold(type_size::CAPTION)),
+            )
+            .wrap(),
+        );
+    }
+}
+
+/// One triangle's rows. CC8 §6 item 2 makes the triangle a property of the
+/// report, so it is a property of the block that draws it.
+fn gamut_triangle(ui: &mut egui::Ui, gamut: &kinewright_core::ColorGamutReport) {
     ui.horizontal_wrapped(|ui| {
-        ui.monospace(format!("{} bp", report.gamut.out_of_gamut_basis_points));
+        ui.monospace(gamut.triangle.as_str());
+        ui.monospace(format!("{} bp", gamut.out_of_gamut_basis_points));
         ui.colored_label(
             color::TEXT_MUTED,
-            format!("{} px out of gamut", report.gamut.out_of_gamut_pixel_count),
+            format!("{} px out of gamut", gamut.out_of_gamut_pixel_count),
         );
     });
     ui.horizontal_wrapped(|ui| {
         ui.colored_label(color::TEXT_MUTED, "min linear");
-        ui.monospace(millionths(report.gamut.minimum_linear_millionths));
+        ui.monospace(millionths(gamut.minimum_linear_millionths));
         ui.colored_label(color::TEXT_MUTED, "· max desaturation");
-        ui.monospace(millionths(report.gamut.maximum_desaturation_millionths));
+        ui.monospace(millionths(gamut.maximum_desaturation_millionths));
         ui.colored_label(
             color::TEXT_MUTED,
-            format!("· below black {} px", report.gamut.below_black_pixel_count),
+            format!("· below black {} px", gamut.below_black_pixel_count),
         );
     });
     // CC6 §14: the relation is a line, not a tooltip. Two named reports over
     // one pixel set invite double-counting in any summary written from them.
     ui.add(
-        egui::Label::new(
-            egui::RichText::new(report.gamut.definition.as_str()).color(color::TEXT_MUTED),
-        )
-        .wrap(),
+        egui::Label::new(egui::RichText::new(gamut.definition.as_str()).color(color::TEXT_MUTED))
+            .wrap(),
+    );
+}
+
+/// CC8 §6 item 3's `MaxCLL`/`MaxFALL` rows — measured, shown, and gated on
+/// nothing.
+///
+/// The heading says `UNGATED` because §6 item 3 and §11 make the un-application
+/// deliberate: CC8 §0.2 Q1 chose HLG, which carries no static metadata, so
+/// nothing writes these numbers into a file and a threshold on them would be
+/// invented. An editor who sees a number in a QC window reasonably assumes
+/// something is checking it, and here nothing is.
+fn light_level_section(ui: &mut egui::Ui, report: &ColorQcReport) {
+    section_heading(ui, "LIGHT LEVEL (UNGATED)");
+    let light = &report.light_level;
+    ui.horizontal_wrapped(|ui| {
+        ui.colored_label(color::TEXT_MUTED, "MaxCLL");
+        ui.monospace(nits(light.max_cll_nits_hundredths));
+        ui.colored_label(color::TEXT_MUTED, "· MaxFALL");
+        ui.monospace(nits(light.max_fall_nits_hundredths));
+        ui.colored_label(
+            color::TEXT_MUTED,
+            format!(
+                "· {} px over {} frame · reference white {} cd/m²",
+                light.sampled_pixel_count, light.sampled_frame_count, light.reference_white_nits
+            ),
+        );
+    });
+    ui.add(
+        egui::Label::new(egui::RichText::new(light.boundary.as_str()).color(color::TEXT_MUTED))
+            .wrap(),
     );
 }
 
 fn skin_section(ui: &mut egui::Ui, report: &ColorQcReport, region_available: bool) {
     section_heading(ui, "SKIN");
+    // CC8 §6 item 4, and §12's mitigation for "HDR content will make the
+    // existing SDR-shaped nodes look broken": a named limitation at the surface
+    // that has it, never a silent absence and never a line in a file nobody
+    // opens. It is drawn before the region hint, because on an HDR source
+    // naming a region would not produce the diagnostic either.
+    if let Some(withheld) = report.skin_withheld.as_ref() {
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(color::STATUS_WARNING, "Withheld");
+            ui.colored_label(
+                color::TEXT_MUTED,
+                format!("· source profile {}", withheld.source_profile),
+            );
+        });
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(withheld.reason.as_str()).color(color::TEXT_MUTED),
+            )
+            .wrap(),
+        );
+        return;
+    }
     let Some(skin) = report.skin.as_ref() else {
         ui.colored_label(
             color::TEXT_MUTED,
@@ -2367,6 +2470,162 @@ mod tests {
             painted.contains(measurement.report.stage.as_str()),
             "and the provenance footer says which stage it measured:\n{painted}"
         );
+    }
+
+    /// CC8 §5.1's HDR delivery description, field by field from the lane table.
+    fn hdr_delivery_description() -> kinewright_core::ColorDescription {
+        let lane = kinewright_core::CC8_HDR_DELIVERY_LANE;
+        let description = kinewright_core::ColorDescription {
+            primaries: kinewright_core::ColorPrimaries::Bt2020,
+            transfer: kinewright_core::ColorTransfer::AribStdB67,
+            matrix: kinewright_core::ColorMatrix::Bt2020Ncl,
+            range: kinewright_core::ColorRange::Limited,
+            white_point: kinewright_core::ColorWhitePoint::D65,
+            bit_depth: DeliveryEncodeDepth::Ten.color_bit_depth(),
+            confidence_basis_points: 10_000,
+            provenance: kinewright_core::ColorProvenance::UserOverride,
+        };
+        assert_eq!(description.primaries.wire(), lane.primaries);
+        assert_eq!(description.transfer.wire(), lane.transfer);
+        assert_eq!(description.matrix.wire(), lane.matrix);
+        assert_eq!(description.range.wire(), lane.range);
+        assert_eq!(description.white_point.wire(), lane.white_point);
+        assert_eq!(
+            kinewright_core::DeliveryLane::for_description(&description),
+            kinewright_core::DeliveryLane::HdrHlgRec2020,
+        );
+        description
+    }
+
+    /// One HDR measurement: a working raster carrying colours outside the
+    /// Rec.709 triangle, on CC8 §5.1's delivery lane, from an HLG source.
+    ///
+    /// The raster is the Rec.2020 blue primary at diffuse white, carried into
+    /// the working space by §2.3's matrix — the same journey §3.3 puts an HDR
+    /// source through — plus a neutral, so the region has both an in-gamut and
+    /// an out-of-Rec.709 pixel and neither report is vacuous.
+    fn hdr_measurement(
+        source_profile: Option<kinewright_core::ColorSourceProfile>,
+    ) -> ColorQcMeasurement {
+        let wide = kinewright_core::cc8_apply_matrix(
+            kinewright_core::CC8_REC2020_TO_BT709,
+            [0.0, 0.0, 1.0],
+        );
+        let proof = WorkingProof {
+            image: LinearRgbaImage {
+                width: 2,
+                height: 1,
+                pixels: vec![1.0, 1.0, 1.0, 1.0, wide[0], wide[1], wide[2], 1.0],
+            },
+            metadata: WorkingProofMetadata {
+                render: MonitorProofMetadata::test_double(),
+                stage: WORKING_PROOF_STAGE.to_owned(),
+                encoding: WORKING_PROOF_ENCODING.to_owned(),
+                raster_aspect_millionths: 2_000_000,
+            },
+        };
+        let request = ColorQcRequest {
+            checks: vec![ColorQcCheck::Range, ColorQcCheck::Gamut, ColorQcCheck::Skin],
+            delivery_bit_depth: DeliveryEncodeDepth::Ten,
+            // §5.2 clause 1: the description selects the lane, so this is the
+            // only thing the window's request has to get right. Every field is
+            // asserted against `CC8_HDR_DELIVERY_LANE`'s cell below, so a lane
+            // table edited in `cc8_hdr.rs` fails here rather than leaving this
+            // test measuring the old lane.
+            expected_delivery: Some(hdr_delivery_description()),
+            project_frame: 3,
+            source_profile,
+            ..ColorQcRequest::default()
+        };
+        let report = measure_color_qc(&proof, &request).expect("the HDR fixture measures");
+        ColorQcMeasurement {
+            key: ColorQcKey {
+                depth: DeliveryEncodeDepth::Ten,
+                ..key()
+            },
+            report,
+            metadata: proof.metadata,
+        }
+    }
+
+    /// CC8 §6 and §8: the window carries the HDR facts at the surface that has
+    /// them, and says nothing about them on an SDR measurement.
+    ///
+    /// §12's mitigations are both surface obligations — "the relation normative
+    /// and printed as a line" for the two triangles, and "both limitations are
+    /// surfaced in the UI at the node that has them, not documented in a file
+    /// nobody opens" for the withheld skin diagnostic — so they are asserted on
+    /// the painted text rather than on the report the window was handed.
+    #[test]
+    fn the_hdr_window_body_names_the_lane_both_triangles_and_the_withheld_skin() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let paint = |measurement: &ColorQcMeasurement| {
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                color_qc_sections(ui, measurement);
+            });
+            crate::theme::painted_text(&output).join("\n")
+        };
+
+        let hdr = hdr_measurement(Some(kinewright_core::ColorSourceProfile::HlgRec2020));
+        let painted = paint(&hdr);
+        // §6 item 1: which lane's encode and matrix produced the range numbers.
+        assert!(
+            painted.contains(kinewright_core::DeliveryLane::HdrHlgRec2020.as_str()),
+            "the range section names the lane it measured through:\n{painted}"
+        );
+        // §6 item 2: two triangles, each named, and the relation as a line.
+        assert!(
+            painted.contains(kinewright_core::GAMUT_TRIANGLE_REC709)
+                && painted.contains(kinewright_core::GAMUT_TRIANGLE_REC2020),
+            "both triangles are named in the gamut section:\n{painted}"
+        );
+        assert!(
+            painted.contains(kinewright_core::GAMUT_TRIANGLE_RELATION),
+            "§12's third risk: the relation is a line, not a tooltip:\n{painted}"
+        );
+        // §6 item 3: the rows, and the word that says nothing checks them.
+        assert!(
+            painted.contains("LIGHT LEVEL (UNGATED)")
+                && painted.contains("MaxCLL")
+                && painted.contains("MaxFALL")
+                && painted.contains(kinewright_core::LIGHT_LEVEL_BOUNDARY),
+            "the light-level section is present and says it gates nothing:\n{painted}"
+        );
+        // §6 item 4: the named limitation, at the section that has it.
+        assert!(
+            painted.contains(kinewright_core::SKIN_WITHHELD_REASON)
+                && painted.contains(kinewright_core::ColorSourceProfile::HlgRec2020.id()),
+            "the skin section names why it is withheld and what caused it:\n{painted}"
+        );
+
+        // The SDR direction, one step away: the same window, an SDR
+        // measurement, and none of the four.
+        let sdr = paint(&full_measurement());
+        assert!(
+            sdr.contains(kinewright_core::GAMUT_TRIANGLE_REC709),
+            "CC6's triangle is still named on an SDR measurement:\n{sdr}"
+        );
+        assert!(
+            !sdr.contains(kinewright_core::GAMUT_TRIANGLE_REC2020)
+                && !sdr.contains(kinewright_core::GAMUT_TRIANGLE_RELATION),
+            "an SDR measurement has one triangle and no relation line:\n{sdr}"
+        );
+        assert!(
+            !sdr.contains(kinewright_core::SKIN_WITHHELD_REASON),
+            "nothing is withheld on an SDR source:\n{sdr}"
+        );
+        assert!(
+            sdr.contains("LIGHT LEVEL (UNGATED)"),
+            "the light-level rows are measured on every lane (§6 item 3):\n{sdr}"
+        );
+
+        // And an HDR *lane* with no resolved source profile still publishes the
+        // second triangle and still withholds nothing: the two keys are
+        // deliberately separate (§6 items 2 and 4).
+        let lane_only = paint(&hdr_measurement(None));
+        assert!(lane_only.contains(kinewright_core::GAMUT_TRIANGLE_REC2020));
+        assert!(!lane_only.contains(kinewright_core::SKIN_WITHHELD_REASON));
     }
 
     /// CC6 §8.3: absent when both deltas are non-positive, present with the

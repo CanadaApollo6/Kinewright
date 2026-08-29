@@ -33,11 +33,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ClipId, DeliveryEncodeDepth, DeliveryTagCheck, EffectId, MatteRegionDescription, MediaError,
-    NormalizedRoi, PixelRoi, QaSeverity, RgbaImage, SCOPE_BASIS_POINTS, WorkingProof,
+    ClipId, ColorSourceProfile, DeliveryEncodeDepth, DeliveryLane, DeliveryTagCheck, EffectId,
+    MatteRegionDescription, MediaError, NormalizedRoi, PixelRoi, QaSeverity, RgbaImage,
+    SCOPE_BASIS_POINTS, WorkingProof,
     cc8_hdr::{
-        CC8_BT2020_CB_DENOMINATOR, CC8_BT2020_CR_DENOMINATOR, CC8_BT2020_KB, CC8_BT2020_KG,
-        CC8_BT2020_KR,
+        CC8_BT709_TO_REC2020, CC8_BT2020_CB_DENOMINATOR, CC8_BT2020_CR_DENOMINATOR, CC8_BT2020_KB,
+        CC8_BT2020_KG, CC8_BT2020_KR, CC8_REFERENCE_WHITE_NITS, cc8_apply_matrix,
+        cc8_hlg_encode_working_linear,
     },
 };
 
@@ -71,6 +73,42 @@ pub fn encode_bt709_delivery(linear: f32) -> f32 {
         4.5 * linear
     } else {
         1.099 * linear.powf(0.45) - 0.099
+    }
+}
+
+/// The delivery encode of one **lane**, in that lane's own primaries and
+/// transfer — CC8 §6 item 1's report-side half.
+///
+/// §6 item 1 makes legality "measured against **the lane's own matrix**", and a
+/// matrix consumes `R'G'B'`: feeding BT.709-coded samples to the BT.2020 NCL
+/// matrix would be exactly the "wrong number, not an approximate one" that item
+/// names. So the *whole* encode is the lane's, not just the matrix that follows
+/// it, and this function is the single place that decides which one runs.
+///
+/// - [`DeliveryLane::SdrRec709`] is [`encode_bt709_delivery`] per channel,
+///   unchanged and in the same channel order, so every CC1–CC7 measurement is
+///   byte-identical (§9.1 fixture 6).
+/// - [`DeliveryLane::HdrHlgRec2020`] is §3.3's delivery line: the working
+///   BT.709 linear goes through
+///   [`CC8_BT709_TO_REC2020`](crate::cc8_hdr::CC8_BT709_TO_REC2020) and then
+///   [`cc8_hlg_encode_working_linear`](crate::cc8_hdr::cc8_hlg_encode_working_linear),
+///   which is the arithmetic `kinewright_media::color_pipeline::encode_delivery_hlg_rec2020_rgba16`
+///   performs before `quantize_delivery16` clamps it. That clamp is what the
+///   range report predicts, so predicting it against the BT.709 curve on the
+///   HDR lane would predict a clamp no HDR export applies.
+///
+/// **No clamp**, on either lane: this is what the delivery clamp *receives*.
+#[must_use]
+pub fn encode_delivery_for_lane(lane: DeliveryLane, working_linear: [f32; 3]) -> [f32; 3] {
+    match lane {
+        DeliveryLane::SdrRec709 => [
+            encode_bt709_delivery(working_linear[0]),
+            encode_bt709_delivery(working_linear[1]),
+            encode_bt709_delivery(working_linear[2]),
+        ],
+        DeliveryLane::HdrHlgRec2020 => {
+            cc8_hlg_encode_working_linear(cc8_apply_matrix(CC8_BT709_TO_REC2020, working_linear))
+        }
     }
 }
 
@@ -397,12 +435,62 @@ pub struct ColorRangeReport {
 // §3.3: gamut.
 // ---------------------------------------------------------------------------
 
-/// The fixed prose [`ColorGamutReport::definition`] carries.
+/// The fixed prose [`ColorGamutReport::definition`] carries on the Rec.709
+/// triangle.
+///
+/// **Unchanged by CC8**, character for character: §9.1 fixture 6 makes every
+/// CC1–CC7 pinned constant unmoved a condition of accepting CC8, and CC6's own
+/// fixtures assert this string verbatim. §6 item 2's second triangle gets its
+/// own prose in [`GAMUT_DEFINITION_REC2020`] rather than editing this one.
 pub const GAMUT_DEFINITION: &str = "Out of gamut is min(r, g, b) < 0 in linear light: exactly the \
 set of pixels with at least one under-range channel in the range report. The two reports describe \
 one pixel set from two sides and must not be summed. An over-range positive value is a range \
 excursion and is not a gamut excursion: it is inside the Rec.709 chromaticity triangle and merely \
 brighter than diffuse white.";
+
+/// [`ColorGamutReport::triangle`] for the Rec.709 report — CC6's, and the one
+/// every SDR measurement carries.
+pub const GAMUT_TRIANGLE_REC709: &str = "rec709";
+
+/// [`ColorGamutReport::triangle`] for CC8 §6 item 2's second report.
+pub const GAMUT_TRIANGLE_REC2020: &str = "rec2020";
+
+/// The fixed prose the Rec.2020 [`ColorGamutReport::definition`] carries
+/// (CC8 §6 item 2).
+///
+/// §6 item 2: "CC8 makes the triangle a property of the report, names it in
+/// `ColorGamutReport.definition`, and reports Rec.2020 representability for
+/// HDR-profile content... CC6 §3.2/§3.3's normative range/gamut relation is
+/// restated per triangle so the double-counting risk CC6 §14 names does not
+/// multiply." So this is [`GAMUT_DEFINITION`]'s statement re-derived for the
+/// wider triangle rather than reused: the test is on the **Rec.2020** linear
+/// components the delivery matrix will consume, and the luma whose desaturation
+/// metric this report prints is BT.2020's, not BT.709's.
+pub const GAMUT_DEFINITION_REC2020: &str = "Out of gamut is min(r, g, b) < 0 after the working \
+BT.709 linear triple is converted to Rec.2020 linear by CC8 §2.3's matrix: the set of pixels the \
+HDR delivery lane itself cannot represent. Its luma is BT.2020's 0.2627 / 0.6780 / 0.0593, because \
+the components it measures are Rec.2020's. This report and the Rec.709 one describe one pixel set \
+from two sides and must not be summed, exactly as the range and gamut reports must not be.";
+
+/// The normative relation between the two triangles' reports (CC8 §6 item 2).
+///
+/// §12's third risk requires this to be "printed as a line": "CC6 §14 already
+/// names two reports over one pixel set as an invitation to double-count; CC8
+/// makes it two triangles as well. *Mitigation:* §6 requires both to be
+/// reported only where they differ, with the relation normative and printed as
+/// a line."
+///
+/// The relation is a strict nesting, and it is a fact about the triangles
+/// rather than about any raster: Rec.709's primaries lie inside Rec.2020's, so
+/// every colour Rec.2020 cannot represent is one Rec.709 cannot represent
+/// either. That makes exactly one subtraction meaningful and every addition
+/// wrong, and the line says which.
+pub const GAMUT_TRIANGLE_RELATION: &str = "The Rec.709 triangle is contained in the Rec.2020 \
+triangle, so the out-of-Rec.2020 pixels are a subset of the out-of-Rec.709 pixels and the two \
+counts must never be summed. The one meaningful arithmetic is the difference: \
+rec709.out_of_gamut_pixel_count - rec2020.out_of_gamut_pixel_count is the count of pixels this \
+HDR delivery can carry and an SDR Rec.709 delivery cannot, which is the SDR-compatibility signal. \
+Both reports are published only when they differ; when they agree, one report is the whole fact.";
 
 /// Representability of a region's colours in the Rec.709 triangle.
 ///
@@ -437,7 +525,12 @@ pub struct ColorGamutReport {
     pub maximum_desaturation_millionths: i64,
     /// Out-of-gamut pixels with `Y < 0`, excluded from the maximum above.
     pub below_black_pixel_count: u64,
-    /// Always [`GAMUT_DEFINITION`].
+    /// [`GAMUT_TRIANGLE_REC709`] or [`GAMUT_TRIANGLE_REC2020`] — CC8 §6 item
+    /// 2's "the triangle is a property of the report", as a field so a consumer
+    /// does not have to parse [`Self::definition`] to learn which one it read.
+    pub triangle: String,
+    /// [`GAMUT_DEFINITION`] on the Rec.709 triangle, [`GAMUT_DEFINITION_REC2020`]
+    /// on the Rec.2020 one.
     pub definition: String,
 }
 
@@ -527,6 +620,109 @@ pub struct SkinDiagnostics {
     /// Always [`SKIN_BAND_HALF_WIDTH_CENTIDEGREES`].
     pub band_half_width_centidegrees: i32,
     /// Always [`SKIN_DIAGNOSTIC_BOUNDARY`].
+    pub boundary: String,
+}
+
+// ---------------------------------------------------------------------------
+// CC8 §6 item 3: MaxCLL and MaxFALL, measured and reported, never gated.
+// ---------------------------------------------------------------------------
+
+/// The statement every [`ColorLightLevelReport`] carries verbatim.
+///
+/// CC8 §6 item 3: "Computed from the working proof over the sampled frames, in
+/// the CC6 evidence style, with the sampled population and its bounds recorded
+/// beside the number. They are reported because an editor should be able to see
+/// them and because a PQ lane (§0.2 Q1) would need them as *inputs*; they are
+/// not gated because CC8 does not write them into a file and a threshold on
+/// them would be invented."
+///
+/// The bound this sentence records is the one the population forces: a report
+/// measures **one** working proof, so its `MaxCLL` is a lower bound on a
+/// programme's and its `MaxFALL` is this frame's average, not the maximum over
+/// frames. Printing it as if it were the programme's figure would be the
+/// invented number §6 refuses.
+pub const LIGHT_LEVEL_BOUNDARY: &str = "MaxCLL and MaxFALL are measured, reported, and never \
+gated: CC8 §0.2 Q1 chose HLG, which carries no static metadata, so nothing writes these numbers \
+into a file and any threshold on them would be invented. Light level is max(r, g, b) of the \
+unclamped working sample scaled by CC8 §2.2's reference-white anchor, so a frame whose channels \
+are all negative reports a negative light level rather than a clamped zero. The population is one \
+working proof: this MaxCLL is a lower bound on a whole programme's, and this MaxFALL is this \
+frame's average light level, not the maximum over frames.";
+
+/// Content light level over one measured region (CC8 §6 item 3).
+///
+/// Units are **hundredths of a cd/m²**, following CC6's rule that no QC API
+/// returns a float and PSNR's own hundredths-of-a-dB precedent. The conversion
+/// from working linear to cd/m² is `nits = working · CC8_REFERENCE_WHITE_NITS`,
+/// the §2.2 anchor read from `kinewright_core::cc8_hdr` and reported in
+/// [`Self::reference_white_nits`] so the number can be re-derived from the
+/// report alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ColorLightLevelReport {
+    /// `MaxCLL`: the largest per-pixel `max(r, g, b)` over the population, in
+    /// hundredths of a cd/m². `0` when the population was empty.
+    pub max_cll_nits_hundredths: i64,
+    /// `MaxFALL`: the mean per-pixel `max(r, g, b)` over the population, in
+    /// hundredths of a cd/m². `0` when the population was empty.
+    pub max_fall_nits_hundredths: i64,
+    /// Frames this measurement spans. Always `1`: [`measure_color_qc`] measures
+    /// one working proof, and the number is stated rather than implied so a
+    /// consumer cannot read a single frame as a programme.
+    pub sampled_frame_count: u32,
+    /// The pixels the two numbers were taken over — visible and finite, which
+    /// is the same population every other accumulator in this report uses.
+    pub sampled_pixel_count: u64,
+    /// The project frame the population came from.
+    pub project_frame: i64,
+    /// Always [`crate::cc8_hdr::CC8_REFERENCE_WHITE_NITS`].
+    pub reference_white_nits: i32,
+    /// Always `false`. CC8 §6 item 3 and §11: deliberately produced, and
+    /// deliberately unapplied.
+    pub gated: bool,
+    /// Always [`LIGHT_LEVEL_BOUNDARY`].
+    pub boundary: String,
+}
+
+// ---------------------------------------------------------------------------
+// CC8 §6 item 4: HDR skin diagnostics, withheld with a named reason.
+// ---------------------------------------------------------------------------
+
+/// The exception code a withheld HDR skin report raises.
+pub const SKIN_WITHHELD_CODE: &str = "hdr_skin_diagnostics_withheld";
+
+/// The named reason CC8 §6 item 4 requires a withheld skin report to carry.
+///
+/// §6 item 4, verbatim: "CC6's band constants were derived at
+/// `θ(+I) = 123.0000°` in `grade709` against Rec.709 primaries (`P4`). Those
+/// numbers do not transfer to Rec.2020 or to HDR luminance, and re-deriving
+/// them is a measurement programme. On an HDR-profile source the skin report is
+/// **withheld with a named reason**, not silently computed against the wrong
+/// constants. This is the deferral CC8 is most likely to be asked to reverse,
+/// and it should be reversed by measurement or not at all."
+pub const SKIN_WITHHELD_REASON: &str = "The skin diagnostic is withheld on a CC8 HDR source. CC6's \
+band constants were derived in grade709 against Rec.709 primaries at SDR luminance - the four CC5 \
+patch angles, their circular mean at 123.39 degrees, and the 12.00 degree half-width - and none of \
+them transfers to Rec.2020 primaries or to HDR magnitudes. Computing them here would publish a hue \
+statistic against the wrong constants, which is a wrong number rather than an approximate one. CC8 \
+section 6 item 4 defers HDR skin diagnostics: re-deriving the band is a measurement programme, and \
+this deferral should be reversed by measurement or not at all.";
+
+/// What a report says instead of a skin diagnostic on an HDR source.
+///
+/// A named limitation, never silence: §12's mitigation for "HDR content will
+/// make the existing SDR-shaped nodes look broken" is that "both limitations
+/// are surfaced in the UI at the node that has them, not documented in a file
+/// nobody opens", and this is the QC half of that.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SkinWithheldReport {
+    /// Always [`SKIN_WITHHELD_CODE`].
+    pub code: String,
+    /// The [`ColorSourceProfile::id`] that caused the withholding.
+    pub source_profile: String,
+    /// Always [`SKIN_WITHHELD_REASON`].
+    pub reason: String,
+    /// Always [`SKIN_DIAGNOSTIC_BOUNDARY`], so the withheld row carries the
+    /// same boundary statement the published diagnostic would have.
     pub boundary: String,
 }
 
@@ -624,6 +820,55 @@ pub struct ColorQcRequest {
     /// identity `ScopeMeasurementMetadata.project_frames` carries. CC6
     /// introduces no new frame-identity type.
     pub project_frame: i64,
+    /// The classified source profile of the layer this measurement is about,
+    /// when the caller resolved one (CC8 §6 items 2 and 4).
+    ///
+    /// It is a *source* question, deliberately separate from the delivery lane
+    /// [`Self::delivery_lane`] derives: §6 item 4 withholds the skin diagnostic
+    /// "on an HDR-profile source", which is true of an HDR project whose
+    /// delivery is still SDR — exactly the project §7 item 2 blocks from
+    /// exporting. Keying the withholding on the lane would publish CC6's band
+    /// constants against Rec.2020 content on precisely the projects that most
+    /// need to be told they cannot be.
+    ///
+    /// `None` is the CC6 answer — no profile resolved, so nothing is withheld
+    /// and no second triangle is reported. Callers that hold a document resolve
+    /// it with [`crate::document_hdr_source_profile`].
+    pub source_profile: Option<ColorSourceProfile>,
+}
+
+impl ColorQcRequest {
+    /// The delivery lane this measurement predicts (CC8 §5.2 clause 1).
+    ///
+    /// **Derived, never carried.** §5.2 clause 1 makes the delivery
+    /// `ColorDescription` the single source of truth for every lane-derived
+    /// term, and [`DeliveryLane::for_description`] "is the only place that
+    /// reads it". A second `lane` field on this request could disagree with
+    /// [`Self::expected_delivery`], which is the divergence class §5.2 clause 3
+    /// makes a fixture out of on the export side; there is nothing to diverge
+    /// if the lane is a function.
+    ///
+    /// A request with no expected delivery description is measured on the SDR
+    /// lane, which is CC6's behaviour unchanged and is what keeps every
+    /// CC1–CC7 measurement byte-identical (§9.1 fixture 6).
+    #[must_use]
+    pub fn delivery_lane(&self) -> DeliveryLane {
+        self.expected_delivery
+            .as_ref()
+            .map_or(DeliveryLane::SdrRec709, DeliveryLane::for_description)
+    }
+
+    /// Whether this measurement is about HDR content at all — CC8 §6 item 2's
+    /// "HDR-profile content".
+    ///
+    /// Either side makes it so: an HDR delivery lane means the second triangle
+    /// is what the file will be written in, and an HDR source means the working
+    /// raster carries colours the Rec.709 triangle cannot hold whatever the
+    /// delivery is.
+    #[must_use]
+    pub fn is_hdr_context(&self) -> bool {
+        self.delivery_lane().is_hdr() || self.source_profile.is_some_and(ColorSourceProfile::is_hdr)
+    }
 }
 
 impl Default for ColorQcRequest {
@@ -637,6 +882,7 @@ impl Default for ColorQcRequest {
             observed_delivery: None,
             max_nodes: MAX_QC_NODE_CONTRIBUTIONS_U8,
             project_frame: 0,
+            source_profile: None,
         }
     }
 }
@@ -756,9 +1002,48 @@ pub struct ColorQcReport {
     pub transparent_pixel_count: u64,
     /// 8 or 10; selects the §3.4 code scale.
     pub delivery_bit_depth: u8,
+    /// [`DeliveryLane::as_str`] of the lane this measurement predicted — the
+    /// lane whose transfer, primaries, and `Y'CbCr` matrix the range and
+    /// legality reports were taken through (CC8 §6 item 1).
+    ///
+    /// Echoed from [`ColorQcRequest::delivery_lane`] so a reader never has to
+    /// infer from the numbers which matrix produced them.
+    pub delivery_lane: String,
     pub range: ColorRangeReport,
+    /// The Rec.709-triangle gamut report, on every lane. CC6's, unchanged.
     pub gamut: ColorGamutReport,
+    /// CC8 §6 item 2's Rec.2020-triangle report, published **only** on HDR
+    /// content and **only** when it differs from [`Self::gamut`].
+    ///
+    /// §6 item 2: "**Both are reported when they differ**, because 'outside
+    /// Rec.709 but inside Rec.2020' is exactly the fact an editor delivering
+    /// HDR needs, and collapsing it loses the SDR-compatibility signal." §12's
+    /// third risk supplies the other half — "§6 requires both to be reported
+    /// only where they differ" — so two identical reports are never published
+    /// as if they were two facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub gamut_rec2020: Option<ColorGamutReport>,
+    /// [`GAMUT_TRIANGLE_RELATION`], present exactly when
+    /// [`Self::gamut_rec2020`] is: §12's "the relation normative and printed as
+    /// a line".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub gamut_triangle_relation: Option<String>,
+    /// CC8 §6 item 3's `MaxCLL`/`MaxFALL`, measured on every lane and gated on
+    /// none.
+    pub light_level: ColorLightLevelReport,
     pub skin: Option<SkinDiagnostics>,
+    /// CC8 §6 item 4: why there is no skin diagnostic on an HDR source.
+    ///
+    /// `Some` exactly when [`ColorQcRequest::source_profile`] resolved to one
+    /// of §2.1's HDR profiles, whether or not [`ColorQcCheck::Skin`] was asked
+    /// for — the limitation is a property of the content, and a report that
+    /// mentions it only when someone happens to ask is the silence §6 refuses.
+    /// [`Self::skin`] is `None` whenever this is `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub skin_withheld: Option<SkinWithheldReport>,
     pub tags: Option<DeliveryTagCheck>,
     pub nodes: Option<ColorQcNodeContributions>,
     pub exceptions: Vec<ColorQcException>,
@@ -941,14 +1226,24 @@ impl From<ColorQcError> for MediaError {
 /// top-left, matching the compositor's own readback order, so a partial-sum
 /// reordering cannot change a floating-point accumulation.
 ///
-/// [`ColorRangeReport`] and [`ColorGamutReport`] are always produced — they are
-/// one pass over the same pixels and they are what the report is *for*.
-/// `checks` selects the optional sections: [`ColorQcCheck::Skin`] produces
+/// [`ColorRangeReport`], [`ColorGamutReport`] and CC8 §6 item 3's
+/// [`ColorLightLevelReport`] are always produced — they are one pass over the
+/// same pixels and they are what the report is *for*. `checks` selects the
+/// optional sections: [`ColorQcCheck::Skin`] produces
 /// [`ColorQcReport::skin`], and [`ColorQcCheck::Tags`] produces
 /// [`ColorQcReport::tags`] when the request carries an expected delivery
 /// description. [`ColorQcCheck::PerNode`] is never honoured here: per-node
 /// attribution needs a renderer and lives in [`nodes`], whose result the caller
 /// attaches with [`attach_node_contributions`].
+///
+/// **Lane-aware, from CC8 §6.** [`ColorQcRequest::delivery_lane`] selects the
+/// delivery encode and the `Y'CbCr` matrix every range and legality number is
+/// taken through (item 1); [`ColorQcRequest::is_hdr_context`] adds §6 item 2's
+/// Rec.2020 triangle when it differs from the Rec.709 one; and
+/// [`ColorQcRequest::source_profile`] withholds the skin diagnostic with §6
+/// item 4's named reason on an HDR source. On the SDR lane with no source
+/// profile — CC6's request, unchanged — every one of those is the identity, so
+/// a CC1–CC7 measurement is byte-identical (§9.1 fixture 6).
 ///
 /// # Errors
 ///
@@ -1017,7 +1312,22 @@ pub fn measure_color_qc(
     }
 
     let bits = request.delivery_bit_depth.bits();
-    let measure_skin = request.checks.contains(&ColorQcCheck::Skin);
+    let lane = request.delivery_lane();
+    let hdr_context = request.is_hdr_context();
+    // CC8 §6 item 4: an HDR source withholds the diagnostic rather than
+    // measuring it against constants that do not transfer, so the skin pass is
+    // not merely unpublished — it never runs, and the chroma buffer it would
+    // have filled is never allocated.
+    let withheld_skin = request
+        .source_profile
+        .filter(|profile| profile.is_hdr())
+        .map(|profile| SkinWithheldReport {
+            code: SKIN_WITHHELD_CODE.to_owned(),
+            source_profile: profile.id().to_owned(),
+            reason: SKIN_WITHHELD_REASON.to_owned(),
+            boundary: SKIN_DIAGNOSTIC_BOUNDARY.to_owned(),
+        });
+    let measure_skin = request.checks.contains(&ColorQcCheck::Skin) && withheld_skin.is_none();
     // The region's own upper bound, so the median buffer is allocated once
     // rather than doubling its way to the raster size. A matte narrows it
     // further: the coverage count is the most pixels the scope can admit, and
@@ -1032,7 +1342,7 @@ pub fn measure_color_qc(
     } else {
         0
     };
-    let mut accumulator = RegionAccumulator::new(bits, skin_capacity);
+    let mut accumulator = RegionAccumulator::new(bits, lane, hdr_context, skin_capacity);
     for y in pixel_roi.y..pixel_roi.bottom() {
         for x in pixel_roi.x..pixel_roi.right() {
             let index = (y as usize * image.width as usize + x as usize) * 4;
@@ -1082,6 +1392,12 @@ pub fn measure_color_qc(
     let visible = accumulator.visible_pixel_count;
     let range = accumulator.range_report(visible);
     let gamut = accumulator.gamut_report(visible);
+    // CC8 §6 item 2 and §12's third risk: the second triangle is published only
+    // where it differs. Two identical reports are one fact printed twice, which
+    // is the double-counting invitation CC6 §14 already names.
+    let gamut_rec2020 = accumulator
+        .rec2020_gamut_report(visible)
+        .filter(|rec2020| !gamut_reports_agree(&gamut, rec2020));
     let skin = measure_skin.then(|| accumulator.skin_diagnostics());
     let tags = request
         .checks
@@ -1099,9 +1415,16 @@ pub fn measure_color_qc(
         non_finite_pixel_count: accumulator.non_finite_pixel_count,
         transparent_pixel_count: accumulator.transparent_pixel_count,
         delivery_bit_depth: bits,
+        delivery_lane: lane.as_str().to_owned(),
         range,
         gamut,
+        gamut_triangle_relation: gamut_rec2020
+            .is_some()
+            .then(|| GAMUT_TRIANGLE_RELATION.to_owned()),
+        gamut_rec2020,
+        light_level: accumulator.light_level_report(request.project_frame),
         skin,
+        skin_withheld: withheld_skin,
         tags,
         nodes: None,
         exceptions: Vec::new(),
@@ -1141,6 +1464,20 @@ pub fn attach_node_contributions(
     }
     report.nodes = Some(contributions);
     finish(report);
+}
+
+/// Whether two triangles' gamut reports say the same thing about one raster.
+///
+/// Everything except the two strings that name the triangle: those differ by
+/// construction and comparing them would make "they differ" true on every HDR
+/// measurement, which is precisely the double-printing §12's third risk asks to
+/// avoid.
+fn gamut_reports_agree(left: &ColorGamutReport, right: &ColorGamutReport) -> bool {
+    left.out_of_gamut_pixel_count == right.out_of_gamut_pixel_count
+        && left.out_of_gamut_basis_points == right.out_of_gamut_basis_points
+        && left.minimum_linear_millionths == right.minimum_linear_millionths
+        && left.maximum_desaturation_millionths == right.maximum_desaturation_millionths
+        && left.below_black_pixel_count == right.below_black_pixel_count
 }
 
 /// Sort the exceptions and derive `technical_pass` from them.
@@ -1239,6 +1576,63 @@ fn non_finite_exception(report: &ColorQcReport) -> Option<ColorQcException> {
     })
 }
 
+/// CC8 §6 item 2's second-triangle warning, when the report has one and it
+/// reaches [`QC_GAMUT_EXCEPTION_BASIS_POINTS`].
+///
+/// Its **own** code, never `delivery_gamut_excursion`. Reusing that name would
+/// put two rows with one name in front of a reader and invite exactly the
+/// addition §12's third risk warns about, so the code differs and the message
+/// carries [`GAMUT_TRIANGLE_RELATION`] — an exceptions-only surface still
+/// learns it must not sum the two.
+fn rec2020_gamut_exception(report: &ColorQcReport) -> Option<ColorQcException> {
+    let rec2020 = report.gamut_rec2020.as_ref()?;
+    if rec2020.out_of_gamut_basis_points < QC_GAMUT_EXCEPTION_BASIS_POINTS {
+        return None;
+    }
+    Some(ColorQcException {
+        code: "delivery_gamut_excursion_rec2020".to_owned(),
+        severity: QaSeverity::Warning,
+        message: format!(
+            "{} visible pixels ({} basis points) are outside the Rec.2020 chromaticity triangle, which the HDR delivery lane itself cannot represent. {}",
+            rec2020.out_of_gamut_pixel_count,
+            rec2020.out_of_gamut_basis_points,
+            GAMUT_TRIANGLE_RELATION,
+        ),
+        field: Some("gamut_rec2020.out_of_gamut_basis_points".to_owned()),
+        observed: Some(rec2020.out_of_gamut_basis_points.to_string()),
+        allowed: Some(format!("< {QC_GAMUT_EXCEPTION_BASIS_POINTS}")),
+        clip: None,
+        effect: None,
+    })
+}
+
+/// CC8 §6 item 4's named limitation, when the source withheld the diagnostic.
+///
+/// [`QaSeverity::Info`], because a withheld diagnostic is a statement about
+/// CC8's constants rather than a fault in this grade, and because §6 keeps the
+/// QC engine evidence-only. It exists at all so that a surface reading only
+/// `exceptions` still learns why the skin section is empty — §12's "a named
+/// limitation is a different support burden from a mysterious one".
+fn withheld_skin_exception(report: &ColorQcReport) -> Option<ColorQcException> {
+    let withheld = report.skin_withheld.as_ref()?;
+    Some(ColorQcException {
+        code: withheld.code.clone(),
+        severity: QaSeverity::Info,
+        message: withheld.reason.clone(),
+        field: Some("skin".to_owned()),
+        observed: Some(format!(
+            "withheld on source profile {}",
+            withheld.source_profile
+        )),
+        allowed: Some(
+            "a CC1 SDR source profile, whose grade709 Rec.709 band constants the diagnostic was derived against"
+                .to_owned(),
+        ),
+        clip: None,
+        effect: None,
+    })
+}
+
 /// Build every exception a finished measurement raises.
 fn report_exceptions(report: &ColorQcReport) -> Vec<ColorQcException> {
     let mut exceptions = Vec::new();
@@ -1287,6 +1681,8 @@ fn report_exceptions(report: &ColorQcReport) -> Vec<ColorQcException> {
             effect: None,
         });
     }
+    exceptions.extend(rec2020_gamut_exception(report));
+    exceptions.extend(withheld_skin_exception(report));
     if let Some(tags) = &report.tags {
         for mismatch in &tags.mismatches {
             exceptions.push(ColorQcException {
@@ -1458,21 +1854,150 @@ impl PlaneAccumulator {
     }
 }
 
+/// One chromaticity triangle's gamut accumulator.
+///
+/// CC8 §6 item 2 makes the triangle "a property of the report", so it is a
+/// property of the accumulator too: the Rec.709 instance holds CC6's numbers
+/// unchanged and the Rec.2020 instance holds the same arithmetic over the
+/// converted components with BT.2020's luma. One type, two instances, so the
+/// two reports cannot drift into two implementations.
+#[derive(Debug, Clone, Copy)]
+struct GamutAccumulator {
+    /// The three luma weights this triangle's desaturation metric uses.
+    luma: [f64; 3],
+    out_of_gamut: u64,
+    below_black: u64,
+    minimum_linear: f64,
+    maximum_desaturation: f64,
+    saw_desaturation: bool,
+}
+
+impl GamutAccumulator {
+    const fn new(luma: [f64; 3]) -> Self {
+        Self {
+            luma,
+            out_of_gamut: 0,
+            below_black: 0,
+            minimum_linear: 0.0,
+            maximum_desaturation: 0.0,
+            saw_desaturation: false,
+        }
+    }
+
+    /// CC6's Rec.709 triangle: `0.2126 / 0.7152 / 0.0722`.
+    const fn rec709() -> Self {
+        Self::new([BT709_KR, 1.0 - BT709_KR - BT709_KB, BT709_KB])
+    }
+
+    /// CC8 §6 item 2's Rec.2020 triangle, with BT.2020's own luma read from the
+    /// authority module.
+    const fn rec2020() -> Self {
+        Self::new([CC8_BT2020_KR, CC8_BT2020_KG, CC8_BT2020_KB])
+    }
+
+    fn add(&mut self, linear: [f64; 3]) {
+        let [red, green, blue] = linear;
+        let minimum = red.min(green).min(blue);
+        self.minimum_linear = self.minimum_linear.min(minimum).min(0.0);
+        if minimum < 0.0 {
+            self.out_of_gamut = self.out_of_gamut.saturating_add(1);
+            let luma = self.luma[0].mul_add(red, self.luma[1].mul_add(green, self.luma[2] * blue));
+            if luma < 0.0 {
+                self.below_black = self.below_black.saturating_add(1);
+            } else {
+                // `Y >= m` always and `m < 0`, so the denominator is positive.
+                let desaturation = -minimum / (luma - minimum);
+                if !self.saw_desaturation || desaturation > self.maximum_desaturation {
+                    self.maximum_desaturation = desaturation;
+                    self.saw_desaturation = true;
+                }
+            }
+        }
+    }
+
+    fn report(&self, visible: u64, triangle: &str, definition: &str) -> ColorGamutReport {
+        ColorGamutReport {
+            out_of_gamut_pixel_count: self.out_of_gamut,
+            out_of_gamut_basis_points: basis_points(self.out_of_gamut, visible),
+            minimum_linear_millionths: millionths(self.minimum_linear.min(0.0)),
+            maximum_desaturation_millionths: if self.saw_desaturation {
+                millionths(self.maximum_desaturation)
+            } else {
+                0
+            },
+            below_black_pixel_count: self.below_black,
+            triangle: triangle.to_owned(),
+            definition: definition.to_owned(),
+        }
+    }
+}
+
+/// CC8 §6 item 3's `MaxCLL`/`MaxFALL` accumulator.
+///
+/// Two numbers over the population every other accumulator here uses: the
+/// running maximum of `max(r, g, b)` and its `f64` sum. Nothing is clamped and
+/// nothing is gated — see [`LIGHT_LEVEL_BOUNDARY`].
+#[derive(Debug, Clone, Copy, Default)]
+struct LightLevelAccumulator {
+    maximum: f64,
+    sum: f64,
+    count: u64,
+    seen: bool,
+}
+
+impl LightLevelAccumulator {
+    fn add(&mut self, linear: [f64; 3]) {
+        let light = linear[0].max(linear[1]).max(linear[2]);
+        if !self.seen || light > self.maximum {
+            self.maximum = light;
+            self.seen = true;
+        }
+        self.sum += light;
+        self.count = self.count.saturating_add(1);
+    }
+
+    fn report(&self, project_frame: i64) -> ColorLightLevelReport {
+        let anchor = f64::from(CC8_REFERENCE_WHITE_NITS);
+        #[allow(clippy::cast_precision_loss)]
+        let mean = if self.count == 0 {
+            0.0
+        } else {
+            self.sum / self.count as f64
+        };
+        ColorLightLevelReport {
+            max_cll_nits_hundredths: if self.seen {
+                hundredths(self.maximum * anchor)
+            } else {
+                0
+            },
+            max_fall_nits_hundredths: hundredths(mean * anchor),
+            sampled_frame_count: 1,
+            sampled_pixel_count: self.count,
+            project_frame,
+            reference_white_nits: CC8_REFERENCE_WHITE_NITS,
+            gated: false,
+            boundary: LIGHT_LEVEL_BOUNDARY.to_owned(),
+        }
+    }
+}
+
 /// Every scalar accumulator one measurement pass fills.
 #[derive(Debug, Clone)]
 struct RegionAccumulator {
     bits: u8,
+    /// The lane whose delivery encode and `Y'CbCr` matrix every code below is
+    /// taken through (CC8 §6 item 1).
+    lane: DeliveryLane,
     region_pixel_count: u64,
     visible_pixel_count: u64,
     transparent_pixel_count: u64,
     non_finite_pixel_count: u64,
     channels: [ChannelAccumulator; 3],
     clamped: u64,
-    out_of_gamut: u64,
-    below_black: u64,
-    minimum_linear: f64,
-    maximum_desaturation: f64,
-    saw_desaturation: bool,
+    gamut: GamutAccumulator,
+    /// CC8 §6 item 2's second triangle, filled only on HDR content.
+    gamut_rec2020: Option<GamutAccumulator>,
+    light_level: LightLevelAccumulator,
     luma: PlaneAccumulator,
     cb: PlaneAccumulator,
     cr: PlaneAccumulator,
@@ -1494,21 +2019,20 @@ impl RegionAccumulator {
     /// `skin_capacity` is the region's pixel count when skin is requested and
     /// `0` otherwise, so the one growable buffer is allocated once instead of
     /// doubling its way to the raster size.
-    fn new(bits: u8, skin_capacity: usize) -> Self {
+    fn new(bits: u8, lane: DeliveryLane, hdr_context: bool, skin_capacity: usize) -> Self {
         let scale = ycbcr_scale(bits);
         Self {
             bits,
+            lane,
             region_pixel_count: 0,
             visible_pixel_count: 0,
             transparent_pixel_count: 0,
             non_finite_pixel_count: 0,
             channels: [ChannelAccumulator::default(); 3],
             clamped: 0,
-            out_of_gamut: 0,
-            below_black: 0,
-            minimum_linear: 0.0,
-            maximum_desaturation: 0.0,
-            saw_desaturation: false,
+            gamut: GamutAccumulator::rec709(),
+            gamut_rec2020: hdr_context.then(GamutAccumulator::rec2020),
+            light_level: LightLevelAccumulator::default(),
             luma: PlaneAccumulator::new(
                 f64::from(YCBCR_LUMA_OFFSET) * scale,
                 f64::from(YCBCR_LUMA_LEGAL_HIGH) * scale,
@@ -1553,12 +2077,11 @@ impl RegionAccumulator {
         }
         self.visible_pixel_count = self.visible_pixel_count.saturating_add(1);
 
-        // `e` is computed in f32, matching the delivery clamp it predicts.
-        let encoded_f32 = [
-            encode_bt709_delivery(linear[0]),
-            encode_bt709_delivery(linear[1]),
-            encode_bt709_delivery(linear[2]),
-        ];
+        // `e` is computed in f32, matching the delivery clamp it predicts, and
+        // through **this lane's** encode (CC8 §6 item 1): BT.709 on the SDR
+        // lane, and Rec.2020 primaries with the HLG OETF on §5.1's HDR lane,
+        // which is the arithmetic `quantize_delivery16` receives there.
+        let encoded_f32 = encode_delivery_for_lane(self.lane, linear);
         if !linear
             .iter()
             .chain(&encoded_f32)
@@ -1583,30 +2106,32 @@ impl RegionAccumulator {
             self.clamped = self.clamped.saturating_add(1);
         }
 
-        let red = f64::from(linear[0]);
-        let green = f64::from(linear[1]);
-        let blue = f64::from(linear[2]);
-        let minimum = red.min(green).min(blue);
-        self.minimum_linear = self.minimum_linear.min(minimum).min(0.0);
-        if minimum < 0.0 {
-            self.out_of_gamut = self.out_of_gamut.saturating_add(1);
-            let luma = BT709_KR.mul_add(
-                red,
-                (1.0 - BT709_KR - BT709_KB).mul_add(green, BT709_KB * blue),
-            );
-            if luma < 0.0 {
-                self.below_black = self.below_black.saturating_add(1);
-            } else {
-                // `Y >= m` always and `m < 0`, so the denominator is positive.
-                let desaturation = -minimum / (luma - minimum);
-                if !self.saw_desaturation || desaturation > self.maximum_desaturation {
-                    self.maximum_desaturation = desaturation;
-                    self.saw_desaturation = true;
-                }
-            }
+        let working = [
+            f64::from(linear[0]),
+            f64::from(linear[1]),
+            f64::from(linear[2]),
+        ];
+        self.gamut.add(working);
+        // CC8 §6 item 2: the second triangle measures the **Rec.2020** linear
+        // components §2.3's matrix produces, because those are the components
+        // the HDR delivery encode consumes. The matrix runs in `f32`, which is
+        // the precision the delivery path applies it in, and widens once here.
+        if let Some(rec2020) = self.gamut_rec2020.as_mut() {
+            let converted = cc8_apply_matrix(CC8_BT709_TO_REC2020, linear);
+            rec2020.add([
+                f64::from(converted[0]),
+                f64::from(converted[1]),
+                f64::from(converted[2]),
+            ]);
         }
+        // CC8 §6 item 3: light level is a property of the working sample, not
+        // of a lane, so it is measured on the same working triple on every
+        // lane and scaled by §2.2's anchor when the report is built.
+        self.light_level.add(working);
 
-        let codes = bt709_limited_ycbcr(encoded, self.bits);
+        // CC8 §6 item 1: the lane's own matrix, never BT.709's on a BT.2020
+        // file. `encoded` is already this lane's `R'G'B'`.
+        let codes = delivery_limited_ycbcr(self.lane, encoded, self.bits);
         self.luma.add(codes[0]);
         self.cb.add(codes[1]);
         self.cr.add(codes[2]);
@@ -1666,18 +2191,19 @@ impl RegionAccumulator {
     }
 
     fn gamut_report(&self, visible: u64) -> ColorGamutReport {
-        ColorGamutReport {
-            out_of_gamut_pixel_count: self.out_of_gamut,
-            out_of_gamut_basis_points: basis_points(self.out_of_gamut, visible),
-            minimum_linear_millionths: millionths(self.minimum_linear.min(0.0)),
-            maximum_desaturation_millionths: if self.saw_desaturation {
-                millionths(self.maximum_desaturation)
-            } else {
-                0
-            },
-            below_black_pixel_count: self.below_black,
-            definition: GAMUT_DEFINITION.to_owned(),
-        }
+        self.gamut
+            .report(visible, GAMUT_TRIANGLE_REC709, GAMUT_DEFINITION)
+    }
+
+    /// CC8 §6 item 2's second report, or `None` on SDR content.
+    fn rec2020_gamut_report(&self, visible: u64) -> Option<ColorGamutReport> {
+        self.gamut_rec2020.as_ref().map(|rec2020| {
+            rec2020.report(visible, GAMUT_TRIANGLE_REC2020, GAMUT_DEFINITION_REC2020)
+        })
+    }
+
+    fn light_level_report(&self, project_frame: i64) -> ColorLightLevelReport {
+        self.light_level.report(project_frame)
     }
 
     fn skin_diagnostics(&self) -> SkinDiagnostics {

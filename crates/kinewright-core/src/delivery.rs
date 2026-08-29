@@ -520,6 +520,56 @@ fn append_managed_source_issues(document: &Document, issues: &mut Vec<QaIssue>) 
     }
 }
 
+/// The CC8 §2.1 HDR source profile a document's managed image chain carries,
+/// or `None` when every referenced visual asset is SDR.
+///
+/// The single question CC8 §6 items 2 and 4 ask of a *source*: the QC engine
+/// withholds the skin diagnostic and publishes the second gamut triangle on
+/// "an HDR-profile source", and both the agent's `get_color_qc` and the app's
+/// Colour QC window need one answer for the document in front of them. Putting
+/// it here rather than in each surface is what keeps the two from classifying
+/// differently — the failure mode where the agent withholds skin and the app
+/// publishes it for the same frame.
+///
+/// The population and the classification order are
+/// [`append_managed_source_issues`]'s, unchanged and deliberately: the same
+/// referenced visual assets, in the same track/clip order, classified first
+/// with no assumption and then under CC1's normative D65 assumption for an
+/// unknown white point. A source that cannot be classified at all is **not**
+/// HDR for this purpose — it is `unsupported_source_color`, which that function
+/// already raises, and guessing HDR for an unclassifiable tuple would be the
+/// silent HDR treatment §1 forbids.
+///
+/// The first HDR profile in that order wins, and the order is the document's
+/// own, so the answer is deterministic for a mixed timeline. A document whose
+/// tracks mix HDR and SDR sources is already blocked from managed export by
+/// [`HDR_SOURCE_ON_SDR_DELIVERY`] or by §5.3, so this is an evidence question,
+/// not a gate.
+#[must_use]
+pub fn document_hdr_source_profile(document: &Document) -> Option<ColorSourceProfile> {
+    document
+        .tracks
+        .iter()
+        .filter(|track| track.kind == TrackKind::Video)
+        .flat_map(|track| &track.clips)
+        .filter(|clip| matches!(clip.content, ClipContent::Media | ClipContent::Freeze(_)))
+        .filter_map(|clip| document.asset(clip.asset))
+        .filter(|asset| matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo))
+        .find_map(|asset| {
+            let profile = classify_source(&asset.color_description).or_else(|error| {
+                if matches!(error, ColorSourceError::UnknownWhitePoint) {
+                    classify_source_with_assumption(
+                        &asset.color_description,
+                        Some(ColorSourceProfileAssumption::D65),
+                    )
+                } else {
+                    Err(error)
+                }
+            });
+            profile.ok().filter(|profile| profile.is_hdr())
+        })
+}
+
 /// CC8 §7 item 2's blocking issue code.
 pub const HDR_SOURCE_ON_SDR_DELIVERY: &str = "hdr_source_on_sdr_delivery";
 

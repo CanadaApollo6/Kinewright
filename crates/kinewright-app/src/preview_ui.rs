@@ -175,6 +175,24 @@ red = an encoded value above 1.0 — clamped to white.";
 /// The grey is `round(255 · clamp(e(Y_linear), 0, 1)) / 2` in integer
 /// division, so the picture stays readable underneath the two flags without
 /// ever being mistaken for one of them.
+///
+/// **CC8: this mask stays BT.709-shaped, and that is a named deferral.** CC8
+/// §6 item 1 makes the Colour QC window's range report lane-aware, so on §5.1's
+/// HDR lane the counted basis points are taken through Rec.2020 primaries and
+/// the HLG OETF while the red flag here is still `encode_bt709_delivery`'s. The
+/// two therefore disagree on an HDR project, in the direction that over-reports
+/// clipping: an HLG signal reaches `1.0` at the nominal peak, which is `4.93` in
+/// working units, so every specular highlight above diffuse white paints red
+/// here and is legal there.
+///
+/// It is not fixed in §10 step 7, because §6 and §8 assign the lane-aware
+/// numbers to the QC engine, `get_color_qc`, and the Colour QC window, and this
+/// overlay is CC6 §8.2's viewer surface — a *preview* of clipping, which is
+/// §10 step 8's slice together with §4's tone-mapped preview and §3.2's node
+/// limitations. Making it lane-aware needs the mask to be handed the delivery
+/// description it currently does not receive, and its legend
+/// ([`QC_MASK_LEGEND`], which names the Rec.709 gamut in so many words) is part
+/// of that change rather than separable from it.
 #[must_use]
 pub(crate) fn qc_mask_image(
     image: &kinewright_core::LinearRgbaImage,
