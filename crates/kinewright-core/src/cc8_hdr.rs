@@ -55,14 +55,19 @@
 //! §3.2 items 1 and 2's two named node limitations,
 //! [`CC8_AUTHORED_DOMAIN_LIMITATION`] and [`CC8_QUALIFIER_LIMITATION`].
 //!
-//! # What §10 step 2 deliberately leaves to a later step
+//! # What §10 step 9 added
 //!
-//! §10 step 2 carries "transfer constants, matrices, the anchor, budgets".
-//! One thing a reader might expect to find here is **not** here, because the
-//! contract puts it in a later step:
-//!
-//! - **§2.4's mastering-display and `MaxCLL`/`MaxFALL` modelling** is probe and
-//!   QC work (§10 steps 3 and 7); this module pins no metadata shape.
+//! §10 step 9 ("migration and serialization") landed §2.4's units — the ST 2086
+//! increments a declared mastering display is stored in
+//! ([`CC8_MASTERING_DISPLAY_CHROMATICITY_INCREMENTS_PER_UNIT`],
+//! [`CC8_MASTERING_DISPLAY_LUMINANCE_TEN_THOUSANDTHS_PER_NIT`]), the exact
+//! conversion [`cc8_st2086_units`] that refuses rather than rounds, and
+//! [`CC8_HDR_STATIC_METADATA_BOUNDARY`], the sentence §8 prints beside the
+//! values saying what CC8 does **not** do with them. Step 2's own note said
+//! this module pinned no metadata shape because §10 gave §2.4 no step of its
+//! own; step 9 is where it lands, because §2.4 stores the values "on the source
+//! description" and that is the `ColorDescription` change §7 item 1's
+//! byte-unchanged obligation governs.
 //!
 //! # Why §9.2's table carries no numbers
 //!
@@ -406,6 +411,98 @@ pub const CC8_HDR_RECOVERY_ACTION: &str = "Apply an explicit supported source-co
      (bt2020 with smpte2084 or arib_std_b67, bt2020_ncl or rgb, limited or full, d65, \
      10..=16-bit integer samples), or relink to media inside that set. CC8 does not \
      infer an HDR profile from a partial match.";
+
+// ===========================================================================
+// CC8 §2.4: the units static HDR metadata is declared in (§10 step 9).
+// ===========================================================================
+
+/// SMPTE ST 2086's chromaticity unit: increments of `0.00002`, so a stored
+/// coordinate is `round(x · 50 000)`.
+///
+/// CC8 §2.4 requires mastering-display primaries to be "read on probe where the
+/// container carries them, stored on the source description with provenance,
+/// and **reported**", and "never invented". Storing the integer the bitstream
+/// itself carries is what makes that exact: the SEI and the `mdcv` box both
+/// code chromaticity in these increments, so
+/// [`MasteringDisplayChromaticity`](crate::MasteringDisplayChromaticity)
+/// records the declared integer rather than a float derived from it. No
+/// rounding happens on the way in — [`cc8_st2086_units`] refuses a value that
+/// is not exactly representable instead of nudging it.
+pub const CC8_MASTERING_DISPLAY_CHROMATICITY_INCREMENTS_PER_UNIT: u32 = 50_000;
+
+/// SMPTE ST 2086's luminance unit: increments of `0.0001 cd/m²`, so a stored
+/// luminance is `round(nits · 10 000)`.
+///
+/// The other half of [`CC8_MASTERING_DISPLAY_CHROMATICITY_INCREMENTS_PER_UNIT`]'s
+/// reasoning, on the `min_luminance`/`max_luminance` rows.
+pub const CC8_MASTERING_DISPLAY_LUMINANCE_TEN_THOUSANDTHS_PER_NIT: u32 = 10_000;
+
+/// The exact byte length of libavutil's `AVMasteringDisplayMetadata`, the
+/// layout probe reads a declared mastering display out of.
+///
+/// Twenty-two `int`s: `display_primaries[3][2]` and `white_point[2]` as
+/// `AVRational` pairs (16 ints), `min_luminance` and `max_luminance` (4), and
+/// the two `has_*` flags. The probe asserts this length rather than trusting a
+/// buffer, so a build whose layout differs reports `Unknown` — §2.4's own
+/// answer for metadata that was not read — instead of decoding whatever the
+/// bytes happen to be.
+pub const CC8_AV_MASTERING_DISPLAY_METADATA_BYTES: usize = 88;
+
+/// The exact byte length of libavutil's `AVContentLightMetadata`: `MaxCLL` and
+/// `MaxFALL`, two `unsigned`s.
+pub const CC8_AV_CONTENT_LIGHT_METADATA_BYTES: usize = 8;
+
+/// What CC8 does, and does not do, with the values §2.4 stores.
+///
+/// §2.4, verbatim on the second half: "Under §0.2 Q1's decision the HLG lane
+/// does not consume them; they exist so the QC surface can report what a source
+/// claimed and so a PQ lane has its inputs already modelled." §11 says the same
+/// from the deferral's side: "PQ / HDR10 delivery, deferred by §0.2 Q1's
+/// decision, and with it mastering-display provenance and gated MaxCLL/MaxFALL.
+/// §2.4 and §6 item 3 deliberately produce its inputs and deliberately leave
+/// them unapplied."
+///
+/// It is a constant rather than a comment because §8 reports it beside the
+/// values, in the manner of `color_qc::LIGHT_LEVEL_BOUNDARY`: a number on a
+/// status surface with no statement of what consumes it is an invitation to
+/// assume something does.
+pub const CC8_HDR_STATIC_METADATA_BOUNDARY: &str = "Declared by the source and reported as evidence. CC8 §2.4 stores mastering-display \
+     primaries and MaxCLL/MaxFALL with their provenance and deliberately leaves them \
+     unapplied: §0.2 Q1's HLG lane does not consume them, and §11 defers the PQ/HDR10 lane \
+     that would. Absent metadata is unknown and stays unknown; nothing here is inferred from \
+     the picture. These are the source's claims, not this build's measurements — CC8 §6 item \
+     3's MaxCLL/MaxFALL are a different number, measured from the working proof.";
+
+/// Convert one declared `AVRational` into ST 2086's integer units **exactly**,
+/// or refuse.
+///
+/// `units_per_whole` is the standard's own denominator —
+/// [`CC8_MASTERING_DISPLAY_CHROMATICITY_INCREMENTS_PER_UNIT`] for a
+/// chromaticity coordinate, [`CC8_MASTERING_DISPLAY_LUMINANCE_TEN_THOUSANDTHS_PER_NIT`]
+/// for a luminance — and the conversion is `numerator · units_per_whole /
+/// denominator`, taken only when that division is exact.
+///
+/// Returning `None` rather than rounding is §2.4's "never invented" rule
+/// applied to arithmetic: a value that cannot be written in the standard's own
+/// units without moving it is not a value this build can honestly say the
+/// source declared. In practice `FFmpeg`'s own SEI and box parsers produce
+/// exactly these denominators, so the refusing arm is the guard and not the
+/// normal path.
+///
+/// A negative numerator or a non-positive denominator refuses for the same
+/// reason: ST 2086's fields are unsigned, so a negative declaration is not a
+/// value in these units at all.
+#[must_use]
+pub fn cc8_st2086_units(numerator: i64, denominator: i64, units_per_whole: u32) -> Option<u32> {
+    if numerator < 0 || denominator <= 0 {
+        return None;
+    }
+    let scaled = numerator.checked_mul(i64::from(units_per_whole))?;
+    if scaled % denominator != 0 {
+        return None;
+    }
+    u32::try_from(scaled / denominator).ok()
+}
 
 // ===========================================================================
 // CC8 §2.2: the reference-white anchor.

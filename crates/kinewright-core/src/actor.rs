@@ -529,6 +529,7 @@ mod tests {
             bit_depth: ColorBitDepth::Ten,
             confidence_basis_points: 9_000,
             provenance: ColorProvenance::UserOverride,
+            hdr_static_metadata: crate::HdrStaticMetadata::unknown(),
         }
     }
 

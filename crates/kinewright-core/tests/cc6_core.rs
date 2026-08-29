@@ -1020,6 +1020,7 @@ fn probed_h264_description(depth: DeliveryEncodeDepth) -> ColorDescription {
         bit_depth: depth.color_bit_depth(),
         confidence_basis_points: 10_000,
         provenance: ColorProvenance::StreamMetadata,
+        hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
     }
 }
 

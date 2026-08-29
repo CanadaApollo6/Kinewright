@@ -815,6 +815,7 @@ mod tests {
             bit_depth: DeliveryEncodeDepth::Ten.color_bit_depth(),
             confidence_basis_points: 10_000,
             provenance: kinewright_core::ColorProvenance::UserOverride,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         assert_eq!(
             kinewright_core::DeliveryLane::for_description(&hdr_delivery),

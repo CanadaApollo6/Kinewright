@@ -86,15 +86,16 @@ use kinewright_core::{
     CC8_REJECTED_HDR_ADJACENT, CC8_SOURCE_PROFILES, ColorBitDepth, ColorContext, ColorDescription,
     ColorMatrix, ColorPrimaries, ColorProvenance, ColorQcCheck, ColorQcRequest, ColorRange,
     ColorSourceError, ColorSourceProfile, ColorSourceProfileAssumption, ColorTransfer,
-    ColorWhitePoint, DeliveryColorError, DeliveryColorMismatch, DeliveryEncodeDepth, DeliveryLane,
-    DeliveryProfile, DeliveryVerificationRequest, Document, Effect, EffectId, ExportSettings,
-    HDR_SOURCE_ON_SDR_DELIVERY, LinearRgbaImage, MediaError, MonitorPreview, MonitorProofMetadata,
-    MonitorProofRenderKind, ParamValue, QaSeverity, Rational, TimeCode, WORKING_PROOF_ENCODING,
-    WORKING_PROOF_STAGE, WorkingProof, WorkingProofMetadata, YCBCR_CHROMA_LEGAL_HIGH,
-    YCBCR_CHROMA_OFFSET, YCBCR_CHROMA_SPAN, YCBCR_LUMA_LEGAL_HIGH, YCBCR_LUMA_OFFSET,
-    YCBCR_LUMA_SPAN, bt709_limited_ycbcr, cc8_apply_matrix, cc8_hlg_decode_working_linear,
-    cc8_hlg_encode_working_linear, cc8_hlg_inverse_oetf, cc8_hlg_oetf,
-    cc8_pq_decode_working_linear, cc8_pq_encode_working_linear, cc8_pq_eotf_nits,
+    ColorWhitePoint, ContentLightLevel, DeliveryColorError, DeliveryColorMismatch,
+    DeliveryEncodeDepth, DeliveryLane, DeliveryProfile, DeliveryVerificationRequest, Document,
+    Effect, EffectId, ExportSettings, HDR_SOURCE_ON_SDR_DELIVERY, HdrStaticMetadata,
+    LinearRgbaImage, MasteringDisplayChromaticity, MasteringDisplayMetadata, MediaError,
+    MonitorPreview, MonitorProofMetadata, MonitorProofRenderKind, ParamValue, QaSeverity, Rational,
+    TimeCode, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof, WorkingProofMetadata,
+    YCBCR_CHROMA_LEGAL_HIGH, YCBCR_CHROMA_OFFSET, YCBCR_CHROMA_SPAN, YCBCR_LUMA_LEGAL_HIGH,
+    YCBCR_LUMA_OFFSET, YCBCR_LUMA_SPAN, bt709_limited_ycbcr, cc8_apply_matrix,
+    cc8_hlg_decode_working_linear, cc8_hlg_encode_working_linear, cc8_hlg_inverse_oetf,
+    cc8_hlg_oetf, cc8_pq_decode_working_linear, cc8_pq_encode_working_linear, cc8_pq_eotf_nits,
     cc8_pq_inverse_eotf, cc8_preview_peak_working_linear, cc8_preview_tone_map_rgb,
     classify_source, classify_source_with_assumption, delivery_color_mismatches,
     delivery_color_mismatches_for_lane, delivery_conformance, delivery_field_recovery_action,
@@ -2176,6 +2177,7 @@ fn cc8_bt2020_limited_boundary_uses_the_p8_denominator() {
         bit_depth: ColorBitDepth::Ten,
         confidence_basis_points: 10_000,
         provenance: ColorProvenance::UserOverride,
+        hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
     };
     // The two candidates, from the two functions that compute them.
     assert_eq!(rgba64_promoted_max(&limited_10), Ok(65_472));
@@ -2763,6 +2765,7 @@ fn cc8_sdr_managed_filter_graph_terms_are_unchanged_by_the_hdr_lane() {
                             bit_depth: bit_depth.clone(),
                             confidence_basis_points: 10_000,
                             provenance: ColorProvenance::UserOverride,
+                            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
                         };
                         let Ok(profile) = classify_source(&description) else {
                             continue;
@@ -2839,6 +2842,7 @@ fn cc8_sdr_managed_filter_graph_terms_are_unchanged_by_the_hdr_lane() {
         bit_depth: ColorBitDepth::Ten,
         confidence_basis_points: 10_000,
         provenance: ColorProvenance::UserOverride,
+        hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
     };
     assert_eq!(classify_source(&hdr), Ok(ColorSourceProfile::HlgRec2020));
     assert_eq!(managed_filter_matrix(&hdr), "bt2020nc");
@@ -3559,6 +3563,7 @@ fn cc8_hdr_delivery_description() -> ColorDescription {
         bit_depth: ColorBitDepth::Ten,
         confidence_basis_points: 10_000,
         provenance: ColorProvenance::UserOverride,
+        hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
     };
     let lane = CC8_HDR_DELIVERY_LANE;
     assert_eq!(description.primaries.wire(), lane.primaries);
@@ -4114,9 +4119,15 @@ fn cc8_setting_an_hdr_delivery_description_is_validated_against_the_lane_table()
         color_context: ColorContext::sdr_rec709(),
         ..Document::default()
     };
-    // The passing direction: §5.1's lane applies.
-    let mut context = ColorContext::sdr_rec709();
-    context.delivery = cc8_hdr_delivery_description();
+    // The passing direction: §7's managed HDR context, whose delivery
+    // description is §5.1's lane. §10 step 9 made the state part of what is
+    // stored, so this is the context the operation now has to accept whole.
+    let context = ColorContext::hdr_hlg_rec2020();
+    assert_eq!(
+        DeliveryLane::for_description(&context.delivery),
+        DeliveryLane::HdrHlgRec2020,
+    );
+    assert!(delivery_color_mismatches(&context.delivery).is_empty());
     kinewright_core::apply_batch(
         &mut document,
         &[kinewright_core::Operation::SetColorContext {
@@ -4325,10 +4336,27 @@ fn cc8_hdr_delivery_project(directory: &TempDirectory) -> (Document, ColorDescri
     assert_eq!(asset.resolution, Some(CC8_PRECONDITION_SIZE));
 
     let mut document = single_clip_document(asset);
-    document.color_context = ColorContext::sdr_rec709();
-    // §3.1: the working and monitoring descriptions are unchanged — CC8 changes
-    // the *delivery* description and nothing else about the colour context.
-    document.color_context.delivery = cc8_hdr_delivery_description();
+    // §7: the managed HDR pipeline, which §10 step 9 made the state this lane
+    // requires. §3.1 still holds inside it — the working and monitoring
+    // descriptions are CC1's, and only the delivery description moves — and the
+    // assertions below say so rather than leaving it to the constructor.
+    document.color_context = ColorContext::hdr_hlg_rec2020();
+    assert_eq!(
+        document.color_context.pipeline_state,
+        kinewright_core::ColorPipelineState::ManagedHdrV1,
+    );
+    assert_eq!(
+        document.color_context.working,
+        ColorContext::sdr_rec709().working,
+    );
+    assert_eq!(
+        document.color_context.monitoring,
+        ColorContext::sdr_rec709().monitoring,
+    );
+    assert_eq!(
+        DeliveryLane::for_description(&document.color_context.delivery),
+        DeliveryLane::HdrHlgRec2020,
+    );
     document
         .validate()
         .expect("the fixture 8 HDR document should validate");
@@ -4339,7 +4367,21 @@ fn cc8_hdr_delivery_project(directory: &TempDirectory) -> (Document, ColorDescri
         CC8_PRECONDITION_SIZE.0,
         CC8_PRECONDITION_SIZE.1,
     );
-    (document, cc8_hdr_delivery_description())
+    // The expected delivery description is the document's own, so the
+    // verification below is about the project that was exported. It is asserted
+    // equal to the fixture's independent transcription of §5.1's table on every
+    // field the lane names; the two differ only in `provenance`, which CC6 §4.2
+    // accepts either way and which no tag carries.
+    let expected = document.color_context.delivery.clone();
+    let transcribed = cc8_hdr_delivery_description();
+    assert_eq!(expected.primaries, transcribed.primaries);
+    assert_eq!(expected.transfer, transcribed.transfer);
+    assert_eq!(expected.matrix, transcribed.matrix);
+    assert_eq!(expected.range, transcribed.range);
+    assert_eq!(expected.white_point, transcribed.white_point);
+    assert_eq!(expected.bit_depth, transcribed.bit_depth);
+    assert!(delivery_color_mismatches(&expected).is_empty());
+    (document, expected)
 }
 
 /// Assert §5.2's lane-derived terms on the record the production export
@@ -6525,5 +6567,405 @@ fn cc8_preview_cpu_gpu_parity_in_monitor_codes() {
         metric.mean,
         starved_metric.max,
         starved_metric.p99,
+    );
+}
+
+// ===========================================================================
+// CC8 §10 step 9 — §9.1 fixture 11.
+// ===========================================================================
+//
+// Step 9 is "Migration and serialization: fixture 11", and fixture 11 reads:
+// "**Migration.** An SDR project opens, round-trips, and exports
+// byte-identically; an HDR-source/SDR-delivery project loads and blocks with
+// the typed reason."
+//
+// The fixture is split across the two crates the way §9.1 fixture 6 is:
+//
+//  * `kinewright_core::tests::cc8_core` carries the document-state half — the
+//    two byte-frozen pre-CC8 project files, §7 item 2's typed block, §7 item
+//    4's save/reopen/journal/undo/redo, and §2.4's serialization — because none
+//    of it needs an encoder, and because CC0's own migration fixtures
+//    (`tests/fixtures/pre_m13_project.json`) live there and are the precedent;
+//  * this section carries the two claims that need real media: **"exports
+//    byte-identically"**, taken on the same fixed SDR project §9.1 fixture 6
+//    exports, and **§2.4's probe**, taken on a real encoded source that
+//    declares a mastering display and content light levels.
+//
+// **What step 9 landed in the model.** §7's `managed_hdr_v1`
+// (`ColorPipelineState::ManagedHdrV1`, written by
+// `ColorContext::hdr_hlg_rec2020` and required by §5.1's lane), and §2.4's
+// declared static metadata on the source description
+// (`ColorDescription::hdr_static_metadata`, read on probe with its provenance).
+//
+// **What step 9 does not take.** §9.2's measured gate table and
+// `cc8_manifest.json` are §10 step 10's; nothing here adds a gate row.
+
+/// §2.4's declared mastering display, as an `x264-params` fragment.
+///
+/// The values are §0.3(a)'s measured transcript's, which is deliberate: that
+/// transcript is the contract's own recorded evidence that these numbers
+/// survive an encode and re-probe, so this fixture measures the path CC8
+/// already documented rather than inventing a second set of primaries. x264
+/// writes them into an SEI, and §0.3(f) is why they have to be read from
+/// somewhere: "**No mastering-display or content-light-level metadata is read
+/// anywhere in the repository**" was true until this step.
+const CC8_DECLARED_MASTERING_DISPLAY: &str =
+    "mastering-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)";
+
+/// §2.4's declared content light levels, as an `x264-params` fragment.
+const CC8_DECLARED_CONTENT_LIGHT_LEVEL: &str = "cll=1000,400";
+
+/// The declared metadata this fixture encodes, as the core model records it.
+///
+/// Every number is [`CC8_DECLARED_MASTERING_DISPLAY`]'s and
+/// [`CC8_DECLARED_CONTENT_LIGHT_LEVEL`]'s, in ST 2086's own integer units —
+/// the units the bitstream carries and the model stores, so this is a
+/// transcription of the encode parameters and not a conversion of them.
+fn cc8_declared_static_metadata(
+    mastering_provenance: ColorProvenance,
+    light_provenance: ColorProvenance,
+) -> HdrStaticMetadata {
+    HdrStaticMetadata {
+        mastering_display: Some(MasteringDisplayMetadata {
+            red: MasteringDisplayChromaticity {
+                x_increments: 34_000,
+                y_increments: 16_000,
+            },
+            green: MasteringDisplayChromaticity {
+                x_increments: 13_250,
+                y_increments: 34_500,
+            },
+            blue: MasteringDisplayChromaticity {
+                x_increments: 7_500,
+                y_increments: 3_000,
+            },
+            white_point: MasteringDisplayChromaticity {
+                x_increments: 15_635,
+                y_increments: 16_450,
+            },
+            min_luminance_ten_thousandths_nits: 1,
+            max_luminance_ten_thousandths_nits: 10_000_000,
+            provenance: mastering_provenance,
+        }),
+        content_light_level: Some(ContentLightLevel {
+            max_cll_nits: 1_000,
+            max_fall_nits: 400,
+            provenance: light_provenance,
+        }),
+    }
+}
+
+/// **§9.1 fixture 11, "exports byte-identically" / §7 item 1.**
+///
+/// §7 item 1: "**Every existing project opens byte-unchanged and exports
+/// byte-identically.** ... An SDR project must not acquire an HDR field, a
+/// changed delivery description, or a different exported byte stream."
+///
+/// The project is §9.1 fixture 6's fixed SDR project, and both SDR lanes are
+/// exercised, so this claim is made about the same bytes fixture 6 froze. Three
+/// things are asserted per lane:
+///
+/// 1. the document **round-trips**: saved, reopened, and re-saved to the same
+///    string, with the reopened document equal to the original;
+/// 2. its serialized form carries **no CC8 field** — the probe path that now
+///    reads §2.4's metadata left an SDR source with none; and
+/// 3. the reopened document **exports byte-identically** to the original.
+///
+/// Claim 3 is the one fixture 6 cannot make: fixture 6 exports the same
+/// in-memory document twice, which proves determinism, while this exports the
+/// document that came back through the serializer, which is what "opens
+/// byte-unchanged **and** exports byte-identically" actually asks.
+#[test]
+fn cc8_migration_sdr_project_round_trips_and_exports_byte_identically() {
+    let gpu = fallback_gpu();
+    initialize_ffmpeg().expect("FFmpeg initializes");
+    let directory = TempDirectory::new("cc8-migration-sdr-round-trip");
+
+    let source = cc6_delivery_source(
+        &directory,
+        CC8_SDR_REGRESSION_SIZE,
+        CC8_SDR_REGRESSION_FRAMES,
+    );
+    let document =
+        cc6_delivery_document(&source, CC8_SDR_REGRESSION_SIZE, CC8_SDR_REGRESSION_FRAMES);
+    // The project is SDR by classification, not by assumption.
+    let profile = classify_source_with_assumption(
+        &document.media_pool[0].color_description,
+        Some(ColorSourceProfileAssumption::D65),
+    )
+    .expect("the fixed SDR project's source must classify");
+    assert!(!profile.is_hdr(), "{profile:?}");
+    assert_eq!(
+        document.color_context.pipeline_state,
+        kinewright_core::ColorPipelineState::ManagedSdrV1,
+    );
+
+    // --- claim 1: the document round-trips ---------------------------------
+    let saved = serde_json::to_string(&document).expect("the project saves");
+    let reopened: Document = serde_json::from_str(&saved).expect("and reopens");
+    assert_eq!(reopened, document, "a reopened project must be the project");
+    assert_eq!(
+        serde_json::to_string(&reopened).expect("and re-saves"),
+        saved,
+        "§7 item 1: byte-unchanged on open",
+    );
+
+    // --- claim 2: no CC8 field appears -------------------------------------
+    for spelling in [
+        "hdr_static_metadata",
+        "managed_hdr_v1",
+        "mastering_display",
+        "content_light_level",
+    ] {
+        assert!(
+            !saved.contains(spelling),
+            "an SDR project acquired the CC8 field `{spelling}`",
+        );
+    }
+    assert!(
+        document.media_pool[0]
+            .color_description
+            .hdr_static_metadata
+            .is_unknown(),
+        "§2.4: a probed SDR source declares nothing and stays unknown",
+    );
+
+    // --- claim 3: the reopened project exports byte-identically ------------
+    let original = Arc::new(document);
+    let reopened = Arc::new(reopened);
+    let (progress_tx, _progress_rx) = crossbeam_channel::unbounded();
+    for depth in DeliveryEncodeDepth::ALL {
+        let label = depth.bits();
+        let settings = cc6_delivery_settings(original.as_ref(), depth);
+        let reopened_settings = cc6_delivery_settings(reopened.as_ref(), depth);
+        assert_eq!(
+            settings.delivery_color, reopened_settings.delivery_color,
+            "{label}-bit: the delivery description must survive the round trip",
+        );
+
+        let original_path = directory.path(&format!("cc8-migration-{label}-original.mp4"));
+        let reopened_path = directory.path(&format!("cc8-migration-{label}-reopened.mp4"));
+        crate::export::export_document(
+            original.as_ref(),
+            &original_path,
+            &settings,
+            &progress_tx,
+            gpu.context(),
+        )
+        .expect("the production export must write the original project");
+        crate::export::export_document(
+            reopened.as_ref(),
+            &reopened_path,
+            &reopened_settings,
+            &progress_tx,
+            gpu.context(),
+        )
+        .expect("the production export must write the reopened project");
+
+        let original_bytes = std::fs::read(&original_path).expect("the original export reads");
+        let reopened_bytes = std::fs::read(&reopened_path).expect("the reopened export reads");
+        assert!(
+            original_bytes.len() > 1_024,
+            "{label}-bit: a {} byte export is not a delivery",
+            original_bytes.len(),
+        );
+        assert!(
+            original_bytes == reopened_bytes,
+            "{label}-bit: a saved and reopened SDR project did not export byte-identically",
+        );
+        println!(
+            "CC8_MEASURED fixture=11 clause=export_byte_identical lane={label}bit \
+             export_bytes={} export_sha256={} project_json_bytes={} gpu_lane={}",
+            original_bytes.len(),
+            crate::sha256::sha256_bytes(&original_bytes),
+            saved.len(),
+            gpu.lane.id(),
+        );
+    }
+}
+
+/// **§2.4.** A declared mastering display and content light level are read on
+/// probe, stored on the source description with provenance, and deliberately
+/// left unapplied.
+///
+/// §2.4, in full: "Mastering-display primaries and MaxCLL/MaxFALL are read on
+/// probe where the container carries them, stored on the source description
+/// with provenance, and **reported**. They are never invented: absent metadata
+/// is `Unknown` and stays `Unknown`. Under §0.2 Q1's decision the HLG lane does
+/// not consume them; they exist so the QC surface can report what a source
+/// claimed and so a PQ lane has its inputs already modelled."
+///
+/// Four claims, and the last two are the ones that make the first two mean
+/// something:
+///
+/// 1. **read**: an encoded source that declares both blocks probes back with
+///    both, exactly, in ST 2086's units, with the provenance of the place they
+///    were read from;
+/// 2. **never invented**: the *same encode without those parameters* probes
+///    back unknown, so claim 1 cannot be passing on a default;
+/// 3. **stored**: the probed asset round-trips through the project serializer
+///    with the values and their provenance intact; and
+/// 4. **deliberately unapplied**: the same project, exported once with the
+///    declared metadata and once with the field cleared, produces
+///    byte-identical files. Nothing downstream of the source description reads
+///    it, and that is asserted rather than asserted-of.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cc8_probe_reads_declared_static_hdr_metadata_and_leaves_it_unapplied() {
+    let gpu = fallback_gpu();
+    initialize_ffmpeg().expect("FFmpeg initializes");
+    let directory = TempDirectory::new("cc8-declared-static-metadata");
+
+    // --- claim 1: read, with provenance ------------------------------------
+    let declared_path = directory.path("cc8-declared-hlg.mp4");
+    let declared_params = encode_hdr_clip(
+        &declared_path,
+        CC8_PRECONDITION_HLG_TRANSFER_PARAM,
+        "step9-declared",
+        Some(&format!(
+            "qp=0:{CC8_DECLARED_MASTERING_DISPLAY}:{CC8_DECLARED_CONTENT_LIGHT_LEVEL}"
+        )),
+        fill_hdr_delivery_bars,
+    );
+    let declared_asset =
+        probe_path(&declared_path, AssetId(1)).expect("the declaring source must probe");
+    let declared = declared_asset.color_description.hdr_static_metadata.clone();
+    assert!(
+        !declared.is_unknown(),
+        "§2.4: a source that declares a mastering display must probe back with one",
+    );
+    let mastering = declared
+        .mastering_display
+        .as_ref()
+        .expect("the mastering display must be read");
+    let light = declared
+        .content_light_level
+        .as_ref()
+        .expect("the content light level must be read");
+    assert_eq!(
+        declared,
+        cc8_declared_static_metadata(mastering.provenance.clone(), light.provenance.clone()),
+        "every declared value must probe back exactly, in ST 2086's own units",
+    );
+    // The provenance is the place it was read from, and it is one of §2.4's two
+    // places rather than an inference.
+    for provenance in [&mastering.provenance, &light.provenance] {
+        assert!(
+            matches!(
+                provenance,
+                ColorProvenance::ContainerMetadata | ColorProvenance::StreamMetadata
+            ),
+            "§2.4 requires the provenance of the declaration: {provenance:?}",
+        );
+    }
+
+    // --- claim 2: the failing direction ------------------------------------
+    let silent_path = directory.path("cc8-silent-hlg.mp4");
+    let silent_params = encode_hdr_clip(
+        &silent_path,
+        CC8_PRECONDITION_HLG_TRANSFER_PARAM,
+        "step9-silent",
+        Some("qp=0"),
+        fill_hdr_delivery_bars,
+    );
+    let silent_asset = probe_path(&silent_path, AssetId(1)).expect("the silent source must probe");
+    assert!(
+        silent_asset
+            .color_description
+            .hdr_static_metadata
+            .is_unknown(),
+        "§2.4: absent metadata is unknown and stays unknown — nothing is invented",
+    );
+    // The two sources are the same tuple otherwise, so claim 1 is about the
+    // declaration and not about the encode.
+    assert_eq!(
+        silent_asset.color_description.primaries,
+        declared_asset.color_description.primaries,
+    );
+    assert_eq!(
+        silent_asset.color_description.transfer,
+        declared_asset.color_description.transfer,
+    );
+    assert_eq!(
+        silent_asset.color_description.confidence_basis_points,
+        declared_asset.color_description.confidence_basis_points,
+        "CC1's coverage confidence must not move because a source also declared \
+         static metadata",
+    );
+
+    // --- claim 3: it round-trips through the project serializer ------------
+    let mut asset = declared_asset.clone();
+    asset.color_description = ColorDescription {
+        white_point: ColorWhitePoint::D65,
+        ..asset.color_description
+    };
+    assert_eq!(
+        classify_source(&asset.color_description),
+        Ok(ColorSourceProfile::HlgRec2020),
+    );
+    let mut document = single_clip_document(asset);
+    document.color_context = ColorContext::hdr_hlg_rec2020();
+    document
+        .validate()
+        .expect("the declaring project validates");
+    let saved = serde_json::to_string(&document).expect("it saves");
+    let reopened: Document = serde_json::from_str(&saved).expect("it reopens");
+    assert_eq!(reopened, document);
+    assert_eq!(
+        reopened.media_pool[0].color_description.hdr_static_metadata, declared,
+        "§2.4's declaration and its provenance must survive save and reopen",
+    );
+    assert_eq!(
+        serde_json::to_string(&reopened).expect("it re-saves"),
+        saved,
+    );
+    assert!(saved.contains("\"max_cll_nits\":1000"), "{saved}");
+
+    // --- claim 4: deliberately unapplied -----------------------------------
+    let mut cleared = document.clone();
+    cleared.media_pool[0].color_description.hdr_static_metadata = HdrStaticMetadata::unknown();
+    assert_ne!(cleared, document, "the two projects must really differ");
+
+    let settings = DeliveryProfile::SourceMaster.export_settings(
+        &document,
+        DeliveryEncodeDepth::Ten,
+        kinewright_core::ExportCancellation::default(),
+    );
+    assert_eq!(
+        DeliveryLane::for_description(&settings.delivery_color),
+        DeliveryLane::HdrHlgRec2020,
+    );
+    let (progress_tx, _progress_rx) = crossbeam_channel::unbounded();
+    let mut exported = Vec::new();
+    for (label, project) in [("declared", &document), ("cleared", &cleared)] {
+        let path = directory.path(&format!("cc8-step9-{label}.mp4"));
+        crate::export::export_document(project, &path, &settings, &progress_tx, gpu.context())
+            .expect("the production export must write CC8 §5.1's HDR lane");
+        exported.push(std::fs::read(&path).expect("the export reads"));
+    }
+    assert!(
+        exported[0].len() > 1_024,
+        "a {} byte export is not a delivery",
+        exported[0].len(),
+    );
+    assert!(
+        exported[0] == exported[1],
+        "§2.4: the declared metadata is reported, not consumed — clearing it must not \
+         change one exported byte",
+    );
+
+    println!(
+        "CC8_MEASURED fixture=11 clause=declared_static_metadata \
+         declared_x264_params=\"{declared_params}\" silent_x264_params=\"{silent_params}\" \
+         mastering_provenance={} light_provenance={} max_cll_nits={} max_fall_nits={} \
+         max_luminance_ten_thousandths_nits={} export_bytes={} \
+         cleared_export_byte_identical=true gpu_lane={}",
+        mastering.provenance.wire(),
+        light.provenance.wire(),
+        light.max_cll_nits,
+        light.max_fall_nits,
+        mastering.max_luminance_ten_thousandths_nits,
+        exported[0].len(),
+        gpu.lane.id(),
     );
 }

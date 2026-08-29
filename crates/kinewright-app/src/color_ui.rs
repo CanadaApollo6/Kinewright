@@ -116,6 +116,12 @@ fn color_pipeline_state_label(state: &ColorPipelineState) -> String {
     match state {
         ColorPipelineState::Legacy => "LEGACY".to_owned(),
         ColorPipelineState::ManagedSdrV1 => "MANAGED SDR V1".to_owned(),
+        // CC8 §7's state, labelled in the same shape as CC1's rather than with
+        // an HDR claim: this row says which managed pipeline the project
+        // asserts, and §4 forbids any surface implying calibrated HDR
+        // monitoring. The preview badge on the viewer is where the picture is
+        // labelled, and it says it is not a reference.
+        ColorPipelineState::ManagedHdrV1 => "MANAGED HDR V1".to_owned(),
         ColorPipelineState::Other(value) => format!("FUTURE ({value})"),
     }
 }
@@ -141,6 +147,7 @@ pub(crate) fn assume_sdr_rec709_operation(asset: &MediaAsset) -> Operation {
             bit_depth,
             confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
             provenance: ColorProvenance::UserOverride,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         },
     }
 }
@@ -329,6 +336,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: 9_000,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         let display = source_color_display(&asset(MediaKind::Video, description)).unwrap();
         assert!(display.warning);
@@ -361,6 +369,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         let display = source_color_display(&asset(MediaKind::Video, description)).unwrap();
         assert!(display.warning);
@@ -400,6 +409,7 @@ mod tests {
             bit_depth: ColorBitDepth::Ten,
             confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         assert_eq!(
             kinewright_core::classify_source(&description),
@@ -423,6 +433,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         let display = source_color_display(&asset(MediaKind::Video, description)).unwrap();
         assert!(display.blocking);
@@ -457,6 +468,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
             provenance: ColorProvenance::UserOverride,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         assert_eq!(
             color_description_summary(&description),
@@ -490,6 +502,7 @@ mod tests {
                         bit_depth: expected_depth,
                         confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
                         provenance: ColorProvenance::UserOverride,
+                        hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
                     },
                 }
             );
@@ -527,5 +540,40 @@ mod tests {
         let mut incompatible_delivery = ColorContext::sdr_rec709();
         incompatible_delivery.delivery.transfer = ColorTransfer::Smpte2084;
         assert!(managed_sdr_reset_needed(&incompatible_delivery));
+    }
+
+    /// CC8 §7's managed HDR state on the project colour panel.
+    ///
+    /// The row names the pipeline the project asserts; it is deliberately not
+    /// an HDR *claim*, because §4 forbids any surface implying calibrated HDR
+    /// monitoring and the viewer's own badge is where the picture is labelled.
+    /// The reset prompt must stay silent for it — telling an operator to
+    /// "reset to Managed SDR" would be telling them to undo §5.1's lane.
+    #[test]
+    fn cc8_pipeline_summary_names_the_managed_hdr_state_and_needs_no_reset() {
+        let hdr = ColorContext::hdr_hlg_rec2020();
+        let summaries = color_pipeline_summary(&hdr);
+        assert_eq!(summaries[3], "PIPELINE · MANAGED HDR V1");
+        // §3.1: the working and monitoring rows are CC1's, unchanged.
+        assert_eq!(
+            summaries[0],
+            color_pipeline_summary(&ColorContext::sdr_rec709())[0]
+        );
+        assert_eq!(
+            summaries[1],
+            color_pipeline_summary(&ColorContext::sdr_rec709())[1]
+        );
+        assert!(
+            summaries[2].contains("M:BT.2020-NCL R:limited"),
+            "{}",
+            summaries[2]
+        );
+        assert!(!managed_sdr_reset_needed(&hdr));
+
+        // The half-formed pairing does need one: it is not a pipeline the
+        // renderer executes, and §7 requires the state to name the lane.
+        let mut mismatched = ColorContext::sdr_rec709();
+        mismatched.delivery = kinewright_core::cc8_hdr_delivery_description();
+        assert!(managed_sdr_reset_needed(&mismatched));
     }
 }

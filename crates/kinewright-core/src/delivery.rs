@@ -405,17 +405,30 @@ pub fn delivery_conformance(
 }
 
 fn append_managed_pipeline_issues(document: &Document, issues: &mut Vec<QaIssue>) {
-    if !matches!(
-        document.color_context.pipeline_state,
-        ColorPipelineState::ManagedSdrV1
-    ) {
+    // CC8 §7: the managed state is a claim about a *pipeline*, so the state
+    // this check requires is a function of the lane the project's delivery
+    // description selects — §5.3's widening, applied to the state field. The
+    // SDR arm's message, code, and severity are CC6's, character for
+    // character; §9.1 fixture 6 gates that they did not move.
+    let lane = DeliveryLane::for_description(&document.color_context.delivery);
+    let required_state = match lane {
+        DeliveryLane::SdrRec709 => ColorPipelineState::ManagedSdrV1,
+        DeliveryLane::HdrHlgRec2020 => ColorPipelineState::ManagedHdrV1,
+    };
+    if document.color_context.pipeline_state != required_state {
         issues.push(QaIssue {
             severity: QaSeverity::Error,
             code: "unsupported_color_pipeline_state".to_owned(),
-            message: format!(
-                "Managed SDR delivery requires pipeline_state=managed_sdr_v1, observed {:?}. Reset the project colour pipeline before proof or export.",
-                document.color_context.pipeline_state
-            ),
+            message: match lane {
+                DeliveryLane::SdrRec709 => format!(
+                    "Managed SDR delivery requires pipeline_state=managed_sdr_v1, observed {:?}. Reset the project colour pipeline before proof or export.",
+                    document.color_context.pipeline_state
+                ),
+                DeliveryLane::HdrHlgRec2020 => format!(
+                    "CC8 §5.1's HDR delivery lane requires pipeline_state=managed_hdr_v1, observed {:?}. {CC8_MANAGED_HDR_STATE_RECOVERY}",
+                    document.color_context.pipeline_state
+                ),
+            },
             asset: None,
             track: None,
             clip: None,
@@ -593,6 +606,53 @@ pub fn hdr_source_profile_for_description(
 pub fn document_monitor_preview(document: &Document) -> MonitorPreview {
     MonitorPreview::for_source_profile(document_hdr_source_profile(document))
 }
+
+/// CC8 §5.1's delivery lane as a [`ColorDescription`]: the delivery target
+/// [`ColorContext::hdr_hlg_rec2020`](crate::ColorContext::hdr_hlg_rec2020)
+/// writes, and the only one the HDR lane accepts.
+///
+/// Every colour field is §5.1's own cell, and the constructed value is checked
+/// against [`CC8_HDR_DELIVERY_LANE`]'s wire spellings by
+/// `cc8_hdr_delivery_description_is_section_5_1s_lane_table`, so this
+/// constructor and the authority table cannot drift apart. The provenance and
+/// confidence are the managed-target pair CC1 §4 uses for every application
+/// default, because this **is** an application default — the one CC8 adds.
+///
+/// [`HdrStaticMetadata`](crate::HdrStaticMetadata) is deliberately unknown: a
+/// delivery description is a target, and §2.4's metadata is something a
+/// *source* declared.
+#[must_use]
+pub fn cc8_hdr_delivery_description() -> ColorDescription {
+    ColorDescription {
+        primaries: ColorPrimaries::Bt2020,
+        transfer: ColorTransfer::AribStdB67,
+        matrix: ColorMatrix::Bt2020Ncl,
+        range: ColorRange::Limited,
+        white_point: ColorWhitePoint::D65,
+        bit_depth: ColorBitDepth::Ten,
+        confidence_basis_points: crate::COLOR_CONFIDENCE_MAX_BASIS_POINTS,
+        provenance: ColorProvenance::ApplicationDefault,
+        hdr_static_metadata: crate::HdrStaticMetadata::unknown(),
+    }
+}
+
+/// The recovery action for a project on §5.1's HDR delivery lane whose managed
+/// state is not `managed_hdr_v1` (CC8 §7).
+///
+/// It names the operation rather than describing a repair, because §7 item 3
+/// makes setting the HDR pipeline "an ordinary undoable, revision-gated,
+/// journalled operation" and there is exactly one: `SetColorContext` with
+/// [`ColorContext::hdr_hlg_rec2020`](crate::ColorContext::hdr_hlg_rec2020).
+/// Nothing rewrites the state on the project's behalf — §7 item 1's
+/// byte-unchanged obligation is why a load may not stamp it, and §0.2 Q6 is
+/// why the alternative reading (silently treating an SDR-stated project as
+/// HDR) is refused outright.
+pub const CC8_MANAGED_HDR_STATE_RECOVERY: &str = "Set the project colour context to CC8 §7's managed HDR pipeline — \
+     ColorContext::hdr_hlg_rec2020, applied through SetColorContext — so the state names the \
+     lane the delivery description selects. CC8 never stamps managed_hdr_v1 on a project's \
+     behalf: §7 item 1 keeps every existing project byte-unchanged on open, and a project that \
+     claims managed_sdr_v1 while naming an HDR delivery target is reporting a mismatch, not \
+     requesting a conversion (§0.2 Q6).";
 
 /// CC8 §7 item 2's blocking issue code.
 pub const HDR_SOURCE_ON_SDR_DELIVERY: &str = "hdr_source_on_sdr_delivery";
@@ -2558,6 +2618,7 @@ mod tests {
             bit_depth: crate::ColorBitDepth::Ten,
             confidence_basis_points: crate::COLOR_CONFIDENCE_MAX_BASIS_POINTS,
             provenance: crate::ColorProvenance::StreamMetadata,
+            hdr_static_metadata: crate::HdrStaticMetadata::unknown(),
         };
 
         let report = delivery_conformance(
@@ -2594,6 +2655,7 @@ mod tests {
             bit_depth: ColorBitDepth::Ten,
             confidence_basis_points: crate::COLOR_CONFIDENCE_MAX_BASIS_POINTS,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: crate::HdrStaticMetadata::unknown(),
         };
         // Non-vacuity: this tuple is now a *supported* CC8 profile, so the
         // block below is the HDR/SDR mismatch and not a leftover source
@@ -2687,6 +2749,7 @@ mod tests {
             bit_depth: crate::ColorBitDepth::Eight,
             confidence_basis_points: crate::COLOR_CONFIDENCE_MAX_BASIS_POINTS,
             provenance: crate::ColorProvenance::Inferred,
+            hdr_static_metadata: crate::HdrStaticMetadata::unknown(),
         };
 
         let report = delivery_conformance(

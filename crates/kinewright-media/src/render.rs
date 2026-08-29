@@ -1310,6 +1310,7 @@ mod tests {
             bit_depth: kinewright_core::ColorBitDepth::Eight,
             confidence_basis_points: 10_000,
             provenance: kinewright_core::ColorProvenance::UserOverride,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         red_asset.color_description = description.clone();
         blue_asset.color_description = description;
@@ -1380,6 +1381,7 @@ mod tests {
             bit_depth: ColorBitDepth::Ten,
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         }
     }
 

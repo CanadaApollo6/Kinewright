@@ -1,0 +1,103 @@
+{
+  "tracks": [
+    {
+      "id": 1,
+      "kind": "Video",
+      "clips": [
+        {
+          "id": 1,
+          "asset": 1,
+          "source_range": {
+            "start": 0,
+            "end": 30
+          },
+          "timeline_start": 0,
+          "effects": [
+            {
+              "id": 1,
+              "name": "primary_correction",
+              "parameters": {
+                "contrast_percent": 12,
+                "exposure_milli_stops": 250
+              }
+            }
+          ],
+          "transition_in": null
+        }
+      ]
+    }
+  ],
+  "media_pool": [
+    {
+      "id": 1,
+      "path": "cc8-migration-source.mp4",
+      "name": "cc8-migration-source.mp4",
+      "duration": 120,
+      "fps": {
+        "numerator": 30,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": [
+        1920,
+        1080
+      ],
+      "source_fingerprint": {
+        "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "byte_len": 4096
+      },
+      "color_description": {
+        "primaries": "bt2020",
+        "transfer": "arib_std_b67",
+        "matrix": "bt2020_ncl",
+        "range": "limited",
+        "white_point": "d65",
+        "bit_depth": 10,
+        "confidence_basis_points": 10000,
+        "provenance": "stream_metadata"
+      }
+    }
+  ],
+  "color_context": {
+    "pipeline_state": "managed_sdr_v1",
+    "working": {
+      "primaries": "bt709",
+      "transfer": "linear",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "monitoring": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "delivery": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "bt709",
+      "range": "limited",
+      "white_point": "d65",
+      "bit_depth": 8,
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    }
+  },
+  "fps": {
+    "numerator": 30,
+    "denominator": 1
+  },
+  "resolution": [
+    1920,
+    1080
+  ],
+  "duration": 30
+}

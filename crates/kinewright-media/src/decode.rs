@@ -3,8 +3,14 @@ use std::{path::Path, sync::Arc};
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
     AssetId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
-    ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, FrameTexture,
+    ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, ContentLightLevel,
+    FrameTexture, HdrStaticMetadata, MasteringDisplayChromaticity, MasteringDisplayMetadata,
     MediaAsset, MediaError, MediaKind, Rational, RgbaImage, TimeCode,
+    cc8_hdr::{
+        CC8_AV_CONTENT_LIGHT_METADATA_BYTES, CC8_AV_MASTERING_DISPLAY_METADATA_BYTES,
+        CC8_MASTERING_DISPLAY_CHROMATICITY_INCREMENTS_PER_UNIT,
+        CC8_MASTERING_DISPLAY_LUMINANCE_TEN_THOUSANDTHS_PER_NIT, cc8_st2086_units,
+    },
     classify_source_with_assumption,
 };
 
@@ -86,8 +92,13 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
         // it sees a packet. Decode one frame through the safe ffmpeg-next API
         // on a short-lived second input so probing can still report the source
         // component depth without consuming the input used for duration data.
-        let negotiated_pixel_format = negotiated_pixel_format(path, stream.index());
-        let color_description = color_description_from_decoder(&decoder, negotiated_pixel_format);
+        let (negotiated_pixel_format, frame_hdr_static_metadata) =
+            negotiated_frame_facts(path, stream.index());
+        let color_description = color_description_from_decoder(
+            &decoder,
+            negotiated_pixel_format,
+            hdr_static_metadata_for_stream(&stream, frame_hdr_static_metadata),
+        );
         let stream_duration = timestamp_to_grid_ceil(stream.duration(), stream.time_base(), rate);
         let packet_duration = timing.duration.map_or(0, |duration| {
             timestamp_to_grid_ceil(duration, stream.time_base(), rate)
@@ -138,6 +149,7 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
 fn color_description_from_decoder(
     decoder: &ffmpeg::codec::decoder::Video,
     negotiated_pixel_format: Option<ffmpeg::format::Pixel>,
+    hdr_static_metadata: HdrStaticMetadata,
 ) -> ColorDescription {
     let primaries = map_color_primaries(decoder.color_primaries());
     let transfer = map_color_transfer(decoder.color_transfer_characteristic());
@@ -162,42 +174,247 @@ fn color_description_from_decoder(
         bit_depth,
         confidence_basis_points,
         provenance,
+        // CC8 §2.4, read where the container or the coded stream carried it.
+        // It deliberately does **not** feed `color_metadata_coverage`: the
+        // confidence CC1 defined is coverage of the four colorimetry fields
+        // plus the depth, and a file that also declares a mastering display is
+        // not better described in that sense. Moving that number would move a
+        // CC1 figure §9.1 fixture 6 holds unchanged.
+        hdr_static_metadata,
     }
 }
 
-/// Return the pixel format negotiated by the first decoded frame.
+/// CC8 §2.4's static HDR metadata, read from the two places a source can
+/// declare it.
+///
+/// §2.4: "Mastering-display primaries and MaxCLL/MaxFALL are read on probe
+/// **where the container carries them**, stored on the source description with
+/// provenance, and reported."
+///
+/// There are two such places, and they are distinguished by provenance rather
+/// than merged:
+///
+/// * the container's own boxes (MP4 `mdcv`/`clli`, Matroska's colour element),
+///   which `FFmpeg` exposes as **coded stream side data** —
+///   [`ColorProvenance::ContainerMetadata`]; and
+/// * an SEI message inside the bitstream, which reaches the **decoded frame** —
+///   [`ColorProvenance::StreamMetadata`].
+///
+/// The container is read first and wins, per block, because a remux that
+/// rewrote the boxes is the more recent statement about the file; a block the
+/// container did not carry is then taken from the frame. Neither is invented,
+/// and a source that declares neither keeps [`HdrStaticMetadata::unknown`].
+fn hdr_static_metadata_for_stream(
+    stream: &ffmpeg::format::stream::Stream<'_>,
+    frame_metadata: HdrStaticMetadata,
+) -> HdrStaticMetadata {
+    let mut container = HdrStaticMetadata::unknown();
+    for side_data in stream.side_data() {
+        match side_data.kind() {
+            ffmpeg::codec::packet::side_data::Type::MasteringDisplayMetadata => {
+                container.mastering_display =
+                    parse_mastering_display(side_data.data(), ColorProvenance::ContainerMetadata);
+            }
+            ffmpeg::codec::packet::side_data::Type::ContentLightLevel => {
+                container.content_light_level =
+                    parse_content_light_level(side_data.data(), ColorProvenance::ContainerMetadata);
+            }
+            _ => {}
+        }
+    }
+    merge_hdr_static_metadata(container, frame_metadata)
+}
+
+/// Combine the container's declaration with the bitstream's, per block.
+///
+/// Split out of [`hdr_static_metadata_for_stream`] so the rule is testable
+/// without a container that carries the boxes. **The pinned build's libx264
+/// writes its mastering display and content light level as an SEI only**, and
+/// neither the MP4 nor the Matroska muxer promotes that to a container box on
+/// a stream copy, so no fixture in this repository can produce container-level
+/// side data with the encoders CC8 ships (§0.2 Q2 keeps libx265, whose
+/// `hdr-opt` route §0.3(a) measured, out of the delivered set). The parsers and
+/// this merge are therefore exercised by `decode::tests` on constructed
+/// buffers, and CC8 §9.1 fixture 11's media half exercises the SEI path
+/// end to end on real media.
+fn merge_hdr_static_metadata(
+    container: HdrStaticMetadata,
+    frame: HdrStaticMetadata,
+) -> HdrStaticMetadata {
+    HdrStaticMetadata {
+        mastering_display: container.mastering_display.or(frame.mastering_display),
+        content_light_level: container.content_light_level.or(frame.content_light_level),
+    }
+}
+
+/// CC8 §2.4's two blocks as one decoded frame declares them.
+fn hdr_static_metadata_from_frame(frame: &ffmpeg::frame::Video) -> HdrStaticMetadata {
+    HdrStaticMetadata {
+        mastering_display: frame
+            .side_data(ffmpeg::frame::side_data::Type::MasteringDisplayMetadata)
+            .and_then(|side_data| {
+                parse_mastering_display(side_data.data(), ColorProvenance::StreamMetadata)
+            }),
+        content_light_level: frame
+            .side_data(ffmpeg::frame::side_data::Type::ContentLightLevel)
+            .and_then(|side_data| {
+                parse_content_light_level(side_data.data(), ColorProvenance::StreamMetadata)
+            }),
+    }
+}
+
+/// Decode libavutil's `AVMasteringDisplayMetadata` from a side-data buffer.
+///
+/// The buffer **is** the C struct, so this reads its twenty-two `int` fields at
+/// their fixed offsets: `display_primaries[3][2]` and `white_point[2]` as
+/// `AVRational` numerator/denominator pairs, then `min_luminance`,
+/// `max_luminance`, `has_primaries` and `has_luminance`. The workspace forbids
+/// `unsafe`, so the fields are read as native-endian integers out of the byte
+/// slice rather than through a pointer cast; the exact length check against
+/// [`CC8_AV_MASTERING_DISPLAY_METADATA_BYTES`] is what makes that sound, and a
+/// buffer of any other length is reported as `Unknown` rather than decoded on a
+/// guess.
+///
+/// `None` — no declaration this build can honestly record — is returned when:
+/// the length is not the struct's; either `has_*` flag is clear, because CC8
+/// stores a mastering display or nothing rather than half of one and §2.4
+/// forbids inventing the other half; or a declared rational cannot be written
+/// in ST 2086's own units exactly ([`cc8_st2086_units`]).
+fn parse_mastering_display(
+    bytes: &[u8],
+    provenance: ColorProvenance,
+) -> Option<MasteringDisplayMetadata> {
+    if bytes.len() != CC8_AV_MASTERING_DISPLAY_METADATA_BYTES {
+        return None;
+    }
+    let field = |index: usize| -> i64 {
+        let start = index * 4;
+        let mut buffer = [0_u8; 4];
+        buffer.copy_from_slice(&bytes[start..start + 4]);
+        i64::from(i32::from_ne_bytes(buffer))
+    };
+    // `has_primaries` and `has_luminance`, the struct's last two ints.
+    if field(20) == 0 || field(21) == 0 {
+        return None;
+    }
+    let chromaticity = |pair: usize| -> Option<MasteringDisplayChromaticity> {
+        Some(MasteringDisplayChromaticity {
+            x_increments: cc8_st2086_units(
+                field(pair * 4),
+                field(pair * 4 + 1),
+                CC8_MASTERING_DISPLAY_CHROMATICITY_INCREMENTS_PER_UNIT,
+            )?,
+            y_increments: cc8_st2086_units(
+                field(pair * 4 + 2),
+                field(pair * 4 + 3),
+                CC8_MASTERING_DISPLAY_CHROMATICITY_INCREMENTS_PER_UNIT,
+            )?,
+        })
+    };
+    Some(MasteringDisplayMetadata {
+        // `display_primaries` is documented "(r, g, b order)".
+        red: chromaticity(0)?,
+        green: chromaticity(1)?,
+        blue: chromaticity(2)?,
+        white_point: chromaticity(3)?,
+        min_luminance_ten_thousandths_nits: cc8_st2086_units(
+            field(16),
+            field(17),
+            CC8_MASTERING_DISPLAY_LUMINANCE_TEN_THOUSANDTHS_PER_NIT,
+        )?,
+        max_luminance_ten_thousandths_nits: cc8_st2086_units(
+            field(18),
+            field(19),
+            CC8_MASTERING_DISPLAY_LUMINANCE_TEN_THOUSANDTHS_PER_NIT,
+        )?,
+        provenance,
+    })
+}
+
+/// Decode libavutil's `AVContentLightMetadata` — `MaxCLL`, `MaxFALL` — from a
+/// side-data buffer, on [`parse_mastering_display`]'s terms.
+fn parse_content_light_level(
+    bytes: &[u8],
+    provenance: ColorProvenance,
+) -> Option<ContentLightLevel> {
+    if bytes.len() != CC8_AV_CONTENT_LIGHT_METADATA_BYTES {
+        return None;
+    }
+    let field = |index: usize| -> u32 {
+        let start = index * 4;
+        let mut buffer = [0_u8; 4];
+        buffer.copy_from_slice(&bytes[start..start + 4]);
+        u32::from_ne_bytes(buffer)
+    };
+    Some(ContentLightLevel {
+        max_cll_nits: field(0),
+        max_fall_nits: field(1),
+        provenance,
+    })
+}
+
+/// Return the facts only a decoded frame can supply: the negotiated pixel
+/// format, and CC8 §2.4's static HDR metadata as the **bitstream** declared it.
 ///
 /// Some codecs leave `AVCodecContext::pix_fmt` at `AV_PIX_FMT_NONE` until the
 /// first decoded frame. Probe-time color metadata uses the negotiated frame
 /// format when available and preserves `Unknown` when the stream never yields
 /// one.
-fn negotiated_pixel_format(path: &Path, stream_index: usize) -> Option<ffmpeg::format::Pixel> {
-    let mut input = media_input(path).ok()?;
-    let mut decoder = {
-        let stream = input
+///
+/// The frame is where an SEI-carried mastering display or content light level
+/// arrives, so §2.4's second source is read from the same single decoded frame
+/// this function already produces rather than from a second decode pass. A
+/// stream that never yields a frame reports no metadata, exactly as it reports
+/// no pixel format.
+fn negotiated_frame_facts(
+    path: &Path,
+    stream_index: usize,
+) -> (Option<ffmpeg::format::Pixel>, HdrStaticMetadata) {
+    let unknown = (None, HdrStaticMetadata::unknown());
+    let Ok(mut input) = media_input(path) else {
+        return unknown;
+    };
+    let decoder = {
+        let Some(stream) = input
             .streams()
-            .find(|stream| stream.index() == stream_index)?;
-        let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters()).ok()?;
-        context.decoder().video().ok()?
+            .find(|stream| stream.index() == stream_index)
+        else {
+            return unknown;
+        };
+        let Ok(context) = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+        else {
+            return unknown;
+        };
+        context.decoder().video().ok()
+    };
+    let Some(mut decoder) = decoder else {
+        return unknown;
     };
 
     let mut frame = ffmpeg::frame::Video::empty();
+    let facts = |frame: &ffmpeg::frame::Video| {
+        (Some(frame.format()), hdr_static_metadata_from_frame(frame))
+    };
     for (stream, packet) in input.packets() {
         if stream.index() != stream_index {
             continue;
         }
-        decoder.send_packet(&packet).ok()?;
+        if decoder.send_packet(&packet).is_err() {
+            return unknown;
+        }
         match decoder.receive_frame(&mut frame) {
-            Ok(()) => return Some(frame.format()),
+            Ok(()) => return facts(&frame),
             Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {}
-            Err(_) => return None,
+            Err(_) => return unknown,
         }
     }
 
-    decoder.send_eof().ok()?;
+    if decoder.send_eof().is_err() {
+        return unknown;
+    }
     match decoder.receive_frame(&mut frame) {
-        Ok(()) => Some(frame.format()),
-        Err(_) => None,
+        Ok(()) => facts(&frame),
+        Err(_) => unknown,
     }
 }
 
@@ -2001,6 +2218,191 @@ mod tests {
                 &eight_bit,
             ),
             (ColorProvenance::StreamMetadata, 10_000)
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // CC8 §2.4: the declared static HDR metadata parsers (§10 step 9).
+    // -----------------------------------------------------------------
+
+    /// One `AVMasteringDisplayMetadata` buffer, built field by field.
+    ///
+    /// The layout is libavutil's: `display_primaries[3][2]` and
+    /// `white_point[2]` as `AVRational` numerator/denominator pairs, then
+    /// `min_luminance`, `max_luminance`, `has_primaries`, `has_luminance` —
+    /// twenty-two native-endian `int`s. Building the buffer here rather than
+    /// casting a struct is the same discipline the parser itself works under:
+    /// the workspace forbids `unsafe`.
+    fn mastering_display_bytes(fields: [i32; 22]) -> Vec<u8> {
+        fields
+            .iter()
+            .flat_map(|value| value.to_ne_bytes())
+            .collect()
+    }
+
+    /// §0.3(a)'s measured mastering display, in its declared rationals.
+    fn declared_mastering_fields() -> [i32; 22] {
+        [
+            34_000, 50_000, 16_000, 50_000, // red x, y
+            13_250, 50_000, 34_500, 50_000, // green x, y
+            7_500, 50_000, 3_000, 50_000, // blue x, y
+            15_635, 50_000, 16_450, 50_000, // white point x, y
+            1, 10_000, // min luminance
+            10_000_000, 10_000, // max luminance
+            1, 1, // has_primaries, has_luminance
+        ]
+    }
+
+    #[test]
+    fn cc8_mastering_display_side_data_parses_into_st2086_units() {
+        let parsed = parse_mastering_display(
+            &mastering_display_bytes(declared_mastering_fields()),
+            ColorProvenance::ContainerMetadata,
+        )
+        .expect("a well-formed buffer must parse");
+        assert_eq!(parsed.red.x_increments, 34_000);
+        assert_eq!(parsed.red.y_increments, 16_000);
+        assert_eq!(parsed.green.x_increments, 13_250);
+        assert_eq!(parsed.green.y_increments, 34_500);
+        assert_eq!(parsed.blue.x_increments, 7_500);
+        assert_eq!(parsed.blue.y_increments, 3_000);
+        assert_eq!(parsed.white_point.x_increments, 15_635);
+        assert_eq!(parsed.white_point.y_increments, 16_450);
+        assert_eq!(parsed.min_luminance_ten_thousandths_nits, 1);
+        assert_eq!(parsed.max_luminance_ten_thousandths_nits, 10_000_000);
+        assert_eq!(parsed.provenance, ColorProvenance::ContainerMetadata);
+
+        // A denominator that is not the standard one still parses when the
+        // conversion is exact: the value is the same number, written twice.
+        let mut halved = declared_mastering_fields();
+        halved[0] = 17_000;
+        halved[1] = 25_000;
+        let parsed = parse_mastering_display(
+            &mastering_display_bytes(halved),
+            ColorProvenance::ContainerMetadata,
+        )
+        .expect("an exactly representable rational must parse");
+        assert_eq!(parsed.red.x_increments, 34_000);
+    }
+
+    /// Every direction in which §2.4's "never invented" rule refuses to record
+    /// a declaration.
+    #[test]
+    fn cc8_mastering_display_side_data_refuses_rather_than_guesses() {
+        let complete = mastering_display_bytes(declared_mastering_fields());
+        // The exact-length guard: this build reads a C struct out of a byte
+        // slice, so a buffer of any other length is not that struct.
+        for length in [0, complete.len() - 4, complete.len() + 4] {
+            let mut truncated = complete.clone();
+            truncated.resize(length, 0);
+            assert_eq!(
+                parse_mastering_display(&truncated, ColorProvenance::ContainerMetadata),
+                None,
+                "a {length}-byte buffer must not be decoded as a mastering display",
+            );
+        }
+
+        // Either `has_*` flag clear: CC8 stores a mastering display or nothing,
+        // never half of one with the other half invented.
+        for index in [20, 21] {
+            let mut fields = declared_mastering_fields();
+            fields[index] = 0;
+            assert_eq!(
+                parse_mastering_display(
+                    &mastering_display_bytes(fields),
+                    ColorProvenance::ContainerMetadata,
+                ),
+                None,
+            );
+        }
+
+        // A rational that cannot be written in ST 2086's units exactly
+        // (`34000/3` increments is not an integer), a negative numerator, and a
+        // zero denominator.
+        for (index, value) in [(1, 3), (0, -1), (1, 0)] {
+            let mut fields = declared_mastering_fields();
+            fields[index] = value;
+            assert_eq!(
+                parse_mastering_display(
+                    &mastering_display_bytes(fields),
+                    ColorProvenance::ContainerMetadata,
+                ),
+                None,
+                "field {index} = {value} must refuse rather than round",
+            );
+        }
+    }
+
+    #[test]
+    fn cc8_content_light_level_side_data_parses_and_guards_its_length() {
+        let bytes: Vec<u8> = [1_000_u32, 400]
+            .iter()
+            .flat_map(|value| value.to_ne_bytes())
+            .collect();
+        let parsed = parse_content_light_level(&bytes, ColorProvenance::StreamMetadata)
+            .expect("a well-formed buffer must parse");
+        assert_eq!(parsed.max_cll_nits, 1_000);
+        assert_eq!(parsed.max_fall_nits, 400);
+        assert_eq!(parsed.provenance, ColorProvenance::StreamMetadata);
+
+        for length in [0, 4, 12] {
+            let mut wrong = bytes.clone();
+            wrong.resize(length, 0);
+            assert_eq!(
+                parse_content_light_level(&wrong, ColorProvenance::StreamMetadata),
+                None,
+            );
+        }
+    }
+
+    /// CC8 §2.4's two declaration sites, and which one wins per block.
+    #[test]
+    fn cc8_container_metadata_wins_per_block_over_the_bitstreams() {
+        let container = HdrStaticMetadata {
+            mastering_display: parse_mastering_display(
+                &mastering_display_bytes(declared_mastering_fields()),
+                ColorProvenance::ContainerMetadata,
+            ),
+            content_light_level: None,
+        };
+        let frame = HdrStaticMetadata {
+            mastering_display: parse_mastering_display(
+                &mastering_display_bytes(declared_mastering_fields()),
+                ColorProvenance::StreamMetadata,
+            ),
+            content_light_level: Some(ContentLightLevel {
+                max_cll_nits: 1_000,
+                max_fall_nits: 400,
+                provenance: ColorProvenance::StreamMetadata,
+            }),
+        };
+
+        let merged = merge_hdr_static_metadata(container.clone(), frame.clone());
+        assert_eq!(
+            merged
+                .mastering_display
+                .as_ref()
+                .map(|display| &display.provenance),
+            Some(&ColorProvenance::ContainerMetadata),
+            "a container declaration is the more recent statement about the file",
+        );
+        assert_eq!(
+            merged
+                .content_light_level
+                .as_ref()
+                .map(|light| &light.provenance),
+            Some(&ColorProvenance::StreamMetadata),
+            "a block the container did not carry is taken from the bitstream",
+        );
+
+        // Neither side declaring anything stays §2.4's Unknown.
+        assert!(
+            merge_hdr_static_metadata(HdrStaticMetadata::unknown(), HdrStaticMetadata::unknown())
+                .is_unknown()
+        );
+        assert_eq!(
+            merge_hdr_static_metadata(HdrStaticMetadata::unknown(), frame.clone()),
+            frame,
         );
     }
 }

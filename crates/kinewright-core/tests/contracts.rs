@@ -63,6 +63,7 @@ fn user_color_override() -> ColorDescription {
         bit_depth: ColorBitDepth::Ten,
         confidence_basis_points: 9_000,
         provenance: ColorProvenance::UserOverride,
+        hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
     }
 }
 
@@ -643,6 +644,7 @@ fn source_colour_description_round_trips_known_and_future_values() {
         bit_depth: ColorBitDepth::Ten,
         confidence_basis_points: 9_500,
         provenance: ColorProvenance::StreamMetadata,
+        hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
     };
     let mut asset = asset(7, Rational::new(30, 1).unwrap(), 120);
     asset.color_description = description.clone();

@@ -2484,6 +2484,7 @@ mod tests {
             bit_depth: DeliveryEncodeDepth::Ten.color_bit_depth(),
             confidence_basis_points: 10_000,
             provenance: kinewright_core::ColorProvenance::UserOverride,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         assert_eq!(description.primaries.wire(), lane.primaries);
         assert_eq!(description.transfer.wire(), lane.transfer);
@@ -2774,6 +2775,7 @@ mod tests {
             bit_depth: kinewright_core::ColorBitDepth::Twelve,
             provenance: kinewright_core::ColorProvenance::Unknown,
             confidence_basis_points: 0,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         let mismatches = kinewright_core::delivery_color_mismatches(&broken);
         assert_eq!(

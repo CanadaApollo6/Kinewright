@@ -1961,6 +1961,7 @@ mod tests {
             bit_depth: kinewright_core::ColorBitDepth::Eight,
             confidence_basis_points: 10_000,
             provenance: kinewright_core::ColorProvenance::UserOverride,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         let mut document = single_clip_document(asset);
         document.tracks[0].clips[0].effects = effects;

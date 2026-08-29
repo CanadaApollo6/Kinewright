@@ -543,6 +543,7 @@ fn two_track_effect_export_matches_preview_after_h264_redecode() {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         },
         "the encoded stream must re-probe with every representable Rec.709 stream tag; H.264 has no separate white-point tag"
     );

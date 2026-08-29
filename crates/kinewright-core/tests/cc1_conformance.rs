@@ -315,6 +315,7 @@ fn user_override_that_is_still_unsupported_keeps_blocking_managed_delivery() {
         bit_depth: ColorBitDepth::Ten,
         confidence_basis_points: 10_000,
         provenance: ColorProvenance::UserOverride,
+        hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
     };
     Operation::SetAssetColorDescription {
         asset: AssetId(1),

@@ -5822,6 +5822,7 @@ mod tests {
             bit_depth: kinewright_core::ColorBitDepth::Ten,
             confidence_basis_points: 10_000,
             provenance: kinewright_core::ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
 
         // §8: the authored-domain condition is on curve and wheel nodes, and

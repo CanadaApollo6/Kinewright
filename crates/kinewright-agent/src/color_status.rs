@@ -6,6 +6,10 @@ use std::{
     sync::Arc,
 };
 
+use kinewright_core::cc8_hdr::{
+    CC8_HDR_STATIC_METADATA_BOUNDARY, CC8_MASTERING_DISPLAY_CHROMATICITY_INCREMENTS_PER_UNIT,
+    CC8_MASTERING_DISPLAY_LUMINANCE_TEN_THOUSANDTHS_PER_NIT,
+};
 use kinewright_core::{
     AssetId, CC8_AUTHORED_DOMAIN_LIMITATION, CC8_AUTHORED_DOMAIN_LIMITATION_CODE,
     CC8_HDR_DEPTH_ALLOWED, CC8_HDR_MATRIX_ALLOWED, CC8_HDR_PRIMARIES_ALLOWED,
@@ -20,12 +24,12 @@ use kinewright_core::{
     ColorNodeInactiveReason, ColorNodeKind, ColorSourceError, ColorSourceProfile,
     ColorSourceProfileAssumption, ColorStage, ColorWheelChannel, ColorWheelControl,
     ColorWheelsParams, ColorWhitePoint, CurvePoints, Document, Effect, EffectCompatibilityStage,
-    EffectId, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER, LUT_MIX_BASIS_POINTS_MAX,
-    LUT_MIX_PARAMETER, LUT_NODE_LIMIT_PER_LAYER, LutAsset, LutAssetId, LutAssetSource,
-    LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams, MANAGED_COLOR_NODE_NAMES,
-    MATTE_MIX_BASIS_POINTS_MAX, MATTE_WINDOW_LIMIT, MatteParams, MatteWindowParams,
-    MediaAvailabilityStatus, MediaError, MediaKind, Operation, ParamValue, ResolvedCurves,
-    TimeCode, TimelineRevision, TrackKind, apply_batch, classify_color_node,
+    EffectId, HdrStaticMetadata, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER,
+    LUT_MIX_BASIS_POINTS_MAX, LUT_MIX_PARAMETER, LUT_NODE_LIMIT_PER_LAYER, LutAsset, LutAssetId,
+    LutAssetSource, LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams,
+    MANAGED_COLOR_NODE_NAMES, MATTE_MIX_BASIS_POINTS_MAX, MATTE_WINDOW_LIMIT, MatteParams,
+    MatteWindowParams, MediaAvailabilityStatus, MediaError, MediaKind, Operation, ParamValue,
+    ResolvedCurves, TimeCode, TimelineRevision, TrackKind, apply_batch, classify_color_node,
     classify_source_with_assumption, effect_compatibility_stage, effect_descriptor, lut_node_count,
     lut_node_may_be_active, managed_color_node_count,
 };
@@ -1298,23 +1302,21 @@ pub(crate) fn legacy_stage_warnings(clip: &Clip) -> Vec<Value> {
 /// (§7 item 2) because §5.1's delivery lane is §10 step 6's; the two answers are
 /// deliberately separate rows so neither can be read as the other.
 ///
-/// §8's remaining HDR row here — "any mastering-display/`MaxCLL` metadata the
-/// source declared — with `Unknown` where the source said nothing" — is
-/// deliberately absent, and **it is not §10 step 7's**. Step 7 delivered §6's
-/// QC extensions and §9.1 fixture 12, whose `MaxCLL`/`MaxFALL` are a *different
-/// number*: §6 item 3 measures them "from the working proof over the sampled
-/// frames", which is what `get_color_qc` now reports as ungated rows, while
-/// §2.4's are what a *container declared* and are read on probe.
+/// §8's last HDR row — "any mastering-display/`MaxCLL` metadata the source
+/// declared — with `Unknown` where the source said nothing" — is
+/// `static_metadata`, landed by §10 step 9 with §2.4's probe modelling. It is
+/// **not** §10 step 7's `MaxCLL`/`MaxFALL`, and the two are deliberately
+/// different rows on different tools: §6 item 3 *measures* light levels "from
+/// the working proof over the sampled frames" and `get_color_qc` reports those,
+/// while these are what the *source declared* and were read on probe.
+/// [`CC8_HDR_STATIC_METADATA_BOUNDARY`] is printed beside them because a
+/// declared number with nothing saying what consumes it invites the assumption
+/// that something does; §0.2 Q1's HLG lane does not, and §11 defers the PQ lane
+/// that would.
 ///
-/// §10 assigns §2.4's probe modelling no step of its own; it is source-side
-/// state that lands with step 9's "migration and serialization", because §2.4
-/// requires the values "stored on the source description with provenance" and
-/// that is a `ColorDescription` change §7's byte-unchanged obligation governs.
-/// Until then, reporting a metadata field this build never reads would be a
-/// claim, not evidence. §0.3(f) records that nothing in the repository reads
-/// mastering-display or content-light-level metadata today, and §11 keeps PQ
-/// delivery — the only lane that would consume it — deferred.
-fn hdr_interpretation(profile: ColorSourceProfile) -> Value {
+/// `null` on either sub-row is §2.4's `Unknown`, unchanged: "They are never
+/// invented: absent metadata is `Unknown` and stays `Unknown`."
+fn hdr_interpretation(profile: ColorSourceProfile, description: &ColorDescription) -> Value {
     let Some(row) = profile.cc8_row() else {
         return Value::Null;
     };
@@ -1348,6 +1350,8 @@ fn hdr_interpretation(profile: ColorSourceProfile) -> Value {
         "profile": row.id,
         "anchor": anchor,
         "stages": stages,
+        // CC8 §2.4, §8's "with `Unknown` where the source said nothing".
+        "static_metadata": hdr_static_metadata_status(&description.hdr_static_metadata),
         "allowed_tuple": {
             "primaries_and_transfer": CC8_HDR_PRIMARIES_ALLOWED,
             "matrix": CC8_HDR_MATRIX_ALLOWED,
@@ -1405,6 +1409,46 @@ fn hdr_interpretation(profile: ColorSourceProfile) -> Value {
     })
 }
 
+/// CC8 §2.4's declared static HDR metadata, as §8 reports it.
+///
+/// The values are the source's own integers in the standard's units, with the
+/// units named beside them so a reader does not have to know ST 2086's
+/// increments to read the row, and with the provenance §2.4 requires travel
+/// with each block. Nothing is converted to nits or to xy floats here: a
+/// rounded restatement of a declared integer is a second number, and the
+/// boundary sentence already says CC8 does not act on either.
+fn hdr_static_metadata_status(metadata: &HdrStaticMetadata) -> Value {
+    json!({
+        "declared": !metadata.is_unknown(),
+        "boundary": CC8_HDR_STATIC_METADATA_BOUNDARY,
+        "mastering_display": metadata.mastering_display.as_ref().map_or(Value::Null, |display| {
+            let chromaticity = |value: &kinewright_core::MasteringDisplayChromaticity| {
+                json!({ "x_increments": value.x_increments, "y_increments": value.y_increments })
+            };
+            json!({
+                "chromaticity_increments_per_unit":
+                    CC8_MASTERING_DISPLAY_CHROMATICITY_INCREMENTS_PER_UNIT,
+                "luminance_ten_thousandths_per_nit":
+                    CC8_MASTERING_DISPLAY_LUMINANCE_TEN_THOUSANDTHS_PER_NIT,
+                "red": chromaticity(&display.red),
+                "green": chromaticity(&display.green),
+                "blue": chromaticity(&display.blue),
+                "white_point": chromaticity(&display.white_point),
+                "min_luminance_ten_thousandths_nits": display.min_luminance_ten_thousandths_nits,
+                "max_luminance_ten_thousandths_nits": display.max_luminance_ten_thousandths_nits,
+                "provenance": display.provenance.wire(),
+            })
+        }),
+        "content_light_level": metadata.content_light_level.as_ref().map_or(Value::Null, |light| {
+            json!({
+                "max_cll_nits": light.max_cll_nits,
+                "max_fall_nits": light.max_fall_nits,
+                "provenance": light.provenance.wire(),
+            })
+        }),
+    })
+}
+
 fn source_status(
     description: &ColorDescription,
     profile_assumption: Option<ColorSourceProfileAssumption>,
@@ -1414,7 +1458,7 @@ fn source_status(
         Ok(profile) => json!({
             "status": "supported",
             "supported_profile": profile.id(),
-            "hdr_interpretation": hdr_interpretation(profile),
+            "hdr_interpretation": hdr_interpretation(profile, description),
             "profile_assumption": {
                 // Serialise the assumption that was actually applied rather
                 // than a hardcoded name, so a future assumption variant cannot
@@ -5748,6 +5792,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         }
     }
 
@@ -5836,6 +5881,7 @@ mod tests {
             bit_depth: kinewright_core::ColorBitDepth::Ten,
             confidence_basis_points: 10_000,
             provenance: kinewright_core::ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         let value = color_context_value(TimelineRevision(3), &document);
         let status = &value["assets"][0]["source"]["status"];
@@ -5957,6 +6003,115 @@ mod tests {
                 .iter()
                 .any(|stage| stage == "hlg_ootf_nominal"),
             "the PQ profile has no OOTF stage",
+        );
+    }
+
+    /// **CC8 §8 / §2.4.** The colour status reports the static HDR metadata the
+    /// source declared, with `Unknown` where it said nothing, and says what CC8
+    /// does not do with it.
+    ///
+    /// §8: `get_color_context` reports "any mastering-display/`MaxCLL` metadata
+    /// the source declared — with `Unknown` where the source said nothing".
+    /// §2.4 makes the values evidence rather than input, and
+    /// [`CC8_HDR_STATIC_METADATA_BOUNDARY`] is the sentence that says so on the
+    /// surface itself; both directions are asserted here so the row cannot
+    /// quietly become a claim.
+    #[test]
+    fn cc8_status_reports_declared_static_hdr_metadata_and_its_boundary() {
+        let mut document = document();
+        document.media_pool[0].color_description = ColorDescription {
+            primaries: kinewright_core::ColorPrimaries::Bt2020,
+            transfer: kinewright_core::ColorTransfer::AribStdB67,
+            matrix: kinewright_core::ColorMatrix::Bt2020Ncl,
+            range: kinewright_core::ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: kinewright_core::ColorBitDepth::Ten,
+            confidence_basis_points: 10_000,
+            provenance: kinewright_core::ColorProvenance::StreamMetadata,
+            hdr_static_metadata: HdrStaticMetadata::unknown(),
+        };
+
+        // The `Unknown` direction first: a source that declared nothing.
+        let value = color_context_value(TimelineRevision(3), &document);
+        let undeclared =
+            &value["assets"][0]["source"]["status"]["hdr_interpretation"]["static_metadata"];
+        assert_eq!(undeclared["declared"], false);
+        assert!(undeclared["mastering_display"].is_null());
+        assert!(undeclared["content_light_level"].is_null());
+        assert_eq!(undeclared["boundary"], CC8_HDR_STATIC_METADATA_BOUNDARY);
+
+        // The declaring direction, in ST 2086's own units, with provenance.
+        document.media_pool[0].color_description.hdr_static_metadata = HdrStaticMetadata {
+            mastering_display: Some(kinewright_core::MasteringDisplayMetadata {
+                red: kinewright_core::MasteringDisplayChromaticity {
+                    x_increments: 34_000,
+                    y_increments: 16_000,
+                },
+                green: kinewright_core::MasteringDisplayChromaticity {
+                    x_increments: 13_250,
+                    y_increments: 34_500,
+                },
+                blue: kinewright_core::MasteringDisplayChromaticity {
+                    x_increments: 7_500,
+                    y_increments: 3_000,
+                },
+                white_point: kinewright_core::MasteringDisplayChromaticity {
+                    x_increments: 15_635,
+                    y_increments: 16_450,
+                },
+                min_luminance_ten_thousandths_nits: 1,
+                max_luminance_ten_thousandths_nits: 10_000_000,
+                provenance: kinewright_core::ColorProvenance::ContainerMetadata,
+            }),
+            content_light_level: Some(kinewright_core::ContentLightLevel {
+                max_cll_nits: 1_000,
+                max_fall_nits: 400,
+                provenance: kinewright_core::ColorProvenance::StreamMetadata,
+            }),
+        };
+        let value = color_context_value(TimelineRevision(3), &document);
+        let declared =
+            &value["assets"][0]["source"]["status"]["hdr_interpretation"]["static_metadata"];
+        assert_eq!(declared["declared"], true);
+        assert_eq!(
+            declared["mastering_display"]["chromaticity_increments_per_unit"],
+            CC8_MASTERING_DISPLAY_CHROMATICITY_INCREMENTS_PER_UNIT,
+        );
+        assert_eq!(
+            declared["mastering_display"]["luminance_ten_thousandths_per_nit"],
+            CC8_MASTERING_DISPLAY_LUMINANCE_TEN_THOUSANDTHS_PER_NIT,
+        );
+        assert_eq!(declared["mastering_display"]["red"]["x_increments"], 34_000);
+        assert_eq!(
+            declared["mastering_display"]["green"]["y_increments"],
+            34_500
+        );
+        assert_eq!(
+            declared["mastering_display"]["max_luminance_ten_thousandths_nits"],
+            10_000_000,
+        );
+        assert_eq!(
+            declared["mastering_display"]["provenance"],
+            "container_metadata"
+        );
+        assert_eq!(declared["content_light_level"]["max_cll_nits"], 1_000);
+        assert_eq!(declared["content_light_level"]["max_fall_nits"], 400);
+        assert_eq!(
+            declared["content_light_level"]["provenance"],
+            "stream_metadata"
+        );
+        assert_eq!(declared["boundary"], CC8_HDR_STATIC_METADATA_BOUNDARY);
+
+        // §2.4's values are the *source's* claims. CC8 §6 item 3's measured
+        // MaxCLL/MaxFALL are a different number on a different tool, so this row
+        // must not appear on an SDR source's status at all — there is no HDR
+        // interpretation block for one.
+        let mut sdr = document.clone();
+        sdr.media_pool[0].color_description = description();
+        let sdr_value = color_context_value(TimelineRevision(3), &sdr);
+        assert!(
+            sdr_value["assets"][0]["source"]["status"]["hdr_interpretation"].is_null(),
+            "an SDR source has no HDR interpretation block to hang §2.4 on",
         );
     }
 

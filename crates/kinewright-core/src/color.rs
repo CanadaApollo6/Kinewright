@@ -198,12 +198,27 @@ color_tag! {
 /// monitoring, and delivery descriptions all match the managed SDR targets is
 /// stamped [`ColorPipelineState::ManagedSdrV1`]; see
 /// [`ColorContext::sdr_rec709`] for the target the first CC1 save writes.
+///
+/// CC8 §7 adds [`ColorPipelineState::ManagedHdrV1`] on the same terms: see
+/// [`ColorContext::hdr_hlg_rec2020`] for the target the first CC8 save writes,
+/// and that constructor's doc comment for why the variant is here now and was
+/// deliberately not added by §10 step 3.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema, Default)]
 #[schemars(with = "String")]
 pub enum ColorPipelineState {
     #[default]
     Legacy,
     ManagedSdrV1,
+    /// CC8 §7's state for the HDR path: CC1's working and monitoring
+    /// descriptions with §5.1's HDR delivery lane.
+    ///
+    /// §7: "The project needs an explicit managed-colour state for the HDR
+    /// path, in CC1 §4's manner: the first CC8 save writes `managed_hdr_v1`;
+    /// an absent value stays `managed_sdr_v1` or `legacy`." Both halves are
+    /// implemented — [`ColorContext::hdr_hlg_rec2020`] writes it, and the
+    /// migrating deserializer below never stamps it on a project that did not
+    /// store it.
+    ManagedHdrV1,
     Other(String),
 }
 
@@ -583,6 +598,7 @@ impl Serialize for ColorPipelineState {
         match self {
             Self::Legacy => serializer.serialize_str("legacy"),
             Self::ManagedSdrV1 => serializer.serialize_str("managed_sdr_v1"),
+            Self::ManagedHdrV1 => serializer.serialize_str("managed_hdr_v1"),
             Self::Other(value) => serializer.serialize_str(value),
         }
     }
@@ -597,6 +613,7 @@ impl<'de> Deserialize<'de> for ColorPipelineState {
         Ok(match value.as_str() {
             "legacy" => Self::Legacy,
             "managed_sdr_v1" => Self::ManagedSdrV1,
+            "managed_hdr_v1" => Self::ManagedHdrV1,
             _ => Self::Other(value),
         })
     }
@@ -755,6 +772,108 @@ impl<'de> Deserialize<'de> for ColorBitDepth {
     }
 }
 
+/// One CIE 1931 xy chromaticity coordinate of a **declared** mastering
+/// display, in SMPTE ST 2086's own integer units (CC8 §2.4).
+///
+/// The stored integers are the bitstream's: increments of `0.00002`, so the
+/// coordinate is `x_increments` divided by
+/// [`CC8_MASTERING_DISPLAY_CHROMATICITY_INCREMENTS_PER_UNIT`](crate::cc8_hdr::CC8_MASTERING_DISPLAY_CHROMATICITY_INCREMENTS_PER_UNIT).
+/// Nothing rounds on the way in — see
+/// [`cc8_st2086_units`](crate::cc8_hdr::cc8_st2086_units).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct MasteringDisplayChromaticity {
+    pub x_increments: u32,
+    pub y_increments: u32,
+}
+
+/// The mastering-display colour volume a source **declared** (CC8 §2.4).
+///
+/// This is evidence about the source, never a statement about this project's
+/// pipeline: CC8 stores it, reports it, and — per §0.2 Q1's HLG decision and
+/// §11's PQ deferral — deliberately does not consume it. See
+/// [`CC8_HDR_STATIC_METADATA_BOUNDARY`](crate::cc8_hdr::CC8_HDR_STATIC_METADATA_BOUNDARY),
+/// which every surface reporting these values prints beside them.
+///
+/// Every field is required on the wire. §2.4's "they are never invented"
+/// forbids the alternative: a `#[serde(default)]` on `max_luminance` would turn
+/// a truncated block into a source that declared zero nits, which is a claim
+/// rather than a gap. A block that cannot be read whole is not stored at all,
+/// and absent metadata stays [`HdrStaticMetadata::unknown`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct MasteringDisplayMetadata {
+    pub red: MasteringDisplayChromaticity,
+    pub green: MasteringDisplayChromaticity,
+    pub blue: MasteringDisplayChromaticity,
+    pub white_point: MasteringDisplayChromaticity,
+    /// ST 2086 `min_display_mastering_luminance`, in increments of
+    /// `0.0001 cd/m²`
+    /// ([`CC8_MASTERING_DISPLAY_LUMINANCE_TEN_THOUSANDTHS_PER_NIT`](crate::cc8_hdr::CC8_MASTERING_DISPLAY_LUMINANCE_TEN_THOUSANDTHS_PER_NIT)).
+    pub min_luminance_ten_thousandths_nits: u32,
+    /// ST 2086 `max_display_mastering_luminance`, in the same units.
+    pub max_luminance_ten_thousandths_nits: u32,
+    /// Where the declaration was read from: `container_metadata` for a
+    /// container box carried as coded stream side data, `stream_metadata` for
+    /// an SEI message on the decoded frame, `user_override` for an explicit
+    /// override. §2.4 requires the provenance to travel with the value.
+    pub provenance: ColorProvenance,
+}
+
+/// The content light levels a source **declared** (CC8 §2.4): CTA-861.3's
+/// `MaxCLL` and `MaxFALL`, in cd/m².
+///
+/// **These are not CC8 §6 item 3's numbers.** §6 item 3 *measures* `MaxCLL` and
+/// `MaxFALL` "from the working proof over the sampled frames"; these are what the
+/// file said about itself. The two are reported as separate rows, never
+/// reconciled, and neither is gated.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct ContentLightLevel {
+    pub max_cll_nits: u32,
+    pub max_fall_nits: u32,
+    /// As [`MasteringDisplayMetadata::provenance`]: the two blocks can be
+    /// declared in different places, so each carries its own.
+    pub provenance: ColorProvenance,
+}
+
+/// CC8 §2.4's static HDR metadata, as declared by the source.
+///
+/// §2.4, verbatim: "Mastering-display primaries and MaxCLL/MaxFALL are read on
+/// probe where the container carries them, stored on the source description
+/// with provenance, and **reported**. They are never invented: absent metadata
+/// is `Unknown` and stays `Unknown`."
+///
+/// So "nothing declared" has exactly one spelling — both fields `None`,
+/// [`Self::unknown`] — and it is what a description with no metadata carries.
+/// It serialises to **nothing at all** on such a description (CC8 §7 item 1:
+/// "An SDR project must not acquire an HDR field"), which is what keeps every
+/// pre-CC8 project byte-identical through a save.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, Default)]
+pub struct HdrStaticMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub mastering_display: Option<MasteringDisplayMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub content_light_level: Option<ContentLightLevel>,
+}
+
+impl HdrStaticMetadata {
+    /// The value every description carries until a probe reads a declaration:
+    /// §2.4's `Unknown`, in both fields.
+    #[must_use]
+    pub const fn unknown() -> Self {
+        Self {
+            mastering_display: None,
+            content_light_level: None,
+        }
+    }
+
+    /// Whether the source declared neither block.
+    #[must_use]
+    pub const fn is_unknown(&self) -> bool {
+        self.mastering_display.is_none() && self.content_light_level.is_none()
+    }
+}
+
 /// A source colour description obtained during media probing or supplied by
 /// an explicit user override.
 ///
@@ -789,6 +908,22 @@ pub struct ColorDescription {
     #[serde(default)]
     #[schemars(default)]
     pub provenance: ColorProvenance,
+    /// CC8 §2.4's static HDR metadata, as the source declared it.
+    ///
+    /// It is skipped entirely when unknown, so a description that carries no
+    /// declaration serialises exactly the eight fields CC0–CC7 wrote and a
+    /// pre-CC8 project round-trips byte-for-byte (§7 item 1, gated by §9.1
+    /// fixture 11).
+    ///
+    /// It is deliberately **not** part of any managed-target comparison:
+    /// `color_description_matches_managed` names the six semantic fields plus
+    /// provenance and confidence, and [`crate::delivery_color_mismatches`]
+    /// keeps §5.3's fixed check order and vocabulary. This is source-side
+    /// evidence, and a working, monitoring, or delivery *target* has no source
+    /// to have declared it.
+    #[serde(default, skip_serializing_if = "HdrStaticMetadata::is_unknown")]
+    #[schemars(default)]
+    pub hdr_static_metadata: HdrStaticMetadata,
 }
 
 impl Default for ColorDescription {
@@ -811,6 +946,7 @@ impl ColorDescription {
             bit_depth: ColorBitDepth::Unknown,
             confidence_basis_points: 0,
             provenance: ColorProvenance::Unknown,
+            hdr_static_metadata: HdrStaticMetadata::unknown(),
         }
     }
 
@@ -866,6 +1002,10 @@ impl ColorDescription {
             bit_depth,
             confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
             provenance: ColorProvenance::ApplicationDefault,
+            // An application default is a *target*, not a probed source: there
+            // is no source to have declared a mastering display, so §2.4's
+            // `Unknown` is the only honest value here.
+            hdr_static_metadata: HdrStaticMetadata::unknown(),
         }
     }
 }
@@ -1236,6 +1376,45 @@ impl ColorContext {
         }
     }
 
+    /// Construct CC8 §7's managed HDR colour context: **the target the first
+    /// CC8 save writes**.
+    ///
+    /// §7's opening sentence is the whole determination: "The project needs an
+    /// explicit managed-colour state for the HDR path, in CC1 §4's manner: the
+    /// first CC8 save writes `managed_hdr_v1`; an absent value stays
+    /// `managed_sdr_v1` or `legacy`."
+    ///
+    /// **Why the variant lands now and not at §10 step 3.** Step 3 declined to
+    /// add it on the ground that a pipeline state nothing produces is a surface
+    /// that reads as a capability — at that point CC8 had no HDR delivery lane,
+    /// so nothing could have written the state truthfully. §10 step 6 landed
+    /// §5.1's lane, and this is the step §10 assigns the state itself
+    /// ("migration and serialization"), so the reason to defer it has expired
+    /// and §7's sentence is discharged rather than reinterpreted.
+    ///
+    /// **What it is.** CC1's working and monitoring descriptions, unchanged —
+    /// §3.1: "`working` stays BT.709 primaries, `linear` transfer, `rgb`
+    /// matrix, full range, D65, `Rgba16Float` — byte-identical to CC1 §2", and
+    /// §4 gives CC8 no calibrated monitoring path — with §5.1's HDR delivery
+    /// lane as the delivery description. One field moves, and the state names
+    /// which pipeline the project asserts about itself.
+    ///
+    /// **What it is not.** It is not something a load can produce: §7's "an
+    /// absent value stays `managed_sdr_v1` or `legacy`" is why the migrating
+    /// deserializer never stamps it, and §7 item 1's "an SDR project must not
+    /// acquire an HDR field" is why no pre-CC8 project can arrive here without
+    /// an explicit, undoable, journalled [`crate::Operation::SetColorContext`].
+    #[must_use]
+    pub fn hdr_hlg_rec2020() -> Self {
+        let sdr = Self::sdr_rec709();
+        Self {
+            pipeline_state: ColorPipelineState::ManagedHdrV1,
+            working: sdr.working,
+            monitoring: sdr.monitoring,
+            delivery: crate::cc8_hdr_delivery_description(),
+        }
+    }
+
     /// Whether this context is exactly the current application default.
     #[must_use]
     pub fn is_default(&self) -> bool {
@@ -1287,15 +1466,45 @@ impl ColorContext {
             && crate::delivery_color_mismatches(&self.delivery).is_empty()
     }
 
-    /// Whether this context selects a managed pipeline the renderer can
-    /// execute: CC1's working and monitoring descriptions with **either** CC1's
-    /// SDR delivery description or CC8 §5.1's HDR lane.
+    /// Whether this context selects CC8 §7's managed **HDR** pipeline: the
+    /// `managed_hdr_v1` state, CC1's working and monitoring descriptions, and
+    /// §5.1's HDR delivery lane.
     ///
-    /// CC8 §3.1 is why the widening is on the delivery side only: "`working`
-    /// stays BT.709 primaries, `linear` transfer, `rgb` matrix, full range,
-    /// D65, `Rgba16Float` — byte-identical to CC1 §2", and §4 gives CC8 no
+    /// The mirror of [`Self::is_managed_sdr_compatible`], and the same shape:
+    /// a state is a claim about the whole pipeline, so all four clauses hold or
+    /// none of it does.
+    ///
+    /// CC8 §3.1 is why only the delivery clause differs: "`working` stays
+    /// BT.709 primaries, `linear` transfer, `rgb` matrix, full range, D65,
+    /// `Rgba16Float` — byte-identical to CC1 §2", and §4 gives CC8 no
     /// calibrated HDR monitoring path, so the monitoring description does not
-    /// move either. What CC8 adds is one delivery target.
+    /// move either. What CC8 adds is one delivery target and one state naming
+    /// it.
+    #[must_use]
+    pub fn is_managed_hdr_compatible(&self) -> bool {
+        matches!(self.pipeline_state, ColorPipelineState::ManagedHdrV1)
+            && self.working_matches_managed_sdr()
+            && self.monitoring_matches_managed_sdr()
+            && self.delivery_matches_cc8_hdr_lane()
+    }
+
+    /// Whether this context selects a managed pipeline the renderer can
+    /// execute: CC1's managed SDR context, **or** CC8 §7's managed HDR one.
+    ///
+    /// Each state answers for its own lane, and neither answers for the
+    /// other's. §7 requires the HDR path to have "an explicit managed-colour
+    /// state", so `managed_sdr_v1` with §5.1's delivery description is **not**
+    /// a managed HDR project: it is a project claiming the SDR contract while
+    /// naming an HDR target, and the fix is the ordinary, undoable,
+    /// journalled operation §7 item 3 describes — which
+    /// [`crate::Operation::SetColorContext`] refuses to store half-formed.
+    ///
+    /// That strictness is the point rather than a side effect. A pre-CC8
+    /// project could already hold a Rec.2020 delivery description CC6 refused
+    /// at export (CC6 deliberately lets a document store a target the export
+    /// rejects); without the state clause such a project would silently become
+    /// HDR-exportable on first open, which is exactly the acquisition §7 item 1
+    /// forbids.
     ///
     /// [`Self::is_managed_sdr_compatible`] is deliberately left alone: it is
     /// the question "is this the CC1 managed **SDR** context?", and surfaces
@@ -1303,10 +1512,7 @@ impl ColorContext {
     /// getting `false` for an HDR delivery target.
     #[must_use]
     pub fn is_managed_compatible(&self) -> bool {
-        matches!(self.pipeline_state, ColorPipelineState::ManagedSdrV1)
-            && self.working_matches_managed_sdr()
-            && self.monitoring_matches_managed_sdr()
-            && (self.delivery_matches_managed_sdr() || self.delivery_matches_cc8_hdr_lane())
+        self.is_managed_sdr_compatible() || self.is_managed_hdr_compatible()
     }
 
     fn working_matches_cc0_placeholder(&self) -> bool {
@@ -1538,6 +1744,7 @@ mod tests {
             bit_depth: ColorBitDepth::Ten,
             confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: HdrStaticMetadata::unknown(),
         };
         assert_eq!(
             classify_source(&srgb).expect("sRGB should be accepted"),
@@ -1674,6 +1881,7 @@ mod tests {
             bit_depth: ColorBitDepth::Ten,
             confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: HdrStaticMetadata::unknown(),
         }
     }
 
@@ -1966,6 +2174,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: HdrStaticMetadata::unknown(),
         };
 
         assert!(matches!(

@@ -15690,6 +15690,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         let mut document = (*seed).clone();
         document.media_pool[0].color_description = managed_source.clone();
@@ -15884,6 +15885,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         let mut document = (*seed).clone();
         document.media_pool[0].color_description = managed_source;
@@ -16248,6 +16250,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         document.lut_assets.push(kinewright_core::LutAsset {
             id: kinewright_core::LutAssetId(1),
@@ -19385,6 +19388,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         let core = Core::spawn(document).unwrap();
         let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
@@ -19487,6 +19491,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         document.tracks[0].clips[0].effects.push(Effect {
             id: EffectId(6),
@@ -19979,6 +19984,7 @@ mod tests {
             bit_depth: ColorBitDepth::Ten,
             confidence_basis_points: 8_765,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         }
     }
 
@@ -19992,6 +19998,7 @@ mod tests {
             bit_depth: ColorBitDepth::Twelve,
             confidence_basis_points: 9_321,
             provenance: ColorProvenance::UserOverride,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         }
     }
 
@@ -20049,6 +20056,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         let effects = &mut document.tracks[0].clips[0].effects;
         effects.push(Effect {
@@ -20964,12 +20972,28 @@ mod tests {
         // inside the crate (`capability_tools` is private), so it is pinned
         // here beside the served figure CC7 asserts is byte-identical to CC6's.
         // Errata D-E9 claimed this test already did that; it did not until now.
+        //
+        // **The registry figure moved once, at CC8 §10 step 9**, from 1_280_060
+        // to the number below. §2.4 added `ColorDescription.hdr_static_metadata`
+        // to the project model, and every operation schema that carries a
+        // colour description publishes it, so the *internal* registry grew by
+        // construction. Nothing M36 or CC7 gates moved with it: the **served**
+        // surface is the second half of this assertion and is byte-identical to
+        // CC6's, the served tool count is unchanged, and CC8 §7 item 1's
+        // byte-unchanged obligation is about stored project bytes — where the
+        // new field serialises to nothing at all when no source declared it.
+        //
+        // The figure is sensitive to **doc text** as well as to fields, because
+        // `schemars` publishes a type's doc comment as its schema description;
+        // editing the documentation on a model type moves it. That is why the
+        // number is asserted rather than bounded — a moved figure should make a
+        // contributor say what they changed.
         assert_eq!(
             (
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_280_060, 5_660),
+            (1_557_210, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
 
@@ -23301,6 +23325,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         };
         document.lut_assets =
             vec![kinewright_media::BuiltinLook::Warm.to_lut_asset(kinewright_core::LutAssetId(1))];
@@ -23404,6 +23429,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         }
     }
 

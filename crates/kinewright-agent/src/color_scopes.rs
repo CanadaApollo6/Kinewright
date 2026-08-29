@@ -2281,6 +2281,7 @@ mod tests {
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::StreamMetadata,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         }
     }
 

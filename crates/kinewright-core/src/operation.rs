@@ -623,6 +623,21 @@ pub enum OpError {
         allowed: String,
         recovery: &'static str,
     },
+    /// CC8 §7: a managed colour state stored against the wrong delivery lane.
+    ///
+    /// The refusal `validate_managed_state_names_its_lane` raises, in the same
+    /// data shape as the sibling above: which state was stored, which lane the
+    /// delivery description actually selects, which lane that state names, and
+    /// what to do about it.
+    #[error(
+        "managed colour state {state} does not name this delivery lane: observed_lane={observed_lane}, required_lane={required_lane}. {recovery}"
+    )]
+    ManagedColorStateLaneMismatch {
+        state: &'static str,
+        observed_lane: &'static str,
+        required_lane: &'static str,
+        recovery: &'static str,
+    },
     #[error("asset {asset} color override must have positive confidence")]
     ZeroConfidenceColorOverride { asset: AssetId },
     #[error("asset {asset} color override requires user_override provenance, got {actual:?}")]
@@ -1225,7 +1240,58 @@ fn set_color_context(doc: &mut Document, color_context: ColorContext) -> Result<
         validate_color_description(description)?;
     }
     validate_hdr_delivery_description(&color_context.delivery)?;
+    validate_managed_state_names_its_lane(&color_context)?;
     doc.color_context = color_context;
+    Ok(())
+}
+
+/// CC8 §7: the managed state and the delivery lane must name each other.
+///
+/// §7's opening sentence gives the HDR path "an explicit managed-colour state",
+/// and a state that can disagree with the lane it is stored beside is not
+/// explicit about anything. So this refuses the two half-formed contexts, in
+/// the manner [`validate_hdr_delivery_description`] refuses a half-formed HDR
+/// delivery description and for the same reason: a project must not be able to
+/// hold a colour context whose state and target contradict each other, only to
+/// fail much later at the export gate.
+///
+/// Both directions are refused:
+///
+/// * `managed_hdr_v1` with a delivery description that is not §5.1's lane, and
+/// * `managed_sdr_v1` with a delivery description that **is** §5.1's lane.
+///
+/// Every other state is left exactly as it was. `legacy` and `Other(_)` are
+/// deliberately untouched on the SDR side — CC6 lets a document hold a delivery
+/// target its export refuses, and CC1 §4 keeps `legacy` readable rather than
+/// repairable — so this check adds no rule to the SDR path that CC6 did not
+/// have. What it adds is that CC8's own state cannot be stored on the wrong
+/// pipeline.
+fn validate_managed_state_names_its_lane(color_context: &ColorContext) -> Result<(), OpError> {
+    let delivery_is_hdr = crate::color_description_is_cc8_hdr(&color_context.delivery);
+    let state_is_hdr = matches!(
+        color_context.pipeline_state,
+        crate::ColorPipelineState::ManagedHdrV1
+    );
+    let state_is_managed_sdr = matches!(
+        color_context.pipeline_state,
+        crate::ColorPipelineState::ManagedSdrV1
+    );
+    if state_is_hdr && !delivery_is_hdr {
+        return Err(OpError::ManagedColorStateLaneMismatch {
+            state: "managed_hdr_v1",
+            observed_lane: crate::DeliveryLane::SdrRec709.as_str(),
+            required_lane: crate::DeliveryLane::HdrHlgRec2020.as_str(),
+            recovery: crate::CC8_MANAGED_HDR_STATE_RECOVERY,
+        });
+    }
+    if state_is_managed_sdr && delivery_is_hdr {
+        return Err(OpError::ManagedColorStateLaneMismatch {
+            state: "managed_sdr_v1",
+            observed_lane: crate::DeliveryLane::HdrHlgRec2020.as_str(),
+            required_lane: crate::DeliveryLane::SdrRec709.as_str(),
+            recovery: crate::CC8_MANAGED_HDR_STATE_RECOVERY,
+        });
+    }
     Ok(())
 }
 

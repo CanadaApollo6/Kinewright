@@ -261,6 +261,7 @@ mod tests {
             bit_depth: depth,
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::UserOverride,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         }
     }
 
@@ -280,6 +281,7 @@ mod tests {
             bit_depth: depth,
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::UserOverride,
+            hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
         }
     }
 

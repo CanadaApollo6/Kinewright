@@ -205,6 +205,7 @@ fn rec709_description(depth: u8, range: ColorRange, transfer: ColorTransfer) -> 
         bit_depth: ColorBitDepth::Integer(u16::from(depth)),
         confidence_basis_points: 10_000,
         provenance: ColorProvenance::UserOverride,
+        hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
     }
 }
 
@@ -218,6 +219,7 @@ fn srgb_description(depth: u8) -> ColorDescription {
         bit_depth: ColorBitDepth::Integer(u16::from(depth)),
         confidence_basis_points: 10_000,
         provenance: ColorProvenance::UserOverride,
+        hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
     }
 }
 
@@ -231,6 +233,7 @@ fn cc0_application_description(matrix: ColorMatrix, range: ColorRange) -> ColorD
         bit_depth: ColorBitDepth::Eight,
         confidence_basis_points: 10_000,
         provenance: ColorProvenance::ApplicationDefault,
+        hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
     }
 }
 
@@ -3441,6 +3444,7 @@ fn cc1_unsupported_source_blocks_managed_proof_and_export() {
         bit_depth: ColorBitDepth::Eight,
         confidence_basis_points: 10_000,
         provenance: ColorProvenance::UserOverride,
+        hdr_static_metadata: kinewright_core::HdrStaticMetadata::unknown(),
     };
     let overridden = match core
         .request(Command::Do(Operation::SetAssetColorDescription {
