@@ -30,10 +30,21 @@ jobs:
       - name: Provision FFmpeg, build, test, and lint
         shell: pwsh
         run: |
+          # pwsh does not stop at a failing native command, and the step's exit
+          # code is only the last command's -- which is how a failing
+          # `cargo test` was reported green behind a passing `cargo clippy`.
+          # Belt and braces: make a non-zero native exit terminating (pwsh
+          # >= 7.4) and still check each command, so a runner on an older pwsh
+          # cannot silently reintroduce the masking.
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           & .\scripts\setup-ffmpeg.ps1
           cargo build --workspace
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --workspace
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo clippy --workspace --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   linux:
     name: Linux workspace
@@ -55,6 +66,11 @@ jobs:
         run: cargo fmt --check
 
       - name: Provision FFmpeg, build, test, and lint
+        # `shell: bash` runs with `-e -o pipefail`; the default `run` shell
+        # supplies only `-e`, so the readelf pipeline below could not fail the
+        # job. Together with setup-ffmpeg.sh no longer clearing the caller's
+        # errexit when sourced, every command here can now fail the step.
+        shell: bash
         run: |
           source ./scripts/setup-ffmpeg.sh
           cargo build --workspace

@@ -2068,6 +2068,16 @@ mod tests {
         }
     }
 
+    /// A scratch directory in the spelling the queue itself uses.
+    ///
+    /// `normalize_output_path` canonicalizes the output's parent, so every path
+    /// the queue records, hands the backend, or names in an error is rooted at
+    /// the canonical directory. `std::env::temp_dir()` is not canonical on
+    /// Windows -- it keeps 8.3 short names (`RUNNER~1`) and lacks the `\\?\`
+    /// verbatim prefix that `canonicalize` adds -- so a test that joined onto
+    /// the raw temp directory was comparing a different spelling of the same
+    /// file and failed on Windows only. Canonicalizing here once keeps every
+    /// path in these tests directly comparable with the queue's own.
     fn test_directory(label: &str) -> PathBuf {
         static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
         let path = std::env::temp_dir().join(format!(
@@ -2076,7 +2086,7 @@ mod tests {
             NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).unwrap();
-        path
+        path.canonicalize().unwrap()
     }
 
     fn cleanup_directory(path: &Path) {

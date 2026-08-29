@@ -8888,20 +8888,41 @@ mod tests {
             "the seam median must be a red, was {median}"
         );
 
-        // Two million samples is the order of a 1080p full-frame ROI. The old
-        // double loop took tens of minutes; this must be a fraction of a
-        // second. The threshold is generous so a loaded CI box does not flake,
-        // but it is four orders of magnitude below quadratic.
-        let mut large = (0..2_000_000_i64)
-            .map(|index| (index * 7_919) % 36_000)
-            .collect::<Vec<_>>();
-        let started = std::time::Instant::now();
-        let measured = circular_median_centidegrees(&mut large).expect("a median exists");
-        let elapsed = started.elapsed();
-        assert!((0..36_000).contains(&measured));
+        // Two million samples is the order of a 1080p full-frame ROI, and the
+        // old double loop took tens of minutes on one. The claim being defended
+        // is the complexity, not a wall-clock number, so it is asserted as
+        // growth rather than as a deadline: quadrupling the sample count must
+        // cost about four times as much (O(n log n) predicts ~4.2x) and nowhere
+        // near sixteen times (what a quadratic scan would cost). A ratio
+        // cancels the machine out, so a slow or loaded runner moves both
+        // measurements together instead of flaking the way a fixed budget did.
+        let timed_sweep = |samples: &[i64]| -> std::time::Duration {
+            // Best of three: the minimum is the run least disturbed by the
+            // scheduler, and interference can only ever make a run look slower.
+            (0..3)
+                .map(|_| {
+                    let mut subject = samples.to_vec();
+                    let started = std::time::Instant::now();
+                    let measured =
+                        circular_median_centidegrees(&mut subject).expect("a median exists");
+                    let elapsed = started.elapsed();
+                    assert!((0..36_000).contains(&measured));
+                    elapsed
+                })
+                .min()
+                .expect("three timings")
+        };
+        let small = (0..500_000).map(|_| next(36_000)).collect::<Vec<_>>();
+        let large = (0..2_000_000).map(|_| next(36_000)).collect::<Vec<_>>();
+        let baseline = timed_sweep(&small);
+        let quadrupled = timed_sweep(&large);
+        let growth = quadrupled.as_secs_f64() / baseline.as_secs_f64().max(f64::EPSILON);
         assert!(
-            elapsed < std::time::Duration::from_secs(2),
-            "two million samples took {elapsed:?}; the sweep is not O(n log n)"
+            growth < 8.0,
+            "quadrupling the sample count cost {growth:.1}x \
+             ({baseline:?} for 500k, {quadrupled:?} for 2M); O(n log n) costs \
+             about 4.2x and a quadratic scan sixteen, so the sweep has stopped \
+             being O(n log n)"
         );
     }
 

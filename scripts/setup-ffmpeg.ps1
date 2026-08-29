@@ -185,6 +185,9 @@ if ($LASTEXITCODE -ne 0) {
     throw 'pkg-config could not resolve libavcodec.'
 }
 $ffmpegVersion = (& (Join-Path $ffmpegBin 'ffmpeg.exe') -version | Select-Object -First 1)
+if ($LASTEXITCODE -ne 0) {
+    throw 'The provisioned ffmpeg.exe could not report its version.'
+}
 
 Write-Host "FFmpeg root: $ffmpegRoot"
 Write-Host "libavcodec: $codecVersion"

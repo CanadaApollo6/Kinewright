@@ -20,7 +20,21 @@ if [[ "${BASH_SOURCE[0]:-}" != "$0" ]]; then
     sourced=1
 fi
 if [[ "$sourced" -eq 1 ]]; then
-    _kinewright_setup_shopts="$(set +o)"
+    # Snapshot the three options set just below so sourcing cannot change the
+    # caller's shell. `$(set +o)` is wrong here: bash does not propagate errexit
+    # into a command substitution, so the snapshot always records
+    # `set +o errexit` and restoring it silently disables the caller's `-e` --
+    # which is how a failing `cargo test` kept passing in CI. `[[ -o ... ]]` is
+    # evaluated in this shell, so it reports the caller's real state.
+    _kinewright_setup_shopts=''
+    for _kinewright_setup_opt in errexit nounset pipefail; do
+        if [[ -o "$_kinewright_setup_opt" ]]; then
+            _kinewright_setup_shopts+="set -o $_kinewright_setup_opt; "
+        else
+            _kinewright_setup_shopts+="set +o $_kinewright_setup_opt; "
+        fi
+    done
+    unset _kinewright_setup_opt
 fi
 set -euo pipefail
 
@@ -30,6 +44,10 @@ FFMPEG_SHA256='c201d31f5c8a3b169345101c63ca70f71442848a271bec4a16ca29a1876e5cb1'
 fail() {
     echo "$*" >&2
     if [[ "$sourced" -eq 1 ]]; then
+        # Give the caller its shell options back before bailing out, so an
+        # aborted provisioning run leaves the shell exactly as it found it.
+        eval "$_kinewright_setup_shopts"
+        unset _kinewright_setup_shopts
         return 1
     fi
     exit 1
