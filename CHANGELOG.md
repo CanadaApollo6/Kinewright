@@ -34,7 +34,48 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   CRLF, failing the byte-equality contract tests that compare a checked-in
   generated file against its generator's bytes; a repository
   `.gitattributes` now pins text checkouts to LF on every platform
-  (every tracked file was already LF, so nothing renormalized).
+  (every tracked file was already LF, so nothing renormalized). Two more
+  Windows-only test defects followed, neither with production exposure: the
+  derived-cache mtime-rewind test opened its handle read-only, and Windows
+  backs `File::set_modified` with `SetFileTime`, which needs
+  `FILE_WRITE_ATTRIBUTES` and denies the call (unix `futimens` does not
+  care), so the handle now opens for writing with the test's
+  same-size/same-mtime premise intact — nothing in production holds a handle
+  across the replacement; and the LUT store-root test spelled its fixture as
+  a Unix literal, which is drive-relative on Windows, so
+  `std::path::absolute` pinned it to the current drive and the assertion
+  compared against the host's drive letters rather than against the
+  derivation — both sides now compose from one absolute temporary base, and
+  `LutStore::for_project` was already platform-correct.
+- CC7's delivery lanes gated each decoded term against one build's
+  measurement, which no second FFmpeg build can satisfy. The first honest
+  Windows run measured the two CI packages decoding the same encode
+  differently — scenario (a)'s 8-bit luma mean 18 688 against the Linux
+  pin's 18 677, scenario (b)'s 10-bit RGB mean 181 569 against 181 593,
+  both far inside CC6's budgets of 400 000 and 1 000 000 — so only the
+  equality broke, not a budget. A `cfg(windows)` switch is the environment
+  gating CC7 forbids, a per-OS constant is forbidden outright, and an
+  invented tolerance around one build's decode figure is a fabricated
+  number; the pre-authorised fallback is taken instead and generalized from
+  the one lane it was written for to the whole measured column. Every
+  delivery lane now asserts the manifest's budget column exactly equal to
+  the CC6 code constant, and both the live and the recorded measurement
+  inside that bound in the term's own direction — identically on both
+  operating systems — while the measured figures are reported, never gated,
+  and the `CC7_MEASURED_DELIVERY_*` summaries are tied to the worst per term
+  of the recorded rows, two static numbers rather than a decoder. The
+  Windows figures are recorded as an asserted per-OS note in the manifest,
+  never a per-OS constant. Root cause, reproduced on Linux: the MSVC
+  package's swscale rounds chroma as if `SWS_ACCURATE_RND` were set —
+  adding `accurate_rnd` to the delivery scaler flags measures the Windows
+  8-bit number exactly and collapses the neutral-chroma dither straddle to
+  the Windows set, while leaving the 10-bit lane bit-identical, so CC6's
+  "`accurate_rnd` is inert" held only for the luma plane it was measured on.
+  `DELIVERY_SCALER_FLAGS` is CC6-owned and unchanged; the 10-bit divergence
+  is a second, unexplained build difference. The neutral-chroma unit test
+  now asserts CC6's own normative window — chroma within 127..=129 with 128
+  present — instead of one build's exact dither sets, with both builds'
+  measured sets recorded beside it.
 - CC7's manifest asserted the *reading* machine's OS and architecture
   against `budgets.measurement.os` / `.arch`, which record the machine the
   published numbers were **measured on**: the first Windows or aarch64 run
