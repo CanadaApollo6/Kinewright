@@ -280,10 +280,12 @@ every control has an analytic expected value and no parity case is vacuous.
    systems with the human reviewer left only the matrix's creative questions.
    The contract is `CC7-WORKFLOW-EVALUATION.md`.
 
-With CC7 the colour programme table is complete; HDR, camera RAW, ACES/OCIO,
-calibrated-monitor output, and temporal noise reduction remain deliberate later
-programmes, and the M40 gauntlet continues to rotate colour tasks as
-regressions.
+With CC7 the SDR colour programme, CC0 through CC7, is complete and evaluated end
+to end. CC8 takes the first bounded slice of HDR on top of it — accepted as a
+contract on 2026-08-29, not yet implemented (`CC8-HDR-INTERPRETATION-AND-DELIVERY.md`).
+Camera RAW, ACES/OCIO, calibrated-monitor output, temporal noise reduction, and the
+parts of HDR CC8 defers remain deliberate later programmes, and the M40 gauntlet
+continues to rotate colour tasks as regressions.
 
 Within that cadence, three workstreams remain active:
 
@@ -371,6 +373,16 @@ shot matching complete, CC3 expands the correction model with curves and wheels.
   distinct concepts, even when their values are initially the same.
 - Use a high-precision intermediate before serious matching, curves, compositing,
   or HDR work. Clamping to display range must not occur between correction stages.
+  CC1 built that intermediate — unclamped scene-linear `Rgba16Float` — and CC8
+  discharges the HDR half of this principle by consuming it rather than widening it:
+  HDR luminance is already representable, so an HDR slice adds interpretation,
+  delivery, and QC, not a new working surface.
+- Keep the working space at BT.709 primaries and D65. Wide-gamut content is carried
+  as out-of-triangle float values — Rec.2020 colours become **negative BT.709
+  components**, which the unclamped intermediate preserves exactly and the inverse
+  matrix restores at delivery. Those negatives are the design working, not a bug to
+  be clamped away, and the primaries conversion is a named stage on the source and
+  delivery sides rather than a change of working primaries (CC8 §0.2 Q3, §2.3).
 - Keep input transforms, corrections, creative looks, and output transforms
   separately inspectable and ordered.
 - Compute scopes from a named stage of the managed pipeline and report which stage,
@@ -458,9 +470,13 @@ constructors, compositor inputs, `ExportSettings`, and FFmpeg stream/container
 metadata. Later stages cannot treat those surfaces as implicit or start before the
 required earlier exit gate passes.
 
-**Current status (2026-08-27): CC0, M41, CC1, M42, CC2, CC3, CC4, CC5, CC6, and CC7
+**Current status (2026-08-29): CC0, M41, CC1, M42, CC2, CC3, CC4, CC5, CC6, and CC7
 are complete apart from the CC3–CC7 hands-on platform smoke gates and CC7's
-real-harness eval run and blind review.** CC0's exit evidence
+real-harness eval run and blind review. CC8 is an accepted contract and is not yet
+implemented** — the owner accepted `CC8-HDR-INTERPRETATION-AND-DELIVERY.md` on
+2026-08-29 with all six of its §0.2 decisions adopted as written, and its first
+implementation step is the Windows encoder precondition (CC8 §0.3(e), §10 step 1).
+CC0's exit evidence
 includes legacy project migration, known/partial/unknown and 10-bit probe fixtures,
 visible human and agent inspection, an undoable source override, delivery rejection
 outside the current contract, and an encoded file decoded again to verify its
@@ -487,8 +503,11 @@ per-node attribution), the 10-bit H.264 delivery lane with typed rejection, and
 decoded-output verification of every export. CC7 adds the scenario authority,
 the lossless synthetic scenario sources, the per-scenario technical gates on
 both CI operating systems, the scripted agent and person paths, the
-`color-workflow-v6` suite, and the blinded review package; with it the colour
-programme table below is complete.
+`color-workflow-v6` suite, and the blinded review package; with it the SDR colour
+programme — CC0 through CC7 — is complete. The table below now carries an eighth
+row: "the colour programme table is complete" means the **SDR** table is complete
+and evaluated end to end, which is the precondition CC8 was waiting on, not that
+every row in the table is built.
 
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |
@@ -500,11 +519,18 @@ programme table below is complete.
 | CC5 — Secondaries | Grade-node matte architecture, HSL qualifier, windows, feathering, tracking/keyframes, matte inspection and matte-scoped scopes | Affected-pixel tests and tracked-shot proof; no misuse of final layer alpha |
 | CC6 — QC and managed delivery | Gamut/legal checks, skin diagnostics, colour tags/transforms, high-quality full-resolution path, decoded-output comparison | Cross-platform encoded fixture passes tag, range, and visual-difference budgets |
 | CC7 — Workflow evaluation | Mixed-camera interview, poor white balance/exposure, skin and product, log-like input, creative look, and tracked secondary | Technical gates pass independently; blind human review is limited to creative and workflow-quality questions |
+| CC8 — HDR interpretation and delivery | HDR source profiles (PQ/HLG Rec.2020) with an explicit reference-white anchor; named Rec.2020↔Rec.709 primaries conversion; one 10-bit HDR delivery lane with typed rejection; HDR legality and gamut QC; labelled tone-mapped preview | Analytic source-interpretation and round-trip fixtures; cross-platform encoded HDR fixture passes tag, legality, and difference budgets on both CI operating systems; SDR lanes bit-unchanged |
 
-HDR, camera RAW controls, ACES/OCIO integration, calibrated-monitor output, and
-advanced temporal noise reduction are deliberate later programmes. CC0–CC6 should
-leave room for them, but we should not claim them before the SDR path is explicit
-and high precision.
+CC8 takes a **bounded** first slice of HDR: honest interpretation of two HDR source
+profiles, one HLG delivery lane, and QC that means something about both — not HDR
+grading, not calibrated HDR monitoring, and not ACES by another route. Everything
+CC8 does not take stays exactly where it was: camera RAW controls, ACES/OCIO
+integration, calibrated-monitor output, and advanced temporal noise reduction remain
+deliberate later programmes, and so do the parts of HDR that CC8 names as deferred
+(PQ/HDR10 delivery, dynamic metadata, tone-mapped delivery, a wide-gamut working
+space). CC0–CC7 leave room for them, but we should not claim them before the SDR
+path is explicit and high precision — which is why CC8 follows CC7 rather than
+preceding it.
 
 ### Agent surface direction
 
@@ -564,6 +590,20 @@ launch, media import/playback, and a fixture render/export. Windows retains its 
 coverage and receives the equivalent hands-on smoke test for release-affecting
 changes. An Arch-family automated build/test job should eventually replace the
 manual build portion when it can reproduce the supported runtime accurately.
+
+CC8 changes native media and export behaviour — colour tags derived from the
+selected delivery lane rather than written as literals, a widened set of accepted
+delivery descriptions, and a new preview stage — so it is release-affecting: the
+HDR delivery lane records the manual Omarchy smoke test and
+the Windows hands-on equivalent, with the FFmpeg build hash of each. Two limits on
+what those records may claim. The smoke record covers import, playback, render, and
+an HDR export whose tags survive a re-probe; **it must not contain a judgment about
+how HDR content looks**, because both hands-on systems have SDR panels and what they
+show is CC8's labelled tone-mapped preview, which is explicitly not a monitoring
+reference (CC8 §0.2 Q4, §4). Separately, the Windows encoder precondition (CC8
+§0.3(e)) is a CI question, not a smoke-test question: it fails typed in a red or
+green build before implementation starts, and a hands-on record cannot substitute
+for it.
 
 ## Programme scorecard
 

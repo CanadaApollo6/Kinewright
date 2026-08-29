@@ -1,11 +1,14 @@
 # CC8 — HDR interpretation and delivery
 
-**DRAFT v1 — not yet accepted.** Nothing in this document is normative until the
-owner accepts it and `docs/ROADMAP-AND-WORKFLOWS.md` is amended per §0.5. No
-implementation should begin against a draft; §0.2's six open questions change the
-shape of the slice, not merely its wording.
+**Accepted 2026-08-29.** The owner accepted draft v1 as written: all six of §0.2's
+recommendations are adopted verbatim, and `docs/ROADMAP-AND-WORKFLOWS.md` was
+amended per §0.5 in the same commit. This document is normative from that date.
+It is **not yet implemented** — the `CHANGELOG.md` entry lands when implementation
+completes, as CC0–CC7's did — and §10 step 1's Windows encoder precondition gates
+every step after it, because a red answer there invalidates §0.2 Q2 and the whole
+lane.
 
-Status: draft contract, 2026-08-29
+Status: accepted contract, 2026-08-29 (see §0.6)
 Depends on: CC0–CC7, principally [CC1](CC1-MANAGED-SDR-PRIMARY.md) (managed
 input/working/output boundaries), [CC3](CC3-CURVES-AND-WHEELS.md) (the `grade709`
 grading encoding), and [CC6](CC6-QC-AND-MANAGED-DELIVERY.md) (QC engine, the
@@ -13,8 +16,7 @@ grading encoding), and [CC6](CC6-QC-AND-MANAGED-DELIVERY.md) (QC engine, the
 Scope: one honest HDR *interpretation* path and one HDR *delivery* contract —
 not an HDR grading programme, not a monitoring claim, and not ACES.
 
-The words **must**, **must not**, and **may** in this document are normative once
-accepted.
+The words **must**, **must not**, and **may** in this document are normative.
 
 ---
 
@@ -26,7 +28,8 @@ CC7 closed the colour table by evaluating the SDR workflow end to end. The
 roadmap has said since CC0 that "HDR, camera RAW controls, ACES/OCIO integration,
 calibrated-monitor output, and advanced temporal noise reduction are deliberate
 later programmes." CC8 takes the first of those, and the honest first slice is
-narrower than "HDR support."
+narrower than "HDR support." (On acceptance §0.5 item 1 amended that sentence; the
+other four programmes keep their standing, and so do the parts of HDR §11 defers.)
 
 The pipeline is already further along than it looks. The working space is
 scene-linear `Rgba16Float` with **no intermediate display-range clamp** (CC1
@@ -42,17 +45,24 @@ means, decide what happens to it, deliver it once, and be honest about everythin
 that is still SDR-shaped.** The three things CC8 must not do are invent a
 tolerance, claim a monitoring path it does not have, and back-door ACES.
 
-### 0.2 Open questions — owner decisions
+### 0.2 Owner decisions
 
-These six are not the implementer's to settle. Each carries a recommendation and
-the reason; the recommendation is what the body of this draft is written against,
-so a different answer means a redraft of the named sections.
+These six were not the implementer's to settle. **The owner decided all six on
+2026-08-29, adopting every recommendation as written**, so each is marked DECIDED
+with its adopted answer. The reasoning under each is kept verbatim as the record of
+*why* the answer is what it is, including the costs and counter-arguments weighed
+at the time; none of it is retrospective justification.
+
+The body of this contract is written against these answers. Changing one is a
+contract amendment recorded in §0.6 and a redraft of the named sections — not an
+implementation decision.
 
 ---
 
 **Q1. HLG or PQ first?**
 
-*Recommendation: HLG (ARIB STD-B67), Rec.2020, limited range, 10-bit.*
+**DECIDED 2026-08-29: HLG (ARIB STD-B67), Rec.2020, limited range, 10-bit.** PQ /
+HDR10 delivery stays deferred (§11).
 
 HLG is scene-referred and relative. It is complete without static metadata: an
 HLG file is correct on its own terms with nothing but its three tags. PQ is
@@ -75,14 +85,18 @@ grows by MaxCLL/MaxFALL measurement (§6) plus a mastering-display provenance
 decision. That is a real slice, not an afterthought — perhaps 30–40% more work —
 but it is coherent, and §6 already scopes the measurement as evidence.
 
-**If the answer is PQ:** §5 changes lane, §6's MaxCLL/MaxFALL rows move from
-*reported* to *required*, and §2.2's anchor becomes normative on both sides.
+**Had the answer been PQ:** §5 would change lane, §6's MaxCLL/MaxFALL rows would
+move from *reported* to *required*, and §2.2's anchor would become normative on both
+sides. That remains the shape of the PQ slice whenever it is taken; §2.4 and §6
+item 3 deliberately produce its inputs and deliberately leave them unapplied.
 
 ---
 
 **Q2. HEVC, or reuse the existing H.264 lane?**
 
-*Recommendation: reuse the existing 10-bit libx264 lane. Do not add HEVC in CC8.*
+**DECIDED 2026-08-29: reuse the existing 10-bit libx264 lane. HEVC is not added in
+CC8.** The counter-argument below was weighed and accepted as a standing risk
+(§12).
 
 This is the finding that most changes CC8's size, and it was measured rather than
 assumed. **The pinned Linux build's libx264 writes BT.2020 primaries and either
@@ -125,19 +139,25 @@ metadata that probes back exactly (§0.3). Nothing here says HEVC is hard; it sa
 CC8 does not need it, and adopting it drags in a licensing decision and a second
 unverified Windows encoder for no measured gain in this slice.
 
-**The honest counter-argument:** HLG-in-AVC is unusual in the wild. The VUI values
-are well-defined and a tag-honouring player will do the right thing, but broadcast
-HLG is carried in HEVC, and some consumer players will not treat an AVC HLG file
-as HDR. If the deliverable must be recognised as HDR by a specific target device
-or platform, that target's requirement decides Q2 and probably Q1 with it. **This
-is the single most important thing to check before accepting this draft.**
+**The honest counter-argument, recorded as a live risk rather than resolved:**
+HLG-in-AVC is unusual in the wild. The VUI values are well-defined and a
+tag-honouring player will do the right thing, but broadcast HLG is carried in HEVC,
+and some consumer players will not treat an AVC HLG file as HDR. If the deliverable
+must be recognised as HDR by a specific target device or platform, that target's
+requirement decides Q2 and probably Q1 with it.
+
+This was put to the owner as the single most important thing to check before
+accepting, and the decision was taken **without a named target device or platform on
+the table**. Acceptance is therefore acceptance of the risk, not a finding that it
+does not apply: **the first named recognition requirement from a real target
+reopens Q2 as a §0.6 amendment**, and it is carried as the first entry in §12.
 
 ---
 
 **Q3. Do Rec.2020 primaries enter the working space?**
 
-*Recommendation: no. Keep BT.709 primaries and D65 in the working space; treat
-Rec.2020 as a named matrix conversion on the source and delivery sides.*
+**DECIDED 2026-08-29: no.** BT.709 primaries and D65 stay in the working space;
+Rec.2020 is a named matrix conversion on the source and delivery sides.
 
 The conversion is exactly invertible, and because the working space is unclamped
 float, out-of-Rec.709-gamut colours survive as **negative BT.709 values** through
@@ -164,8 +184,8 @@ obligation rather than letting the report quietly lie.
 
 **Q4. What is the monitoring story on a non-HDR display?**
 
-*Recommendation: a named, explicitly-labelled tone-mapped preview that is not a
-monitoring reference and carries no exit gate.*
+**DECIDED 2026-08-29: a named, explicitly-labelled tone-mapped preview that is not
+a monitoring reference and carries no exit gate.**
 
 Every developer and CI machine here has an SDR display, so the alternatives are:
 show nothing, show clipped garbage, or show a tone-mapped approximation that is
@@ -181,7 +201,7 @@ programme. CC8 must not imply otherwise anywhere in the UI.
 
 **Q5. Where does CC8 sit relative to ACES/OCIO?**
 
-*Recommendation: strictly before it, with an explicit prohibition.*
+**DECIDED 2026-08-29: strictly before it, with an explicit prohibition.**
 
 CC8 introduces the first non-identity primaries conversion and the first
 scene-referred anchor — the two pieces that make it tempting to say "this is
@@ -198,8 +218,8 @@ they are easier to replace for being explicit.
 
 **Q6. Does SDR-from-HDR conversion ship?**
 
-*Recommendation: as a preview only (Q4), never as a deliverable in CC8. HDR-from-SDR:
-never at all.*
+**DECIDED 2026-08-29: as a preview only (Q4), never as a deliverable in CC8.
+HDR-from-SDR: never at all.**
 
 A delivery-grade tone map is a creative decision with a rendering intent and a
 compression curve — CC6 §13 refused gamut *mapping* on exactly this reasoning, and
@@ -264,9 +284,9 @@ color_space=bt2020nc / color_transfer=unknown / color_primaries=unknown     (.mp
 Tags survive only via bitstream-level `-svtav1-params
 "color-primaries=9:transfer-characteristics=16:matrix-coefficients=9:color-range=0"`.
 AV1 is royalty-free and therefore the answer if Q2 rules out HEVC *and* AVC, but it
-is a third tagging mechanism to build and verify, so it is not recommended for CC8.
+is a third tagging mechanism to build and verify, so it is not taken in CC8.
 
-**(d) The recommended lane needs no new encoder** — see Q2's transcript.
+**(d) The adopted lane needs no new encoder** — see Q2's transcript.
 
 **(e) Windows is a precondition, not an assumption.** Windows CI pins a different
 package: `System233/ffmpeg-msvc-prebuilt ffmpeg-8.0.1-r3` (SHA-256
@@ -299,7 +319,7 @@ None is an accident; each is a correct SDR statement that becomes a wrong HDR on
 | 2 | `kinewright-core/src/delivery.rs:537-548` (`delivery_color_mismatches`) | Hard-requires `Bt709` primaries, `Bt709` transfer, `Bt709` matrix, `Limited` range. | §5.3 widens by lane, not globally. |
 | 3 | `kinewright-media/src/export.rs:216-217` | `set_colorspace(BT709)` / `set_color_range(MPEG)` unconditionally on the encoder. | §5.2 selects from the delivery description. |
 | 4 | `kinewright-media/src/export.rs:529` (`DELIVERY_X264_PARAMS`) | Literal `"colorprim=bt709:transfer=bt709:colormatrix=bt709"`. | §5.2 makes it lane-derived. |
-| 5 | `kinewright-media/src/export.rs:522` (`DELIVERY_VIDEO_CODEC`) | `libx264`, doc'd "the only video encoder that may carry the managed delivery tags." | Unchanged under Q2's recommendation. |
+| 5 | `kinewright-media/src/export.rs:522` (`DELIVERY_VIDEO_CODEC`) | `libx264`, doc'd "the only video encoder that may carry the managed delivery tags." | Unchanged under Q2's decision. |
 | 6 | `kinewright-media/src/export.rs:425` | Scaler string pins `out_color_matrix=bt709`. | §5.2 derives from the lane. |
 | 7 | `kinewright-media/src/export.rs:1187` | `setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709`. | §5.2, same. |
 | 8 | `kinewright-media/src/export.rs:626, :638` | `set_color_primaries(BT709)` on both frame paths. | §5.2, same. |
@@ -316,9 +336,12 @@ so HDR values pass through it losslessly. And the CC4 LUT lattice
 excursion back (`z = y + (e - u)`), deliberately, so over-range highlights are not
 collapsed. The working space is already the right shape.
 
-### 0.5 Roadmap edits acceptance would require
+### 0.5 Roadmap edits acceptance required — applied 2026-08-29
 
-`docs/ROADMAP-AND-WORKFLOWS.md` is **not modified by this draft**. On acceptance:
+Six edits were required on acceptance. **All six were applied in the acceptance
+commit**, against the roadmap's and CC6's text as it then stood; the line numbers
+below are draft v1's and had drifted, so each item records where the edit actually
+landed and where the drafted instruction did not match the text it addressed.
 
 1. **Line ~505**, the deliberate-later-programmes sentence: strike `HDR` from
    "HDR, camera RAW controls, ACES/OCIO integration, calibrated-monitor output,
@@ -326,6 +349,15 @@ collapsed. The working space is already the right shape.
    replace with a sentence naming CC8's *bounded* HDR scope, so that
    calibrated-monitor output and the rest keep their standing and CC8 is not read
    as having delivered HDR generally.
+   *Applied* at roadmap **line 524-533**, replacing the sentence that stood at 504.
+   **Drifted:** the same claim appears **twice** in the roadmap — the second copy
+   is the "With CC7 the colour programme table is complete; HDR, camera RAW,
+   ACES/OCIO, calibrated-monitor output, and temporal noise reduction remain
+   deliberate later programmes" sentence in the cadence section, which draft v1 did
+   not name. Leaving it would have left the roadmap contradicting itself about
+   whether HDR is a later programme, so the intent was applied there too (**line
+   283-288**). The trailing "CC0–CC6 should leave room for them" also read a stage
+   behind and now reads CC0–CC7.
 2. **The staged table (~line 495-503)**: add a `CC8 — HDR interpretation and
    delivery` row. Deliverable: "HDR source profiles (PQ/HLG Rec.2020) with an
    explicit reference-white anchor; named Rec.2020↔Rec.709 primaries conversion;
@@ -333,27 +365,79 @@ collapsed. The working space is already the right shape.
    labelled tone-mapped preview." Exit gate: "Analytic source-interpretation and
    round-trip fixtures; cross-platform encoded HDR fixture passes tag, legality,
    and difference budgets on both CI operating systems; SDR lanes bit-unchanged."
+   *Applied verbatim* as the eighth row at roadmap **line 522**, both cells word
+   for word as drafted. The table's rows carry no status column, so the row states
+   the slice and the status paragraph states that it is unbuilt (item 3).
 3. **Line ~461**, current status: extend the completed list to include CC8 and
    restate what "the colour programme table is complete" means now that the table
    has an eighth row.
+   *Applied* at roadmap **line 473-478** and **line 506-510**, in two parts, and
+   **not as literally drafted.** CC8 was **not** added to the completed list: it is
+   an accepted contract with no implementation, and listing it as complete would be
+   a claim against unbuilt work — the same rule that keeps its `CHANGELOG.md` entry
+   until implementation lands, as CC0–CC7's did. The status paragraph instead names
+   CC8 as accepted-and-not-yet-implemented and points at §10 step 1 as its first
+   step, and its date moves 2026-08-27 → 2026-08-29. The completeness sentence is
+   restated as drafted: "the colour programme table is complete" now means the
+   **SDR** table, CC0–CC7, is complete and evaluated end to end — the precondition
+   CC8 was waiting on — not that every row in the table is built.
 4. **Colour architecture principles (~line 366-390)**: the principle "Use a
    high-precision intermediate before serious matching, curves, compositing, or
    HDR work" is discharged by CC8 and should say so. Add a principle stating that
    the working space stays BT.709-primaries and that wide gamut is carried as
    out-of-triangle float values, so a later contributor does not "fix" the
    negatives (per Q3).
+   *Applied* at roadmap **line 374-385**: the existing principle gains the sentence
+   that CC1 built the intermediate and CC8 discharges the HDR half by *consuming*
+   rather than widening it, and a new principle follows it stating the
+   BT.709-primaries working space, the negative components, and the named
+   conversion stage. Both are written in the present tense of the contract, which
+   is now normative, not of an implementation that does not exist yet.
 5. **Windows/Omarchy release evidence (~line 554-566)**: CC8 changes native media
    and export behaviour, so it is release-affecting; note that the HDR lane needs
    the manual Omarchy smoke record and the Windows hands-on equivalent, and that
    neither can be a claim about HDR *appearance* on an SDR panel (Q4).
+   *Applied* at roadmap **line 594-606** as a new paragraph closing that section.
+   It also draws the line draft v1 left implicit: the §0.3(e) Windows encoder
+   precondition is a CI question that fails typed in a red or green build, and a
+   hands-on smoke record may not stand in for it.
 6. **CC6 §13's deferral bullet** ("HDR, BT.2020, PQ (SMPTE 2084), and HLG") should
    be annotated as superseded-in-part by CC8, naming what remains deferred
    (dynamic metadata, calibrated monitoring, tone-mapped delivery).
+   *Applied* in `docs/CC6-QC-AND-MANAGED-DELIVERY.md` **§13**, appended to that
+   bullet in the manner of CC6 §0.4's post-hoc erratum: what CC8 takes, what
+   "delivery keeps rejecting them" narrows to (every HDR description outside the one
+   lane, by CC8 §5.3's lane-derived widening, not a global rule), the four things
+   that stay deferred with the reasoning that still holds for each, and the
+   statement that no measured CC6 figure is reopened. The bullet is annotated, not
+   rewritten: CC6's own words stand and the note follows them.
 
 ### 0.6 Amendments register
 
-*Empty. Amendments from implementation and review are recorded here in CC6 §0 /
-CC7 §0 form once this draft is accepted and built.*
+Amendments to this contract are recorded here in CC6 §0 / CC7 §0 form, one line
+each, as a design change rather than an edit.
+
+- **A0 — accepted as drafted (owner, Riel, 2026-08-29).** Draft v1 was accepted
+  without change: **all six §0.2 recommendations adopted verbatim** — Q1 HLG
+  (ARIB STD-B67), Rec.2020, limited range, 10-bit, with PQ/HDR10 deferred; Q2 reuse
+  the existing 10-bit libx264 lane, no HEVC; Q3 no wide-gamut working space, BT.709
+  primaries and D65 kept with Rec.2020 as a named conversion; Q4 a labelled
+  tone-mapped preview that is not a monitoring reference and carries no exit gate;
+  Q5 strictly before ACES/OCIO, with the prohibition of §1; Q6 SDR-from-HDR as
+  preview only and HDR-from-SDR refused permanently. No section was redrafted,
+  because no answer differed from the recommendation the body is written against.
+  The draft-status block, the §0.2 preamble, and the conditional phrasing elsewhere
+  were made unconditional in the same pass; the must/must-not language of this
+  document is live from this date. **The §0.5 roadmap edits were applied in the same
+  commit** — all six, with the two divergences §0.5 now records (the duplicate
+  later-programmes sentence at roadmap line 283, which draft v1 did not name; and
+  CC8 recorded as accepted-but-unimplemented rather than added to the completed
+  list). `CHANGELOG.md` is deliberately untouched: the entry lands when
+  implementation completes, matching how CC0–CC7 entered it.
+  **Accepted with Q2's counter-argument outstanding** — no target device or platform
+  was named at acceptance, so HLG-in-AVC recognition remains a live risk carried as
+  the first entry in §12, and the first named recognition requirement reopens Q2 as
+  an amendment here.
 
 ---
 
@@ -478,7 +562,7 @@ them exactly. A fixture asserts the round trip (§9).
 Mastering-display primaries and MaxCLL/MaxFALL are read on probe where the
 container carries them, stored on the source description with provenance, and
 **reported**. They are never invented: absent metadata is `Unknown` and stays
-`Unknown`. Under §0.2 Q1's recommendation the HLG lane does not consume them; they
+`Unknown`. Under §0.2 Q1's decision the HLG lane does not consume them; they
 exist so the QC surface can report what a source claimed and so a PQ lane has its
 inputs already modelled.
 
@@ -766,7 +850,8 @@ inventory equals the declared set.
 6. **SDR regression — the byte-equality gate.** Every CC1–CC7 fixture passes with
    every pinned constant unmoved, and the SDR `x264-params` string, scaler flags,
    and exported bytes for a fixed SDR project are **unchanged**. This is the
-   fixture that makes CC8 safe to accept.
+   fixture the acceptance of CC8 rests on, and §10 step 5 lands it before any
+   export change.
 7. **Delivery rejection.** One failing direction per §5.3 bullet, each named.
 8. **The cross-platform encoded HDR fixture** — the central gate. A synthetic HDR
    source is exported through the production path, re-probed, decoded, and gated
@@ -791,9 +876,9 @@ inventory equals the declared set.
 
 **Every tolerance below is a placeholder to be measured at implementation.** None
 may be invented, scaled, or inherited from another lane — CC6 Appendix A's rule,
-which CC8 adopts wholesale. The *shape* of each gate is fixed here; the *number*
-is not, and a number that appears in this draft is a description of what will be
-measured, not a value.
+which CC8 adopts wholesale. The *shape* of each gate is fixed here and is
+normative; the *number* is not, and a number that appears in this table is a
+description of what will be measured, not a value.
 
 | Gate | Shape | Value |
 | --- | --- | --- |
@@ -853,8 +938,9 @@ presented as monitoring.
   consume (§6's MaxCLL/MaxFALL, the dual-triangle gamut) is deliberately produced
   and deliberately unapplied.
 - **HDR from SDR.** Not deferred — refused. It invents information.
-- **PQ / HDR10 delivery**, pending §0.2 Q1, and with it mastering-display
-  provenance and gated MaxCLL/MaxFALL.
+- **PQ / HDR10 delivery**, deferred by §0.2 Q1's decision, and with it
+  mastering-display provenance and gated MaxCLL/MaxFALL. §2.4 and §6 item 3
+  deliberately produce its inputs and deliberately leave them unapplied.
 - **HEVC, AV1, and every other encoder** (§0.2 Q2). The pinned build has libx265,
   libsvtav1, librav1e, libaom, libkvazaar and libvvenc. **That is not a reason to
   ship them** — CC6 §13's sentence, unchanged.
@@ -872,12 +958,21 @@ presented as monitoring.
 
 ## 12. Risks
 
-- **§0.2 Q2 may not survive contact with a real delivery target.** The whole
-  lane's economy rests on HLG-in-AVC being acceptable. If the target platform
-  rejects it, CC8 needs HEVC, and the licensing question in Q2 becomes blocking
-  rather than avoidable. *Mitigation:* Q2 is the first question in the memo and
-  §10 step 1 is a precondition, so this is answered before code exists — but the
-  honest mitigation is that the owner checks a real target before accepting.
+- **§0.2 Q2 may not survive contact with a real delivery target — accepted
+  knowingly, and still open.** The whole lane's economy rests on HLG-in-AVC being
+  acceptable, and HLG-in-AVC is unusual in the wild: the VUI values are well-defined
+  and a tag-honouring player will do the right thing, but broadcast HLG is carried
+  in HEVC and some consumer players will not treat an AVC HLG file as HDR. If the
+  target platform rejects it, CC8 needs HEVC, and the licensing question in Q2
+  becomes blocking rather than avoidable. **Q2 was accepted on 2026-08-29 with no
+  target device or platform named**, so this risk was taken rather than retired, and
+  it is the one risk in this list that no fixture can close — a green cross-platform
+  fixture proves the tags are written and survive a re-probe, which is not the same
+  claim as a television calling the file HDR. *Mitigation:* the tags are correct and
+  the lane is one parameter string, so the reversal is cheap; a named recognition
+  requirement from a real target decides Q2 and probably Q1 with it, and reopens
+  both as a §0.6 amendment before §10's later steps are wasted. §10 step 1 remains
+  the precondition that runs first regardless.
 - **The Windows x264 build may not accept `arib-std-b67`.** It is a later addition
   to x264's tables than the `bt709` values CC6 verified, and the Windows package
   is a different vcpkg port. *Mitigation:* §10 step 1; and per CC6 §11.2.11 the
