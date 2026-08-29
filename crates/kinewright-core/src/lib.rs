@@ -5,6 +5,7 @@ mod agent;
 mod automation;
 mod captions;
 pub mod cc7_scenarios;
+pub mod cc8_hdr;
 mod color;
 mod color_qc;
 mod creator;
@@ -44,6 +45,20 @@ pub use cc7_scenarios::{
     cc7_canonical_operations, cc7_d2_canonical_operations, cc7_decode_display709, cc7_encode_bt709,
     cc7_grade709_decode, cc7_log_encode_code, cc7_log_inverse_display,
     cc7_lut_backed_canonical_operations, cc7_spec, cc7_tracking_sample_frames,
+};
+pub use cc8_hdr::{
+    CC8_BT709_PRIMARIES_TEN_THOUSANDTHS, CC8_BT709_TO_REC2020, CC8_BT2020_CB_DENOMINATOR,
+    CC8_BT2020_CR_DENOMINATOR, CC8_BT2020_KB, CC8_BT2020_KG, CC8_BT2020_KR, CC8_BT2020_LUMA_F32,
+    CC8_D65_TEN_THOUSANDTHS, CC8_GATE_MEASUREMENT_STEP, CC8_GATES, CC8_HLG_A, CC8_HLG_B, CC8_HLG_C,
+    CC8_HLG_NOMINAL_PEAK_NITS, CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT, CC8_HLG_SCENE_BREAKPOINT,
+    CC8_HLG_SIGNAL_BREAKPOINT, CC8_HLG_SYSTEM_GAMMA_THOUSANDTHS, CC8_PQ_C1, CC8_PQ_C2, CC8_PQ_C3,
+    CC8_PQ_M1, CC8_PQ_M2, CC8_PQ_PEAK_NITS, CC8_REC2020_PRIMARIES_TEN_THOUSANDTHS,
+    CC8_REC2020_TO_BT709, CC8_REFERENCE_WHITE_NITS, Cc8ChromaticityTenThousandths, Cc8Gate,
+    Cc8GateShape, Cc8GateValue, cc8_apply_matrix, cc8_bt2020_luma, cc8_hlg_inverse_oetf,
+    cc8_hlg_inverse_ootf, cc8_hlg_inverse_ootf_nominal, cc8_hlg_nominal_peak_nits, cc8_hlg_oetf,
+    cc8_hlg_ootf_nits, cc8_hlg_ootf_nits_nominal, cc8_hlg_system_gamma, cc8_nits_to_working_linear,
+    cc8_pq_decode_working_linear, cc8_pq_encode_working_linear, cc8_pq_eotf_nits,
+    cc8_pq_inverse_eotf, cc8_sign, cc8_working_linear_to_nits,
 };
 pub use color::{
     COLOR_CONFIDENCE_MAX_BASIS_POINTS, ColorBitDepth, ColorContext, ColorDescription, ColorMatrix,
