@@ -363,9 +363,24 @@ fn mux_speech(wav: &Path, output: &Path) {
 }
 
 fn unique_stem(label: &str) -> String {
+    // The clock alone is not a nonce: `SystemTime::now` advances in 100 ns
+    // ticks on Windows, so two test threads spawning fixtures in the same
+    // instant can read identical nanos under one pid and share a path — the
+    // second `ffmpeg` run overwrites the first file, and whichever fixture
+    // drops first deletes it out from under the survivor (observed as
+    // `scope_render_failed` / "No such file or directory" mid-test in CI runs
+    // 33228085881 and 33233849668, both on `cc-color` fixtures created in the
+    // same tick). The process-wide counter makes the stem unique by
+    // construction; the timestamp stays so stems remain unique across
+    // processes and self-describing on disk.
+    static NEXT_STEM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock should follow the Unix epoch")
         .as_nanos();
-    format!("kinewright-{label}-{}-{nonce}", std::process::id())
+    let sequence = NEXT_STEM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(
+        "kinewright-{label}-{}-{nonce}-{sequence}",
+        std::process::id()
+    )
 }
