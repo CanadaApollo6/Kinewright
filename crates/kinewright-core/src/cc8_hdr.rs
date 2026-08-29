@@ -29,15 +29,22 @@
 //! [`cc8_sign`] is the same `sgn(0) = 0` helper `grade709_sign` uses, and for
 //! the same reason.
 //!
+//! # What §10 step 3 added
+//!
+//! §10 step 3 ("source profiles and transfer decode") added §2.1's closed
+//! profile table — [`CC8_SOURCE_PROFILES`], the 10-bit floor
+//! [`CC8_HDR_MIN_INTEGER_DEPTH_BITS`], and [`CC8_REJECTED_HDR_ADJACENT`] — and
+//! the two fused working-linear decodes the managed input path calls,
+//! [`cc8_pq_decode_working_linear`] and [`cc8_hlg_decode_working_linear`]. The
+//! latter carries §3.3's HLG working-linear determination; read its doc comment
+//! before changing it.
+//!
 //! # What §10 step 2 deliberately leaves to a later step
 //!
 //! §10 step 2 carries "transfer constants, matrices, the anchor, budgets".
-//! Four things that a reader might expect to find here are **not** here, each
+//! Three things that a reader might expect to find here are **not** here, each
 //! because the contract puts them in a later step:
 //!
-//! - **§2.1's source-profile table** (`pq_rec2020`, `hlg_rec2020`, the 10-bit
-//!   floor, the rejected tuples) is §10 step 3's. It belongs in this module
-//!   when it lands, beside the anchor it uses.
 //! - **§5.1's delivery-lane table and §5.2's `x264-params` string** are §10
 //!   step 6's, after §10 step 5's SDR byte-equality gate.
 //! - **§2.4's mastering-display and `MaxCLL`/`MaxFALL` modelling** is probe and
@@ -125,6 +132,269 @@ pub fn cc8_sign(value: f32) -> f32 {
         0.0
     }
 }
+
+// ===========================================================================
+// CC8 §2.1: the closed source-profile set.
+// ===========================================================================
+
+/// CC8 §2.1's **10-bit floor**, in bits.
+///
+/// §2.1: "The 10-bit floor is deliberate and normative: 8-bit PQ or HLG is
+/// banding by construction, and accepting it would be a claim CC8 cannot
+/// defend. An 8- or 9-bit HDR tuple is a typed rejection naming the depth, not
+/// a warning." So this is not a tolerance and not a preference — it is the
+/// lower bound of the profile table's own `Integer depth` column.
+pub const CC8_HDR_MIN_INTEGER_DEPTH_BITS: u8 = 10;
+
+/// CC8 §2.1's integer-depth ceiling, in bits: the table's `10..=16 bits`.
+///
+/// The same ceiling CC1 §2.1 puts on an SDR source, kept identical so an HDR
+/// tuple is narrowed only at the floor and a future widening is one change in
+/// one place.
+pub const CC8_HDR_MAX_INTEGER_DEPTH_BITS: u8 = 16;
+
+/// One row of CC8 §2.1's source-profile table.
+///
+/// The fields are the table's own columns, and each is stored in the **wire
+/// spelling** the project schema serialises (`color.rs`'s `color_tag!`
+/// strings), not as a `ColorPrimaries`/`ColorTransfer` value. That is the same
+/// boundary [`CC8_REC2020_TO_BT709`] takes with its derivation: one definition,
+/// asserted against the other rather than duplicated. `color_tag!`'s `wire`
+/// accessor is the other side, and
+/// `cc8_source_profile_wire_spellings_are_the_color_tag_serde_forms` holds the
+/// two together, so a renamed tag breaks the build's tests rather than
+/// silently unmatching a profile.
+///
+/// §2.1: "A profile match is on all listed fields; a partial match is not
+/// enough, exactly as CC1 §2.1."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cc8SourceProfile {
+    /// The `Profile id` column: `pq_rec2020` or `hlg_rec2020`.
+    pub id: &'static str,
+    /// The `Primaries` column. `bt2020` for both rows.
+    pub primaries: &'static str,
+    /// The `Transfer` column: `smpte2084` or `arib_std_b67`.
+    pub transfer: &'static str,
+    /// The `Matrix` column: `bt2020_ncl` or `rgb`.
+    pub matrices: [&'static str; 2],
+    /// The `Range` column: `limited` or `full`.
+    pub ranges: [&'static str; 2],
+    /// The `White point` column. `d65` for both rows.
+    pub white_point: &'static str,
+    /// The `Integer depth` column's inclusive floor,
+    /// [`CC8_HDR_MIN_INTEGER_DEPTH_BITS`].
+    pub min_integer_depth_bits: u8,
+    /// The `Integer depth` column's inclusive ceiling,
+    /// [`CC8_HDR_MAX_INTEGER_DEPTH_BITS`].
+    pub max_integer_depth_bits: u8,
+}
+
+impl Cc8SourceProfile {
+    /// Whether this row admits a matrix, by wire spelling.
+    #[must_use]
+    pub fn accepts_matrix(&self, matrix: &str) -> bool {
+        self.matrices.contains(&matrix)
+    }
+
+    /// Whether this row admits a coded range, by wire spelling.
+    #[must_use]
+    pub fn accepts_range(&self, range: &str) -> bool {
+        self.ranges.contains(&range)
+    }
+
+    /// Whether this row admits a white point, by wire spelling.
+    ///
+    /// §2.1 carries CC1's D65 rule over unchanged: an *unknown* white point is
+    /// not admitted here, because admitting it is only allowed "through an
+    /// explicit `profile_assumption` recorded in the colour status and proof".
+    /// The caller owns that decision; this function answers only what the
+    /// table says.
+    #[must_use]
+    pub fn accepts_white_point(&self, white_point: &str) -> bool {
+        self.white_point == white_point
+    }
+
+    /// Whether this row admits an integer sample depth.
+    #[must_use]
+    pub const fn accepts_integer_depth(&self, bits: u8) -> bool {
+        bits >= self.min_integer_depth_bits && bits <= self.max_integer_depth_bits
+    }
+}
+
+/// CC8 §2.1's table, in the contract's own row order.
+///
+/// This is the **closed** set. §1: "An HDR source that is not one of §2.1's two
+/// profiles **must** produce a visible typed status with an explicit override
+/// path. It **must not** be silently treated as Rec.709, and it **must not** be
+/// silently tone-mapped." [`CC8_REJECTED_HDR_ADJACENT`] enumerates what §2.1
+/// names as being outside it, so a fixture cannot quietly drop one.
+pub const CC8_SOURCE_PROFILES: [Cc8SourceProfile; 2] = [
+    Cc8SourceProfile {
+        id: "pq_rec2020",
+        primaries: "bt2020",
+        transfer: "smpte2084",
+        matrices: ["bt2020_ncl", "rgb"],
+        ranges: ["limited", "full"],
+        white_point: "d65",
+        min_integer_depth_bits: CC8_HDR_MIN_INTEGER_DEPTH_BITS,
+        max_integer_depth_bits: CC8_HDR_MAX_INTEGER_DEPTH_BITS,
+    },
+    Cc8SourceProfile {
+        id: "hlg_rec2020",
+        primaries: "bt2020",
+        transfer: "arib_std_b67",
+        matrices: ["bt2020_ncl", "rgb"],
+        ranges: ["limited", "full"],
+        white_point: "d65",
+        min_integer_depth_bits: CC8_HDR_MIN_INTEGER_DEPTH_BITS,
+        max_integer_depth_bits: CC8_HDR_MAX_INTEGER_DEPTH_BITS,
+    },
+];
+
+/// The §2.1 row a primaries/transfer pair selects, or `None`.
+///
+/// The pair is what *identifies* a row — no other column distinguishes
+/// `pq_rec2020` from `hlg_rec2020`, and no other column can make a tuple HDR
+/// that this pair does not — so this is the single question "is this one of the
+/// two profiles' shapes?", asked before any per-field check. A `None` here
+/// means the tuple is not in the closed set at all and must be diagnosed by the
+/// SDR field rules, which is exactly what keeps a BT.709/PQ or Rec.2020/BT.709
+/// mismatch reported against the field CC1 already names it by.
+#[must_use]
+pub fn cc8_source_profile_for_primaries_and_transfer(
+    primaries: &str,
+    transfer: &str,
+) -> Option<&'static Cc8SourceProfile> {
+    CC8_SOURCE_PROFILES
+        .iter()
+        .find(|profile| profile.primaries == primaries && profile.transfer == transfer)
+}
+
+/// The §2.1 row with this id, or `None`.
+#[must_use]
+pub fn cc8_source_profile_by_id(id: &str) -> Option<&'static Cc8SourceProfile> {
+    CC8_SOURCE_PROFILES.iter().find(|profile| profile.id == id)
+}
+
+/// Whether a primaries/transfer pair is one of §2.1's two profile shapes.
+#[must_use]
+pub fn cc8_is_hdr_source_pair(primaries: &str, transfer: &str) -> bool {
+    cc8_source_profile_for_primaries_and_transfer(primaries, transfer).is_some()
+}
+
+/// One HDR-adjacent tuple CC8 §2.1 places **outside** the closed set.
+///
+/// §2.1: "`bt2020_cl` (constant luminance), `ictcp`, `chroma_derived_*`, P3
+/// primaries in any combination, and `smpte2084`/`arib_std_b67` paired with
+/// non-Rec.2020 primaries are **explicit CC8 failures**, not guesses. As in CC1
+/// §2.1, the error must name the asset, the unsupported field, the observed
+/// value, and the allowed values."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cc8RejectedHdrTuple {
+    /// The source-description field the rejection is reported against — the
+    /// same wire field names `ColorSourceError::field` uses.
+    pub field: &'static str,
+    /// The observed value's wire spelling, or the shape §2.1 names when the
+    /// rejection is a family rather than one value.
+    pub observed: &'static str,
+    /// Why §2.1 places it outside the set, in the contract's own terms.
+    pub reason: &'static str,
+}
+
+/// Every HDR-adjacent tuple §2.1 names as outside the closed set.
+///
+/// §9.1 fixture 5 enumerates this table rather than a hand-written list, so a
+/// rejection that stops being reachable fails the fixture instead of quietly
+/// disappearing from it.
+pub const CC8_REJECTED_HDR_ADJACENT: [Cc8RejectedHdrTuple; 8] = [
+    Cc8RejectedHdrTuple {
+        field: "bit_depth",
+        observed: "8",
+        reason: "8-bit PQ or HLG is banding by construction (§2.1's 10-bit floor)",
+    },
+    Cc8RejectedHdrTuple {
+        field: "bit_depth",
+        observed: "9",
+        reason: "below §2.1's 10-bit floor",
+    },
+    Cc8RejectedHdrTuple {
+        field: "matrix",
+        observed: "bt2020_cl",
+        reason: "constant luminance is outside §1's matrix set",
+    },
+    Cc8RejectedHdrTuple {
+        field: "matrix",
+        observed: "ictcp",
+        reason: "ICtCp is an explicit §1 non-deliverable",
+    },
+    Cc8RejectedHdrTuple {
+        field: "matrix",
+        observed: "chroma_derived_ncl",
+        reason: "chroma-derived matrices are outside §2.1's set",
+    },
+    Cc8RejectedHdrTuple {
+        field: "matrix",
+        observed: "chroma_derived_cl",
+        reason: "chroma-derived matrices are outside §2.1's set",
+    },
+    Cc8RejectedHdrTuple {
+        field: "primaries",
+        observed: "display_p3",
+        reason: "P3 primaries in any combination are an explicit CC8 failure",
+    },
+    Cc8RejectedHdrTuple {
+        field: "primaries",
+        observed: "dci_p3",
+        reason: "P3 primaries in any combination are an explicit CC8 failure",
+    },
+];
+
+/// The allowed-value phrase for a primaries field rejected on an HDR tuple.
+///
+/// The §2.1 allowed-value strings are pinned here for the same reason the
+/// transfer constants are: they are part of the contract's typed-failure
+/// surface, and CC1's own strings are asserted verbatim by
+/// `cc1_fixtures::cc1_source_profile_classification_is_typed_and_actionable`.
+/// Keeping CC8's separate from CC1's is what lets both be verbatim.
+pub const CC8_HDR_PRIMARIES_ALLOWED: &str = "bt2020 with smpte2084 or arib_std_b67";
+/// The allowed-value phrase for a matrix field rejected on an HDR tuple.
+pub const CC8_HDR_MATRIX_ALLOWED: &str = "bt2020_ncl or rgb in a CC8 HDR source profile";
+/// The allowed-value phrase for a range field rejected on an HDR tuple.
+pub const CC8_HDR_RANGE_ALLOWED: &str = "limited or full in a CC8 HDR source profile";
+/// The allowed-value phrase for a white point rejected on an HDR tuple.
+pub const CC8_HDR_WHITE_POINT_ALLOWED: &str =
+    "d65, or an explicit D65 assumption for a CC8 HDR source profile";
+/// The allowed-value phrase for a depth rejected on an HDR tuple: §2.1's floor
+/// and ceiling, formatted from the two pinned constants rather than restated.
+pub const CC8_HDR_DEPTH_ALLOWED: &str = "integer depth 10..=16 for a CC8 HDR source profile";
+
+/// What a *delivery* description must be before a CC8 HDR source can be
+/// exported, as one phrase for CC8 §7 item 2's typed block.
+///
+/// §5.1's exact lane table — codec, pixel format, and the single
+/// `arib_std_b67` transfer §0.2 Q1 chose — is §10 step 6's and is deliberately
+/// not pinned here yet, so this phrase names the *shape* §2.1 already fixes
+/// rather than a lane that does not exist. §11 records that PQ / HDR10
+/// delivery is deferred, which is why the phrase names the deferral.
+pub const CC8_HDR_DELIVERY_ALLOWED: &str = "a CC8 HDR delivery description (bt2020 primaries with smpte2084 or arib_std_b67); \
+     §5.1's single HLG delivery lane lands with §10 step 6, and §11 defers PQ/HDR10 delivery";
+
+/// The recovery action for a tuple refused by §2.1's HDR rules.
+///
+/// §2.1 requires the error to "name the asset, the unsupported field, the
+/// observed value, and the allowed values"; §1 requires "an explicit override
+/// path". CC1's bare "relink to compatible media" does not say *which* set to
+/// relink into for a file that is HDR and is being refused on one named field,
+/// so this names the closed set.
+///
+/// It opens with CC1's own clause deliberately: every surface that checks a
+/// recovery action is present looks for "Apply an explicit supported
+/// source-colour override", and a CC8 reason is still that instruction — it
+/// just says more.
+pub const CC8_HDR_RECOVERY_ACTION: &str = "Apply an explicit supported source-colour override matching a CC8 HDR source profile \
+     (bt2020 with smpte2084 or arib_std_b67, bt2020_ncl or rgb, limited or full, d65, \
+     10..=16-bit integer samples), or relink to media inside that set. CC8 does not \
+     infer an HDR profile from a partial match.";
 
 // ===========================================================================
 // CC8 §2.2: the reference-white anchor.
@@ -494,6 +764,89 @@ pub fn cc8_hlg_inverse_ootf_nominal(display_nits: [f32; 3]) -> [f32; 3] {
         cc8_hlg_nominal_peak_nits(),
         cc8_hlg_system_gamma(),
     )
+}
+
+/// CC8 §3.3's HLG source decode, all three stages: an HLG signal triple to
+/// working linear.
+///
+/// ```text
+/// E_S  = inverse_oetf(E')                     per channel, ARIB STD-B67
+/// F_D  = ootf(E_S, peak = 1000, gamma = 1.2)  BT.2100, absolute cd/m²
+/// w    = F_D / CC8_REFERENCE_WHITE_NITS       §2.2's anchor
+/// ```
+///
+/// # §3.3's HLG working-linear determination (CC8 §10 step 3)
+///
+/// §3.3's pipeline listing marks reference-white normalization "(\* PQ profile
+/// only, §2.2)" and names the HLG stage "HLG inverse OOTF". §2.2 leaves the
+/// composition to the implementation — it fixes only that the OETF and OOTF are
+/// "two separately named stages, so a later slice can vary the peak without
+/// disturbing the curve". Step 3 makes the determination explicitly, and it is
+/// this: **the anchor divide does follow the OOTF on the HLG path, and the
+/// stage that realizes §3.3's HLG OOTF in the decode direction is the forward
+/// [`cc8_hlg_ootf_nits_nominal`], not [`cc8_hlg_inverse_ootf_nominal`].**
+///
+/// Three things forced it, in order of weight:
+///
+/// 1. **§3.1 fixes the working space and §3.1 wins.** The working space is
+///    "byte-identical to CC1 §2" with diffuse white at `1.0`. BT.2408 puts HLG
+///    diffuse white at [`CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT`] of the
+///    signal range, and `inverse_oetf(0.75) ≈ 0.2650` — so an HLG decode that
+///    stopped at the inverse OETF would land diffuse white **1.92 stops under**
+///    a PQ source of the same nominal white and under every Rec.709 source,
+///    and every CC3 curve and CC5 wheel authored on that domain would be
+///    reading the wrong exposure. Stopping after the OOTF without the divide is
+///    worse still: diffuse white would land at 203.0.
+/// 2. **The constants are otherwise dead.** §2.2 pins
+///    [`CC8_HLG_NOMINAL_PEAK_NITS`] and [`CC8_HLG_SYSTEM_GAMMA_THOUSANDTHS`]
+///    *for the source side* — "its OETF is defined against a nominal peak with
+///    a system gamma that depends on it". A decode that skipped the OOTF would
+///    use neither. A decode that applied the OOTF and not the anchor would
+///    leave the result in cd/m², which is not a working-space quantity.
+/// 3. **§10 step 2 already wrote the relation down.** [`cc8_nits_to_working_linear`]
+///    says: "where an HLG display luminance is wanted in working units, it is
+///    this same function applied after [`cc8_hlg_ootf_nits`], and the 75 %
+///    relation above is why the two profiles agree", and
+///    `cc8_hlg_reference_white_signal_lands_on_the_anchor` asserts that
+///    75 % → 203 cd/m² → working `1.0`. This function is that assertion made
+///    into the production stage; §9.1 fixture 2 gates it.
+///
+/// **On §3.3's word "inverse".** [`cc8_hlg_inverse_ootf`]'s signature is
+/// display cd/m² → scene linear, which is the *delivery* direction — §3.3's own
+/// delivery line has the mirror-image looseness, writing "HLG OOTF+OETF" where
+/// encoding needs the inverse OOTF and then the OETF. Read consistently, §3.3
+/// names each stage by the OETF/OOTF *pair* it belongs to and fixes their
+/// order; the function that realizes a stage is the one whose signature matches
+/// the direction it is used in. Both stages stay separately named and the OOTF
+/// still takes its peak and gamma as arguments, so §2.2's separability
+/// requirement is met exactly.
+///
+/// Sign-preserving throughout: the inverse OETF is sign-preserving per channel,
+/// the OOTF takes its gain on `|Y_S|` and keeps each component's sign, and the
+/// anchor is a plain positive scale.
+#[must_use]
+pub fn cc8_hlg_decode_working_linear(signal_rgb: [f32; 3]) -> [f32; 3] {
+    let scene_linear = signal_rgb.map(cc8_hlg_inverse_oetf);
+    let display_nits = cc8_hlg_ootf_nits_nominal(scene_linear);
+    display_nits.map(cc8_nits_to_working_linear)
+}
+
+/// The exact inverse of [`cc8_hlg_decode_working_linear`]: working linear to an
+/// HLG signal triple.
+///
+/// The three stages run backwards — [`cc8_working_linear_to_nits`], then
+/// [`cc8_hlg_inverse_ootf_nominal`], then [`cc8_hlg_oetf`] per channel — which
+/// is why *this* direction is where [`cc8_hlg_inverse_ootf`]'s
+/// display-nits-to-scene-linear signature belongs.
+///
+/// CC8 §5.1 does deliver HLG, but §10 step 6 owns that lane; this exists now
+/// because §9.1 fixture 1's round trip needs both directions, in the manner
+/// [`cc8_pq_encode_working_linear`] already exists for a deferred PQ lane.
+#[must_use]
+pub fn cc8_hlg_encode_working_linear(working_linear_rgb: [f32; 3]) -> [f32; 3] {
+    let display_nits = working_linear_rgb.map(cc8_working_linear_to_nits);
+    let scene_linear = cc8_hlg_inverse_ootf_nominal(display_nits);
+    scene_linear.map(cc8_hlg_oetf)
 }
 
 // ===========================================================================
@@ -1267,6 +1620,221 @@ mod tests {
         // working 1.0, which is why one anchor serves both profiles.
         let working = cc8_nits_to_working_linear(display[0]);
         assert!((working - 1.0).abs() < 0.5 / anchor, "{working}");
+    }
+
+    #[test]
+    fn cc8_hlg_working_linear_decode_lands_diffuse_white_on_one() {
+        // §3.3's determination, stated as the number it produces: BT.2408's
+        // 75 % HLG signal decodes to working 1.0, the same place PQ's 203 nits
+        // lands, so one anchor serves both profiles. The bound is the same
+        // half-nit-in-working-units argument
+        // `cc8_hlg_reference_white_signal_lands_on_the_anchor` uses, because it
+        // is the same claim carried through one more multiply.
+        let signal = cc8_as_f32(CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT) / 100.0;
+        let working = cc8_hlg_decode_working_linear([signal, signal, signal]);
+        let bound = 0.5 / cc8_as_f32(CC8_REFERENCE_WHITE_NITS);
+        for channel in working {
+            assert!(
+                (channel - 1.0).abs() < bound,
+                "75% HLG decodes to working {working:?}, not 1.0",
+            );
+        }
+        // Unity HLG signal is the nominal peak, so it lands where a
+        // 1 000-nit PQ highlight lands. Neither number is written here: both
+        // are the pinned constants' quotient.
+        let peak = cc8_hlg_decode_working_linear([1.0, 1.0, 1.0]);
+        let expected = cc8_hlg_nominal_peak_nits() / cc8_as_f32(CC8_REFERENCE_WHITE_NITS);
+        assert!(
+            relative_error(peak[0], expected) <= HLG_ROUND_TRIP_RELATIVE_BOUND,
+            "HLG peak lands at {peak:?}, not {expected}",
+        );
+        // The failing direction that catches the two rejected compositions:
+        // stopping at the inverse OETF would leave diffuse white near 0.265,
+        // and applying the inverse OOTF in the decode direction would leave it
+        // near 0.001. Both are far outside the bound above, and asserting the
+        // gap keeps this test from passing on a decode that is merely close.
+        let stopped_at_the_oetf = cc8_hlg_inverse_oetf(signal);
+        assert!(
+            (stopped_at_the_oetf - 1.0).abs() > 0.7,
+            "the inverse OETF alone must not already be working linear: {stopped_at_the_oetf}",
+        );
+        let wrong_ootf_direction = cc8_hlg_inverse_ootf_nominal([
+            stopped_at_the_oetf,
+            stopped_at_the_oetf,
+            stopped_at_the_oetf,
+        ]);
+        assert!(
+            wrong_ootf_direction[0] < 0.01,
+            "the inverse OOTF is the delivery direction: {wrong_ootf_direction:?}",
+        );
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn cc8_hlg_working_linear_pair_round_trips_and_preserves_sign() {
+        for working in [
+            [0.05_f32, 0.05, 0.05],
+            [1.0, 1.0, 1.0],
+            [4.926_108, 1.0, 0.25],
+            [0.5, -0.05, 0.75],
+        ] {
+            let round_tripped =
+                cc8_hlg_decode_working_linear(cc8_hlg_encode_working_linear(working));
+            for channel in 0..3 {
+                assert!(
+                    (round_tripped[channel] - working[channel]).abs()
+                        <= HLG_ROUND_TRIP_RELATIVE_BOUND * working[channel].abs().max(1.0),
+                    "HLG working round trip of {working:?} gave {round_tripped:?}",
+                );
+            }
+        }
+        assert_eq!(
+            cc8_hlg_decode_working_linear([0.0, 0.0, 0.0]),
+            [0.0, 0.0, 0.0]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CC8 §2.1's closed profile set.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cc8_source_profile_table_is_section_2_1s_two_closed_rows() {
+        assert_eq!(CC8_SOURCE_PROFILES.len(), 2);
+        let ids: Vec<&str> = CC8_SOURCE_PROFILES.iter().map(|row| row.id).collect();
+        assert_eq!(ids, vec!["pq_rec2020", "hlg_rec2020"]);
+        for row in &CC8_SOURCE_PROFILES {
+            // Both rows are Rec.2020 D65 with the same matrix, range, and depth
+            // columns; only the transfer distinguishes them, which is why
+            // `cc8_source_profile_for_primaries_and_transfer` keys on the pair.
+            assert_eq!(row.primaries, "bt2020");
+            assert_eq!(row.white_point, "d65");
+            assert!(row.accepts_matrix("bt2020_ncl") && row.accepts_matrix("rgb"));
+            assert!(!row.accepts_matrix("bt2020_cl") && !row.accepts_matrix("ictcp"));
+            assert!(row.accepts_range("limited") && row.accepts_range("full"));
+            assert!(row.accepts_white_point("d65") && !row.accepts_white_point("unknown"));
+            // §2.1's 10-bit floor, at the two codes either side of it.
+            assert_eq!(row.min_integer_depth_bits, CC8_HDR_MIN_INTEGER_DEPTH_BITS);
+            assert_eq!(row.max_integer_depth_bits, CC8_HDR_MAX_INTEGER_DEPTH_BITS);
+            assert!(!row.accepts_integer_depth(8));
+            assert!(!row.accepts_integer_depth(9));
+            assert!(row.accepts_integer_depth(10));
+            assert!(row.accepts_integer_depth(16));
+            assert!(!row.accepts_integer_depth(17));
+        }
+        assert_eq!(
+            cc8_source_profile_for_primaries_and_transfer("bt2020", "smpte2084").map(|row| row.id),
+            Some("pq_rec2020"),
+        );
+        assert_eq!(
+            cc8_source_profile_for_primaries_and_transfer("bt2020", "arib_std_b67")
+                .map(|row| row.id),
+            Some("hlg_rec2020"),
+        );
+        // The mismatched pairs §2.1 makes explicit failures: an HDR transfer
+        // on non-Rec.2020 primaries, and Rec.2020 with an SDR transfer.
+        assert!(!cc8_is_hdr_source_pair("bt709", "smpte2084"));
+        assert!(!cc8_is_hdr_source_pair("bt709", "arib_std_b67"));
+        assert!(!cc8_is_hdr_source_pair("display_p3", "smpte2084"));
+        assert!(!cc8_is_hdr_source_pair("dci_p3", "arib_std_b67"));
+        assert!(!cc8_is_hdr_source_pair("bt2020", "bt709"));
+        assert!(!cc8_is_hdr_source_pair("bt2020", "unknown"));
+        assert_eq!(
+            cc8_source_profile_by_id("hlg_rec2020").map(|row| row.transfer),
+            Some("arib_std_b67"),
+        );
+        assert!(cc8_source_profile_by_id("hdr10").is_none());
+    }
+
+    #[test]
+    fn cc8_source_profile_wire_spellings_are_the_color_tag_serde_forms() {
+        // The table stores wire spellings rather than `ColorPrimaries` values,
+        // so this is the boundary assertion that keeps the transcription from
+        // becoming a second definition — the rule
+        // `cc8_pinned_matrices_are_the_derivation_transcribed` states for the
+        // matrices, applied to the profile table.
+        fn wire<T: serde::Serialize>(value: &T) -> String {
+            serde_json::to_value(value)
+                .expect("a colour tag serialises")
+                .as_str()
+                .expect("a colour tag serialises as a string")
+                .to_owned()
+        }
+
+        assert_eq!(wire(&crate::ColorPrimaries::Bt2020), "bt2020");
+        assert_eq!(wire(&crate::ColorTransfer::Smpte2084), "smpte2084");
+        assert_eq!(wire(&crate::ColorTransfer::AribStdB67), "arib_std_b67");
+        assert_eq!(wire(&crate::ColorMatrix::Bt2020Ncl), "bt2020_ncl");
+        assert_eq!(wire(&crate::ColorMatrix::Rgb), "rgb");
+        assert_eq!(wire(&crate::ColorRange::Limited), "limited");
+        assert_eq!(wire(&crate::ColorRange::Full), "full");
+        assert_eq!(wire(&crate::ColorWhitePoint::D65), "d65");
+        for row in &CC8_SOURCE_PROFILES {
+            assert_eq!(row.primaries, wire(&crate::ColorPrimaries::Bt2020));
+            assert_eq!(row.white_point, wire(&crate::ColorWhitePoint::D65));
+            assert!(row.accepts_matrix(&wire(&crate::ColorMatrix::Bt2020Ncl)));
+            assert!(row.accepts_range(&wire(&crate::ColorRange::Limited)));
+        }
+        // And the rejected table's observed spellings are the same forms, so
+        // §9.1 fixture 5 can drive the classifier straight from this table.
+        for rejected in &CC8_REJECTED_HDR_ADJACENT {
+            match rejected.observed {
+                "bt2020_cl" => assert_eq!(wire(&crate::ColorMatrix::Bt2020Cl), rejected.observed),
+                "ictcp" => assert_eq!(wire(&crate::ColorMatrix::Ictcp), rejected.observed),
+                "chroma_derived_ncl" => {
+                    assert_eq!(
+                        wire(&crate::ColorMatrix::ChromaDerivedNcl),
+                        rejected.observed
+                    );
+                }
+                "chroma_derived_cl" => {
+                    assert_eq!(
+                        wire(&crate::ColorMatrix::ChromaDerivedCl),
+                        rejected.observed
+                    );
+                }
+                "display_p3" => {
+                    assert_eq!(wire(&crate::ColorPrimaries::DisplayP3), rejected.observed);
+                }
+                "dci_p3" => assert_eq!(wire(&crate::ColorPrimaries::DciP3), rejected.observed),
+                depth => assert!(
+                    depth
+                        .parse::<u8>()
+                        .is_ok_and(|bits| !CC8_SOURCE_PROFILES[0].accepts_integer_depth(bits)),
+                    "{depth} must be a depth the table rejects",
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn cc8_rejected_hdr_adjacent_covers_every_family_section_2_1_names() {
+        // §2.1 names five families: `bt2020_cl`, `ictcp`, `chroma_derived_*`,
+        // P3 primaries, and an HDR transfer on non-Rec.2020 primaries. The
+        // last is a *pair* rather than a value, so it is asserted through
+        // `cc8_is_hdr_source_pair` above rather than as a row here; the other
+        // four plus §2.1's depth floor are rows.
+        let fields: Vec<&str> = CC8_REJECTED_HDR_ADJACENT
+            .iter()
+            .map(|row| row.field)
+            .collect();
+        assert!(fields.contains(&"matrix"));
+        assert!(fields.contains(&"primaries"));
+        assert!(fields.contains(&"bit_depth"));
+        for row in &CC8_REJECTED_HDR_ADJACENT {
+            assert!(!row.reason.is_empty(), "{} has no reason", row.observed);
+        }
+        let mut observed: Vec<&str> = CC8_REJECTED_HDR_ADJACENT
+            .iter()
+            .map(|row| row.observed)
+            .collect();
+        observed.sort_unstable();
+        observed.dedup();
+        assert_eq!(
+            observed.len(),
+            CC8_REJECTED_HDR_ADJACENT.len(),
+            "a duplicated row would hide a family rather than add one",
+        );
     }
 
     // -----------------------------------------------------------------------

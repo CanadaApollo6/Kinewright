@@ -7,18 +7,21 @@ use std::{
 };
 
 use kinewright_core::{
-    AssetId, COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN, COLOR_CURVE_MAX_POINTS,
-    COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS, COLOR_NODE_BYPASS_PARAMETER,
-    COLOR_NODE_LIMIT_PER_LAYER, Clip, ClipContent, ClipId, ColorCurveChannel, ColorDescription,
-    ColorNodeInactiveReason, ColorNodeKind, ColorSourceError, ColorSourceProfile,
-    ColorSourceProfileAssumption, ColorStage, ColorWheelChannel, ColorWheelControl,
-    ColorWheelsParams, ColorWhitePoint, CurvePoints, Document, Effect, EffectCompatibilityStage,
-    EffectId, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER, LUT_MIX_BASIS_POINTS_MAX,
-    LUT_MIX_PARAMETER, LUT_NODE_LIMIT_PER_LAYER, LutAsset, LutAssetId, LutAssetSource,
-    LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams, MANAGED_COLOR_NODE_NAMES,
-    MATTE_MIX_BASIS_POINTS_MAX, MATTE_WINDOW_LIMIT, MatteParams, MatteWindowParams,
-    MediaAvailabilityStatus, MediaError, MediaKind, Operation, ParamValue, ResolvedCurves,
-    TimeCode, TimelineRevision, TrackKind, apply_batch, classify_color_node,
+    AssetId, CC8_HDR_DEPTH_ALLOWED, CC8_HDR_MATRIX_ALLOWED, CC8_HDR_PRIMARIES_ALLOWED,
+    CC8_HDR_RANGE_ALLOWED, CC8_HDR_WHITE_POINT_ALLOWED, CC8_HLG_NOMINAL_PEAK_NITS,
+    CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT, CC8_HLG_SYSTEM_GAMMA_THOUSANDTHS, CC8_PQ_PEAK_NITS,
+    CC8_REFERENCE_WHITE_NITS, COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN,
+    COLOR_CURVE_MAX_POINTS, COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS,
+    COLOR_NODE_BYPASS_PARAMETER, COLOR_NODE_LIMIT_PER_LAYER, Clip, ClipContent, ClipId,
+    ColorCurveChannel, ColorDescription, ColorNodeInactiveReason, ColorNodeKind, ColorSourceError,
+    ColorSourceProfile, ColorSourceProfileAssumption, ColorStage, ColorWheelChannel,
+    ColorWheelControl, ColorWheelsParams, ColorWhitePoint, CurvePoints, Document, Effect,
+    EffectCompatibilityStage, EffectId, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER,
+    LUT_MIX_BASIS_POINTS_MAX, LUT_MIX_PARAMETER, LUT_NODE_LIMIT_PER_LAYER, LutAsset, LutAssetId,
+    LutAssetSource, LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams,
+    MANAGED_COLOR_NODE_NAMES, MATTE_MIX_BASIS_POINTS_MAX, MATTE_WINDOW_LIMIT, MatteParams,
+    MatteWindowParams, MediaAvailabilityStatus, MediaError, MediaKind, Operation, ParamValue,
+    ResolvedCurves, TimeCode, TimelineRevision, TrackKind, apply_batch, classify_color_node,
     classify_source_with_assumption, effect_compatibility_stage, effect_descriptor, lut_node_count,
     lut_node_may_be_active, managed_color_node_count,
 };
@@ -1267,6 +1270,76 @@ pub(crate) fn legacy_stage_warnings(clip: &Clip) -> Vec<Value> {
         .collect()
 }
 
+/// CC8 §8's HDR rows for one classified source profile, or `null` on SDR.
+///
+/// §2.2 makes the reference-white anchor's inspectability normative: the number
+/// "**must** be stated, pinned as an integer constant in the authority module,
+/// and inspectable in the colour status. It must never be a literal buried in a
+/// shader." So the value here is [`CC8_REFERENCE_WHITE_NITS`] read from
+/// `kinewright_core::cc8_hdr`, not a copy, and §12's mitigation — "the colour
+/// status reports its value, so an editor can see why an HDR clip landed where
+/// it did" — is this row.
+///
+/// `stages` lists CC8 §3.3's source-side additions **in §3.3's order**, which
+/// §3.3 requires of every added stage ("Every added stage is separately named
+/// in the colour status and proof"). `managed_decode` states plainly which of
+/// them the executed path can run today; §10 step 4 changes that answer and
+/// §10 step 8 adds §4's preview rows.
+///
+/// §8's remaining HDR rows — the mastering-display and `MaxCLL`/`MaxFALL`
+/// metadata of §2.4, and the primaries-conversion stage's own report — are
+/// deliberately absent: §2.4's probe modelling and §6's QC are §10 step 7's,
+/// and reporting a metadata field this build never reads would be a claim, not
+/// evidence.
+fn hdr_interpretation(profile: ColorSourceProfile) -> Value {
+    let Some(row) = profile.cc8_row() else {
+        return Value::Null;
+    };
+    let mut stages = vec![
+        "source_range_expansion",
+        "source_matrix_decode_bt2020_ncl",
+        "source_transfer_decode",
+    ];
+    let mut anchor = json!({
+        "reference_white_nits": CC8_REFERENCE_WHITE_NITS,
+        "peak_nits": CC8_PQ_PEAK_NITS,
+    });
+    if profile == ColorSourceProfile::HlgRec2020 {
+        stages.push("hlg_ootf_nominal");
+        anchor = json!({
+            "reference_white_nits": CC8_REFERENCE_WHITE_NITS,
+            "nominal_peak_nits": CC8_HLG_NOMINAL_PEAK_NITS,
+            "system_gamma_thousandths": CC8_HLG_SYSTEM_GAMMA_THOUSANDTHS,
+            "reference_white_signal_percent": CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT,
+        });
+    }
+    stages.push("reference_white_normalization");
+    stages.push("primaries_conversion_rec2020_to_bt709");
+    json!({
+        "profile": row.id,
+        "anchor": anchor,
+        "stages": stages,
+        "allowed_tuple": {
+            "primaries_and_transfer": CC8_HDR_PRIMARIES_ALLOWED,
+            "matrix": CC8_HDR_MATRIX_ALLOWED,
+            "range": CC8_HDR_RANGE_ALLOWED,
+            "white_point": CC8_HDR_WHITE_POINT_ALLOWED,
+            "bit_depth": CC8_HDR_DEPTH_ALLOWED,
+        },
+        "managed_decode": {
+            "available": false,
+            "reason": "CC8 §10 step 3 lands the source profile and the §3.3 transfer-decode \
+                       stages; the primaries conversion and the BT.2020 NCL source matrix \
+                       decode are §10 step 4",
+        },
+        "monitoring": {
+            "calibrated_hdr": false,
+            "reason": "CC8 §4: no calibrated HDR monitoring path, in any form or claim. \
+                       The labelled tone-mapped preview is §10 step 8.",
+        },
+    })
+}
+
 fn source_status(
     description: &ColorDescription,
     profile_assumption: Option<ColorSourceProfileAssumption>,
@@ -1276,6 +1349,7 @@ fn source_status(
         Ok(profile) => json!({
             "status": "supported",
             "supported_profile": profile.id(),
+            "hdr_interpretation": hdr_interpretation(profile),
             "profile_assumption": {
                 // Serialise the assumption that was actually applied rather
                 // than a hardcoded name, so a future assumption variant cannot
@@ -1297,6 +1371,7 @@ fn source_status(
             json!({
                 "status": "needs_color_override",
                 "supported_profile": Value::Null,
+                "hdr_interpretation": Value::Null,
                 "profile_assumption": {
                     "selected": Value::Null,
                     "required": assumption_required,
@@ -5673,6 +5748,94 @@ mod tests {
             0
         );
         assert_eq!(value["ordered_stage_names"].as_array().unwrap().len(), 8);
+        // CC8 §8: an SDR source carries no HDR rows at all, rather than rows
+        // full of nulls that read as "HDR, but empty".
+        assert!(
+            value["assets"][0]["source"]["status"]["hdr_interpretation"].is_null(),
+            "an SDR source must not carry CC8 HDR interpretation rows",
+        );
+    }
+
+    /// CC8 §2.2: "that number **must** be stated, pinned as an integer constant
+    /// in the authority module, and **inspectable in the colour status**."
+    #[test]
+    fn status_reports_the_cc8_hdr_profile_its_anchor_and_its_named_stages() {
+        let mut document = document();
+        document.media_pool[0].color_description = ColorDescription {
+            primaries: kinewright_core::ColorPrimaries::Bt2020,
+            transfer: kinewright_core::ColorTransfer::AribStdB67,
+            matrix: kinewright_core::ColorMatrix::Bt2020Ncl,
+            range: kinewright_core::ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: kinewright_core::ColorBitDepth::Ten,
+            confidence_basis_points: 10_000,
+            provenance: kinewright_core::ColorProvenance::StreamMetadata,
+        };
+        let value = color_context_value(TimelineRevision(3), &document);
+        let status = &value["assets"][0]["source"]["status"];
+        assert_eq!(status["status"], "supported");
+        assert_eq!(
+            status["supported_profile"],
+            ColorSourceProfile::HlgRec2020.id()
+        );
+
+        let hdr = &status["hdr_interpretation"];
+        assert_eq!(hdr["profile"], ColorSourceProfile::HlgRec2020.id());
+        // The anchor's value, read from the authority module rather than
+        // written here — §12's mitigation is that an editor can see it.
+        assert_eq!(
+            hdr["anchor"]["reference_white_nits"],
+            CC8_REFERENCE_WHITE_NITS
+        );
+        assert_eq!(
+            hdr["anchor"]["nominal_peak_nits"],
+            CC8_HLG_NOMINAL_PEAK_NITS
+        );
+        assert_eq!(
+            hdr["anchor"]["system_gamma_thousandths"],
+            CC8_HLG_SYSTEM_GAMMA_THOUSANDTHS
+        );
+        // §3.3: "Every added stage is separately named in the colour status and
+        // proof", in §3.3's order. The HLG profile carries the OOTF stage the
+        // PQ profile does not.
+        let stages: Vec<&str> = hdr["stages"]
+            .as_array()
+            .expect("stages is a list")
+            .iter()
+            .map(|stage| stage.as_str().expect("a stage name"))
+            .collect();
+        assert_eq!(
+            stages,
+            vec![
+                "source_range_expansion",
+                "source_matrix_decode_bt2020_ncl",
+                "source_transfer_decode",
+                "hlg_ootf_nominal",
+                "reference_white_normalization",
+                "primaries_conversion_rec2020_to_bt709",
+            ]
+        );
+        // §4: no calibrated monitoring claim, anywhere, in any form.
+        assert_eq!(hdr["monitoring"]["calibrated_hdr"], false);
+        assert_eq!(hdr["managed_decode"]["available"], false);
+
+        // The PQ profile's rows differ where §2.2 says they differ: no OOTF
+        // stage, and the PQ peak in place of HLG's nominal peak and gamma.
+        document.media_pool[0].color_description.transfer =
+            kinewright_core::ColorTransfer::Smpte2084;
+        let pq = color_context_value(TimelineRevision(3), &document);
+        let pq_hdr = &pq["assets"][0]["source"]["status"]["hdr_interpretation"];
+        assert_eq!(pq_hdr["profile"], ColorSourceProfile::PqRec2020.id());
+        assert_eq!(pq_hdr["anchor"]["peak_nits"], CC8_PQ_PEAK_NITS);
+        assert!(pq_hdr["anchor"]["system_gamma_thousandths"].is_null());
+        assert!(
+            !pq_hdr["stages"]
+                .as_array()
+                .expect("stages is a list")
+                .iter()
+                .any(|stage| stage == "hlg_ootf_nominal"),
+            "the PQ profile has no OOTF stage",
+        );
     }
 
     #[test]

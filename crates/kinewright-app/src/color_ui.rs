@@ -334,6 +334,15 @@ mod tests {
         assert!(display.summary.contains("W:unknown"));
     }
 
+    /// A completely specified description that still matches no profile blocks.
+    ///
+    /// This used to use the full `bt2020` / `smpte2084` / `bt2020_ncl` /
+    /// `limited` / `d65` / 10-bit tuple, which CC8 §2.1 now makes the
+    /// `pq_rec2020` profile — see
+    /// `a_supported_hdr_source_is_not_blocking_and_names_its_profile` for that
+    /// tuple's behaviour. The tuple below keeps this test's subject by dropping
+    /// the depth below §2.1's 10-bit floor, which §2.1 makes "a typed rejection
+    /// naming the depth, not a warning".
     #[test]
     fn fully_known_unsupported_source_is_blocking() {
         let description = ColorDescription {
@@ -342,7 +351,7 @@ mod tests {
             matrix: ColorMatrix::Bt2020Ncl,
             range: ColorRange::Limited,
             white_point: ColorWhitePoint::D65,
-            bit_depth: ColorBitDepth::Ten,
+            bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
             provenance: ColorProvenance::StreamMetadata,
         };
@@ -353,8 +362,47 @@ mod tests {
         assert!(
             display
                 .summary
-                .contains("code=unsupported_source_primaries")
+                .contains("code=unsupported_hdr_source_bit_depth"),
+            "{}",
+            display.summary
         );
+        assert!(
+            display.summary.contains("observed=Eight"),
+            "{}",
+            display.summary
+        );
+        assert!(
+            display
+                .summary
+                .contains("Apply an explicit supported source-colour override"),
+            "{}",
+            display.summary
+        );
+    }
+
+    /// CC8 §2.1: the same tuple at 10 bits is the `pq_rec2020` profile, and the
+    /// inspector stops calling it an error.
+    #[test]
+    fn a_supported_hdr_source_is_not_blocking_and_names_its_profile() {
+        let description = ColorDescription {
+            primaries: ColorPrimaries::Bt2020,
+            transfer: ColorTransfer::Smpte2084,
+            matrix: ColorMatrix::Bt2020Ncl,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Ten,
+            confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
+            provenance: ColorProvenance::StreamMetadata,
+        };
+        assert_eq!(
+            kinewright_core::classify_source(&description),
+            Ok(kinewright_core::ColorSourceProfile::PqRec2020)
+        );
+        let display = source_color_display(&asset(MediaKind::Video, description)).unwrap();
+        assert!(!display.blocking, "{}", display.summary);
+        assert!(!display.warning, "{}", display.summary);
+        assert!(display.summary.contains("P:BT.2020"), "{}", display.summary);
+        assert!(display.summary.contains("T:ST.2084"), "{}", display.summary);
     }
 
     #[test]

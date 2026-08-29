@@ -3,8 +3,8 @@ use std::{path::Path, sync::Arc};
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
     AssetId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
-    ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, FrameTexture,
-    MediaAsset, MediaError, MediaKind, Rational, RgbaImage, TimeCode,
+    ColorRange, ColorSourceProfile, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint,
+    FrameTexture, MediaAsset, MediaError, MediaKind, Rational, RgbaImage, TimeCode,
     classify_source_with_assumption,
 };
 
@@ -1047,6 +1047,49 @@ impl DecoderFrame for WorkingFrame {
     }
 }
 
+/// CC8 §10 step 3's boundary: a classified HDR source is refused by the
+/// managed *frame* decoder, with a typed reason naming what is missing.
+///
+/// §10 step 3 delivers "source profiles and transfer decode": the
+/// classification (§2.1), the named §3.3 interpretation stages
+/// (`color_pipeline::decode_hdr_source_working_linear`), and their fixtures 1,
+/// 2 and 5. It does **not** deliver §3.3's next two stages, and both are
+/// required before a frame of HDR media can be composited honestly:
+///
+/// - **the primaries conversion to working BT.709 D65**, which §3.3 marks
+///   "(\* now non-identity)" and §10 step 4 owns with §9.1 fixture 3 as its
+///   gate. The matrices are already pinned and tested
+///   (`kinewright_core::CC8_REC2020_TO_BT709`), but landing the stage before
+///   its fixture would put an ungated non-identity transform in the production
+///   path; and
+/// - **the BT.2020 NCL source matrix decode**, which `managed_filter_graph`
+///   still pins to `in_color_matrix=bt709`, and whose swscale boundary
+///   normalization (`color_pipeline::rgba64_normalization_max`) has a
+///   BT.709-limited special case with no BT.2020 sibling.
+///
+/// Decoding anyway would composite Rec.2020 values as though they were BT.709
+/// — a wrong picture, silently. §1 forbids exactly that shape of silence
+/// ("**must not** be silently treated as Rec.709"), so this fails typed and
+/// says which step supplies the missing stage. §10 step 4 removes it.
+///
+/// This is **not** the §7 item 2 delivery block, which is permanent and lives
+/// in `kinewright_core::delivery` under `HDR_SOURCE_ON_SDR_DELIVERY`.
+pub(crate) fn hdr_managed_decode_not_yet_available(
+    path: &Path,
+    profile: ColorSourceProfile,
+) -> MediaError {
+    MediaError::Backend(format!(
+        "managed HDR frame decode is not available yet for {} (source_profile={}): CC8 §10 \
+         step 3 lands the source profile and the §3.3 transfer-decode stages; §3.3's \
+         primaries conversion to working BT.709 D65 and the BT.2020 NCL source matrix \
+         decode are §10 step 4, gated by §9.1 fixture 3. Decoding without them would \
+         composite Rec.2020 values as BT.709, which CC8 §1 forbids. Recovery: relink to \
+         an SDR source, or apply an explicit supported SDR source-colour override.",
+        path.display(),
+        profile.id(),
+    ))
+}
+
 pub(crate) struct VideoDecoder {
     path: std::path::PathBuf,
     input: ffmpeg::format::context::Input,
@@ -1095,7 +1138,9 @@ impl VideoDecoder {
                 path.display()
             ))
         })?;
-        let _ = source;
+        if source.is_hdr() {
+            return Err(hdr_managed_decode_not_yet_available(path, source));
+        }
         let _declared_depth = declared_integer_depth(description).map_err(|error| {
             unsupported_decoder_format(
                 path,

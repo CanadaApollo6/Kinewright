@@ -1652,9 +1652,20 @@ mod tests {
             .expect("BT.2020/PQ source must block the export");
         assert_eq!(issue.asset, Some(AssetId(1)));
         assert!(issue.message.contains("hdr-master.mov"));
-        assert!(issue.message.contains("code=unsupported_source_primaries"));
-        assert!(issue.message.contains("field=primaries"));
-        assert!(issue.message.contains("observed=Bt2020"));
+        // The fixture's tuple is Rec.2020/PQ with a BT.709 matrix at 8 bits.
+        // CC8 §2.1 makes that an HDR-adjacent tuple *outside* the closed set —
+        // its matrix is not in the `bt2020_ncl`/`rgb` column — so it is
+        // refused on the matrix rather than, as before CC8, on the primaries.
+        // The subject of this test is unchanged: an unsupported source colour
+        // refuses the export and names its code, field, observed value,
+        // allowed values, and recovery action.
+        assert!(
+            issue.message.contains("code=unsupported_hdr_source_matrix"),
+            "{}",
+            issue.message
+        );
+        assert!(issue.message.contains("field=matrix"));
+        assert!(issue.message.contains("observed=Bt709"));
         assert!(issue.message.contains("allowed="));
         assert!(
             issue
@@ -1664,7 +1675,7 @@ mod tests {
 
         let summary = conformance.summary();
         assert!(summary.contains("unsupported_source_color"));
-        assert!(summary.contains("field=primaries"));
+        assert!(summary.contains("field=matrix"));
 
         // The encoder is never reached for a refused document.
         let export_called = Cell::new(false);

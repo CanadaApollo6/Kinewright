@@ -1345,10 +1345,22 @@ mod tests {
         assert!(bytes.saturating_mul(cached_frames) < FRAME_CACHE_BYTE_BUDGET);
     }
 
+    /// A completely specified source description that matches no profile.
+    ///
+    /// It used to be `bt2020` / `smpte2084` / `bt2020_ncl` / `limited` / `d65`
+    /// / 10-bit, standing in for "an HDR source, which is unsupported". CC8
+    /// §2.1 makes exactly that tuple the `pq_rec2020` profile, so it no longer
+    /// demonstrates the thing these two tests are about — the *shape* of a
+    /// managed decode error. Pairing Rec.2020 primaries with a BT.709 transfer
+    /// keeps the subject and keeps the reported field: §2.1 lists a mismatched
+    /// primaries/transfer pair among the "explicit CC8 failures, not guesses",
+    /// and because the pair is not one of §2.1's rows it is diagnosed by CC1's
+    /// primaries rule, which is where `observed=Bt2020` / `allowed=bt709` below
+    /// still comes from.
     fn unsupported_source() -> ColorDescription {
         ColorDescription {
             primaries: ColorPrimaries::Bt2020,
-            transfer: ColorTransfer::Smpte2084,
+            transfer: ColorTransfer::Bt709,
             matrix: ColorMatrix::Bt2020Ncl,
             range: ColorRange::Limited,
             white_point: ColorWhitePoint::D65,

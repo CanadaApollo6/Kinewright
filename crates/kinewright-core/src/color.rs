@@ -12,8 +12,23 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as DeError};
 use thiserror::Error;
 
+use crate::cc8_hdr::{
+    CC8_HDR_DEPTH_ALLOWED, CC8_HDR_MATRIX_ALLOWED, CC8_HDR_RANGE_ALLOWED, CC8_HDR_RECOVERY_ACTION,
+    CC8_HDR_WHITE_POINT_ALLOWED, CC8_SOURCE_PROFILES, Cc8SourceProfile, cc8_source_profile_by_id,
+    cc8_source_profile_for_primaries_and_transfer,
+};
+
 /// The maximum representable colour-confidence value in basis points.
 pub const COLOR_CONFIDENCE_MAX_BASIS_POINTS: u16 = 10_000;
+
+/// The complete closed source-profile set, as one phrase, for the
+/// `UnsupportedCombination` allowed-value string.
+///
+/// CC1's two profiles then CC8 §2.1's two, in [`ColorSourceProfile::id`] order.
+/// `supported_profile_ids_phrase_names_every_profile` asserts every variant's
+/// id appears here, so a profile added without updating this phrase fails a
+/// test rather than shipping a status that quietly under-reports the set.
+const SUPPORTED_PROFILE_IDS: &str = "rec709_video, srgb_full, pq_rec2020, or hlg_rec2020";
 
 macro_rules! color_tag {
     (
@@ -34,6 +49,26 @@ macro_rules! color_tag {
         impl Default for $name {
             fn default() -> Self {
                 Self::Unknown
+            }
+        }
+
+        impl $name {
+            /// The serialized wire spelling of this tag.
+            ///
+            /// The same string [`Serialize`] writes and [`Deserialize`] reads,
+            /// returned by reference so a caller can match a value against a
+            /// table of wire spellings without allocating or restating the
+            /// literal. CC8 §2.1's profile table
+            /// (`crate::cc8_hdr::CC8_SOURCE_PROFILES`) is that caller, and
+            /// `cc8_source_profile_wire_spellings_are_the_color_tag_serde_forms`
+            /// asserts the two agree, so a renamed tag cannot silently stop
+            /// matching a profile.
+            #[must_use]
+            pub fn wire(&self) -> &str {
+                match self {
+                    $(Self::$variant => $wire,)+
+                    Self::Other(value) => value.as_str(),
+                }
             }
         }
 
@@ -172,22 +207,56 @@ pub enum ColorPipelineState {
     Other(String),
 }
 
-/// A managed SDR source profile accepted by the CC1 colour contract.
+/// A managed source profile accepted by the colour contract.
+///
+/// [`Self::Rec709Video`] and [`Self::SrgbFull`] are CC1's managed SDR profiles.
+/// [`Self::PqRec2020`] and [`Self::HlgRec2020`] are CC8 §2.1's two HDR
+/// profiles, and the set stays **closed**: §1 requires an HDR source that is
+/// not one of them to "produce a visible typed status with an explicit override
+/// path", never a silent Rec.709 reading and never a silent tone map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ColorSourceProfile {
     Rec709Video,
     SrgbFull,
+    /// CC8 §2.1 `pq_rec2020`: BT.2020 primaries, ST 2084, BT.2020 NCL or RGB,
+    /// limited or full range, D65, 10..=16-bit integer samples.
+    PqRec2020,
+    /// CC8 §2.1 `hlg_rec2020`: the same table row with ARIB STD-B67.
+    HlgRec2020,
 }
 
 impl ColorSourceProfile {
     /// Stable identifier used by status, proof, and agent surfaces.
+    ///
+    /// The two HDR ids are read from CC8 §2.1's table rather than restated, so
+    /// this accessor and the authority module cannot drift apart;
+    /// `hdr_profile_ids_come_from_the_cc8_authority_table` asserts the
+    /// `serde` form agrees with both.
     #[must_use]
     pub const fn id(self) -> &'static str {
         match self {
             Self::Rec709Video => "rec709_video",
             Self::SrgbFull => "srgb_full",
+            Self::PqRec2020 => CC8_SOURCE_PROFILES[0].id,
+            Self::HlgRec2020 => CC8_SOURCE_PROFILES[1].id,
         }
+    }
+
+    /// Whether this is one of CC8 §2.1's HDR profiles.
+    ///
+    /// The single question every surface that behaves differently on HDR asks:
+    /// the §3.3 interpretation stages, §7 item 2's HDR-source/SDR-delivery
+    /// block, §6 item 4's withheld skin report, and §8's status rows.
+    #[must_use]
+    pub const fn is_hdr(self) -> bool {
+        matches!(self, Self::PqRec2020 | Self::HlgRec2020)
+    }
+
+    /// CC8 §2.1's table row for this profile, or `None` for a CC1 SDR profile.
+    #[must_use]
+    pub fn cc8_row(self) -> Option<&'static Cc8SourceProfile> {
+        self.is_hdr().then(|| cc8_source_profile_by_id(self.id()))?
     }
 }
 
@@ -227,6 +296,42 @@ pub enum ColorSourceError {
     UnknownBitDepth,
     #[error("unsupported source colour bit depth: {0:?}")]
     UnsupportedBitDepth(ColorBitDepth),
+    /// CC8 §2.1's 10-bit floor, as its own typed reason.
+    ///
+    /// §2.1: "The 10-bit floor is deliberate and normative: 8-bit PQ or HLG is
+    /// banding by construction, and accepting it would be a claim CC8 cannot
+    /// defend. **An 8- or 9-bit HDR tuple is a typed rejection naming the
+    /// depth, not a warning.**"
+    ///
+    /// It is a separate variant from [`Self::UnsupportedBitDepth`] rather than
+    /// a widened one because the two have different allowed sets — CC1 admits
+    /// `8..=16`, CC8 admits `10..=16` — and because CC1's allowed-value strings
+    /// are asserted verbatim by
+    /// `cc1_fixtures::cc1_source_profile_classification_is_typed_and_actionable`.
+    /// One variant carrying two answers would have to pick one of them. The
+    /// same reasoning gives the three siblings below their own variants.
+    #[error("unsupported CC8 HDR source colour bit depth: {0:?}")]
+    UnsupportedHdrBitDepth(ColorBitDepth),
+    /// A matrix outside CC8 §2.1's `bt2020_ncl`/`rgb` column on an otherwise
+    /// HDR tuple — `bt2020_cl`, `ictcp`, and `chroma_derived_*` among them.
+    #[error("unsupported CC8 HDR source colour matrix: {0:?}")]
+    UnsupportedHdrMatrix(ColorMatrix),
+    /// A range outside CC8 §2.1's `limited`/`full` column on an HDR tuple.
+    #[error("unsupported CC8 HDR source colour range: {0:?}")]
+    UnsupportedHdrRange(ColorRange),
+    /// A **known** white point other than D65 on an HDR tuple.
+    ///
+    /// An *unknown* white point on an HDR tuple stays
+    /// [`Self::UnknownWhitePoint`] deliberately. §2.1: "The CC1 D65 rule
+    /// carries over unchanged" — the recovery is the same explicit
+    /// `profile_assumption`, and every surface that keys on that variant to
+    /// report `profile_assumption.required` must keep working for an HDR source
+    /// without forking. The CC8-specific allowed phrase for that case is
+    /// `cc8_hdr::CC8_HDR_WHITE_POINT_ALLOWED`, reported by §8's HDR status
+    /// block; this variant is only the known-and-wrong case, which has no
+    /// assumption recovery at all.
+    #[error("unsupported CC8 HDR source colour white point: {0:?}")]
+    UnsupportedHdrWhitePoint(ColorWhitePoint),
     #[error(
         "unsupported CC1 source combination: primaries={primaries:?}, transfer={transfer:?}, matrix={matrix:?}, range={range:?}"
     )]
@@ -255,6 +360,10 @@ impl ColorSourceError {
             Self::UnsupportedWhitePoint(_) => "unsupported_source_white_point",
             Self::UnknownBitDepth => "unknown_source_bit_depth",
             Self::UnsupportedBitDepth(_) => "unsupported_source_bit_depth",
+            Self::UnsupportedHdrBitDepth(_) => "unsupported_hdr_source_bit_depth",
+            Self::UnsupportedHdrMatrix(_) => "unsupported_hdr_source_matrix",
+            Self::UnsupportedHdrRange(_) => "unsupported_hdr_source_range",
+            Self::UnsupportedHdrWhitePoint(_) => "unsupported_hdr_source_white_point",
             Self::UnsupportedCombination { .. } => "unsupported_source_combination",
         }
     }
@@ -265,10 +374,18 @@ impl ColorSourceError {
         match self {
             Self::UnknownPrimaries | Self::UnsupportedPrimaries(_) => "primaries",
             Self::UnknownTransfer | Self::UnsupportedTransfer(_) => "transfer",
-            Self::UnknownMatrix | Self::UnsupportedMatrix(_) => "matrix",
-            Self::UnknownRange | Self::UnsupportedRange(_) => "range",
-            Self::UnknownWhitePoint | Self::UnsupportedWhitePoint(_) => "white_point",
-            Self::UnknownBitDepth | Self::UnsupportedBitDepth(_) => "bit_depth",
+            Self::UnknownMatrix | Self::UnsupportedMatrix(_) | Self::UnsupportedHdrMatrix(_) => {
+                "matrix"
+            }
+            Self::UnknownRange | Self::UnsupportedRange(_) | Self::UnsupportedHdrRange(_) => {
+                "range"
+            }
+            Self::UnknownWhitePoint
+            | Self::UnsupportedWhitePoint(_)
+            | Self::UnsupportedHdrWhitePoint(_) => "white_point",
+            Self::UnknownBitDepth
+            | Self::UnsupportedBitDepth(_)
+            | Self::UnsupportedHdrBitDepth(_) => "bit_depth",
             Self::UnsupportedCombination { .. } => "profile",
         }
     }
@@ -285,10 +402,18 @@ impl ColorSourceError {
             | Self::UnknownBitDepth => "unknown".to_owned(),
             Self::UnsupportedPrimaries(value) => format!("{value:?}"),
             Self::UnsupportedTransfer(value) => format!("{value:?}"),
-            Self::UnsupportedMatrix(value) => format!("{value:?}"),
-            Self::UnsupportedRange(value) => format!("{value:?}"),
-            Self::UnsupportedWhitePoint(value) => format!("{value:?}"),
-            Self::UnsupportedBitDepth(value) => format!("{value:?}"),
+            Self::UnsupportedMatrix(value) | Self::UnsupportedHdrMatrix(value) => {
+                format!("{value:?}")
+            }
+            Self::UnsupportedRange(value) | Self::UnsupportedHdrRange(value) => {
+                format!("{value:?}")
+            }
+            Self::UnsupportedWhitePoint(value) | Self::UnsupportedHdrWhitePoint(value) => {
+                format!("{value:?}")
+            }
+            Self::UnsupportedBitDepth(value) | Self::UnsupportedHdrBitDepth(value) => {
+                format!("{value:?}")
+            }
             Self::UnsupportedCombination {
                 primaries,
                 transfer,
@@ -301,6 +426,17 @@ impl ColorSourceError {
     }
 
     /// Allowed values or tuple shapes for the failed field.
+    ///
+    /// **The CC1 phrases are CC1 statements and are unchanged**, because
+    /// `cc1_fixtures::cc1_source_profile_classification_is_typed_and_actionable`
+    /// pins each verbatim and CC8 §9.1 fixture 6 requires every CC1 fixture to
+    /// pass unmoved. So `unsupported_source_primaries` on a Rec.2020 tuple
+    /// still reads "bt709 or srgb in a supported CC1 profile" — true of the CC1
+    /// profiles, and complemented rather than contradicted by
+    /// [`cc8_hdr::CC8_HDR_PRIMARIES_ALLOWED`](crate::cc8_hdr::CC8_HDR_PRIMARIES_ALLOWED),
+    /// which §8's HDR status block reports and which
+    /// [`SUPPORTED_PROFILE_IDS`] names in the combination phrase. The CC8 §2.1
+    /// reasons carry their own phrases from the authority module.
     #[must_use]
     pub const fn allowed_values(&self) -> &'static str {
         match self {
@@ -320,14 +456,32 @@ impl ColorSourceError {
                 "d65, or an explicit D65 assumption for BT.709"
             }
             Self::UnknownBitDepth | Self::UnsupportedBitDepth(_) => "integer depth 8..=16",
-            Self::UnsupportedCombination { .. } => "rec709_video or srgb_full",
+            Self::UnsupportedHdrBitDepth(_) => CC8_HDR_DEPTH_ALLOWED,
+            Self::UnsupportedHdrMatrix(_) => CC8_HDR_MATRIX_ALLOWED,
+            Self::UnsupportedHdrRange(_) => CC8_HDR_RANGE_ALLOWED,
+            Self::UnsupportedHdrWhitePoint(_) => CC8_HDR_WHITE_POINT_ALLOWED,
+            Self::UnsupportedCombination { .. } => SUPPORTED_PROFILE_IDS,
         }
     }
 
     /// Recovery action suitable for a visible status or agent response.
+    ///
+    /// CC1's sentence is unchanged for every CC1 reason and is asserted
+    /// verbatim by `cc1_fixtures::cc1_unsupported_metadata_classification`; the
+    /// CC8 §2.1 reasons get their own, because "relink to compatible media" is
+    /// not a useful instruction for a file that *is* HDR and is being refused
+    /// for a named field rather than for being HDR.
     #[must_use]
     pub const fn recovery_action(&self) -> &'static str {
-        "Apply an explicit supported source-colour override or relink to compatible media."
+        match self {
+            Self::UnsupportedHdrBitDepth(_)
+            | Self::UnsupportedHdrMatrix(_)
+            | Self::UnsupportedHdrRange(_)
+            | Self::UnsupportedHdrWhitePoint(_) => CC8_HDR_RECOVERY_ACTION,
+            _ => {
+                "Apply an explicit supported source-colour override or relink to compatible media."
+            }
+        }
     }
 
     /// Render the complete actionable status while retaining the structured
@@ -640,10 +794,35 @@ impl ColorDescription {
     }
 }
 
-/// Classify a source description against the bounded CC1 managed SDR input
-/// profiles. Unknown white point is intentionally rejected; callers that
-/// have an explicit, inspectable D65 assumption may use
-/// [`classify_source_with_assumption`].
+/// The CC8 §2.1 profile row a description's primaries/transfer pair selects.
+///
+/// This is the one place the HDR arm is entered from, and it is keyed on the
+/// **pair** because that is what §2.1's table makes distinctive: a description
+/// whose pair is not one of the two rows is not an HDR tuple at all and is
+/// diagnosed entirely by CC1's field rules, which is what keeps a BT.709/PQ or
+/// Rec.2020/BT.709 mismatch reported against the field CC1 already names.
+fn cc8_hdr_row(description: &ColorDescription) -> Option<&'static Cc8SourceProfile> {
+    cc8_source_profile_for_primaries_and_transfer(
+        description.primaries.wire(),
+        description.transfer.wire(),
+    )
+}
+
+/// Whether a colour description is one of CC8 §2.1's HDR profile *shapes*.
+///
+/// The pair only — this answers "is this description HDR?" for surfaces that
+/// need the question before a full classification, such as §7 item 2's
+/// HDR-source/SDR-delivery check, which must recognise an HDR delivery target
+/// whether or not every other field would classify.
+#[must_use]
+pub fn color_description_is_cc8_hdr(description: &ColorDescription) -> bool {
+    cc8_hdr_row(description).is_some()
+}
+
+/// Classify a source description against the bounded managed input profiles:
+/// CC1's two SDR profiles and CC8 §2.1's two HDR profiles. Unknown white point
+/// is intentionally rejected; callers that have an explicit, inspectable D65
+/// assumption may use [`classify_source_with_assumption`].
 ///
 /// # Errors
 ///
@@ -694,6 +873,19 @@ pub fn classify_source_with_assumption(
         return Err(error);
     }
 
+    // CC8 §2.1's closed HDR set. `validate_source_fields` has already checked
+    // every other column of the selected row, and the row is selected by the
+    // primaries/transfer pair, so a row that survives validation is a complete
+    // match on all listed fields — §2.1's "a partial match is not enough".
+    if let Some(row) = cc8_hdr_row(description) {
+        return Ok(match row.transfer {
+            transfer if transfer == CC8_SOURCE_PROFILES[0].transfer => {
+                ColorSourceProfile::PqRec2020
+            }
+            _ => ColorSourceProfile::HlgRec2020,
+        });
+    }
+
     let rec709_video = matches!(description.primaries, ColorPrimaries::Bt709)
         && matches!(
             description.transfer,
@@ -727,6 +919,9 @@ fn validate_source_fields(
     description: &ColorDescription,
     assumption: Option<ColorSourceProfileAssumption>,
 ) -> Result<(), ColorSourceError> {
+    if let Some(row) = cc8_hdr_row(description) {
+        return validate_cc8_hdr_source_fields(description, row, assumption);
+    }
     match &description.primaries {
         ColorPrimaries::Unknown => return Err(ColorSourceError::UnknownPrimaries),
         ColorPrimaries::Srgb | ColorPrimaries::Bt709 => {}
@@ -769,6 +964,60 @@ fn validate_source_fields(
         value => match value.integer_bits() {
             Some(bits) if (8..=16).contains(&bits) => Ok(()),
             _ => Err(ColorSourceError::UnsupportedBitDepth(value.clone())),
+        },
+    }
+}
+
+/// Validate the remaining columns of one CC8 §2.1 profile row.
+///
+/// The primaries and transfer are already known to be the row's, because the
+/// row was selected by that pair. Everything else is checked against the row
+/// itself rather than against a literal, so widening §2.1's table is a change
+/// to `cc8_hdr::CC8_SOURCE_PROFILES` and nothing else.
+///
+/// Each failure is one of the CC8-specific typed reasons, never a CC1 one:
+/// CC1's allowed-value strings are pinned verbatim by
+/// `cc1_fixtures::cc1_source_profile_classification_is_typed_and_actionable`
+/// and describe a different allowed set.
+fn validate_cc8_hdr_source_fields(
+    description: &ColorDescription,
+    row: &'static Cc8SourceProfile,
+    assumption: Option<ColorSourceProfileAssumption>,
+) -> Result<(), ColorSourceError> {
+    match &description.matrix {
+        ColorMatrix::Unknown => return Err(ColorSourceError::UnknownMatrix),
+        value if row.accepts_matrix(value.wire()) => {}
+        // §2.1: `bt2020_cl`, `ictcp`, and `chroma_derived_*` are "explicit CC8
+        // failures, not guesses".
+        value => return Err(ColorSourceError::UnsupportedHdrMatrix(value.clone())),
+    }
+
+    match &description.range {
+        ColorRange::Unknown => return Err(ColorSourceError::UnknownRange),
+        value if row.accepts_range(value.wire()) => {}
+        value => return Err(ColorSourceError::UnsupportedHdrRange(value.clone())),
+    }
+
+    match &description.white_point {
+        value if row.accepts_white_point(value.wire()) => {}
+        // §2.1: "The CC1 D65 rule carries over unchanged: an unknown white
+        // point on an otherwise supported HDR tuple may use the normative D65
+        // value only through an explicit `profile_assumption` recorded in the
+        // colour status and proof. The raw source metadata stays `Unknown`. No
+        // code may rewrite it." Nothing here writes to `description`.
+        ColorWhitePoint::Unknown
+            if matches!(assumption, Some(ColorSourceProfileAssumption::D65)) => {}
+        ColorWhitePoint::Unknown => return Err(ColorSourceError::UnknownWhitePoint),
+        value => return Err(ColorSourceError::UnsupportedHdrWhitePoint(value.clone())),
+    }
+
+    match &description.bit_depth {
+        ColorBitDepth::Unknown => Err(ColorSourceError::UnknownBitDepth),
+        // §2.1's 10-bit floor, and CC1 §2.1's rule that a named depth and its
+        // numeric spelling are the same declared depth.
+        value => match value.integer_bits() {
+            Some(bits) if row.accepts_integer_depth(bits) => Ok(()),
+            _ => Err(ColorSourceError::UnsupportedHdrBitDepth(value.clone())),
         },
     }
 }
@@ -1303,6 +1552,297 @@ mod tests {
                 "depth {depth:?} must be rejected"
             );
         }
+    }
+
+    fn hdr_description(transfer: ColorTransfer) -> ColorDescription {
+        ColorDescription {
+            primaries: ColorPrimaries::Bt2020,
+            transfer,
+            matrix: ColorMatrix::Bt2020Ncl,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Ten,
+            confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
+            provenance: ColorProvenance::StreamMetadata,
+        }
+    }
+
+    /// CC8 §2.1's two rows, on every column the table lists.
+    #[test]
+    fn cc8_source_classifier_accepts_the_two_hdr_profiles_on_every_listed_column() {
+        for (transfer, expected) in [
+            (ColorTransfer::Smpte2084, ColorSourceProfile::PqRec2020),
+            (ColorTransfer::AribStdB67, ColorSourceProfile::HlgRec2020),
+        ] {
+            let base = hdr_description(transfer.clone());
+            assert_eq!(classify_source(&base), Ok(expected));
+            assert!(expected.is_hdr());
+            assert_eq!(
+                expected.cc8_row().map(|row| row.transfer),
+                Some(match transfer {
+                    ColorTransfer::Smpte2084 => "smpte2084",
+                    _ => "arib_std_b67",
+                })
+            );
+
+            // §2.1's `Matrix` column: `bt2020_ncl` or `rgb`, both spellings.
+            for matrix in [ColorMatrix::Bt2020Ncl, ColorMatrix::Rgb] {
+                assert_eq!(
+                    classify_source(&ColorDescription {
+                        matrix,
+                        ..base.clone()
+                    }),
+                    Ok(expected)
+                );
+            }
+            // §2.1's `Range` column: `limited` or `full`.
+            for range in [ColorRange::Limited, ColorRange::Full] {
+                assert_eq!(
+                    classify_source(&ColorDescription {
+                        range,
+                        ..base.clone()
+                    }),
+                    Ok(expected)
+                );
+            }
+            // §2.1's `Integer depth` column, at both ends and in both
+            // spellings — CC1 §2.1's named/numeric equivalence, on the HDR row.
+            for depth in [
+                ColorBitDepth::Ten,
+                ColorBitDepth::Integer(10),
+                ColorBitDepth::Twelve,
+                ColorBitDepth::Sixteen,
+                ColorBitDepth::Integer(16),
+            ] {
+                assert_eq!(
+                    classify_source(&ColorDescription {
+                        bit_depth: depth.clone(),
+                        ..base.clone()
+                    }),
+                    Ok(expected),
+                    "depth {depth:?} is inside §2.1's 10..=16",
+                );
+            }
+        }
+    }
+
+    /// CC8 §2.1's closed set: every HDR-adjacent tuple outside it fails typed.
+    #[test]
+    fn cc8_source_classifier_rejects_every_hdr_adjacent_tuple_outside_the_closed_set() {
+        let pq = hdr_description(ColorTransfer::Smpte2084);
+
+        // §2.1's 10-bit floor. Both codes below it, in both spellings.
+        for depth in [
+            ColorBitDepth::Eight,
+            ColorBitDepth::Integer(8),
+            ColorBitDepth::Integer(9),
+            ColorBitDepth::Integer(17),
+            ColorBitDepth::Float16,
+        ] {
+            let error = classify_source(&ColorDescription {
+                bit_depth: depth.clone(),
+                ..pq.clone()
+            })
+            .expect_err("a depth outside §2.1's column must be rejected");
+            assert_eq!(error, ColorSourceError::UnsupportedHdrBitDepth(depth));
+            assert_eq!(error.code(), "unsupported_hdr_source_bit_depth");
+            assert_eq!(error.field(), "bit_depth");
+            assert_eq!(error.allowed_values(), CC8_HDR_DEPTH_ALLOWED);
+            assert!(error.recovery_action().contains("CC8 HDR source profile"));
+        }
+
+        // §2.1's named matrix rejections.
+        for matrix in [
+            ColorMatrix::Bt2020Cl,
+            ColorMatrix::Ictcp,
+            ColorMatrix::ChromaDerivedNcl,
+            ColorMatrix::ChromaDerivedCl,
+            ColorMatrix::Bt709,
+            ColorMatrix::Identity,
+        ] {
+            let error = classify_source(&ColorDescription {
+                matrix: matrix.clone(),
+                ..pq.clone()
+            })
+            .expect_err("a matrix outside §2.1's column must be rejected");
+            assert_eq!(error, ColorSourceError::UnsupportedHdrMatrix(matrix));
+            assert_eq!(error.code(), "unsupported_hdr_source_matrix");
+            assert_eq!(error.allowed_values(), CC8_HDR_MATRIX_ALLOWED);
+        }
+
+        // P3 primaries in any combination, including with an HDR transfer.
+        // The pair is not one of §2.1's rows, so this is diagnosed by CC1's
+        // primaries rule — the tuple is not HDR, it is unsupported.
+        for primaries in [ColorPrimaries::DisplayP3, ColorPrimaries::DciP3] {
+            let error = classify_source(&ColorDescription {
+                primaries: primaries.clone(),
+                ..pq.clone()
+            })
+            .expect_err("P3 primaries are an explicit CC8 failure");
+            assert_eq!(error, ColorSourceError::UnsupportedPrimaries(primaries));
+        }
+
+        // §2.1's mismatched pairs, both directions, reported against the field
+        // CC1 already names them by so no CC1 fixture moves.
+        for transfer in [ColorTransfer::Smpte2084, ColorTransfer::AribStdB67] {
+            let error = classify_source(&ColorDescription {
+                primaries: ColorPrimaries::Bt709,
+                matrix: ColorMatrix::Bt709,
+                transfer: transfer.clone(),
+                ..pq.clone()
+            })
+            .expect_err("an HDR transfer on BT.709 primaries is an explicit failure");
+            assert_eq!(error, ColorSourceError::UnsupportedTransfer(transfer));
+        }
+        let error = classify_source(&ColorDescription {
+            transfer: ColorTransfer::Bt709,
+            ..pq.clone()
+        })
+        .expect_err("Rec.2020 primaries with a BT.709 transfer is an explicit failure");
+        assert_eq!(
+            error,
+            ColorSourceError::UnsupportedPrimaries(ColorPrimaries::Bt2020)
+        );
+
+        // A range outside `limited`/`full` is the HDR range reason.
+        let other_range = ColorRange::Other("mpeg".to_owned());
+        assert_eq!(
+            classify_source(&ColorDescription {
+                range: other_range.clone(),
+                ..pq
+            }),
+            Err(ColorSourceError::UnsupportedHdrRange(other_range)),
+        );
+    }
+
+    /// CC8 §2.1's white-point and unknown-field rules on an HDR tuple.
+    #[test]
+    fn cc8_source_classifier_keeps_the_d65_rule_and_unknown_fields_honest() {
+        let pq = hdr_description(ColorTransfer::Smpte2084);
+
+        // A known-but-wrong white point on an HDR tuple, and the D65 rule.
+        let error = classify_source(&ColorDescription {
+            white_point: ColorWhitePoint::Dci,
+            ..pq.clone()
+        })
+        .expect_err("a non-D65 white point on an HDR tuple must be rejected");
+        assert_eq!(
+            error,
+            ColorSourceError::UnsupportedHdrWhitePoint(ColorWhitePoint::Dci)
+        );
+        assert_eq!(error.allowed_values(), CC8_HDR_WHITE_POINT_ALLOWED);
+
+        let unknown_white_point = ColorDescription {
+            white_point: ColorWhitePoint::Unknown,
+            ..pq.clone()
+        };
+        assert_eq!(
+            classify_source(&unknown_white_point),
+            Err(ColorSourceError::UnknownWhitePoint),
+            "§2.1 carries CC1's D65 rule over: no silent inference",
+        );
+        assert_eq!(
+            classify_source_with_assumption(
+                &unknown_white_point,
+                Some(ColorSourceProfileAssumption::D65)
+            ),
+            Ok(ColorSourceProfile::PqRec2020),
+        );
+        assert_eq!(
+            unknown_white_point.white_point,
+            ColorWhitePoint::Unknown,
+            "§2.1: the raw source metadata stays Unknown. No code may rewrite it.",
+        );
+
+        // Unknown fields stay honest rather than being inferred from the rest
+        // of an otherwise complete HDR tuple.
+        for (description, expected) in [
+            (
+                ColorDescription {
+                    matrix: ColorMatrix::Unknown,
+                    ..pq.clone()
+                },
+                ColorSourceError::UnknownMatrix,
+            ),
+            (
+                ColorDescription {
+                    range: ColorRange::Unknown,
+                    ..pq.clone()
+                },
+                ColorSourceError::UnknownRange,
+            ),
+            (
+                ColorDescription {
+                    bit_depth: ColorBitDepth::Unknown,
+                    ..pq
+                },
+                ColorSourceError::UnknownBitDepth,
+            ),
+        ] {
+            assert_eq!(classify_source(&description), Err(expected));
+        }
+    }
+
+    /// CC8 §7: the classification's identity serialises and round-trips, and
+    /// the wire spellings are the authority table's.
+    #[test]
+    fn hdr_profile_ids_come_from_the_cc8_authority_table() {
+        for profile in [
+            ColorSourceProfile::PqRec2020,
+            ColorSourceProfile::HlgRec2020,
+        ] {
+            let encoded = serde_json::to_value(profile).expect("a profile serialises");
+            assert_eq!(
+                encoded,
+                Value::String(profile.id().to_owned()),
+                "the serde form and `id()` must be the same string",
+            );
+            let decoded: ColorSourceProfile =
+                serde_json::from_value(encoded).expect("a profile round-trips");
+            assert_eq!(decoded, profile);
+            assert!(cc8_source_profile_by_id(profile.id()).is_some());
+        }
+        assert_eq!(ColorSourceProfile::PqRec2020.id(), "pq_rec2020");
+        assert_eq!(ColorSourceProfile::HlgRec2020.id(), "hlg_rec2020");
+        assert!(!ColorSourceProfile::Rec709Video.is_hdr());
+        assert!(!ColorSourceProfile::SrgbFull.is_hdr());
+        assert!(ColorSourceProfile::Rec709Video.cc8_row().is_none());
+    }
+
+    #[test]
+    fn supported_profile_ids_phrase_names_every_profile() {
+        for profile in [
+            ColorSourceProfile::Rec709Video,
+            ColorSourceProfile::SrgbFull,
+            ColorSourceProfile::PqRec2020,
+            ColorSourceProfile::HlgRec2020,
+        ] {
+            assert!(
+                SUPPORTED_PROFILE_IDS.contains(profile.id()),
+                "the combination allowed-value phrase omits {}",
+                profile.id(),
+            );
+        }
+    }
+
+    #[test]
+    fn color_tag_wire_spellings_are_the_serde_forms() {
+        // `wire()` is what CC8 §2.1's table is matched against, so it must be
+        // the same string `Serialize` writes for every variant, including the
+        // `Other` passthrough that keeps a newer decoder's value readable.
+        for value in [
+            ColorPrimaries::Bt709,
+            ColorPrimaries::Bt2020,
+            ColorPrimaries::DisplayP3,
+            ColorPrimaries::Other("acesap0".to_owned()),
+        ] {
+            let encoded = serde_json::to_value(&value).expect("a tag serialises");
+            assert_eq!(encoded, Value::String(value.wire().to_owned()));
+        }
+        assert_eq!(ColorTransfer::AribStdB67.wire(), "arib_std_b67");
+        assert_eq!(ColorMatrix::Bt2020Ncl.wire(), "bt2020_ncl");
+        assert_eq!(ColorWhitePoint::D65.wire(), "d65");
+        assert_eq!(ColorRange::Unknown.wire(), "unknown");
     }
 
     #[test]

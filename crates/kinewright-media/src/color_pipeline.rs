@@ -15,7 +15,8 @@ use kinewright_core::{
     ColorDescription, ColorMatrix, ColorNodeKind, ColorPrimaries, ColorRange, ColorTransfer,
     ColorWheelsParams, ColorWhitePoint, CurvePoints, Effect, LutAssetId, LutNodeParams,
     MatteParams, MatteQualifierParams, MatteWindowParams, ParamValue, ResolvedCurves,
-    active_color_nodes, effect_descriptor, is_matte_parameter, managed_color_node_count,
+    active_color_nodes, cc8_hlg_decode_working_linear, cc8_pq_decode_working_linear,
+    effect_descriptor, is_matte_parameter, managed_color_node_count,
 };
 
 use crate::lut::CubeLut;
@@ -112,6 +113,13 @@ pub enum ColorPipelineError {
     /// The Core primary descriptor is unavailable or disagrees with the
     /// media-side canonical control table.
     PrimaryDescriptorMismatch(String),
+    /// A CC8 §3.3 HDR interpretation stage was asked for a profile that is not
+    /// one of CC8 §2.1's two HDR rows.
+    ///
+    /// A typed refusal rather than a silent identity: the HDR stages change
+    /// what a pixel *means*, so running or skipping them on the wrong profile
+    /// is a wrong picture, not a no-op.
+    NotAnHdrSourceProfile(ColorSourceProfile),
     /// The target transfer is not the CC1 BT.709 monitor transfer.
     UnsupportedMonitorTransfer(ColorTransfer),
     /// The target transfer is not the CC1 BT.709 delivery transfer.
@@ -201,6 +209,13 @@ impl fmt::Display for ColorPipelineError {
             Self::PrimaryDescriptorMismatch(value) => {
                 write!(formatter, "Core/media primary descriptor mismatch: {value}")
             }
+            Self::NotAnHdrSourceProfile(value) => write!(
+                formatter,
+                "not_an_hdr_source_profile: observed {}, allowed {} or {} (CC8 §2.1)",
+                value.id(),
+                ColorSourceProfile::PqRec2020.id(),
+                ColorSourceProfile::HlgRec2020.id(),
+            ),
             Self::UnsupportedMonitorTransfer(value) => {
                 write!(formatter, "unsupported monitor transfer: {value:?}")
             }
@@ -332,6 +347,15 @@ pub fn decode_bt1886(encoded: f32) -> f32 {
 
 /// Decode one of the transfers accepted by a CC1 source profile.
 ///
+/// **This is the SDR, per-channel decode and it stays that way.** CC8 §2.1's
+/// two HDR profiles are decoded by [`decode_hdr_source_working_linear`]
+/// instead, because HLG's stage chain is not separable per channel — §3.3's
+/// OOTF stage takes a BT.2020 luma over the whole triple — and because
+/// splitting an HDR decode into a per-channel call would let a caller take the
+/// first stage and drop the rest, which is the mistake
+/// `cc8_pq_decode_working_linear`'s fused shape exists to prevent. An HDR
+/// transfer reaching here is still the typed refusal it is today.
+///
 /// # Errors
 ///
 /// Returns an error when the transfer characteristic is unknown or outside
@@ -343,6 +367,55 @@ pub fn decode_transfer(transfer: &ColorTransfer, encoded: f32) -> Result<f32, Co
         ColorTransfer::Bt1886 => Ok(decode_bt1886(encoded)),
         ColorTransfer::Unknown => Err(ColorPipelineError::UnknownTransfer),
         value => Err(ColorPipelineError::UnsupportedTransfer(value.clone())),
+    }
+}
+
+/// CC8 §3.3's HDR source interpretation, from coded RGB to working linear.
+///
+/// This is the managed input path's HDR half: the named stages §3.3 marks `*`
+/// on the source side, in §3.3's order, selected by the classified profile.
+///
+/// ```text
+/// pq_rec2020:   source transfer decode (ST 2084 EOTF, absolute cd/m²)
+///               -> reference-white normalization        (§2.2's anchor)
+/// hlg_rec2020:  source transfer decode (ARIB STD-B67 inverse OETF)
+///               -> HLG OOTF at §2.2's nominal peak and gamma (absolute cd/m²)
+///               -> reference-white normalization        (§2.2's anchor)
+/// ```
+///
+/// Every constant and every stage comes from `kinewright_core::cc8_hdr`; this
+/// function contains no transfer arithmetic of its own, which is CC8 §2.2's
+/// rule that the standards' constants "must not be delegated" restated from the
+/// other side — they are also not *duplicated*.
+///
+/// **The result is Rec.2020-primaried linear light**, not working BT.709.
+/// §3.3's next stage is "primaries conversion to working BT.709 D65 (\* now
+/// non-identity)", and that stage is §10 step 4's, with §9.1 fixture 3 as its
+/// gate. `kinewright_core::CC8_REC2020_TO_BT709` is already pinned and tested
+/// for it. Until step 4 lands, [`VideoDecoder::open_scaled_managed`] refuses an
+/// HDR-profile source rather than composite Rec.2020 values as though they were
+/// BT.709 — see `decode::hdr_managed_decode_not_yet_available`.
+///
+/// **No clamp, at any stage.** CC1 §2.2 invariant 5, restated by CC8 §2.3.
+/// Undershoot below black survives as negative working values and over-range
+/// highlights survive at their magnitude: a PQ 10 000-nit code lands at
+/// `≈ 49.3`, far inside `f16`'s range (§3.1).
+///
+/// # Errors
+///
+/// Returns [`ColorPipelineError::SourceProfile`] when the profile is not one of
+/// CC8 §2.1's two, so a caller cannot reach the HDR stages with an SDR or
+/// unclassified description.
+pub fn decode_hdr_source_working_linear(
+    profile: ColorSourceProfile,
+    coded_rgb: [f32; 3],
+) -> Result<[f32; 3], ColorPipelineError> {
+    match profile {
+        ColorSourceProfile::PqRec2020 => Ok(coded_rgb.map(cc8_pq_decode_working_linear)),
+        ColorSourceProfile::HlgRec2020 => Ok(cc8_hlg_decode_working_linear(coded_rgb)),
+        // A CC1 SDR profile has no HDR stages; asking for them is a caller
+        // error, not a silent identity.
+        profile => Err(ColorPipelineError::NotAnHdrSourceProfile(profile)),
     }
 }
 
@@ -495,17 +568,27 @@ pub fn decode_bt709_ycbcr(
 /// profile.  Matrix conversion is intentionally not performed here: the
 /// bounded `FFmpeg`/swscale boundary must already have converted `Y'CbCr` to RGB.
 ///
+/// The profile selects the interpretation, which is the whole point of CC1
+/// §2.1's and CC8 §2.1's closed sets: a CC1 SDR profile takes the per-channel
+/// [`decode_transfer`], and one of CC8 §2.1's two HDR profiles takes §3.3's
+/// named HDR stages through [`decode_hdr_source_working_linear`]. The HDR
+/// result is Rec.2020-primaried linear light in working units; §3.3's
+/// primaries conversion is the next stage and is §10 step 4's.
+///
 /// # Errors
 ///
-/// Returns an error when the source metadata is not a complete supported CC1
+/// Returns an error when the source metadata is not a complete supported
 /// profile or its transfer cannot be decoded.
 pub fn decode_source_rgb(
     description: &ColorDescription,
     encoded_rgb: [f32; 3],
     assumption: Option<SourceProfileAssumption>,
 ) -> Result<[f32; 3], ColorPipelineError> {
-    let _profile = classify_source_with_assumption(description, assumption)
+    let profile = classify_source_with_assumption(description, assumption)
         .map_err(ColorPipelineError::SourceProfile)?;
+    if profile.is_hdr() {
+        return decode_hdr_source_working_linear(profile, encoded_rgb);
+    }
     let mut decoded = [0.0; 3];
     for (index, value) in encoded_rgb.into_iter().enumerate() {
         decoded[index] = decode_transfer(&description.transfer, value)?;
@@ -2573,6 +2656,98 @@ mod tests {
             Ok(SupportedSourceProfile::Rec709Video)
         );
         assert_eq!(description.white_point, ColorWhitePoint::Unknown);
+    }
+
+    fn cc8_hdr_description(transfer: ColorTransfer) -> ColorDescription {
+        ColorDescription {
+            primaries: ColorPrimaries::Bt2020,
+            transfer,
+            matrix: ColorMatrix::Bt2020Ncl,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Ten,
+            confidence_basis_points: 10_000,
+            provenance: kinewright_core::ColorProvenance::StreamMetadata,
+        }
+    }
+
+    /// CC8 §2.2/§3.3: the managed input conversion routes a classified HDR
+    /// source through the HDR stages, and keeps the SDR path per-channel.
+    #[test]
+    fn decode_source_rgb_selects_the_cc8_hdr_stages_by_profile() {
+        // The PQ leg lands §2.2's anchor: a signal encoding 203 cd/m² is
+        // working 1.0. Neither 203 nor 1.0/203 is written here.
+        #[allow(clippy::cast_precision_loss)]
+        let anchor = kinewright_core::CC8_REFERENCE_WHITE_NITS as f32;
+        let pq_signal = kinewright_core::cc8_pq_inverse_eotf(anchor);
+        let pq = decode_source_rgb(
+            &cc8_hdr_description(ColorTransfer::Smpte2084),
+            [pq_signal; 3],
+            None,
+        )
+        .expect("a pq_rec2020 source decodes");
+        for channel in pq {
+            assert!((channel - 1.0).abs() < 1.0e-3, "PQ decoded to {pq:?}");
+        }
+
+        // The HLG leg lands the same 1.0 from BT.2408's 75 % signal — §10 step
+        // 3's determination, exercised through the production entry point.
+        #[allow(clippy::cast_precision_loss)]
+        let hlg_signal = kinewright_core::CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT as f32 / 100.0;
+        let hlg = decode_source_rgb(
+            &cc8_hdr_description(ColorTransfer::AribStdB67),
+            [hlg_signal; 3],
+            None,
+        )
+        .expect("an hlg_rec2020 source decodes");
+        for channel in hlg {
+            assert!(
+                (channel - 1.0).abs() < 0.5 / anchor,
+                "HLG decoded to {hlg:?}"
+            );
+        }
+
+        // The failing direction that proves the routing is real: the SDR
+        // per-channel decode refuses both HDR transfers, so an HDR source that
+        // reached `decode_transfer` would error rather than be misread.
+        for transfer in [ColorTransfer::Smpte2084, ColorTransfer::AribStdB67] {
+            assert!(matches!(
+                decode_transfer(&transfer, 0.5),
+                Err(ColorPipelineError::UnsupportedTransfer(_))
+            ));
+        }
+        // And the HDR stages refuse an SDR profile rather than acting as an
+        // identity on it.
+        for profile in [
+            ColorSourceProfile::Rec709Video,
+            ColorSourceProfile::SrgbFull,
+        ] {
+            let error = decode_hdr_source_working_linear(profile, [0.5; 3])
+                .expect_err("a CC1 profile has no CC8 HDR stages");
+            assert!(matches!(
+                error,
+                ColorPipelineError::NotAnHdrSourceProfile(_)
+            ));
+            assert!(error.to_string().contains("not_an_hdr_source_profile"));
+        }
+
+        // §2.3/CC1 §2.2 invariant 5: no clamp at any stage. A negative signal
+        // survives as a negative working value and an over-range PQ code
+        // survives at HDR magnitude.
+        let undershoot = decode_source_rgb(
+            &cc8_hdr_description(ColorTransfer::Smpte2084),
+            [-0.05; 3],
+            None,
+        )
+        .expect("undershoot decodes");
+        assert!(undershoot.iter().all(|value| *value < 0.0));
+        let peak = decode_source_rgb(
+            &cc8_hdr_description(ColorTransfer::Smpte2084),
+            [1.0; 3],
+            None,
+        )
+        .expect("the PQ peak decodes");
+        assert!(peak.iter().all(|value| *value > 49.0));
     }
 
     #[test]

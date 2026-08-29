@@ -6,10 +6,11 @@ use thiserror::Error;
 
 use crate::{
     ClipContent, ColorBitDepth, ColorDescription, ColorMatrix, ColorPipelineState, ColorPrimaries,
-    ColorProvenance, ColorRange, ColorSourceError, ColorSourceProfileAssumption, ColorTransfer,
-    ColorWhitePoint, Document, Effect, EffectId, ExportCancellation, ExportSettings, MediaKind,
-    OpError, ParamValue, QaIssue, QaSeverity, TrackKind, classify_source,
-    classify_source_with_assumption, qa_document,
+    ColorProvenance, ColorRange, ColorSourceError, ColorSourceProfile,
+    ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Document, Effect, EffectId,
+    ExportCancellation, ExportSettings, MediaAsset, MediaKind, OpError, ParamValue, QaIssue,
+    QaSeverity, TrackKind, cc8_hdr::CC8_HDR_DELIVERY_ALLOWED, classify_source,
+    classify_source_with_assumption, color_description_is_cc8_hdr, qa_document,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -446,13 +447,17 @@ fn append_managed_source_issues(document: &Document, issues: &mut Vec<QaIssue>) 
             continue;
         }
         let error = match classify_source(&asset.color_description) {
-            Ok(_) => continue,
+            Ok(profile) => {
+                append_hdr_source_delivery_issue(document, asset, profile, issues);
+                continue;
+            }
             Err(ColorSourceError::UnknownWhitePoint) => {
                 match classify_source_with_assumption(
                     &asset.color_description,
                     Some(ColorSourceProfileAssumption::D65),
                 ) {
-                    Ok(_) => {
+                    Ok(profile) => {
+                        append_hdr_source_delivery_issue(document, asset, profile, issues);
                         issues.push(QaIssue {
                             severity: QaSeverity::Warning,
                             code: "source_color_profile_assumption".to_owned(),
@@ -491,6 +496,61 @@ fn append_managed_source_issues(document: &Document, issues: &mut Vec<QaIssue>) 
             range: None,
         });
     }
+}
+
+/// CC8 §7 item 2's blocking issue code.
+pub const HDR_SOURCE_ON_SDR_DELIVERY: &str = "hdr_source_on_sdr_delivery";
+
+/// CC8 §7 item 2: an HDR-profile source in a project whose delivery
+/// description is not HDR blocks managed export with a typed reason naming
+/// the deferral.
+///
+/// §7 item 2, verbatim: "A project whose source is HDR but whose delivery is
+/// SDR **loads**, reports the mismatch, and blocks managed export with the §5.3
+/// typed reason naming the deferral. It is not auto-tone-mapped and its
+/// delivery target is not silently rewritten (§0.2 Q6)."
+///
+/// This is **not** scaffolding for the unbuilt HDR lane. §0.2 Q6 refuses
+/// tone-mapped delivery permanently — "a rendering intent and a compression
+/// curve… no defensible objective pass threshold, so it cannot have a
+/// CC8-shaped exit gate" — so an HDR source with an SDR delivery target is a
+/// permanent block, not a temporary one. What §10 step 6 changes is only which
+/// delivery descriptions satisfy [`color_description_is_cc8_hdr`] in practice,
+/// not this rule.
+///
+/// The message carries §5.3's three facts (`field` / `observed` / `allowed`) in
+/// the same shape [`DeliveryColorMismatch`] does, because [`QaIssue`] still has
+/// no structured detail map (CC6 §3.6).
+fn append_hdr_source_delivery_issue(
+    document: &Document,
+    asset: &MediaAsset,
+    profile: ColorSourceProfile,
+    issues: &mut Vec<QaIssue>,
+) {
+    if !profile.is_hdr() || color_description_is_cc8_hdr(&document.color_context.delivery) {
+        return;
+    }
+    issues.push(QaIssue {
+        severity: QaSeverity::Error,
+        code: HDR_SOURCE_ON_SDR_DELIVERY.to_owned(),
+        message: format!(
+            "Asset {} ({}) is a CC8 HDR source (profile={}) but this project's delivery \
+             description is not HDR: field=delivery.transfer, observed={:?}, allowed={}. \
+             CC8 §0.2 Q6 defers tone-mapped SDR delivery from an HDR timeline and refuses \
+             HDR-from-SDR outright, so the delivery target is neither tone-mapped nor \
+             rewritten. Set an HDR delivery description explicitly, or relink the clip to \
+             an SDR source.",
+            asset.id,
+            asset.name,
+            profile.id(),
+            document.color_context.delivery.transfer,
+            CC8_HDR_DELIVERY_ALLOWED,
+        ),
+        asset: Some(asset.id),
+        track: None,
+        clip: None,
+        range: None,
+    });
 }
 
 /// One delivery-colour field that the current export contract rejects.
@@ -2015,6 +2075,20 @@ mod tests {
         }));
     }
 
+    /// The tuple this test uses moved for CC8 §2.1, and the reason is worth
+    /// recording rather than leaving to a diff.
+    ///
+    /// It used to be `bt2020` / `smpte2084` / `bt2020_ncl` / `limited` / `d65`
+    /// / 10-bit — a full HDR tuple standing in for "a known but unsupported
+    /// source". CC8 §2.1 makes exactly that tuple the `pq_rec2020` profile, so
+    /// it is no longer an example of the thing this test is about. The tuple
+    /// below keeps the test's subject — a **completely specified** source
+    /// description that still matches no profile, blocking managed delivery on
+    /// a named field rather than on missing metadata — by pairing Rec.2020
+    /// primaries with a BT.709 transfer, which §2.1 lists among the mismatched
+    /// pairs that stay "explicit CC8 failures, not guesses". The HDR tuple's
+    /// own behaviour is now
+    /// `hdr_source_with_sdr_delivery_blocks_export_without_tone_mapping`.
     #[test]
     fn unsupported_known_source_profile_blocks_managed_delivery() {
         let mut document = fixture();
@@ -2022,7 +2096,7 @@ mod tests {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         document.media_pool[0].color_description = crate::ColorDescription {
             primaries: crate::ColorPrimaries::Bt2020,
-            transfer: crate::ColorTransfer::Smpte2084,
+            transfer: crate::ColorTransfer::Bt709,
             matrix: crate::ColorMatrix::Bt2020Ncl,
             range: crate::ColorRange::Limited,
             white_point: crate::ColorWhitePoint::D65,
@@ -2048,6 +2122,100 @@ mod tests {
         assert!(issue.message.contains("unsupported_source_primaries"));
         assert!(issue.message.contains("field=primaries"));
         assert!(!report.export_ready());
+    }
+
+    /// CC8 §7 item 2, both directions.
+    #[test]
+    fn hdr_source_with_sdr_delivery_blocks_export_without_tone_mapping() {
+        let mut document = fixture();
+        document.media_pool[0].path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let hdr_source = crate::ColorDescription {
+            primaries: ColorPrimaries::Bt2020,
+            transfer: ColorTransfer::Smpte2084,
+            matrix: ColorMatrix::Bt2020Ncl,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Ten,
+            confidence_basis_points: crate::COLOR_CONFIDENCE_MAX_BASIS_POINTS,
+            provenance: ColorProvenance::StreamMetadata,
+        };
+        // Non-vacuity: this tuple is now a *supported* CC8 profile, so the
+        // block below is the HDR/SDR mismatch and not a leftover source
+        // rejection.
+        assert_eq!(
+            classify_source(&hdr_source),
+            Ok(ColorSourceProfile::PqRec2020)
+        );
+        document.media_pool[0].color_description = hdr_source;
+
+        let report = delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Eight,
+            50,
+            50,
+        )
+        .expect("an HDR source must be reported, not returned as an error");
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == HDR_SOURCE_ON_SDR_DELIVERY)
+            .expect("an HDR source on an SDR delivery target must block");
+        assert_eq!(issue.severity, QaSeverity::Error);
+        assert_eq!(issue.asset, Some(AssetId(1)));
+        assert!(issue.message.contains("pq_rec2020"), "{}", issue.message);
+        assert!(
+            issue.message.contains("field=delivery.transfer"),
+            "{}",
+            issue.message
+        );
+        // §0.2 Q6 and §7 item 2: neither tone-mapped nor silently rewritten.
+        assert!(issue.message.contains("§0.2 Q6"), "{}", issue.message);
+        assert!(!report.export_ready());
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "unsupported_source_color"),
+            "a classified HDR source is not an unsupported source",
+        );
+        assert_eq!(
+            document
+                .asset(AssetId(1))
+                .expect("asset")
+                .color_description
+                .transfer,
+            ColorTransfer::Smpte2084,
+            "the source description must not be rewritten by the report",
+        );
+        assert_eq!(
+            document.color_context.delivery,
+            ColorContext::sdr_rec709().delivery,
+            "the delivery target must not be silently rewritten",
+        );
+
+        // The passing direction: an HDR delivery description clears this
+        // specific block. §10 step 6 owns the lane that makes such a
+        // description reachable through an operation; the rule is here now
+        // because §10 step 3 is what creates HDR-classified sources.
+        document.color_context.delivery.primaries = ColorPrimaries::Bt2020;
+        document.color_context.delivery.transfer = ColorTransfer::AribStdB67;
+        let hdr_delivery = delivery_conformance(
+            &document,
+            DeliveryProfile::SourceMaster,
+            DeliveryEncodeDepth::Ten,
+            50,
+            50,
+        )
+        .expect("an HDR delivery description should still produce a report");
+        assert!(
+            !hdr_delivery
+                .issues
+                .iter()
+                .any(|issue| issue.code == HDR_SOURCE_ON_SDR_DELIVERY),
+            "an HDR delivery description clears the HDR-source mismatch",
+        );
     }
 
     #[test]
