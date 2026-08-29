@@ -3,12 +3,17 @@
 **Accepted 2026-08-29.** The owner accepted draft v1 as written: all six of §0.2's
 recommendations are adopted verbatim, and `docs/ROADMAP-AND-WORKFLOWS.md` was
 amended per §0.5 in the same commit. This document is normative from that date.
-It is **not yet implemented** — the `CHANGELOG.md` entry lands when implementation
-completes, as CC0–CC7's did — and §10 step 1's Windows encoder precondition gates
-every step after it, because a red answer there invalidates §0.2 Q2 and the whole
-lane.
 
-Status: accepted contract, 2026-08-29 (see §0.6)
+**Implemented 2026-08-29 (§0.6 A1).** §10's ten steps landed, one commit each,
+and `CHANGELOG.md` carries the entry as CC0–CC7's did. §10 step 1's Windows
+encoder precondition — which gated every step after it, because a red answer
+there would have invalidated §0.2 Q2 and the whole lane — was answered green by
+`windows-latest` CI run `33235031761`. §9.2's table below now carries measured
+values. What remains open is recorded in §0.6 A1 and in `cc8_manifest.json`'s
+`open_gates`: the two hands-on smoke records, §12's HLG-in-AVC recognition risk,
+and the fact that every §9.2 figure is a Linux measurement.
+
+Status: implemented 2026-08-29, pending platform smoke (see §0.6)
 Depends on: CC0–CC7, principally [CC1](CC1-MANAGED-SDR-PRIMARY.md) (managed
 input/working/output boundaries), [CC3](CC3-CURVES-AND-WHEELS.md) (the `grade709`
 grading encoding), and [CC6](CC6-QC-AND-MANAGED-DELIVERY.md) (QC engine, the
@@ -439,6 +444,114 @@ each, as a design change rather than an edit.
   the first entry in §12, and the first named recognition requirement reopens Q2 as
   an amendment here.
 
+- **A1 — implemented (2026-08-29).** §10's ten steps landed on branch
+  `claude/cc7-roadmap-completion-kpg248`, one commit each:
+
+  | Step | Commit | What landed |
+  | --- | --- | --- |
+  | 1 | `a37aafe` | §0.3(e)'s Windows encoder precondition, as two typed tests (`cc8_fixtures.rs:576`, `:599`). No production change; §0.3(f) confirmed by the probe side needing none. |
+  | 2 | `5f483f9` | The `cc8_hdr` authority module: ST 2084 and ARIB STD-B67 transcribed, the anchor, the primaries matrices, and §9.2's gate table scaffolded with one value variant. |
+  | 3 | `85830df` | §2.1's closed profile set, the classifier arms, the two fused working-linear decodes; fixtures 1, 2, 5. |
+  | 4 | `4517a9a` | §2.3's non-identity primaries stage and the managed HDR frame decode; fixtures 3, 4, 10. |
+  | 5 | `d81f30d` | §9.1 fixture 6, the SDR byte-equality gate, before any export change. |
+  | 6 | `290ce77` | §5's delivery lane, lane-derived tags, §5.3's typed rejection; fixtures 7 and 8. |
+  | 7 | `9a92b31` | §6's four QC extensions; fixture 12. |
+  | 8 | `1f2d6dd` | §4's labelled tone-mapped preview and §3.2's two node limitations; fixture 9. |
+  | 9 | `54fd175` | §7's `managed_hdr_v1` and §2.4's static metadata; fixture 11. |
+  | 10 | this commit | Every §9.2 budget measured, `cc8_manifest.json` written, the inventory reconciled. |
+
+  **The amendment.** §3.3's stage naming is tightened to the realized stage
+  directions: the HLG source stage is the **forward** OOTF between the inverse
+  OETF and the anchor divide, the anchor is **both** HDR profiles' stage rather
+  than PQ's alone, and the delivery stage is the **inverse** OOTF followed by
+  the OETF. Draft v1 named each stage by the OETF/OOTF *pair* it belongs to,
+  which reads as a direction and is not one. The determination and its three
+  reasons are recorded at `crates/kinewright-core/src/cc8_hdr.rs:898-942`
+  (`cc8_hlg_decode_working_linear`); §3.3's own text is amended in place, in
+  this register's manner — the section is rewritten to match what was built,
+  with the amendment marked and dated at the point of change, because the
+  looseness was in the contract's words and not in the implementation.
+
+  **Five implementer determinations**, each recorded where it was made rather
+  than only here:
+
+  1. **§9.1 fixture 6's "unchanged"** (step 5). Measured on whatever build runs
+     the fixture, never against a checked-in digest: every delivery colour term
+     the export handed FFmpeg — encoder colourspace and range, the options
+     dictionary, the buffer/scale/format graph strings, both stamped frames — is
+     asserted character-for-character against the frozen pre-CC8 SDR literals on
+     both SDR lanes; two exports of one project are byte-identical; three
+     differently-spelled same-lane delivery descriptions export the same bytes.
+     The SHA-256s are printed and recorded in the manifest, never asserted
+     (`cc8_fixtures.rs:3216` `cc8_sdr_regression_byte_equality_gate`).
+  2. **`DELIVERY_INTERMEDIATE_WHITE` on the HDR lane** (step 6). §5.1 keeps
+     CC6's 65 280 convention "unchanged and … not re-measured", which fixes the
+     number and leaves its HDR *meaning* open. It means the **HLG signal peak**,
+     not diffuse white, and diffuse white lands at 75 % of it; the claim is
+     gated with a bound derived from the half-nit argument through the OOTF and
+     OETF slopes (`cc8_fixtures.rs:4747`
+     `cc8_hdr_delivery_intermediate_white_is_the_hlg_signal_peak`).
+  3. **§4's preview curve** (step 8). §4 names properties — determinism,
+     monotonicity, endpoint behaviour, CPU/GPU parity — and not a curve.
+     Extended Reinhard at §2.2's **already pinned** HLG nominal peak was chosen,
+     so §4 item 2's "parameters are pinned integer constants" is satisfied by an
+     assertion that the preview peak *equals* `CC8_HLG_NOMINAL_PEAK_NITS` rather
+     than by a second number (`cc8_hdr.rs:1414` `CC8_PREVIEW_PEAK_NITS`,
+     `cc8_hdr.rs:3109` `cc8_preview_peak_is_the_pinned_hlg_nominal_peak`). It is
+     built from IEEE-exact operations only, so determinism is bitwise on both
+     operating systems with no libm allowance.
+  4. **`managed_hdr_v1`'s timing** (step 9). §7 puts the state at the top of the
+     section, which reads as step 3's work; it lands at step 9 because the lane
+     it names did not exist until step 6, and a state naming an absent lane
+     could not have been validated in both directions. It is never stamped by a
+     load — only the ordinary undoable, revision-gated `SetColorContext` writes
+     it — so a pre-CC8 project holding a Rec.2020 delivery description CC6
+     refused cannot silently become HDR-exportable on first open
+     (`crates/kinewright-core/tests/cc8_core.rs:241`
+     `cc8_managed_hdr_state_is_written_by_cc8_and_never_stamped_by_a_load`).
+  5. **The inventory's declared-set rule** (step 10). §9 says "Test names are
+     `cc8_`-prefixed and the manifest asserts the inventory equals the declared
+     set." CC8 declares **105** tests across four crates: 95 carry the prefix,
+     and 10 are named explicitly under CC7 §11.3's "or be named explicitly in
+     the inventory", because steps 3–9 wrote them into `#[cfg(test)] mod tests`
+     blocks that predate CC8 (`color.rs`, `delivery.rs`, `color_pipeline.rs`,
+     `color_status.rs`, `color_qc_tool.rs`, `color_ui.rs`, `color_qc_ui.rs`)
+     where every neighbour is an unprefixed descriptive name. The line drawn is
+     CC7's: **a test is CC8's if CC8 wrote it** — the CC1–CC7 tests whose tuples
+     steps 3, 4 and 6 moved keep their own contract's inventory, because
+     claiming them here would be claiming another slice's work
+     (`cc8_fixtures.rs:7026` `CC8_EXPLICIT_TEST_NAMES`).
+
+  **The honest platform note, in §9.2's own terms.** Every figure in §9.2's
+  table, in `CC8_GATES`, and in `cc8_manifest.json` is a **Linux** measurement
+  on `mifi/ffmpeg-builds 8.0-1` / llvmpipe, and stays one until the first
+  Windows run of these fixtures prints its own `CC8_MEASURED` lines. What is
+  separately known, and is a different claim, is that the fixtures **pass** on
+  Windows: `windows-latest` CI ran green on the commit of every step landed
+  through 8 — runs `33235031761` (which carries step 1's encoder precondition
+  and is therefore §0.3(e)'s green answer; step 1's own push, run
+  `33233849668`, was red on an unrelated `cc2_scope_tools` intermittent fixed by
+  `89aac95`), `33237026987`, `33239083483`, `33240770490`, `33241968697`,
+  `33245077348`, `33246869396` and `33248465523`. Step 9's run,
+  `33250611786`, was still in flight when step 10 was written, so this entry
+  records it as unconfirmed rather than as green. A passing gate on Windows says
+  the constants hold there; it does not publish a Windows number, because CC8's
+  fixtures gate against constants from the first commit and a green run prints
+  no figure the manifest could record. This is why
+  `budgets.delivery_windows_observed.terms_measured_on_windows` is **0** and
+  says so, rather than carrying CC7's two MSVC figures' equivalent: CC7 had
+  those only because an equality assertion stopped a Windows job mid-term, and
+  CC8 has no such assertion to stop.
+
+  **What §12's closing paragraph still leaves open**, carried into
+  `cc8_manifest.json`'s `open_gates`: the hands-on Windows and Omarchy smoke
+  records for the HDR lane (§0.5 item 5 — release-affecting, and neither may be
+  a claim about HDR *appearance* on an SDR panel, nor stand in for §0.3(e)'s CI
+  precondition); §12's first risk, HLG-in-AVC recognition by a named target,
+  which no fixture can close; and the Linux-only provenance above.
+
+  `CHANGELOG.md` carries the entry from this commit, as CC0–CC7's did.
+
 ---
 
 ## 1. In scope and out of scope
@@ -624,17 +737,37 @@ absent. Additions are marked `*`.
 source coded samples
   -> source range expansion
   -> source matrix decode to coded RGB              (* BT.2020 NCL added)
-  -> source transfer decode to linear light         (* PQ / HLG added)
-  -> HLG inverse OOTF                               (* HLG profile only)
-  -> reference-white normalization                  (* PQ profile only, §2.2)
+  -> source transfer decode to linear light         (* PQ / HLG added: inverse OETF)
+  -> HLG forward OOTF, at the §2.2 peak and gamma   (* HLG profile only)
+  -> reference-white normalization                  (* both HDR profiles, §2.2)
   -> primaries conversion to working BT.709 D65     (* now non-identity)
   -> grading nodes, in serialized clip.effects order (unchanged)
   -> non-colour layer operations and linear-light compositing (unchanged)
   -> monitoring transform OR delivery transform
        monitoring: tone-mapped preview (§4) on an SDR display
-       delivery:   primaries conversion to Rec.2020 -> HLG OOTF+OETF -> §5
+       delivery:   primaries conversion to Rec.2020
+                   -> HLG inverse OOTF -> HLG OETF -> §5
   -> final clamp, quantization, and display/codec packing
 ```
+
+**Amended 2026-08-29 (§0.6 A1).** Draft v1 wrote the HLG decode stage as "HLG
+inverse OOTF", marked reference-white normalization "PQ profile only", and wrote
+the delivery stage as "HLG OOTF+OETF". All three named the OETF/OOTF *pair* a
+stage belongs to rather than the direction it runs in, and the realized stage
+directions are the ones above: on the source side the inverse OETF is followed
+by the **forward** OOTF and then the anchor divide, and on the delivery side the
+**inverse** OOTF is followed by the OETF. The determination is recorded in full,
+with the three reasons that forced it, at `crates/kinewright-core/src/cc8_hdr.rs`
+§3.3's HLG working-linear determination (`cc8_hlg_decode_working_linear`,
+`cc8_hdr.rs:889-951`); the short form is that §3.1 fixes diffuse white at working
+`1.0`, an HLG decode stopping at the inverse OETF lands it 1.92 stops low, and
+one stopping after the OOTF without the divide leaves the result in cd/m². The
+anchor is therefore **both** profiles' stage, not PQ's alone, which is why the
+"PQ profile only" marking is struck. §2.2's separability requirement is
+unaffected: the OETF and the OOTF remain two separately named stages and the
+OOTF still takes its peak and gamma as arguments
+(`cc8_hlg_ootf_nits` at `cc8_hdr.rs:828` and `cc8_hlg_inverse_ootf` at
+`cc8_hdr.rs:852`, each taking `peak_nits` and `system_gamma` as arguments).
 
 Every added stage is separately named in the colour status and proof. The
 existing SDR path must traverse **byte-identical** stages to today — the two
@@ -874,20 +1007,32 @@ inventory equals the declared set.
 
 ### 9.2 Numeric gates
 
-**Every tolerance below is a placeholder to be measured at implementation.** None
-may be invented, scaled, or inherited from another lane — CC6 Appendix A's rule,
-which CC8 adopts wholesale. The *shape* of each gate is fixed here and is
-normative; the *number* is not, and a number that appears in this table is a
-description of what will be measured, not a value.
+**Every tolerance below was a placeholder to be measured at implementation.**
+None may be invented, scaled, or inherited from another lane — CC6 Appendix A's
+rule, which CC8 adopts wholesale. The *shape* of each gate was fixed here and is
+normative; the *number* was not, and until §10 step 10 no number appeared in this
+table at all — `kinewright_core::CC8_GATES` carried each row's shape with the
+single typed value `ToBeMeasuredAtImplementation`.
 
-| Gate | Shape | Value |
+**§10 step 10 measured them (§0.6 A1).** The values below are the measurements
+and the constants placed from them, and the full forty-term table — every
+column of every shape, with its unit, its margin kind, and its starved control
+where it has one — is `CC8_GATES` (`crates/kinewright-core/src/cc8_hdr.rs:1715-2059`)
+and `budgets.gates` in `crates/kinewright-media/tests/fixtures/cc8_manifest.json`.
+Nothing here was chosen: every budget is the measuring fixture's own rule,
+`next_power_of_two(recorded) × 4` with a derived granularity floor where a term
+measured zero (`cc8_next_power_of_two_bound`, `cc8_fixtures.rs:762`,
+`CC8_MEASURED_BOUND_HEADROOM`, `cc8_fixtures.rs:755`), applied to a figure that
+fixture took.
+
+| Gate | Shape | Value (worst term, Linux, 2026-08-29) |
 | --- | --- | --- |
-| PQ/HLG transfer round trip | max / P99 / mean absolute, linear domain, banded by magnitude as CC1 §6.2 | **to be measured at implementation** |
-| Primaries round trip | max / P99 / mean absolute, linear | **to be measured at implementation** |
-| CPU vs GPU, HDR magnitudes | max / P99 / mean, per half-float band | **to be measured at implementation** |
-| Decoded HDR delivery | max / P99 / mean luma; RGB mean; PSNR floor | **to be measured at implementation** |
-| BT.2020 legality excursion | basis points outside legal range | **to be measured at implementation** |
-| Preview parity | max / P99 / mean, monitor codes | **to be measured at implementation** |
+| PQ/HLG transfer round trip | max / P99 / mean absolute, linear domain, banded by magnitude as CC1 §6.2 | 18 terms, 2 profiles × 3 bands. Widest: PQ `abs_above_2_hdr` max **1.080322e-2** against **6.25e-2** (5.79×). Tightest margin: HLG `abs_above_2_hdr` max **7.629395e-6** against **3.051758e-5** (4.00×). PQ is three to four orders looser than HLG, which is ST 2084's `(p − c1)` cancellation rather than a defect. `cc8_transfer_round_trip_over_a_ten_bit_ramp_is_banded_and_monotone` (`cc8_fixtures.rs:876`) |
+| Primaries round trip | max / P99 / mean absolute, linear | max **7.629395e-6** against **3.051758e-5** (4.00×); P99 3.814697e-6 / 1.525879e-5; mean 3.456745e-7 / 1.907349e-6 (5.52×). One `f32` ULP at the raster's top magnitude of 49.26. `cc8_primaries_round_trip_over_a_wide_gamut_raster_carries_negatives` (`cc8_fixtures.rs:1926`) |
+| CPU vs GPU, HDR magnitudes | max / P99 / mean, per half-float band | 9 terms. Every band's max and P99 is **exactly one `Rgba16Float` ULP** at that band — 4.882812e-4, 9.765625e-4, 1.953125e-3 — each against 4× (4.00×). Means 9.045420e-5 / 1.723346e-4 / 4.595588e-4 against the half-float granularity floor (8.50× to 11.33×). `cc8_cpu_gpu_parity_on_hdr_magnitudes_bands_the_hdr_range` (`cc8_fixtures.rs:2605`) |
+| Decoded HDR delivery | max / P99 / mean luma; RGB mean; PSNR floor | luma max **0** codes / budget **4**; luma P99 **0** / **4 000 000** millionths; luma mean **0** / **1 000 000** millionths; RGB mean **10 417** / **250 000** 8-bit-equivalent millionths (24.0×); PSNR **7 397** / floor **4 500** hundredths dB (28.97 dB of headroom). Constants at `delivery.rs:1703-1754`. The three zeros are bounded from above by the 100 000 b/s starved control at 10 codes, 10 000 000 millionths and 2 420 703 millionths; the PSNR floor is bounded from below by the same control's 4 008. **Measured column reported, not gated** (PM-E12). `cc8_encoded_hdr_delivery_fixture` (`cc8_fixtures.rs:4500`) |
+| BT.2020 legality excursion | basis points outside legal range | decoded native planes of the written HDR file: **0** basis points on all three planes, against CC6 §6.4's 1 % exception rate **100** (`DECODED_RANGE_EXCEPTION_BASIS_POINTS`), with fixture 12's two deliberate control patches at 10 000. **Reported, not gated.** Beside it, the analytic half: predicted-vs-hand-derived `Y′CbCr` deviation **3.853619e-2** delivery codes against **0.25** (6.49×), which touches no codec and is gated. `cc8_qc_bt2020_legality_measures_the_lanes_own_matrix` (`cc8_fixtures.rs:5164`) |
+| Preview parity | max / P99 / mean, monitor codes | max **1** code against **4** (4.00×); P99 **0** against the derived one-code floor **1**, with the 10 %-misread starved control at **2**; mean **2.604167e-3** against **1.5625e-2** (6.00×). `cc8_preview_cpu_gpu_parity_in_monitor_codes` (`cc8_fixtures.rs:6411`) |
 
 Two rules govern how those numbers are taken, both carried forward from CC7:
 

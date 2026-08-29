@@ -138,6 +138,69 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   whatever is there.
 
 ### Added
+- CC8 HDR interpretation and delivery: one honest HDR interpretation path and
+  one HDR delivery contract, on the six decisions the owner took on 2026-08-29
+  — HLG before PQ, no HEVC, Rec.2020 as a named conversion rather than a wider
+  working space, a labelled preview that is not a monitoring reference, ACES
+  prohibited rather than deferred, and SDR-from-HDR as preview only.
+  `kinewright_core::cc8_hdr` is the single authority: ST 2084's five constants
+  and ARIB STD-B67's three transcribed from the standards in their exact
+  rational and eight-decimal integer forms, evaluated in `f32` with CC1-style
+  sign-preserving negative extension; BT.2408's reference white pinned as
+  `CC8_REFERENCE_WHITE_NITS = 203`, with the HLG nominal peak and system gamma
+  beside it and the OETF and OOTF kept as separately named stages; and the
+  Rec.2020↔BT.709 matrices pinned as `f32` rows asserted bit-for-bit against
+  their own `f64` derivation from the pinned chromaticities. Two source
+  profiles enter a closed classifier table — `pq_rec2020` and `hlg_rec2020`,
+  `bt2020` primaries, `bt2020_ncl` or `rgb`, limited or full, D65, 10-to-16-bit
+  — with eight HDR-adjacent tuples enumerated as typed rejections beside them,
+  because 8-bit PQ is banding by construction and `bt2020_cl`, ICtCp and P3 are
+  explicit failures rather than guesses. The managed decode runs the source
+  side of the pipeline order through the authority module alone: swscale's
+  BT.2020 NCL matrix and range expansion, the `RGBA64` boundary with its own
+  measured `P_8` denominator, the inverse OETF, the forward OOTF at the pinned
+  peak and gamma, the reference-white divide, and the first non-identity
+  primaries stage — no clamp between any two of them, so out-of-Rec.709 colours
+  reach the compositor as negative BT.709 components and the delivery matrix
+  restores them exactly. One delivery lane lands (HLG, Rec.2020, BT.2020 NCL,
+  limited, 10-bit, H.264 High 10 on the existing `libx264` path): the six
+  export colour literals become functions of the lane with each SDR arm
+  returning the literal it replaced, the tags travel on the `x264-params`
+  string because the generic codec-context fields do not carry them, and the
+  written file is re-probed with a tag that does not survive a failure rather
+  than a warning. `delivery_color_mismatches` becomes lane-derived with CC6's
+  SDR phrases byte-unchanged, and PQ refusals name the deferral instead of
+  implying a conversion exists. QC gains a BT.2020 NCL Y′CbCr legality sibling
+  measured against the lane's own matrix, a dual-triangle gamut report that
+  publishes both triangles only where they differ with the nesting relation
+  printed as a normative line, MaxCLL and MaxFALL measured from the working
+  proof and reported on every lane but gated on none, and an HDR skin report
+  withheld with a named reason rather than computed against Rec.709-derived
+  band constants. The preview is extended Reinhard at §2.2's already-pinned HLG
+  nominal peak — no new number — applied per channel in linear light before the
+  unchanged BT.709 monitor encode, labelled in the program viewer, the scopes
+  panel and `get_color_context`, and unreachable from the delivery path;
+  §3.2's two SDR-shaped node limitations (the authored curve domain and the HSL
+  qualifier's `[0, 1]` clamp) surface at the nodes that have them. `Document`
+  gains `managed_hdr_v1`, written only by the ordinary undoable revision-gated
+  `SetColorContext` and never stamped by a load, and `ColorDescription` gains
+  §2.4's mastering-display and content-light-level metadata in integer-exact ST
+  2086 units with per-block provenance, read on probe from container and SEI
+  blocks behind exact length checks, reported, and deliberately unapplied. The
+  gate is a twelve-fixture suite whose centre is a synthetic HDR source exported
+  through the production path, re-probed for `bt2020`/`arib-std-b67`/
+  `bt2020nc`/`tv`/`yuv420p10le`/High 10, decoded, and held to five budgets that
+  are CC8's own rather than any other lane's, each bounded from the far side by
+  a deliberately starved encode; beside it, the SDR byte-equality regression
+  gate landed before any export change and asserts every frozen delivery colour
+  term character-for-character on both SDR lanes. All 105 CC8 tests across four
+  crates are declared in `cc8_manifest.json`, which also publishes the forty
+  measured terms of the six §9.2 budgets with their margins, their starved
+  controls, and — for the seven that pass through an FFmpeg decode — the
+  statement that the measured column is reported and never gated. Every §9.2
+  figure is a Linux measurement; the fixtures pass on `windows-latest`, which is
+  a different claim and is recorded as one. See
+  docs/CC8-HDR-INTERPRETATION-AND-DELIVERY.md.
 - CC7 workflow evaluation: no colour feature and no MCP tool — the slice
   evaluates the CC0–CC6 surface. `kinewright_core::cc7_scenarios` is the single
   authority for six synthetic scenarios (patch geometry, analytic codes, camera

@@ -34,12 +34,12 @@
 use std::sync::Arc;
 
 use kinewright_core::{
-    AssetId, BatchError, CC8_HDR_DELIVERY_LANE, CC8_MANAGED_HDR_STATE_RECOVERY, ColorContext,
-    ColorDescription, ColorPipelineState, ColorProvenance, ColorSourceProfile,
+    AssetId, BatchError, CC8_HDR_DELIVERY_LANE, CC8_MANAGED_HDR_STATE_RECOVERY, Cc8GateMarginKind,
+    ColorContext, ColorDescription, ColorPipelineState, ColorProvenance, ColorSourceProfile,
     ColorSourceProfileAssumption, ColorWhitePoint, Command, ContentLightLevel, Core,
     DeliveryEncodeDepth, DeliveryLane, DeliveryProfile, Document, Event,
     HDR_SOURCE_ON_SDR_DELIVERY, HdrStaticMetadata, JournalCommand, MasteringDisplayChromaticity,
-    MasteringDisplayMetadata, OpError, Operation, QaSeverity, TimelineRevision,
+    MasteringDisplayMetadata, OpError, Operation, QaSeverity, TimelineRevision, cc8_gate_terms,
     cc8_hdr_delivery_description, classify_source, classify_source_with_assumption,
     delivery_conformance,
 };
@@ -667,6 +667,292 @@ fn cc8_hdr_delivery_description_is_section_5_1s_lane_table() {
     );
     assert!(kinewright_core::delivery_color_mismatches(&description).is_empty());
 }
+
+// ===========================================================================
+// CC8 §9.2 — §10 step 10's margin and distinctness machinery.
+// ===========================================================================
+//
+// §10 step 10 is "Measure every §9.2 budget; write `cc8_manifest.json`;
+// reconcile the inventory", and §9.2 names two rules the budgets must satisfy
+// once they carry numbers. `cc8_hdr` publishes the table; these two tests are
+// the rules, in the place CC7 put its own pair
+// (`cc7_every_budget_carries_the_declared_margin` and
+// `cc7_budgets_are_distinct_from_every_neighbouring_constant`,
+// `crates/kinewright-core/tests/cc7_core.rs:1357` and `:1240`).
+//
+// They live in core rather than in `cc8_fixtures` because they are properties
+// of the constants, not of a render: they must hold with no FFmpeg, no GPU and
+// no media, so a machine that cannot build the media crate can still be told
+// the table is wrong.
+
+/// §9.2's second rule: "**A budget must carry a real margin, and a margin
+/// nothing approaches proves nothing.**"
+///
+/// Every term of every [`kinewright_core::CC8_GATES`] row is checked by the
+/// rule its own [`Cc8GateMarginKind`] declares, and the classification is
+/// asserted in **both** directions — a ratio row that measured zero, or a
+/// `RecordedMargin` row that in fact clears the 2x bar, fails here rather than
+/// passing under the looser rule. That is what stops `RecordedMargin` from
+/// becoming a quiet waiver, which is exactly the property
+/// `cc7_every_budget_carries_the_declared_margin` was written to protect.
+///
+/// A `MeasuredZero` term must additionally carry its starved control, because
+/// §9.2's remedy for a zero measurement is not a smaller bound but a
+/// deliberately starved fixture that exceeds it: "where a term measures zero on
+/// the passing source, a deliberately starved fixture bounds the constant from
+/// above."
+#[test]
+// One `match` arm per margin kind, each with its own two- or three-clause rule
+// and its own message: the arms are the contract's six rules and splitting them
+// across helpers would put the rule and the reason in different files.
+#[allow(clippy::too_many_lines)]
+fn cc8_every_gate_term_carries_the_declared_margin() {
+    let terms = cc8_gate_terms();
+    assert_eq!(
+        terms.len(),
+        40,
+        "§9.2's six rows publish forty terms between them; a shorter table has lost one",
+    );
+    let mut ratio_rows = 0_usize;
+    let mut zero_rows = 0_usize;
+    for (gate, row) in terms {
+        let label = format!("{gate} / {} ({})", row.term, row.unit);
+        assert!(
+            row.budget.is_finite() && row.budget > 0.0,
+            "{label}: a budget of {} bounds nothing",
+            row.budget,
+        );
+        assert!(row.measured.is_finite(), "{label}");
+        match row.kind {
+            Cc8GateMarginKind::RatioAtLeastTwo => {
+                ratio_rows += 1;
+                let measured = row.measured.abs();
+                assert!(
+                    measured > 0.0,
+                    "{label}: a ratio row measured zero; it belongs in MeasuredZero",
+                );
+                assert!(
+                    measured < row.budget,
+                    "{label}: measured {measured} must be strictly inside the budget {}",
+                    row.budget,
+                );
+                assert!(
+                    row.budget >= 2.0 * measured,
+                    "{label}: budget {} over measured {measured} is below the 2x bar",
+                    row.budget,
+                );
+            }
+            Cc8GateMarginKind::Exact => assert!(
+                (row.measured - row.budget).abs() < f64::EPSILON,
+                "{label}: an exact term must measure its budget",
+            ),
+            Cc8GateMarginKind::MeasuredZero => {
+                zero_rows += 1;
+                assert!(
+                    row.measured == 0.0,
+                    "{label}: a MeasuredZero row must measure exactly zero, so its bound is its \
+                     starved control rather than a ratio",
+                );
+                let control = row.control.unwrap_or_else(|| {
+                    panic!(
+                        "{label}: §9.2 requires a term that measured zero to be bounded from \
+                         above by a deliberately starved fixture, and this row records none"
+                    )
+                });
+                assert!(
+                    control > row.budget,
+                    "{label}: the starved control {control} does not exceed the budget {}, so \
+                     the budget is decorative rather than reachable",
+                    row.budget,
+                );
+            }
+            Cc8GateMarginKind::Floor => {
+                assert!(
+                    row.measured > row.budget,
+                    "{label}: measured {} must clear the floor {}",
+                    row.measured,
+                    row.budget,
+                );
+                // A floor is two-sided in CC8 as it was in CC7 §4.1 note 5: a
+                // floor nothing can fail is not a gate, so the starved control
+                // must sit *below* it.
+                let control = row.control.unwrap_or_else(|| {
+                    panic!("{label}: a floor with no failing control bounds nothing")
+                });
+                assert!(
+                    control < row.budget,
+                    "{label}: the starved control {control} clears the floor {}, so nothing \
+                     trips it",
+                    row.budget,
+                );
+            }
+            Cc8GateMarginKind::Ceiling => assert!(
+                row.measured < row.budget,
+                "{label}: measured {} must stay under the ceiling {}",
+                row.measured,
+                row.budget,
+            ),
+            Cc8GateMarginKind::RecordedMargin => {
+                let measured = row.measured.abs();
+                assert!(
+                    measured > 0.0,
+                    "{label}: a recorded-margin row measured zero; it belongs in MeasuredZero",
+                );
+                assert!(
+                    measured < row.budget,
+                    "{label}: measured {measured} must be strictly inside the budget {}",
+                    row.budget,
+                );
+                assert!(
+                    row.budget < 2.0 * measured,
+                    "{label}: budget {} over measured {measured} clears the 2x bar, so it \
+                     belongs in RatioAtLeastTwo rather than recording its margin",
+                    row.budget,
+                );
+            }
+        }
+    }
+    // CC8 has **no** `RecordedMargin` term, and that is a measurement rather
+    // than a boast: every ratio budget is `next_power_of_two(recorded) * 4`,
+    // which clears the bar by construction. CC7 had exactly one, against a CC6
+    // constant it could not move; CC8's own constants were all placed at step
+    // 10 by the same rule, so none of them is short. Asserting the count keeps
+    // a future re-baseline from adding one silently.
+    assert_eq!(
+        cc8_gate_terms()
+            .into_iter()
+            .filter(|(_, row)| row.kind == Cc8GateMarginKind::RecordedMargin)
+            .count(),
+        0,
+        "no CC8 §9.2 term falls short of the 2x bar",
+    );
+    // Thirty-four ratio terms, five zero terms, one floor: the whole table,
+    // counted so a row that changed kind cannot slip past the loop above.
+    assert_eq!(ratio_rows, 34);
+    assert_eq!(
+        zero_rows, 5,
+        "§9.2's zero-measurement rule governs five terms"
+    );
+    assert_eq!(
+        cc8_gate_terms()
+            .into_iter()
+            .filter(|(_, row)| row.kind == Cc8GateMarginKind::Floor)
+            .count(),
+        1,
+        "the decoded-delivery PSNR row is CC8's only floor",
+    );
+}
+
+/// §9.2's "**None may be invented, scaled, or inherited from another lane**",
+/// asserted where inheritance would be invisible: between the HDR lane's five
+/// delivery budgets and the CC6 SDR budgets they sit beside.
+///
+/// The HDR lane reuses CC6's *depth* (§5.1: "This reuses CC6 §4.1's
+/// `DeliveryEncodeDepth::Ten` lane"), so `DeliveryBudgets::for_hdr_delivery_lane`
+/// and `DeliveryBudgets::for_depth(Ten)` are one keystroke apart and a
+/// lane-derivation bug would substitute one for the other with nothing to say
+/// so. Every field is asserted distinct where the two lanes genuinely measured
+/// different numbers, and the two that legitimately coincide are named with the
+/// reason, in CC7 §4.1's manner rather than by silence.
+#[test]
+fn cc8_gate_budgets_are_distinct_from_every_neighbouring_constant() {
+    let hdr = kinewright_core::DeliveryBudgets::for_hdr_delivery_lane();
+    let sdr_ten = kinewright_core::DeliveryBudgets::for_depth(DeliveryEncodeDepth::Ten);
+    let sdr_eight = kinewright_core::DeliveryBudgets::for_depth(DeliveryEncodeDepth::Eight);
+    assert_ne!(
+        hdr, sdr_ten,
+        "§9.2 forbids inheriting a budget from another lane, so the HDR set must differ from \
+         the 10-bit SDR set it shares a depth with",
+    );
+    assert_ne!(hdr, sdr_eight);
+    // The three terms CC8 measured to a different number than CC6's 10-bit
+    // lane. Each is a codec gate, and each is *tighter* on the HDR lane, which
+    // is the direction a lane with its own measurement should move.
+    assert_ne!(hdr.luma_max_code, sdr_ten.luma_max_code);
+    assert_ne!(
+        hdr.rgb_mean_code_millionths,
+        sdr_ten.rgb_mean_code_millionths
+    );
+    assert_ne!(
+        hdr.psnr_floor_db_hundredths,
+        sdr_ten.psnr_floor_db_hundredths
+    );
+    assert!(hdr.luma_max_code < sdr_ten.luma_max_code);
+    assert!(hdr.rgb_mean_code_millionths < sdr_ten.rgb_mean_code_millionths);
+    assert!(hdr.psnr_floor_db_hundredths > sdr_ten.psnr_floor_db_hundredths);
+    // The two that coincide, named rather than hidden. Both HDR terms measured
+    // **zero** on the passing source, so §9.2's second rule placed them from
+    // the granularity floor and the starved control — one delivery code, and
+    // one delivery code as a mean — and the 10-bit SDR lane's own derivation
+    // arrived at the same two round figures from a different measurement. They
+    // are equal by coincidence of unit, not by inheritance, and
+    // `delivery.rs`'s doc comments carry each derivation.
+    assert_eq!(
+        hdr.luma_p99_code_millionths,
+        sdr_ten.luma_p99_code_millionths
+    );
+    assert_eq!(
+        hdr.luma_mean_code_millionths,
+        sdr_ten.luma_mean_code_millionths
+    );
+    assert_ne!(
+        hdr.luma_p99_code_millionths,
+        sdr_eight.luma_p99_code_millionths
+    );
+    assert_ne!(
+        hdr.luma_mean_code_millionths,
+        sdr_eight.luma_mean_code_millionths
+    );
+
+    // §9.2's table against its neighbours: a gate budget must never be one of
+    // CC1's compositor tolerances. CC6 §6.3 makes this rule for the codec
+    // budgets, and CC8 restates it because its preview row is reported in
+    // monitor codes, the same unit CC1 §6.2's constants are in.
+    let preview: Vec<f64> = cc8_gate_terms()
+        .into_iter()
+        .filter(|(gate, _)| *gate == "Preview parity")
+        .map(|(_, row)| row.budget)
+        .collect();
+    assert_eq!(preview.len(), 3);
+    assert!(
+        preview[0] > f64::from(CC8_MONITOR_CPU_GPU_MAX_NEIGHBOUR),
+        "the preview max budget must not be CC1's monitor constant restated; it is this \
+         fixture's own measurement",
+    );
+
+    // One name per term across the whole table, and never a per-OS constant
+    // (§9.2's first rule, CC7 §14 / R5's form).
+    let mut names: Vec<String> = cc8_gate_terms()
+        .into_iter()
+        .map(|(gate, row)| format!("{gate}/{}", row.term))
+        .collect();
+    let total = names.len();
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), total, "a §9.2 term name is used twice");
+    assert!(
+        names
+            .iter()
+            .all(|name| !name.contains("windows") && !name.contains("linux")),
+        "there is one constant per term and never a per-OS constant",
+    );
+    // And the six rows cite six distinct measuring fixtures, each `cc8_`-named
+    // so `cargo test -- cc8_` reaches every one of them.
+    for gate in kinewright_core::CC8_GATES {
+        assert!(gate.measuring_fixture.starts_with("cc8_"), "{}", gate.gate);
+    }
+}
+
+/// CC1 §6.2's monitor maximum, restated here **only** as the neighbour the
+/// preview budget must not equal.
+///
+/// It is not imported from `cc1_fixtures`: that constant lives in the media
+/// crate, which core cannot see (`cc7_scenarios`' R-M2 boundary), and
+/// `cc8_preview_cpu_gpu_parity_in_monitor_codes` already asserts the real
+/// cross-check against the real constant. What this file needs is a number to
+/// be distinct *from*, and a distinctness assertion that silently compared
+/// against the wrong neighbour would still be a distinctness assertion.
+const CC8_MONITOR_CPU_GPU_MAX_NEIGHBOUR: u8 = 2;
 
 // ---------------------------------------------------------------------------
 // Shared source values.

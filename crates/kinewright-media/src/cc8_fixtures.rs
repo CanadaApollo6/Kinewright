@@ -73,6 +73,8 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use ffmpeg_next as ffmpeg;
 use half::f16;
+use serde_json::{Value, json};
+
 use kinewright_core::{
     Analysis, AssetId, CC8_BT709_TO_REC2020, CC8_BT2020_CB_DENOMINATOR, CC8_BT2020_CR_DENOMINATOR,
     CC8_BT2020_KB, CC8_BT2020_KG, CC8_BT2020_KR, CC8_HDR_DELIVERY_DEPTH_ALLOWED,
@@ -6968,4 +6970,1189 @@ fn cc8_probe_reads_declared_static_hdr_metadata_and_leaves_it_unapplied() {
         exported[0].len(),
         gpu.lane.id(),
     );
+}
+
+// ===========================================================================
+// CC8 §10 step 10 — the manifest and the inventory.
+// ===========================================================================
+//
+// Step 10 is "Measure every §9.2 budget; write `cc8_manifest.json`; reconcile
+// the inventory", and §9 fixes where each of those lives: "Constants
+// authority: `kinewright_core::cc8_hdr` ... Fixtures:
+// `kinewright_media::cc8_fixtures`. Manifest: `cc8_manifest.json`. Test names
+// are `cc8_`-prefixed and the manifest asserts the inventory equals the
+// declared set."
+//
+// This is the LAST thing CC8 writes, and it is written the way CC7 §11.2.33
+// wrote its own: `CC8_TEST_SOURCES` `include_str!`s every file that owns a CC8
+// test at **compile** time, so renaming a test in another crate rebuilds this
+// file and fails it, instead of leaving a manifest entry that names a function
+// nobody has written for three commits.
+//
+// # The declared-set rule, and what it counts
+//
+// §9's sentence is the rule: a CC8 test is `cc8_`-prefixed, and the manifest
+// asserts the inventory equals the declared set. CC7 §11.3 added the one
+// escape its own tree needed — "or be named explicitly in the inventory" — for
+// `published_v6_manifest_tracks_the_color_workflow_suite`, a test written into
+// a file whose local convention is unprefixed. CC8 inherits that rule and
+// needs it **ten** times rather than once, for the same reason: §10 steps 3
+// through 9 added tests to `#[cfg(test)] mod tests` blocks that predate CC8
+// (`color.rs`, `delivery.rs`, `color_pipeline.rs`, `color_status.rs`,
+// `color_qc_tool.rs`, `color_ui.rs`, `color_qc_ui.rs`), where every neighbour
+// is an unprefixed descriptive name and a `cc8_` prefix would have read as an
+// import from another crate. Those ten are named in
+// [`CC8_EXPLICIT_TEST_NAMES`] and are declared exactly as loudly as the
+// prefixed ones; what they do **not** do is answer to `cargo test -- cc8_`,
+// which is why naming them is a rule rather than a courtesy.
+//
+// What the inventory does **not** try to count is "every test CC8 touched".
+// §10 steps 3, 4 and 6 each moved a tuple inside a CC1–CC7 test that CC8 made
+// lane-selecting; those tests keep their own contract's name and their own
+// contract's inventory, and claiming them here would be claiming CC7's work.
+// The line is the one CC7 drew: a test is CC8's if CC8 wrote it.
+
+/// The manifest's contract token, the spelling every CC8 artefact keys on.
+const CC8_CONTRACT: &str = "cc8_hdr_interpretation_and_delivery";
+
+/// The declared names that do **not** carry the `cc8_` prefix, and are
+/// therefore named explicitly rather than discovered by the prefix scan.
+///
+/// Ten, all of them written by §10 steps 3 through 9 into `#[cfg(test)] mod
+/// tests` blocks that predate CC8, where every neighbouring test is an
+/// unprefixed descriptive name. CC7 §11.3's rule — `cc7_`-prefixed "or be named
+/// explicitly in the inventory" — is what admits them, and naming them here is
+/// what stops `cargo test -- cc8_` from being mistaken for the whole slice.
+const CC8_EXPLICIT_TEST_NAMES: [&str; 10] = [
+    // color_pipeline.rs — §10 step 4's two stage-selection tests.
+    "decode_source_rgb_selects_the_cc8_hdr_stages_by_profile",
+    "source_primaries_stage_is_selected_by_profile_and_is_never_clamped",
+    // color.rs — §10 steps 3 and 9's three classifier-vocabulary tests.
+    "hdr_profile_ids_come_from_the_cc8_authority_table",
+    "supported_profile_ids_phrase_names_every_profile",
+    "color_tag_wire_spellings_are_the_serde_forms",
+    // delivery.rs — §7 item 2's typed block.
+    "hdr_source_with_sdr_delivery_blocks_export_without_tone_mapping",
+    // color_status.rs and color_qc_tool.rs — §8's two agent surfaces.
+    "status_reports_the_cc8_hdr_profile_its_anchor_and_its_named_stages",
+    "the_envelope_carries_cc8_section_8s_hdr_rows_and_leaves_the_sdr_one_alone",
+    // color_ui.rs and color_qc_ui.rs — §8's two person-facing surfaces.
+    "a_supported_hdr_source_is_not_blocking_and_names_its_profile",
+    "the_hdr_window_body_names_the_lane_both_triangles_and_the_withheld_skin",
+];
+
+/// The CC8 fixtures that produce a **measured** figure the manifest publishes.
+///
+/// Six of them are §9.2's measuring fixtures, one per row; the other two are
+/// the gates CC8's acceptance rests on that publish bytes rather than a
+/// tolerance — §9.1 fixture 6's SDR byte-equality gate and fixture 11's
+/// byte-identical export.
+const CC8_EVIDENCE_FIXTURES: [&str; 8] = [
+    "cc8_transfer_round_trip_over_a_ten_bit_ramp_is_banded_and_monotone",
+    "cc8_primaries_round_trip_over_a_wide_gamut_raster_carries_negatives",
+    "cc8_cpu_gpu_parity_on_hdr_magnitudes_bands_the_hdr_range",
+    "cc8_encoded_hdr_delivery_fixture",
+    "cc8_qc_bt2020_legality_measures_the_lanes_own_matrix",
+    "cc8_preview_cpu_gpu_parity_in_monitor_codes",
+    "cc8_sdr_regression_byte_equality_gate",
+    "cc8_migration_sdr_project_round_trips_and_exports_byte_identically",
+];
+
+/// The fixtures and constants CC8 **cites** rather than duplicates.
+///
+/// Each entry is the manifest's own citation key, so a constant that is moved
+/// or renamed out from under CC8 fails here rather than silently leaving a
+/// claim unevidenced. Every one of them is a CC1 or CC6 number CC8 reads as a
+/// **cross-check** and never as its own budget — §9.2 forbids inheriting a
+/// tolerance from another lane, so each of these is asserted beside a CC8
+/// measurement rather than in place of one.
+const CC8_EXTERNAL_OWNERS: [&str; 6] = [
+    "cc1_fixtures.rs MONITOR_CPU_GPU_MAX/P99/MEAN",
+    "cc1_fixtures.rs LINEAR_CPU_GPU_MAX/P99/MEAN and LINEAR_OVER_RANGE_P99/MEAN",
+    "cc6_fixtures.rs CC6_DELIVERY_SOURCE_SIZE and cc6_delivery_document",
+    "color_pipeline.rs DELIVERY_INTERMEDIATE_WHITE",
+    "delivery.rs DECODED_RANGE_EXCEPTION_BASIS_POINTS",
+    "CC6 §6.3's DELIVERY_* budgets",
+];
+
+const CC8_MEDIA_TESTS: [&str; 41] = [
+    // cc8_fixtures.rs
+    "cc8_precondition_libx264_carries_hlg_hdr_tags_through_encode_and_reprobe",
+    "cc8_precondition_libx264_carries_pq_hdr_tags_through_encode_and_reprobe",
+    "cc8_transfer_round_trip_over_a_ten_bit_ramp_is_banded_and_monotone",
+    "cc8_transfer_segment_seams_are_exact_analytic_inverses",
+    "cc8_reference_white_anchor_lands_the_pinned_working_values",
+    "cc8_unsupported_hdr_metadata_blocks_managed_decode_and_export",
+    "cc8_primaries_round_trip_over_a_wide_gamut_raster_carries_negatives",
+    "cc8_managed_decode_of_an_hdr_source_lands_working_bt709_linear",
+    "cc8_bt2020_limited_boundary_uses_the_p8_denominator",
+    "cc8_no_intermediate_clamp_recovers_hdr_highlights",
+    "cc8_cpu_gpu_parity_on_hdr_magnitudes_bands_the_hdr_range",
+    "cc8_sdr_managed_filter_graph_terms_are_unchanged_by_the_hdr_lane",
+    "cc8_sdr_regression_byte_equality_gate",
+    "cc8_delivery_rejects_an_hdr_description_on_an_sdr_lane_and_an_sdr_one_on_the_hdr_lane",
+    "cc8_delivery_rejects_hlg_and_pq_at_eight_bit_depth",
+    "cc8_delivery_rejects_mismatched_primaries_and_transfer_pairs",
+    "cc8_delivery_rejects_every_matrix_outside_the_hdr_lane_table",
+    "cc8_delivery_rejects_full_range_on_the_hdr_lane",
+    "cc8_delivery_rejects_pq_on_the_hlg_lane_and_names_the_deferral",
+    "cc8_delivery_hdr_source_block_stands_and_lifts_only_on_the_hdr_lane",
+    "cc8_setting_an_hdr_delivery_description_is_validated_against_the_lane_table",
+    "cc8_encoded_hdr_delivery_fixture",
+    "cc8_hdr_delivery_intermediate_white_is_the_hlg_signal_peak",
+    "cc8_qc_bt2020_legality_measures_the_lanes_own_matrix",
+    "cc8_qc_dual_triangle_gamut_reports_both_only_where_they_differ",
+    "cc8_qc_light_level_is_measured_and_reported_but_never_gated",
+    "cc8_qc_skin_is_withheld_with_a_named_reason_on_an_hdr_source",
+    "cc8_preview_tone_map_is_deterministic_monotone_and_holds_its_endpoints",
+    "cc8_preview_transform_is_unreachable_from_the_delivery_path",
+    "cc8_sdr_monitor_transform_is_unmoved_by_the_preview_arm",
+    "cc8_preview_cpu_gpu_parity_in_monitor_codes",
+    "cc8_migration_sdr_project_round_trips_and_exports_byte_identically",
+    "cc8_probe_reads_declared_static_hdr_metadata_and_leaves_it_unapplied",
+    "cc8_manifest_declares_every_required_fixture_and_constant",
+    "cc8_declared_test_names_exist_in_their_source_files",
+    // decode.rs
+    "cc8_mastering_display_side_data_parses_into_st2086_units",
+    "cc8_mastering_display_side_data_refuses_rather_than_guesses",
+    "cc8_content_light_level_side_data_parses_and_guards_its_length",
+    "cc8_container_metadata_wins_per_block_over_the_bitstreams",
+    // color_pipeline.rs
+    "decode_source_rgb_selects_the_cc8_hdr_stages_by_profile",
+    "source_primaries_stage_is_selected_by_profile_and_is_never_clamped",
+];
+
+const CC8_CORE_TESTS: [&str; 55] = [
+    // cc8_hdr.rs
+    "cc8_pq_constants_are_their_exact_rational_forms",
+    "cc8_pq_eotf_holds_the_analytic_endpoints_exactly",
+    "cc8_pq_round_trips_over_the_ten_bit_ramp",
+    "cc8_pq_luminance_round_trips_across_the_full_range",
+    "cc8_pq_is_monotone_over_the_ten_bit_ramp",
+    "cc8_pq_negative_extension_is_sign_preserving",
+    "cc8_pq_eotf_pole_is_where_the_st2084_denominator_vanishes",
+    "cc8_reference_white_anchor_is_bt2408s_two_hundred_and_three",
+    "cc8_working_linear_scale_round_trips_exactly",
+    "cc8_pq_working_linear_encode_inverts_the_decode",
+    "cc8_hlg_constants_are_the_standard_decimals",
+    "cc8_hlg_oetf_anchor_points",
+    "cc8_hlg_round_trips_over_the_ten_bit_ramp",
+    "cc8_hlg_is_monotone_over_the_ten_bit_ramp",
+    "cc8_hlg_negative_extension_is_sign_preserving",
+    "cc8_hlg_ootf_realizes_the_system_gamma_relation",
+    "cc8_hlg_ootf_round_trips_with_its_inverse",
+    "cc8_hlg_reference_white_signal_lands_on_the_anchor",
+    "cc8_hlg_working_linear_decode_lands_diffuse_white_on_one",
+    "cc8_hlg_working_linear_pair_round_trips_and_preserves_sign",
+    "cc8_source_profile_table_is_section_2_1s_two_closed_rows",
+    "cc8_source_profile_wire_spellings_are_the_color_tag_serde_forms",
+    "cc8_rejected_hdr_adjacent_covers_every_family_section_2_1_names",
+    "cc8_bt2020_luma_coefficients_agree_at_both_widths",
+    "cc8_pinned_matrices_are_the_derivation_transcribed",
+    "cc8_primaries_matrices_are_mutually_inverse",
+    "cc8_primaries_preserve_the_shared_d65_white_point",
+    "cc8_primaries_round_trip_carries_negatives_not_a_clamp",
+    "cc8_derived_xyz_matrices_reproduce_the_standard_luma_coefficients",
+    "cc8_gate_table_is_section_9_2s_six_measured_rows",
+    "cc8_only_the_decode_dependent_gate_terms_are_reported_not_gated",
+    "cc8_hdr_delivery_lane_is_section_5_1s_table",
+    "cc8_hdr_delivery_x264_params_carry_section_5_2s_three_terms",
+    "cc8_hdr_delivery_allowed_phrases_are_six_distinct_lane_named_strings",
+    "cc8_preview_peak_is_the_pinned_hlg_nominal_peak",
+    "cc8_preview_tone_map_holds_its_endpoints",
+    "cc8_preview_tone_map_is_strictly_increasing_and_sign_preserving",
+    "cc8_preview_tone_map_is_bitwise_deterministic_and_per_channel",
+    "cc8_preview_and_node_limitation_prose_names_its_own_clauses",
+    // color.rs
+    "cc8_source_classifier_accepts_the_two_hdr_profiles_on_every_listed_column",
+    "cc8_source_classifier_rejects_every_hdr_adjacent_tuple_outside_the_closed_set",
+    "cc8_source_classifier_keeps_the_d65_rule_and_unknown_fields_honest",
+    "hdr_profile_ids_come_from_the_cc8_authority_table",
+    "supported_profile_ids_phrase_names_every_profile",
+    "color_tag_wire_spellings_are_the_serde_forms",
+    // delivery.rs
+    "hdr_source_with_sdr_delivery_blocks_export_without_tone_mapping",
+    // cc8_core.rs
+    "cc8_pre_cc8_projects_open_byte_unchanged_and_acquire_no_hdr_field",
+    "cc8_pre_cc8_hdr_source_on_sdr_delivery_loads_and_blocks_with_the_typed_reason",
+    "cc8_managed_hdr_state_is_written_by_cc8_and_never_stamped_by_a_load",
+    "cc8_managed_state_and_delivery_lane_must_name_each_other",
+    "cc8_hdr_state_survives_save_reopen_journal_replay_undo_and_redo",
+    "cc8_declared_static_hdr_metadata_round_trips_with_its_provenance",
+    "cc8_hdr_delivery_description_is_section_5_1s_lane_table",
+    "cc8_every_gate_term_carries_the_declared_margin",
+    "cc8_gate_budgets_are_distinct_from_every_neighbouring_constant",
+];
+
+const CC8_AGENT_TESTS: [&str; 3] = [
+    // color_status.rs
+    "status_reports_the_cc8_hdr_profile_its_anchor_and_its_named_stages",
+    "cc8_status_reports_declared_static_hdr_metadata_and_its_boundary",
+    // color_qc_tool.rs
+    "the_envelope_carries_cc8_section_8s_hdr_rows_and_leaves_the_sdr_one_alone",
+];
+
+const CC8_APP_TESTS: [&str; 6] = [
+    // inspector_ui.rs
+    "cc8_node_limitations_appear_only_on_an_hdr_source_and_only_where_section_3_2_puts_them",
+    // preview_ui.rs
+    "cc8_the_tone_mapped_preview_is_labelled_and_an_sdr_preview_is_not",
+    "cc8_the_qc_mask_flags_are_measured_on_the_delivery_lane",
+    // color_ui.rs
+    "a_supported_hdr_source_is_not_blocking_and_names_its_profile",
+    "cc8_pipeline_summary_names_the_managed_hdr_state_and_needs_no_reset",
+    // color_qc_ui.rs
+    "the_hdr_window_body_names_the_lane_both_triangles_and_the_withheld_skin",
+];
+
+const CC8_DECLARED_TEST_COUNT: usize = 105;
+
+/// The three media files that own a CC8 test.
+///
+/// `cc8_fixtures.rs` is the slice's own file; `decode.rs` owns §2.4's four
+/// side-data parsers, which are unit tests over byte buffers and belong beside
+/// the code that reads them; `color_pipeline.rs` owns the two stage-selection
+/// tests §10 step 4 wrote into its existing module. They are one crate's share
+/// of the slice, and a test that moved between them is not a change the
+/// inventory needs to notice.
+const CC8_MEDIA_TEST_SOURCES: [&str; 3] = [
+    "crates/kinewright-media/src/cc8_fixtures.rs",
+    "crates/kinewright-media/src/decode.rs",
+    "crates/kinewright-media/src/color_pipeline.rs",
+];
+
+/// The four core files that own a CC8 test.
+const CC8_CORE_TEST_SOURCES: [&str; 4] = [
+    "crates/kinewright-core/src/cc8_hdr.rs",
+    "crates/kinewright-core/src/color.rs",
+    "crates/kinewright-core/src/delivery.rs",
+    "crates/kinewright-core/tests/cc8_core.rs",
+];
+
+/// The two agent files that own a CC8 test — §8's two evidence surfaces.
+const CC8_AGENT_TEST_SOURCES: [&str; 2] = [
+    "crates/kinewright-agent/src/color_status.rs",
+    "crates/kinewright-agent/src/color_qc_tool.rs",
+];
+
+/// The four app files that own a CC8 test — §8's four person-facing surfaces.
+const CC8_APP_TEST_SOURCES: [&str; 4] = [
+    "crates/kinewright-app/src/inspector_ui.rs",
+    "crates/kinewright-app/src/preview_ui.rs",
+    "crates/kinewright-app/src/color_ui.rs",
+    "crates/kinewright-app/src/color_qc_ui.rs",
+];
+
+/// The two §10 step 10 inventory tests, which are fixture-quality rules rather
+/// than numbered §9.1 fixtures and are claimed by `manifest_self_test`.
+const CC8_INVENTORY_TESTS: [&str; 2] = [
+    "cc8_manifest_declares_every_required_fixture_and_constant",
+    "cc8_declared_test_names_exist_in_their_source_files",
+];
+
+/// The helpers a CC8 gate must never reach for.
+///
+/// **The array-literal form is normative**, for the mechanical reason CC7
+/// §11.3 records: `uses_outside_prose` counts a needle as used when a
+/// non-comment line contains `needle(` or `("needle")`, so a call would put the
+/// needle directly inside a call's parentheses and the guard would match
+/// itself. Inside an array literal every element is preceded by `[` or `, `.
+///
+/// CC8 is stricter than CC7 in one way and it costs nothing: **every** CC8
+/// source is held to all three needles, including the agent one. CC7 had to
+/// exempt `tests/mcp_server.rs` because §5.3's scripted endpoints ran a GPU
+/// proof behind a skip opt-in; no CC8 test does, so none of them may consult
+/// an environment variable at all — §9.1's rules carry over "no vacuous
+/// assertion", and evidence that reports `ok` without running is not evidence.
+const CC8_FORBIDDEN_HELPERS: [&str; 3] = [
+    "fixture_gpu_or_skip",
+    "KINEWRIGHT_GPU_TESTS_MAY_SKIP",
+    "std::env::var",
+];
+
+/// The sources every declared CC8 test name is verified against, keyed by the
+/// workspace-relative path the manifest names.
+///
+/// `include_str!` rather than a runtime read on purpose: the check is a
+/// **compile-time** dependency, so a rename in another crate cannot land green.
+const CC8_TEST_SOURCES: [(&str, &str); 13] = [
+    (
+        "crates/kinewright-media/src/cc8_fixtures.rs",
+        include_str!("cc8_fixtures.rs"),
+    ),
+    (
+        "crates/kinewright-media/src/decode.rs",
+        include_str!("decode.rs"),
+    ),
+    (
+        "crates/kinewright-media/src/color_pipeline.rs",
+        include_str!("color_pipeline.rs"),
+    ),
+    (
+        "crates/kinewright-core/src/cc8_hdr.rs",
+        include_str!("../../kinewright-core/src/cc8_hdr.rs"),
+    ),
+    (
+        "crates/kinewright-core/src/color.rs",
+        include_str!("../../kinewright-core/src/color.rs"),
+    ),
+    (
+        "crates/kinewright-core/src/delivery.rs",
+        include_str!("../../kinewright-core/src/delivery.rs"),
+    ),
+    (
+        "crates/kinewright-core/tests/cc8_core.rs",
+        include_str!("../../kinewright-core/tests/cc8_core.rs"),
+    ),
+    (
+        "crates/kinewright-agent/src/color_status.rs",
+        include_str!("../../kinewright-agent/src/color_status.rs"),
+    ),
+    (
+        "crates/kinewright-agent/src/color_qc_tool.rs",
+        include_str!("../../kinewright-agent/src/color_qc_tool.rs"),
+    ),
+    (
+        "crates/kinewright-app/src/inspector_ui.rs",
+        include_str!("../../kinewright-app/src/inspector_ui.rs"),
+    ),
+    (
+        "crates/kinewright-app/src/preview_ui.rs",
+        include_str!("../../kinewright-app/src/preview_ui.rs"),
+    ),
+    (
+        "crates/kinewright-app/src/color_ui.rs",
+        include_str!("../../kinewright-app/src/color_ui.rs"),
+    ),
+    (
+        "crates/kinewright-app/src/color_qc_ui.rs",
+        include_str!("../../kinewright-app/src/color_qc_ui.rs"),
+    ),
+];
+
+/// One source's text, or a panic naming the path the manifest invented.
+fn cc8_test_source(path: &str) -> &'static str {
+    CC8_TEST_SOURCES
+        .iter()
+        .find_map(|(candidate, source)| (*candidate == path).then_some(*source))
+        .unwrap_or_else(|| {
+            panic!(
+                "the manifest names source {path}, which cc8_fixtures.rs does not include; add \
+                 it to CC8_TEST_SOURCES"
+            )
+        })
+}
+
+fn cc8_is_test_attribute(line: &str) -> bool {
+    line == "#[test]" || line.starts_with("#[tokio::test")
+}
+
+/// Whether `source` declares `name` as a `#[test]` (or `#[tokio::test]`)
+/// function.
+///
+/// The attribute is required, so a name mentioned in a doc comment, a string
+/// literal, or a helper function is not mistaken for a fixture — which matters
+/// here, because this file names every CC8 test in prose as well as in code.
+fn cc8_declares_test(source: &str, name: &str) -> bool {
+    let needle = format!("fn {name}(");
+    let lines = source.lines().collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate() {
+        if !line.contains(&needle) {
+            continue;
+        }
+        for previous in lines[..index].iter().rev() {
+            let previous = previous.trim();
+            if cc8_is_test_attribute(previous) {
+                return true;
+            }
+            if previous.is_empty() || previous.starts_with("//") || previous.starts_with("#[") {
+                continue;
+            }
+            break;
+        }
+    }
+    false
+}
+
+/// Every `#[test]` function in `source` whose name starts with `prefix`, in
+/// declaration order.
+fn cc8_declared_test_names_in(source: &str, prefix: &str) -> Vec<String> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut names = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if !cc8_is_test_attribute(line.trim()) {
+            continue;
+        }
+        for candidate in &lines[index + 1..] {
+            let candidate = candidate.trim();
+            if candidate.is_empty() || candidate.starts_with("//") || candidate.starts_with("#[") {
+                continue;
+            }
+            let Some(rest) = candidate.split_once("fn ").map(|(_, rest)| rest) else {
+                break;
+            };
+            let Some((name, _)) = rest.split_once('(') else {
+                break;
+            };
+            if name.starts_with(prefix) {
+                names.push(name.to_owned());
+            }
+            break;
+        }
+    }
+    names
+}
+
+/// Whether `source` *uses* `needle` as code rather than merely naming it in a
+/// comment or a message.
+///
+/// A call is the identifier followed by `(`, on a line that is not a comment,
+/// with any trailing `//` comment stripped first. The quoted form is the
+/// `std::env::var("NAME")` shape. String literals are deliberately not exempt,
+/// because `fixture_gpu_or_skip("cc8-a")` is the natural spelling and must not
+/// evade the guard; the array-literal rule on [`CC8_FORBIDDEN_HELPERS`] is what
+/// keeps this file's own needle list from matching itself.
+fn cc8_uses_outside_prose(source: &str, needle: &str) -> bool {
+    let call = format!("{needle}(");
+    let quoted = format!("(\"{needle}\")");
+    source.lines().any(|line| {
+        let code = line.split("//").next().unwrap_or_default();
+        code.contains(&call) || code.contains(&quoted)
+    })
+}
+
+fn cc8_sorted(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut names = names.into_iter().collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+}
+
+/// The four inventory arrays, with the sources that own them.
+fn cc8_inventory_groups() -> [(
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+); 4] {
+    [
+        ("MEDIA", &CC8_MEDIA_TEST_SOURCES, &CC8_MEDIA_TESTS),
+        ("CORE", &CC8_CORE_TEST_SOURCES, &CC8_CORE_TESTS),
+        ("AGENT", &CC8_AGENT_TEST_SOURCES, &CC8_AGENT_TESTS),
+        ("APP", &CC8_APP_TEST_SOURCES, &CC8_APP_TESTS),
+    ]
+}
+
+/// Every CC8 test name the inventory declares, sorted and deduplicated.
+fn cc8_declared_test_names() -> Vec<String> {
+    let mut names = Vec::new();
+    for (_, _, expected) in cc8_inventory_groups() {
+        names.extend(expected.iter().map(|name| (*name).to_owned()));
+    }
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// The checked-in §10 step 10 manifest.
+fn cc8_manifest() -> Value {
+    serde_json::from_str(include_str!("../tests/fixtures/cc8_manifest.json"))
+        .expect("CC8 fixture manifest must be valid JSON")
+}
+
+fn cc8_assert_manifest_i64(parent: &Value, key: &str, expected: i64) {
+    let declared = parent
+        .get(key)
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| panic!("manifest must declare an integer {key}"));
+    assert_eq!(
+        declared, expected,
+        "manifest {key} does not match the code constant"
+    );
+}
+
+/// Assert a manifest number equals a code constant **at `f32` width**.
+///
+/// Every numeric constant CC8 publishes is an `f32` quantity: the transfer and
+/// matrix figures are `f32` by §2.2's requirement that the transfers evaluate
+/// in that width, and the delivery terms are integers far inside `2^24`. The
+/// manifest carries them as JSON decimals, which are parsed as `f64`, so this
+/// narrows the parsed value back to the width the constant is actually stored
+/// in and compares bit patterns there.
+///
+/// The narrowing is not laxity, it is the correct width, and it also steps
+/// around a real hazard: `serde_json`'s decimal-to-`f64` conversion can land
+/// one unit in the last place away from the shortest round-trip decimal that
+/// `f64`'s own `Debug` prints — measured here on two of `CC8_BT709_TO_REC2020`'s
+/// nine coefficients, in both directions and at both 17 and 20 significant
+/// digits. Comparing at `f64` would have made the manifest assert a property of
+/// the JSON parser rather than of the constant. One `f32` ULP is still four to
+/// seven orders of magnitude below anything §9.2 gates.
+fn cc8_assert_manifest_f32(parent: &Value, key: &str, expected: f32) {
+    let declared = parent
+        .get(key)
+        .and_then(Value::as_f64)
+        .unwrap_or_else(|| panic!("manifest must declare a number {key}"));
+    #[allow(clippy::cast_possible_truncation)]
+    let narrowed = declared as f32;
+    assert!(
+        narrowed.to_bits() == expected.to_bits(),
+        "manifest {key} is {declared:?} ({narrowed:?} at f32), not the code constant \
+         {expected:?}; a decimal that does not narrow to the same f32 is a second definition"
+    );
+}
+
+/// [`cc8_assert_manifest_f32`] for a `Cc8GateTerm` field, which core stores as
+/// `f64` because §9.2's six rows do not share one unit — but every value in
+/// them is an `f32` quantity or an integer far inside `2^24`, so the narrowing
+/// is exact in both directions.
+fn cc8_assert_manifest_gate_number(parent: &Value, key: &str, expected: f64) {
+    #[allow(clippy::cast_possible_truncation)]
+    let narrowed = expected as f32;
+    assert!(
+        f64::from(narrowed).to_bits() == expected.to_bits(),
+        "the CC8_GATES value {expected:?} for {key} is not an f32 quantity; §9.2's table is \
+         published at the width its fixtures measure in"
+    );
+    cc8_assert_manifest_f32(parent, key, narrowed);
+}
+
+/// The operating systems Kinewright targets, and therefore the only values the
+/// manifest's **measuring**-OS provenance field may take.
+///
+/// `docs/BUILDING.md`: 64-bit Windows (MSVC) and 64-bit Linux (glibc).
+const CC8_SUPPORTED_MEASUREMENT_OS: [&str; 2] = ["linux", "windows"];
+/// The architectures those two targets are built for.
+const CC8_SUPPORTED_MEASUREMENT_ARCH: [&str; 1] = ["x86_64"];
+
+/// **CC8 §10 step 10 — the constant half of the inventory test.**
+///
+/// Every declared figure in `cc8_manifest.json` is asserted **equal to the code
+/// constant** the fixtures gate with, never restated as a literal, and the
+/// §9.2 gate table is asserted against `kinewright_core::CC8_GATES` term by
+/// term **and** against the `cc8_fixtures` recorded measurements those terms
+/// summarise — so the published number, the gated constant, and the figure the
+/// fixture actually took cannot drift apart in any pair.
+///
+/// The both-direction source scan and the `cc8_uses_outside_prose` guard are
+/// `cc8_declared_test_names_exist_in_their_source_files`'s.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cc8_manifest_declares_every_required_fixture_and_constant() {
+    let manifest = cc8_manifest();
+    assert_eq!(manifest["manifest_version"], 1);
+    assert_eq!(manifest["contract"], "CC8 HDR interpretation and delivery");
+    assert_eq!(manifest["contract_token"], CC8_CONTRACT);
+
+    // --- §2.1's closed profile table ---------------------------------------
+    let profiles = manifest["profiles"]["source_profiles"]
+        .as_array()
+        .expect("one object per §2.1 row");
+    assert_eq!(profiles.len(), kinewright_core::CC8_SOURCE_PROFILES.len());
+    for (declared, row) in profiles.iter().zip(kinewright_core::CC8_SOURCE_PROFILES) {
+        assert_eq!(declared["id"], row.id);
+        assert_eq!(declared["primaries"], row.primaries);
+        assert_eq!(declared["transfer"], row.transfer);
+        assert_eq!(declared["matrices"], json!(row.matrices));
+        assert_eq!(declared["ranges"], json!(row.ranges));
+        assert_eq!(declared["white_point"], row.white_point);
+        cc8_assert_manifest_i64(
+            declared,
+            "min_integer_depth_bits",
+            i64::from(row.min_integer_depth_bits),
+        );
+        cc8_assert_manifest_i64(
+            declared,
+            "max_integer_depth_bits",
+            i64::from(row.max_integer_depth_bits),
+        );
+    }
+    let rejected = manifest["profiles"]["rejected_hdr_adjacent"]
+        .as_array()
+        .expect("§2.1's rejected set");
+    assert_eq!(
+        rejected.len(),
+        kinewright_core::CC8_REJECTED_HDR_ADJACENT.len()
+    );
+    for (declared, row) in rejected
+        .iter()
+        .zip(kinewright_core::CC8_REJECTED_HDR_ADJACENT)
+    {
+        assert_eq!(declared["field"], row.field);
+        assert_eq!(declared["observed"], row.observed);
+        assert_eq!(declared["reason"], row.reason);
+    }
+
+    // --- §2.2's anchor ------------------------------------------------------
+    let anchor = &manifest["anchor"];
+    cc8_assert_manifest_i64(
+        anchor,
+        "reference_white_nits",
+        i64::from(kinewright_core::CC8_REFERENCE_WHITE_NITS),
+    );
+    cc8_assert_manifest_i64(
+        anchor,
+        "pq_peak_nits",
+        i64::from(kinewright_core::CC8_PQ_PEAK_NITS),
+    );
+    cc8_assert_manifest_i64(
+        anchor,
+        "hlg_nominal_peak_nits",
+        i64::from(kinewright_core::CC8_HLG_NOMINAL_PEAK_NITS),
+    );
+    cc8_assert_manifest_i64(
+        anchor,
+        "hlg_system_gamma_thousandths",
+        i64::from(kinewright_core::CC8_HLG_SYSTEM_GAMMA_THOUSANDTHS),
+    );
+    cc8_assert_manifest_i64(
+        anchor,
+        "hlg_reference_white_signal_percent",
+        i64::from(kinewright_core::CC8_HLG_REFERENCE_WHITE_SIGNAL_PERCENT),
+    );
+    assert_eq!(
+        anchor["standards_value_not_a_measurement"], true,
+        "§2.2: 203 is a standards value and is not subject to the measured-tolerance rule",
+    );
+
+    // --- §2.3's matrices ----------------------------------------------------
+    // Compared coefficient by coefficient at `f32` width, for
+    // `cc8_assert_manifest_f32`'s reason: the matrices are `f32` and a whole-
+    // array `assert_eq!` on the parsed JSON would be asserting a property of
+    // `serde_json`'s decimal conversion.
+    for (key, matrix) in [
+        ("rec2020_to_bt709", kinewright_core::CC8_REC2020_TO_BT709),
+        ("bt709_to_rec2020", kinewright_core::CC8_BT709_TO_REC2020),
+    ] {
+        let declared = manifest["matrices"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("the manifest must declare the {key} matrix"));
+        assert_eq!(declared.len(), 3, "{key}");
+        for (row_index, row) in matrix.iter().enumerate() {
+            let declared_row = declared[row_index]
+                .as_array()
+                .unwrap_or_else(|| panic!("{key} row {row_index}"));
+            assert_eq!(declared_row.len(), 3, "{key} row {row_index}");
+            for (column, expected) in row.iter().enumerate() {
+                #[allow(clippy::cast_possible_truncation)]
+                let narrowed = declared_row[column]
+                    .as_f64()
+                    .unwrap_or_else(|| panic!("{key}[{row_index}][{column}] is not a number"))
+                    as f32;
+                assert!(
+                    narrowed.to_bits() == expected.to_bits(),
+                    "manifest {key}[{row_index}][{column}] is {narrowed:?}, not the pinned \
+                     {expected:?}"
+                );
+            }
+        }
+    }
+
+    // --- §5.1's lane and §5.2's proven strings ------------------------------
+    let lane = &manifest["lane"];
+    let table = kinewright_core::CC8_HDR_DELIVERY_LANE;
+    assert_eq!(lane["codec"], table.codec);
+    assert_eq!(lane["pixel_format"], table.pixel_format);
+    assert_eq!(lane["primaries"], table.primaries);
+    assert_eq!(lane["transfer"], table.transfer);
+    assert_eq!(lane["matrix"], table.matrix);
+    assert_eq!(lane["range"], table.range);
+    assert_eq!(lane["white_point"], table.white_point);
+    cc8_assert_manifest_i64(lane, "bit_depth_bits", i64::from(table.bit_depth_bits));
+    assert_eq!(
+        lane["x264_params"],
+        kinewright_core::CC8_HDR_DELIVERY_X264_PARAMS,
+    );
+    assert_eq!(
+        lane["sdr_x264_params"],
+        kinewright_core::CC8_SDR_DELIVERY_X264_PARAMS,
+    );
+    assert_eq!(lane["sdr_x264_params"], CC8_SDR_FROZEN_X264_PARAMS);
+    assert_eq!(lane["scaler_flags"], CC8_SDR_FROZEN_SCALER_FLAGS);
+    cc8_assert_manifest_i64(
+        lane,
+        "intermediate_white",
+        i64::from(DELIVERY_INTERMEDIATE_WHITE),
+    );
+    assert_eq!(lane["managed_state"], "managed_hdr_v1");
+
+    // --- §4's preview -------------------------------------------------------
+    let preview = &manifest["preview"];
+    assert_eq!(preview["stage"], kinewright_core::CC8_PREVIEW_STAGE);
+    cc8_assert_manifest_i64(
+        preview,
+        "peak_nits",
+        i64::from(kinewright_core::CC8_PREVIEW_PEAK_NITS),
+    );
+    assert_eq!(preview["badge"], kinewright_core::CC8_PREVIEW_BADGE);
+    assert_eq!(preview["label"], kinewright_core::CC8_PREVIEW_LABEL);
+    assert_eq!(
+        preview["delivery_boundary"],
+        kinewright_core::CC8_PREVIEW_DELIVERY_BOUNDARY,
+    );
+
+    // --- §9.2's gate table, three ways --------------------------------------
+    // (1) against `CC8_GATES`, term by term; (2) against the `cc8_fixtures`
+    // recorded measurements the terms summarise, so core and media cannot
+    // drift; (3) the PM-E12 flag, so a decode-dependent figure cannot be
+    // published as a gate.
+    let gates = manifest["budgets"]["gates"]
+        .as_object()
+        .expect("§9.2's six rows");
+    assert_eq!(gates.len(), kinewright_core::CC8_GATES.len());
+    let mut declared_terms = 0_usize;
+    for gate in kinewright_core::CC8_GATES {
+        let declared = &manifest["budgets"]["gates"][gate.gate];
+        assert_eq!(
+            declared["shape"],
+            format!("{:?}", gate.shape),
+            "{}",
+            gate.gate
+        );
+        cc8_assert_manifest_i64(declared, "fixture", i64::from(gate.fixture));
+        assert_eq!(
+            declared["measuring_fixture"], gate.measuring_fixture,
+            "{}",
+            gate.gate,
+        );
+        let kinewright_core::Cc8GateValue::Measured(rows) = gate.value else {
+            panic!("{}: §10 step 10 measured every row", gate.gate);
+        };
+        let terms = declared["terms"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{}: the manifest must carry its terms", gate.gate));
+        assert_eq!(terms.len(), rows.len(), "{}", gate.gate);
+        for row in rows {
+            let term = &declared["terms"][row.term];
+            assert_eq!(term["unit"], row.unit, "{} {}", gate.gate, row.term);
+            cc8_assert_manifest_gate_number(term, "budget", row.budget);
+            cc8_assert_manifest_gate_number(term, "measured", row.measured);
+            assert_eq!(
+                term["kind"],
+                format!("{:?}", row.kind),
+                "{} {}",
+                gate.gate,
+                row.term,
+            );
+            assert_eq!(
+                term["measured_is_reported_not_gated"], row.measured_is_reported_not_gated,
+                "{} {}",
+                gate.gate, row.term,
+            );
+            assert!(
+                term.get("margin").is_some(),
+                "{} {} must record a margin",
+                gate.gate,
+                row.term,
+            );
+            match row.control {
+                Some(control) => cc8_assert_manifest_gate_number(term, "control", control),
+                None => assert!(
+                    term.get("control").is_none(),
+                    "{} {} records a control its code row does not",
+                    gate.gate,
+                    row.term,
+                ),
+            }
+            declared_terms += 1;
+        }
+    }
+    assert_eq!(declared_terms, kinewright_core::cc8_gate_terms().len());
+    assert_eq!(declared_terms, 40);
+
+    // The cross-crate half: core's published figures ARE the media fixtures'
+    // recorded ones. A decimal transcribed one digit out fails here.
+    let transfer = &manifest["budgets"]["gates"]["PQ/HLG transfer round trip"]["terms"];
+    for (profile_index, profile) in ["pq_rec2020", "hlg_rec2020"].into_iter().enumerate() {
+        for (band_index, band) in CC8_BAND_NAMES.into_iter().enumerate() {
+            for (term_index, term) in ["max", "p99", "mean"].into_iter().enumerate() {
+                cc8_assert_manifest_f32(
+                    &transfer[format!("{profile}/{band}/{term}")],
+                    "measured",
+                    CC8_FIXTURE1_MEASURED[profile_index][band_index][term_index],
+                );
+            }
+        }
+    }
+    let primaries = &manifest["budgets"]["gates"]["Primaries round trip"]["terms"];
+    for (index, term) in ["max", "p99", "mean"].into_iter().enumerate() {
+        cc8_assert_manifest_f32(&primaries[term], "measured", CC8_FIXTURE3_MEASURED[index]);
+    }
+    let parity = &manifest["budgets"]["gates"]["CPU vs GPU, HDR magnitudes"]["terms"];
+    for (band_index, band) in CC8_BAND_NAMES.into_iter().enumerate() {
+        for (term_index, term) in ["max", "p99", "mean"].into_iter().enumerate() {
+            cc8_assert_manifest_f32(
+                &parity[format!("{band}/{term}")],
+                "measured",
+                CC8_FIXTURE10_MEASURED[band_index][term_index],
+            );
+        }
+    }
+    cc8_assert_manifest_f32(
+        &manifest["budgets"]["gates"]["BT.2020 legality excursion"]["terms"]["predicted_code_deviation"],
+        "measured",
+        CC8_FIXTURE12_LEGALITY_MEASURED,
+    );
+    let preview_terms = &manifest["budgets"]["gates"]["Preview parity"]["terms"];
+    for (index, term) in ["max", "p99", "mean"].into_iter().enumerate() {
+        cc8_assert_manifest_f32(
+            &preview_terms[term],
+            "measured",
+            CC8_FIXTURE9_PARITY_MEASURED[index],
+        );
+    }
+    cc8_assert_manifest_f32(
+        &preview_terms["p99"],
+        "budget",
+        CC8_PREVIEW_PARITY_CODE_FLOOR,
+    );
+
+    // --- §5.1's delivery constants, HDR against CC6's two SDR lanes ---------
+    let constants = &manifest["budgets"]["delivery_constants"];
+    for (key, budgets) in [
+        (
+            "hdr_hlg_rec2020",
+            kinewright_core::DeliveryBudgets::for_hdr_delivery_lane(),
+        ),
+        (
+            "sdr_ten_bit",
+            kinewright_core::DeliveryBudgets::for_depth(DeliveryEncodeDepth::Ten),
+        ),
+        (
+            "sdr_eight_bit",
+            kinewright_core::DeliveryBudgets::for_depth(DeliveryEncodeDepth::Eight),
+        ),
+    ] {
+        let declared = &constants[key];
+        cc8_assert_manifest_i64(declared, "luma_max_code", i64::from(budgets.luma_max_code));
+        cc8_assert_manifest_i64(
+            declared,
+            "luma_p99_code_millionths",
+            budgets.luma_p99_code_millionths,
+        );
+        cc8_assert_manifest_i64(
+            declared,
+            "luma_mean_code_millionths",
+            budgets.luma_mean_code_millionths,
+        );
+        cc8_assert_manifest_i64(
+            declared,
+            "rgb_mean_code_millionths",
+            budgets.rgb_mean_code_millionths,
+        );
+        cc8_assert_manifest_i64(
+            declared,
+            "psnr_floor_db_hundredths",
+            i64::from(budgets.psnr_floor_db_hundredths),
+        );
+    }
+    assert!(
+        manifest["budgets"]["delivery_measured_note"]
+            .as_str()
+            .is_some_and(|note| note.contains("reported, not gated")),
+        "the delivery block must state that its measured column is not a gate",
+    );
+    // §14 / R5's form: a per-OS **note**, never a per-OS constant — and CC8's
+    // note is that there is nothing to record yet.
+    let windows = &manifest["budgets"]["delivery_windows_observed"];
+    assert_eq!(
+        windows["ffmpeg_build"],
+        "System233/ffmpeg-msvc-prebuilt ffmpeg-8.0.1-r3",
+    );
+    assert_eq!(
+        windows["terms_measured_on_windows"], 0,
+        "CC8 has no Windows measurement of any §9.2 term; a non-zero count here would be a \
+         claim no run supports",
+    );
+    assert!(
+        windows["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("unmeasured on Windows")),
+        "the Windows block must say plainly that these figures are unmeasured there",
+    );
+
+    // --- reported, never gated ----------------------------------------------
+    let reported = &manifest["budgets"]["reported_not_gated"];
+    cc8_assert_manifest_i64(
+        reported,
+        "starved_video_bitrate",
+        i64::try_from(CC8_STARVED_VIDEO_BITRATE).expect("the starved bitrate fits an i64"),
+    );
+    cc8_assert_manifest_i64(
+        reported,
+        "preview_starved_peak_percent",
+        i64::from(CC8_PREVIEW_STARVED_PEAK_PERCENT),
+    );
+    assert!(
+        reported["rgb_extremes_note"]
+            .as_str()
+            .is_some_and(|note| !note.is_empty()),
+    );
+
+    // --- measurement provenance ---------------------------------------------
+    let measurement = &manifest["budgets"]["measurement"];
+    for key in [
+        "os",
+        "arch",
+        "kernel",
+        "lane",
+        "adapter",
+        "backend",
+        "source_generator",
+        "ffmpeg_build",
+        "libavcodec",
+        "libswscale",
+        "libavutil",
+        "x264_core",
+        "rustc",
+        "commit",
+        "date",
+    ] {
+        assert!(
+            measurement[key].is_string(),
+            "the measurement provenance block must record {key}",
+        );
+    }
+    // PM-E1's determination, inherited verbatim: `os` and `arch` name the
+    // machine the published numbers were **measured on**, not the machine
+    // reading them back. Comparing them against `std::env::consts` would make
+    // the whole manifest environment-gated and would fail the very first
+    // Windows run against a record that is *correct*, so membership of the
+    // supported set is what is asserted.
+    assert!(
+        CC8_SUPPORTED_MEASUREMENT_OS.contains(
+            &measurement["os"]
+                .as_str()
+                .expect("the measuring OS is a string")
+        ),
+        "the measuring OS {} is not one of {CC8_SUPPORTED_MEASUREMENT_OS:?}",
+        measurement["os"],
+    );
+    assert!(
+        CC8_SUPPORTED_MEASUREMENT_ARCH.contains(
+            &measurement["arch"]
+                .as_str()
+                .expect("the measuring architecture is a string")
+        ),
+        "the measuring architecture {} is not one of {CC8_SUPPORTED_MEASUREMENT_ARCH:?}",
+        measurement["arch"],
+    );
+
+    // --- §0.6's register and §11's deferrals --------------------------------
+    let review = &manifest["review"];
+    assert_eq!(review["amendments"].as_array().expect("§0.6").len(), 2);
+    assert_eq!(
+        review["owner_decisions"].as_object().expect("§0.2").len(),
+        6
+    );
+    let deferrals = manifest["deferrals"]
+        .as_array()
+        .expect("§11's explicit deferrals");
+    assert!(
+        deferrals.len() >= 9,
+        "§11 lists at least nine deferrals; the manifest declares {}",
+        deferrals.len(),
+    );
+    for entry in deferrals {
+        assert!(entry["item"].is_string());
+        assert!(entry["reason"].is_string());
+    }
+    assert!(
+        manifest["open_gates"]
+            .as_array()
+            .expect("what the contract's closing paragraph still leaves open")
+            .len()
+            >= 2,
+    );
+
+    // --- the manifest names the same tests ----------------------------------
+    let all = cc8_declared_test_names();
+    let mut verified = 0_usize;
+    for entry in manifest["required_fixtures"]
+        .as_array()
+        .expect("the manifest must list every declared CC8 test")
+    {
+        let item = entry["item"].as_str().expect("a contract reference");
+        let name = entry["test"].as_str().expect("a test name");
+        assert!(
+            CC8_TEST_SOURCES
+                .iter()
+                .any(|(_, source)| cc8_declares_test(source, name)),
+            "{item} claims a test named {name}, which no included source declares as a #[test] \
+             function"
+        );
+        assert!(
+            all.iter().any(|declared| declared == name),
+            "{item}'s test {name} is not in any inventory array"
+        );
+        verified += 1;
+    }
+    assert_eq!(
+        verified,
+        all.len(),
+        "every declared CC8 test must appear exactly once in `required_fixtures`",
+    );
+    // Every §9.2 row's measuring fixture is one of them, so a published number
+    // cannot cite a test the inventory does not carry.
+    for gate in kinewright_core::CC8_GATES {
+        assert!(
+            all.iter()
+                .any(|declared| declared == gate.measuring_fixture),
+            "§9.2 row {} cites {}, which the inventory does not declare",
+            gate.gate,
+            gate.measuring_fixture,
+        );
+    }
+
+    // --- the manifest records the arrays themselves -------------------------
+    let inventory = &manifest["inventory"];
+    assert_eq!(inventory["asserted_by"], CC8_INVENTORY_TESTS[1]);
+    for (label, expected) in [
+        ("CC8_MEDIA_TESTS", CC8_MEDIA_TESTS.as_slice()),
+        ("CC8_CORE_TESTS", CC8_CORE_TESTS.as_slice()),
+        ("CC8_AGENT_TESTS", CC8_AGENT_TESTS.as_slice()),
+        ("CC8_APP_TESTS", CC8_APP_TESTS.as_slice()),
+        ("CC8_INVENTORY_TESTS", CC8_INVENTORY_TESTS.as_slice()),
+        ("CC8_EVIDENCE_FIXTURES", CC8_EVIDENCE_FIXTURES.as_slice()),
+        ("CC8_EXTERNAL_OWNERS", CC8_EXTERNAL_OWNERS.as_slice()),
+    ] {
+        assert_eq!(
+            inventory["arrays"][label],
+            json!(expected),
+            "the manifest's {label} does not match the array in cc8_fixtures.rs",
+        );
+    }
+    assert_eq!(
+        inventory["test_sources"],
+        json!(CC8_TEST_SOURCES.map(|(path, _)| path)),
+        "the manifest must name every include_str!'d source",
+    );
+    assert_eq!(inventory["forbidden_helpers"], json!(CC8_FORBIDDEN_HELPERS));
+    assert_eq!(
+        inventory["explicit_non_prefixed_tests"],
+        json!(CC8_EXPLICIT_TEST_NAMES),
+    );
+    assert_eq!(
+        inventory["declared_test_count"],
+        i64::try_from(all.len()).expect("a test count"),
+    );
+    assert_eq!(manifest["evidence_fixtures"], json!(CC8_EVIDENCE_FIXTURES));
+    assert_eq!(
+        manifest["external_owners"]
+            .as_array()
+            .expect("the cited fixtures")
+            .iter()
+            .map(|owner| owner
+                .get("fixture")
+                .and_then(Value::as_str)
+                .expect("every cited owner names a fixture"))
+            .collect::<Vec<_>>(),
+        CC8_EXTERNAL_OWNERS.to_vec(),
+        "CC8_EXTERNAL_OWNERS and the manifest's cited fixtures disagree",
+    );
+    assert_eq!(manifest["manifest_self_test"], json!(CC8_INVENTORY_TESTS));
+    assert_eq!(
+        manifest["fixture_quality_rules"],
+        "docs/CC8-HDR-INTERPRETATION-AND-DELIVERY.md §9",
+    );
+}
+
+/// **CC8 §10 step 10 — the test-name half of the inventory test.**
+///
+/// The declared inventories are tied to the sources they claim to describe, in
+/// **both** directions: every name this file lists exists as a `#[test]` /
+/// `#[tokio::test]` function in a file that owns it, **and** every `cc8_*` test
+/// those files declare is listed — so a test that exists but is undeclared
+/// fails exactly as loudly as a declared name that does not exist.
+#[test]
+fn cc8_declared_test_names_exist_in_their_source_files() {
+    // --- both directions, per crate ----------------------------------------
+    for (label, sources, expected) in cc8_inventory_groups() {
+        for name in expected {
+            assert!(
+                sources
+                    .iter()
+                    .any(|path| cc8_declares_test(cc8_test_source(path), name)),
+                "no CC8_{label}_TEST_SOURCES file declares a #[test] named {name}; the \
+                 inventory names what §9 requires and is never trimmed to match an unfinished \
+                 crate"
+            );
+        }
+        let declared = cc8_sorted(
+            sources
+                .iter()
+                .flat_map(|path| cc8_declared_test_names_in(cc8_test_source(path), "cc8_")),
+        );
+        let mut named = cc8_sorted(expected.iter().map(|name| (*name).to_owned()));
+        named.retain(|name| !CC8_EXPLICIT_TEST_NAMES.contains(&name.as_str()));
+        assert_eq!(
+            declared, named,
+            "CC8_{label}_TESTS and the `cc8_*` tests the {label} sources actually declare \
+             disagree"
+        );
+    }
+
+    // --- the `cargo test -- cc8_` filter, and no name declared twice --------
+    let mut all = Vec::new();
+    for (_, _, expected) in cc8_inventory_groups() {
+        for name in expected {
+            assert!(
+                name.starts_with("cc8_") || CC8_EXPLICIT_TEST_NAMES.contains(name),
+                "{name} does not match the `cargo test -- cc8_` filter and is not one of the \
+                 explicitly named non-prefixed tests"
+            );
+            all.push((*name).to_owned());
+        }
+    }
+    let total = all.len();
+    all.sort_unstable();
+    all.dedup();
+    assert_eq!(
+        all.len(),
+        total,
+        "a CC8 test name is declared in two inventory arrays"
+    );
+    assert_eq!(
+        total, CC8_DECLARED_TEST_COUNT,
+        "the CC8 slice declares {CC8_DECLARED_TEST_COUNT} tests across four crates"
+    );
+    for name in CC8_EXPLICIT_TEST_NAMES {
+        assert!(
+            !name.starts_with("cc8_"),
+            "{name} carries the prefix and does not need naming explicitly"
+        );
+        assert!(
+            all.iter().any(|declared| declared == name),
+            "{name} is named as an explicit exception but is in no inventory array"
+        );
+        // And it is a real test in a real CC8 source, not a name in a comment.
+        assert!(
+            CC8_TEST_SOURCES
+                .iter()
+                .any(|(_, source)| cc8_declares_test(source, name)),
+            "{name} is named explicitly but no included source declares it"
+        );
+    }
+    let fixtures = cc8_test_source(CC8_MEDIA_TEST_SOURCES[0]);
+    for name in CC8_INVENTORY_TESTS {
+        assert!(
+            cc8_declares_test(fixtures, name),
+            "the §10 step 10 inventory test {name} is not declared in cc8_fixtures.rs"
+        );
+        assert!(
+            CC8_MEDIA_TESTS.contains(&name),
+            "the inventory tests are media tests and must be declared as such"
+        );
+    }
+
+    // --- the `cc8_uses_outside_prose` guard ---------------------------------
+    // Every CC8 source, all three needles. §9.1's rules carry CC6 §11.0's "no
+    // vacuous assertion" forward, and a gate that consults the environment can
+    // report `ok` without having run.
+    for (path, source) in CC8_TEST_SOURCES {
+        for needle in CC8_FORBIDDEN_HELPERS {
+            assert!(
+                !cc8_uses_outside_prose(source, needle),
+                "§9's fixture rules: {path} must never reach for {needle}"
+            );
+        }
+    }
 }

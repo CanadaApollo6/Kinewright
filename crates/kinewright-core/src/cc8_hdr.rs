@@ -69,22 +69,34 @@
 //! description" and that is the `ColorDescription` change §7 item 1's
 //! byte-unchanged obligation governs.
 //!
-//! # Why §9.2's table carries no numbers
+//! # What §10 step 10 added
 //!
+//! §10 step 10 ("measure every §9.2 budget; write `cc8_manifest.json`;
+//! reconcile the inventory") filled [`CC8_GATES`]' measured arm. Every row now
+//! carries [`Cc8GateValue::Measured`] — a slice of [`Cc8GateTerm`], one per
+//! column of the row's shape, each with its budget, its measurement, its
+//! [`Cc8GateMarginKind`] and, where §9.2's second rule needs one, the starved
+//! control that bounds the budget from the far side — plus the
+//! [`Cc8Gate::measuring_fixture`] that takes the numbers.
+//!
+//! Until that step, §9.2's table deliberately carried no numbers at all.
 //! §9.2 is unambiguous: "**Every tolerance below is a placeholder to be
 //! measured at implementation.** None may be invented, scaled, or inherited
 //! from another lane... The *shape* of each gate is fixed here and is
 //! normative; the *number* is not, and a number that appears in this table is
-//! a description of what will be measured, not a value."
+//! a description of what will be measured, not a value." So steps 2 through 9
+//! left one typed variant, [`Cc8GateValue::ToBeMeasuredAtImplementation`] —
+//! the contract's own phrase, made a type so the absence could not be papered
+//! over with a plausible integer. It is kept for a gate a later slice adds,
+//! and `cc8_gate_table_is_section_9_2s_six_measured_rows` asserts that no CC8
+//! row is still on it.
 //!
-//! So [`CC8_GATES`] carries every row's shape and the fixture that will
-//! measure it, and its value is the single typed variant
-//! [`Cc8GateValue::ToBeMeasuredAtImplementation`] — the contract's own phrase,
-//! made a type so the absence cannot be papered over with a plausible integer.
-//! §10 step 10 measures them; that step adds the measured arm and the margin
-//! kinds, following `cc7_scenarios::Cc7BudgetKind` and §9.2's two rules (a
-//! constant asserted against the manifest with no `cfg(windows)` and no per-OS
-//! value, and a real margin or a `RecordedMargin` row that says why not).
+//! None of the numbers below was chosen. Each budget is the measuring
+//! fixture's own rule — `next_power_of_two(recorded) * 4`, with a derived
+//! granularity floor where a term measured zero — applied to a figure that
+//! fixture took, and `cc8_manifest_declares_every_required_fixture_and_constant`
+//! asserts each against the `cc8_fixtures` constant it summarises so the two
+//! cannot drift.
 //!
 //! The test epsilons in this module's own `tests` are **not** gates and are
 //! not §9.2 rows. Each is a bound on an `f32` round trip derived from a stated
@@ -1580,23 +1592,110 @@ pub enum Cc8GateShape {
     MonitorCodes,
 }
 
-/// What a §9.2 row's value is at this step.
+/// How §10 step 10 checks one [`Cc8GateTerm`]'s margin.
 ///
-/// One variant, and that is the point: §9.2 says every tolerance in its table
-/// "is a placeholder to be measured at implementation" and that "a number that
-/// appears in this table is a description of what will be measured, not a
-/// value". Typing the absence keeps a later reader from mistaking a plausible
-/// integer for a measured one. §10 step 10 adds the measured arm, carrying the
-/// budget, the measurement, and a margin kind in
-/// `cc7_scenarios::Cc7BudgetKind`'s manner.
+/// This is `cc7_scenarios::Cc7BudgetKind`, transcribed rather than imported:
+/// CC7's enum is about CC7's own `i64` rows, and CC8's terms are `f64` in six
+/// different units. The **rules** are the same ones, because §9.2 adopts them
+/// ("A budget must carry a real margin, and a margin nothing approaches proves
+/// nothing"), and `cc8_every_gate_term_carries_the_declared_margin`
+/// (`crates/kinewright-core/tests/cc8_core.rs`) asserts each by its own rule in
+/// both directions, exactly as `cc7_every_budget_carries_the_declared_margin`
+/// does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Cc8GateMarginKind {
+    /// `budget / measured >= 2`, and `|measured|` strictly inside the budget.
+    ///
+    /// Every CC8 term derived by the fixtures' own rule —
+    /// `next_power_of_two(recorded) * CC8_MEASURED_BOUND_HEADROOM` — clears
+    /// this by construction at 4x to 8x, which is why most rows carry it.
+    RatioAtLeastTwo,
+    /// The measurement **is** the budget: an exact count, not a bound.
+    Exact,
+    /// Measured at or near zero: the margin is the starved control recorded in
+    /// [`Cc8GateTerm::control`], never a fabricated ratio. §9.2's second rule
+    /// names this case — "where a term measures zero on the passing source, a
+    /// deliberately starved fixture bounds the constant from above".
+    MeasuredZero,
+    /// A floor: `measured >= budget`, and the headroom is a distance in the
+    /// term's own unit rather than a ratio.
+    Floor,
+    /// A ceiling: `measured <= budget`, and the headroom is a distance.
+    Ceiling,
+    /// The measurement is strictly inside a budget CC8 does **not** own and may
+    /// not move, but does not clear the 2x bar: the margin is recorded rather
+    /// than asserted, in CC7 §4.1 note 2's manner.
+    ///
+    /// Not a general escape hatch —
+    /// `cc8_every_gate_term_carries_the_declared_margin` asserts that a
+    /// `RecordedMargin` term genuinely fails the 2x bar, so a term that clears
+    /// it must be a [`Cc8GateMarginKind::RatioAtLeastTwo`] term.
+    RecordedMargin,
+}
+
+/// One measured term of one §9.2 gate: the `budget | measured | margin` row
+/// CC7 §4.1 established and §9.2's second rule requires of every CC8 budget.
+///
+/// A gate's *shape* (§9.2's second column) names several terms — "max / P99 /
+/// mean absolute", "max / P99 / mean luma; RGB mean; PSNR floor" — so a row of
+/// [`CC8_GATES`] carries one of these per term rather than one number for the
+/// whole gate. Collapsing them to a single figure would have published a number
+/// no fixture takes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Cc8GateTerm {
+    /// The term's name inside its gate, as the measuring fixture prints it in
+    /// its `CC8_MEASURED` line.
+    pub term: &'static str,
+    /// The unit `budget`, `measured` and `control` are all expressed in. Stated
+    /// because CC8's six gates do not share one: a working-linear absolute
+    /// error, a delivery code, a code millionth, a hundredth of a dB, a basis
+    /// point, and an 8-bit monitor code all appear below.
+    pub unit: &'static str,
+    /// The gated constant.
+    pub budget: f64,
+    /// What the measuring fixture measured on the recorded run (the
+    /// `measurement` provenance block of `cc8_manifest.json`).
+    pub measured: f64,
+    /// How the margin is checked.
+    pub kind: Cc8GateMarginKind,
+    /// The starved / failing-direction control that bounds the budget from the
+    /// far side, where §9.2's second rule requires one. `None` where the margin
+    /// is a ratio and the budget needs no separate reachability proof.
+    pub control: Option<f64>,
+    /// **CC7 §0.3 PM-E12.** Whether `measured` is a decode-dependent per-build
+    /// figure — the two CI `FFmpeg` builds decode one encode to different
+    /// numbers — and is therefore **reported, never gated**. What gates on both
+    /// operating systems is `budget`, with the live and the recorded
+    /// measurement each inside it in the term's own direction. `false` means
+    /// the term is a property of arithmetic this workspace performs itself and
+    /// is the same number on both.
+    pub measured_is_reported_not_gated: bool,
+}
+
+/// What a §9.2 row's value is.
+///
+/// §10 steps 2 through 9 left exactly one variant here, and that was the point:
+/// §9.2 says every tolerance in its table "is a placeholder to be measured at
+/// implementation" and that "a number that appears in this table is a
+/// description of what will be measured, not a value". Typing the absence kept
+/// a reader from mistaking a plausible integer for a measured one.
+///
+/// **§10 step 10 added [`Cc8GateValue::Measured`]** — the measured arm, in
+/// `cc7_scenarios::Cc7BudgetKind`'s manner — and moved all six rows onto it.
+/// [`Cc8GateValue::ToBeMeasuredAtImplementation`] is kept rather than deleted
+/// so that a gate row added by a later slice starts life unmeasured and says
+/// so; `cc8_gate_table_is_section_9_2s_six_measured_rows` asserts that no CC8
+/// row is on it now.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Cc8GateValue {
     /// §9.2's own words, verbatim: "to be measured at implementation".
     ToBeMeasuredAtImplementation,
+    /// The measured terms of one gate, in the order its shape names them.
+    Measured(&'static [Cc8GateTerm]),
 }
 
 /// One row of CC8 §9.2's numeric-gate table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Cc8Gate {
     /// The gate's name, as §9.2's first column writes it.
     pub gate: &'static str,
@@ -1604,63 +1703,381 @@ pub struct Cc8Gate {
     pub shape: Cc8GateShape,
     /// §9.2's third column.
     pub value: Cc8GateValue,
-    /// The §9.1 fixture that will produce the measurement.
+    /// The §9.1 fixture that produced the measurement.
     pub fixture: u8,
+    /// The **measuring fixture**: the `#[test]` function that takes this row's
+    /// numbers and prints them under `CC8_MEASURED`. §10 step 10 requires each
+    /// row to cite it, so a published figure always names the thing that would
+    /// go red if it moved.
+    pub measuring_fixture: &'static str,
 }
 
-/// CC8 §9.2's six rows, shapes only.
+/// The unit every §9.1 fixture 1, 3 and 10 term is measured in: an **absolute**
+/// error in working-linear units, where diffuse white is `1.0`.
 ///
-/// Two rules govern how the numbers are taken when §10 step 10 takes them,
-/// both carried forward from CC7 and restated here because this is the module
-/// they will be written into:
+/// Named once because §9.2's first three rows share it and a reader who
+/// mistook one of them for a *relative* error would read a bound three orders
+/// of magnitude out at HDR magnitudes.
+pub const CC8_GATE_UNIT_WORKING_LINEAR: &str = "working_linear_absolute";
+/// One delivery code at the lane's ten-bit depth.
+pub const CC8_GATE_UNIT_DELIVERY_CODE: &str = "delivery_code_10bit";
+/// Millionths of one delivery code at the lane's ten-bit depth.
+pub const CC8_GATE_UNIT_DELIVERY_CODE_MILLIONTHS: &str = "delivery_code_10bit_millionths";
+/// Millionths of one **8-bit-equivalent** code, CC6 §6.3's whole-raster unit.
+pub const CC8_GATE_UNIT_EIGHT_BIT_EQUIVALENT_MILLIONTHS: &str =
+    "eight_bit_equivalent_code_millionths";
+/// Hundredths of a dB, CC6 §6.3's PSNR unit.
+pub const CC8_GATE_UNIT_DB_HUNDREDTHS: &str = "psnr_db_hundredths";
+/// Basis points of the sampled population, CC6 §6.4's legality unit.
+pub const CC8_GATE_UNIT_BASIS_POINTS: &str = "basis_points";
+/// One 8-bit monitor code, CC1 §6.2's monitor unit.
+pub const CC8_GATE_UNIT_MONITOR_CODE: &str = "monitor_code_8bit";
+
+/// §9.2 row 1's eighteen terms: two §2.1 profiles x CC1 §6.2's three magnitude
+/// bands x max / P99 / mean.
+///
+/// Every `measured` is `cc8_fixtures::CC8_FIXTURE1_MEASURED`'s own `f32`
+/// literal widened to `f64`, so the two cannot drift apart in a way a decimal
+/// transcription could hide; `cc8_manifest_declares_every_required_fixture_and_constant`
+/// asserts the equality across the crate boundary. Every `budget` is the
+/// fixture's own rule applied to that figure —
+/// `next_power_of_two(recorded) * CC8_MEASURED_BOUND_HEADROOM` — so no number
+/// here was chosen, and the realised margins run 4.00x to 7.94x.
+const CC8_GATE_TERMS_TRANSFER_ROUND_TRIP: [Cc8GateTerm; 18] = [
+    cc8_ratio_term("pq_rec2020/abs_le_1/max", 0.000_244_140_625, 4.249_811e-5),
+    cc8_ratio_term("pq_rec2020/abs_le_1/p99", 0.000_244_140_625, 3.075_6e-5),
+    cc8_ratio_term("pq_rec2020/abs_le_1/mean", 7.629_394_531_25e-6, 1.359_05e-6),
+    cc8_ratio_term("pq_rec2020/abs_1_to_2/max", 0.000_488_281_25, 8.761_883e-5),
+    cc8_ratio_term("pq_rec2020/abs_1_to_2/p99", 0.000_488_281_25, 8.761_883e-5),
+    cc8_ratio_term("pq_rec2020/abs_1_to_2/mean", 6.103_515_625e-5, 1.008_877e-5),
+    cc8_ratio_term("pq_rec2020/abs_above_2_hdr/max", 0.062_5, 1.080_322e-2),
+    cc8_ratio_term("pq_rec2020/abs_above_2_hdr/p99", 0.062_5, 1.014_709e-2),
+    cc8_ratio_term(
+        "pq_rec2020/abs_above_2_hdr/mean",
+        0.003_906_25,
+        6.137_814e-4,
+    ),
+    cc8_ratio_term(
+        "hlg_rec2020/abs_le_1/max",
+        1.907_348_632_812_5e-6,
+        3.576_279e-7,
+    ),
+    cc8_ratio_term(
+        "hlg_rec2020/abs_le_1/p99",
+        9.536_743_164_062_5e-7,
+        1.490_116e-7,
+    ),
+    cc8_ratio_term(
+        "hlg_rec2020/abs_le_1/mean",
+        2.980_232_238_769_531_2e-8,
+        6.477_401e-9,
+    ),
+    cc8_ratio_term(
+        "hlg_rec2020/abs_1_to_2/max",
+        3.814_697_265_625e-6,
+        8.344_65e-7,
+    ),
+    cc8_ratio_term(
+        "hlg_rec2020/abs_1_to_2/p99",
+        3.814_697_265_625e-6,
+        8.344_65e-7,
+    ),
+    cc8_ratio_term(
+        "hlg_rec2020/abs_1_to_2/mean",
+        4.768_371_582_031_25e-7,
+        1.021_794e-7,
+    ),
+    cc8_ratio_term(
+        "hlg_rec2020/abs_above_2_hdr/max",
+        3.051_757_812_5e-5,
+        7.629_395e-6,
+    ),
+    cc8_ratio_term(
+        "hlg_rec2020/abs_above_2_hdr/p99",
+        3.051_757_812_5e-5,
+        5.722_046e-6,
+    ),
+    cc8_ratio_term(
+        "hlg_rec2020/abs_above_2_hdr/mean",
+        1.907_348_632_812_5e-6,
+        2.547_008e-7,
+    ),
+];
+
+/// §9.2 row 2's three terms, from `cc8_fixtures::CC8_FIXTURE3_MEASURED`.
+///
+/// The arithmetic on this path is `+`, `-`, `*` and `/` only, which IEEE 754
+/// defines exactly, so these are the same figures on both CI operating systems
+/// and the 4x is pure margin rather than a libm allowance.
+const CC8_GATE_TERMS_PRIMARIES_ROUND_TRIP: [Cc8GateTerm; 3] = [
+    cc8_ratio_term("max", 3.051_757_812_5e-5, 7.629_395e-6),
+    cc8_ratio_term("p99", 1.525_878_906_25e-5, 3.814_697_3e-6),
+    cc8_ratio_term("mean", 1.907_348_632_812_5e-6, 3.456_745e-7),
+];
+
+/// §9.2 row 3's nine terms, from `cc8_fixtures::CC8_FIXTURE10_MEASURED`.
+///
+/// Every `max` and `p99` measured **exactly one `Rgba16Float` ULP** at its
+/// band, which is CC1 §6.2's own prediction; the bound is the fixture's rule
+/// with CC1's half-float granularity as the floor, so the three `mean` terms
+/// carry the wider margins.
+const CC8_GATE_TERMS_CPU_GPU_HDR: [Cc8GateTerm; 9] = [
+    cc8_ratio_term("abs_le_1/max", 0.001_953_125, 4.882_812e-4),
+    cc8_ratio_term("abs_le_1/p99", 0.001_953_125, 4.882_812e-4),
+    cc8_ratio_term("abs_le_1/mean", 0.000_976_562_5, 9.045_42e-5),
+    cc8_ratio_term("abs_1_to_2/max", 0.003_906_25, 9.765_625e-4),
+    cc8_ratio_term("abs_1_to_2/p99", 0.003_906_25, 9.765_625e-4),
+    cc8_ratio_term("abs_1_to_2/mean", 0.001_953_125, 1.723_346e-4),
+    cc8_ratio_term("abs_above_2_hdr/max", 0.007_812_5, 1.953_125e-3),
+    cc8_ratio_term("abs_above_2_hdr/p99", 0.007_812_5, 1.953_125e-3),
+    cc8_ratio_term("abs_above_2_hdr/mean", 0.003_906_25, 4.595_588e-4),
+];
+
+/// §9.2 row 4's five terms — CC6 §6.3's shape on CC8 §5.1's lane, with the
+/// constants `delivery.rs` pins and the figures `cc8_encoded_hdr_delivery_fixture`
+/// measured on the passing source and on its starved control.
+///
+/// **Every term here is decode-dependent**, so every one carries
+/// `measured_is_reported_not_gated: true`. This is CC7 §0.3 PM-E12's rule
+/// applied where it was written for: the two CI `FFmpeg` builds decode one
+/// encode to different numbers, so the measured column is a Linux figure and
+/// the *budget* is what gates on both operating systems.
+const CC8_GATE_TERMS_DECODED_HDR_DELIVERY: [Cc8GateTerm; 5] = [
+    Cc8GateTerm {
+        term: "luma_max_code",
+        unit: CC8_GATE_UNIT_DELIVERY_CODE,
+        budget: 4.0,
+        measured: 0.0,
+        kind: Cc8GateMarginKind::MeasuredZero,
+        control: Some(10.0),
+        measured_is_reported_not_gated: true,
+    },
+    Cc8GateTerm {
+        term: "luma_p99_code_millionths",
+        unit: CC8_GATE_UNIT_DELIVERY_CODE_MILLIONTHS,
+        budget: 4_000_000.0,
+        measured: 0.0,
+        kind: Cc8GateMarginKind::MeasuredZero,
+        control: Some(10_000_000.0),
+        measured_is_reported_not_gated: true,
+    },
+    Cc8GateTerm {
+        term: "luma_mean_code_millionths",
+        unit: CC8_GATE_UNIT_DELIVERY_CODE_MILLIONTHS,
+        budget: 1_000_000.0,
+        measured: 0.0,
+        kind: Cc8GateMarginKind::MeasuredZero,
+        control: Some(2_420_703.0),
+        measured_is_reported_not_gated: true,
+    },
+    Cc8GateTerm {
+        term: "rgb_mean_code_millionths",
+        unit: CC8_GATE_UNIT_EIGHT_BIT_EQUIVALENT_MILLIONTHS,
+        budget: 250_000.0,
+        measured: 10_417.0,
+        kind: Cc8GateMarginKind::RatioAtLeastTwo,
+        control: Some(1_537_720.0),
+        measured_is_reported_not_gated: true,
+    },
+    Cc8GateTerm {
+        term: "psnr_db_hundredths",
+        unit: CC8_GATE_UNIT_DB_HUNDREDTHS,
+        budget: 4_500.0,
+        measured: 7_397.0,
+        kind: Cc8GateMarginKind::Floor,
+        control: Some(4_008.0),
+        measured_is_reported_not_gated: true,
+    },
+];
+
+/// §9.2 row 5's two terms, which come from two different fixtures because the
+/// row has two halves and only one of them touches a codec.
+///
+/// * `decoded_legal_excursion_basis_points` is measured by
+///   `cc8_encoded_hdr_delivery_fixture` on the **decoded native planes** of the
+///   written HDR file, against CC6 §6.4's own 1 % exception rate
+///   ([`crate::DECODED_RANGE_EXCEPTION_BASIS_POINTS`]). That constant is CC6's
+///   *definition* of a legality excursion — EBU R 103's rate — and not another
+///   lane's difference budget, so using it is not the inheritance §9.2 forbids.
+///   It is decode-dependent and therefore reported, never gated.
+/// * `predicted_code_deviation` is measured by
+///   `cc8_qc_bt2020_legality_measures_the_lanes_own_matrix`, comparing the
+///   engine's predicted `Y'CbCr` against hand-derived BT.2020 NCL codes. No
+///   codec is on that path, so it is one number on both operating systems.
+const CC8_GATE_TERMS_BT2020_LEGALITY: [Cc8GateTerm; 2] = [
+    Cc8GateTerm {
+        term: "decoded_legal_excursion_basis_points",
+        unit: CC8_GATE_UNIT_BASIS_POINTS,
+        // CC6's own constant, widened rather than restated: `u32` -> `f64` is
+        // exact and is `From`-able, so no cast lint applies and no second copy
+        // of the 1 % rate exists.
+        budget: crate::DECODED_RANGE_EXCEPTION_BASIS_POINTS as f64,
+        measured: 0.0,
+        kind: Cc8GateMarginKind::MeasuredZero,
+        // Fixture 12's two deliberate control patches sit wholly outside the
+        // legal box, so each reports the full 10 000 basis points.
+        control: Some(10_000.0),
+        measured_is_reported_not_gated: true,
+    },
+    Cc8GateTerm {
+        term: "predicted_code_deviation",
+        unit: CC8_GATE_UNIT_DELIVERY_CODE,
+        budget: 0.25,
+        // `cc8_fixtures::CC8_FIXTURE12_LEGALITY_MEASURED`'s own `f32` literal.
+        measured: 3.853_619e-2_f32 as f64,
+        kind: Cc8GateMarginKind::RatioAtLeastTwo,
+        control: None,
+        measured_is_reported_not_gated: false,
+    },
+];
+
+/// §9.2 row 6's three terms, from `cc8_fixtures::CC8_FIXTURE9_PARITY_MEASURED`.
+///
+/// The P99 measured exactly zero, so §9.2's second rule supplies its bound: the
+/// monitor buffer's own one-code granularity, with
+/// `cc8_preview_cpu_gpu_parity_in_monitor_codes`' 10 %-misread starved control
+/// at **2 codes** proving the floor reachable rather than decorative.
+const CC8_GATE_TERMS_PREVIEW_PARITY: [Cc8GateTerm; 3] = [
+    Cc8GateTerm {
+        term: "max",
+        unit: CC8_GATE_UNIT_MONITOR_CODE,
+        budget: 4.0,
+        measured: 1.0,
+        kind: Cc8GateMarginKind::RatioAtLeastTwo,
+        control: Some(2.0),
+        measured_is_reported_not_gated: false,
+    },
+    Cc8GateTerm {
+        term: "p99",
+        unit: CC8_GATE_UNIT_MONITOR_CODE,
+        budget: 1.0,
+        measured: 0.0,
+        kind: Cc8GateMarginKind::MeasuredZero,
+        control: Some(2.0),
+        measured_is_reported_not_gated: false,
+    },
+    Cc8GateTerm {
+        term: "mean",
+        unit: CC8_GATE_UNIT_MONITOR_CODE,
+        budget: 0.015_625,
+        // `cc8_fixtures::CC8_FIXTURE9_PARITY_MEASURED[2]`'s own `f32` literal.
+        measured: 2.604_167e-3_f32 as f64,
+        kind: Cc8GateMarginKind::RatioAtLeastTwo,
+        control: None,
+        measured_is_reported_not_gated: false,
+    },
+];
+
+/// One `RatioAtLeastTwo` working-linear term, whose budget is the measuring
+/// fixture's own derived bound and whose margin therefore needs no control.
+///
+/// A helper rather than thirty repeated literals: the three linear gates differ
+/// only in their names and numbers, and spelling `unit`, `kind`, `control` and
+/// `measured_is_reported_not_gated` out thirty times would have made a wrong
+/// one hard to see. `measured` is taken as `f32` so the caller writes the
+/// measuring fixture's own literal and the widening happens once, here.
+#[allow(clippy::cast_lossless)]
+const fn cc8_ratio_term(term: &'static str, budget: f64, measured: f32) -> Cc8GateTerm {
+    Cc8GateTerm {
+        term,
+        unit: CC8_GATE_UNIT_WORKING_LINEAR,
+        budget,
+        measured: measured as f64,
+        kind: Cc8GateMarginKind::RatioAtLeastTwo,
+        control: None,
+        measured_is_reported_not_gated: false,
+    }
+}
+
+/// CC8 §9.2's six rows, **measured** at §10 step 10.
+///
+/// Two rules govern how the numbers were taken, both carried forward from CC7
+/// and restated here because this is the module they are written into:
 ///
 /// - **No gate may be an equality against one `FFmpeg` build's decode output.**
 ///   What gates is a constant asserted against the manifest, with both the
 ///   live and the recorded measurement inside that bound. Per-build figures
 ///   are reported, never gated: no `cfg(windows)`, no per-OS constant, no
-///   window invented around one build's output.
+///   window invented around one build's output. The seven terms that *are*
+///   decode-dependent say so in their own
+///   [`Cc8GateTerm::measured_is_reported_not_gated`] flag rather than in prose.
 /// - **A budget must carry a real margin, and a margin nothing approaches
 ///   proves nothing.** A term too close to its constant is recorded with its
 ///   margin (CC7's `RecordedMargin`), and a term that measures zero on the
-///   passing source is bounded from above by a deliberately starved fixture.
+///   passing source is bounded from above by a deliberately starved fixture,
+///   recorded in [`Cc8GateTerm::control`]. CC8 has **no** `RecordedMargin`
+///   term: every ratio row clears the 2x bar at 4.00x or better, because each
+///   budget is `next_power_of_two(recorded) * 4` rather than a chosen number.
+///
+/// The measurements are the pinned Linux build's, `2026-08-29`; the
+/// `measurement` block of `crates/kinewright-media/tests/fixtures/cc8_manifest.json`
+/// records the machine, and §0.6 A1 records that no §9.2 figure has a Windows
+/// measurement yet.
 pub const CC8_GATES: [Cc8Gate; 6] = [
     Cc8Gate {
         gate: "PQ/HLG transfer round trip",
         shape: Cc8GateShape::BandedLinearAbsolute,
-        value: Cc8GateValue::ToBeMeasuredAtImplementation,
+        value: Cc8GateValue::Measured(&CC8_GATE_TERMS_TRANSFER_ROUND_TRIP),
         fixture: 1,
+        measuring_fixture: "cc8_transfer_round_trip_over_a_ten_bit_ramp_is_banded_and_monotone",
     },
     Cc8Gate {
         gate: "Primaries round trip",
         shape: Cc8GateShape::LinearAbsolute,
-        value: Cc8GateValue::ToBeMeasuredAtImplementation,
+        value: Cc8GateValue::Measured(&CC8_GATE_TERMS_PRIMARIES_ROUND_TRIP),
         fixture: 3,
+        measuring_fixture: "cc8_primaries_round_trip_over_a_wide_gamut_raster_carries_negatives",
     },
     Cc8Gate {
         gate: "CPU vs GPU, HDR magnitudes",
         shape: Cc8GateShape::PerHalfFloatBand,
-        value: Cc8GateValue::ToBeMeasuredAtImplementation,
+        value: Cc8GateValue::Measured(&CC8_GATE_TERMS_CPU_GPU_HDR),
         fixture: 10,
+        measuring_fixture: "cc8_cpu_gpu_parity_on_hdr_magnitudes_bands_the_hdr_range",
     },
     Cc8Gate {
         gate: "Decoded HDR delivery",
         shape: Cc8GateShape::DecodedDelivery,
-        value: Cc8GateValue::ToBeMeasuredAtImplementation,
+        value: Cc8GateValue::Measured(&CC8_GATE_TERMS_DECODED_HDR_DELIVERY),
         fixture: 8,
+        measuring_fixture: "cc8_encoded_hdr_delivery_fixture",
     },
     Cc8Gate {
         gate: "BT.2020 legality excursion",
         shape: Cc8GateShape::LegalityBasisPoints,
-        value: Cc8GateValue::ToBeMeasuredAtImplementation,
+        value: Cc8GateValue::Measured(&CC8_GATE_TERMS_BT2020_LEGALITY),
         fixture: 12,
+        measuring_fixture: "cc8_qc_bt2020_legality_measures_the_lanes_own_matrix",
     },
     Cc8Gate {
         gate: "Preview parity",
         shape: Cc8GateShape::MonitorCodes,
-        value: Cc8GateValue::ToBeMeasuredAtImplementation,
+        value: Cc8GateValue::Measured(&CC8_GATE_TERMS_PREVIEW_PARITY),
         fixture: 9,
+        measuring_fixture: "cc8_preview_cpu_gpu_parity_in_monitor_codes",
     },
 ];
+
+/// Every [`Cc8GateTerm`] of every [`CC8_GATES`] row, in table order.
+///
+/// The one place the whole §9.2 table is a flat list: the margin test, the
+/// distinctness test and the manifest all walk it, so none of them can quietly
+/// skip a row by iterating a shorter copy.
+#[must_use]
+pub fn cc8_gate_terms() -> Vec<(&'static str, Cc8GateTerm)> {
+    let mut terms = Vec::new();
+    for gate in CC8_GATES {
+        match gate.value {
+            Cc8GateValue::ToBeMeasuredAtImplementation => {}
+            Cc8GateValue::Measured(rows) => {
+                for row in rows {
+                    terms.push((gate.gate, *row));
+                }
+            }
+        }
+    }
+    terms
+}
 
 #[cfg(test)]
 mod tests {
@@ -2468,18 +2885,57 @@ mod tests {
     // CC8 §9.2.
     // -----------------------------------------------------------------------
 
+    /// §9.2's table is six rows, and at §10 step 10 every one of them carries
+    /// a measurement.
+    ///
+    /// This is the step-2 test's successor: it asserted the opposite — that no
+    /// row carried a number before the measuring step — and asserting that now
+    /// would be asserting the work was not done. What it keeps verbatim is the
+    /// structural half, because six distinct shapes and six distinct names are
+    /// still what says no §9.2 row was lost.
     #[test]
-    fn cc8_gate_table_is_section_9_2s_six_rows_with_no_number_in_it() {
+    fn cc8_gate_table_is_section_9_2s_six_measured_rows() {
         assert_eq!(CC8_GATES.len(), 6);
+        assert_eq!(CC8_GATE_MEASUREMENT_STEP, 10);
         for gate in CC8_GATES {
-            assert_eq!(
-                gate.value,
-                Cc8GateValue::ToBeMeasuredAtImplementation,
-                "{} carries a number before §10 step {CC8_GATE_MEASUREMENT_STEP}",
-                gate.gate,
-            );
+            let Cc8GateValue::Measured(terms) = gate.value else {
+                panic!(
+                    "{} is still ToBeMeasuredAtImplementation after §10 step \
+                     {CC8_GATE_MEASUREMENT_STEP}",
+                    gate.gate,
+                );
+            };
             assert!(!gate.gate.is_empty());
             assert!(gate.fixture >= 1 && gate.fixture <= 12, "{}", gate.gate);
+            assert!(
+                gate.measuring_fixture.starts_with("cc8_"),
+                "{} must cite a cc8_-prefixed measuring fixture, not {}",
+                gate.gate,
+                gate.measuring_fixture,
+            );
+            assert!(
+                !terms.is_empty(),
+                "{}: a measured row with no terms publishes nothing",
+                gate.gate,
+            );
+            // Within one gate the term names are the shape's own columns, so a
+            // repeated name would mean a column was written twice and another
+            // lost.
+            let mut names: Vec<&str> = terms.iter().map(|term| term.term).collect();
+            names.sort_unstable();
+            names.dedup();
+            assert_eq!(names.len(), terms.len(), "{}", gate.gate);
+            for term in terms {
+                assert!(!term.unit.is_empty(), "{} {}", gate.gate, term.term);
+                assert!(
+                    term.budget.is_finite() && term.budget > 0.0,
+                    "{} {}: a budget of {} bounds nothing",
+                    gate.gate,
+                    term.term,
+                    term.budget,
+                );
+                assert!(term.measured.is_finite());
+            }
         }
         // Six rows, six distinct shapes, six distinct names: a table that
         // repeated a shape would have lost one of §9.2's rows.
@@ -2491,6 +2947,62 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), 6);
+        // Six measuring fixtures, one per row: a row that cited another row's
+        // fixture would be publishing a figure nothing takes.
+        let mut fixtures: Vec<&str> = CC8_GATES
+            .iter()
+            .map(|gate| gate.measuring_fixture)
+            .collect();
+        fixtures.sort_unstable();
+        fixtures.dedup();
+        assert_eq!(fixtures.len(), 6);
+        assert_eq!(cc8_gate_terms().len(), 40);
+    }
+
+    /// §9.2's PM-E12 rule, asserted on the flag rather than trusted to prose:
+    /// a term is `measured_is_reported_not_gated` **exactly** when its
+    /// measurement passed through an `FFmpeg` decode.
+    ///
+    /// The two decode-dependent gates are §9.1 fixture 8's ("Decoded HDR
+    /// delivery", all five terms) and the decoded half of fixture 12's
+    /// legality row. Everything else is arithmetic this workspace performs
+    /// itself — `f32` transfers, an IEEE-exact matrix, a WGSL shader read back
+    /// — and is the same number on both operating systems.
+    #[test]
+    fn cc8_only_the_decode_dependent_gate_terms_are_reported_not_gated() {
+        let reported: Vec<&str> = cc8_gate_terms()
+            .into_iter()
+            .filter(|(_, term)| term.measured_is_reported_not_gated)
+            .map(|(gate, term)| {
+                assert!(
+                    gate == "Decoded HDR delivery" || term.term.starts_with("decoded_"),
+                    "{gate} / {}: only a decode-dependent term may be reported rather than \
+                     gated (CC7 §0.3 PM-E12)",
+                    term.term,
+                );
+                term.term
+            })
+            .collect();
+        assert_eq!(
+            reported.len(),
+            6,
+            "the five decoded-delivery terms and the decoded legality rate are the whole of \
+             CC8's reported-not-gated set: {reported:?}",
+        );
+        // The failing direction: a gate whose arithmetic never meets a codec
+        // must not have quietly opted out of being gated.
+        for (gate, term) in cc8_gate_terms() {
+            if gate == "PQ/HLG transfer round trip"
+                || gate == "Primaries round trip"
+                || gate == "Preview parity"
+            {
+                assert!(
+                    !term.measured_is_reported_not_gated,
+                    "{gate} / {} touches no decoder and must gate its measurement",
+                    term.term,
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

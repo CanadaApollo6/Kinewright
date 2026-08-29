@@ -279,13 +279,35 @@ every control has an analytic expected value and no parity case is vacuous.
    questions. The exit gate is the technical gates green on both CI operating
    systems with the human reviewer left only the matrix's creative questions.
    The contract is `CC7-WORKFLOW-EVALUATION.md`.
+11. **CC8 HDR interpretation and delivery — implemented 2026-08-29, pending
+   platform smoke.** One honest HDR interpretation path and one HDR delivery
+   contract, on the terms the owner accepted the same day. Two source profiles
+   (`pq_rec2020`, `hlg_rec2020`, 10-bit floor) enter through a closed classifier
+   table; ST 2084 and ARIB STD-B67 are transcribed into a core authority module
+   (`cc8_hdr`) rather than delegated to a backend, and BT.2408's 203 cd/m²
+   reference white is pinned and inspectable so an editor can see why an HDR clip
+   landed where it did. The first non-identity primaries stage carries Rec.2020
+   into the unchanged BT.709-primaries working space, out-of-triangle colours
+   surviving as negative components that the delivery matrix restores exactly.
+   One delivery lane — HLG, Rec.2020, BT.2020 NCL, limited, 10-bit, on the
+   existing libx264 High 10 path — writes its tags through the encoder's own
+   parameter string and re-probes the written file, with typed rejection widened
+   by lane rather than globally. QC gains a BT.2020 legality reference, a
+   dual-triangle gamut report, ungated MaxCLL/MaxFALL, and a withheld-with-a-
+   reason skin report; the preview is a labelled tone map that carries no exit
+   gate and is unreachable from the delivery path. The SDR path is proven not to
+   have moved by a byte-equality gate that landed before any export change. Its
+   §9.2 budgets are measured and published in `cc8_manifest.json`, which also
+   reconciles the 105-test inventory. The contract is
+   `CC8-HDR-INTERPRETATION-AND-DELIVERY.md`.
 
 With CC7 the SDR colour programme, CC0 through CC7, is complete and evaluated end
-to end. CC8 takes the first bounded slice of HDR on top of it — accepted as a
-contract on 2026-08-29, not yet implemented (`CC8-HDR-INTERPRETATION-AND-DELIVERY.md`).
-Camera RAW, ACES/OCIO, calibrated-monitor output, temporal noise reduction, and the
-parts of HDR CC8 defers remain deliberate later programmes, and the M40 gauntlet
-continues to rotate colour tasks as regressions.
+to end, and CC8 has taken the first bounded slice of HDR on top of it —
+implemented 2026-08-29, pending the hands-on platform smoke records
+(`CC8-HDR-INTERPRETATION-AND-DELIVERY.md`). Camera RAW, ACES/OCIO,
+calibrated-monitor output, temporal noise reduction, and the parts of HDR CC8
+defers remain deliberate later programmes, and the M40 gauntlet continues to
+rotate colour tasks as regressions.
 
 Within that cadence, three workstreams remain active:
 
@@ -470,12 +492,19 @@ constructors, compositor inputs, `ExportSettings`, and FFmpeg stream/container
 metadata. Later stages cannot treat those surfaces as implicit or start before the
 required earlier exit gate passes.
 
-**Current status (2026-08-29): CC0, M41, CC1, M42, CC2, CC3, CC4, CC5, CC6, and CC7
-are complete apart from the CC3–CC7 hands-on platform smoke gates and CC7's
-real-harness eval run and blind review. CC8 is an accepted contract and is not yet
-implemented** — the owner accepted `CC8-HDR-INTERPRETATION-AND-DELIVERY.md` on
-2026-08-29 with all six of its §0.2 decisions adopted as written, and its first
-implementation step is the Windows encoder precondition (CC8 §0.3(e), §10 step 1).
+**Current status (2026-08-29): CC0, M41, CC1, M42, CC2, CC3, CC4, CC5, CC6, CC7,
+and CC8 are complete apart from the CC3–CC8 hands-on platform smoke gates and
+CC7's real-harness eval run and blind review.** The owner accepted
+`CC8-HDR-INTERPRETATION-AND-DELIVERY.md` on 2026-08-29 with all six of its §0.2
+decisions adopted as written, and it was implemented the same day across its §10
+steps 1–10; step 1's Windows encoder precondition (CC8 §0.3(e)) was answered
+green by CI before any later step started. CC8's remaining gates are the
+hands-on Windows and Omarchy smoke records for the HDR lane, which may not
+contain a judgment about how HDR content looks (CC8 §0.2 Q4), and the standing
+HLG-in-AVC recognition risk CC8 §12 carries — a risk no fixture can close.
+Every CC8 §9.2 figure is a Linux measurement until the first Windows run of
+those fixtures publishes its own; the fixtures themselves have run green on
+`windows-latest`.
 CC0's exit evidence
 includes legacy project migration, known/partial/unknown and 10-bit probe fixtures,
 visible human and agent inspection, an undoable source override, delivery rejection
@@ -504,10 +533,15 @@ decoded-output verification of every export. CC7 adds the scenario authority,
 the lossless synthetic scenario sources, the per-scenario technical gates on
 both CI operating systems, the scripted agent and person paths, the
 `color-workflow-v6` suite, and the blinded review package; with it the SDR colour
-programme — CC0 through CC7 — is complete. The table below now carries an eighth
-row: "the colour programme table is complete" means the **SDR** table is complete
-and evaluated end to end, which is the precondition CC8 was waiting on, not that
-every row in the table is built.
+programme — CC0 through CC7 — is complete. CC8 then adds the two HDR source
+profiles and their transfers, the reference-white anchor, the first non-identity
+primaries stage, the one HLG/Rec.2020 10-bit delivery lane with lane-derived tags
+and typed rejection, the lane-aware QC extensions, the labelled tone-mapped
+preview, the `managed_hdr_v1` state, and the SDR byte-equality regression gate
+that proves none of it moved the SDR path. With that eighth row built, "the
+colour programme table is complete" no longer needs its SDR qualifier for the
+rows that exist — but it still means the table as written, not HDR generally:
+what CC8 defers stays deferred and is listed below.
 
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |

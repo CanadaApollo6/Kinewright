@@ -1,0 +1,1799 @@
+{
+  "contract": "CC8 HDR interpretation and delivery",
+  "contract_token": "cc8_hdr_interpretation_and_delivery",
+  "manifest_version": 1,
+  "fixture_quality_rules": "docs/CC8-HDR-INTERPRETATION-AND-DELIVERY.md §9",
+  "written_by": "CC8 §10 step 10 — measure every §9.2 budget; write cc8_manifest.json; reconcile the inventory",
+  "profiles": {
+    "source_profiles": [
+      {
+        "id": "pq_rec2020",
+        "primaries": "bt2020",
+        "transfer": "smpte2084",
+        "matrices": [
+          "bt2020_ncl",
+          "rgb"
+        ],
+        "ranges": [
+          "limited",
+          "full"
+        ],
+        "white_point": "d65",
+        "min_integer_depth_bits": 10,
+        "max_integer_depth_bits": 16
+      },
+      {
+        "id": "hlg_rec2020",
+        "primaries": "bt2020",
+        "transfer": "arib_std_b67",
+        "matrices": [
+          "bt2020_ncl",
+          "rgb"
+        ],
+        "ranges": [
+          "limited",
+          "full"
+        ],
+        "white_point": "d65",
+        "min_integer_depth_bits": 10,
+        "max_integer_depth_bits": 16
+      }
+    ],
+    "closed_set": true,
+    "ten_bit_floor_is_normative": true,
+    "rejected_hdr_adjacent": [
+      {
+        "field": "bit_depth",
+        "observed": "8",
+        "reason": "8-bit PQ or HLG is banding by construction (§2.1's 10-bit floor)"
+      },
+      {
+        "field": "bit_depth",
+        "observed": "9",
+        "reason": "below §2.1's 10-bit floor"
+      },
+      {
+        "field": "matrix",
+        "observed": "bt2020_cl",
+        "reason": "constant luminance is outside §1's matrix set"
+      },
+      {
+        "field": "matrix",
+        "observed": "ictcp",
+        "reason": "ICtCp is an explicit §1 non-deliverable"
+      },
+      {
+        "field": "matrix",
+        "observed": "chroma_derived_ncl",
+        "reason": "chroma-derived matrices are outside §2.1's set"
+      },
+      {
+        "field": "matrix",
+        "observed": "chroma_derived_cl",
+        "reason": "chroma-derived matrices are outside §2.1's set"
+      },
+      {
+        "field": "primaries",
+        "observed": "display_p3",
+        "reason": "P3 primaries in any combination are an explicit CC8 failure"
+      },
+      {
+        "field": "primaries",
+        "observed": "dci_p3",
+        "reason": "P3 primaries in any combination are an explicit CC8 failure"
+      }
+    ],
+    "asserted_by": "cc8_source_profile_table_is_section_2_1s_two_closed_rows"
+  },
+  "anchor": {
+    "reference_white_nits": 203,
+    "pq_peak_nits": 10000,
+    "hlg_nominal_peak_nits": 1000,
+    "hlg_system_gamma_thousandths": 1200,
+    "hlg_reference_white_signal_percent": 75,
+    "standards_value_not_a_measurement": true,
+    "source": "ITU-R BT.2408 nominal HDR reference white; BT.2100 system gamma at 1 000 nits",
+    "working_values": {
+      "pq_203_nits": 1.000022054,
+      "pq_1000_nits": 4.926323891,
+      "pq_10000_nits": 49.26108551,
+      "hlg_nominal_peak": 4.926108837,
+      "worst_relative_error": 4.375267e-05
+    },
+    "asserted_by": "cc8_reference_white_anchor_lands_the_pinned_working_values"
+  },
+  "matrices": {
+    "rec2020_to_bt709": [
+      [
+        1.6604909896850586,
+        -0.5876411199569702,
+        -0.07284986227750778
+      ],
+      [
+        -0.1245504766702652,
+        1.1328998804092407,
+        -0.008349422365427017
+      ],
+      [
+        -0.01815076358616352,
+        -0.10057889670133591,
+        1.1187297105789185
+      ]
+    ],
+    "bt709_to_rec2020": [
+      [
+        0.6274039149284363,
+        0.3292830288410187,
+        0.04331306740641594
+      ],
+      [
+        0.06909728795289993,
+        0.9195404052734375,
+        0.011362315155565739
+      ],
+      [
+        0.016391439363360405,
+        0.08801330626010895,
+        0.8955952525138855
+      ]
+    ],
+    "derivation": "RGB→XYZ from the pinned Rec.2020 and BT.709 chromaticities at the shared D65 white, inverted in f64 and narrowed to f32; asserted bit-for-bit against the in-module derivation",
+    "not_a_gamut_map": true,
+    "negatives_are_carried_not_clamped": true,
+    "asserted_by": "cc8_pinned_matrices_are_the_derivation_transcribed"
+  },
+  "lane": {
+    "id": "hlg_rec2020_h264_high10",
+    "codec": "libx264",
+    "profile": "High 10",
+    "pixel_format": "yuv420p10le",
+    "primaries": "bt2020",
+    "transfer": "arib_std_b67",
+    "matrix": "bt2020_ncl",
+    "range": "limited",
+    "white_point": "d65",
+    "bit_depth_bits": 10,
+    "x264_params": "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
+    "sdr_x264_params": "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+    "scaler_flags": "bicubic",
+    "intermediate_white": 65280,
+    "managed_state": "managed_hdr_v1",
+    "probed_tags": {
+      "profile": "High 10",
+      "pix_fmt": "yuv420p10le",
+      "color_range": "tv",
+      "color_space": "bt2020nc",
+      "color_transfer": "arib-std-b67",
+      "color_primaries": "bt2020"
+    },
+    "sdr_export_sha256": {
+      "eight_bit": "1241716e8b5388a46563071ac35f6302fa692af3d27fe5a42d82a254a44f3b76",
+      "ten_bit": "639ce0c35a3a6bf7f95817709106764dbb02564bf5458ca5c0fa98dafcf9f592",
+      "note": "recorded, never asserted: an exported byte stream is a property of the encoder build, and CC7 §0.3 PM-E12 forbids gating on one. §9.1 fixture 6 gates that two exports of the same project on the same build are byte-identical, and that every delivery colour term is character-unchanged."
+    },
+    "asserted_by": "cc8_hdr_delivery_lane_is_section_5_1s_table"
+  },
+  "preview": {
+    "stage": "tone_map_preview_reinhard_extended",
+    "peak_nits": 1000,
+    "peak_is_the_pinned_hlg_nominal_peak": true,
+    "badge": "TONE-MAPPED PREVIEW · NOT A REFERENCE",
+    "label": "This picture is a tone-mapped SDR approximation of HDR content, not a monitoring reference. It is not calibrated, it is not what the HDR deliverable looks like, and no Kinewright check is a judgment about how it looks. Calibrated HDR monitoring is a separate later programme: CC8 makes no display-capability query and no HDR handoff, so this preview is what an HDR-capable display gets too.",
+    "delivery_boundary": "Preview only. CC8 §4 item 5: the tone map must not be reachable from the delivery path, and §0.2 Q6 refuses tone-mapped SDR delivery from an HDR timeline as a deliverable.",
+    "no_exit_gate_is_a_judgment_about_how_it_looks": true,
+    "asserted_by": "cc8_preview_tone_map_is_deterministic_monotone_and_holds_its_endpoints"
+  },
+  "budgets": {
+    "gates": {
+      "PQ/HLG transfer round trip": {
+        "shape": "BandedLinearAbsolute",
+        "fixture": 1,
+        "measuring_fixture": "cc8_transfer_round_trip_over_a_ten_bit_ramp_is_banded_and_monotone",
+        "bands": [
+          "abs_le_1",
+          "abs_1_to_2",
+          "abs_above_2_hdr"
+        ],
+        "band_edges": [
+          1.0,
+          2.0
+        ],
+        "channel_samples": {
+          "pq_rec2020/abs_le_1": 1719,
+          "pq_rec2020/abs_1_to_2": 195,
+          "pq_rec2020/abs_above_2_hdr": 1158,
+          "hlg_rec2020/abs_le_1": 2163,
+          "hlg_rec2020/abs_1_to_2": 294,
+          "hlg_rec2020/abs_above_2_hdr": 615
+        },
+        "terms": {
+          "pq_rec2020/abs_le_1/max": {
+            "unit": "working_linear_absolute",
+            "budget": 0.000244140625,
+            "measured": 4.2498111724853516e-05,
+            "kind": "RatioAtLeastTwo",
+            "margin": 5.7447,
+            "measured_is_reported_not_gated": false
+          },
+          "pq_rec2020/abs_le_1/p99": {
+            "unit": "working_linear_absolute",
+            "budget": 0.000244140625,
+            "measured": 3.075600034208037e-05,
+            "kind": "RatioAtLeastTwo",
+            "margin": 7.938,
+            "measured_is_reported_not_gated": false
+          },
+          "pq_rec2020/abs_le_1/mean": {
+            "unit": "working_linear_absolute",
+            "budget": 7.62939453125e-06,
+            "measured": 1.3590499747806462e-06,
+            "kind": "RatioAtLeastTwo",
+            "margin": 5.6138,
+            "measured_is_reported_not_gated": false
+          },
+          "pq_rec2020/abs_1_to_2/max": {
+            "unit": "working_linear_absolute",
+            "budget": 0.00048828125,
+            "measured": 8.761882781982422e-05,
+            "kind": "RatioAtLeastTwo",
+            "margin": 5.5728,
+            "measured_is_reported_not_gated": false
+          },
+          "pq_rec2020/abs_1_to_2/p99": {
+            "unit": "working_linear_absolute",
+            "budget": 0.00048828125,
+            "measured": 8.761882781982422e-05,
+            "kind": "RatioAtLeastTwo",
+            "margin": 5.5728,
+            "measured_is_reported_not_gated": false
+          },
+          "pq_rec2020/abs_1_to_2/mean": {
+            "unit": "working_linear_absolute",
+            "budget": 6.103515625e-05,
+            "measured": 1.0088770068250597e-05,
+            "kind": "RatioAtLeastTwo",
+            "margin": 6.0498,
+            "measured_is_reported_not_gated": false
+          },
+          "pq_rec2020/abs_above_2_hdr/max": {
+            "unit": "working_linear_absolute",
+            "budget": 0.0625,
+            "measured": 0.010803219862282276,
+            "kind": "RatioAtLeastTwo",
+            "margin": 5.7853,
+            "measured_is_reported_not_gated": false
+          },
+          "pq_rec2020/abs_above_2_hdr/p99": {
+            "unit": "working_linear_absolute",
+            "budget": 0.0625,
+            "measured": 0.010147090069949627,
+            "kind": "RatioAtLeastTwo",
+            "margin": 6.1594,
+            "measured_is_reported_not_gated": false
+          },
+          "pq_rec2020/abs_above_2_hdr/mean": {
+            "unit": "working_linear_absolute",
+            "budget": 0.00390625,
+            "measured": 0.0006137813907116652,
+            "kind": "RatioAtLeastTwo",
+            "margin": 6.3642,
+            "measured_is_reported_not_gated": false
+          },
+          "hlg_rec2020/abs_le_1/max": {
+            "unit": "working_linear_absolute",
+            "budget": 1.9073486328125e-06,
+            "measured": 3.576278970740532e-07,
+            "kind": "RatioAtLeastTwo",
+            "margin": 5.3333,
+            "measured_is_reported_not_gated": false
+          },
+          "hlg_rec2020/abs_le_1/p99": {
+            "unit": "working_linear_absolute",
+            "budget": 9.5367431640625e-07,
+            "measured": 1.4901159772762185e-07,
+            "kind": "RatioAtLeastTwo",
+            "margin": 6.4,
+            "measured_is_reported_not_gated": false
+          },
+          "hlg_rec2020/abs_le_1/mean": {
+            "unit": "working_linear_absolute",
+            "budget": 2.9802322387695312e-08,
+            "measured": 6.477400837923142e-09,
+            "kind": "RatioAtLeastTwo",
+            "margin": 4.601,
+            "measured_is_reported_not_gated": false
+          },
+          "hlg_rec2020/abs_1_to_2/max": {
+            "unit": "working_linear_absolute",
+            "budget": 3.814697265625e-06,
+            "measured": 8.344650268554688e-07,
+            "kind": "RatioAtLeastTwo",
+            "margin": 4.5714,
+            "measured_is_reported_not_gated": false
+          },
+          "hlg_rec2020/abs_1_to_2/p99": {
+            "unit": "working_linear_absolute",
+            "budget": 3.814697265625e-06,
+            "measured": 8.344650268554688e-07,
+            "kind": "RatioAtLeastTwo",
+            "margin": 4.5714,
+            "measured_is_reported_not_gated": false
+          },
+          "hlg_rec2020/abs_1_to_2/mean": {
+            "unit": "working_linear_absolute",
+            "budget": 4.76837158203125e-07,
+            "measured": 1.021793991640152e-07,
+            "kind": "RatioAtLeastTwo",
+            "margin": 4.6667,
+            "measured_is_reported_not_gated": false
+          },
+          "hlg_rec2020/abs_above_2_hdr/max": {
+            "unit": "working_linear_absolute",
+            "budget": 3.0517578125e-05,
+            "measured": 7.629395440744702e-06,
+            "kind": "RatioAtLeastTwo",
+            "margin": 4.0,
+            "measured_is_reported_not_gated": false
+          },
+          "hlg_rec2020/abs_above_2_hdr/p99": {
+            "unit": "working_linear_absolute",
+            "budget": 3.0517578125e-05,
+            "measured": 5.7220458984375e-06,
+            "kind": "RatioAtLeastTwo",
+            "margin": 5.3333,
+            "measured_is_reported_not_gated": false
+          },
+          "hlg_rec2020/abs_above_2_hdr/mean": {
+            "unit": "working_linear_absolute",
+            "budget": 1.9073486328125e-06,
+            "measured": 2.5470080800005235e-07,
+            "kind": "RatioAtLeastTwo",
+            "margin": 7.4886,
+            "measured_is_reported_not_gated": false
+          }
+        }
+      },
+      "Primaries round trip": {
+        "shape": "LinearAbsolute",
+        "fixture": 3,
+        "measuring_fixture": "cc8_primaries_round_trip_over_a_wide_gamut_raster_carries_negatives",
+        "channel_samples": 1200,
+        "negative_channels": 448,
+        "most_negative_bt709_component": -32.536503,
+        "largest_stage_change": 32.536507,
+        "terms": {
+          "max": {
+            "unit": "working_linear_absolute",
+            "budget": 3.0517578125e-05,
+            "measured": 7.629395440744702e-06,
+            "kind": "RatioAtLeastTwo",
+            "margin": 4.0,
+            "measured_is_reported_not_gated": false
+          },
+          "p99": {
+            "unit": "working_linear_absolute",
+            "budget": 1.52587890625e-05,
+            "measured": 3.814697265625e-06,
+            "kind": "RatioAtLeastTwo",
+            "margin": 4.0,
+            "measured_is_reported_not_gated": false
+          },
+          "mean": {
+            "unit": "working_linear_absolute",
+            "budget": 1.9073486328125e-06,
+            "measured": 3.456744934737799e-07,
+            "kind": "RatioAtLeastTwo",
+            "margin": 5.5178,
+            "measured_is_reported_not_gated": false
+          }
+        }
+      },
+      "CPU vs GPU, HDR magnitudes": {
+        "shape": "PerHalfFloatBand",
+        "fixture": 10,
+        "measuring_fixture": "cc8_cpu_gpu_parity_on_hdr_magnitudes_bands_the_hdr_range",
+        "bands": [
+          "abs_le_1",
+          "abs_1_to_2",
+          "abs_above_2_hdr"
+        ],
+        "channel_samples": {
+          "abs_le_1": 1264,
+          "abs_1_to_2": 136,
+          "abs_above_2_hdr": 136
+        },
+        "raster": [
+          64,
+          8
+        ],
+        "moved_samples": 1536,
+        "terms": {
+          "abs_le_1/max": {
+            "unit": "working_linear_absolute",
+            "budget": 0.001953125,
+            "measured": 0.0004882811917923391,
+            "kind": "RatioAtLeastTwo",
+            "margin": 4.0,
+            "measured_is_reported_not_gated": false,
+            "half_float_ulp_floor": 0.0009765625
+          },
+          "abs_le_1/p99": {
+            "unit": "working_linear_absolute",
+            "budget": 0.001953125,
+            "measured": 0.0004882811917923391,
+            "kind": "RatioAtLeastTwo",
+            "margin": 4.0,
+            "measured_is_reported_not_gated": false,
+            "half_float_ulp_floor": 0.0009765625
+          },
+          "abs_le_1/mean": {
+            "unit": "working_linear_absolute",
+            "budget": 0.0009765625,
+            "measured": 9.045420301845297e-05,
+            "kind": "RatioAtLeastTwo",
+            "margin": 10.7962,
+            "measured_is_reported_not_gated": false,
+            "half_float_ulp_floor": 0.0009765625
+          },
+          "abs_1_to_2/max": {
+            "unit": "working_linear_absolute",
+            "budget": 0.00390625,
+            "measured": 0.0009765625,
+            "kind": "RatioAtLeastTwo",
+            "margin": 4.0,
+            "measured_is_reported_not_gated": false,
+            "half_float_ulp_floor": 0.001953125
+          },
+          "abs_1_to_2/p99": {
+            "unit": "working_linear_absolute",
+            "budget": 0.00390625,
+            "measured": 0.0009765625,
+            "kind": "RatioAtLeastTwo",
+            "margin": 4.0,
+            "measured_is_reported_not_gated": false,
+            "half_float_ulp_floor": 0.001953125
+          },
+          "abs_1_to_2/mean": {
+            "unit": "working_linear_absolute",
+            "budget": 0.001953125,
+            "measured": 0.00017233460675925016,
+            "kind": "RatioAtLeastTwo",
+            "margin": 11.3333,
+            "measured_is_reported_not_gated": false,
+            "half_float_ulp_floor": 0.001953125
+          },
+          "abs_above_2_hdr/max": {
+            "unit": "working_linear_absolute",
+            "budget": 0.0078125,
+            "measured": 0.001953125,
+            "kind": "RatioAtLeastTwo",
+            "margin": 4.0,
+            "measured_is_reported_not_gated": false,
+            "half_float_ulp_floor": 0.00390625
+          },
+          "abs_above_2_hdr/p99": {
+            "unit": "working_linear_absolute",
+            "budget": 0.0078125,
+            "measured": 0.001953125,
+            "kind": "RatioAtLeastTwo",
+            "margin": 4.0,
+            "measured_is_reported_not_gated": false,
+            "half_float_ulp_floor": 0.00390625
+          },
+          "abs_above_2_hdr/mean": {
+            "unit": "working_linear_absolute",
+            "budget": 0.00390625,
+            "measured": 0.00045955879613757133,
+            "kind": "RatioAtLeastTwo",
+            "margin": 8.5,
+            "measured_is_reported_not_gated": false,
+            "half_float_ulp_floor": 0.00390625
+          }
+        }
+      },
+      "Decoded HDR delivery": {
+        "shape": "DecodedDelivery",
+        "fixture": 8,
+        "measuring_fixture": "cc8_encoded_hdr_delivery_fixture",
+        "lane": "hlg_rec2020_h264_high10",
+        "starved_video_bitrate": 100000,
+        "starved_tripped": [
+          "combined.mean_code_diff_millionths",
+          "luma.maximum_code_diff",
+          "luma.mean_code_diff_millionths",
+          "luma.p99_code_diff_millionths",
+          "psnr_db_hundredths"
+        ],
+        "terms": {
+          "luma_max_code": {
+            "unit": "delivery_code_10bit",
+            "budget": 4,
+            "measured": 0,
+            "kind": "MeasuredZero",
+            "control": 10,
+            "margin": "unbounded (measured exactly zero); the starved control at 10 codes is 2.5x above the budget",
+            "measured_is_reported_not_gated": true
+          },
+          "luma_p99_code_millionths": {
+            "unit": "delivery_code_10bit_millionths",
+            "budget": 4000000,
+            "measured": 0,
+            "kind": "MeasuredZero",
+            "control": 10000000,
+            "margin": "unbounded (measured exactly zero); the starved control at 10 codes is 2.5x above the budget",
+            "measured_is_reported_not_gated": true
+          },
+          "luma_mean_code_millionths": {
+            "unit": "delivery_code_10bit_millionths",
+            "budget": 1000000,
+            "measured": 0,
+            "kind": "MeasuredZero",
+            "control": 2420703,
+            "margin": "unbounded (measured exactly zero); the starved control at 2.42 codes is 2.42x above the budget",
+            "measured_is_reported_not_gated": true
+          },
+          "rgb_mean_code_millionths": {
+            "unit": "eight_bit_equivalent_code_millionths",
+            "budget": 250000,
+            "measured": 10417,
+            "kind": "RatioAtLeastTwo",
+            "control": 1537720,
+            "margin": 24.0,
+            "measured_is_reported_not_gated": true
+          },
+          "psnr_db_hundredths": {
+            "unit": "psnr_db_hundredths",
+            "budget": 4500,
+            "measured": 7397,
+            "kind": "Floor",
+            "control": 4008,
+            "margin": "2897 hundredths dB of headroom below the measurement; the starved control at 4008 trips the floor by 492",
+            "measured_is_reported_not_gated": true
+          }
+        }
+      },
+      "BT.2020 legality excursion": {
+        "shape": "LegalityBasisPoints",
+        "fixture": 12,
+        "measuring_fixture": "cc8_qc_bt2020_legality_measures_the_lanes_own_matrix",
+        "patches": 9,
+        "plane_samples": 27,
+        "smallest_bt709_gap_codes": 11.3004,
+        "terms": {
+          "decoded_legal_excursion_basis_points": {
+            "unit": "basis_points",
+            "budget": 100,
+            "measured": 0,
+            "kind": "MeasuredZero",
+            "control": 10000,
+            "margin": "unbounded (measured exactly zero on every plane of the decoded HDR file); fixture 12's two deliberate control patches sit wholly outside the legal box at 10 000 basis points",
+            "measured_is_reported_not_gated": true,
+            "measured_by": "cc8_encoded_hdr_delivery_fixture",
+            "budget_owner": "DECODED_RANGE_EXCEPTION_BASIS_POINTS (CC6 6.4's EBU R 103 rate, a definition and not another lane's difference budget)"
+          },
+          "predicted_code_deviation": {
+            "unit": "delivery_code_10bit",
+            "budget": 0.25,
+            "measured": 0.0385361909866333,
+            "kind": "RatioAtLeastTwo",
+            "margin": 6.4874,
+            "measured_is_reported_not_gated": false,
+            "measured_by": "cc8_qc_bt2020_legality_measures_the_lanes_own_matrix"
+          }
+        }
+      },
+      "Preview parity": {
+        "shape": "MonitorCodes",
+        "fixture": 9,
+        "measuring_fixture": "cc8_preview_cpu_gpu_parity_in_monitor_codes",
+        "raster": [
+          64,
+          8
+        ],
+        "moved_samples": 512,
+        "starved_peak_percent": 110,
+        "starved_max": 2,
+        "starved_p99": 2.0,
+        "terms": {
+          "max": {
+            "unit": "monitor_code_8bit",
+            "budget": 4.0,
+            "measured": 1.0,
+            "kind": "RatioAtLeastTwo",
+            "control": 2.0,
+            "margin": 4.0,
+            "measured_is_reported_not_gated": false
+          },
+          "p99": {
+            "unit": "monitor_code_8bit",
+            "budget": 1.0,
+            "measured": 0.0,
+            "kind": "MeasuredZero",
+            "control": 2.0,
+            "margin": "unbounded (measured exactly zero); the 10 %-misread starved control measures 2 codes and fails the one-code floor",
+            "measured_is_reported_not_gated": false
+          },
+          "mean": {
+            "unit": "monitor_code_8bit",
+            "budget": 0.015625,
+            "measured": 0.002604166977107525,
+            "kind": "RatioAtLeastTwo",
+            "margin": 6.0,
+            "measured_is_reported_not_gated": false
+          }
+        }
+      }
+    },
+    "gate_bound_rule": "bound = max(next_power_of_two(recorded), granularity_floor) × 4. The x4 is cc8_fixtures::CC8_MEASURED_BOUND_HEADROOM, two powers of two, the allowance cc8_hdr's own test bounds make for f32::powf/exp/ln accuracy Rust does not specify across two libm implementations. Nothing in §9.2's table was chosen; every budget is this rule applied to a figure a fixture took.",
+    "delivery_constants": {
+      "hdr_hlg_rec2020": {
+        "luma_max_code": 4,
+        "luma_p99_code_millionths": 4000000,
+        "luma_mean_code_millionths": 1000000,
+        "rgb_mean_code_millionths": 250000,
+        "psnr_floor_db_hundredths": 4500
+      },
+      "sdr_ten_bit": {
+        "luma_max_code": 16,
+        "luma_p99_code_millionths": 4000000,
+        "luma_mean_code_millionths": 1000000,
+        "rgb_mean_code_millionths": 1000000,
+        "psnr_floor_db_hundredths": 3300
+      },
+      "sdr_eight_bit": {
+        "luma_max_code": 8,
+        "luma_p99_code_millionths": 3000000,
+        "luma_mean_code_millionths": 400000,
+        "rgb_mean_code_millionths": 1750000,
+        "psnr_floor_db_hundredths": 3300
+      },
+      "note": "§9.2: 'None may be invented, scaled, or inherited from another lane.' The HDR lane shares CC6 §4.1's Ten depth and nothing else: its five constants were measured on its own HLG-coded Rec.2020 population. Three differ from the 10-bit SDR lane's and are tighter; the two that coincide do so because both derivations arrived at one delivery code and one delivery code as a mean from different measurements, which cc8_gate_budgets_are_distinct_from_every_neighbouring_constant names rather than hides."
+    },
+    "delivery_note": "CC6 owns the two SDR lanes' constants and CC8 never re-baselines one; the HDR lane's five are CC8's own, measured at §10 step 6 and published here at step 10.",
+    "delivery_measured_note": "Every 'measured' figure in the Decoded HDR delivery row, and the decoded legality rate beside it, is a Linux measurement (see budgets.measurement) and is reported, not gated: the two CI FFmpeg builds decode the same encode to different numbers (CC7 §0.3 PM-E12, CC6 §0.4), so what gates on both operating systems is the 'budget' column, with the live and this recorded measurement each inside it in the term's own direction. No cfg(windows), no per-OS constant.",
+    "delivery_windows_observed": {
+      "ffmpeg_build": "System233/ffmpeg-msvc-prebuilt ffmpeg-8.0.1-r3",
+      "linux_ffmpeg_build": "mifi/ffmpeg-builds 8.0-1",
+      "terms_measured_on_windows": 0,
+      "note": "Nothing to record yet: every §9.2 figure in this manifest is unmeasured on Windows. CC7's equivalent block carried two MSVC figures because a Windows run had reached them before an equality assertion stopped it; CC8's fixtures gate against constants from the first commit, so a green Windows run publishes no number and a red one would publish a failure. What IS known is that the CC8 fixtures have run green on windows-latest for every step landed through 8 — CI runs 33235031761 (§10 step 1's encoder precondition, §0.3(e)), 33237026987, 33239083483, 33240770490, 33241968697, 33245077348, 33246869396 and 33248465523 — so the tags survive an MSVC libx264 encode and re-probe and every budget above holds there. The step-9 run, 33250611786, was still in flight when step 10 was written. The figures themselves stay Linux figures until a Windows job prints its own CC8_MEASURED lines.",
+      "rule": "§14 / R5's form: a per-OS note, never a per-OS constant."
+    },
+    "failing_direction": {
+      "transfer round trip": {
+        "fixture": "cc8_transfer_segment_seams_are_exact_analytic_inverses",
+        "claim": "the three segment seams are exact analytic inverses, and ST 2084's non-injective foot and rational pole are asserted rather than hidden"
+      },
+      "primaries stage lost": {
+        "fixture": "cc8_primaries_round_trip_over_a_wide_gamut_raster_carries_negatives",
+        "claim": "largest_stage_change > 0.1 — a stage that moved nothing would composite Rec.2020 values as BT.709",
+        "measured": 32.536507
+      },
+      "intermediate clamp": {
+        "fixture": "cc8_no_intermediate_clamp_recovers_hdr_highlights",
+        "claim": "clamping between the two nodes destroys the highlight",
+        "measured": 48.89645,
+        "bound": 0.03125
+      },
+      "unsupported HDR tuple": {
+        "fixture": "cc8_unsupported_hdr_metadata_blocks_managed_decode_and_export",
+        "cases": 21,
+        "codes": [
+          "unsupported_hdr_source_bit_depth",
+          "unsupported_hdr_source_matrix",
+          "unsupported_source_primaries",
+          "unsupported_source_transfer"
+        ]
+      },
+      "lane crossing": {
+        "fixture": "cc8_delivery_rejects_an_hdr_description_on_an_sdr_lane_and_an_sdr_one_on_the_hdr_lane",
+        "claim": "§5.3 bullet 1, both directions"
+      },
+      "eight-bit HDR": {
+        "fixture": "cc8_delivery_rejects_hlg_and_pq_at_eight_bit_depth",
+        "refused": 4
+      },
+      "mismatched pairs": {
+        "fixture": "cc8_delivery_rejects_mismatched_primaries_and_transfer_pairs",
+        "cases": 3
+      },
+      "matrix outside the table": {
+        "fixture": "cc8_delivery_rejects_every_matrix_outside_the_hdr_lane_table",
+        "refused": 11,
+        "accepted": [
+          "bt2020_ncl"
+        ]
+      },
+      "full range on the HDR lane": {
+        "fixture": "cc8_delivery_rejects_full_range_on_the_hdr_lane",
+        "refused": "full, unknown"
+      },
+      "PQ on the HLG lane": {
+        "fixture": "cc8_delivery_rejects_pq_on_the_hlg_lane_and_names_the_deferral",
+        "claim": "the recovery action names §11's deferral rather than implying a conversion exists",
+        "recovery_bytes": 336
+      },
+      "starved HDR encode": {
+        "fixture": "cc8_encoded_hdr_delivery_fixture",
+        "bitrate": 100000,
+        "tripped": [
+          "combined.mean_code_diff_millionths",
+          "luma.maximum_code_diff",
+          "luma.mean_code_diff_millionths",
+          "luma.p99_code_diff_millionths",
+          "psnr_db_hundredths"
+        ]
+      },
+      "legality controls": {
+        "fixture": "cc8_qc_bt2020_legality_measures_the_lanes_own_matrix",
+        "claim": "two patches sit outside the legal box and are reported as excursions",
+        "luma_above": 1,
+        "luma_below": 1
+      },
+      "dual triangle": {
+        "fixture": "cc8_qc_dual_triangle_gamut_reports_both_only_where_they_differ",
+        "rec709_out": 340,
+        "rec2020_out": 0,
+        "control_rec2020_out": 396
+      },
+      "withheld skin": {
+        "fixture": "cc8_qc_skin_is_withheld_with_a_named_reason_on_an_hdr_source",
+        "claim": "present on an HDR source, absent on an SDR one"
+      },
+      "preview reachable from delivery": {
+        "fixture": "cc8_preview_transform_is_unreachable_from_the_delivery_path",
+        "separable": 240
+      },
+      "preview parity starved": {
+        "fixture": "cc8_preview_cpu_gpu_parity_in_monitor_codes",
+        "starved_peak_percent": 110,
+        "starved_p99": 2.0,
+        "floor": 1.0
+      },
+      "SDR regression": {
+        "fixture": "cc8_sdr_regression_byte_equality_gate",
+        "claim": "every frozen delivery colour term character-unchanged on both SDR lanes, two exports byte-identical, three equivalent spellings identical"
+      }
+    },
+    "reported_not_gated": {
+      "starved_video_bitrate": 100000,
+      "preview_starved_peak_percent": 110,
+      "managed_decode_vs_cpu_reference": {
+        "max": 0.001163006,
+        "p99": 0.001163006,
+        "mean": 0.0002775358,
+        "channel_samples": 24,
+        "note": "§10 step 4's production-path decode against an independent CPU reference: swscale's fixed-point matrix and range rounding at the RGBA64 boundary plus Rgba16Float storage quantization, amplified by the HLG inverse OETF and the OOTF's ^1.2 gain. Decode-dependent, so reported."
+      },
+      "max_cll_hundredths": 100000,
+      "max_fall_hundredths": 40100,
+      "max_cll_max_fall_note": "§6 item 3: computed from the working proof over the sampled frames and reported on every lane. Never gated — CC8 does not write them into a file, and a threshold on them would be invented (§0.2 Q1's deferral of PQ/HDR10 is what would consume them).",
+      "decoded_luma_extremes_hundredths": [
+        6400,
+        94000
+      ],
+      "rgb_extremes_note": "4:2:0 chroma decimation at hard saturated edges dominates the whole-raster RGB terms on the HDR lane as it does on both SDR ones; they are evidence, not a gate. The luma plane is the codec-only gate.",
+      "p8_denominator": {
+        "decoded": 4.925781,
+        "p8": 4.927593,
+        "p8_error": 0.001811504,
+        "p10": 4.833845,
+        "p10_error": 0.09193611,
+        "note": "which prediction the RGBA64 boundary matches, not an equality against a decoded code (CC7 §0.3 PM-E12)"
+      },
+      "smallest_bt709_gap_codes": 11.3004
+    },
+    "measurement": {
+      "os": "linux",
+      "arch": "x86_64",
+      "kernel": "6.18.44-fc-v22",
+      "lane": "software_fallback",
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "backend": "vulkan",
+      "source_generator": "kinewright_media::cc8_fixtures (authored HLG bars and ramps, libx264 yuv420p10le -qp 0, x264-params colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc)",
+      "ffmpeg_build": "n8.0-23-gd1f31a829d-20251022 (third_party/ffmpeg, scripts/setup-ffmpeg.sh, mifi/ffmpeg-builds 8.0-1)",
+      "libavcodec": "62.11.100",
+      "libswscale": "9.1.100",
+      "libavutil": "60.8.100",
+      "x264_core": "165",
+      "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+      "commit": "54fd1751ab1623139c449c8db596ef0c1086e47f",
+      "date": "2026-08-29",
+      "probe": "CC8 §10 steps 3-9, measured live in cc8_fixtures.rs and re-read at step 10 from the CC8_MEASURED lines",
+      "accumulation": "row-major from the top-left; band statistics use CC1's inclusive nearest-rank P99, ceil(0.99·n)-1",
+      "os_and_arch_are_the_measuring_machine": "PM-E1's determination, inherited: these name the machine the published numbers were measured on, not the machine reading them back. cc8_manifest_declares_every_required_fixture_and_constant asserts membership of the supported set rather than equality with std::env::consts, so the first Windows run cannot fail on a provenance record that is correct."
+    }
+  },
+  "review": {
+    "register": "docs/CC8-HDR-INTERPRETATION-AND-DELIVERY.md §0.6",
+    "amendments": [
+      {
+        "id": "A0",
+        "date": "2026-08-29",
+        "by": "owner (Riel)",
+        "summary": "Draft v1 accepted as written; all six §0.2 recommendations adopted verbatim; the §0.5 roadmap edits applied in the same commit; accepted with Q2's HLG-in-AVC recognition counter-argument outstanding as §12's first risk.",
+        "commit": "2ab56ee"
+      },
+      {
+        "id": "A1",
+        "date": "2026-08-29",
+        "by": "implementation",
+        "summary": "CC8 implemented across §10 steps 1-10; §3.3's HLG stage-naming amended to the realized decode and delivery directions; §9.2's table filled with the measured values; five implementer determinations recorded (fixture 6's 'unchanged', §5.1's intermediate white, §4's preview curve, managed_hdr_v1's timing, and the inventory's declared-set rule).",
+        "commit": "this commit"
+      }
+    ],
+    "owner_decisions": {
+      "Q1": "HLG (ARIB STD-B67), Rec.2020, limited range, 10-bit; PQ/HDR10 deferred",
+      "Q2": "reuse the existing 10-bit libx264 lane; no HEVC. Accepted with the HLG-in-AVC recognition risk open.",
+      "Q3": "no wide-gamut working space; BT.709 primaries and D65 kept, Rec.2020 a named conversion",
+      "Q4": "a labelled tone-mapped preview that is not a monitoring reference and carries no exit gate",
+      "Q5": "strictly before ACES/OCIO, with §1's prohibition",
+      "Q6": "SDR-from-HDR as preview only; HDR-from-SDR refused permanently"
+    },
+    "determinations": [
+      {
+        "id": "§3.3 HLG stage order",
+        "step": 3,
+        "determination": "decode = inverse OETF → forward OOTF at the pinned nominal peak and gamma → anchor divide; delivery = inverse OOTF → OETF. §3.3's pipeline listing named the decode-side stage 'HLG inverse OOTF', which is the delivery direction; §0.6 A1 amends the section text to the realized directions.",
+        "recorded_at": "cc8_hdr.rs cc8_hlg_decode_working_linear"
+      },
+      {
+        "id": "fixture 6's 'unchanged'",
+        "step": 5,
+        "determination": "'unchanged' is measured on whatever build runs the fixture, never against a checked-in digest: every delivery colour term the export handed FFmpeg is asserted character-for-character against the frozen pre-CC8 literals, two exports of one project are byte-identical, and three equivalent spellings export the same bytes. The SHA-256s are printed, never asserted."
+      },
+      {
+        "id": "DELIVERY_INTERMEDIATE_WHITE on the HDR lane",
+        "step": 6,
+        "determination": "65 280 means the HLG signal peak, not diffuse white. §5.1 keeps the convention unchanged and unmeasured; its HDR meaning had to be determined, and it is gated with a bound derived from the half-nit argument through the OOTF and OETF slopes.",
+        "recorded_at": "cc8_hdr_delivery_intermediate_white_is_the_hlg_signal_peak"
+      },
+      {
+        "id": "§4's preview curve",
+        "step": 8,
+        "determination": "§4 names properties, not a curve. Extended Reinhard at §2.2's own pinned HLG nominal peak was chosen — no new number, one parameter asserted equal to the existing constant — applied per channel in linear light before the unchanged BT.709 monitor encode, from IEEE-exact operations only so determinism is bitwise on both operating systems."
+      },
+      {
+        "id": "managed_hdr_v1's timing",
+        "step": 9,
+        "determination": "§7's state lands at step 9 rather than step 3, because the lane it names did not exist until step 6. It is never stamped by a load; only the ordinary undoable revision-gated SetColorContext writes it, so a pre-CC8 project holding a Rec.2020 delivery description CC6 refused cannot silently become HDR-exportable on first open."
+      },
+      {
+        "id": "the declared-set rule",
+        "step": 10,
+        "determination": "A test is CC8's if CC8 wrote it. 95 carry the cc8_ prefix; 10 were written into #[cfg(test)] mod tests blocks that predate CC8, where the local convention is unprefixed, and are named explicitly under CC7 §11.3's 'or be named explicitly in the inventory'. Tests of CC1-CC7 whose tuples CC8 moved keep their own contract's inventory."
+      }
+    ]
+  },
+  "deferrals": [
+    {
+      "item": "Calibrated HDR monitoring, HDR display output, and HDR swapchain handoff",
+      "reason": "the roadmap's own later programme; CC8's preview is not a down payment on it",
+      "surfaced_by": "CC8_PREVIEW_NOT_CALIBRATED_REASON"
+    },
+    {
+      "item": "Tone-mapped SDR delivery from an HDR timeline",
+      "reason": "a rendering intent and a compression curve with no defensible objective threshold (CC6 §13's argument on a different axis)",
+      "surfaced_by": "CC8_PREVIEW_DELIVERY_BOUNDARY"
+    },
+    {
+      "item": "HDR from SDR",
+      "reason": "refused, not deferred: it invents information",
+      "surfaced_by": "§1's non-deliverables"
+    },
+    {
+      "item": "PQ / HDR10 delivery, mastering-display provenance, and gated MaxCLL/MaxFALL",
+      "reason": "§0.2 Q1's decision; §2.4 and §6 item 3 deliberately produce the inputs and deliberately leave them unapplied",
+      "surfaced_by": "CC8_HDR_STATIC_METADATA_BOUNDARY and CC8_PQ_DELIVERY_RECOVERY_ACTION"
+    },
+    {
+      "item": "HEVC, AV1, and every other encoder",
+      "reason": "§0.2 Q2; the pinned build has libx265, libsvtav1, librav1e, libaom, libkvazaar and libvvenc, and that is not a reason to ship them",
+      "surfaced_by": "§11"
+    },
+    {
+      "item": "Dolby Vision, HDR10+, ST 2094, and all dynamic metadata",
+      "reason": "§11",
+      "surfaced_by": "§11"
+    },
+    {
+      "item": "A wide-gamut working space, ICtCp, and constant-luminance BT.2020",
+      "reason": "§0.2 Q3; changing the working primaries would re-baseline every pinned constant in CC3-CC7",
+      "surfaced_by": "CC8_REJECTED_HDR_ADJACENT"
+    },
+    {
+      "item": "HDR-aware HSL qualifier domain",
+      "reason": "§3.2 item 2; a correct fix needs its own parity gate and its own measured band constants",
+      "surfaced_by": "CC8_QUALIFIER_LIMITATION"
+    },
+    {
+      "item": "HDR skin diagnostics",
+      "reason": "§6 item 4; CC6's band constants were derived at θ(+I) = 123.0000° in grade709 against Rec.709 primaries and do not transfer. Withheld with a named reason, not silently computed against the wrong constants.",
+      "surfaced_by": "cc8_qc_skin_is_withheld_with_a_named_reason_on_an_hdr_source"
+    },
+    {
+      "item": "HDR-aware curve and wheel authoring domains",
+      "reason": "§3.2 item 1; widening the domain is a CC3 amendment with its own parity gate. CC8 reports the condition instead.",
+      "surfaced_by": "CC8_AUTHORED_DOMAIN_LIMITATION"
+    },
+    {
+      "item": "ACES, OCIO, and camera vendor transforms",
+      "reason": "§0.2 Q5's prohibition, not a deferral",
+      "surfaced_by": "§1's named forbidden terms"
+    }
+  ],
+  "open_gates": [
+    {
+      "gate": "The hands-on Windows smoke record for the HDR lane",
+      "owner": "release evidence, docs/ROADMAP-AND-WORKFLOWS.md",
+      "status": "open",
+      "note": "§0.5 item 5: CC8 changes native media and export behaviour, so it is release-affecting. The record may not be a claim about HDR appearance on an SDR panel (§0.2 Q4), and it may not stand in for §0.3(e)'s CI precondition, which is a typed CI question and is answered green."
+    },
+    {
+      "gate": "The manual Omarchy smoke record for the HDR lane",
+      "owner": "release evidence, docs/ROADMAP-AND-WORKFLOWS.md",
+      "status": "open",
+      "note": "same terms as the Windows record"
+    },
+    {
+      "gate": "§12's first risk: HLG-in-AVC recognition by a named target",
+      "owner": "§0.6 amendment",
+      "status": "open, accepted knowingly",
+      "note": "no fixture can close it: a green cross-platform fixture proves the tags are written and survive a re-probe, which is not the claim that a television calls the file HDR. The first named recognition requirement from a real target reopens §0.2 Q2, and probably Q1 with it."
+    },
+    {
+      "gate": "Every §9.2 figure is a Linux measurement",
+      "owner": "the first Windows run that prints CC8_MEASURED lines",
+      "status": "open",
+      "note": "the fixtures have run green on windows-latest for every step through 8, so the budgets hold there; the numbers inside them are still this machine's."
+    }
+  ],
+  "external_owners": [
+    {
+      "fixture": "cc1_fixtures.rs MONITOR_CPU_GPU_MAX/P99/MEAN",
+      "claim": "CC1 §6.2's monitor parity band, read as a not-worse cross-check beside CC8's own preview-parity measurement, never as CC8's budget"
+    },
+    {
+      "fixture": "cc1_fixtures.rs LINEAR_CPU_GPU_MAX/P99/MEAN and LINEAR_OVER_RANGE_P99/MEAN",
+      "claim": "CC1 §6.2's banded linear parity, the same cross-check on the HDR magnitudes fixture 10 extends"
+    },
+    {
+      "fixture": "cc6_fixtures.rs CC6_DELIVERY_SOURCE_SIZE and cc6_delivery_document",
+      "claim": "§9.1 fixture 6's SDR regression source is CC6's own, so 'unchanged' is measured against the project CC6 measured"
+    },
+    {
+      "fixture": "color_pipeline.rs DELIVERY_INTERMEDIATE_WHITE",
+      "claim": "§5.1 keeps the 65 280 convention unchanged and unmeasured; CC8 determines what it means on the HDR lane and gates that"
+    },
+    {
+      "fixture": "delivery.rs DECODED_RANGE_EXCEPTION_BASIS_POINTS",
+      "claim": "CC6 §6.4's EBU R 103 1 % exception rate, the definition §9.2's legality row is measured against"
+    },
+    {
+      "fixture": "CC6 §6.3's DELIVERY_* budgets",
+      "claim": "the two SDR lanes' constants, unmoved by CC8 and asserted unmoved by §9.1 fixture 6"
+    }
+  ],
+  "evidence_fixtures": [
+    "cc8_transfer_round_trip_over_a_ten_bit_ramp_is_banded_and_monotone",
+    "cc8_primaries_round_trip_over_a_wide_gamut_raster_carries_negatives",
+    "cc8_cpu_gpu_parity_on_hdr_magnitudes_bands_the_hdr_range",
+    "cc8_encoded_hdr_delivery_fixture",
+    "cc8_qc_bt2020_legality_measures_the_lanes_own_matrix",
+    "cc8_preview_cpu_gpu_parity_in_monitor_codes",
+    "cc8_sdr_regression_byte_equality_gate",
+    "cc8_migration_sdr_project_round_trips_and_exports_byte_identically"
+  ],
+  "required_fixtures": [
+    {
+      "item": "§0.3(e) / §10 step 1",
+      "test": "cc8_precondition_libx264_carries_hlg_hdr_tags_through_encode_and_reprobe",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§0.3(e) / §10 step 1",
+      "test": "cc8_precondition_libx264_carries_pq_hdr_tags_through_encode_and_reprobe",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 1",
+      "test": "cc8_transfer_round_trip_over_a_ten_bit_ramp_is_banded_and_monotone",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 1 (seams)",
+      "test": "cc8_transfer_segment_seams_are_exact_analytic_inverses",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 2",
+      "test": "cc8_reference_white_anchor_lands_the_pinned_working_values",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 5",
+      "test": "cc8_unsupported_hdr_metadata_blocks_managed_decode_and_export",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 3",
+      "test": "cc8_primaries_round_trip_over_a_wide_gamut_raster_carries_negatives",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§3.3 (source side)",
+      "test": "cc8_managed_decode_of_an_hdr_source_lands_working_bt709_linear",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§3.3 (RGBA64 boundary)",
+      "test": "cc8_bt2020_limited_boundary_uses_the_p8_denominator",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 4",
+      "test": "cc8_no_intermediate_clamp_recovers_hdr_highlights",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 10",
+      "test": "cc8_cpu_gpu_parity_on_hdr_magnitudes_bands_the_hdr_range",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 6 (filter graph)",
+      "test": "cc8_sdr_managed_filter_graph_terms_are_unchanged_by_the_hdr_lane",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 6",
+      "test": "cc8_sdr_regression_byte_equality_gate",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 7 / §5.3 bullet 1",
+      "test": "cc8_delivery_rejects_an_hdr_description_on_an_sdr_lane_and_an_sdr_one_on_the_hdr_lane",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 7 / §5.3 bullet 2",
+      "test": "cc8_delivery_rejects_hlg_and_pq_at_eight_bit_depth",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 7 / §5.3 bullet 3",
+      "test": "cc8_delivery_rejects_mismatched_primaries_and_transfer_pairs",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 7 / §5.3 bullet 4",
+      "test": "cc8_delivery_rejects_every_matrix_outside_the_hdr_lane_table",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 7 / §5.3 bullet 5",
+      "test": "cc8_delivery_rejects_full_range_on_the_hdr_lane",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 7 / §5.3 bullet 6",
+      "test": "cc8_delivery_rejects_pq_on_the_hlg_lane_and_names_the_deferral",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 7 / §7 item 2",
+      "test": "cc8_delivery_hdr_source_block_stands_and_lifts_only_on_the_hdr_lane",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§7 item 3",
+      "test": "cc8_setting_an_hdr_delivery_description_is_validated_against_the_lane_table",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 8",
+      "test": "cc8_encoded_hdr_delivery_fixture",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 8 / §5.1",
+      "test": "cc8_hdr_delivery_intermediate_white_is_the_hlg_signal_peak",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 12 / §6 item 1",
+      "test": "cc8_qc_bt2020_legality_measures_the_lanes_own_matrix",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 12 / §6 item 2",
+      "test": "cc8_qc_dual_triangle_gamut_reports_both_only_where_they_differ",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 12 / §6 item 3",
+      "test": "cc8_qc_light_level_is_measured_and_reported_but_never_gated",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 12 / §6 item 4",
+      "test": "cc8_qc_skin_is_withheld_with_a_named_reason_on_an_hdr_source",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 9 / §4 item 4",
+      "test": "cc8_preview_tone_map_is_deterministic_monotone_and_holds_its_endpoints",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 9 / §4 item 5",
+      "test": "cc8_preview_transform_is_unreachable_from_the_delivery_path",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 9 (SDR control)",
+      "test": "cc8_sdr_monitor_transform_is_unmoved_by_the_preview_arm",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 9 (parity)",
+      "test": "cc8_preview_cpu_gpu_parity_in_monitor_codes",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§9.1 fixture 11 / §7 item 1",
+      "test": "cc8_migration_sdr_project_round_trips_and_exports_byte_identically",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§2.4",
+      "test": "cc8_probe_reads_declared_static_hdr_metadata_and_leaves_it_unapplied",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§10 step 10 (inventory)",
+      "test": "cc8_manifest_declares_every_required_fixture_and_constant",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§10 step 10 (inventory)",
+      "test": "cc8_declared_test_names_exist_in_their_source_files",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/cc8_fixtures.rs"
+    },
+    {
+      "item": "§2.4",
+      "test": "cc8_mastering_display_side_data_parses_into_st2086_units",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/decode.rs"
+    },
+    {
+      "item": "§2.4",
+      "test": "cc8_mastering_display_side_data_refuses_rather_than_guesses",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/decode.rs"
+    },
+    {
+      "item": "§2.4",
+      "test": "cc8_content_light_level_side_data_parses_and_guards_its_length",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/decode.rs"
+    },
+    {
+      "item": "§2.4",
+      "test": "cc8_container_metadata_wins_per_block_over_the_bitstreams",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/decode.rs"
+    },
+    {
+      "item": "§3.3",
+      "test": "decode_source_rgb_selects_the_cc8_hdr_stages_by_profile",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/color_pipeline.rs"
+    },
+    {
+      "item": "§2.3",
+      "test": "source_primaries_stage_is_selected_by_profile_and_is_never_clamped",
+      "owner": "media",
+      "source": "crates/kinewright-media/src/color_pipeline.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_pq_constants_are_their_exact_rational_forms",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_pq_eotf_holds_the_analytic_endpoints_exactly",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_pq_round_trips_over_the_ten_bit_ramp",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_pq_luminance_round_trips_across_the_full_range",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_pq_is_monotone_over_the_ten_bit_ramp",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_pq_negative_extension_is_sign_preserving",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_pq_eotf_pole_is_where_the_st2084_denominator_vanishes",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_reference_white_anchor_is_bt2408s_two_hundred_and_three",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_working_linear_scale_round_trips_exactly",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_pq_working_linear_encode_inverts_the_decode",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_hlg_constants_are_the_standard_decimals",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_hlg_oetf_anchor_points",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_hlg_round_trips_over_the_ten_bit_ramp",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_hlg_is_monotone_over_the_ten_bit_ramp",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_hlg_negative_extension_is_sign_preserving",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_hlg_ootf_realizes_the_system_gamma_relation",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_hlg_ootf_round_trips_with_its_inverse",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_hlg_reference_white_signal_lands_on_the_anchor",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_hlg_working_linear_decode_lands_diffuse_white_on_one",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.2",
+      "test": "cc8_hlg_working_linear_pair_round_trips_and_preserves_sign",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.1",
+      "test": "cc8_source_profile_table_is_section_2_1s_two_closed_rows",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.1",
+      "test": "cc8_source_profile_wire_spellings_are_the_color_tag_serde_forms",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.1",
+      "test": "cc8_rejected_hdr_adjacent_covers_every_family_section_2_1_names",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§6 item 1",
+      "test": "cc8_bt2020_luma_coefficients_agree_at_both_widths",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.3",
+      "test": "cc8_pinned_matrices_are_the_derivation_transcribed",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.3",
+      "test": "cc8_primaries_matrices_are_mutually_inverse",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.3",
+      "test": "cc8_primaries_preserve_the_shared_d65_white_point",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.3",
+      "test": "cc8_primaries_round_trip_carries_negatives_not_a_clamp",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.3",
+      "test": "cc8_derived_xyz_matrices_reproduce_the_standard_luma_coefficients",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§9.2",
+      "test": "cc8_gate_table_is_section_9_2s_six_measured_rows",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§9.2 (PM-E12)",
+      "test": "cc8_only_the_decode_dependent_gate_terms_are_reported_not_gated",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§5.1",
+      "test": "cc8_hdr_delivery_lane_is_section_5_1s_table",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§5.2",
+      "test": "cc8_hdr_delivery_x264_params_carry_section_5_2s_three_terms",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§5.3",
+      "test": "cc8_hdr_delivery_allowed_phrases_are_six_distinct_lane_named_strings",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§4 item 2",
+      "test": "cc8_preview_peak_is_the_pinned_hlg_nominal_peak",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§4 item 4",
+      "test": "cc8_preview_tone_map_holds_its_endpoints",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§4 item 4",
+      "test": "cc8_preview_tone_map_is_strictly_increasing_and_sign_preserving",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§4 item 4",
+      "test": "cc8_preview_tone_map_is_bitwise_deterministic_and_per_channel",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§4 item 3 / §3.2",
+      "test": "cc8_preview_and_node_limitation_prose_names_its_own_clauses",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/cc8_hdr.rs"
+    },
+    {
+      "item": "§2.1",
+      "test": "cc8_source_classifier_accepts_the_two_hdr_profiles_on_every_listed_column",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/color.rs"
+    },
+    {
+      "item": "§2.1",
+      "test": "cc8_source_classifier_rejects_every_hdr_adjacent_tuple_outside_the_closed_set",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/color.rs"
+    },
+    {
+      "item": "§2.1 (D65 rule)",
+      "test": "cc8_source_classifier_keeps_the_d65_rule_and_unknown_fields_honest",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/color.rs"
+    },
+    {
+      "item": "§2.1",
+      "test": "hdr_profile_ids_come_from_the_cc8_authority_table",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/color.rs"
+    },
+    {
+      "item": "§2.1",
+      "test": "supported_profile_ids_phrase_names_every_profile",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/color.rs"
+    },
+    {
+      "item": "§2.1 / §2.4",
+      "test": "color_tag_wire_spellings_are_the_serde_forms",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/color.rs"
+    },
+    {
+      "item": "§7 item 2",
+      "test": "hdr_source_with_sdr_delivery_blocks_export_without_tone_mapping",
+      "owner": "core",
+      "source": "crates/kinewright-core/src/delivery.rs"
+    },
+    {
+      "item": "§9.1 fixture 11 / §7 item 1",
+      "test": "cc8_pre_cc8_projects_open_byte_unchanged_and_acquire_no_hdr_field",
+      "owner": "core",
+      "source": "crates/kinewright-core/tests/cc8_core.rs"
+    },
+    {
+      "item": "§9.1 fixture 11 / §7 item 2",
+      "test": "cc8_pre_cc8_hdr_source_on_sdr_delivery_loads_and_blocks_with_the_typed_reason",
+      "owner": "core",
+      "source": "crates/kinewright-core/tests/cc8_core.rs"
+    },
+    {
+      "item": "§7",
+      "test": "cc8_managed_hdr_state_is_written_by_cc8_and_never_stamped_by_a_load",
+      "owner": "core",
+      "source": "crates/kinewright-core/tests/cc8_core.rs"
+    },
+    {
+      "item": "§7 item 3",
+      "test": "cc8_managed_state_and_delivery_lane_must_name_each_other",
+      "owner": "core",
+      "source": "crates/kinewright-core/tests/cc8_core.rs"
+    },
+    {
+      "item": "§7 item 4",
+      "test": "cc8_hdr_state_survives_save_reopen_journal_replay_undo_and_redo",
+      "owner": "core",
+      "source": "crates/kinewright-core/tests/cc8_core.rs"
+    },
+    {
+      "item": "§2.4 / §7 item 4",
+      "test": "cc8_declared_static_hdr_metadata_round_trips_with_its_provenance",
+      "owner": "core",
+      "source": "crates/kinewright-core/tests/cc8_core.rs"
+    },
+    {
+      "item": "§5.1",
+      "test": "cc8_hdr_delivery_description_is_section_5_1s_lane_table",
+      "owner": "core",
+      "source": "crates/kinewright-core/tests/cc8_core.rs"
+    },
+    {
+      "item": "§9.2 (margin rule)",
+      "test": "cc8_every_gate_term_carries_the_declared_margin",
+      "owner": "core",
+      "source": "crates/kinewright-core/tests/cc8_core.rs"
+    },
+    {
+      "item": "§9.2 (distinctness)",
+      "test": "cc8_gate_budgets_are_distinct_from_every_neighbouring_constant",
+      "owner": "core",
+      "source": "crates/kinewright-core/tests/cc8_core.rs"
+    },
+    {
+      "item": "§8",
+      "test": "status_reports_the_cc8_hdr_profile_its_anchor_and_its_named_stages",
+      "owner": "agent",
+      "source": "crates/kinewright-agent/src/color_status.rs"
+    },
+    {
+      "item": "§8 / §2.4",
+      "test": "cc8_status_reports_declared_static_hdr_metadata_and_its_boundary",
+      "owner": "agent",
+      "source": "crates/kinewright-agent/src/color_status.rs"
+    },
+    {
+      "item": "§8",
+      "test": "the_envelope_carries_cc8_section_8s_hdr_rows_and_leaves_the_sdr_one_alone",
+      "owner": "agent",
+      "source": "crates/kinewright-agent/src/color_qc_tool.rs"
+    },
+    {
+      "item": "§3.2 / §8",
+      "test": "cc8_node_limitations_appear_only_on_an_hdr_source_and_only_where_section_3_2_puts_them",
+      "owner": "app",
+      "source": "crates/kinewright-app/src/inspector_ui.rs"
+    },
+    {
+      "item": "§4 item 3",
+      "test": "cc8_the_tone_mapped_preview_is_labelled_and_an_sdr_preview_is_not",
+      "owner": "app",
+      "source": "crates/kinewright-app/src/preview_ui.rs"
+    },
+    {
+      "item": "§6 item 2 / §8",
+      "test": "cc8_the_qc_mask_flags_are_measured_on_the_delivery_lane",
+      "owner": "app",
+      "source": "crates/kinewright-app/src/preview_ui.rs"
+    },
+    {
+      "item": "§8",
+      "test": "a_supported_hdr_source_is_not_blocking_and_names_its_profile",
+      "owner": "app",
+      "source": "crates/kinewright-app/src/color_ui.rs"
+    },
+    {
+      "item": "§7 / §8",
+      "test": "cc8_pipeline_summary_names_the_managed_hdr_state_and_needs_no_reset",
+      "owner": "app",
+      "source": "crates/kinewright-app/src/color_ui.rs"
+    },
+    {
+      "item": "§6 / §8",
+      "test": "the_hdr_window_body_names_the_lane_both_triangles_and_the_withheld_skin",
+      "owner": "app",
+      "source": "crates/kinewright-app/src/color_qc_ui.rs"
+    }
+  ],
+  "inventory": {
+    "asserted_by": "cc8_declared_test_names_exist_in_their_source_files",
+    "declared_test_count": 105,
+    "prefixed_test_count": 95,
+    "rule": "§9: 'Test names are cc8_-prefixed and the manifest asserts the inventory equals the declared set.' CC7 §11.3's escape — 'or be named explicitly in the inventory' — admits the ten tests §10 steps 3-9 wrote into #[cfg(test)] mod tests blocks that predate CC8. A test is CC8's if CC8 wrote it; a CC1-CC7 test whose tuple CC8 moved keeps its own contract's inventory.",
+    "arrays": {
+      "CC8_MEDIA_TESTS": [
+        "cc8_precondition_libx264_carries_hlg_hdr_tags_through_encode_and_reprobe",
+        "cc8_precondition_libx264_carries_pq_hdr_tags_through_encode_and_reprobe",
+        "cc8_transfer_round_trip_over_a_ten_bit_ramp_is_banded_and_monotone",
+        "cc8_transfer_segment_seams_are_exact_analytic_inverses",
+        "cc8_reference_white_anchor_lands_the_pinned_working_values",
+        "cc8_unsupported_hdr_metadata_blocks_managed_decode_and_export",
+        "cc8_primaries_round_trip_over_a_wide_gamut_raster_carries_negatives",
+        "cc8_managed_decode_of_an_hdr_source_lands_working_bt709_linear",
+        "cc8_bt2020_limited_boundary_uses_the_p8_denominator",
+        "cc8_no_intermediate_clamp_recovers_hdr_highlights",
+        "cc8_cpu_gpu_parity_on_hdr_magnitudes_bands_the_hdr_range",
+        "cc8_sdr_managed_filter_graph_terms_are_unchanged_by_the_hdr_lane",
+        "cc8_sdr_regression_byte_equality_gate",
+        "cc8_delivery_rejects_an_hdr_description_on_an_sdr_lane_and_an_sdr_one_on_the_hdr_lane",
+        "cc8_delivery_rejects_hlg_and_pq_at_eight_bit_depth",
+        "cc8_delivery_rejects_mismatched_primaries_and_transfer_pairs",
+        "cc8_delivery_rejects_every_matrix_outside_the_hdr_lane_table",
+        "cc8_delivery_rejects_full_range_on_the_hdr_lane",
+        "cc8_delivery_rejects_pq_on_the_hlg_lane_and_names_the_deferral",
+        "cc8_delivery_hdr_source_block_stands_and_lifts_only_on_the_hdr_lane",
+        "cc8_setting_an_hdr_delivery_description_is_validated_against_the_lane_table",
+        "cc8_encoded_hdr_delivery_fixture",
+        "cc8_hdr_delivery_intermediate_white_is_the_hlg_signal_peak",
+        "cc8_qc_bt2020_legality_measures_the_lanes_own_matrix",
+        "cc8_qc_dual_triangle_gamut_reports_both_only_where_they_differ",
+        "cc8_qc_light_level_is_measured_and_reported_but_never_gated",
+        "cc8_qc_skin_is_withheld_with_a_named_reason_on_an_hdr_source",
+        "cc8_preview_tone_map_is_deterministic_monotone_and_holds_its_endpoints",
+        "cc8_preview_transform_is_unreachable_from_the_delivery_path",
+        "cc8_sdr_monitor_transform_is_unmoved_by_the_preview_arm",
+        "cc8_preview_cpu_gpu_parity_in_monitor_codes",
+        "cc8_migration_sdr_project_round_trips_and_exports_byte_identically",
+        "cc8_probe_reads_declared_static_hdr_metadata_and_leaves_it_unapplied",
+        "cc8_manifest_declares_every_required_fixture_and_constant",
+        "cc8_declared_test_names_exist_in_their_source_files",
+        "cc8_mastering_display_side_data_parses_into_st2086_units",
+        "cc8_mastering_display_side_data_refuses_rather_than_guesses",
+        "cc8_content_light_level_side_data_parses_and_guards_its_length",
+        "cc8_container_metadata_wins_per_block_over_the_bitstreams",
+        "decode_source_rgb_selects_the_cc8_hdr_stages_by_profile",
+        "source_primaries_stage_is_selected_by_profile_and_is_never_clamped"
+      ],
+      "CC8_CORE_TESTS": [
+        "cc8_pq_constants_are_their_exact_rational_forms",
+        "cc8_pq_eotf_holds_the_analytic_endpoints_exactly",
+        "cc8_pq_round_trips_over_the_ten_bit_ramp",
+        "cc8_pq_luminance_round_trips_across_the_full_range",
+        "cc8_pq_is_monotone_over_the_ten_bit_ramp",
+        "cc8_pq_negative_extension_is_sign_preserving",
+        "cc8_pq_eotf_pole_is_where_the_st2084_denominator_vanishes",
+        "cc8_reference_white_anchor_is_bt2408s_two_hundred_and_three",
+        "cc8_working_linear_scale_round_trips_exactly",
+        "cc8_pq_working_linear_encode_inverts_the_decode",
+        "cc8_hlg_constants_are_the_standard_decimals",
+        "cc8_hlg_oetf_anchor_points",
+        "cc8_hlg_round_trips_over_the_ten_bit_ramp",
+        "cc8_hlg_is_monotone_over_the_ten_bit_ramp",
+        "cc8_hlg_negative_extension_is_sign_preserving",
+        "cc8_hlg_ootf_realizes_the_system_gamma_relation",
+        "cc8_hlg_ootf_round_trips_with_its_inverse",
+        "cc8_hlg_reference_white_signal_lands_on_the_anchor",
+        "cc8_hlg_working_linear_decode_lands_diffuse_white_on_one",
+        "cc8_hlg_working_linear_pair_round_trips_and_preserves_sign",
+        "cc8_source_profile_table_is_section_2_1s_two_closed_rows",
+        "cc8_source_profile_wire_spellings_are_the_color_tag_serde_forms",
+        "cc8_rejected_hdr_adjacent_covers_every_family_section_2_1_names",
+        "cc8_bt2020_luma_coefficients_agree_at_both_widths",
+        "cc8_pinned_matrices_are_the_derivation_transcribed",
+        "cc8_primaries_matrices_are_mutually_inverse",
+        "cc8_primaries_preserve_the_shared_d65_white_point",
+        "cc8_primaries_round_trip_carries_negatives_not_a_clamp",
+        "cc8_derived_xyz_matrices_reproduce_the_standard_luma_coefficients",
+        "cc8_gate_table_is_section_9_2s_six_measured_rows",
+        "cc8_only_the_decode_dependent_gate_terms_are_reported_not_gated",
+        "cc8_hdr_delivery_lane_is_section_5_1s_table",
+        "cc8_hdr_delivery_x264_params_carry_section_5_2s_three_terms",
+        "cc8_hdr_delivery_allowed_phrases_are_six_distinct_lane_named_strings",
+        "cc8_preview_peak_is_the_pinned_hlg_nominal_peak",
+        "cc8_preview_tone_map_holds_its_endpoints",
+        "cc8_preview_tone_map_is_strictly_increasing_and_sign_preserving",
+        "cc8_preview_tone_map_is_bitwise_deterministic_and_per_channel",
+        "cc8_preview_and_node_limitation_prose_names_its_own_clauses",
+        "cc8_source_classifier_accepts_the_two_hdr_profiles_on_every_listed_column",
+        "cc8_source_classifier_rejects_every_hdr_adjacent_tuple_outside_the_closed_set",
+        "cc8_source_classifier_keeps_the_d65_rule_and_unknown_fields_honest",
+        "hdr_profile_ids_come_from_the_cc8_authority_table",
+        "supported_profile_ids_phrase_names_every_profile",
+        "color_tag_wire_spellings_are_the_serde_forms",
+        "hdr_source_with_sdr_delivery_blocks_export_without_tone_mapping",
+        "cc8_pre_cc8_projects_open_byte_unchanged_and_acquire_no_hdr_field",
+        "cc8_pre_cc8_hdr_source_on_sdr_delivery_loads_and_blocks_with_the_typed_reason",
+        "cc8_managed_hdr_state_is_written_by_cc8_and_never_stamped_by_a_load",
+        "cc8_managed_state_and_delivery_lane_must_name_each_other",
+        "cc8_hdr_state_survives_save_reopen_journal_replay_undo_and_redo",
+        "cc8_declared_static_hdr_metadata_round_trips_with_its_provenance",
+        "cc8_hdr_delivery_description_is_section_5_1s_lane_table",
+        "cc8_every_gate_term_carries_the_declared_margin",
+        "cc8_gate_budgets_are_distinct_from_every_neighbouring_constant"
+      ],
+      "CC8_AGENT_TESTS": [
+        "status_reports_the_cc8_hdr_profile_its_anchor_and_its_named_stages",
+        "cc8_status_reports_declared_static_hdr_metadata_and_its_boundary",
+        "the_envelope_carries_cc8_section_8s_hdr_rows_and_leaves_the_sdr_one_alone"
+      ],
+      "CC8_APP_TESTS": [
+        "cc8_node_limitations_appear_only_on_an_hdr_source_and_only_where_section_3_2_puts_them",
+        "cc8_the_tone_mapped_preview_is_labelled_and_an_sdr_preview_is_not",
+        "cc8_the_qc_mask_flags_are_measured_on_the_delivery_lane",
+        "a_supported_hdr_source_is_not_blocking_and_names_its_profile",
+        "cc8_pipeline_summary_names_the_managed_hdr_state_and_needs_no_reset",
+        "the_hdr_window_body_names_the_lane_both_triangles_and_the_withheld_skin"
+      ],
+      "CC8_INVENTORY_TESTS": [
+        "cc8_manifest_declares_every_required_fixture_and_constant",
+        "cc8_declared_test_names_exist_in_their_source_files"
+      ],
+      "CC8_EVIDENCE_FIXTURES": [
+        "cc8_transfer_round_trip_over_a_ten_bit_ramp_is_banded_and_monotone",
+        "cc8_primaries_round_trip_over_a_wide_gamut_raster_carries_negatives",
+        "cc8_cpu_gpu_parity_on_hdr_magnitudes_bands_the_hdr_range",
+        "cc8_encoded_hdr_delivery_fixture",
+        "cc8_qc_bt2020_legality_measures_the_lanes_own_matrix",
+        "cc8_preview_cpu_gpu_parity_in_monitor_codes",
+        "cc8_sdr_regression_byte_equality_gate",
+        "cc8_migration_sdr_project_round_trips_and_exports_byte_identically"
+      ],
+      "CC8_EXTERNAL_OWNERS": [
+        "cc1_fixtures.rs MONITOR_CPU_GPU_MAX/P99/MEAN",
+        "cc1_fixtures.rs LINEAR_CPU_GPU_MAX/P99/MEAN and LINEAR_OVER_RANGE_P99/MEAN",
+        "cc6_fixtures.rs CC6_DELIVERY_SOURCE_SIZE and cc6_delivery_document",
+        "color_pipeline.rs DELIVERY_INTERMEDIATE_WHITE",
+        "delivery.rs DECODED_RANGE_EXCEPTION_BASIS_POINTS",
+        "CC6 §6.3's DELIVERY_* budgets"
+      ]
+    },
+    "test_sources": [
+      "crates/kinewright-media/src/cc8_fixtures.rs",
+      "crates/kinewright-media/src/decode.rs",
+      "crates/kinewright-media/src/color_pipeline.rs",
+      "crates/kinewright-core/src/cc8_hdr.rs",
+      "crates/kinewright-core/src/color.rs",
+      "crates/kinewright-core/src/delivery.rs",
+      "crates/kinewright-core/tests/cc8_core.rs",
+      "crates/kinewright-agent/src/color_status.rs",
+      "crates/kinewright-agent/src/color_qc_tool.rs",
+      "crates/kinewright-app/src/inspector_ui.rs",
+      "crates/kinewright-app/src/preview_ui.rs",
+      "crates/kinewright-app/src/color_ui.rs",
+      "crates/kinewright-app/src/color_qc_ui.rs"
+    ],
+    "explicit_non_prefixed_tests": [
+      "decode_source_rgb_selects_the_cc8_hdr_stages_by_profile",
+      "source_primaries_stage_is_selected_by_profile_and_is_never_clamped",
+      "hdr_profile_ids_come_from_the_cc8_authority_table",
+      "supported_profile_ids_phrase_names_every_profile",
+      "color_tag_wire_spellings_are_the_serde_forms",
+      "hdr_source_with_sdr_delivery_blocks_export_without_tone_mapping",
+      "status_reports_the_cc8_hdr_profile_its_anchor_and_its_named_stages",
+      "the_envelope_carries_cc8_section_8s_hdr_rows_and_leaves_the_sdr_one_alone",
+      "a_supported_hdr_source_is_not_blocking_and_names_its_profile",
+      "the_hdr_window_body_names_the_lane_both_triangles_and_the_withheld_skin"
+    ],
+    "forbidden_helpers": [
+      "fixture_gpu_or_skip",
+      "KINEWRIGHT_GPU_TESTS_MAY_SKIP",
+      "std::env::var"
+    ],
+    "forbidden_helpers_scope": "every CC8 source, all three needles. CC7 had to exempt tests/mcp_server.rs for §5.3's GPU skip opt-in; no CC8 test consults the environment at all.",
+    "reason": "CC8_TEST_SOURCES include_str!s all thirteen files at compile time, so renaming a test in another crate rebuilds cc8_fixtures.rs and fails it rather than leaving a manifest entry naming a function nobody has written."
+  },
+  "manifest_self_test": [
+    "cc8_manifest_declares_every_required_fixture_and_constant",
+    "cc8_declared_test_names_exist_in_their_source_files"
+  ]
+}
