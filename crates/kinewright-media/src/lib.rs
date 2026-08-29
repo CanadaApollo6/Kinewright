@@ -54,6 +54,9 @@ mod cc6_fixtures;
 mod cc7_fixtures;
 
 #[cfg(test)]
+mod cc8_fixtures;
+
+#[cfg(test)]
 mod gpu_test_support;
 
 use ffmpeg_next as ffmpeg;
