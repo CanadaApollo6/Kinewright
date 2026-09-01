@@ -16,7 +16,8 @@ CC7 (with M41 and M42 in between), which landed between 2026-08-24 and
 | Test functions (`#[test]` and `#[tokio::test]`) | ≈1,760 |
 | Release tags | none |
 | CHANGELOG sections | one, `[Unreleased]` |
-| Core crate tests on a fresh Linux box | 402 passed in under a second |
+| Workspace on a fresh Ubuntu box (Rust 1.94.1, pinned FFmpeg 8) | build 3 m 39 s; `fmt --check` clean; 1,710 tests passed, 0 failed, 20 ignored, about 4 min wall |
+| Clippy | green on CI's current stable; on Rust 1.94.1 one `manual_range_contains` hit in `color_qc.rs:1507` fails `-D warnings` |
 
 The roadmap's colour table (CC0–CC7) is complete on paper. There is no CC8 in
 the repository or in the plan; the colour programme's own closing line says HDR,
@@ -105,6 +106,9 @@ seams did not. Concrete list, each item a measurable exit:
   has `match name` label tables next to the descriptor-driven path. Exit: one
   source of truth for each.
 - Report the libswscale `bilinear + full_chroma_int` defect upstream (CC6 P7).
+- **Pin the toolchain CI actually lints with.** `rust-version = "1.92"` promises
+  a floor, there is no `rust-toolchain.toml`, and `clippy -D warnings` only
+  passes on the newest stable. Either add the pin or drop the floor claim.
 
 ### 3. Then the next capability slice: audio delivery
 
