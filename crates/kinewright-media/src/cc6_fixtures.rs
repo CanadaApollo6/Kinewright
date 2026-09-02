@@ -55,7 +55,6 @@
 #![allow(clippy::uninlined_format_args)]
 
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
@@ -68,12 +67,16 @@ use kinewright_core::{
     DECODED_RANGE_EXCEPTION_BASIS_POINTS, DELIVERY_RGB_EXTREMES_NOTE,
     DELIVERY_VERIFICATION_FRAME_COUNT, DELIVERY_VERIFICATION_MAX_FRAMES, DeliveryColorError,
     DeliveryEncodeDepth, DeliveryProfile, DeliveryVerification, DeliveryVerificationRequest,
-    Document, Effect, EffectId, ExportCancellation, ExportSettings, NormalizedRoi, ParamValue,
-    QaSeverity, TimeCode, YCbCrLegalSource, measure_color_qc,
+    Document, Effect, ExportCancellation, ExportSettings, NormalizedRoi, ParamValue, QaSeverity,
+    TimeCode, YCbCrLegalSource, measure_color_qc,
 };
 use serde_json::{Value, json};
 
 use crate::{
+    cc_fixture_support::{
+        assert_manifest_i64, declared_test_names, declares_test, effect_with, sorted,
+        uses_outside_prose,
+    },
     cc1_fixtures::{
         FixtureGpu, MONITOR_CPU_GPU_MAX, MONITOR_CPU_GPU_MEAN, MONITOR_CPU_GPU_P99,
         backend_metadata, fallback_gpu, file_hash, git_revision, hardware_gpu, simple_document,
@@ -597,19 +600,6 @@ pub(crate) fn cc6_delivery_source(
     ];
     run_ffmpeg(&arguments, &path);
     path
-}
-
-/// One `color_wheels` or `primary_correction` node.
-fn effect_with(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
-    Effect {
-        id: EffectId(id),
-        name: name.to_owned(),
-        parameters: parameters
-            .iter()
-            .map(|(name, value)| ((*name).to_owned(), ParamValue::Integer(*value)))
-            .collect::<BTreeMap<_, _>>(),
-        keyframes: BTreeMap::new(),
-    }
 }
 
 /// The §11.1 grade: a deliberately over-range and out-of-gamut managed stack,
@@ -2456,96 +2446,6 @@ fn cc6_test_source(path: &str) -> &'static str {
         })
 }
 
-fn is_test_attribute(line: &str) -> bool {
-    line == "#[test]" || line.starts_with("#[tokio::test")
-}
-
-/// Whether `source` declares `name` as a `#[test]` (or `#[tokio::test]`)
-/// function.
-///
-/// The attribute is required, so a name mentioned in a doc comment, a string
-/// literal, or a helper function is not mistaken for a fixture.
-fn declares_test(source: &str, name: &str) -> bool {
-    let needle = format!("fn {name}(");
-    let lines = source.lines().collect::<Vec<_>>();
-    for (index, line) in lines.iter().enumerate() {
-        if !line.contains(&needle) {
-            continue;
-        }
-        for previous in lines[..index].iter().rev() {
-            let previous = previous.trim();
-            if is_test_attribute(previous) {
-                return true;
-            }
-            if previous.is_empty() || previous.starts_with("//") || previous.starts_with("#[") {
-                continue;
-            }
-            break;
-        }
-    }
-    false
-}
-
-/// Every `#[test]` function in `source` whose name starts with `prefix`, in
-/// declaration order.
-fn declared_test_names(source: &str, prefix: &str) -> Vec<String> {
-    let lines = source.lines().collect::<Vec<_>>();
-    let mut names = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        if !is_test_attribute(line.trim()) {
-            continue;
-        }
-        for candidate in &lines[index + 1..] {
-            let candidate = candidate.trim();
-            if candidate.is_empty() || candidate.starts_with("//") || candidate.starts_with("#[") {
-                continue;
-            }
-            let Some(rest) = candidate.split_once("fn ").map(|(_, rest)| rest) else {
-                break;
-            };
-            let Some((name, _)) = rest.split_once('(') else {
-                break;
-            };
-            if name.starts_with(prefix) {
-                names.push(name.to_owned());
-            }
-            break;
-        }
-    }
-    names
-}
-
-/// Whether `source` *uses* `needle` as code rather than merely naming it in a
-/// comment or a message.
-///
-/// The distinction matters because this file has to be able to say
-/// "`fixture_gpu_or_skip` is forbidden here" in the very assertion that
-/// forbids it, and `include_str!` cannot tell prose from code on its own.
-fn uses_outside_prose(source: &str, needle: &str) -> bool {
-    // A call is the identifier followed by `(`, on a line that is not a
-    // comment, with any trailing `//` comment stripped first. Exempting every
-    // line that contains a string literal would let
-    // `fixture_gpu_or_skip("cc6-verify")` — the natural spelling — evade the
-    // guard, so string literals are not exempt; only the identifier-plus-paren
-    // shape counts, and prose mentions inside quotes never carry the paren
-    // directly after the name.
-    // The quoted form is the `std::env::var("NAME")` shape — the needle
-    // directly inside a call's parentheses — so this file's own needle list
-    // (`["…", "…"]`) cannot match itself.
-    let call = format!("{needle}(");
-    let env = format!("(\"{needle}\")");
-    source.lines().any(|line| {
-        let code = line.split("//").next().unwrap_or_default();
-        code.contains(&call) || code.contains(&env)
-    })
-}
-
-fn sorted(names: impl IntoIterator<Item = String>) -> Vec<String> {
-    let mut names = names.into_iter().collect::<Vec<_>>();
-    names.sort_unstable();
-    names
-}
-
 fn cc6_manifest() -> Value {
     serde_json::from_str(include_str!("../tests/fixtures/cc6_manifest.json"))
         .expect("CC6 fixture manifest must be valid JSON")
@@ -2741,24 +2641,6 @@ fn cc6_declared_test_names_exist_in_their_source_files() {
             "§11.2 item {item} must be owned by {owner}"
         );
     }
-}
-
-/// Assert one declared manifest integer equals the code constant the fixtures
-/// actually gate with.
-///
-/// The `i64` sibling of CC1's [`assert_manifest_f64`]: every CC6 threshold that
-/// is an integer constant — millionths, hundredths, basis points, code bounds —
-/// is asserted exactly, with no float round trip that could hide a one-unit
-/// drift.
-fn assert_manifest_i64(parent: &Value, key: &str, expected: i64) {
-    let declared = parent
-        .get(key)
-        .and_then(Value::as_i64)
-        .unwrap_or_else(|| panic!("manifest must declare an integer {key}"));
-    assert_eq!(
-        declared, expected,
-        "manifest {key} does not match the code constant"
-    );
 }
 
 /// CC6 §11.2.23 and §11.3. Every required fixture is declared with its owner,

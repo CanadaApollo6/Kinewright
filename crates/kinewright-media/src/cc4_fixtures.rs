@@ -15,8 +15,9 @@
 //! Per CC4 §10.1 rule 1 no expected value in this file is obtained by calling
 //! `Lut3d::lookup`, `LutNode::apply`, `apply_color_nodes_at`, the compositor, or
 //! the shader. Expected values are either literal constants transcribed from
-//! the contract tables or computed by the `spec_*_f64` functions below, which
-//! are an independent f64 transcription of §2.6 and §3.5.
+//! the contract tables or computed by the `spec_*_f64` functions below and in
+//! [`crate::cc_fixture_support`], which are an independent f64 transcription
+//! of §2.6 and §3.5.
 //!
 //! Per CC4 §10.1 rule 7 the precision gate uses a **non-dyadic** 33³ look
 //! (a cross-talk matrix followed by a filmic S-curve, written out below), not
@@ -54,8 +55,14 @@ use crate::{
     COMPOSITOR_LEGACY_LUT_SLOT, COMPOSITOR_LUT_ATLAS_SLOTS, COMPOSITOR_LUT_SLOTS_PER_LAYER,
     COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE,
     COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D,
-    Compositor, CompositorLayer,
+    Compositor,
     builtin_looks::{BUILTIN_LOOK_SHA256, BuiltinLook},
+    cc_fixture_support::{
+        apply_stack, clip_effects, cpu_nodes_with, cpu_reference_linear, cpu_reference_monitor,
+        document_from, effect_with, gpu_linear, gpu_monitor, grade_header_word,
+        spec_grade709_decode_f64, spec_grade709_encode_f64, spec_luma_f64, spec_sign_f64,
+        with_parameter,
+    },
     cc1_fixtures::{
         DiffMetrics, FixtureGpu, LINEAR_CPU_GPU_MAX, LINEAR_CPU_GPU_MEAN, LINEAR_CPU_GPU_P99,
         LINEAR_GATE_DOMAIN, LINEAR_GATE_IN_GAMUT, LINEAR_OVER_RANGE_MEAN, LINEAR_OVER_RANGE_P99,
@@ -70,10 +77,7 @@ use crate::{
         assert_case_is_not_vacuous, bits_of, cc3_parity_raster, cc3_raster_frame, descending_pairs,
         json_hash, neutral_ramp, primary_effect, representative_curves, representative_wheels,
     },
-    color_pipeline::{
-        ColorNode, LutInputEncoding, apply_color_nodes_at, encode_monitor_rgba8,
-        resolve_color_nodes_with,
-    },
+    color_pipeline::{ColorNode, LutInputEncoding},
     compositor::grade_buffer_bytes_with_luts,
     frame::WorkingFrame,
     lut::{
@@ -83,7 +87,6 @@ use crate::{
     lut_store::{LUT_MAX_FILE_BYTES, LutLibrary, LutStore, metadata_mismatch},
     sha256::sha256_bytes,
     test_support::TempDirectory,
-    timeline::TransitionRenderParams,
 };
 
 /// The contract token recorded on every CC4 evidence payload.
@@ -137,26 +140,16 @@ const CC4_EVIDENCE_FIXTURES: [&str; 17] = [
 // ---------------------------------------------------------------------------
 // The independent f64 transcription of CC4 §2.6, §3.4, and §3.5.
 //
-// Nothing below calls the production evaluator. The constants are the contract
-// digits and the algorithms are the §3.5 pseudocode, transcribed by hand, so a
-// parity or anchor assertion compares two implementations of the written
-// contract rather than one implementation with itself.
+// Nothing below calls the production evaluator. The CC3 §2.1 `grade709`
+// digits and pair, `sgn`, and the §2.6 luma are the hand transcription in
+// `crate::cc_fixture_support`; the algorithms below are the §3.5 pseudocode,
+// transcribed by hand, so a parity or anchor assertion compares two
+// implementations of the written contract rather than one implementation with
+// itself.
 // ---------------------------------------------------------------------------
 
-/// `sgn` with `sgn(0) = 0`; `signum` returns `±1` at zero and would break the
-/// bit-exact identity CC4 §10.3.2 needs.
-fn spec_sign_f64(value: f64) -> f64 {
-    if value > 0.0 {
-        1.0
-    } else if value < 0.0 {
-        -1.0
-    } else {
-        0.0
-    }
-}
-
 /// CC1's sign-preserving `encode_bt709`, in f64.
-fn spec_encode_bt709_f64(x: f64) -> f64 {
+fn spec_encode_bt709_signed_f64(x: f64) -> f64 {
     let sign = spec_sign_f64(x);
     let magnitude = x.abs();
     if magnitude < 0.018 {
@@ -177,41 +170,10 @@ fn spec_decode_display709_f64(e: f64) -> f64 {
     }
 }
 
-const SPEC_GRADE709_ALPHA: f64 = 1.099_296_8;
-const SPEC_GRADE709_BETA: f64 = 0.018_053_969;
-const SPEC_GRADE709_BETA_ENCODED: f64 = 0.081_242_86;
-const SPEC_GRADE709_K: f64 = 0.099_296_8;
-const SPEC_GRADE709_SLOPE: f64 = 4.5;
-const SPEC_GRADE709_EXPONENT: f64 = 0.45;
-const SPEC_GRADE709_INVERSE_EXPONENT: f64 = 2.222_222_3;
-
-/// CC3 §2.1's `grade709_encode`, in f64.
-fn spec_grade709_encode_f64(x: f64) -> f64 {
-    let sign = spec_sign_f64(x);
-    let magnitude = x.abs();
-    if magnitude < SPEC_GRADE709_BETA {
-        sign * SPEC_GRADE709_SLOPE * magnitude
-    } else {
-        sign * (SPEC_GRADE709_ALPHA * magnitude.powf(SPEC_GRADE709_EXPONENT) - SPEC_GRADE709_K)
-    }
-}
-
-/// CC3 §2.1's `grade709_decode`, in f64.
-fn spec_grade709_decode_f64(e: f64) -> f64 {
-    let sign = spec_sign_f64(e);
-    let magnitude = e.abs();
-    if magnitude < SPEC_GRADE709_BETA_ENCODED {
-        sign * magnitude / SPEC_GRADE709_SLOPE
-    } else {
-        sign * ((magnitude + SPEC_GRADE709_K) / SPEC_GRADE709_ALPHA)
-            .powf(SPEC_GRADE709_INVERSE_EXPONENT)
-    }
-}
-
 /// `ENC` for one CC4 §3.4 token, in f64.
 fn spec_encode_f64(encoding: LutInputEncoding, x: f64) -> f64 {
     match encoding {
-        LutInputEncoding::Display709 => spec_encode_bt709_f64(x),
+        LutInputEncoding::Display709 => spec_encode_bt709_signed_f64(x),
         LutInputEncoding::Linear => x,
         LutInputEncoding::Grade709 => spec_grade709_encode_f64(x),
     }
@@ -436,11 +398,6 @@ fn spec_tetra(
             + f_b * (d1[channel] - d0[channel]);
     }
     out
-}
-
-/// Rec.709 luma, transcribed from CC4 §2.6.
-fn spec_luma_f64(e: [f64; 3]) -> f64 {
-    0.2126 * e[0] + 0.7152 * e[1] + 0.0722 * e[2]
 }
 
 /// The five §2.6 built-in formulas, transcribed independently of
@@ -681,18 +638,6 @@ impl FixtureLuts {
 // Effects.
 // ---------------------------------------------------------------------------
 
-fn effect_with(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
-    Effect {
-        id: EffectId(id),
-        name: name.to_owned(),
-        parameters: parameters
-            .iter()
-            .map(|(name, value)| ((*name).to_owned(), ParamValue::Integer(*value)))
-            .collect(),
-        keyframes: BTreeMap::new(),
-    }
-}
-
 /// A `creative_look` node bound to `asset`, at `mix` basis points and the
 /// given `input_encoding_token`.
 fn creative_look(id: u64, asset: i64, encoding: i64, mix: i64) -> Effect {
@@ -717,14 +662,6 @@ fn technical_lut(id: u64, asset: i64, encoding: i64) -> Effect {
     )
 }
 
-fn with_parameter(effect: &Effect, name: &str, value: i64) -> Effect {
-    let mut updated = effect.clone();
-    updated
-        .parameters
-        .insert(name.to_owned(), ParamValue::Integer(value));
-    updated
-}
-
 fn cc4_asset() -> kinewright_core::MediaAsset {
     kinewright_core::MediaAsset {
         id: kinewright_core::AssetId(1),
@@ -743,142 +680,13 @@ fn cc4_document() -> Document {
     simple_document(cc4_asset(), (16, 16))
 }
 
-fn clip_effects(document: &Document) -> &[Effect] {
-    &document.tracks[0].clips[0].effects
-}
-
 // ---------------------------------------------------------------------------
 // CPU reference and GPU rendering.
 // ---------------------------------------------------------------------------
 
-fn cpu_nodes(effects: &[Effect], library: &LutLibrary) -> Vec<ColorNode> {
-    resolve_color_nodes_with(effects, library).expect("CC4 fixture node stack must resolve")
-}
-
-/// The CC5 §3.4 pixel-centre uv of raster index `index`,
-/// `((x + 0.5) / W, (y + 0.5) / H)`, matching the rasterizer's
-/// `@builtin(position)` convention.
-#[allow(clippy::cast_precision_loss)]
-fn pixel_centre_uv(frame: &WorkingFrame, index: usize) -> [f32; 2] {
-    let width = (frame.width.max(1)) as usize;
-    let x = index % width;
-    let y = index / width;
-    [
-        (x as f32 + 0.5) / frame.width.max(1) as f32,
-        (y as f32 + 0.5) / frame.height.max(1) as f32,
-    ]
-}
-
-/// The output raster aspect `a = W / H` the host supplies to the matte
-/// (CC5 §3.2).
-#[allow(clippy::cast_precision_loss)]
-fn raster_aspect(frame: &WorkingFrame) -> f32 {
-    frame.width.max(1) as f32 / frame.height.max(1) as f32
-}
-
-/// The CC5 §3.4 reference at the centre of a square raster.
-///
-/// No CC4 node stack carries a matte, so the position and the aspect are
-/// immaterial and the result is bit-identical to the pre-CC5 positionless
-/// reference — which is the point of CC5 §2.5's mandatory matte-free branch.
-fn apply_stack(nodes: &[ColorNode], rgb: [f32; 3]) -> [f32; 3] {
-    apply_color_nodes_at(nodes, rgb, [0.5, 0.5], 1.0)
-}
-
-/// The production CPU reference in the linear working domain, including the
-/// normative `Rgba16Float` storage quantization.
-fn cpu_reference_linear(frame: &WorkingFrame, nodes: &[ColorNode]) -> Vec<f32> {
-    let aspect = raster_aspect(frame);
-    frame
-        .pixels
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .enumerate()
-        .flat_map(|(index, rgba)| {
-            let output = apply_color_nodes_at(
-                nodes,
-                [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()],
-                pixel_centre_uv(frame, index),
-                aspect,
-            );
-            output
-                .into_iter()
-                .map(|value| f16::from_f32(value).to_f32())
-                .chain(std::iter::once(f16::from_f32(rgba[3].to_f32()).to_f32()))
-        })
-        .collect()
-}
-
-fn cpu_reference_monitor(frame: &WorkingFrame, nodes: &[ColorNode]) -> Vec<u8> {
-    let aspect = raster_aspect(frame);
-    frame
-        .pixels
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .enumerate()
-        .flat_map(|(index, rgba)| {
-            let output = apply_color_nodes_at(
-                nodes,
-                [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()],
-                pixel_centre_uv(frame, index),
-                aspect,
-            );
-            let quantized = output.map(|value| f16::from_f32(value).to_f32());
-            encode_monitor_rgba8([quantized[0], quantized[1], quantized[2], rgba[3].to_f32()])
-        })
-        .collect()
-}
-
-fn gpu_linear(
-    compositor: &Compositor,
-    resolution: (u32, u32),
-    frame: &WorkingFrame,
-    effects: &[Effect],
-    library: Option<&LutLibrary>,
-) -> Vec<f32> {
-    compositor
-        .render_working_with_luts(
-            resolution,
-            &[CompositorLayer {
-                frame,
-                effects,
-                transition: TransitionRenderParams::default(),
-            }],
-            library,
-        )
-        .expect("production GPU working-surface readback")
-        .pixels
-}
-
-fn gpu_monitor(
-    compositor: &Compositor,
-    resolution: (u32, u32),
-    frame: &WorkingFrame,
-    effects: &[Effect],
-    library: Option<&LutLibrary>,
-) -> Vec<u8> {
-    compositor
-        .render_monitor_with_luts(
-            resolution,
-            &[CompositorLayer {
-                frame,
-                effects,
-                transition: TransitionRenderParams::default(),
-            }],
-            &kinewright_core::ColorContext::sdr_rec709().monitoring,
-            library,
-        )
-        .expect("production GPU compositor should render the CC4 fixture")
-        .rgba
-        .as_ref()
-        .clone()
-}
-
 /// Render one case on the GPU, compare it against the CPU reference, and apply
 /// the CC1 §6.2 gates verbatim.
-fn assert_gpu_case(
+fn assert_gpu_case_with_luts(
     compositor: &Compositor,
     resolution: (u32, u32),
     frame: &WorkingFrame,
@@ -887,7 +695,7 @@ fn assert_gpu_case(
     baseline_linear: Option<&[f32]>,
     label: &str,
 ) -> (DiffMetrics, LinearParityMetrics, Vec<u8>) {
-    let nodes = cpu_nodes(effects, library);
+    let nodes = cpu_nodes_with(effects, library);
     let expected_linear = cpu_reference_linear(frame, &nodes);
     let expected_monitor = cpu_reference_monitor(frame, &nodes);
     if let Some(baseline) = baseline_linear {
@@ -929,11 +737,6 @@ fn assert_gpu_case(
 const GRADE_HEADER_BYTES: usize = 16;
 const GRADE_NODE_WORDS: usize = 16;
 const GRADE_NODE_VALUE_OFFSET: usize = 4;
-
-fn grade_header_word(bytes: &[u8], index: usize) -> u32 {
-    let offset = index * 4;
-    u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("header word"))
-}
 
 fn grade_value(bytes: &[u8], node: usize, value: usize) -> f32 {
     let word = node * GRADE_NODE_WORDS + GRADE_NODE_VALUE_OFFSET + value;
@@ -1360,7 +1163,7 @@ fn cc4_identity_lattices_are_bit_exact_in_linear_on_cpu_and_gpu() {
             "the identity case must be an ACTIVE node, or it proves nothing"
         );
 
-        let nodes = cpu_nodes(&stack, luts.library());
+        let nodes = cpu_nodes_with(&stack, luts.library());
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].kind(), ColorNodeKind::CreativeLook);
         let cpu = cpu_reference_linear(&frame, &nodes);
@@ -1440,7 +1243,7 @@ fn cc4_identity_round_trips_display709_and_grade709_within_the_linear_gate() {
             let stack = [creative_look(1, 1, encoding.token(), 10_000)];
             // The node must actually be resolved and written, or "the output
             // equals the input" would be a statement about an empty stack.
-            let nodes = cpu_nodes(&stack, luts.library());
+            let nodes = cpu_nodes_with(&stack, luts.library());
             assert_eq!(nodes.len(), 1, "{label}: the node must be active");
             assert_eq!(nodes[0].kind(), ColorNodeKind::CreativeLook);
             let bytes = grade_buffer_bytes_with_luts(&stack, Some(luts.library()))
@@ -1527,7 +1330,7 @@ fn cc4_inactive_lut_nodes_are_bit_identical_to_the_stack_without_them() {
     // The reference stack: a real correction node, so the comparison is not
     // between two empty stacks.
     let baseline = vec![primary_effect(10)];
-    let baseline_nodes = cpu_nodes(&baseline, luts.library());
+    let baseline_nodes = cpu_nodes_with(&baseline, luts.library());
     let baseline_linear = cpu_reference_linear(&frame, &baseline_nodes);
     let baseline_monitor = cpu_reference_monitor(&frame, &baseline_nodes);
     let baseline_gpu_linear = gpu_linear(
@@ -1551,7 +1354,7 @@ fn cc4_inactive_lut_nodes_are_bit_identical_to_the_stack_without_them() {
         primary_effect(10),
         creative_look(1, 1, LutInputEncoding::Display709.token(), 10_000),
     ];
-    let active_linear = cpu_reference_linear(&frame, &cpu_nodes(&active, luts.library()));
+    let active_linear = cpu_reference_linear(&frame, &cpu_nodes_with(&active, luts.library()));
     assert_case_is_not_vacuous(&active_linear, &baseline_linear, "active_look");
 
     let cases: [(&str, Effect, ColorNodeInactiveReason); 3] = [
@@ -1586,7 +1389,7 @@ fn cc4_inactive_lut_nodes_are_bit_identical_to_the_stack_without_them() {
             "{label}: Core must classify the node inactive on the stored integers"
         );
         let stack = vec![primary_effect(10), effect.clone()];
-        let nodes = cpu_nodes(&stack, luts.library());
+        let nodes = cpu_nodes_with(&stack, luts.library());
         assert_eq!(
             nodes.len(),
             1,
@@ -1874,7 +1677,7 @@ fn cc4_interpolation_anchors_match_the_hand_derived_values() {
         let inputs = rows.iter().map(|anchor| anchor.input).collect::<Vec<_>>();
         let (width, height, frame) = anchor_frame(&inputs);
         let stack = [creative_look(1, asset_index as i64 + 1, linear, 10_000)];
-        let nodes = cpu_nodes(&stack, luts.library());
+        let nodes = cpu_nodes_with(&stack, luts.library());
         let cpu = cpu_reference_linear(&frame, &nodes);
         let rendered = gpu_linear(
             &compositor,
@@ -2009,7 +1812,7 @@ fn cc4_out_of_domain_restores_the_excursion_and_stays_monotone() {
     let inputs = CASES.map(|(_, input, _, _)| input);
     let (width, height, frame) = anchor_frame(&inputs);
     let stack = [creative_look(1, 1, linear, 10_000)];
-    let nodes = cpu_nodes(&stack, luts.library());
+    let nodes = cpu_nodes_with(&stack, luts.library());
     let cpu = cpu_reference_linear(&frame, &nodes);
     let rendered = gpu_linear(
         &compositor,
@@ -2062,7 +1865,7 @@ fn cc4_out_of_domain_restores_the_excursion_and_stays_monotone() {
 
     // --- monotonicity across the boundary -------------------------------
     let boundary_stack = [creative_look(1, 2, linear, 10_000)];
-    let boundary_nodes = cpu_nodes(&boundary_stack, luts.library());
+    let boundary_nodes = cpu_nodes_with(&boundary_stack, luts.library());
     let mut ramps = Vec::new();
     for depth in [8_u32, 10] {
         let (ramp_width, ramp_height, ramp) = neutral_ramp(depth);
@@ -2161,7 +1964,7 @@ fn cc4_mix_endpoints_and_midpoint_match_the_hand_derived_values() {
                 "mix {mix}: the f64 transcription disagrees with the contract literal: {spec:?}"
             );
         }
-        let nodes = cpu_nodes(&stack, luts.library());
+        let nodes = cpu_nodes_with(&stack, luts.library());
         let cpu = cpu_reference_linear(&frame, &nodes);
         assert_eq!(block_rgb(&cpu, 0), expected, "mix {mix}: CPU reference");
         let rendered = gpu_linear(
@@ -2282,7 +2085,7 @@ fn cc4_stage_order_is_the_execution_order_and_a_violation_is_rejected() {
 
     // --- the legal five-kind stack -------------------------------------
     let stack = five_kind_stack();
-    let nodes = cpu_nodes(&stack, luts.library());
+    let nodes = cpu_nodes_with(&stack, luts.library());
     assert_eq!(
         nodes.iter().map(ColorNode::kind).collect::<Vec<_>>(),
         vec![
@@ -2302,7 +2105,7 @@ fn cc4_stage_order_is_the_execution_order_and_a_violation_is_rejected() {
         vec![(0, 0), (1, 1), (2, 1), (3, 1), (4, 2)],
         "stage ranks must be non-decreasing in the serialized order"
     );
-    let (monitor, linear, _) = assert_gpu_case(
+    let (monitor, linear, _) = assert_gpu_case_with_luts(
         &compositor,
         resolution,
         &frame,
@@ -2320,8 +2123,10 @@ fn cc4_stage_order_is_the_execution_order_and_a_violation_is_rejected() {
         creative_look(5, 2, LutInputEncoding::Display709.token(), 7_500),
     ];
     let reversed_pair = vec![forward_pair[1].clone(), forward_pair[0].clone()];
-    let forward_linear = cpu_reference_linear(&frame, &cpu_nodes(&forward_pair, luts.library()));
-    let reversed_linear = cpu_reference_linear(&frame, &cpu_nodes(&reversed_pair, luts.library()));
+    let forward_linear =
+        cpu_reference_linear(&frame, &cpu_nodes_with(&forward_pair, luts.library()));
+    let reversed_linear =
+        cpu_reference_linear(&frame, &cpu_nodes_with(&reversed_pair, luts.library()));
     let mut worst = 0.0_f32;
     let mut differing = 0_usize;
     for (a, b) in forward_linear
@@ -2518,7 +2323,7 @@ fn raster_samples_outside_unit_display() -> usize {
         .into_iter()
         .filter(|rgb| {
             rgb.iter().any(|value| {
-                let encoded = spec_encode_bt709_f64(f64::from(*value));
+                let encoded = spec_encode_bt709_signed_f64(f64::from(*value));
                 !(0.0..=1.0).contains(&encoded)
             })
         })
@@ -2616,7 +2421,7 @@ fn assert_cc4_gpu_parity(gpu: &FixtureGpu) {
     let mut recorded = Vec::new();
     for (label, stack, non_neutral) in &cases {
         if *non_neutral {
-            let (monitor, linear, _) = assert_gpu_case(
+            let (monitor, linear, _) = assert_gpu_case_with_luts(
                 &compositor,
                 resolution,
                 &frame,
@@ -2640,7 +2445,7 @@ fn assert_cc4_gpu_parity(gpu: &FixtureGpu) {
         } else {
             // `mix = 0` is the neutral endpoint: it must be *bit-identical* to
             // the look-free stack, so the vacuity gate does not apply to it.
-            let nodes = cpu_nodes(stack, luts.library());
+            let nodes = cpu_nodes_with(stack, luts.library());
             assert!(nodes.is_empty());
             let rendered = gpu_linear(&compositor, resolution, &frame, stack, Some(luts.library()));
             assert_eq!(bits_of(&rendered), bits_of(&baseline_gpu));
@@ -2905,7 +2710,7 @@ fn cc4_lut_slots_limits_and_abi_constants_hold() {
         LINEAR_CPU_GPU_MAX,
         "four_slots",
     );
-    let cpu = cpu_reference_linear(&frame, &cpu_nodes(&stack, luts.library()));
+    let cpu = cpu_reference_linear(&frame, &cpu_nodes_with(&stack, luts.library()));
     assert_rgb_within(
         block_rgb(&cpu, 0),
         EXPECTED,
@@ -3321,7 +3126,7 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
             LutInputEncoding::Display709.token(),
             10_000,
         )];
-        let nodes = cpu_nodes(&stack, &library);
+        let nodes = cpu_nodes_with(&stack, &library);
         assert_eq!(nodes.len(), 1);
 
         // The closed-form expectation, per pixel, in display code and in
@@ -3334,7 +3139,7 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
                 f64::from(rgba[1].to_f32()),
                 f64::from(rgba[2].to_f32()),
             ];
-            let e = x.map(spec_encode_bt709_f64);
+            let e = x.map(spec_encode_bt709_signed_f64);
             let display = spec_builtin_formula_f64(look, e);
             expected_display.extend_from_slice(&display);
             for value in display {
@@ -3353,7 +3158,7 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
                 [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()],
             );
             for channel in 0..3 {
-                let actual = spec_encode_bt709_f64(f64::from(out[channel]));
+                let actual = spec_encode_bt709_signed_f64(f64::from(out[channel]));
                 let expected = expected_display[pixel * 3 + channel];
                 cpu_display_error = cpu_display_error.max((actual - expected).abs());
             }
@@ -3377,7 +3182,7 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
         let mut gpu_display_error = 0.0_f64;
         for (pixel, rgb) in rendered.as_chunks::<4>().0.iter().enumerate() {
             for channel in 0..3 {
-                let actual = spec_encode_bt709_f64(f64::from(rgb[channel]));
+                let actual = spec_encode_bt709_signed_f64(f64::from(rgb[channel]));
                 let expected = expected_display[pixel * 3 + channel];
                 gpu_display_error = gpu_display_error.max((actual - expected).abs());
             }
@@ -3951,13 +3756,6 @@ fn cc4_recovery_rejections_are_typed_and_leave_the_store_untouched() {
 // ---------------------------------------------------------------------------
 // §10.3.13: serialization, history, and typed rejections.
 // ---------------------------------------------------------------------------
-
-fn document_from(event: Event, label: &str) -> Arc<Document> {
-    match event {
-        Event::DocumentChanged { doc, .. } => doc,
-        other => panic!("{label} was not an accepted document state: {other:?}"),
-    }
-}
 
 /// The actor's current document, read through the public query boundary.
 fn query_document(core: &Core) -> Arc<Document> {
@@ -5056,7 +4854,7 @@ fn cc4_input_encoding_tokens_are_hand_derived_and_dispatched() {
         // f16, so this is the very value the working frame hands the node, and
         // the comparison is not limited by the `Rgba16Float` storage step the
         // way a readback would be.
-        let cpu = apply_stack(&cpu_nodes(&stack, luts.library()), INPUT);
+        let cpu = apply_stack(&cpu_nodes_with(&stack, luts.library()), INPUT);
         assert_rgb_within(cpu, expected, CPU_TOLERANCE, &format!("{name}: CPU"));
         let rendered = block_rgb(
             &gpu_linear(
@@ -5103,7 +4901,7 @@ fn cc4_input_encoding_tokens_are_hand_derived_and_dispatched() {
         let encoding = LutInputEncoding::from_token(token).expect("a documented token");
         let spec = look.apply(encoding, 1.0, OVER_RANGE.map(f64::from));
         let stack = [creative_look(1, 2, token, 10_000)];
-        let cpu = apply_stack(&cpu_nodes(&stack, luts.library()), OVER_RANGE);
+        let cpu = apply_stack(&cpu_nodes_with(&stack, luts.library()), OVER_RANGE);
         let expected = spec.map(|value| value as f32);
         assert_rgb_within(
             cpu,

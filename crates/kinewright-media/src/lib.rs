@@ -54,6 +54,9 @@ mod cc6_fixtures;
 mod cc7_fixtures;
 
 #[cfg(test)]
+mod cc_fixture_support;
+
+#[cfg(test)]
 mod gpu_test_support;
 
 use ffmpeg_next as ffmpeg;
@@ -86,7 +89,7 @@ pub use kinewright_core::{
     MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory,
     ThumbnailFrame, ThumbnailKey, VisualAssetResult, VisualRequestKind, WaveformData, WaveformPeak,
 };
-pub use loudness::measure_loudness;
+pub use loudness::{measure_delivery_audio, measure_loudness};
 pub use lut::{
     CubeLut, LutParseError, LutParseErrorCode, MAX_CUBE_SIZE, MIN_CUBE_SIZE, parse_cube_lut,
     parse_cube_lut_bytes, parse_cube_lut_typed,

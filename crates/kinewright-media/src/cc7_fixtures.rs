@@ -128,6 +128,9 @@ use serde_json::{Value, json};
 
 use crate::{
     Compositor, CompositorLayer,
+    cc_fixture_support::{
+        assert_manifest_i64, declared_test_names, declares_test, sorted, uses_outside_prose,
+    },
     cc1_fixtures::{
         FixtureGpu, assert_linear_parity, backend_metadata, fallback_gpu, git_revision,
         hardware_gpu, linear_parity_metrics, working_frame, write_evidence_artefact,
@@ -3272,17 +3275,6 @@ fn cc7_manifest() -> Value {
         .expect("CC7 fixture manifest must be valid JSON")
 }
 
-fn assert_manifest_i64(parent: &Value, key: &str, expected: i64) {
-    let declared = parent
-        .get(key)
-        .and_then(Value::as_i64)
-        .unwrap_or_else(|| panic!("manifest must declare an integer {key}"));
-    assert_eq!(
-        declared, expected,
-        "manifest {key} does not match the code constant"
-    );
-}
-
 /// Every `cc7_scenarios` constant the manifest must declare, paired with the
 /// code constant it is asserted **equal to** (rule 11.0.3: never restated as a
 /// literal).
@@ -4365,66 +4357,6 @@ fn cc7_test_source(path: &str) -> &'static str {
         })
 }
 
-fn is_test_attribute(line: &str) -> bool {
-    line == "#[test]" || line.starts_with("#[tokio::test")
-}
-
-/// Whether `source` declares `name` as a `#[test]` (or `#[tokio::test]`)
-/// function.
-///
-/// The attribute is required, so a name mentioned in a doc comment, a string
-/// literal, or a helper function is not mistaken for a fixture — which matters
-/// here, because this file names every CC7 test in prose as well as in code.
-fn declares_test(source: &str, name: &str) -> bool {
-    let needle = format!("fn {name}(");
-    let lines = source.lines().collect::<Vec<_>>();
-    for (index, line) in lines.iter().enumerate() {
-        if !line.contains(&needle) {
-            continue;
-        }
-        for previous in lines[..index].iter().rev() {
-            let previous = previous.trim();
-            if is_test_attribute(previous) {
-                return true;
-            }
-            if previous.is_empty() || previous.starts_with("//") || previous.starts_with("#[") {
-                continue;
-            }
-            break;
-        }
-    }
-    false
-}
-
-/// Every `#[test]` function in `source` whose name starts with `prefix`, in
-/// declaration order.
-fn declared_test_names(source: &str, prefix: &str) -> Vec<String> {
-    let lines = source.lines().collect::<Vec<_>>();
-    let mut names = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        if !is_test_attribute(line.trim()) {
-            continue;
-        }
-        for candidate in &lines[index + 1..] {
-            let candidate = candidate.trim();
-            if candidate.is_empty() || candidate.starts_with("//") || candidate.starts_with("#[") {
-                continue;
-            }
-            let Some(rest) = candidate.split_once("fn ").map(|(_, rest)| rest) else {
-                break;
-            };
-            let Some((name, _)) = rest.split_once('(') else {
-                break;
-            };
-            if name.starts_with(prefix) {
-                names.push(name.to_owned());
-            }
-            break;
-        }
-    }
-    names
-}
-
 /// The text of one top-level test in an integration-test file, from its `fn`
 /// line to the closing brace in column zero.
 ///
@@ -4450,31 +4382,6 @@ fn cc7_test_body(source: &str, name: &str) -> String {
         "{name}'s body could not be delimited; the test is not a top-level item"
     );
     body.join("\n")
-}
-
-/// Whether `source` *uses* `needle` as code rather than merely naming it in a
-/// comment or a message (`cc6_fixtures.rs:2524-2541`).
-///
-/// A call is the identifier followed by `(`, on a line that is not a comment,
-/// with any trailing `//` comment stripped first. The quoted form is the
-/// `std::env::var("NAME")` shape — the needle directly inside a call's
-/// parentheses. String literals are deliberately **not** exempt, because
-/// `fixture_gpu_or_skip("cc7-a")` is the natural spelling and must not evade
-/// the guard; the array-literal rule above is what keeps this file's own
-/// needle list from matching itself.
-fn uses_outside_prose(source: &str, needle: &str) -> bool {
-    let call = format!("{needle}(");
-    let quoted = format!("(\"{needle}\")");
-    source.lines().any(|line| {
-        let code = line.split("//").next().unwrap_or_default();
-        code.contains(&call) || code.contains(&quoted)
-    })
-}
-
-fn sorted(names: impl IntoIterator<Item = String>) -> Vec<String> {
-    let mut names = names.into_iter().collect::<Vec<_>>();
-    names.sort_unstable();
-    names
 }
 
 /// The five inventory arrays, with the sources that own them.

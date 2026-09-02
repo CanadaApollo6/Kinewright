@@ -45,6 +45,7 @@ use serde_json::{Value, json};
 
 use crate::{
     Compositor, CompositorLayer, GpuContext,
+    cc_fixture_support::{spec_luma_f64, spec_smoothstep_f64},
     color_pipeline::{
         DELIVERY_INTERMEDIATE_WHITE, PrimaryCorrection, PrimaryParameter,
         apply_primary_corrections, classify_source, classify_source_with_assumption, decode_bt709,
@@ -1013,15 +1014,6 @@ fn spec_monitor_code_f64(linear: f64) -> u8 {
     (spec_encode_bt709_f64(linear).clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-fn spec_luma_f64(rgb: [f64; 3]) -> f64 {
-    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
-}
-
-fn spec_smoothstep_f64(start: f64, end: f64, value: f64) -> f64 {
-    let t = ((value - start) / (end - start)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
 /// The complete §3.2 control chain in `f64`, in the canonical order: white
 /// balance, exposure, tonal balance, contrast around the pivot, saturation
 /// around Rec.709 luma.
@@ -1121,7 +1113,10 @@ pub(crate) fn working_frame(width: u32, height: u32, rgb: &[[f32; 3]]) -> Workin
     }
 }
 
-fn cpu_reference_monitor(frame: &WorkingFrame, corrections: &[PrimaryCorrection]) -> Vec<u8> {
+fn cpu_reference_monitor_primary(
+    frame: &WorkingFrame,
+    corrections: &[PrimaryCorrection],
+) -> Vec<u8> {
     frame
         .pixels
         .as_chunks::<4>()
@@ -1205,7 +1200,7 @@ fn control_case_parameters(parameter: PrimaryParameter, value: i64) -> Vec<(&'st
 
 /// The independent CPU reference in the linear working domain, including the
 /// normative `Rgba16Float` storage quantization.
-fn cpu_reference_linear(frame: &WorkingFrame, correction: PrimaryCorrection) -> Vec<f32> {
+fn cpu_reference_linear_primary(frame: &WorkingFrame, correction: PrimaryCorrection) -> Vec<f32> {
     frame
         .pixels
         .as_chunks::<4>()
@@ -1230,7 +1225,11 @@ fn cpu_reference_linear(frame: &WorkingFrame, correction: PrimaryCorrection) -> 
 /// in the linear working domain rather than on monitor codes: the working
 /// surface is the CC1 contract domain, and a fully saturated chart patch can
 /// clip to the same 8-bit code under a real control change.
-fn assert_case_is_not_vacuous(expected: &[f32], neutral: &[f32], correction: PrimaryCorrection) {
+fn assert_control_case_is_not_vacuous(
+    expected: &[f32],
+    neutral: &[f32],
+    correction: PrimaryCorrection,
+) {
     if correction == PrimaryCorrection::default() {
         return;
     }
@@ -1321,11 +1320,11 @@ fn assert_gpu_control_case(
     over_range: OverRangeBand,
 ) -> (DiffMetrics, LinearParityMetrics, Vec<u8>) {
     let effect = correction_effect(1, correction);
-    let expected = cpu_reference_monitor(frame, &[correction]);
-    let expected_linear = cpu_reference_linear(frame, correction);
-    assert_case_is_not_vacuous(
+    let expected = cpu_reference_monitor_primary(frame, &[correction]);
+    let expected_linear = cpu_reference_linear_primary(frame, correction);
+    assert_control_case_is_not_vacuous(
         &expected_linear,
-        &cpu_reference_linear(frame, PrimaryCorrection::default()),
+        &cpu_reference_linear_primary(frame, PrimaryCorrection::default()),
         correction,
     );
     let actual = compositor
@@ -2541,7 +2540,7 @@ fn cc1_primary_controls_match_the_spec_equations_at_neutral_bounds_and_interiors
             // The CPU lane needs the same guard as the GPU lane: a case whose
             // output is indistinguishable from its input reports a flattering
             // zero spec error while proving nothing about the control.
-            assert_case_is_not_vacuous(&case_output, &case_neutral, correction);
+            assert_control_case_is_not_vacuous(&case_output, &case_neutral, correction);
         }
         // Neutral values are exact identities, including a neutral 0.5 pivot.
         let neutral_effect =
@@ -3663,7 +3662,7 @@ fn cc1_full_raster_monitor_proof_has_same_render_semantics_as_monitor_preview() 
     // against the independent CPU reference on the same decoded frame.
     let working = decode_managed_working_frame(&path, &raw_description);
     assert_eq!((working.width, working.height), (width, height));
-    let cpu_reference = cpu_reference_monitor(&working, &[]);
+    let cpu_reference = cpu_reference_monitor_primary(&working, &[]);
     let cpu_gpu_metric = abs_code_diff_rgb(&proof.image.pixels, &cpu_reference);
     assert!(
         cpu_gpu_metric.max <= MONITOR_CPU_GPU_MAX,

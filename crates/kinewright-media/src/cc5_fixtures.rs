@@ -17,8 +17,8 @@
 //! `Matte::coverage`, `MatteWindow::weight`, `MatteQualifier::weight`,
 //! `apply_color_nodes_at`, the compositor, or the shader. Expected values are
 //! either literal constants transcribed from the contract tables or computed
-//! by the `spec_*` functions below, which are an independent transcription of
-//! §2.3, §2.4, and §2.5.
+//! by the `spec_*` functions below and in [`crate::cc_fixture_support`], which
+//! are an independent transcription of §2.3, §2.4, and §2.5.
 //!
 //! Per CC5 §9.0 rule 7 the vacuity gate is **two-sided**:
 //! [`assert_matte_containment`] requires at least
@@ -56,6 +56,14 @@ use crate::{
     COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE,
     COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, Compositor, CompositorLayer,
     MatteRenderTarget,
+    cc_fixture_support::{
+        SPEC_GRADE709_ALPHA, SPEC_GRADE709_BETA, SPEC_GRADE709_BETA_ENCODED,
+        SPEC_GRADE709_EXPONENT, SPEC_GRADE709_INVERSE_EXPONENT, SPEC_GRADE709_K,
+        SPEC_GRADE709_SLOPE, cpu_nodes, cpu_nodes_with, cpu_reference_linear,
+        cpu_reference_monitor, declared_test_names, declares_test, gpu_linear, gpu_monitor,
+        grade_header_word, pixel_centre_uv, raster_aspect, spec_grade709_encode_f64, spec_sign_f64,
+        spec_smoothstep_f64,
+    },
     cc1_fixtures::{
         FixtureGpu, LINEAR_CPU_GPU_MAX, LINEAR_CPU_GPU_MEAN, LINEAR_CPU_GPU_P99,
         LINEAR_GATE_DOMAIN, LINEAR_GATE_IN_GAMUT, LINEAR_OVER_RANGE_MEAN, LINEAR_OVER_RANGE_P99,
@@ -66,10 +74,7 @@ use crate::{
         write_evidence_artefact,
     },
     cc3_fixtures::{cc3_parity_raster, json_hash},
-    color_pipeline::{
-        ColorNode, Matte, MatteWindow, apply_color_nodes_at, encode_monitor_rgba8, grade709_decode,
-        resolve_color_nodes_with,
-    },
+    color_pipeline::{Matte, MatteWindow, apply_color_nodes_at, grade709_decode},
     frame::WorkingFrame,
     lut_store::{LutLibrary, LutStore},
     test_support::TempDirectory,
@@ -180,12 +185,6 @@ const CC5_EVIDENCE_FIXTURES: [&str; 17] = [
 // itself.
 // ---------------------------------------------------------------------------
 
-/// The exact `smoothstep(A, B, x) = t·t·(3 − 2t)` of CC5 §2.3, in f64.
-fn spec_smoothstep_f64(start: f64, end: f64, value: f64) -> f64 {
-    let t = ((value - start) / (end - start)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
 /// The §2.3 normalized distance field `D` of one window at `uv`, in f64.
 ///
 /// `shape_ellipse` selects `sqrt(n.x² + n.y²)` over `max(|n.x|, |n.y|)`; the
@@ -268,53 +267,8 @@ fn spec_pixel_centre_uv_f64(index: usize) -> [f64; 2] {
 /// The §9.1 raster aspect `a = W / H`, in f64.
 const SPEC_RASTER_ASPECT_F64: f64 = CC5_RASTER_WIDTH as f64 / CC5_RASTER_HEIGHT as f64;
 
-// --- the CC3 §2.1 `grade709` transfer pair, transcribed for CC5 §2.4 -------
-
-const SPEC_GRADE709_ALPHA: f64 = 1.099_296_8;
-const SPEC_GRADE709_BETA: f64 = 0.018_053_969;
-const SPEC_GRADE709_BETA_ENCODED: f64 = 0.081_242_86;
-const SPEC_GRADE709_K: f64 = 0.099_296_8;
-const SPEC_GRADE709_SLOPE: f64 = 4.5;
-const SPEC_GRADE709_EXPONENT: f64 = 0.45;
-const SPEC_GRADE709_INVERSE_EXPONENT: f64 = 2.222_222_3;
-
-/// `sgn` with `sgn(0) = 0`, the CC3 definition WGSL's `sign` also matches.
-fn spec_sign_f64(value: f64) -> f64 {
-    if value > 0.0 {
-        1.0
-    } else if value < 0.0 {
-        -1.0
-    } else {
-        0.0
-    }
-}
-
-fn spec_grade709_encode_f64(x: f64) -> f64 {
-    let sign = spec_sign_f64(x);
-    let magnitude = x.abs();
-    if magnitude < SPEC_GRADE709_BETA {
-        sign * SPEC_GRADE709_SLOPE * magnitude
-    } else {
-        sign * (SPEC_GRADE709_ALPHA * magnitude.powf(SPEC_GRADE709_EXPONENT) - SPEC_GRADE709_K)
-    }
-}
-
-/// The exact analytic inverse of [`spec_grade709_encode_f64`].
-///
-/// Retained beside its inverse so the transcription of CC3 §2.1 is complete
-/// and the round trip below can be checked by inspection; CC5's own anchors
-/// only ever need the encode leg.
-#[allow(dead_code)]
-fn spec_grade709_decode_f64(e: f64) -> f64 {
-    let sign = spec_sign_f64(e);
-    let magnitude = e.abs();
-    if magnitude < SPEC_GRADE709_BETA_ENCODED {
-        sign * magnitude / SPEC_GRADE709_SLOPE
-    } else {
-        sign * ((magnitude + SPEC_GRADE709_K) / SPEC_GRADE709_ALPHA)
-            .powf(SPEC_GRADE709_INVERSE_EXPONENT)
-    }
-}
+// --- the CC3 §2.1 `grade709` transfer pair in f32, for CC5 §2.4; the f64
+// pair and its digits are the shared transcription in `cc_fixture_support` --
 
 /// The CC3 §2.2 `color_wheels` node, transcribed in **f32** ops.
 ///
@@ -895,7 +849,7 @@ fn cc5_document() -> Document {
     simple_document(cc5_asset(), CC5_RESOLUTION)
 }
 
-fn color_node_effect(id: u64, name: &str, parameters: Vec<(String, i64)>) -> Effect {
+fn color_node_effect_from_integers(id: u64, name: &str, parameters: Vec<(String, i64)>) -> Effect {
     Effect {
         id: EffectId(id),
         name: name.to_owned(),
@@ -917,7 +871,7 @@ fn gain_wheels(id: u64, gain_thousandths: i64, matte: Option<&MatteSpec>) -> Eff
     if let Some(matte) = matte {
         parameters.extend(matte.parameters());
     }
-    color_node_effect(id, "color_wheels", parameters)
+    color_node_effect_from_integers(id, "color_wheels", parameters)
 }
 
 /// The §9.2.1 over-range node: gain and gamma at their descriptor maxima on
@@ -932,123 +886,12 @@ fn overflow_wheels(id: u64, matte: Option<&MatteSpec>) -> Effect {
     if let Some(matte) = matte {
         parameters.extend(matte.parameters());
     }
-    color_node_effect(id, "color_wheels", parameters)
+    color_node_effect_from_integers(id, "color_wheels", parameters)
 }
 
 // ---------------------------------------------------------------------------
 // CPU reference and GPU rendering.
 // ---------------------------------------------------------------------------
-
-fn cpu_nodes(effects: &[Effect]) -> Vec<ColorNode> {
-    crate::color_pipeline::resolve_color_nodes(effects).expect("CC5 fixture stack must resolve")
-}
-
-fn cpu_nodes_with(effects: &[Effect], library: &LutLibrary) -> Vec<ColorNode> {
-    resolve_color_nodes_with(effects, library).expect("CC5 fixture stack must resolve")
-}
-
-/// The CC5 §3.4 pixel-centre uv of raster index `index`.
-fn pixel_centre_uv(frame: &WorkingFrame, index: usize) -> [f32; 2] {
-    let width = frame.width.max(1) as usize;
-    [
-        ((index % width) as f32 + 0.5) / frame.width.max(1) as f32,
-        ((index / width) as f32 + 0.5) / frame.height.max(1) as f32,
-    ]
-}
-
-/// The output raster aspect `a = W / H` the host supplies (CC5 §3.2).
-fn raster_aspect(frame: &WorkingFrame) -> f32 {
-    frame.width.max(1) as f32 / frame.height.max(1) as f32
-}
-
-/// The production CPU reference in the linear working domain, including the
-/// normative `Rgba16Float` storage quantization.
-fn cpu_reference_linear(frame: &WorkingFrame, nodes: &[ColorNode]) -> Vec<f32> {
-    let aspect = raster_aspect(frame);
-    frame
-        .pixels
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .enumerate()
-        .flat_map(|(index, rgba)| {
-            let output = apply_color_nodes_at(
-                nodes,
-                [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()],
-                pixel_centre_uv(frame, index),
-                aspect,
-            );
-            output
-                .into_iter()
-                .map(|value| f16::from_f32(value).to_f32())
-                .chain(std::iter::once(f16::from_f32(rgba[3].to_f32()).to_f32()))
-        })
-        .collect()
-}
-
-fn cpu_reference_monitor(frame: &WorkingFrame, nodes: &[ColorNode]) -> Vec<u8> {
-    let aspect = raster_aspect(frame);
-    frame
-        .pixels
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .enumerate()
-        .flat_map(|(index, rgba)| {
-            let output = apply_color_nodes_at(
-                nodes,
-                [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()],
-                pixel_centre_uv(frame, index),
-                aspect,
-            );
-            let quantized = output.map(|value| f16::from_f32(value).to_f32());
-            encode_monitor_rgba8([quantized[0], quantized[1], quantized[2], rgba[3].to_f32()])
-        })
-        .collect()
-}
-
-fn gpu_linear(
-    compositor: &Compositor,
-    frame: &WorkingFrame,
-    effects: &[Effect],
-    library: Option<&LutLibrary>,
-) -> Vec<f32> {
-    compositor
-        .render_working_with_luts(
-            CC5_RESOLUTION,
-            &[CompositorLayer {
-                frame,
-                effects,
-                transition: TransitionRenderParams::default(),
-            }],
-            library,
-        )
-        .expect("production GPU working-surface readback")
-        .pixels
-}
-
-fn gpu_monitor(
-    compositor: &Compositor,
-    frame: &WorkingFrame,
-    effects: &[Effect],
-    library: Option<&LutLibrary>,
-) -> Vec<u8> {
-    compositor
-        .render_monitor_with_luts(
-            CC5_RESOLUTION,
-            &[CompositorLayer {
-                frame,
-                effects,
-                transition: TransitionRenderParams::default(),
-            }],
-            &kinewright_core::ColorContext::sdr_rec709().monitoring,
-            library,
-        )
-        .expect("production GPU compositor should render the CC5 fixture")
-        .rgba
-        .as_ref()
-        .clone()
-}
 
 /// The GPU coverage raster of one node's matte, one byte per pixel.
 fn gpu_coverage(
@@ -1534,16 +1377,33 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
     // --- the production GPU ----------------------------------------------
     let gpu = fallback_gpu();
     let compositor = Compositor::new(gpu.context());
-    let gpu_baseline_linear = gpu_linear(&compositor, &frame, &[], None);
-    let gpu_baseline_monitor = gpu_monitor(&compositor, &frame, &[], None);
-    let gpu_matted_linear = gpu_linear(&compositor, &frame, std::slice::from_ref(&graded), None);
-    let gpu_matted_monitor = gpu_monitor(&compositor, &frame, std::slice::from_ref(&graded), None);
+    let gpu_baseline_linear = gpu_linear(&compositor, CC5_RESOLUTION, &frame, &[], None);
+    let gpu_baseline_monitor = gpu_monitor(&compositor, CC5_RESOLUTION, &frame, &[], None);
+    let gpu_matted_linear = gpu_linear(
+        &compositor,
+        CC5_RESOLUTION,
+        &frame,
+        std::slice::from_ref(&graded),
+        None,
+    );
+    let gpu_matted_monitor = gpu_monitor(
+        &compositor,
+        CC5_RESOLUTION,
+        &frame,
+        std::slice::from_ref(&graded),
+        None,
+    );
     let gpu_counts =
         assert_matte_containment(&gpu_matted_linear, &gpu_baseline_linear, &covered, "gpu");
     assert_eq!(gpu_counts.inside_changed_pixels, CENTRED_WINDOW_PIXELS);
     assert_monitor_containment(&gpu_matted_monitor, &gpu_baseline_monitor, &covered, "gpu");
-    let gpu_unmatted_monitor =
-        gpu_monitor(&compositor, &frame, std::slice::from_ref(&unmatted), None);
+    let gpu_unmatted_monitor = gpu_monitor(
+        &compositor,
+        CC5_RESOLUTION,
+        &frame,
+        std::slice::from_ref(&unmatted),
+        None,
+    );
     for index in 0..CC5_RASTER_PIXELS {
         assert_eq!(
             gpu_matted_monitor[index * 4 + 3],
@@ -1551,8 +1411,13 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
             "the GPU matte changed an alpha byte at pixel {index}"
         );
     }
-    let gpu_inverted_linear =
-        gpu_linear(&compositor, &frame, std::slice::from_ref(&inverted), None);
+    let gpu_inverted_linear = gpu_linear(
+        &compositor,
+        CC5_RESOLUTION,
+        &frame,
+        std::slice::from_ref(&inverted),
+        None,
+    );
     let gpu_inverted_counts = assert_matte_containment(
         &gpu_inverted_linear,
         &gpu_baseline_linear,
@@ -1621,7 +1486,8 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
     // upload normalises it to `+0.0` before the node stack runs (the no-node
     // baseline already carries `+0.0`), so the gate is bit-equality against
     // that baseline plus a genuine negative surviving.
-    let gpu_over_range_baseline = gpu_linear(&compositor, &over_range_frame, &[], None);
+    let gpu_over_range_baseline =
+        gpu_linear(&compositor, CC5_RESOLUTION, &over_range_frame, &[], None);
     assert_eq!(
         gpu_over_range_baseline[negative_zero * 4].to_bits(),
         0.0_f32.to_bits(),
@@ -1629,6 +1495,7 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
     );
     let gpu_over_range = gpu_linear(
         &compositor,
+        CC5_RESOLUTION,
         &over_range_frame,
         std::slice::from_ref(&overflow),
         None,
@@ -1648,6 +1515,7 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
     // than a coincidence.
     let gpu_over_range_unmatted = gpu_linear(
         &compositor,
+        CC5_RESOLUTION,
         &over_range_frame,
         std::slice::from_ref(&overflow_unmatted),
         None,
@@ -1777,8 +1645,14 @@ fn assert_matte_case(
         matte.is_hard_edged(),
         label,
     );
-    let gpu_baseline = gpu_linear(compositor, frame, &[], None);
-    let gpu = gpu_linear(compositor, frame, std::slice::from_ref(&graded), None);
+    let gpu_baseline = gpu_linear(compositor, CC5_RESOLUTION, frame, &[], None);
+    let gpu = gpu_linear(
+        compositor,
+        CC5_RESOLUTION,
+        frame,
+        std::slice::from_ref(&graded),
+        None,
+    );
     assert_matte_containment(&gpu, &gpu_baseline, &covered, &format!("{label}_gpu"));
     covered
 }
@@ -3442,8 +3316,14 @@ fn cc5_mix_and_invert_scale_the_coverage_exactly() {
     let frame = frame_of(&raster);
     let gpu = fallback_gpu();
     let compositor = Compositor::new(gpu.context());
-    let with_excluded = gpu_linear(&compositor, &frame, std::slice::from_ref(&excluded), None);
-    let without = gpu_linear(&compositor, &frame, &[], None);
+    let with_excluded = gpu_linear(
+        &compositor,
+        CC5_RESOLUTION,
+        &frame,
+        std::slice::from_ref(&excluded),
+        None,
+    );
+    let without = gpu_linear(&compositor, CC5_RESOLUTION, &frame, &[], None);
     assert_eq!(
         with_excluded
             .iter()
@@ -3669,11 +3549,6 @@ const GRADE_CURVE_PAYLOAD_WORDS: usize = 4 * 49;
 /// The CC5 §3.1 worst case, written out by hand.
 const GRADE_BUFFER_WORST_CASE_BYTES: usize = 17_680;
 
-fn grade_header_word(bytes: &[u8], index: usize) -> u32 {
-    let offset = index * 4;
-    u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("header word"))
-}
-
 fn grade_word(bytes: &[u8], word: usize) -> f32 {
     let offset = GRADE_HEADER_BYTES + word * 4;
     f32::from_le_bytes(
@@ -3684,7 +3559,7 @@ fn grade_word(bytes: &[u8], word: usize) -> f32 {
 }
 
 /// A `color_curves` node whose master curve carries `points`.
-fn curves_effect(id: u64, points: &[(i64, i64)], matte: Option<&MatteSpec>) -> Effect {
+fn master_curves_effect(id: u64, points: &[(i64, i64)], matte: Option<&MatteSpec>) -> Effect {
     let curve = kinewright_core::ColorCurveChannel::Master;
     let mut parameters = vec![(
         curve.point_count_parameter().to_owned(),
@@ -3703,7 +3578,7 @@ fn curves_effect(id: u64, points: &[(i64, i64)], matte: Option<&MatteSpec>) -> E
     if let Some(matte) = matte {
         parameters.extend(matte.parameters());
     }
-    color_node_effect(id, "color_curves", parameters)
+    color_node_effect_from_integers(id, "color_curves", parameters)
 }
 
 /// CC5 §9.2.13. The worst-case buffer is exactly 17 680 bytes with
@@ -3730,7 +3605,7 @@ fn cc5_buffer_layout_limits_and_abi_constants_hold() {
     let matte = MatteSpec::window(WindowSpec::CENTRED);
     let stack = (0..kinewright_core::COLOR_NODE_LIMIT_PER_LAYER)
         .map(|index| {
-            curves_effect(
+            master_curves_effect(
                 index as u64 + 1,
                 &[(0, 0), (5_000, 6_000), (10_000, 10_000)],
                 Some(&matte),
@@ -3788,7 +3663,7 @@ fn cc5_buffer_layout_limits_and_abi_constants_hold() {
     let store = TempDirectory::new("cc5-limits");
     let luts = fixture_luts(&store);
     let lut_stack = vec![
-        color_node_effect(
+        color_node_effect_from_integers(
             1,
             "technical_lut",
             vec![
@@ -3833,7 +3708,7 @@ fn cc5_buffer_layout_limits_and_abi_constants_hold() {
     let mut scale_evidence = Vec::new();
     for scale_percent in [50_i64, 100, 200] {
         let effects = vec![
-            color_node_effect(
+            color_node_effect_from_integers(
                 1,
                 "transform",
                 vec![("scale_percent".to_owned(), scale_percent)],
@@ -3943,7 +3818,7 @@ fn parity_cases() -> Vec<ParityCase> {
         ParityCase {
             label: "full_stack",
             effects: vec![
-                color_node_effect(
+                color_node_effect_from_integers(
                     1,
                     "technical_lut",
                     vec![
@@ -3951,7 +3826,7 @@ fn parity_cases() -> Vec<ParityCase> {
                         ("input_encoding_token".to_owned(), 1),
                     ],
                 ),
-                color_node_effect(2, "primary_correction", {
+                color_node_effect_from_integers(2, "primary_correction", {
                     let mut parameters = vec![
                         ("exposure_milli_stops".to_owned(), 750),
                         ("contrast_percent".to_owned(), 20),
@@ -3961,12 +3836,12 @@ fn parity_cases() -> Vec<ParityCase> {
                     parameters
                 }),
                 gain_wheels(3, 1_200, Some(&full_window)),
-                curves_effect(
+                master_curves_effect(
                     4,
                     &[(0, 0), (2_500, 1_800), (7_500, 8_200), (10_000, 10_000)],
                     Some(&full_window),
                 ),
-                color_node_effect(5, "creative_look", {
+                color_node_effect_from_integers(5, "creative_look", {
                     let mut parameters = vec![
                         ("lut_asset_id".to_owned(), 2),
                         ("mix_basis_points".to_owned(), 8_000),
@@ -3978,7 +3853,7 @@ fn parity_cases() -> Vec<ParityCase> {
             ],
             // Outside the matte only the technical input transform runs, so
             // that is the baseline the containment gate must compare against.
-            baseline: vec![color_node_effect(
+            baseline: vec![color_node_effect_from_integers(
                 1,
                 "technical_lut",
                 vec![
@@ -4021,8 +3896,9 @@ fn assert_cc5_gpu_parity(gpu: &FixtureGpu) {
             assert_matte_containment(&expected_linear, &baseline_linear, &covered, case.label);
         assert_monitor_containment(&expected_monitor, &baseline_monitor, &covered, case.label);
 
-        let actual_linear = gpu_linear(&compositor, &frame, &case.effects, library);
-        let actual_monitor = gpu_monitor(&compositor, &frame, &case.effects, library);
+        let actual_linear = gpu_linear(&compositor, CC5_RESOLUTION, &frame, &case.effects, library);
+        let actual_monitor =
+            gpu_monitor(&compositor, CC5_RESOLUTION, &frame, &case.effects, library);
         let linear = linear_parity_metrics(&actual_linear, &expected_linear);
         let monitor = abs_code_diff_rgb(&actual_monitor, &expected_monitor);
         assert!(
@@ -4048,7 +3924,7 @@ fn assert_cc5_gpu_parity(gpu: &FixtureGpu) {
         assert_linear_parity(&linear, case.label);
         // And the GPU obeys containment against its own baseline, so a
         // shader-side leak cannot hide behind the CPU/GPU tolerance.
-        let gpu_baseline = gpu_linear(&compositor, &frame, &case.baseline, library);
+        let gpu_baseline = gpu_linear(&compositor, CC5_RESOLUTION, &frame, &case.baseline, library);
         assert_matte_containment(
             &actual_linear,
             &gpu_baseline,
@@ -4157,7 +4033,7 @@ fn cc5_migration_is_bit_identical_and_the_mask_never_interacts() {
     );
     let mut stored_neutral = vec![("gain_master_thousandths".to_owned(), 1_500_i64)];
     stored_neutral.extend(neutral_matte_parameters("color_wheels"));
-    let migrated = color_node_effect(1, "color_wheels", stored_neutral);
+    let migrated = color_node_effect_from_integers(1, "color_wheels", stored_neutral);
     // The neutral matte has the master switch off, so it is inactive; so is an
     // *enabled* matte that selects everything at full strength (CC5 §2.6).
     let mut enabled_but_neutral = neutral_matte_parameters("color_wheels");
@@ -4167,7 +4043,7 @@ fn cc5_migration_is_bit_identical_and_the_mask_never_interacts() {
         }
     }
     enabled_but_neutral.push(("gain_master_thousandths".to_owned(), 1_500));
-    let enabled_neutral = color_node_effect(1, "color_wheels", enabled_but_neutral);
+    let enabled_neutral = color_node_effect_from_integers(1, "color_wheels", enabled_but_neutral);
 
     for (label, candidate) in [
         ("stored_neutral_matte", &migrated),
@@ -4208,19 +4084,33 @@ fn cc5_migration_is_bit_identical_and_the_mask_never_interacts() {
             "{label}: the CPU reference must be to_bits-identical"
         );
         assert_eq!(
-            gpu_monitor(&compositor, &frame, std::slice::from_ref(&cc4_era), None),
-            gpu_monitor(&compositor, &frame, std::slice::from_ref(candidate), None),
+            gpu_monitor(
+                &compositor,
+                CC5_RESOLUTION,
+                &frame,
+                std::slice::from_ref(&cc4_era),
+                None
+            ),
+            gpu_monitor(
+                &compositor,
+                CC5_RESOLUTION,
+                &frame,
+                std::slice::from_ref(candidate),
+                None
+            ),
             "{label}: the monitor render must be byte-identical"
         );
         assert_eq!(
             to_bits(&gpu_linear(
                 &compositor,
+                CC5_RESOLUTION,
                 &frame,
                 std::slice::from_ref(&cc4_era),
                 None
             )),
             to_bits(&gpu_linear(
                 &compositor,
+                CC5_RESOLUTION,
                 &frame,
                 std::slice::from_ref(candidate),
                 None
@@ -4243,7 +4133,7 @@ fn cc5_migration_is_bit_identical_and_the_mask_never_interacts() {
     }
 
     // --- the `mask` regression -------------------------------------------
-    let mask = color_node_effect(
+    let mask = color_node_effect_from_integers(
         9,
         "mask",
         vec![
@@ -4261,9 +4151,27 @@ fn cc5_migration_is_bit_identical_and_the_mask_never_interacts() {
     );
     let matte = MatteSpec::window(WindowSpec::CENTRED);
     let matted = gain_wheels(1, 1_500, Some(&matte));
-    let mask_only = gpu_linear(&compositor, &frame, std::slice::from_ref(&mask), None);
-    let matte_only = gpu_linear(&compositor, &frame, std::slice::from_ref(&matted), None);
-    let both = gpu_linear(&compositor, &frame, &[mask.clone(), matted.clone()], None);
+    let mask_only = gpu_linear(
+        &compositor,
+        CC5_RESOLUTION,
+        &frame,
+        std::slice::from_ref(&mask),
+        None,
+    );
+    let matte_only = gpu_linear(
+        &compositor,
+        CC5_RESOLUTION,
+        &frame,
+        std::slice::from_ref(&matted),
+        None,
+    );
+    let both = gpu_linear(
+        &compositor,
+        CC5_RESOLUTION,
+        &frame,
+        &[mask.clone(), matted.clone()],
+        None,
+    );
     let covered = matte.covered_pixels(&raster);
     // `render_working` composites the layer over the cleared, opaque target,
     // so the layer's own alpha is observed as its premultiplied contribution:
@@ -4321,7 +4229,13 @@ fn cc5_migration_is_bit_identical_and_the_mask_never_interacts() {
             "matte": "rect, centre (5000, 5000), half extents 2500/2500",
         }),
         CC5_RESOLUTION,
-        output_hash(&gpu_monitor(&compositor, &frame, &[mask, matted], None)),
+        output_hash(&gpu_monitor(
+            &compositor,
+            CC5_RESOLUTION,
+            &frame,
+            &[mask, matted],
+            None,
+        )),
         json!({
             "matte_parameter_count": MATTE_PARAMETER_COUNT,
             "mask_outside_matte_outside": quadrants[0],
@@ -4467,7 +4381,8 @@ fn cc5_matte_proof_matches_the_cpu_reference_coverage() {
         1_500,
         Some(&MatteSpec::window(WindowSpec::CENTRED).with_mix(0)),
     );
-    let not_a_node = color_node_effect(3, "brightness", vec![("percent".to_owned(), 10)]);
+    let not_a_node =
+        color_node_effect_from_integers(3, "brightness", vec![("percent".to_owned(), 10)]);
     let stack = vec![matte_free.clone(), excluded.clone(), not_a_node.clone()];
     let refusal = |effect: EffectId| -> String {
         compositor
@@ -4782,8 +4697,14 @@ fn cc5_skin_and_product_qualifiers_select_only_their_patch() {
         );
         assert_monitor_containment(&cpu_monitor, &baseline_monitor, &covered, label);
 
-        let gpu_baseline = gpu_linear(&compositor, &frame, &[], None);
-        let gpu_graded = gpu_linear(&compositor, &frame, std::slice::from_ref(&graded), None);
+        let gpu_baseline = gpu_linear(&compositor, CC5_RESOLUTION, &frame, &[], None);
+        let gpu_graded = gpu_linear(
+            &compositor,
+            CC5_RESOLUTION,
+            &frame,
+            std::slice::from_ref(&graded),
+            None,
+        );
         assert_matte_containment(
             &gpu_graded,
             &gpu_baseline,
@@ -4993,7 +4914,7 @@ fn performance_stack() -> Vec<Effect> {
         });
     (0..kinewright_core::COLOR_NODE_LIMIT_PER_LAYER)
         .map(|index| {
-            curves_effect(
+            master_curves_effect(
                 index as u64 + 1,
                 &[(0, 0), (2_500, 1_800), (7_500, 8_200), (10_000, 10_000)],
                 Some(&matte),
@@ -5062,7 +4983,7 @@ fn record_cc5_performance(gpu: &FixtureGpu) {
     // the frame is visible rather than inferred.
     let matte_free = (0..kinewright_core::COLOR_NODE_LIMIT_PER_LAYER)
         .map(|index| {
-            curves_effect(
+            master_curves_effect(
                 index as u64 + 1,
                 &[(0, 0), (2_500, 1_800), (7_500, 8_200), (10_000, 10_000)],
                 None,
@@ -5823,7 +5744,7 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
         )
         .expect("the unscaled coverage renders");
     let scaled_effects = vec![
-        color_node_effect(9, "transform", vec![("scale_percent".to_owned(), 50)]),
+        color_node_effect_from_integers(9, "transform", vec![("scale_percent".to_owned(), 50)]),
         probe.clone(),
     ];
     let scaled = compositor
@@ -5902,7 +5823,7 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
     let transformed_bounds = |parameters: &[(&str, i64)]| {
         let mut effects = Vec::new();
         if !parameters.is_empty() {
-            effects.push(color_node_effect(
+            effects.push(color_node_effect_from_integers(
                 9,
                 "transform",
                 parameters
@@ -6206,67 +6127,6 @@ fn cc5_test_source(path: &str) -> &'static str {
                  to CC5_TEST_SOURCES"
             )
         })
-}
-
-/// Whether `source` declares `name` as a `#[test]` (or `#[tokio::test]`)
-/// function.
-///
-/// The attribute is required, so a name mentioned in a doc comment, a string
-/// literal, or a helper function is not mistaken for a fixture. Attribute,
-/// comment, and blank lines between the attribute and the signature are
-/// skipped, because `#[ignore = "…"]` and a doc comment routinely sit there.
-fn is_test_attribute(line: &str) -> bool {
-    line == "#[test]" || line.starts_with("#[tokio::test")
-}
-
-fn declares_test(source: &str, name: &str) -> bool {
-    let needle = format!("fn {name}(");
-    let lines = source.lines().collect::<Vec<_>>();
-    for (index, line) in lines.iter().enumerate() {
-        if !line.contains(&needle) {
-            continue;
-        }
-        for previous in lines[..index].iter().rev() {
-            let previous = previous.trim();
-            if is_test_attribute(previous) {
-                return true;
-            }
-            if previous.is_empty() || previous.starts_with("//") || previous.starts_with("#[") {
-                continue;
-            }
-            break;
-        }
-    }
-    false
-}
-
-/// Every `#[test]` function in `source` whose name starts with `prefix`, in
-/// declaration order.
-fn declared_test_names(source: &str, prefix: &str) -> Vec<String> {
-    let lines = source.lines().collect::<Vec<_>>();
-    let mut names = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        if !is_test_attribute(line.trim()) {
-            continue;
-        }
-        for candidate in &lines[index + 1..] {
-            let candidate = candidate.trim();
-            if candidate.is_empty() || candidate.starts_with("//") || candidate.starts_with("#[") {
-                continue;
-            }
-            let Some(rest) = candidate.split_once("fn ").map(|(_, rest)| rest) else {
-                break;
-            };
-            let Some((name, _)) = rest.split_once('(') else {
-                break;
-            };
-            if name.starts_with(prefix) {
-                names.push(name.to_owned());
-            }
-            break;
-        }
-    }
-    names
 }
 
 /// CC5 §9.0.4. The declared test inventories are tied to the source they claim

@@ -13,8 +13,9 @@
 //! Per CC3 §10.1.1 no expected value in this file is obtained by calling
 //! `ColorWheels::apply`, `ColorCurve::evaluate`, the compositor, or the
 //! shader. Expected values are either literal constants transcribed from the
-//! contract or computed by the `spec_*_f64` functions below, which are an
-//! independent f64 transcription of the §2 equations.
+//! contract or computed by the `spec_*_f64` functions below and in
+//! [`crate::cc_fixture_support`], which are an independent f64 transcription
+//! of the §2 equations.
 
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_possible_wrap)]
@@ -30,19 +31,23 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use half::f16;
 use kinewright_core::{
     Analysis, AssetId, AutomationCurve, COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN,
     COLOR_CURVE_MAX_POINTS, COLOR_NODE_LIMIT_PER_LAYER, ClipId, ColorCurveChannel,
     ColorNodeInactiveReason, ColorNodeKind, ColorSourceProfile, Command, Core, Document, Effect,
-    EffectId, Event, JournalCommand, Keyframe, KeyframeInterpolation, OpError, Operation,
-    ParamValue, ResolvedCurves, TimeCode, active_color_nodes, classify_color_node,
-    color_node_inactive_reason, effect_descriptor,
+    EffectId, JournalCommand, Keyframe, KeyframeInterpolation, OpError, Operation, ParamValue,
+    ResolvedCurves, TimeCode, active_color_nodes, classify_color_node, color_node_inactive_reason,
+    effect_descriptor,
 };
 use serde_json::{Value, json};
 
 use crate::{
     Compositor, CompositorLayer,
+    cc_fixture_support::{
+        apply_stack, clip_effects, cpu_nodes, cpu_reference_linear, cpu_reference_monitor,
+        document_from, spec_grade709_decode_f64, spec_grade709_encode_f64, spec_sign_f64,
+        with_parameter,
+    },
     cc1_fixtures::{
         DiffMetrics, FixtureGpu, IDENTITY_RAMP_MONITOR_MAX, IDENTITY_RAMP_MONITOR_MEAN,
         IDENTITY_RAMP_MONITOR_P99, LINEAR_CPU_GPU_MAX, LINEAR_CPU_GPU_MEAN, LINEAR_CPU_GPU_P99,
@@ -54,10 +59,7 @@ use crate::{
         linear_parity_metrics, monitor_luma_and_clipping, output_hash, simple_document,
         working_frame, write_evidence_artefact,
     },
-    color_pipeline::{
-        ColorNode, apply_color_nodes_at, decode_bt709, encode_monitor_rgba8, grade709_decode,
-        grade709_encode, resolve_color_nodes,
-    },
+    color_pipeline::{ColorNode, decode_bt709, grade709_decode, grade709_encode},
     decode::probe_path,
     frame::WorkingFrame,
     initialize_ffmpeg,
@@ -284,14 +286,6 @@ fn curves_effect(id: u64, curves: &[(ColorCurveChannel, &[(i64, i64)])]) -> Effe
     color_node_effect(id, "color_curves", parameters)
 }
 
-fn with_parameter(effect: &Effect, name: &str, value: i64) -> Effect {
-    let mut updated = effect.clone();
-    updated
-        .parameters
-        .insert(name.to_owned(), ParamValue::Integer(value));
-    updated
-}
-
 /// A representative non-neutral wheels node used by the ordering, parity, and
 /// proof fixtures.
 pub(crate) fn representative_wheels(id: u64) -> Effect {
@@ -349,87 +343,7 @@ pub(crate) fn primary_effect(id: u64) -> Effect {
 // CPU reference and GPU rendering.
 // ---------------------------------------------------------------------------
 
-fn cpu_nodes(effects: &[Effect]) -> Vec<ColorNode> {
-    resolve_color_nodes(effects).expect("CC3 fixture node stack must resolve")
-}
-
-/// The CC5 §3.4 pixel-centre uv of raster index `index`,
-/// `((x + 0.5) / W, (y + 0.5) / H)`, matching the rasterizer's
-/// `@builtin(position)` convention.
-#[allow(clippy::cast_precision_loss)]
-fn pixel_centre_uv(frame: &WorkingFrame, index: usize) -> [f32; 2] {
-    let width = (frame.width.max(1)) as usize;
-    let x = index % width;
-    let y = index / width;
-    [
-        (x as f32 + 0.5) / frame.width.max(1) as f32,
-        (y as f32 + 0.5) / frame.height.max(1) as f32,
-    ]
-}
-
-/// The output raster aspect `a = W / H` the host supplies to the matte
-/// (CC5 §3.2).
-#[allow(clippy::cast_precision_loss)]
-fn raster_aspect(frame: &WorkingFrame) -> f32 {
-    frame.width.max(1) as f32 / frame.height.max(1) as f32
-}
-
-/// The CC5 §3.4 reference at the centre of a square raster.
-///
-/// No CC3 node stack carries a matte, so the position and the aspect are
-/// immaterial and the result is bit-identical to the pre-CC5 positionless
-/// reference — which is the point of CC5 §2.5's mandatory matte-free branch.
-fn apply_stack(nodes: &[ColorNode], rgb: [f32; 3]) -> [f32; 3] {
-    apply_color_nodes_at(nodes, rgb, [0.5, 0.5], 1.0)
-}
-
-/// The independent CPU reference in the linear working domain, including the
-/// normative `Rgba16Float` storage quantization.
-fn cpu_reference_linear(frame: &WorkingFrame, nodes: &[ColorNode]) -> Vec<f32> {
-    let aspect = raster_aspect(frame);
-    frame
-        .pixels
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .enumerate()
-        .flat_map(|(index, rgba)| {
-            let output = apply_color_nodes_at(
-                nodes,
-                [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()],
-                pixel_centre_uv(frame, index),
-                aspect,
-            );
-            output
-                .into_iter()
-                .map(|value| f16::from_f32(value).to_f32())
-                .chain(std::iter::once(f16::from_f32(rgba[3].to_f32()).to_f32()))
-        })
-        .collect()
-}
-
-fn cpu_reference_monitor(frame: &WorkingFrame, nodes: &[ColorNode]) -> Vec<u8> {
-    let aspect = raster_aspect(frame);
-    frame
-        .pixels
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .enumerate()
-        .flat_map(|(index, rgba)| {
-            let output = apply_color_nodes_at(
-                nodes,
-                [rgba[0].to_f32(), rgba[1].to_f32(), rgba[2].to_f32()],
-                pixel_centre_uv(frame, index),
-                aspect,
-            );
-            let quantized = output.map(|value| f16::from_f32(value).to_f32());
-            encode_monitor_rgba8([quantized[0], quantized[1], quantized[2], rgba[3].to_f32()])
-        })
-        .collect()
-}
-
-fn gpu_linear(
+fn gpu_linear_no_luts(
     compositor: &Compositor,
     resolution: (u32, u32),
     frame: &WorkingFrame,
@@ -448,7 +362,7 @@ fn gpu_linear(
         .pixels
 }
 
-fn gpu_monitor(
+fn gpu_monitor_no_luts(
     compositor: &Compositor,
     resolution: (u32, u32),
     frame: &WorkingFrame,
@@ -512,8 +426,8 @@ fn assert_gpu_case(
     if let Some(baseline) = baseline_linear {
         assert_case_is_not_vacuous(&expected_linear, baseline, label);
     }
-    let actual_linear = gpu_linear(compositor, resolution, frame, effects);
-    let actual_monitor = gpu_monitor(compositor, resolution, frame, effects);
+    let actual_linear = gpu_linear_no_luts(compositor, resolution, frame, effects);
+    let actual_monitor = gpu_monitor_no_luts(compositor, resolution, frame, effects);
     let linear = linear_parity_metrics(&actual_linear, &expected_linear);
     let monitor = abs_code_diff_rgb(&actual_monitor, &expected_monitor);
     assert!(
@@ -589,48 +503,14 @@ pub(crate) fn json_hash(value: &Value) -> String {
 // ---------------------------------------------------------------------------
 // The independent f64 transcription of CC3 §2 (fixture-quality rule 10.1.1).
 //
-// Nothing below calls the production crate. The constants are the §2.1 digits
-// and the algorithms are the §2.2/§2.3 pseudocode, transcribed by hand, so a
-// parity or boundary assertion compares two implementations of the written
-// contract rather than one implementation with itself.
+// Nothing below calls the production crate. The §2.1 digits and the
+// `grade709` transfer pair are the hand transcription in
+// `crate::cc_fixture_support` (shared with CC4 and CC5 so the three copies
+// cannot drift); the algorithms below are the §2.2/§2.3 pseudocode,
+// transcribed by hand, so a parity or boundary assertion compares two
+// implementations of the written contract rather than one implementation with
+// itself.
 // ---------------------------------------------------------------------------
-
-const SPEC_ALPHA: f64 = 1.099_296_8;
-const SPEC_BETA: f64 = 0.018_053_969;
-const SPEC_BETA_ENCODED: f64 = 0.081_242_86;
-const SPEC_K: f64 = 0.099_296_8;
-const SPEC_INVERSE_EXPONENT: f64 = 2.222_222_3;
-
-/// `sgn(0) = 0`; `f64::signum` returns ±1 at zero and must not be used.
-fn spec_sign_f64(value: f64) -> f64 {
-    if value > 0.0 {
-        1.0
-    } else if value < 0.0 {
-        -1.0
-    } else {
-        0.0
-    }
-}
-
-fn spec_grade709_encode_f64(x: f64) -> f64 {
-    let sign = spec_sign_f64(x);
-    let magnitude = x.abs();
-    if magnitude < SPEC_BETA {
-        sign * 4.5 * magnitude
-    } else {
-        sign * (SPEC_ALPHA * magnitude.powf(0.45) - SPEC_K)
-    }
-}
-
-fn spec_grade709_decode_f64(e: f64) -> f64 {
-    let sign = spec_sign_f64(e);
-    let magnitude = e.abs();
-    if magnitude < SPEC_BETA_ENCODED {
-        sign * magnitude / 4.5
-    } else {
-        sign * ((magnitude + SPEC_K) / SPEC_ALPHA).powf(SPEC_INVERSE_EXPONENT)
-    }
-}
 
 fn spec_control(parameters: &[(&str, i64)], name: &str, neutral: i64) -> i64 {
     parameters
@@ -1010,8 +890,8 @@ fn cc3_inactive_nodes_are_bit_identical_to_the_stack_without_them() {
     let mut recorded = Vec::new();
     for (carrier_name, carrier) in carriers {
         let baseline_cpu = cpu_reference_linear(&frame, &cpu_nodes(&carrier));
-        let baseline_linear = gpu_linear(&compositor, resolution, &frame, &carrier);
-        let baseline_monitor = gpu_monitor(&compositor, resolution, &frame, &carrier);
+        let baseline_linear = gpu_linear_no_luts(&compositor, resolution, &frame, &carrier);
+        let baseline_monitor = gpu_monitor_no_luts(&compositor, resolution, &frame, &carrier);
         let baseline_buffer =
             crate::compositor::grade_buffer_bytes(&carrier).expect("carrier stack serializes");
         for (name, effect, reason) in &cases {
@@ -1040,13 +920,13 @@ fn cc3_inactive_nodes_are_bit_identical_to_the_stack_without_them() {
                 bits_of(&baseline_cpu),
                 "{name} ({carrier_name}): CPU linear working values must be bit-identical"
             );
-            let linear = gpu_linear(&compositor, resolution, &frame, &stack);
+            let linear = gpu_linear_no_luts(&compositor, resolution, &frame, &stack);
             assert_eq!(
                 bits_of(&linear),
                 bits_of(&baseline_linear),
                 "{name} ({carrier_name}): GPU linear working values must be bit-identical"
             );
-            let monitor = gpu_monitor(&compositor, resolution, &frame, &stack);
+            let monitor = gpu_monitor_no_luts(&compositor, resolution, &frame, &stack);
             assert_eq!(
                 monitor, baseline_monitor,
                 "{name} ({carrier_name}): monitor RGBA8 must be bit-identical"
@@ -1379,7 +1259,7 @@ fn cc3_monotone_nodes_never_descend_on_the_neutral_ramps() {
             );
             checked += 1;
             if gpu_case_names.contains(&name.as_str()) {
-                let rendered = gpu_monitor(&compositor, (*width, *height), frame, &stack);
+                let rendered = gpu_monitor_no_luts(&compositor, (*width, *height), frame, &stack);
                 let gpu_descending = descending_pairs(&rendered, *width, *height);
                 assert_eq!(
                     gpu_descending, 0,
@@ -1779,8 +1659,10 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
     let (width, height, frame) = boundary_frame();
     let extreme_stack = [extreme.clone()];
     let cpu_monitor = cpu_reference_monitor(&frame, &extreme_nodes);
-    let gpu_monitor_codes = gpu_monitor(&compositor, (width, height), &frame, &extreme_stack);
-    let gpu_overflow_linear = gpu_linear(&compositor, (width, height), &frame, &extreme_stack);
+    let gpu_monitor_codes =
+        gpu_monitor_no_luts(&compositor, (width, height), &frame, &extreme_stack);
+    let gpu_overflow_linear =
+        gpu_linear_no_luts(&compositor, (width, height), &frame, &extreme_stack);
     // The 4.0 block is the last of the four blocks in `boundary_frame`.
     let overflow_column = (width - CC3_RASTER_BLOCK_WIDTH / 2) as usize;
     assert_eq!(
@@ -1981,8 +1863,8 @@ fn cc3_red_only_changes_leave_green_and_blue_bit_identical() {
         let variant_stack = [variant];
         let baseline_cpu = cpu_reference_linear(&frame, &cpu_nodes(&baseline_stack));
         let variant_cpu = cpu_reference_linear(&frame, &cpu_nodes(&variant_stack));
-        let baseline_gpu = gpu_linear(&compositor, resolution, &frame, &baseline_stack);
-        let variant_gpu = gpu_linear(&compositor, resolution, &frame, &variant_stack);
+        let baseline_gpu = gpu_linear_no_luts(&compositor, resolution, &frame, &baseline_stack);
+        let variant_gpu = gpu_linear_no_luts(&compositor, resolution, &frame, &variant_stack);
 
         let mut changed_red = 0_usize;
         for (path, (baseline_values, variant_values)) in [
@@ -2019,8 +1901,9 @@ fn cc3_red_only_changes_leave_green_and_blue_bit_identical() {
 
         // The monitor path must agree too: an 8-bit encode that coupled
         // channels would be invisible in the linear comparison alone.
-        let baseline_monitor = gpu_monitor(&compositor, resolution, &frame, &baseline_stack);
-        let variant_monitor = gpu_monitor(&compositor, resolution, &frame, &variant_stack);
+        let baseline_monitor =
+            gpu_monitor_no_luts(&compositor, resolution, &frame, &baseline_stack);
+        let variant_monitor = gpu_monitor_no_luts(&compositor, resolution, &frame, &variant_stack);
         for (baseline_pixel, variant_pixel) in baseline_monitor
             .as_chunks::<4>()
             .0
@@ -2128,7 +2011,7 @@ fn cc3_collinear_sixteen_point_curve_is_identity_without_the_short_circuit() {
         }
     }
 
-    let rendered = gpu_linear(&compositor, (width, height), &frame, &stack);
+    let rendered = gpu_linear_no_luts(&compositor, (width, height), &frame, &stack);
     let source = frame
         .pixels
         .iter()
@@ -2192,10 +2075,6 @@ fn cc3_asset() -> kinewright_core::MediaAsset {
 
 fn cc3_document() -> Document {
     simple_document(cc3_asset(), (16, 16))
-}
-
-fn clip_effects(document: &Document) -> &[Effect] {
-    &document.tracks[0].clips[0].effects
 }
 
 /// CC3 §10.3.7. `[wheels, curves]` and `[curves, wheels]` produce different
@@ -2481,7 +2360,7 @@ fn assert_cc3_gpu_parity(gpu: &FixtureGpu) {
     // The §6.2 neutral-identity numbers, reused verbatim: an empty node stack
     // must reproduce the CPU reference within one monitor code.
     let neutral_expected = cpu_reference_monitor(&frame, &[]);
-    let neutral_actual = gpu_monitor(&compositor, resolution, &frame, &[]);
+    let neutral_actual = gpu_monitor_no_luts(&compositor, resolution, &frame, &[]);
     let neutral_metric = abs_code_diff_rgb(&neutral_actual, &neutral_expected);
     assert!(
         neutral_metric.max <= IDENTITY_RAMP_MONITOR_MAX,
@@ -2657,13 +2536,6 @@ fn sixteen_point_curve(offset: i64) -> Vec<(i64, i64)> {
             )
         })
         .collect()
-}
-
-fn document_from(event: Event, label: &str) -> Arc<Document> {
-    match event {
-        Event::DocumentChanged { doc, .. } => doc,
-        other => panic!("{label} was not an accepted document state: {other:?}"),
-    }
 }
 
 /// CC3 §10.3.10. Save/reopen, journal replay, undo, and redo preserve both
