@@ -98,7 +98,10 @@ seams did not. Concrete list, each item a measurable exit:
   `FfmpegMediaEngine`'s process-exit teardown raises a SIGSEGV in two of three
   runs. The workspace forbids `unsafe`, so the fault is in the FFmpeg binding's
   drop order, and it is the same drop order the desktop app runs on quit. Root
-  cause it. Exit: the ignored fixture runs.
+  cause it. Exit: the ignored fixture runs. *Done 2026-09-02: the engine's
+  four workers were detached and the playback worker was still inside
+  libavfilter when `exit()` ran the FFmpeg finalizers; the engine now joins
+  them on drop, and the fixture runs in the default lane.*
 - **Typed `stale_revision` on all seven colour planners.** CC7 D-E2 records
   four of them returning prose. Exit: one envelope, seven tools.
 - **Two parallel registries.** `INSPECTOR_TOOL_NAMES: [&str; 75]` is

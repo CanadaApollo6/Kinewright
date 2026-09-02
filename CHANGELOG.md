@@ -47,6 +47,14 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   passes on Rust 1.94 as well as the newest stable.
 
 ### Fixed
+- `FfmpegMediaEngine` left its playback, transcript, visual-asset, and
+  derived-analysis workers detached, so dropping the engine while the
+  playback worker was still inside a proxy render (which `set_document`
+  triggers) let process exit run the FFmpeg and lavapipe finalizers under a
+  live `libavfilter` call. That was the CC7 F-E6 process-exit SIGSEGV. The
+  engine now signals every worker, cancels queued jobs, joins them against a
+  10 s deadline, and does so from `Drop`; the previously ignored
+  `cc7_every_color_fixture_builds_a_valid_document` runs in the default lane.
 - Every H.264 export lost its last frame on playback: video packets were
   muxed without a duration, so the MP4 muxer computed a track duration one
   frame short and wrote an edit list that hid the final coded picture

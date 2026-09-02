@@ -370,6 +370,7 @@ Pending real-harness run. CI covers the suite's unit tests — construction,
 packaging, the blind-package leak test, and
 `published_v6_manifest_tracks_the_color_workflow_suite` — and spends nothing.
 `cc7_every_color_fixture_builds_a_valid_document` boots the real media engine
-and is `#[ignore]`d because that engine's process-exit teardown raises the
-known SIGSEGV; run it by hand with `--ignored`. No model result is recorded
-yet.
+and runs in the default lane since 2026-09-02, when the engine gained a joining
+shutdown on drop (the process-exit SIGSEGV it was `#[ignore]`d for was a
+detached playback worker still inside libavfilter at exit). No model result is
+recorded yet.
