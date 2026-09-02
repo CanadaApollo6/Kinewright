@@ -7,7 +7,7 @@ use std::{
 
 use eframe::egui;
 use kinewright_core::{
-    CaptionCue, ColorDescription, DELIVERY_VERIFICATION_FRAME_COUNT, DeliveryAspect,
+    AudioDeliveryPreset, AudioVerification, CaptionCue, ColorDescription, DELIVERY_VERIFICATION_FRAME_COUNT, DeliveryAspect,
     DeliveryBudgets, DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile,
     DeliveryVariant, DeliveryVariantError, DeliveryVerification, DeliveryVerificationRequest,
     Document, ExportCancellation, ExportLutPreflightReport, ExportMediaPreflightReport,
@@ -57,6 +57,11 @@ pub(crate) struct ExportDialog {
     /// its own 8-bit delivery contract and only
     /// `ExportSettings.delivery_color.bit_depth` moves.
     pub(crate) delivery_bit_depth: DeliveryEncodeDepth,
+    /// AD0: the loudness contract the decoded file is measured against after
+    /// the encode. A job parameter like the depth; the document is untouched.
+    /// Defaults to measure-only until the audio smoke test has run on real
+    /// footage (AD0 §7).
+    pub(crate) audio_preset: AudioDeliveryPreset,
     /// The last finished export's verification (CC6 §6, §8.4).
     ///
     /// A measurement of a file that already exists. Whatever it says, the
@@ -453,6 +458,14 @@ pub(crate) fn verification_status(verification: Option<&ExportVerification>) -> 
             color: color::STATUS_DANGER,
         };
     }
+    // AD0 §6: the audio leg keeps its own pass so a loudness miss is named
+    // as one, never folded into the picture budgets above.
+    if !verification.audio.technical_pass() {
+        return VerificationStatus {
+            label: "AUDIO OUT OF SPEC",
+            color: color::STATUS_DANGER,
+        };
+    }
     VerificationStatus {
         label: "VERIFIED",
         color: color::STATUS_SUCCESS,
@@ -676,6 +689,147 @@ pub(crate) fn verification_lines(
         )));
     }
     for exception in &verification.exceptions {
+        lines.push(VerificationLine {
+            text: format!(
+                "{:?} · {} · {}",
+                exception.severity, exception.code, exception.message
+            ),
+            color: crate::color_qc_ui::severity_color(exception.severity),
+        });
+    }
+    lines.extend(audio_verification_lines(&verification.audio));
+    lines
+}
+
+/// The AD0 audio block of the verification lines: what the decoded file
+/// measured, against which contract, and what would move it there.
+fn audio_verification_lines(audio: &AudioVerification) -> Vec<VerificationLine> {
+    let mut lines = vec![VerificationLine::muted("DECODED AUDIO".to_owned())];
+    let measured = match audio {
+        AudioVerification::NotMeasured => {
+            lines.push(VerificationLine::muted(
+                "not measured · this verification predates audio delivery QC".to_owned(),
+            ));
+            return lines;
+        }
+        AudioVerification::NoAudioStream => {
+            lines.push(VerificationLine::muted(
+                "the file carries no audio stream · nothing to measure".to_owned(),
+            ));
+            return lines;
+        }
+        AudioVerification::Unavailable { reason } => {
+            lines.push(VerificationLine {
+                text: format!("audio could not be measured: {reason}"),
+                color: color::STATUS_WARNING,
+            });
+            return lines;
+        }
+        AudioVerification::Measured(measured) => measured,
+    };
+    let report = &measured.report;
+    let target = report.target;
+    lines.push(VerificationLine::muted(format!(
+        "{} · {} Hz · {} ch · analysed as 48 kHz stereo",
+        measured.probed_audio_codec, measured.probed_sample_rate, measured.probed_channels
+    )));
+    lines.push(VerificationLine::muted(match target.integrated_lufs_hundredths {
+        Some(wanted) => format!(
+            "target {} · {} LUFS ± {} LU{}",
+            target.preset.label(),
+            decibels(wanted),
+            decibels(i32::from(target.tolerance_lu_hundredths)),
+            target
+                .maximum_true_peak_dbtp_hundredths
+                .map(|ceiling| format!(" · true peak ≤ {} dBTP", decibels(ceiling)))
+                .unwrap_or_default()
+        ),
+        None => format!("target {} · nothing gated", target.preset.label()),
+    }));
+    let loudness = report.measured.loudness;
+    lines.push(match loudness.integrated_lufs_hundredths {
+        Some(integrated) => {
+            let within = target.integrated_lufs_hundredths.is_none_or(|wanted| {
+                (integrated - wanted).abs() <= i32::from(target.tolerance_lu_hundredths)
+            });
+            VerificationLine {
+                text: format!(
+                    "integrated {} LUFS · {}",
+                    decibels(integrated),
+                    if target.integrated_lufs_hundredths.is_none() {
+                        "reported"
+                    } else if within {
+                        "within"
+                    } else {
+                        "OUT OF SPEC"
+                    }
+                ),
+                color: if within {
+                    color::TEXT_SECONDARY
+                } else {
+                    color::STATUS_DANGER
+                },
+            }
+        }
+        None => VerificationLine {
+            text: "integrated — · the programme is silent".to_owned(),
+            color: if target.integrated_lufs_hundredths.is_some() {
+                color::STATUS_DANGER
+            } else {
+                color::TEXT_SECONDARY
+            },
+        },
+    });
+    if let Some(true_peak) = report.measured.true_peak_dbtp_hundredths {
+        let within = target
+            .maximum_true_peak_dbtp_hundredths
+            .is_none_or(|ceiling| true_peak <= ceiling);
+        lines.push(VerificationLine {
+            text: format!(
+                "true peak {} dBTP · sample peak {} dBFS · {}",
+                decibels(true_peak),
+                loudness
+                    .sample_peak_dbfs_hundredths
+                    .map(decibels)
+                    .unwrap_or_else(|| "—".to_owned()),
+                if target.maximum_true_peak_dbtp_hundredths.is_none() {
+                    "reported"
+                } else if within {
+                    "within"
+                } else {
+                    "OVER"
+                }
+            ),
+            color: if within {
+                color::TEXT_SECONDARY
+            } else {
+                color::STATUS_DANGER
+            },
+        });
+    }
+    if let Some(range) = report.measured.loudness_range_lu_hundredths {
+        lines.push(VerificationLine::muted(format!(
+            "loudness range {} LU{}",
+            decibels(range),
+            target
+                .maximum_loudness_range_lu_hundredths
+                .map(|limit| format!(" · advised ≤ {} LU", decibels(limit)))
+                .unwrap_or_default()
+        )));
+    }
+    if let Some(gain) = report.gain_to_target_db_hundredths {
+        lines.push(VerificationLine::muted(format!(
+            "gain to target {}{} dB{}",
+            if gain >= 0 { "+" } else { "" },
+            decibels(gain),
+            if report.gain_would_exceed_peak_ceiling {
+                " · would exceed the true-peak ceiling: limit or remix, gain alone cannot conform"
+            } else {
+                ""
+            }
+        )));
+    }
+    for exception in &report.exceptions {
         lines.push(VerificationLine {
             text: format!(
                 "{:?} · {} · {}",
@@ -1032,6 +1186,7 @@ impl KinewrightApp {
             return;
         };
         let depth = self.export_dialog.delivery_bit_depth;
+        let audio_target = self.export_dialog.audio_preset.target();
         // R11: the dialog keeps its inline construction and moves exactly one
         // field. Routing this through `DeliveryProfile::export_settings` would
         // take the resolution from the profile and the fps from the document,
@@ -1090,6 +1245,7 @@ impl KinewrightApp {
                     frame_count: DELIVERY_VERIFICATION_FRAME_COUNT,
                     budgets: DeliveryBudgets::for_depth(depth),
                     expected_delivery: verify_settings.delivery_color.clone(),
+                    audio_target,
                 };
                 let verification =
                     worker_verification(&result, &verify_settings.cancellation, || {
@@ -1392,6 +1548,23 @@ impl KinewrightApp {
                     ui.colored_label(
                         color::TEXT_MUTED,
                         "a job parameter, not a document edit",
+                    );
+                });
+                // AD0 §5: the loudness contract is chosen per job exactly as
+                // the depth is, and it only ever changes what the decoded file
+                // is measured against; the mix is never touched here.
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Loudness target");
+                    for preset in AudioDeliveryPreset::ALL {
+                        ui.radio_value(
+                            &mut self.export_dialog.audio_preset,
+                            preset,
+                            preset.label(),
+                        );
+                    }
+                    ui.colored_label(
+                        color::TEXT_MUTED,
+                        "measured from the decoded file after the encode",
                     );
                 });
                 ui.add_space(space::TWO);
@@ -2238,6 +2411,7 @@ mod tests {
         ExportVerification::Measured(Box::new(DeliveryVerification {
             output_path: PathBuf::from("/tmp/export.mp4"),
             delivery_bit_depth: DeliveryEncodeDepth::Eight,
+            audio_preset: AudioDeliveryPreset::MeasureOnly,
             probed: observed,
             tags,
             decoded_pixel_format: "yuv420p".to_owned(),
@@ -2752,9 +2926,11 @@ mod tests {
             width: 1920,
             height: 1080,
             delivery_bit_depth: DeliveryEncodeDepth::Eight,
+            audio_preset: AudioDeliveryPreset::MeasureOnly,
         };
         let ten = ConformanceKey {
             delivery_bit_depth: DeliveryEncodeDepth::Ten,
+            audio_preset: AudioDeliveryPreset::MeasureOnly,
             ..eight
         };
         assert_ne!(eight, ten, "the lane is part of the cache identity");

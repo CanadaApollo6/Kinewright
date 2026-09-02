@@ -4,6 +4,7 @@ mod actor;
 mod agent;
 mod automation;
 mod captions;
+pub mod audio_qc;
 pub mod cc7_scenarios;
 mod color;
 mod color_qc;
@@ -27,6 +28,11 @@ pub use actor::{Command, Core, CoreDisconnected, Event, Query, QueryResult, Time
 pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,
+};
+pub use audio_qc::{
+    AUDIO_DELIVERY_ANALYSIS_SAMPLE_RATE, AUDIO_QC_CODES, AudioDeliveryMeasurement,
+    AudioDeliveryPreset, AudioDeliveryTarget, AudioQcException, AudioQcReport,
+    TRUE_PEAK_OVERSAMPLING, hundredths_to_string, measure_audio_qc,
 };
 pub use automation::{AutomationCurve, AutomationCurveError, Keyframe, KeyframeInterpolation};
 pub use captions::{
@@ -92,7 +98,7 @@ pub use delivery::{
     DeliveryComparison, DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile,
     DeliveryTagCheck, DeliveryTagNotRepresentable, DeliveryTagSource, DeliveryVariant,
     DeliveryVariantError, DeliveryVerification, DeliveryVerificationError,
-    DeliveryVerificationRequest, H264_WHITE_POINT_NOT_REPRESENTABLE_REASON,
+    DeliveryVerificationRequest, AudioVerification, AudioDeliveryVerification, H264_WHITE_POINT_NOT_REPRESENTABLE_REASON,
     delivery_color_for_depth, delivery_color_mismatch, delivery_color_mismatches,
     delivery_conformance, delivery_tag_check, document_for_delivery_profile,
     document_for_delivery_variant,

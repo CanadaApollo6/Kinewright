@@ -1922,6 +1922,7 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
 #[test]
 fn cc6_delivery_verification_sampling_is_the_closed_form_integer_rule() {
     let request = |frame_count: u8| kinewright_core::DeliveryVerificationRequest {
+        audio_target: kinewright_core::AudioDeliveryTarget::default(),
         frame_count,
         budgets: kinewright_core::DeliveryBudgets::for_depth(DeliveryEncodeDepth::Eight),
         expected_delivery: ColorContext::sdr_rec709().delivery,
@@ -2285,6 +2286,7 @@ fn cc6_exceptions_sort_by_severity_then_code_then_field() {
 #[test]
 fn cc6_delivery_verification_refuses_a_frame_count_outside_the_sampled_range() {
     let request = |frame_count: u8| kinewright_core::DeliveryVerificationRequest {
+        audio_target: kinewright_core::AudioDeliveryTarget::default(),
         frame_count,
         budgets: kinewright_core::DeliveryBudgets::for_depth(DeliveryEncodeDepth::Eight),
         expected_delivery: ColorContext::sdr_rec709().delivery,

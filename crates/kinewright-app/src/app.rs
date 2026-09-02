@@ -340,6 +340,7 @@ impl KinewrightApp {
                 focus_y_percent: 50,
                 conformance_cache: None,
                 delivery_bit_depth: kinewright_core::DeliveryEncodeDepth::default(),
+                audio_preset: kinewright_core::AudioDeliveryPreset::default(),
                 verification: None,
             },
             export_job: None,

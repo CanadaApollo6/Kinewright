@@ -8,6 +8,44 @@ All notable changes to Kinewright are documented here. The format follows
 
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
+### Added
+- AD0 audio delivery foundation: `kinewright_core::audio_qc` defines typed
+  `AudioDeliveryPreset`s (measure-only, streaming −14 LUFS, podcast −16,
+  EBU R 128 −23, ATSC A/85 −24) whose numbers live in one `target()`
+  function, an `AudioDeliveryMeasurement` (BS.1770 integrated loudness,
+  sample peak, 4× oversampled true peak, EBU Tech 3342 loudness range), and a
+  pure `measure_audio_qc` engine publishing seven typed codes with
+  `observed`/`allowed` strings and the gain that would reach the target.
+  `measure_delivery_audio` in the media crate adds the true-peak
+  interpolator and the short-term loudness range. Every verified export now
+  decodes its own audio and carries an `AudioVerification` on the
+  `DeliveryVerification` (defaulting to `not_measured` for older records);
+  the export queue attaches each profile's default preset and the export
+  dialog offers a `Loudness target` row, an `AUDIO OUT OF SPEC` status, and
+  a `DECODED AUDIO` block. Nothing applies gain. See
+  docs/AD0-AUDIO-DELIVERY.md.
+- `kinewright-eval --write-color-smoke-media DIRECTORY` writes the six CC7
+  synthetic sources and the 65³ inverse `.cube` to disk so a person can run
+  docs/COLOR-SMOKE-TEST.md, the hands-on procedure for the CC0–CC7 platform
+  gates, against known-answer footage.
+- docs/ROADMAP-REVIEW-2026-09.md records the post-CC7 review.
+
+### Changed
+- The media crate's synthetic-media generators (`test_support`,
+  `cc7_sources`) no longer ship in the desktop binary: `kinewright-agent`
+  gates them behind an `eval` feature that only the `kinewright-eval` binary
+  and the crates' tests enable, and `kinewright-app` opts out of the agent
+  crate's default features.
+- `kinewright-agent/src/server.rs` is split into `server/` submodules by tool
+  family with the tests beside them; no tool, schema, or behaviour changed.
+- The six colour fixture files share one `cc_fixture_support` module instead
+  of restating their helpers.
+- CI caches the cargo registry and build outputs and the pinned FFmpeg
+  archive, runs the media crate's fixture suite in its own Linux job, cancels
+  superseded runs, and has a timeout on every job.
+- `color_qc.rs` uses `RangeInclusive::contains` so `clippy -D warnings`
+  passes on Rust 1.94 as well as the newest stable.
+
 ### Fixed
 - Every H.264 export lost its last frame on playback: video packets were
   muxed without a duration, so the MP4 muxer computed a track duration one

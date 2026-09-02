@@ -132,7 +132,7 @@ Colour begins immediately, while non-colour work continues in parallel.
 | Editorial and long-form | Three-point edits, slip/roll/slide, replace, fit-to-fill, bins, string-outs, sync groups, transcript editing | Dual source/program workflow, source patching and track targeting, compound/nested structure, long-sequence navigation and revision |
 | Media and interchange | Import, project media, verified source identity, offline/changed status, undoable relink, ephemeral scaled preview memory, scoped cache visibility/clearing, hostile-media policy, save/recovery | Generated playable proxies, richer metadata, managed/project-relative media, interchange that preserves supported edit semantics |
 | Colour | Managed SDR Rec.709 input → high-precision working → primary correction → monitor/delivery pipeline, typed source assumptions and metadata, ten primary controls, CPU/GPU/proof/export parity, four built-in looks, agent/core `.cube` LUT support, masks, chroma key, professional post-composite scopes, ROI/temporal evidence, and reference-shot matching proposals | Curves/wheels, grade-scoped secondaries, human LUT workflow, look management, delivery QC |
-| Audio | Multi-track mixing, buses, EQ/compression/ducking operations, waveform/transcript analysis | Manual mixer and bus UI, meters, detailed EQ/dynamics control, repair and room-tone workflows, loudness-aware delivery |
+| Audio | Multi-track mixing, buses, EQ/compression/ducking operations, waveform/transcript analysis, typed loudness/true-peak/range delivery QC on every verified export (AD0) | Loudness normalization as an operation, a true-peak limiter, manual mixer and bus UI, meters, detailed EQ/dynamics control, repair and room-tone workflows |
 | Motion, compositing, and retiming | GPU compositor, effects, keyframes, masks/tracking, transitions, constant-speed controls | Keyframe editing UI, speed ramps, effect-scoped mattes, adjustment/compound layers, transform and compositing polish |
 | Multicam | Sync groups and agent speaker/angle planning primitives | Angle viewer, live switching and revision, audio-follow policy, explicit master-audio handling |
 | Delivery and performance | Shared render path, H.264/AAC export queue and profiles | Codec/preset breadth, colour/audio tags and QC, cache control, long-project responsiveness, interruption and recovery testing |
@@ -284,6 +284,31 @@ With CC7 the colour programme table is complete; HDR, camera RAW, ACES/OCIO,
 calibrated-monitor output, and temporal noise reduction remain deliberate later
 programmes, and the M40 gauntlet continues to rotate colour tasks as
 regressions.
+
+11. **Post-CC7 review and hardening — 2026-09-02.** `ROADMAP-REVIEW-2026-09.md`
+   records the review. The hardening it asked for landed in one cycle: the
+   media crate's test generators no longer ship in the desktop binary (the
+   agent crate's `eval` feature owns them), `server.rs` is split into
+   tool-family submodules, the six colour fixture files share one support
+   module, CI caches the toolchain and the pinned FFmpeg build, runs the media
+   fixture suite in its own job, and has a timeout. `COLOR-SMOKE-TEST.md` is
+   the hands-on procedure for the CC3–CC7 platform gates, written for a
+   person who is not a colourist against known-answer footage that
+   `kinewright-eval --write-color-smoke-media` materializes.
+
+12. **AD0 audio delivery contract — foundation implemented 2026-09-02,
+   pending platform smoke.** The first non-colour primary slice, chosen by
+   the bottleneck M40 observed in a real edit (an event cut delivered at
+   −39.9 LUFS). Typed `AudioDeliveryTarget` presets (measure-only, streaming
+   −14, podcast −16, EBU R 128, ATSC A/85) are a job parameter beside the
+   delivery depth; every verified export now decodes its own audio, measures
+   BS.1770 integrated loudness, 4× oversampled true peak, and EBU Tech 3342
+   loudness range, and reports typed exceptions with the gain that would
+   reach the target. The export dialog gains the preset choice, an
+   `AUDIO OUT OF SPEC` status, and a `DECODED AUDIO` block. Nothing applies
+   gain. The contract, the fixtures, and the deferrals (normalization as an
+   operation, a true-peak limiter, meters and the mixer, the agent tools) are
+   in `AD0-AUDIO-DELIVERY.md`.
 
 Within that cadence, three workstreams remain active:
 
@@ -458,9 +483,11 @@ constructors, compositor inputs, `ExportSettings`, and FFmpeg stream/container
 metadata. Later stages cannot treat those surfaces as implicit or start before the
 required earlier exit gate passes.
 
-**Current status (2026-08-27): CC0, M41, CC1, M42, CC2, CC3, CC4, CC5, CC6, and CC7
-are complete apart from the CC3–CC7 hands-on platform smoke gates and CC7's
-real-harness eval run and blind review.** CC0's exit evidence
+**Current status (2026-09-02): CC0, M41, CC1, M42, CC2, CC3, CC4, CC5, CC6, and CC7
+are complete apart from the CC3–CC7 hands-on platform smoke gates
+(`COLOR-SMOKE-TEST.md` is the procedure) and CC7's real-harness eval run and
+blind review. The AD0 audio delivery foundation is implemented and awaits the
+same smoke.** CC0's exit evidence
 includes legacy project migration, known/partial/unknown and 10-bit probe fixtures,
 visible human and agent inspection, an undoable source override, delivery rejection
 outside the current contract, and an encoded file decoded again to verify its
@@ -600,5 +627,11 @@ ownership boundary, and definition of done stable.
 - [M42 source/program patching and track targeting](M42-SOURCE-PROGRAM-PATCHING.md)
   — independent Source/Program workflow, explicit routes, and verified compound
   edits.
+- [Roadmap review, September 2026](ROADMAP-REVIEW-2026-09.md) — the post-CC7
+  review, the hardening list, and the case for audio delivery next.
+- [Color pipeline smoke test](COLOR-SMOKE-TEST.md) — the hands-on procedure
+  for the CC0–CC7 platform gates.
+- [AD0 audio delivery](AD0-AUDIO-DELIVERY.md) — the audio delivery contract,
+  decoded-file measurement, and QC engine.
 - [Media policy](MEDIA-POLICY.md) — hostile-media behaviour and invariants.
 - [Building Kinewright](BUILDING.md) — Windows, Linux, FFmpeg, and toolchain setup.

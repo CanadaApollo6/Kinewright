@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    AudioDeliveryPreset, AudioDeliveryTarget,
     ClipContent, ColorBitDepth, ColorDescription, ColorMatrix, ColorPipelineState, ColorPrimaries,
     ColorProvenance, ColorRange, ColorSourceError, ColorSourceProfileAssumption, ColorTransfer,
     ColorWhitePoint, Document, Effect, EffectId, ExportCancellation, ExportSettings, MediaKind,
@@ -131,6 +132,21 @@ impl DeliveryProfile {
     #[must_use]
     pub const fn container_extension(self) -> &'static str {
         "mp4"
+    }
+
+    /// AD0: the loudness contract a profile's audience expects.
+    ///
+    /// The platform profiles normalize to −14 LUFS on ingest, so a file that
+    /// lands there is heard as mixed; `source_master` is a mezzanine and only
+    /// measures. A job may override this with any [`AudioDeliveryPreset`].
+    #[must_use]
+    pub const fn default_audio_preset(self) -> AudioDeliveryPreset {
+        match self {
+            Self::SourceMaster => AudioDeliveryPreset::MeasureOnly,
+            Self::Youtube1080p | Self::VerticalShort | Self::SquareSocial => {
+                AudioDeliveryPreset::Streaming
+            }
+        }
     }
 
     #[must_use]
@@ -1265,17 +1281,31 @@ pub struct DeliveryVerificationRequest {
     pub budgets: DeliveryBudgets,
     /// The tags the file is expected to carry: `ExportSettings.delivery_color`.
     pub expected_delivery: ColorDescription,
+    /// AD0: what the decoded audio is expected to measure. Defaults to
+    /// [`AudioDeliveryPreset::MeasureOnly`], which reports and gates nothing.
+    #[serde(default)]
+    #[schemars(default)]
+    pub audio_target: AudioDeliveryTarget,
 }
 
 impl DeliveryVerificationRequest {
-    /// A default-sampled request for one lane and one expected description.
+    /// A default-sampled request for one lane and one expected description,
+    /// measuring audio without gating it.
     #[must_use]
     pub fn new(depth: DeliveryEncodeDepth, expected_delivery: ColorDescription) -> Self {
         Self {
             frame_count: DELIVERY_VERIFICATION_FRAME_COUNT,
             budgets: DeliveryBudgets::for_depth(depth),
             expected_delivery,
+            audio_target: AudioDeliveryTarget::default(),
         }
+    }
+
+    /// The same request with an audio target attached.
+    #[must_use]
+    pub const fn with_audio_target(mut self, audio_target: AudioDeliveryTarget) -> Self {
+        self.audio_target = audio_target;
+        self
     }
 
     /// Refuse a request whose `frame_count` is outside
@@ -1397,8 +1427,67 @@ pub struct DeliveryVerification {
     pub decoded_pixel_format: String,
     pub comparison: DeliveryComparison,
     pub exceptions: Vec<crate::ColorQcException>,
-    /// No `Error`-severity entry in `exceptions`.
+    /// No `Error`-severity entry in `exceptions`. Colour only: the audio leg
+    /// carries its own `technical_pass` inside [`AudioVerification::Measured`]
+    /// so a loudness miss cannot masquerade as a decoded-picture budget overrun
+    /// (CC6 §3.8 pins this field to exactly two colour codes).
     pub technical_pass: bool,
+    /// AD0: the decoded audio, measured against `request.audio_target`.
+    /// Defaulted on read so a verification recorded before AD0 deserializes as
+    /// "not measured", which is what it meant.
+    #[serde(default)]
+    #[schemars(default)]
+    pub audio: AudioVerification,
+}
+
+/// The audio leg of one delivery verification.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum AudioVerification {
+    /// Recorded before AD0, or by a backend that does not measure audio.
+    #[default]
+    NotMeasured,
+    /// The probed file carries no audio stream. Not a failure: a picture-only
+    /// deliverable has nothing to measure.
+    NoAudioStream,
+    /// The file has audio but it could not be decoded or measured. The reason
+    /// is recorded; nothing is invented.
+    Unavailable { reason: String },
+    Measured(AudioDeliveryVerification),
+}
+
+impl AudioVerification {
+    /// `true` unless a measured leg failed. Not-measured, no-stream, and
+    /// unavailable are all "no evidence against", never a pass or a fail.
+    #[must_use]
+    pub fn technical_pass(&self) -> bool {
+        match self {
+            Self::Measured(measured) => measured.report.technical_pass,
+            Self::NotMeasured | Self::NoAudioStream | Self::Unavailable { .. } => true,
+        }
+    }
+
+    #[must_use]
+    pub const fn measured(&self) -> Option<&AudioDeliveryVerification> {
+        match self {
+            Self::Measured(measured) => Some(measured),
+            _ => None,
+        }
+    }
+}
+
+/// One decoded audio stream, measured and compared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AudioDeliveryVerification {
+    /// The codec the probe reported for the stream that was decoded.
+    pub probed_audio_codec: String,
+    /// The channel count and rate the *file* carries, before the analysis
+    /// path's fixed 48 kHz stereo conversion.
+    pub probed_sample_rate: u32,
+    pub probed_channels: u16,
+    pub report: crate::AudioQcReport,
 }
 
 #[cfg(test)]

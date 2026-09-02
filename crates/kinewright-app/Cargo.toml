@@ -12,7 +12,7 @@ crossbeam-channel.workspace = true
 eframe.workspace = true
 egui_extras.workspace = true
 image.workspace = true
-kinewright-agent = { path = "../kinewright-agent" }
+kinewright-agent = { path = "../kinewright-agent", default-features = false }
 kinewright-core = { path = "../kinewright-core" }
 kinewright-media = { path = "../kinewright-media" }
 rfd.workspace = true
@@ -20,6 +20,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+kinewright-media = { path = "../kinewright-media", features = ["test-util"] }
 proptest.workspace = true
 
 [lints]

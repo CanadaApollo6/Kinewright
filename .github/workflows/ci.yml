@@ -4,10 +4,19 @@ on:
   push:
   pull_request:
 
+# A newer push to the same branch supersedes the run in flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   windows:
     name: Windows workspace
     runs-on: windows-latest
+    timeout-minutes: 120
 
     steps:
       - name: Check out repository
@@ -24,6 +33,21 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Cache the pinned FFmpeg build
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/ffmpeg
+            third_party/ffmpeg.zip
+            third_party/pkgconf
+            third_party/libclang
+          key: ffmpeg-windows-${{ hashFiles('scripts/setup-ffmpeg.ps1') }}
+
+      - name: Cache cargo registry and build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -38,6 +62,7 @@ jobs:
   linux:
     name: Linux workspace
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     steps:
       - name: Check out repository
@@ -51,13 +76,62 @@ jobs:
       - name: Install native build dependencies
         run: ./scripts/install-linux-deps.sh
 
+      - name: Cache the pinned FFmpeg build
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/ffmpeg
+            third_party/ffmpeg.tar.xz
+          key: ffmpeg-linux-${{ hashFiles('scripts/setup-ffmpeg.sh') }}
+
+      - name: Cache cargo registry and build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux
+
       - name: Check formatting
         run: cargo fmt --check
 
+      # The media crate's fixture suite (GPU-backed and FFmpeg-shelling) runs in
+      # its own job below so a slow or flaky render does not hide the rest of
+      # the workspace's result behind it.
       - name: Provision FFmpeg, build, test, and lint
         run: |
           source ./scripts/setup-ffmpeg.sh
           cargo build --workspace
           readelf -d target/debug/kinewright-eval | grep -F '[libavcodec.so.62]'
-          cargo test --workspace
+          cargo test --workspace --exclude kinewright-media
           cargo clippy --workspace --all-targets -- -D warnings
+
+  linux-media:
+    name: Linux media fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install native build dependencies
+        run: ./scripts/install-linux-deps.sh
+
+      - name: Cache the pinned FFmpeg build
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/ffmpeg
+            third_party/ffmpeg.tar.xz
+          key: ffmpeg-linux-${{ hashFiles('scripts/setup-ffmpeg.sh') }}
+
+      - name: Cache cargo registry and build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux
+
+      - name: Provision FFmpeg and run the media fixture suite
+        run: |
+          source ./scripts/setup-ffmpeg.sh
+          cargo test -p kinewright-media

@@ -47,7 +47,8 @@ use kinewright_core::{
 use kinewright_media::{
     FfmpegMediaEngine,
     cc7_sources::{
-        cc7_camera_source, cc7_log_source, cc7_tracked_source, write_log_like_inverse_cube,
+        Cc7SourceKind, cc7_camera_source, cc7_log_source, cc7_tracked_source,
+        write_log_like_inverse_cube,
     },
     test_support::{
         GeneratedMedia, SpeechClip, TempDirectory, joined_words, normalized_words, test_engine,
@@ -120,6 +121,9 @@ fn run() -> Result<bool, EvalError> {
         );
         return Ok(true);
     }
+    if let Some(directory) = &options.write_color_smoke_media {
+        return write_color_smoke_media(directory).map(|()| true);
+    }
     if let Some(review_path) = &options.score_review {
         return score_review_file(review_path).map(|()| true);
     }
@@ -127,6 +131,44 @@ fn run() -> Result<bool, EvalError> {
         return rerender_document(document_path, &options);
     }
     run_subscription_suite(&options)
+}
+
+/// The files `--write-color-smoke-media` materializes, in order: the file name
+/// and the CC7 source it is cut from. Names are stable so the smoke-test
+/// document can refer to them.
+const COLOR_SMOKE_MEDIA: [(&str, Cc7SourceKind); 6] = [
+    ("cc7-camera-a.mkv", Cc7SourceKind::Camera(Cc7Camera::A)),
+    ("cc7-camera-b.mkv", Cc7SourceKind::Camera(Cc7Camera::B)),
+    ("cc7-camera-c1.mkv", Cc7SourceKind::Camera(Cc7Camera::C1)),
+    ("cc7-camera-c2.mkv", Cc7SourceKind::Camera(Cc7Camera::C2)),
+    ("cc7-log-carrier.mkv", Cc7SourceKind::Log),
+    ("cc7-tracked.mkv", Cc7SourceKind::Tracked),
+];
+
+/// Write every CC7 synthetic source plus the 65³ inverse `.cube` into
+/// `directory`, so a person can open the same known-answer footage the
+/// technical gates run on. The generators author each raster in Rust and mux
+/// it FFV1 lossless (CC7 §3.2); nothing here depends on a model or a network.
+fn write_color_smoke_media(directory: &Path) -> Result<(), EvalError> {
+    let io = |error: std::io::Error| EvalError::Fixture(error.to_string());
+    fs::create_dir_all(directory).map_err(io)?;
+    for (name, kind) in COLOR_SMOKE_MEDIA {
+        let generated = match kind {
+            Cc7SourceKind::Camera(camera) => cc7_camera_source(camera),
+            Cc7SourceKind::Log => cc7_log_source(),
+            Cc7SourceKind::Tracked => cc7_tracked_source(),
+        };
+        let destination = directory.join(name);
+        fs::copy(generated.path(), &destination).map_err(io)?;
+        println!("{}", destination.display());
+    }
+    let cube = write_log_like_inverse_cube(directory, CC7_LOG_CUBE_SIZE);
+    println!("{}", cube.display());
+    println!(
+        "{} × {} at {} fps, {} frames per camera; see docs/COLOR-SMOKE-TEST.md",
+        CC7_SOURCE_WIDTH, CC7_SOURCE_HEIGHT, CC7_SOURCE_FPS, CC7_SOURCE_FRAMES
+    );
+    Ok(())
 }
 
 fn run_subscription_suite(options: &Options) -> Result<bool, EvalError> {
@@ -561,6 +603,9 @@ struct Options {
     delivery_profile: DeliveryProfile,
     loudness_contract: Option<EvalLoudnessSpec>,
     audio_tail_contract: Option<EvalAudioTailSpec>,
+    /// Write the CC7 synthetic colour scenarios to a directory for a hands-on
+    /// smoke test (`docs/COLOR-SMOKE-TEST.md`).
+    write_color_smoke_media: Option<PathBuf>,
 }
 
 impl Options {
@@ -589,6 +634,7 @@ impl Options {
             delivery_profile: DeliveryProfile::VerticalShort,
             loudness_contract: None,
             audio_tail_contract: None,
+            write_color_smoke_media: None,
         }
     }
 
@@ -666,6 +712,12 @@ impl Options {
                     "TERMINAL_FRAMES,MAX_PEAK,ACTIVITY_FRAMES,MIN_ACTIVE_LUFS,MAX_INACTIVE_FRAMES",
                 )?)?);
             }
+            "--write-color-smoke-media" => {
+                self.write_color_smoke_media = Some(PathBuf::from(next_option_value(
+                    arguments,
+                    "--write-color-smoke-media",
+                )?));
+            }
             "-h" | "--help" => {
                 print_usage();
                 return Err(EvalError::Agent("help requested".to_owned()));
@@ -706,7 +758,7 @@ fn print_usage() {
 /// The usage banner, as one string, so a test can assert the suite list is
 /// complete without capturing stdout.
 fn usage_text() -> &'static str {
-    "Usage: KINEWRIGHT_EVAL=1 cargo run -p kinewright-agent --bin kinewright-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3|dialogue-pacing-v4|generalization-v5|color-workflow-v6] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p kinewright-agent --bin kinewright-eval -- --prepare-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --verify-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --score-review PATH\n       cargo run -p kinewright-agent --bin kinewright-eval -- --rerender-document DOCUMENT --artifact-directory DIRECTORY [--delivery-profile vertical_short] [--loudness-contract MIN_LUFS,MAX_LUFS,MAX_PEAK] [--audio-tail-contract TERMINAL_FRAMES,MAX_PEAK,ACTIVITY_FRAMES,MIN_ACTIVE_LUFS,MAX_INACTIVE_FRAMES]"
+    "Usage: KINEWRIGHT_EVAL=1 cargo run -p kinewright-agent --bin kinewright-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3|dialogue-pacing-v4|generalization-v5|color-workflow-v6] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p kinewright-agent --bin kinewright-eval -- --prepare-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --verify-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --score-review PATH\n       cargo run -p kinewright-agent --bin kinewright-eval -- --rerender-document DOCUMENT --artifact-directory DIRECTORY [--delivery-profile vertical_short] [--loudness-contract MIN_LUFS,MAX_LUFS,MAX_PEAK] [--audio-tail-contract TERMINAL_FRAMES,MAX_PEAK,ACTIVITY_FRAMES,MIN_ACTIVE_LUFS,MAX_INACTIVE_FRAMES]\n       cargo run -p kinewright-agent --bin kinewright-eval -- --write-color-smoke-media DIRECTORY"
 }
 
 fn next_option_value(

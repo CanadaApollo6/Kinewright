@@ -1504,7 +1504,7 @@ impl RegionAccumulator {
         let mut clamped = false;
         for (channel, value) in self.channels.iter_mut().zip(encoded) {
             channel.add(value);
-            if value > 1.0 || value < 0.0 {
+            if !(0.0..=1.0).contains(&value) {
                 clamped = true;
             }
         }

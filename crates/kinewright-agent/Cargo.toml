@@ -6,13 +6,26 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# `eval` is what the `kinewright-eval` binary and this crate's own tests need:
+# the media crate's synthetic-media generators (`test_support`, `cc7_sources`).
+# It is on by default so `cargo build --workspace` still builds the eval binary,
+# and the desktop app opts out with `default-features = false` so those
+# generators never reach the shipped `kinewright-app` binary.
+[features]
+default = ["eval"]
+eval = ["kinewright-media/test-util"]
+
+[[bin]]
+name = "kinewright-eval"
+required-features = ["eval"]
+
 [dependencies]
 axum.workspace = true
 base64.workspace = true
 crossbeam-channel.workspace = true
 image.workspace = true
 kinewright-core = { path = "../kinewright-core" }
-kinewright-media = { path = "../kinewright-media", features = ["test-util"] }
+kinewright-media = { path = "../kinewright-media" }
 reqwest.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
@@ -20,6 +33,9 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+kinewright-media = { path = "../kinewright-media", features = ["test-util"] }
 
 [lints]
 workspace = true

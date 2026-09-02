@@ -12,7 +12,7 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender};
 use kinewright_core::{
-    Analysis, AssetId, DELIVERY_VERIFICATION_FRAME_COUNT, DeliveryBudgets,
+    Analysis, AssetId, AudioDeliveryTarget, DELIVERY_VERIFICATION_FRAME_COUNT, DeliveryBudgets,
     DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile, DeliveryVerification,
     DeliveryVerificationRequest, Document, Export, ExportCancellation, ExportLutPreflightReport,
     ExportMediaPreflightIssue, ExportMediaPreflightReport, ExportProgress, ExportSettings,
@@ -267,6 +267,8 @@ struct WorkItem {
     verify: bool,
     /// CC6 §4.1: the delivery lane the settings are materialized at.
     depth: DeliveryEncodeDepth,
+    /// AD0 §5: the loudness contract the decoded file is measured against.
+    audio_target: AudioDeliveryTarget,
     cancellation: ExportCancellation,
     /// The live source identity observed when this job passed preflight.
     ///
@@ -651,6 +653,7 @@ impl ExportQueue {
             overwrite,
             verify,
             depth: delivery_bit_depth,
+            audio_target: profile.default_audio_preset().target(),
             cancellation,
             verified_sources,
         };
@@ -797,6 +800,7 @@ fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
                         state,
                         work.verify,
                         work.depth,
+                        work.audio_target,
                         &work.output_path,
                         Arc::clone(&document),
                         &verification_settings,
@@ -925,6 +929,7 @@ fn verify_output(
     state: &Arc<QueueState>,
     verify: bool,
     depth: DeliveryEncodeDepth,
+    audio_target: AudioDeliveryTarget,
     output_path: &Path,
     document: Arc<Document>,
     settings: &ExportSettings,
@@ -936,6 +941,7 @@ fn verify_output(
         frame_count: DELIVERY_VERIFICATION_FRAME_COUNT,
         budgets: DeliveryBudgets::for_depth(depth),
         expected_delivery: settings.delivery_color.clone(),
+        audio_target,
     };
     // A backend that panics while verifying must not take down the worker or
     // destroy a finished encode either.

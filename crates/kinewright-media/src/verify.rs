@@ -39,7 +39,11 @@ use kinewright_core::{
     YCBCR_CHROMA_LEGAL_HIGH, YCBCR_LUMA_LEGAL_HIGH, YCBCR_LUMA_OFFSET, YCbCrLegalReport,
     YCbCrLegalSource, bt709_limited_ycbcr, delivery_tag_check, map_frames_with_rounding,
 };
-use kinewright_core::{ColorQcException, DeliveryColorMismatch};
+use kinewright_core::{
+    AUDIO_DELIVERY_ANALYSIS_SAMPLE_RATE, AudioDeliveryTarget, AudioDeliveryVerification,
+    AudioVerification, ColorQcException, DeliveryColorMismatch, MediaAsset, MediaKind,
+    measure_audio_qc,
+};
 
 use crate::{
     color_pipeline::DELIVERY_INTERMEDIATE_WHITE,
@@ -933,6 +937,10 @@ pub(crate) fn verify_delivery_output(
         .iter()
         .any(|exception| exception.severity == QaSeverity::Error);
 
+    // AD0 §6: the audio leg reads the same written file, after the picture
+    // leg, and never changes what the picture leg concluded.
+    let audio = verify_audio_leg(path, &probed_asset, settings, request.audio_target);
+
     Ok(DeliveryVerification {
         output_path: path.to_path_buf(),
         delivery_bit_depth: depth,
@@ -942,6 +950,75 @@ pub(crate) fn verify_delivery_output(
         comparison,
         exceptions,
         technical_pass,
+        audio,
+    })
+}
+
+/// The codec name, native rate, and native channel count of the file's best
+/// audio stream, from the container, before any conversion.
+fn probe_audio_stream(path: &Path) -> Result<(String, u32, u16), MediaError> {
+    let input = crate::decode::media_input(path)?;
+    let stream = input
+        .streams()
+        .best(ffmpeg::media::Type::Audio)
+        .ok_or_else(|| MediaError::Backend(format!("{} has no audio stream", path.display())))?;
+    let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+        .map_err(|error| crate::decode::media_error(path, "audio stream parameters", error))?;
+    let codec = context
+        .codec()
+        .map_or_else(|| "unknown".to_owned(), |codec| codec.name().to_owned());
+    let decoder = context
+        .decoder()
+        .audio()
+        .map_err(|error| crate::decode::media_error(path, "audio decoder", error))?;
+    Ok((codec, decoder.rate(), decoder.channels()))
+}
+
+/// AD0 §6: decode the written file's audio the way a player would, measure it
+/// on the fixed 48 kHz stereo analysis path, and compare it with the target.
+///
+/// Every failure is recorded as [`AudioVerification::Unavailable`] with its
+/// reason: the picture verification stands on its own, and an unmeasurable
+/// audio stream is never reported as a pass.
+fn verify_audio_leg(
+    path: &Path,
+    probed: &MediaAsset,
+    settings: &ExportSettings,
+    target: AudioDeliveryTarget,
+) -> AudioVerification {
+    if !matches!(probed.kind, MediaKind::Audio | MediaKind::AudioVideo) {
+        return AudioVerification::NoAudioStream;
+    }
+    let unavailable = |error: MediaError| AudioVerification::Unavailable {
+        reason: error.to_string(),
+    };
+    let (probed_audio_codec, probed_sample_rate, probed_channels) = match probe_audio_stream(path) {
+        Ok(stream) => stream,
+        Err(error) => return unavailable(error),
+    };
+    let samples = match crate::audio::decode_audio_range(
+        path,
+        probed.fps,
+        TimeCode::ZERO,
+        probed.duration,
+        AUDIO_DELIVERY_ANALYSIS_SAMPLE_RATE,
+        2,
+        &settings.cancellation,
+    ) {
+        Ok(samples) => samples,
+        Err(error) => return unavailable(error),
+    };
+    let measured =
+        match crate::loudness::measure_delivery_audio(&samples, AUDIO_DELIVERY_ANALYSIS_SAMPLE_RATE, 2)
+        {
+            Ok(measured) => measured,
+            Err(error) => return unavailable(error),
+        };
+    AudioVerification::Measured(AudioDeliveryVerification {
+        probed_audio_codec,
+        probed_sample_rate,
+        probed_channels,
+        report: measure_audio_qc(target, measured),
     })
 }
 
