@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -15,9 +16,9 @@ use crate::{
     audio::decode_audio_peaks,
     decode::thumbnail,
     derived_cache::{
-        CacheStats, ContentHashes, JsonCache, TempFileStyle, atomic_write, cache_path, cache_root,
-        clear_cache_root, create_cache_dir, inventory_cache_root, read_cache, spawn_worker,
-        trim_cache,
+        CacheStats, ContentHashes, JsonCache, TempFileStyle, WorkerHandle, atomic_write,
+        cache_path, cache_root, clear_cache_root, close_channel, create_cache_dir,
+        inventory_cache_root, read_cache, spawn_worker, trim_cache,
     },
 };
 
@@ -37,6 +38,7 @@ pub(crate) struct VisualAssetService {
     results: Receiver<VisualAssetResult>,
     in_flight: Arc<Mutex<HashSet<JobKey>>>,
     root: PathBuf,
+    worker: WorkerHandle,
 }
 
 impl VisualAssetService {
@@ -47,7 +49,7 @@ impl VisualAssetService {
         let worker_in_flight = Arc::clone(&in_flight);
         let root = cache_root(data_dir, "visual-assets", CACHE_VERSION);
         let mut worker = VisualAssetWorker::new(root.clone(), results_tx, worker_in_flight);
-        spawn_worker(
+        let worker = spawn_worker(
             "kinewright-visual-assets",
             "visual asset",
             jobs_rx,
@@ -58,7 +60,19 @@ impl VisualAssetService {
             results,
             in_flight,
             root,
+            worker,
         })
+    }
+
+    /// Close the queue so the worker stops after its current job.
+    pub(crate) fn request_shutdown(&mut self) {
+        self.worker.request_stop();
+        close_channel(&mut self.jobs);
+    }
+
+    /// Join the worker, waiting at most until `deadline`.
+    pub(crate) fn await_shutdown(&mut self, deadline: Instant) -> bool {
+        self.worker.join_by(deadline)
     }
 
     pub(crate) fn request_waveform(&self, asset: MediaAsset, request_generation: u64) -> bool {
@@ -504,6 +518,8 @@ mod tests {
             results,
             in_flight: Arc::clone(&in_flight),
             root: PathBuf::from("visual-assets/v1"),
+            worker: crate::derived_cache::spawn_thread("test-visual-assets", "test", |_| {})
+                .expect("a no-op worker thread starts"),
         };
 
         assert!(service.request(Job::Waveform {

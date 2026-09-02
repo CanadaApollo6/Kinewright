@@ -6,8 +6,7 @@ use std::{
         Arc, OnceLock, RwLock,
         atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering},
     },
-    thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
@@ -32,7 +31,7 @@ use crate::{
     compositor::GpuContext,
     decode::probe_path,
     derived::{DerivedAnalysisConfig, DerivedAnalysisService},
-    derived_cache::CacheStats,
+    derived_cache::{CacheStats, WorkerHandle, close_channel, spawn_thread},
     loudness::measure_loudness,
     lut::CubeLut,
     lut_store::LutLibrary,
@@ -42,6 +41,9 @@ use crate::{
 };
 
 const WORKER_TICK: Duration = Duration::from_millis(5);
+/// How long a dropped engine waits for its worker threads to finish the job
+/// they are on before leaving them detached.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct SharedClock {
     position_samples: Arc<AtomicU64>,
@@ -290,6 +292,8 @@ enum Control {
 
 pub struct FfmpegMediaEngine {
     control_tx: Sender<Control>,
+    /// The playback worker, joined on drop (see [`FfmpegMediaEngine::shutdown`]).
+    worker: WorkerHandle,
     frames_rx: Receiver<(TimeCode, FrameTexture)>,
     events_rx: Receiver<MediaEvent>,
     requested: Arc<RequestedPositions>,
@@ -309,6 +313,12 @@ pub struct FfmpegMediaEngine {
     transcripts: TranscriptService,
     visual_assets: VisualAssetService,
     derived_analysis: DerivedAnalysisService,
+}
+
+impl Drop for FfmpegMediaEngine {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
 }
 
 impl FfmpegMediaEngine {
@@ -387,31 +397,29 @@ impl FfmpegMediaEngine {
         let worker_gpu = gpu.clone();
         let lut_lattices = Arc::new(RwLock::new(PublishedLattices::default()));
         let worker_lut_lattices = Arc::clone(&lut_lattices);
-        thread::Builder::new()
-            .name("kinewright-media".to_owned())
-            .spawn(move || {
-                Worker::new(
-                    WorkerChannels {
-                        control_rx,
-                        frames_tx,
-                        frames_drop_rx,
-                        events_tx,
-                        events_drop_rx,
-                    },
-                    worker_clock,
-                    worker_meter,
-                    worker_requested,
-                    worker_gpu,
-                    worker_lut_lattices,
-                )
-                .run();
-            })
-            .map_err(|error| MediaError::Backend(error.to_string()))?;
+        let worker = spawn_thread("kinewright-media", "media", move |_stop| {
+            Worker::new(
+                WorkerChannels {
+                    control_rx,
+                    frames_tx,
+                    frames_drop_rx,
+                    events_tx,
+                    events_drop_rx,
+                },
+                worker_clock,
+                worker_meter,
+                worker_requested,
+                worker_gpu,
+                worker_lut_lattices,
+            )
+            .run();
+        })?;
 
         let visual_assets = VisualAssetService::new(&data_dir)?;
         let derived_analysis = DerivedAnalysisService::new(&data_dir, analysis_config)?;
         Ok(Self {
             control_tx,
+            worker,
             frames_rx,
             events_rx,
             requested,
@@ -426,6 +434,30 @@ impl FfmpegMediaEngine {
             visual_assets,
             derived_analysis,
         })
+    }
+
+    /// Stop every thread this engine owns and join it, waiting at most
+    /// [`SHUTDOWN_TIMEOUT`] in total. Returns `false` if any worker was still
+    /// on a job when the deadline passed; it is then left detached.
+    ///
+    /// The workers otherwise outlive the engine: the playback worker keeps
+    /// rendering the frame it was asked for, the analysis workers keep
+    /// decoding, and if the process exits meanwhile they are still inside
+    /// `FFmpeg`, cpal, or wgpu calls while those libraries are torn down -
+    /// the process-exit SIGSEGV CC7 F-E6 records. Every signal is sent
+    /// before any wait so the workers wind down concurrently.
+    pub(crate) fn shutdown(&mut self) -> bool {
+        close_channel(&mut self.control_tx);
+        self.worker.request_stop();
+        self.transcripts.request_shutdown();
+        self.visual_assets.request_shutdown();
+        self.derived_analysis.request_shutdown();
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+        let mut joined = self.worker.join_by(deadline);
+        joined &= self.transcripts.await_shutdown(deadline);
+        joined &= self.visual_assets.await_shutdown(deadline);
+        joined &= self.derived_analysis.await_shutdown(deadline);
+        joined
     }
 
     /// Register a trusted transcript for this engine session after verifying
@@ -2037,6 +2069,27 @@ mod tests {
             proof.metadata.render.full_resolution,
             "an isolated proof renders the document raster at full scale"
         );
+    }
+
+    /// CC7 F-E6: a dropped engine leaves no thread of its own behind. The
+    /// document handed over here starts a preview render on the playback
+    /// worker, so the shutdown that follows has to wait for a decoder that
+    /// is being opened - the state the worker was found in at process exit.
+    #[test]
+    fn dropping_the_engine_joins_its_workers_mid_render() {
+        initialize_ffmpeg().expect("FFmpeg should initialize for the shutdown fixture");
+        let gpu = fallback_gpu().context();
+        let media = matte_source("shutdown-joins-workers");
+        let document = matte_document(&media, Vec::new());
+        let mut engine = FfmpegMediaEngine::new_with_gpu(gpu)
+            .expect("media engine should start for the shutdown fixture");
+        engine.set_document(Arc::clone(&document));
+        assert!(
+            engine.shutdown(),
+            "every worker should have been joined within SHUTDOWN_TIMEOUT"
+        );
+        // A second shutdown - the one `Drop` runs - has nothing left to join.
+        assert!(engine.shutdown());
     }
 
     /// CC5 4.1: a proof never returns a blank frame. Each refusal is typed and

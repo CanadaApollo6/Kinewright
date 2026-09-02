@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
     thread,
+    time::Instant,
 };
 
 use crossbeam_channel::{Sender, unbounded};
@@ -21,7 +22,10 @@ use whisper_rs::{
 
 use crate::{
     audio::decode_audio_range,
-    derived_cache::{CancellationRegistry, JsonCache, StatusReporter, cache_root, spawn_worker},
+    derived_cache::{
+        CancellationRegistry, JsonCache, StatusReporter, WorkerHandle, cache_root, close_channel,
+        spawn_worker,
+    },
     sha256::sha256_file,
 };
 
@@ -42,6 +46,7 @@ pub(crate) struct TranscriptService {
     states: StatusReporter<TranscriptStatus>,
     cancellations: CancellationRegistry,
     root: PathBuf,
+    worker: WorkerHandle,
 }
 
 struct TranscriptJob {
@@ -57,7 +62,7 @@ impl TranscriptService {
         let cancellations = CancellationRegistry::default();
         let root = cache_root(&data_dir, "transcripts", CACHE_VERSION);
         let mut worker = TranscriptWorker::new(data_dir, states.clone(), cancellations.clone());
-        spawn_worker("kinewright-transcript", "transcript", jobs_rx, move |job| {
+        let worker = spawn_worker("kinewright-transcript", "transcript", jobs_rx, move |job| {
             worker.handle(&job)
         })?;
         Ok(Self {
@@ -65,7 +70,21 @@ impl TranscriptService {
             states,
             cancellations,
             root,
+            worker,
         })
+    }
+
+    /// Cancel every queued or running transcription and close the queue, so
+    /// the worker stops as soon as its current job notices.
+    pub(crate) fn request_shutdown(&mut self) {
+        self.worker.request_stop();
+        self.cancellations.cancel_all();
+        close_channel(&mut self.jobs);
+    }
+
+    /// Join the worker, waiting at most until `deadline`.
+    pub(crate) fn await_shutdown(&mut self, deadline: Instant) -> bool {
+        self.worker.join_by(deadline)
     }
 
     pub(crate) fn request(&self, asset: MediaAsset, language: Option<String>) {

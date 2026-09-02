@@ -3,6 +3,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Instant,
 };
 
 use crossbeam_channel::{Sender, unbounded};
@@ -20,8 +21,8 @@ use crate::{
     cache::FrameCache,
     decode::VideoDecoder,
     derived_cache::{
-        CacheStats, CancellationRegistry, ContentHashes, JsonCache, StatusReporter, cache_root,
-        clear_cache_root, inventory_cache_root, spawn_worker,
+        CacheStats, CancellationRegistry, ContentHashes, JsonCache, StatusReporter, WorkerHandle,
+        cache_root, clear_cache_root, close_channel, inventory_cache_root, spawn_worker,
     },
 };
 
@@ -98,6 +99,7 @@ pub(crate) struct DerivedAnalysisService {
     beat_cancellations: CancellationRegistry,
     config: DerivedAnalysisConfig,
     root: PathBuf,
+    worker: WorkerHandle,
 }
 
 impl DerivedAnalysisService {
@@ -119,7 +121,7 @@ impl DerivedAnalysisService {
             scene_cancellations.clone(),
             beat_cancellations.clone(),
         );
-        spawn_worker(
+        let worker = spawn_worker(
             "kinewright-derived-analysis",
             "derived analysis",
             jobs_rx,
@@ -135,7 +137,23 @@ impl DerivedAnalysisService {
             beat_cancellations,
             config,
             root,
+            worker,
         })
+    }
+
+    /// Cancel every queued or running analysis and close the queue, so the
+    /// worker stops as soon as its current job notices.
+    pub(crate) fn request_shutdown(&mut self) {
+        self.worker.request_stop();
+        self.silence_cancellations.cancel_all();
+        self.scene_cancellations.cancel_all();
+        self.beat_cancellations.cancel_all();
+        close_channel(&mut self.jobs);
+    }
+
+    /// Join the worker, waiting at most until `deadline`.
+    pub(crate) fn await_shutdown(&mut self, deadline: Instant) -> bool {
+        self.worker.join_by(deadline)
     }
 
     pub(crate) fn request_silences(&self, asset: MediaAsset) {

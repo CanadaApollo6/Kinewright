@@ -716,6 +716,7 @@ impl Options {
                 self.write_color_smoke_media = Some(PathBuf::from(next_option_value(
                     arguments,
                     "--write-color-smoke-media",
+                    "a directory path",
                 )?));
             }
             "-h" | "--help" => {
@@ -7617,15 +7618,11 @@ mod tests {
     /// than in a paid session. It shells out to the pinned `FFmpeg` once per
     /// generated raster (~11 s on the software lane).
     ///
-    /// Ignored for the same reason every other fixture-build test in this file
-    /// is: it constructs a real `FfmpegMediaEngine`, and this binary carries
-    /// none otherwise. The engine's process-exit teardown raises the known
-    /// SIGSEGV that `tests/mcp_server.rs` already lives with, *after* every
-    /// test has reported ok, which would make the default lane red on a
-    /// teardown that has nothing to do with the fixtures. Run it with
-    /// `cargo test -p kinewright-agent --bin kinewright-eval -- --ignored`.
+    /// It constructs a real `FfmpegMediaEngine`, which is safe in the default
+    /// lane since the engine joins its worker threads on drop (CC7 F-E6): the
+    /// process-exit SIGSEGV came from a dropped engine's playback worker still
+    /// opening an `FFmpeg` decoder while the process was tearing down.
     #[test]
-    #[ignore = "constructs a real media engine, whose process-exit teardown raises the known SIGSEGV"]
     fn cc7_every_color_fixture_builds_a_valid_document() {
         for (definition, scenario) in color_workflow_suite().iter().zip(CC7_SCENARIOS) {
             let fixture = (definition.fixture_builder)()

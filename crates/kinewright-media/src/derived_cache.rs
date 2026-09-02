@@ -2,13 +2,13 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, Mutex, RwLock},
-    thread,
-    time::SystemTime,
+    thread::{self, JoinHandle},
+    time::{Instant, SystemTime},
 };
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use kinewright_core::{ExportCancellation, MediaError};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -18,29 +18,105 @@ pub(crate) fn cache_root(data_dir: &Path, family: &str, version: u32) -> PathBuf
     data_dir.join(family).join(format!("v{version}"))
 }
 
+/// A thread this crate owns: the handle it is joined by, and the signal that
+/// makes a job loop stop taking work.
+///
+/// Every worker the media engine starts is held through one of these so the
+/// engine can stop and join it on drop. A detached worker would otherwise be
+/// left mid-`FFmpeg` call while the process exits and its shared libraries
+/// are torn down, which is the process-exit crash CC7 F-E6 records.
+pub(crate) struct WorkerHandle {
+    stop: Arc<AtomicBool>,
+    /// Never sent on: it disconnects when the thread's body has returned,
+    /// including by unwinding, which is what [`WorkerHandle::join_by`] waits
+    /// for with a deadline.
+    exited: Receiver<()>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl WorkerHandle {
+    /// Ask the job loop to stop before it takes its next job.
+    pub(crate) fn request_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+
+    /// Wait for the thread's body to return, at most until `deadline`, and
+    /// join it once it has. Returns `false` when the deadline passed with the
+    /// thread still running; it is then left detached, exactly as before.
+    pub(crate) fn join_by(&mut self, deadline: Instant) -> bool {
+        let Some(thread) = self.thread.take() else {
+            return true;
+        };
+        let wait = deadline.saturating_duration_since(Instant::now());
+        match self.exited.recv_timeout(wait) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                let _ = thread.join();
+                true
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                self.thread = Some(thread);
+                false
+            }
+        }
+    }
+}
+
+/// Start a named thread running `body`, which is handed the stop flag
+/// [`WorkerHandle::request_stop`] raises.
+pub(crate) fn spawn_thread<F>(
+    thread_name: &str,
+    worker_label: &str,
+    body: F,
+) -> Result<WorkerHandle, MediaError>
+where
+    F: FnOnce(&AtomicBool) + Send + 'static,
+{
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let (exited_tx, exited) = bounded::<()>(0);
+    let thread = thread::Builder::new()
+        .name(thread_name.to_owned())
+        .spawn(move || {
+            // Held until the body has returned, so `exited` disconnects then.
+            let _exited = exited_tx;
+            body(&thread_stop);
+        })
+        .map_err(|error| {
+            MediaError::Backend(format!("could not start {worker_label} worker: {error}"))
+        })?;
+    Ok(WorkerHandle {
+        stop,
+        exited,
+        thread: Some(thread),
+    })
+}
+
+/// Start a job loop that runs `process` on every job until the channel
+/// disconnects, `process` returns `false`, or a stop is requested.
 pub(crate) fn spawn_worker<J, F>(
     thread_name: &str,
     worker_label: &str,
     jobs: Receiver<J>,
     mut process: F,
-) -> Result<(), MediaError>
+) -> Result<WorkerHandle, MediaError>
 where
     J: Send + 'static,
     F: FnMut(J) -> bool + Send + 'static,
 {
-    thread::Builder::new()
-        .name(thread_name.to_owned())
-        .spawn(move || {
-            while let Ok(job) = jobs.recv() {
-                if !process(job) {
-                    break;
-                }
+    spawn_thread(thread_name, worker_label, move |stop| {
+        while let Ok(job) = jobs.recv() {
+            if stop.load(Ordering::Acquire) || !process(job) {
+                break;
             }
-        })
-        .map(|_| ())
-        .map_err(|error| {
-            MediaError::Backend(format!("could not start {worker_label} worker: {error}"))
-        })
+        }
+    })
+}
+
+/// Replace `sender` with one whose receiver is already gone, so the worker
+/// reading the original channel sees it disconnect once its queue drains.
+pub(crate) fn close_channel<T>(sender: &mut Sender<T>) {
+    let (closed, _) = bounded(0);
+    *sender = closed;
 }
 
 /// Derived-data state keyed by the asset's PATH, never its id: asset ids are
@@ -113,6 +189,15 @@ impl CancellationRegistry {
                 true
             })
         })
+    }
+
+    /// Cancel every queued or running job, for shutdown.
+    pub(crate) fn cancel_all(&self) {
+        if let Ok(active) = self.active.lock() {
+            for cancellation in active.values() {
+                cancellation.cancel();
+            }
+        }
     }
 
     pub(crate) fn finish(&self, path: &Path, cancellation: &ExportCancellation) {
