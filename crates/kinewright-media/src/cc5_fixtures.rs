@@ -6099,8 +6099,8 @@ const CC5_TEST_SOURCES: [(&str, &str); 9] = [
         include_str!("../../kinewright-core/tests/cc5_core_proof.rs"),
     ),
     (
-        "crates/kinewright-agent/src/server.rs",
-        include_str!("../../kinewright-agent/src/server.rs"),
+        "crates/kinewright-agent/src/server/mod.rs",
+        include_str!("../../kinewright-agent/src/server/mod.rs"),
     ),
     (
         "crates/kinewright-agent/src/color_status.rs",

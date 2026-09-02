@@ -194,7 +194,7 @@ pub fn measure_loudness(
 
 /// Half the interpolation support, in input samples, on each side of the
 /// output position: a 12-sample window, 48 taps at 4× oversampling.
-const TRUE_PEAK_HALF_SUPPORT: i64 = 6;
+const TRUE_PEAK_HALF_SUPPORT: isize = 6;
 
 /// EBU Tech 3342 short-term window and hop, in frames at the analysis rate.
 const SHORT_TERM_WINDOW_FRAMES: usize = 3 * AUDIO_DELIVERY_ANALYSIS_SAMPLE_RATE as usize;
@@ -249,27 +249,26 @@ fn true_peak_kernel() -> Vec<Vec<f64>> {
 }
 
 /// The largest absolute value of the 4× oversampled signal, per channel, as
-/// a linear amplitude. Zero for silence.
-#[allow(clippy::cast_possible_wrap)]
+/// a linear amplitude. Zero for silence. Samples outside the signal read as
+/// zero, so the ends are interpolated against silence rather than skipped.
 fn true_peak_amplitude(samples: &[f32], channels: usize) -> f64 {
     let kernel = true_peak_kernel();
     let frames = samples.len() / channels;
     let mut peak = 0.0_f64;
     for channel in 0..channels {
-        let sample = |frame: i64| -> f64 {
-            if frame < 0 || frame >= frames as i64 {
-                0.0
-            } else {
-                f64::from(samples[frame as usize * channels + channel])
-            }
+        let sample = |frame: usize, offset: isize| -> f64 {
+            frame
+                .checked_add_signed(offset)
+                .filter(|index| *index < frames)
+                .map_or(0.0, |index| f64::from(samples[index * channels + channel]))
         };
-        for frame in 0..frames as i64 {
-            peak = peak.max(sample(frame).abs());
+        for frame in 0..frames {
+            peak = peak.max(sample(frame, 0).abs());
             for taps in &kernel {
                 let interpolated = taps
                     .iter()
                     .zip(-TRUE_PEAK_HALF_SUPPORT..TRUE_PEAK_HALF_SUPPORT)
-                    .map(|(tap, offset)| tap * sample(frame + offset))
+                    .map(|(tap, offset)| tap * sample(frame, offset))
                     .sum::<f64>();
                 peak = peak.max(interpolated.abs());
             }
@@ -394,11 +393,13 @@ mod tests {
     /// every sample is `±sin(π/4)`, so the sample peak reads −3.01 dBFS while
     /// the waveform's true peak is 0 dBFS. The canonical inter-sample-peak
     /// fixture.
-    #[allow(clippy::cast_precision_loss)]
     fn quarter_rate_tone_between_samples() -> Vec<f32> {
-        (0..48_000)
+        // Four exact phases per cycle, taken from the residue so no float
+        // phase accumulates across the buffer.
+        (0..48_000_u32)
             .flat_map(|frame| {
-                let phase = std::f32::consts::FRAC_PI_2 * frame as f32 + std::f32::consts::FRAC_PI_4;
+                let quarter = f32::from(u8::try_from(frame % 4).unwrap());
+                let phase = std::f32::consts::FRAC_PI_2 * quarter + std::f32::consts::FRAC_PI_4;
                 let sample = phase.sin();
                 [sample, sample]
             })
@@ -463,7 +464,7 @@ mod tests {
     #[test]
     fn the_kernel_has_unit_dc_gain_in_every_phase() {
         for taps in true_peak_kernel() {
-            assert_eq!(taps.len(), 2 * TRUE_PEAK_HALF_SUPPORT as usize);
+            assert_eq!(taps.len(), 2 * TRUE_PEAK_HALF_SUPPORT.unsigned_abs());
             assert!((taps.iter().sum::<f64>() - 1.0).abs() < 1e-12);
         }
     }
