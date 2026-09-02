@@ -325,7 +325,11 @@ fn short_term_loudness(samples: &[f32], channels: usize) -> Result<Vec<f64>, Med
 /// energy-mean of the absolutely gated short-term values; the range is the
 /// 95th minus the 10th percentile (nearest rank) of what survives. `None` with
 /// fewer than two surviving windows.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn loudness_range_lu(short_term: &[f64]) -> Option<f64> {
     if short_term.len() < 2 {
         return None;
@@ -412,7 +416,10 @@ mod tests {
             measure_delivery_audio(&quarter_rate_tone_between_samples(), 48_000, 2).unwrap();
         let sample_peak = measured.loudness.sample_peak_dbfs_hundredths.unwrap();
         let true_peak = measured.true_peak_dbtp_hundredths.unwrap();
-        assert!((-305..=-297).contains(&sample_peak), "sample peak {sample_peak}");
+        assert!(
+            (-305..=-297).contains(&sample_peak),
+            "sample peak {sample_peak}"
+        );
         assert!((-20..=20).contains(&true_peak), "true peak {true_peak}");
     }
 
@@ -422,10 +429,16 @@ mod tests {
             let measured = measure_delivery_audio(&sine(amplitude), 48_000, 2).unwrap();
             let sample_peak = measured.loudness.sample_peak_dbfs_hundredths.unwrap();
             let true_peak = measured.true_peak_dbtp_hundredths.unwrap();
-            assert!(true_peak >= sample_peak, "{amplitude}: {true_peak} < {sample_peak}");
+            assert!(
+                true_peak >= sample_peak,
+                "{amplitude}: {true_peak} < {sample_peak}"
+            );
             // A 1 kHz tone is band-limited: the interpolator adds at most a
             // few hundredths of a dB.
-            assert!(true_peak - sample_peak <= 10, "{amplitude}: {true_peak} vs {sample_peak}");
+            assert!(
+                true_peak - sample_peak <= 10,
+                "{amplitude}: {true_peak} vs {sample_peak}"
+            );
         }
     }
 

@@ -33,7 +33,7 @@ pub enum AudioDeliveryPreset {
     /// mezzanine (`source_master`) export.
     #[default]
     MeasureOnly,
-    /// Platform loudness normalization (YouTube, Spotify, Apple Music, TikTok):
+    /// Platform loudness normalization (`YouTube`, Spotify, Apple Music, `TikTok`):
     /// −14 LUFS ± 1 LU, −1 dBTP.
     Streaming,
     /// Spoken-word delivery (Apple Podcasts, Spotify podcasts):
@@ -122,9 +122,7 @@ impl AudioDeliveryPreset {
 
 /// What one delivery is expected to measure. A job parameter, never a
 /// document edit (the same rule CC6 gives the delivery bit depth).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AudioDeliveryTarget {
     /// The preset these numbers came from, for the report line. A custom
     /// target carries the preset it was derived from.
@@ -168,9 +166,7 @@ impl AudioDeliveryTarget {
 }
 
 /// The decoded-file measurement AD0 adds on top of [`AudioLoudness`].
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AudioDeliveryMeasurement {
     /// BS.1770 integrated loudness and the raw sample peak.
     pub loudness: AudioLoudness,
@@ -271,6 +267,7 @@ fn exception(
 /// Pure and total: every input produces a report, and a report never carries
 /// a value the measurement did not.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn measure_audio_qc(
     target: AudioDeliveryTarget,
     measured: AudioDeliveryMeasurement,
@@ -470,7 +467,10 @@ mod tests {
                 !target.gates_anything()
             );
         }
-        assert_eq!(AudioDeliveryTarget::default().preset, AudioDeliveryPreset::MeasureOnly);
+        assert_eq!(
+            AudioDeliveryTarget::default().preset,
+            AudioDeliveryPreset::MeasureOnly
+        );
     }
 
     #[test]
@@ -564,7 +564,10 @@ mod tests {
         assert!(report.technical_pass);
         assert_eq!(
             codes(&report),
-            ["audio_analysis_rate_unexpected", "audio_loudness_range_over_limit"]
+            [
+                "audio_analysis_rate_unexpected",
+                "audio_loudness_range_over_limit"
+            ]
         );
         assert!(
             report

@@ -6077,7 +6077,7 @@ const CC5_INVENTORY_TESTS: [&str; 2] = [
 /// that names a function nobody has written for three commits. The prose
 /// entries this replaced ("`track_matte_window` tracking tests") could not fail
 /// at all.
-const CC5_TEST_SOURCES: [(&str, &str); 9] = [
+const CC5_TEST_SOURCES: [(&str, &str); 11] = [
     (
         "crates/kinewright-media/src/cc5_fixtures.rs",
         include_str!("cc5_fixtures.rs"),
@@ -6101,6 +6101,14 @@ const CC5_TEST_SOURCES: [(&str, &str); 9] = [
     (
         "crates/kinewright-agent/src/server/tests/mattes.rs",
         include_str!("../../kinewright-agent/src/server/tests/mattes.rs"),
+    ),
+    (
+        "crates/kinewright-agent/src/server/tests/color_proof.rs",
+        include_str!("../../kinewright-agent/src/server/tests/color_proof.rs"),
+    ),
+    (
+        "crates/kinewright-agent/src/server/tests/tracking_tests.rs",
+        include_str!("../../kinewright-agent/src/server/tests/tracking_tests.rs"),
     ),
     (
         "crates/kinewright-agent/src/color_status.rs",

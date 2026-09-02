@@ -165,8 +165,7 @@ fn write_color_smoke_media(directory: &Path) -> Result<(), EvalError> {
     let cube = write_log_like_inverse_cube(directory, CC7_LOG_CUBE_SIZE);
     println!("{}", cube.display());
     println!(
-        "{} × {} at {} fps, {} frames per camera; see docs/COLOR-SMOKE-TEST.md",
-        CC7_SOURCE_WIDTH, CC7_SOURCE_HEIGHT, CC7_SOURCE_FPS, CC7_SOURCE_FRAMES
+        "{CC7_SOURCE_WIDTH} × {CC7_SOURCE_HEIGHT} at {CC7_SOURCE_FPS} fps, {CC7_SOURCE_FRAMES} frames per camera; see docs/COLOR-SMOKE-TEST.md"
     );
     Ok(())
 }

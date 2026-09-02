@@ -7,14 +7,14 @@ use std::{
 
 use eframe::egui;
 use kinewright_core::{
-    AudioDeliveryPreset, AudioVerification, CaptionCue, ColorDescription, DELIVERY_VERIFICATION_FRAME_COUNT, DeliveryAspect,
-    DeliveryBudgets, DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile,
-    DeliveryVariant, DeliveryVariantError, DeliveryVerification, DeliveryVerificationRequest,
-    Document, ExportCancellation, ExportLutPreflightReport, ExportMediaPreflightReport,
-    ExportProgress, ExportSettings, LutAsset, LutAssetSource, LutAvailabilityKind,
-    LutAvailabilityStatus, MediaError, Operation, QaIssue, QaSeverity, Rational, TimeCode,
-    delivery_conformance, document_for_delivery_variant, export_lut_preflight_with,
-    export_media_preflight, srt, vtt,
+    AudioDeliveryPreset, AudioVerification, CaptionCue, ColorDescription,
+    DELIVERY_VERIFICATION_FRAME_COUNT, DeliveryAspect, DeliveryBudgets, DeliveryConformanceReport,
+    DeliveryEncodeDepth, DeliveryProfile, DeliveryVariant, DeliveryVariantError,
+    DeliveryVerification, DeliveryVerificationRequest, Document, ExportCancellation,
+    ExportLutPreflightReport, ExportMediaPreflightReport, ExportProgress, ExportSettings, LutAsset,
+    LutAssetSource, LutAvailabilityKind, LutAvailabilityStatus, MediaError, Operation, QaIssue,
+    QaSeverity, Rational, TimeCode, delivery_conformance, document_for_delivery_variant,
+    export_lut_preflight_with, export_media_preflight, srt, vtt,
 };
 use kinewright_media::{BuiltinLook, LutStore, LutStoreError, LutStoreErrorCode};
 
@@ -703,6 +703,7 @@ pub(crate) fn verification_lines(
 
 /// The AD0 audio block of the verification lines: what the decoded file
 /// measured, against which contract, and what would move it there.
+#[allow(clippy::too_many_lines)]
 fn audio_verification_lines(audio: &AudioVerification) -> Vec<VerificationLine> {
     let mut lines = vec![VerificationLine::muted("DECODED AUDIO".to_owned())];
     let measured = match audio {
@@ -733,19 +734,21 @@ fn audio_verification_lines(audio: &AudioVerification) -> Vec<VerificationLine> 
         "{} · {} Hz · {} ch · analysed as 48 kHz stereo",
         measured.probed_audio_codec, measured.probed_sample_rate, measured.probed_channels
     )));
-    lines.push(VerificationLine::muted(match target.integrated_lufs_hundredths {
-        Some(wanted) => format!(
-            "target {} · {} LUFS ± {} LU{}",
-            target.preset.label(),
-            decibels(wanted),
-            decibels(i32::from(target.tolerance_lu_hundredths)),
-            target
-                .maximum_true_peak_dbtp_hundredths
-                .map(|ceiling| format!(" · true peak ≤ {} dBTP", decibels(ceiling)))
-                .unwrap_or_default()
-        ),
-        None => format!("target {} · nothing gated", target.preset.label()),
-    }));
+    lines.push(VerificationLine::muted(
+        match target.integrated_lufs_hundredths {
+            Some(wanted) => format!(
+                "target {} · {} LUFS ± {} LU{}",
+                target.preset.label(),
+                decibels(wanted),
+                decibels(i32::from(target.tolerance_lu_hundredths)),
+                target
+                    .maximum_true_peak_dbtp_hundredths
+                    .map(|ceiling| format!(" · true peak ≤ {} dBTP", decibels(ceiling)))
+                    .unwrap_or_default()
+            ),
+            None => format!("target {} · nothing gated", target.preset.label()),
+        },
+    ));
     let loudness = report.measured.loudness;
     lines.push(match loudness.integrated_lufs_hundredths {
         Some(integrated) => {
@@ -790,8 +793,7 @@ fn audio_verification_lines(audio: &AudioVerification) -> Vec<VerificationLine> 
                 decibels(true_peak),
                 loudness
                     .sample_peak_dbfs_hundredths
-                    .map(decibels)
-                    .unwrap_or_else(|| "—".to_owned()),
+                    .map_or_else(|| "—".to_owned(), decibels),
                 if target.maximum_true_peak_dbtp_hundredths.is_none() {
                     "reported"
                 } else if within {
@@ -2411,13 +2413,13 @@ mod tests {
         ExportVerification::Measured(Box::new(DeliveryVerification {
             output_path: PathBuf::from("/tmp/export.mp4"),
             delivery_bit_depth: DeliveryEncodeDepth::Eight,
-            audio_preset: AudioDeliveryPreset::MeasureOnly,
             probed: observed,
             tags,
             decoded_pixel_format: "yuv420p".to_owned(),
             comparison,
             exceptions: Vec::new(),
             technical_pass: tags_conform && within_budgets,
+            audio: kinewright_core::AudioVerification::NotMeasured,
         }))
     }
 
@@ -2926,11 +2928,9 @@ mod tests {
             width: 1920,
             height: 1080,
             delivery_bit_depth: DeliveryEncodeDepth::Eight,
-            audio_preset: AudioDeliveryPreset::MeasureOnly,
         };
         let ten = ConformanceKey {
             delivery_bit_depth: DeliveryEncodeDepth::Ten,
-            audio_preset: AudioDeliveryPreset::MeasureOnly,
             ..eight
         };
         assert_ne!(eight, ten, "the lane is part of the cache identity");

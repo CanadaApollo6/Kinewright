@@ -31,6 +31,11 @@ use std::sync::Arc;
 
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
+    AUDIO_DELIVERY_ANALYSIS_SAMPLE_RATE, AudioDeliveryTarget, AudioDeliveryVerification,
+    AudioVerification, ColorQcException, DeliveryColorMismatch, MediaAsset, MediaKind,
+    measure_audio_qc,
+};
+use kinewright_core::{
     AssetId, ColorBitDepth, ColorDescription, DECODED_RANGE_EXCEPTION_BASIS_POINTS,
     DELIVERY_RGB_EXTREMES_NOTE, DeliveryBudgets, DeliveryChannelDifference, DeliveryColorError,
     DeliveryComparison, DeliveryEncodeDepth, DeliveryTagCheck, DeliveryTagSource,
@@ -38,11 +43,6 @@ use kinewright_core::{
     ExportSettings, FrameRounding, MediaError, PlaneLegalExcursion, QaSeverity, Rational, TimeCode,
     YCBCR_CHROMA_LEGAL_HIGH, YCBCR_LUMA_LEGAL_HIGH, YCBCR_LUMA_OFFSET, YCbCrLegalReport,
     YCbCrLegalSource, bt709_limited_ycbcr, delivery_tag_check, map_frames_with_rounding,
-};
-use kinewright_core::{
-    AUDIO_DELIVERY_ANALYSIS_SAMPLE_RATE, AudioDeliveryTarget, AudioDeliveryVerification,
-    AudioVerification, ColorQcException, DeliveryColorMismatch, MediaAsset, MediaKind,
-    measure_audio_qc,
 };
 
 use crate::{
@@ -1008,12 +1008,14 @@ fn verify_audio_leg(
         Ok(samples) => samples,
         Err(error) => return unavailable(error),
     };
-    let measured =
-        match crate::loudness::measure_delivery_audio(&samples, AUDIO_DELIVERY_ANALYSIS_SAMPLE_RATE, 2)
-        {
-            Ok(measured) => measured,
-            Err(error) => return unavailable(error),
-        };
+    let measured = match crate::loudness::measure_delivery_audio(
+        &samples,
+        AUDIO_DELIVERY_ANALYSIS_SAMPLE_RATE,
+        2,
+    ) {
+        Ok(measured) => measured,
+        Err(error) => return unavailable(error),
+    };
     AudioVerification::Measured(AudioDeliveryVerification {
         probed_audio_codec,
         probed_sample_rate,

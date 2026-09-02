@@ -2,9 +2,9 @@
 
 mod actor;
 mod agent;
+pub mod audio_qc;
 mod automation;
 mod captions;
-pub mod audio_qc;
 pub mod cc7_scenarios;
 mod color;
 mod color_qc;
@@ -87,21 +87,21 @@ pub use creator::{
     validate_beat_montage_plan_cadence,
 };
 pub use delivery::{
-    DECODED_RANGE_EXCEPTION_BASIS_POINTS, DELIVERY_BIT_DEPTH_ALLOWED, DELIVERY_LUMA_MAX_CODE_8BIT,
-    DELIVERY_LUMA_MAX_CODE_10BIT, DELIVERY_LUMA_MEAN_CODE_8BIT_MILLIONTHS,
-    DELIVERY_LUMA_MEAN_CODE_10BIT_MILLIONTHS, DELIVERY_LUMA_P99_CODE_8BIT_MILLIONTHS,
-    DELIVERY_LUMA_P99_CODE_10BIT_MILLIONTHS, DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_8BIT,
-    DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_10BIT, DELIVERY_RGB_EXTREMES_NOTE,
-    DELIVERY_RGB_MEAN_CODE_8BIT_MILLIONTHS, DELIVERY_RGB_MEAN_CODE_10BIT_MILLIONTHS,
-    DELIVERY_VERIFICATION_FRAME_COUNT, DELIVERY_VERIFICATION_MAX_FRAMES, DeliveryAspect,
-    DeliveryBudgets, DeliveryChannelDifference, DeliveryColorError, DeliveryColorMismatch,
-    DeliveryComparison, DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile,
-    DeliveryTagCheck, DeliveryTagNotRepresentable, DeliveryTagSource, DeliveryVariant,
-    DeliveryVariantError, DeliveryVerification, DeliveryVerificationError,
-    DeliveryVerificationRequest, AudioVerification, AudioDeliveryVerification, H264_WHITE_POINT_NOT_REPRESENTABLE_REASON,
-    delivery_color_for_depth, delivery_color_mismatch, delivery_color_mismatches,
-    delivery_conformance, delivery_tag_check, document_for_delivery_profile,
-    document_for_delivery_variant,
+    AudioDeliveryVerification, AudioVerification, DECODED_RANGE_EXCEPTION_BASIS_POINTS,
+    DELIVERY_BIT_DEPTH_ALLOWED, DELIVERY_LUMA_MAX_CODE_8BIT, DELIVERY_LUMA_MAX_CODE_10BIT,
+    DELIVERY_LUMA_MEAN_CODE_8BIT_MILLIONTHS, DELIVERY_LUMA_MEAN_CODE_10BIT_MILLIONTHS,
+    DELIVERY_LUMA_P99_CODE_8BIT_MILLIONTHS, DELIVERY_LUMA_P99_CODE_10BIT_MILLIONTHS,
+    DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_8BIT, DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_10BIT,
+    DELIVERY_RGB_EXTREMES_NOTE, DELIVERY_RGB_MEAN_CODE_8BIT_MILLIONTHS,
+    DELIVERY_RGB_MEAN_CODE_10BIT_MILLIONTHS, DELIVERY_VERIFICATION_FRAME_COUNT,
+    DELIVERY_VERIFICATION_MAX_FRAMES, DeliveryAspect, DeliveryBudgets, DeliveryChannelDifference,
+    DeliveryColorError, DeliveryColorMismatch, DeliveryComparison, DeliveryConformanceReport,
+    DeliveryEncodeDepth, DeliveryProfile, DeliveryTagCheck, DeliveryTagNotRepresentable,
+    DeliveryTagSource, DeliveryVariant, DeliveryVariantError, DeliveryVerification,
+    DeliveryVerificationError, DeliveryVerificationRequest,
+    H264_WHITE_POINT_NOT_REPRESENTABLE_REASON, delivery_color_for_depth, delivery_color_mismatch,
+    delivery_color_mismatches, delivery_conformance, delivery_tag_check,
+    document_for_delivery_profile, document_for_delivery_variant,
 };
 pub use editorial::ThreePointMode;
 pub use effect::{

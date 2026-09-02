@@ -504,7 +504,8 @@
           ],
           "sources": [
             "crates/kinewright-agent/src/color_scopes.rs",
-            "crates/kinewright-agent/src/server.rs"
+            "crates/kinewright-agent/src/server/tests/color_proof.rs",
+            "crates/kinewright-agent/src/server/tests/mattes.rs"
           ]
         }
       ]
@@ -537,7 +538,8 @@
             "track_matte_window_smoothed_curve_contains_the_subject_at_every_frame"
           ],
           "sources": [
-            "crates/kinewright-agent/src/server.rs"
+            "crates/kinewright-agent/src/server/tests/mattes.rs",
+            "crates/kinewright-agent/src/server/tests/tracking_tests.rs"
           ]
         }
       ]
@@ -621,7 +623,7 @@
           ],
           "sources": [
             "crates/kinewright-agent/src/color_status.rs",
-            "crates/kinewright-agent/src/server.rs",
+            "crates/kinewright-agent/src/server/tests/mattes.rs",
             "crates/kinewright-agent/tests/mcp_server.rs"
           ]
         }

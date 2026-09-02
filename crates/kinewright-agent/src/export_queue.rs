@@ -2242,6 +2242,7 @@ mod tests {
             },
             exceptions,
             technical_pass,
+            audio: kinewright_core::AudioVerification::NotMeasured,
         }
     }
 

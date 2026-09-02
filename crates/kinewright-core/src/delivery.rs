@@ -5,12 +5,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AudioDeliveryPreset, AudioDeliveryTarget,
-    ClipContent, ColorBitDepth, ColorDescription, ColorMatrix, ColorPipelineState, ColorPrimaries,
-    ColorProvenance, ColorRange, ColorSourceError, ColorSourceProfileAssumption, ColorTransfer,
-    ColorWhitePoint, Document, Effect, EffectId, ExportCancellation, ExportSettings, MediaKind,
-    OpError, ParamValue, QaIssue, QaSeverity, TrackKind, classify_source,
-    classify_source_with_assumption, qa_document,
+    AudioDeliveryPreset, AudioDeliveryTarget, ClipContent, ColorBitDepth, ColorDescription,
+    ColorMatrix, ColorPipelineState, ColorPrimaries, ColorProvenance, ColorRange, ColorSourceError,
+    ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Document, Effect, EffectId,
+    ExportCancellation, ExportSettings, MediaKind, OpError, ParamValue, QaIssue, QaSeverity,
+    TrackKind, classify_source, classify_source_with_assumption, qa_document,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -1441,9 +1440,7 @@ pub struct DeliveryVerification {
 }
 
 /// The audio leg of one delivery verification.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum AudioVerification {
     /// Recorded before AD0, or by a backend that does not measure audio.
@@ -1454,7 +1451,9 @@ pub enum AudioVerification {
     NoAudioStream,
     /// The file has audio but it could not be decoded or measured. The reason
     /// is recorded; nothing is invented.
-    Unavailable { reason: String },
+    Unavailable {
+        reason: String,
+    },
     Measured(AudioDeliveryVerification),
 }
 
