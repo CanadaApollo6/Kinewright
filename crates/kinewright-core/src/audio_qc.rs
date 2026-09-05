@@ -43,6 +43,11 @@ pub enum AudioDeliveryPreset {
     BroadcastEbuR128,
     /// ATSC A/85: −24 LKFS ± 2 LU, −2 dBTP.
     BroadcastAtscA85,
+    /// Numbers supplied by the caller rather than by a preset (the agent's
+    /// legacy `target_lufs_hundredths` arguments). Not offered in the export
+    /// dialog and absent from [`AudioDeliveryPreset::ALL`]; its own `target()`
+    /// gates nothing because the caller owns the numbers.
+    Custom,
 }
 
 impl AudioDeliveryPreset {
@@ -62,6 +67,7 @@ impl AudioDeliveryPreset {
             Self::Podcast => "podcast",
             Self::BroadcastEbuR128 => "broadcast_ebu_r128",
             Self::BroadcastAtscA85 => "broadcast_atsc_a85",
+            Self::Custom => "custom",
         }
     }
 
@@ -74,6 +80,7 @@ impl AudioDeliveryPreset {
             Self::Podcast => "Podcast −16 LUFS",
             Self::BroadcastEbuR128 => "Broadcast EBU R 128 −23 LUFS",
             Self::BroadcastAtscA85 => "Broadcast ATSC A/85 −24 LKFS",
+            Self::Custom => "Custom",
         }
     }
 
@@ -81,7 +88,7 @@ impl AudioDeliveryPreset {
     #[must_use]
     pub const fn target(self) -> AudioDeliveryTarget {
         match self {
-            Self::MeasureOnly => AudioDeliveryTarget {
+            Self::MeasureOnly | Self::Custom => AudioDeliveryTarget {
                 preset: self,
                 integrated_lufs_hundredths: None,
                 tolerance_lu_hundredths: 0,
@@ -471,6 +478,9 @@ mod tests {
             AudioDeliveryTarget::default().preset,
             AudioDeliveryPreset::MeasureOnly
         );
+        assert!(!AudioDeliveryPreset::ALL.contains(&AudioDeliveryPreset::Custom));
+        assert!(!AudioDeliveryPreset::Custom.target().gates_anything());
+        assert_eq!(AudioDeliveryPreset::Custom.as_str(), "custom");
     }
 
     #[test]

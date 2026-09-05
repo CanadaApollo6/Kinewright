@@ -2483,14 +2483,20 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         kinewright_agent::compact_tool_names()
     );
 
-    // The internal registry: 124 tools, of which `INSPECTOR_TOOL_NAMES` is 75.
+    // The internal registry: 125 tools, of which `INSPECTOR_TOOL_NAMES` is 76.
+    // CC7 added no registry tool (124/75); AD1 added exactly one,
+    // `get_audio_qc`, and this is where that fact is pinned.
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
-    assert_eq!(registry.len(), 124, "CC7 adds no registry tool");
+    assert_eq!(
+        registry.len(),
+        125,
+        "AD1 adds get_audio_qc and nothing else"
+    );
     assert_eq!(
         registry.len() - operations.len(),
-        75,
-        "INSPECTOR_TOOL_NAMES stays at 75"
+        76,
+        "INSPECTOR_TOOL_NAMES is 75 + get_audio_qc"
     );
 
     // The served byte counts CC6 recorded, asserted byte-identically.

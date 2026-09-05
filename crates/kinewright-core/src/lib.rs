@@ -2,6 +2,7 @@
 
 mod actor;
 mod agent;
+pub mod audio_normalization;
 pub mod audio_qc;
 mod automation;
 mod captions;
@@ -28,6 +29,12 @@ pub use actor::{Command, Core, CoreDisconnected, Event, Query, QueryResult, Time
 pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,
+};
+pub use audio_normalization::{
+    AudioNormalizationError, AudioNormalizationPlan, LOSSY_CODEC_PEAK_HEADROOM_HUNDREDTHS,
+    NORMALIZATION_BUS_NAME, NORMALIZATION_GAIN_RANGE_HUNDREDTHS, NORMALIZATION_MAX_ROUNDS,
+    NORMALIZATION_MIN_TOLERANCE_HUNDREDTHS, audio_tracks_for_normalization, normalization_bus,
+    plan_audio_normalization,
 };
 pub use audio_qc::{
     AUDIO_DELIVERY_ANALYSIS_SAMPLE_RATE, AUDIO_QC_CODES, AudioDeliveryMeasurement,

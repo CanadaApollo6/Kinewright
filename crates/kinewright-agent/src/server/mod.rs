@@ -18,23 +18,24 @@ use base64::{
 };
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use kinewright_core::{
-    Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AudioBus, AudioBusId,
-    AudioLoudness, AutomationCurve, BeatMontageCadenceContract, BeatMontageSelect, BeatStatus,
-    CaptionCue, CaptionMotion, CaptionPreset, Clip, ClipContent, ClipId, ColorNodeKind,
-    ColorSourceError, Command, Core, DeliveryAspect, DeliveryEncodeDepth, DeliveryProfile,
-    DeliveryVariant, Document, Effect, EffectId, Event, Export, ExportCancellation, Keyframe,
-    KeyframeInterpolation, LutAsset, MUSIC_STRUCTURE_DEFAULT_METER_BEATS,
-    MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId, MediaAsset, MediaAvailabilityKind,
-    MediaCacheFamily, MediaCacheInventory, MediaKind, Operation, ParamValue, Playback, Query,
-    QueryResult, ReframeFocusBounds, RelinkCandidate, SceneStatus, SilenceStatus,
-    SpeakerAngleAssignment, SpeakerMulticamSettings, SubjectCenterBasisPointSample,
-    SubjectFocusBasisPointConstraint, SubjectReframeSettings, SyncGroupId, ThreePointMode,
-    TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange,
-    TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, Track, TrackId, TrackKind,
-    TranscriptStatus, animated_caption_operations_at, apply_batch, authored_caption_cues,
-    beat_montage_plan, beat_montage_plan_near_anchors_with_report, beat_montage_plan_with_anchors,
-    beat_pacing_plan, caption_cues, dedup_timeline_words, delivery_conformance,
-    document_for_delivery_profile, document_for_delivery_variant, is_filler_word,
+    Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AudioDeliveryPreset,
+    AudioDeliveryTarget, AudioNormalizationError, AutomationCurve, BeatMontageCadenceContract,
+    BeatMontageSelect, BeatStatus, CaptionCue, CaptionMotion, CaptionPreset, Clip, ClipContent,
+    ClipId, ColorNodeKind, ColorSourceError, Command, Core, DeliveryAspect, DeliveryEncodeDepth,
+    DeliveryProfile, DeliveryVariant, Document, Effect, EffectId, Event, Export,
+    ExportCancellation, Keyframe, KeyframeInterpolation, LOSSY_CODEC_PEAK_HEADROOM_HUNDREDTHS,
+    LutAsset, MUSIC_STRUCTURE_DEFAULT_METER_BEATS, MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker,
+    MarkerId, MediaAsset, MediaAvailabilityKind, MediaCacheFamily, MediaCacheInventory, MediaKind,
+    Operation, ParamValue, Playback, Query, QueryResult, ReframeFocusBounds, RelinkCandidate,
+    SceneStatus, SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings,
+    SubjectCenterBasisPointSample, SubjectFocusBasisPointConstraint, SubjectReframeSettings,
+    SyncGroupId, ThreePointMode, TimeCode, TimelineBeat, TimelineBeatAnalysisState,
+    TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TitlePosition, Track, TrackId, TrackKind, TranscriptStatus, animated_caption_operations_at,
+    apply_batch, authored_caption_cues, beat_montage_plan,
+    beat_montage_plan_near_anchors_with_report, beat_montage_plan_with_anchors, beat_pacing_plan,
+    caption_cues, dedup_timeline_words, delivery_conformance, document_for_delivery_profile,
+    document_for_delivery_variant, hundredths_to_string, is_filler_word,
     map_source_range_to_project, music_fit_plan_with_end_anchor, music_structure_analysis,
     plan_speaker_multicam, plan_subject_reframe_basis_points_with_containment, qa_document,
     validate_beat_montage_plan_cadence,
@@ -149,10 +150,6 @@ const MATTE_INVERT_PARAMETER: &str = "matte_invert";
 pub(crate) const REFRAME_SUBJECT_PROVENANCE_PREFIX: &str = "__kinewright_reframe_subject_v1:";
 const REFRAME_SUBJECT_PROVENANCE_HEADER_BYTES: usize = 18;
 const REFRAME_SUBJECT_PROVENANCE_SAMPLE_BYTES: usize = 16;
-/// AAC and other lossy encoders can overshoot a decoded sample ceiling. Keep
-/// deterministic pre-encode headroom while evaluating the public ceiling on
-/// the actual decoded delivery artifact.
-const LOSSY_CODEC_PEAK_HEADROOM_HUNDREDTHS: i32 = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmationRequest {
@@ -946,6 +943,10 @@ impl KinewrightMcp {
             "get_color_qc" => {
                 let args: ColorQcArgs = decode_args("get_color_qc", arguments)?;
                 self.color_qc(&args)
+            }
+            "get_audio_qc" => {
+                let args: AudioQcArgs = decode_args("get_audio_qc", arguments)?;
+                self.audio_qc(&args)
             }
             "plan_shot_match" => {
                 let args: PlanShotMatchArgs = decode_args("plan_shot_match", arguments)?;
@@ -1748,6 +1749,13 @@ struct TrackReframeArgs {
 struct AudioNormalizationPlanArgs {
     /// Source tracks to route through one deterministic delivery bus.
     track_ids: Vec<TrackId>,
+    /// AD1: the delivery preset to normalize onto (`streaming`, `podcast`,
+    /// `broadcast_ebu_r128`, `broadcast_atsc_a85`). When given, the three
+    /// explicit numbers below are ignored and the preset's integrated target,
+    /// tolerance, and true-peak ceiling are used; `measure_only` is refused
+    /// because it gates nothing.
+    #[serde(default)]
+    audio_preset: Option<AudioDeliveryPreset>,
     /// Target integrated loudness in hundredths of LUFS. Defaults to -1600.
     #[serde(default = "default_target_lufs_hundredths")]
     target_lufs_hundredths: i32,
@@ -1802,6 +1810,21 @@ struct QueueExportArgs {
     /// colour contract.
     #[serde(default)]
     delivery_bit_depth: DeliveryEncodeDepth,
+    /// AD1: the loudness contract the decoded file is measured against after
+    /// the encode. Omitted, the profile's default applies (`streaming` for the
+    /// platform profiles, `measure_only` for `source_master`).
+    #[serde(default)]
+    audio_preset: Option<AudioDeliveryPreset>,
+}
+
+/// `get_audio_qc` (AD1): measure the live timeline mix against a delivery
+/// preset without touching the document.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct AudioQcArgs {
+    /// The preset to judge against. Omitted: `measure_only`, which reports
+    /// every quantity and gates none.
+    #[serde(default)]
+    audio_preset: Option<AudioDeliveryPreset>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2987,6 +3010,12 @@ fn inspector_tools() -> Vec<Tool> {
             "get_color_qc",
             COLOR_QC_DESCRIPTION,
             schema_object::<ColorQcArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_audio_qc",
+            "AD1 evidence-only audio delivery QC of the live timeline mix. Renders the current audio graph in memory (48 kHz stereo), measures BS.1770 integrated loudness, sample peak, 4x-oversampled true peak, and EBU Tech 3342 loudness range, and judges them against a delivery preset (measure_only, streaming -14 LUFS, podcast -16, broadcast_ebu_r128 -23, broadcast_atsc_a85 -24) with typed exceptions, gain_to_target_db_hundredths, and gain_would_exceed_peak_ceiling. All decibel values are signed integer hundredths. Never mutates the document; the decoded-file measurement of a finished export is on get_export_jobs. To act on the result, call plan_audio_normalization with the same audio_preset.",
+            schema_object::<AudioQcArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(

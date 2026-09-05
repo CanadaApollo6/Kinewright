@@ -1678,6 +1678,19 @@ pub trait Analysis: Send + Sync {
     fn timeline_loudness(&self, _document: &Document) -> Result<AudioLoudness, MediaError> {
         Err(MediaError::NotImplemented)
     }
+    /// AD1: render the current audio graph in memory and take the AD0 delivery
+    /// measurement (integrated loudness, sample peak, true peak, loudness
+    /// range) on the fixed 48 kHz stereo analysis path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when timeline audio cannot be rendered or measured.
+    fn timeline_delivery_audio(
+        &self,
+        _document: &Document,
+    ) -> Result<crate::AudioDeliveryMeasurement, MediaError> {
+        Err(MediaError::NotImplemented)
+    }
     /// Queue deterministic beat/onset analysis without blocking the caller.
     fn request_beat_detection(&self, _asset: MediaAsset) {}
     /// Return the latest beat-analysis state for an asset.

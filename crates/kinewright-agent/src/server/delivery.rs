@@ -5,6 +5,11 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+/// The stage `get_audio_qc` measures: the in-memory mix of the current
+/// document, before any encode. The decoded-file stage is the export
+/// verification's (`DeliveryVerification.audio`).
+pub(super) const AUDIO_QC_STAGE: &str = "timeline_mix_pre_encode";
+
 impl KinewrightMcp {
     pub(super) fn delivery_variants() -> CallToolResult {
         let variants = DeliveryAspect::ALL.map(|aspect| {
@@ -265,6 +270,63 @@ impl KinewrightMcp {
         )
     }
 
+    /// AD1 `get_audio_qc`: render the live mix in memory, take the AD0
+    /// delivery measurement, and judge it against a preset. Evidence only.
+    pub(super) fn audio_qc(&self, args: &AudioQcArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let target = args
+            .audio_preset
+            .unwrap_or(AudioDeliveryPreset::MeasureOnly)
+            .target();
+        let measured = match self.analysis.timeline_delivery_audio(&document) {
+            Ok(measured) => measured,
+            Err(error) => {
+                return Ok(error_structured(
+                    format!("get_audio_qc rejected: could not measure the timeline mix: {error}"),
+                    serde_json::json!({
+                        "code": "audio_measurement_unavailable",
+                        "message": error.to_string(),
+                        "evidence_only": true,
+                        "applied": false,
+                    }),
+                ));
+            }
+        };
+        let report = kinewright_core::measure_audio_qc(target, measured);
+        let integrated = report
+            .measured
+            .loudness
+            .integrated_lufs_hundredths
+            .map_or_else(
+                || "silent".to_owned(),
+                |lufs| format!("{} LUFS", hundredths_to_string(lufs)),
+            );
+        let true_peak = report.measured.true_peak_dbtp_hundredths.map_or_else(
+            || "—".to_owned(),
+            |peak| format!("{} dBTP", hundredths_to_string(peak)),
+        );
+        Ok(success_structured(
+            format!(
+                "evidence-only AD0 audio QC of the timeline mix at timeline revision {revision}: integrated {integrated}, true peak {true_peak}, target {}, technical_pass={}; no operation was applied",
+                target.preset.as_str(),
+                report.technical_pass
+            ),
+            serde_json::json!({
+                "timeline_revision": revision.0,
+                "stage": AUDIO_QC_STAGE,
+                "analysis": {
+                    "sample_rate": kinewright_core::AUDIO_DELIVERY_ANALYSIS_SAMPLE_RATE,
+                    "channels": 2,
+                    "true_peak_oversampling": kinewright_core::TRUE_PEAK_OVERSAMPLING,
+                },
+                "target": target,
+                "report": report,
+                "evidence_only": true,
+                "applied": false,
+            }),
+        ))
+    }
+
     pub(super) fn queue_export(&self, args: QueueExportArgs) -> Result<CallToolResult, McpError> {
         let Some(queue) = &self.export_queue else {
             return Ok(error_text(
@@ -306,6 +368,7 @@ impl KinewrightMcp {
                 focus_x_percent: args.focus_x_percent,
                 focus_y_percent: args.focus_y_percent,
                 overwrite: args.overwrite,
+                audio_preset: args.audio_preset,
                 verify: args.verify,
                 delivery_bit_depth: args.delivery_bit_depth,
             },

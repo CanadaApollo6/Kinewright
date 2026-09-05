@@ -442,6 +442,13 @@ impl Analysis for BaselineProofAnalysis {
         self.inner.timeline_loudness(document)
     }
 
+    fn timeline_delivery_audio(
+        &self,
+        document: &Document,
+    ) -> Result<kinewright_core::AudioDeliveryMeasurement, MediaError> {
+        self.inner.timeline_delivery_audio(document)
+    }
+
     fn request_beat_detection(&self, asset: kinewright_core::MediaAsset) {
         self.inner.request_beat_detection(asset);
     }

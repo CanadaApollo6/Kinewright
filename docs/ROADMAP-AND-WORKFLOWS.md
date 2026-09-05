@@ -132,7 +132,7 @@ Colour begins immediately, while non-colour work continues in parallel.
 | Editorial and long-form | Three-point edits, slip/roll/slide, replace, fit-to-fill, bins, string-outs, sync groups, transcript editing | Dual source/program workflow, source patching and track targeting, compound/nested structure, long-sequence navigation and revision |
 | Media and interchange | Import, project media, verified source identity, offline/changed status, undoable relink, ephemeral scaled preview memory, scoped cache visibility/clearing, hostile-media policy, save/recovery | Generated playable proxies, richer metadata, managed/project-relative media, interchange that preserves supported edit semantics |
 | Colour | Managed SDR Rec.709 input → high-precision working → primary correction → monitor/delivery pipeline, typed source assumptions and metadata, ten primary controls, CPU/GPU/proof/export parity, four built-in looks, agent/core `.cube` LUT support, masks, chroma key, professional post-composite scopes, ROI/temporal evidence, and reference-shot matching proposals | Curves/wheels, grade-scoped secondaries, human LUT workflow, look management, delivery QC |
-| Audio | Multi-track mixing, buses, EQ/compression/ducking operations, waveform/transcript analysis, typed loudness/true-peak/range delivery QC on every verified export (AD0) | Loudness normalization as an operation, a true-peak limiter, manual mixer and bus UI, meters, detailed EQ/dynamics control, repair and room-tone workflows |
+| Audio | Multi-track mixing, buses, EQ/compression/ducking operations, waveform/transcript analysis, typed loudness/true-peak/range delivery QC on every verified export (AD0), normalization onto a delivery preset from the dialog and the agent (AD1) | A true-peak limiter, manual mixer and bus UI, meters, detailed EQ/dynamics control, repair and room-tone workflows |
 | Motion, compositing, and retiming | GPU compositor, effects, keyframes, masks/tracking, transitions, constant-speed controls | Keyframe editing UI, speed ramps, effect-scoped mattes, adjustment/compound layers, transform and compositing polish |
 | Multicam | Sync groups and agent speaker/angle planning primitives | Angle viewer, live switching and revision, audio-follow policy, explicit master-audio handling |
 | Delivery and performance | Shared render path, H.264/AAC export queue and profiles | Codec/preset breadth, colour/audio tags and QC, cache control, long-project responsiveness, interruption and recovery testing |
@@ -309,6 +309,17 @@ regressions.
    gain. The contract, the fixtures, and the deferrals (normalization as an
    operation, a true-peak limiter, meters and the mixer, the agent tools) are
    in `AD0-AUDIO-DELIVERY.md`.
+
+13. **AD1 loudness normalization — implemented 2026-09-05, pending platform
+   smoke.** The normalization recipe, validation, and predict-and-correct loop
+   move into core (`plan_audio_normalization`), driven by the same
+   `AudioDeliveryPreset` AD0 measures against; the export dialog offers
+   `Normalize the mix to <preset>` when a decoded file missed its target and
+   applies the one `UpsertAudioBus` through the ordinary edit path; the agent
+   gains `get_audio_qc` and `audio_preset` on `plan_audio_normalization` and
+   `queue_export`, with the legacy numeric arguments kept as a `Custom`
+   target. `AD1-LOUDNESS-NORMALIZATION.md` is the contract; AD2 (a true-peak
+   limiter) and AD3 (meters and the mixer) are the next audio slices.
 
 Within that cadence, three workstreams remain active:
 
@@ -633,5 +644,7 @@ ownership boundary, and definition of done stable.
   for the CC0–CC7 platform gates.
 - [AD0 audio delivery](AD0-AUDIO-DELIVERY.md) — the audio delivery contract,
   decoded-file measurement, and QC engine.
+- [AD1 loudness normalization](AD1-LOUDNESS-NORMALIZATION.md) — one typed
+  normalization plan for the dialog and the agent, judged by the next export.
 - [Media policy](MEDIA-POLICY.md) — hostile-media behaviour and invariants.
 - [Building Kinewright](BUILDING.md) — Windows, Linux, FFmpeg, and toolchain setup.

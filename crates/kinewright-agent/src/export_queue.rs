@@ -12,13 +12,13 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender};
 use kinewright_core::{
-    Analysis, AssetId, AudioDeliveryTarget, DELIVERY_VERIFICATION_FRAME_COUNT, DeliveryBudgets,
-    DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile, DeliveryVerification,
-    DeliveryVerificationRequest, Document, Export, ExportCancellation, ExportLutPreflightReport,
-    ExportMediaPreflightIssue, ExportMediaPreflightReport, ExportProgress, ExportSettings,
-    MediaAvailabilityKind, MediaError, MediaSourceFingerprint, delivery_conformance,
-    document_for_delivery_profile, export_lut_preflight_with, export_media_preflight,
-    lut_node_may_be_active,
+    Analysis, AssetId, AudioDeliveryPreset, AudioDeliveryTarget, DELIVERY_VERIFICATION_FRAME_COUNT,
+    DeliveryBudgets, DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile,
+    DeliveryVerification, DeliveryVerificationRequest, Document, Export, ExportCancellation,
+    ExportLutPreflightReport, ExportMediaPreflightIssue, ExportMediaPreflightReport,
+    ExportProgress, ExportSettings, MediaAvailabilityKind, MediaError, MediaSourceFingerprint,
+    delivery_conformance, document_for_delivery_profile, export_lut_preflight_with,
+    export_media_preflight, lut_node_may_be_active,
 };
 use kinewright_media::LutStore;
 use schemars::JsonSchema;
@@ -56,6 +56,10 @@ pub struct QueueExportRequest {
     /// setting this to true.
     #[serde(default)]
     pub overwrite: bool,
+    /// AD1: the loudness contract the decoded file is measured against. `None`
+    /// takes the profile's default (`DeliveryProfile::default_audio_preset`).
+    #[serde(default)]
+    pub audio_preset: Option<AudioDeliveryPreset>,
     /// CC6 §6.5: decode the finished encode and compare it against a freshly
     /// rendered delivery reference. Defaults to **true**; verification reads a
     /// file the caller just asked to write, so it needs no confirmation gate.
@@ -550,6 +554,7 @@ impl ExportQueue {
             focus_x_percent,
             focus_y_percent,
             overwrite,
+            audio_preset,
             verify,
             delivery_bit_depth,
         } = request;
@@ -653,7 +658,9 @@ impl ExportQueue {
             overwrite,
             verify,
             depth: delivery_bit_depth,
-            audio_target: profile.default_audio_preset().target(),
+            audio_target: audio_preset
+                .unwrap_or_else(|| profile.default_audio_preset())
+                .target(),
             cancellation,
             verified_sources,
         };
@@ -1969,6 +1976,7 @@ mod tests {
             focus_x_percent: 50,
             focus_y_percent: 50,
             overwrite,
+            audio_preset: None,
             // The queue's pre-CC6 tests describe an encode, not a
             // verification, so they keep the default lane and opt out.
             verify: false,
@@ -2164,6 +2172,7 @@ mod tests {
             focus_x_percent: 50,
             focus_y_percent: 50,
             overwrite: false,
+            audio_preset: None,
             verify,
             delivery_bit_depth,
         }

@@ -162,11 +162,10 @@ audio leg's own `technical_pass` produces a fifth status label,
 - **The smoke test on real footage** (Windows and Omarchy): export a real cut
   at `Streaming`, read the `DECODED AUDIO` block, and compare with a
   third-party meter. This decides the dialog's default preset.
-- **Normalization as a typed operation.** `gain_to_target_db_hundredths` is
-  reported, not applied. The existing `plan_audio_normalization` planner
-  targets tracks with its own `target_lufs_hundredths` argument; moving it
-  onto `AudioDeliveryPreset` and adding a bus-level gain proposal is the next
-  audio slice.
+- **Normalization as a typed operation.** *Done in AD1 (2026-09-05,
+  `AD1-LOUDNESS-NORMALIZATION.md`):* the plan lives in core, both the export
+  dialog and `plan_audio_normalization` call it with an `AudioDeliveryPreset`,
+  and the next export's decoded measurement is the proof.
 - **A true-peak limiter.** `gain_would_exceed_peak_ceiling` names the case a
   limiter exists for. `audio_limiter` is an effect name today; a measured,
   oversampled limiter with a parity gate is its own slice.
@@ -174,10 +173,7 @@ audio leg's own `technical_pass` produces a fifth status label,
   reads the live mix, and a mixer panel: the human audio surface the
   competitive audit rates one star, unchanged since August.
 - **`get_audio_qc` and `queue_export.audio_preset` on the agent surface.**
-  Both are additive; they wait for the `server.rs` split to land so they can
-  be added to the delivery family in one place. Until then the agent reads the
-  audio leg through `get_export_jobs`, which serializes the whole
-  `DeliveryVerification`.
+  *Done in AD1.*
 - **Surround and >2-channel delivery.** The analysis path folds to stereo;
   `measure_loudness` refuses more than two channels. Channel-weighted BS.1770
   for 5.1 is a contract of its own.
@@ -196,4 +192,4 @@ audio leg's own `technical_pass` produces a fifth status label,
 - [x] Export dialog: preset choice and the `DECODED AUDIO` block.
 - [ ] Platform smoke on Windows and Omarchy with a third-party meter
       cross-check (§7).
-- [ ] Agent tools `get_audio_qc` and `queue_export.audio_preset` (§7).
+- [x] Agent tools `get_audio_qc` and `queue_export.audio_preset` (AD1).

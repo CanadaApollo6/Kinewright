@@ -701,6 +701,39 @@ pub(crate) fn verification_lines(
     lines
 }
 
+/// What the dialog offers to do about a decoded file that missed its loudness
+/// contract: normalize onto the preset the verification was measured against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NormalizationOffer {
+    pub(crate) preset: AudioDeliveryPreset,
+    pub(crate) gain_hundredths_db: i32,
+}
+
+/// The offer, if any, one verification outcome earns (AD1 §5).
+///
+/// Only a *measured* audio leg that carries an integrated target, missed it,
+/// and reports a gain to reach it earns the button. Measure-only targets,
+/// silent programmes, files with no audio, and passes offer nothing: the
+/// button must never suggest an edit the numbers do not call for.
+#[must_use]
+pub(crate) fn normalization_offer(
+    verification: Option<&ExportVerification>,
+) -> Option<NormalizationOffer> {
+    let Some(ExportVerification::Measured(verification)) = verification else {
+        return None;
+    };
+    let measured = verification.audio.measured()?;
+    let report = &measured.report;
+    if report.technical_pass || report.target.integrated_lufs_hundredths.is_none() {
+        return None;
+    }
+    let gain_hundredths_db = report.gain_to_target_db_hundredths?;
+    Some(NormalizationOffer {
+        preset: report.target.preset,
+        gain_hundredths_db,
+    })
+}
+
 /// The AD0 audio block of the verification lines: what the decoded file
 /// measured, against which contract, and what would move it there.
 #[allow(clippy::too_many_lines)]
@@ -1008,6 +1041,55 @@ pub(crate) fn verification_block(ui: &mut egui::Ui, verification: Option<&Export
 }
 
 impl KinewrightApp {
+    /// AD1 §5, the person path: plan a normalization of every unmixed audio
+    /// track onto `preset` through the same core function the agent's
+    /// `plan_audio_normalization` uses, and send its one operation through the
+    /// ordinary edit path (one undo entry). The mix is rendered in memory once
+    /// per predict-and-correct round on this thread; a long timeline pays for
+    /// that here, which AD1 §7 records as a deferral.
+    pub(crate) fn normalize_mix_to_target(&mut self, preset: AudioDeliveryPreset) {
+        let document = Arc::clone(&self.focused().document);
+        let tracks = kinewright_core::audio_tracks_for_normalization(&document);
+        let analysis = Arc::clone(&self.analysis);
+        match kinewright_core::plan_audio_normalization(
+            &document,
+            &tracks,
+            preset.target(),
+            |candidate| analysis.timeline_delivery_audio(candidate),
+        ) {
+            Ok(plan) => {
+                let predicted = plan
+                    .predicted
+                    .loudness
+                    .integrated_lufs_hundredths
+                    .map_or_else(
+                        || "silent".to_owned(),
+                        |lufs| format!("{} LUFS", decibels(lufs)),
+                    );
+                self.status = format!(
+                    "Added \"{}\" bus {} over {} track(s): {}{} dB, predicted {predicted} against {}. Export again to verify from the decoded file.",
+                    kinewright_core::NORMALIZATION_BUS_NAME,
+                    plan.bus_id,
+                    plan.tracks.len(),
+                    if plan.gain_hundredths_db >= 0 {
+                        "+"
+                    } else {
+                        ""
+                    },
+                    decibels(plan.gain_hundredths_db),
+                    preset.label()
+                );
+                self.send_operations(vec![plan.operation]);
+            }
+            Err(error) => {
+                self.record_error(
+                    "Export",
+                    format!("Normalize to {}: {error}", preset.label()),
+                );
+            }
+        }
+    }
+
     pub(crate) fn open_export_dialog(&mut self) {
         let resolution = self.export_dialog.delivery_aspect.map_or(
             self.focused().document.resolution,
@@ -1378,6 +1460,7 @@ impl KinewrightApp {
         let mut cancel = false;
         let mut reset_color_pipeline = false;
         let mut open_color_qc = false;
+        let mut normalize_to: Option<AudioDeliveryPreset> = None;
         let caption_cues = self.timeline_caption_cues();
         let mut caption_format = None;
         let project_color_pipeline = color_pipeline_summary(&self.focused().document.color_context);
@@ -1698,6 +1781,21 @@ impl KinewrightApp {
                     // preflight advisories, and a truncated verification result
                     // would be worse than none (CC6 §8.4).
                     verification_block(ui, verification.as_ref());
+                    // AD1 §5: the person path. Offered only when the decoded
+                    // file missed its loudness contract; it inserts the same
+                    // normalization bus the agent's planner would.
+                    if let Some(offer) = normalization_offer(verification.as_ref())
+                        && ui
+                            .button(format!("Normalize the mix to {}", offer.preset.label()))
+                            .on_hover_text(format!(
+                                "Adds a \"{}\" bus (compressor if needed, gain, limiter) over every unmixed audio track, aiming {} dB at the target. One undo entry. Export again to verify from the decoded file.",
+                                kinewright_core::NORMALIZATION_BUS_NAME,
+                                decibels(offer.gain_hundredths_db)
+                            ))
+                            .clicked()
+                    {
+                        normalize_to = Some(offer.preset);
+                    }
                     if color_qc_link(ui).clicked() {
                         open_color_qc = true;
                     }
@@ -1709,6 +1807,9 @@ impl KinewrightApp {
         // open for the life of the job left the close button inert for the
         // whole verification pass, which sends no progress at all.
         self.export_dialog.open = open;
+        if let Some(preset) = normalize_to {
+            self.normalize_mix_to_target(preset);
+        }
         if open_color_qc {
             self.color_qc.open = true;
         }
@@ -2348,6 +2449,77 @@ mod tests {
     }
 
     /// One verification, built with the requested outcome.
+    /// AD1 §5: the button appears for exactly one outcome, a measured audio
+    /// leg that carries an integrated target and missed it.
+    #[test]
+    fn normalization_is_offered_only_for_a_measured_miss_with_a_target() {
+        use kinewright_core::{
+            AudioDeliveryMeasurement, AudioDeliveryPreset, AudioDeliveryVerification,
+            AudioLoudness, AudioVerification, measure_audio_qc,
+        };
+        let measurement = |lufs: Option<i32>| AudioDeliveryMeasurement {
+            loudness: AudioLoudness {
+                integrated_lufs_hundredths: lufs,
+                sample_peak_dbfs_hundredths: lufs.map(|_| -2_500),
+                sample_rate: 48_000,
+                channels: 2,
+                sample_frames: 480_000,
+            },
+            true_peak_dbtp_hundredths: lufs.map(|_| -2_480),
+            loudness_range_lu_hundredths: None,
+        };
+        let with_audio = |preset: AudioDeliveryPreset, lufs: Option<i32>| {
+            let ExportVerification::Measured(mut inner) = verification(true, true) else {
+                unreachable!()
+            };
+            inner.audio = AudioVerification::Measured(AudioDeliveryVerification {
+                probed_audio_codec: "aac".to_owned(),
+                probed_sample_rate: 48_000,
+                probed_channels: 2,
+                report: measure_audio_qc(preset.target(), measurement(lufs)),
+            });
+            ExportVerification::Measured(inner)
+        };
+
+        // The M40 event cut against Streaming: offered, with the gain AD0 reports.
+        let offer = normalization_offer(Some(&with_audio(
+            AudioDeliveryPreset::Streaming,
+            Some(-3_990),
+        )))
+        .expect("a miss with a target earns the offer");
+        assert_eq!(offer.preset, AudioDeliveryPreset::Streaming);
+        assert_eq!(offer.gain_hundredths_db, 2_590);
+
+        // Inside the band: nothing to offer.
+        assert_eq!(
+            normalization_offer(Some(&with_audio(
+                AudioDeliveryPreset::Streaming,
+                Some(-1_400)
+            ))),
+            None
+        );
+        // Measure-only reports and gates nothing, so it offers nothing.
+        assert_eq!(
+            normalization_offer(Some(&with_audio(
+                AudioDeliveryPreset::MeasureOnly,
+                Some(-3_990)
+            ))),
+            None
+        );
+        // A silent programme has no gain to reach anything with.
+        assert_eq!(
+            normalization_offer(Some(&with_audio(AudioDeliveryPreset::Streaming, None))),
+            None
+        );
+        // No audio leg, no measurement, no verification: nothing.
+        assert_eq!(normalization_offer(Some(&verification(true, true))), None);
+        assert_eq!(
+            normalization_offer(Some(&ExportVerification::Unavailable("x".to_owned()))),
+            None
+        );
+        assert_eq!(normalization_offer(None), None);
+    }
+
     fn verification(tags_conform: bool, within_budgets: bool) -> ExportVerification {
         let expected = ColorContext::sdr_rec709().delivery;
         let observed = if tags_conform {

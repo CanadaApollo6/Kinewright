@@ -463,7 +463,10 @@ fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
             registry_metrics.serialized_bytes,
             served_metrics.serialized_bytes
         ),
-        (1_280_060, 5_660),
+        // CC7 pinned (1_280_060, 5_660). AD1 added `get_audio_qc` to the
+        // registry: the registry grew by that one tool's schema and
+        // description, and the served surface is byte-identical.
+        (1_285_751, 5_660),
         "registry={registry_metrics:?} served={served_metrics:?}"
     );
 
@@ -807,4 +810,44 @@ fn inspector_tool_names_are_exactly_the_inspector_registry() {
         registry, listed,
         "INSPECTOR_TOOL_NAMES must name exactly the tools inspector_tools() registers"
     );
+}
+
+/// AD1: `get_audio_qc` is a registered read-only inspector, and the
+/// normalization planner and `queue_export` both take the same `audio_preset`
+/// the export dialog offers, so the person and the agent name one contract.
+#[test]
+fn ad1_audio_delivery_tools_share_the_preset_vocabulary() {
+    let tools = KinewrightMcp::tools().unwrap();
+    let audio_qc = tools
+        .iter()
+        .find(|tool| tool.name == "get_audio_qc")
+        .expect("get_audio_qc is registered");
+    assert_eq!(
+        audio_qc.annotations.as_ref().unwrap().read_only_hint,
+        Some(true)
+    );
+    assert!(audio_qc.description.as_deref().unwrap_or_default().len() <= 1_024);
+    for name in ["get_audio_qc", "plan_audio_normalization", "queue_export"] {
+        let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+        let schema = serde_json::to_value(&tool.input_schema).unwrap();
+        let preset = &schema["properties"]["audio_preset"];
+        assert!(
+            !preset.is_null(),
+            "{name} must accept audio_preset; schema={schema}"
+        );
+        // The enum is a `$defs` entry the property references, so the
+        // variants are asserted on the whole schema while the property is
+        // asserted to point at that definition.
+        assert!(
+            preset.to_string().contains("AudioDeliveryPreset"),
+            "{name}.audio_preset must reference the preset enum: {preset}"
+        );
+        let text = schema.to_string();
+        for variant in ["streaming", "podcast", "broadcast_ebu_r128"] {
+            assert!(
+                text.contains(variant),
+                "{name} schema lacks {variant}: {text}"
+            );
+        }
+    }
 }

@@ -14,7 +14,7 @@ whether a picture looks good. You only compare what you see with the expected
 result.
 
 Do the full procedure once on Windows and once on Omarchy. Record the result
-of each test in the record sheet in section 15.
+of each test in the record sheet in section 18.
 
 ## 2. Before you start
 
@@ -505,7 +505,49 @@ external meter, if you have one.
 
 Pass or fail for step 5 and step 7.
 
-## 17. Record sheet
+## 17. Test 14 — Normalize the mix to a target (AD1)
+
+Use the real clip from test 12. This test needs a clip whose sound is quiet
+or loud. A phone recording is usually quiet.
+
+### Steps
+
+1. Open the project from test 12. Press Ctrl+Z until the timeline holds the
+   clip with no color nodes, or create a new project with the clip.
+2. Press Ctrl+E. Select "Loudness target" › "Streaming −14 LUFS".
+3. Export. Wait for the verification block.
+4. Read the status label and the "integrated" line.
+5. If the label reads "VERIFIED", the clip is already at −14 LUFS. Record
+   "already in spec" and stop this test.
+6. Click the button "Normalize the mix to Streaming −14 LUFS".
+7. Read the status line at the bottom of the window.
+8. Press Space to play a few seconds. Listen.
+9. Export again to a new file name. Wait for the verification block.
+10. Read the status label and the "integrated" line.
+11. Press Ctrl+Z once. Read the status line.
+
+### Expected result
+
+- After step 4 the label reads "AUDIO OUT OF SPEC". The "integrated" line
+  ends with "OUT OF SPEC". A "gain to target" line shows a signed number of
+  dB.
+- After step 6 the button exists only because step 4 failed. The status line
+  reads `Added "Delivery normalization" bus ...` with the gain, the predicted
+  loudness, and the words "Export again to verify from the decoded file."
+- After step 8 the clip is audibly louder or quieter than before. It does not
+  distort.
+- After step 10 the label reads "VERIFIED". The "integrated" line shows a
+  value between −15.00 and −13.00 LUFS and ends with "within". The "true
+  peak" line ends with "within".
+- After step 11 one undo removes the whole normalization. The clip sounds as
+  it did in step 3.
+
+### Record
+
+The integrated loudness from step 4 and step 10. The gain from step 7.
+Whether step 8 distorted.
+
+## 18. Record sheet
 
 Fill in one sheet per machine. Keep the sheet with the release record; the
 roadmap requires it for any release that changes native media, GPU, audio,
@@ -533,11 +575,12 @@ Test 10 Tracked secondary          PASS / FAIL / NOT TESTED   low-confidence fra
 Test 11 QC and delivery            PASS / FAIL   labels: __________________
 Test 12 Real footage               PASS / FAIL   LUFS: ______ dBTP: ______
 Test 13 Save, reopen, move         PASS / FAIL
+Test 14 Normalize the mix          PASS / FAIL   LUFS before/after: ________
 
 Notes (anything that looked wrong, slow, or surprising):
 ```
 
-## 18. What to do with a failure
+## 19. What to do with a failure
 
 1. Write down the test number, the step number, and what you saw.
 2. Take a screenshot.

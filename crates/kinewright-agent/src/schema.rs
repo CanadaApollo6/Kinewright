@@ -13,7 +13,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 75] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 76] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -41,6 +41,7 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 75] = [
     // `CapabilityKind::Inspector`, so no `CAPABILITY_KIND_OVERRIDES` entry is
     // needed; that omission is a decision, not an oversight.
     "get_color_qc",
+    "get_audio_qc",
     "get_media_status",
     "get_cache_status",
     "clear_media_cache",

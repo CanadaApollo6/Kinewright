@@ -9,6 +9,19 @@ All notable changes to Kinewright are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Added
+- AD1 loudness normalization: `kinewright_core::audio_normalization` owns the
+  normalization recipe (compressor when the peak leaves no room, gain,
+  limiter 2 dB under the target's true-peak ceiling), the track validation,
+  and the predict-and-correct loop, with a typed `AudioNormalizationError`
+  and an `AudioNormalizationPlan` that carries the AD0 judgement of its
+  prediction. `Analysis::timeline_delivery_audio` measures the in-memory mix
+  with true peak and loudness range. The export dialog offers `Normalize the
+  mix to <preset>` when a decoded file missed its loudness target and applies
+  the one `UpsertAudioBus` as a single undo entry. The agent gains
+  `get_audio_qc` (evidence-only, read-only) and `audio_preset` on
+  `plan_audio_normalization` and `queue_export`; the planner's legacy numeric
+  arguments become a `Custom` target with their original bounds and every
+  pre-AD1 response key is kept. See docs/AD1-LOUDNESS-NORMALIZATION.md.
 - AD0 audio delivery foundation: `kinewright_core::audio_qc` defines typed
   `AudioDeliveryPreset`s (measure-only, streaming −14 LUFS, podcast −16,
   EBU R 128 −23, ATSC A/85 −24) whose numbers live in one `target()`

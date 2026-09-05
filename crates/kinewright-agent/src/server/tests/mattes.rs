@@ -1647,7 +1647,7 @@ fn cc5_matte_tools_are_registered_read_only_inspectors() {
             "{name} must be read-only"
         );
     }
-    assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 75);
+    assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 76);
 
     // M36: every colour planner and every CC5 tool stays inside the
     // kilobyte description budget, measured on the *registered* descriptor

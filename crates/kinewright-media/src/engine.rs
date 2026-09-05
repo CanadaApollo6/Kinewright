@@ -769,6 +769,24 @@ impl Analysis for FfmpegMediaEngine {
         measure_loudness(&samples, 48_000, 2)
     }
 
+    fn timeline_delivery_audio(
+        &self,
+        document: &Document,
+    ) -> Result<kinewright_core::AudioDeliveryMeasurement, MediaError> {
+        let settings = ExportSettings {
+            fps: document.fps,
+            resolution: document.resolution,
+            delivery_color: kinewright_core::ColorContext::sdr_rec709().delivery,
+            video_codec: "libx264".to_owned(),
+            audio_codec: "aac".to_owned(),
+            video_bitrate: 1,
+            audio_bitrate: 1,
+            cancellation: ExportCancellation::default(),
+        };
+        let samples = crate::export::mix_audio(document, &settings)?;
+        crate::loudness::measure_delivery_audio(&samples, 48_000, 2)
+    }
+
     fn timeline_loudness(&self, document: &Document) -> Result<AudioLoudness, MediaError> {
         let settings = ExportSettings {
             fps: document.fps,

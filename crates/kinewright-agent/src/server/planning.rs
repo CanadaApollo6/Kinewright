@@ -709,53 +709,67 @@ impl KinewrightMcp {
         args: &AudioNormalizationPlanArgs,
     ) -> Result<CallToolResult, McpError> {
         let (revision, document) = self.snapshot()?;
-        let context = match normalization_context(&document, args) {
-            Ok(context) => context,
+        let target = match normalization_target(args) {
+            Ok(target) => target,
             Err(error) => return Ok(error_text(error)),
         };
-        let current = match self.analysis.timeline_loudness(&document) {
-            Ok(measurement) => measurement,
-            Err(error) => {
-                return Ok(error_text(format!(
-                    "could not measure timeline audio: {error}"
-                )));
-            }
-        };
-        let (operation, predicted) = match verified_normalization_operation(
-            self.analysis.as_ref(),
+        let plan = match kinewright_core::plan_audio_normalization(
             &document,
-            args,
-            &context,
-            current,
+            &args.track_ids,
+            target,
+            |candidate| self.analysis.timeline_delivery_audio(candidate),
         ) {
-            Ok(result) => result,
-            Err(error) => return Ok(error_text(error)),
+            Ok(plan) => plan,
+            Err(error) => return Ok(normalization_error_result(&error)),
         };
-        let prepared = match self.prepare_operations(revision, &document, vec![operation]) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Ok(error_text(format!(
-                    "normalization plan does not fit the current timeline: {error}"
-                )));
-            }
-        };
-        let current_lufs = current.integrated_lufs_hundredths.unwrap_or_default();
-        let predicted_lufs = predicted.integrated_lufs_hundredths.unwrap_or_default();
+        let prepared =
+            match self.prepare_operations(revision, &document, vec![plan.operation.clone()]) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return Ok(error_text(format!(
+                        "normalization plan does not fit the current timeline: {error}"
+                    )));
+                }
+            };
+        let current_lufs = plan
+            .current
+            .loudness
+            .integrated_lufs_hundredths
+            .unwrap_or_default();
+        let predicted_lufs = plan
+            .predicted
+            .loudness
+            .integrated_lufs_hundredths
+            .unwrap_or_default();
         Ok(success_structured(
             format!(
-                "prepared measured audio normalization from {current_lufs} to {predicted_lufs} LUFS hundredths as edit plan {}; inspect the bus processing and preview, then commit it at timeline revision {revision}",
+                "prepared measured audio normalization from {current_lufs} to {predicted_lufs} LUFS hundredths ({} dB on bus {}) as edit plan {}; inspect the bus processing and preview, then commit it at timeline revision {revision}",
+                hundredths_to_string(plan.gain_hundredths_db),
+                plan.bus_id,
                 prepared.id
             ),
             serde_json::json!({
                 "timeline_revision": revision.0,
-                "target_lufs_hundredths": args.target_lufs_hundredths,
-                "maximum_sample_peak_dbfs_hundredths": args.maximum_sample_peak_dbfs_hundredths,
+                "audio_preset": target.preset,
+                "target": target,
+                // The pre-AD1 keys, kept so a caller written against them
+                // still reads the same numbers.
+                "target_lufs_hundredths": target.integrated_lufs_hundredths,
+                "maximum_sample_peak_dbfs_hundredths": target.maximum_true_peak_dbtp_hundredths,
                 "lossy_codec_peak_headroom_hundredths": LOSSY_CODEC_PEAK_HEADROOM_HUNDREDTHS,
-                "processing_ceiling_dbfs_hundredths": args.maximum_sample_peak_dbfs_hundredths
-                    .saturating_sub(LOSSY_CODEC_PEAK_HEADROOM_HUNDREDTHS),
-                "tolerance_hundredths": args.tolerance_hundredths,
-                "current": current,
-                "predicted": predicted,
+                "processing_ceiling_dbfs_hundredths": plan.processing_ceiling_dbfs_hundredths,
+                "tolerance_hundredths": target.tolerance_lu_hundredths,
+                "current": plan.current.loudness,
+                "predicted": plan.predicted.loudness,
+                // AD1: the full delivery measurements and the AD0 judgement of
+                // the prediction, the same shape `get_audio_qc` publishes.
+                "current_measurement": plan.current,
+                "predicted_measurement": plan.predicted,
+                "predicted_qc": plan.predicted_qc,
+                "gain_hundredths_db": plan.gain_hundredths_db,
+                "rounds": plan.rounds,
+                "bus_id": plan.bus_id,
+                "tracks": plan.tracks,
                 "prepared_edit_plan": {
                     "plan_id": prepared.id,
                     "expected_revision": revision,
@@ -764,6 +778,48 @@ impl KinewrightMcp {
             }),
         ))
     }
+}
+
+/// The target a normalization request names: a preset when one is given,
+/// otherwise the pre-AD1 explicit numbers as a `Custom` target. The explicit
+/// numbers keep their original bounds so a caller written against them gets
+/// the same refusals.
+fn normalization_target(args: &AudioNormalizationPlanArgs) -> Result<AudioDeliveryTarget, String> {
+    if let Some(preset) = args.audio_preset
+        && preset != AudioDeliveryPreset::Custom
+    {
+        return Ok(preset.target());
+    }
+    if !(-2_400..=-900).contains(&args.target_lufs_hundredths) {
+        return Err("target_lufs_hundredths must be in -2400..=-900".to_owned());
+    }
+    if !(-300..=0).contains(&args.maximum_sample_peak_dbfs_hundredths) {
+        return Err("maximum_sample_peak_dbfs_hundredths must be in -300..=0".to_owned());
+    }
+    if !(25..=300).contains(&args.tolerance_hundredths) {
+        return Err("tolerance_hundredths must be in 25..=300".to_owned());
+    }
+    Ok(AudioDeliveryTarget {
+        preset: AudioDeliveryPreset::Custom,
+        integrated_lufs_hundredths: Some(args.target_lufs_hundredths),
+        tolerance_lu_hundredths: args.tolerance_hundredths,
+        maximum_true_peak_dbtp_hundredths: Some(args.maximum_sample_peak_dbfs_hundredths),
+        maximum_loudness_range_lu_hundredths: None,
+    })
+}
+
+/// A normalization refusal, typed: the core error's stable `code`, its
+/// message, and its fields, with `applied: false`.
+pub(super) fn normalization_error_result(error: &AudioNormalizationError) -> CallToolResult {
+    error_structured(
+        format!("plan_audio_normalization rejected: {error}"),
+        serde_json::json!({
+            "code": error.code(),
+            "message": error.to_string(),
+            "details": error,
+            "applied": false,
+        }),
+    )
 }
 
 pub(super) fn beat_montage_analysis_state(
@@ -791,244 +847,6 @@ pub(super) fn beat_montage_analysis_state(
             asset_ids: vec![music_asset],
         },
     }
-}
-
-struct NormalizationContext {
-    tracks: Vec<TrackId>,
-    bus_id: AudioBusId,
-    first_effect_id: u64,
-}
-
-fn normalization_context(
-    document: &Document,
-    args: &AudioNormalizationPlanArgs,
-) -> Result<NormalizationContext, String> {
-    if args.track_ids.is_empty() {
-        return Err("track_ids must contain at least one audio source track".to_owned());
-    }
-    let tracks = args.track_ids.iter().copied().collect::<BTreeSet<_>>();
-    if tracks.len() != args.track_ids.len() {
-        return Err("track_ids must not contain duplicates".to_owned());
-    }
-    for track in &tracks {
-        let candidate = document
-            .tracks
-            .iter()
-            .find(|candidate| candidate.id == *track)
-            .ok_or_else(|| format!("track {track} does not exist"))?;
-        if candidate.clips.is_empty() {
-            return Err(format!("track {track} contains no audio source clips"));
-        }
-    }
-    if let Some(bus) = document
-        .audio_mix
-        .buses
-        .iter()
-        .find(|bus| bus.tracks.iter().any(|track| tracks.contains(track)))
-    {
-        return Err(format!(
-            "track selection already intersects audio bus {} ({}); remove or deliberately revise that mix before normalizing",
-            bus.id, bus.name
-        ));
-    }
-    if !(-2_400..=-900).contains(&args.target_lufs_hundredths) {
-        return Err("target_lufs_hundredths must be in -2400..=-900".to_owned());
-    }
-    if !(-300..=0).contains(&args.maximum_sample_peak_dbfs_hundredths) {
-        return Err("maximum_sample_peak_dbfs_hundredths must be in -300..=0".to_owned());
-    }
-    if !(25..=300).contains(&args.tolerance_hundredths) {
-        return Err("tolerance_hundredths must be in 25..=300".to_owned());
-    }
-    let bus_id = AudioBusId(
-        document
-            .audio_mix
-            .buses
-            .iter()
-            .map(|bus| bus.id.0)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1),
-    );
-    let first_effect_id = document
-        .tracks
-        .iter()
-        .flat_map(|track| &track.clips)
-        .flat_map(|clip| &clip.effects)
-        .chain(document.audio_mix.buses.iter().flat_map(|bus| &bus.effects))
-        .map(|effect| effect.id.0)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
-    Ok(NormalizationContext {
-        tracks: tracks.into_iter().collect(),
-        bus_id,
-        first_effect_id,
-    })
-}
-
-fn verified_normalization_operation(
-    analysis: &dyn Analysis,
-    document: &Document,
-    args: &AudioNormalizationPlanArgs,
-    context: &NormalizationContext,
-    current: AudioLoudness,
-) -> Result<(Operation, AudioLoudness), String> {
-    let current_lufs = current.integrated_lufs_hundredths.ok_or_else(|| {
-        "timeline audio is silent; normalization cannot infer a programme level".to_owned()
-    })?;
-    let current_peak = current
-        .sample_peak_dbfs_hundredths
-        .ok_or_else(|| "timeline audio has no measurable sample peak".to_owned())?;
-    let mut requested_gain = args.target_lufs_hundredths.saturating_sub(current_lufs);
-    let mut final_operation = None;
-    let mut predicted = current;
-    for _ in 0..4 {
-        let processing_ceiling = args
-            .maximum_sample_peak_dbfs_hundredths
-            .saturating_sub(LOSSY_CODEC_PEAK_HEADROOM_HUNDREDTHS);
-        let bus = normalization_bus(
-            context.bus_id,
-            context.first_effect_id,
-            context.tracks.clone(),
-            requested_gain,
-            current_peak,
-            processing_ceiling,
-        )?;
-        let operation = Operation::UpsertAudioBus { bus };
-        let mut candidate = document.clone();
-        apply_batch(&mut candidate, std::slice::from_ref(&operation))
-            .map_err(|error| format!("normalization processing is not applicable: {error}"))?;
-        predicted = analysis
-            .timeline_loudness(&candidate)
-            .map_err(|error| format!("could not verify normalized timeline audio: {error}"))?;
-        let predicted_lufs = predicted
-            .integrated_lufs_hundredths
-            .ok_or_else(|| "normalization unexpectedly produced silent output".to_owned())?;
-        final_operation = Some(operation);
-        let correction = args.target_lufs_hundredths.saturating_sub(predicted_lufs);
-        if correction.unsigned_abs() <= u32::from(args.tolerance_hundredths) {
-            break;
-        }
-        requested_gain = requested_gain.saturating_add(correction);
-    }
-    let predicted_lufs = predicted
-        .integrated_lufs_hundredths
-        .ok_or_else(|| "normalized loudness measurement disappeared".to_owned())?;
-    let predicted_peak = predicted
-        .sample_peak_dbfs_hundredths
-        .ok_or_else(|| "normalized peak measurement disappeared".to_owned())?;
-    if predicted_lufs.abs_diff(args.target_lufs_hundredths) > u32::from(args.tolerance_hundredths)
-        || predicted_peak > args.maximum_sample_peak_dbfs_hundredths
-    {
-        return Err(format!(
-            "normalization could not satisfy the delivery contract: predicted_lufs_hundredths={predicted_lufs}, predicted_peak_dbfs_hundredths={predicted_peak}"
-        ));
-    }
-    Ok((
-        final_operation.expect("normalization produced an operation"),
-        predicted,
-    ))
-}
-
-fn round_hundredths_to_tenths(value: i32) -> i64 {
-    i64::from(if value >= 0 {
-        value.saturating_add(5) / 10
-    } else {
-        value.saturating_sub(5) / 10
-    })
-}
-
-fn static_audio_effect(id: EffectId, name: &str, parameters: &[(&str, i64)]) -> Effect {
-    Effect {
-        id,
-        name: name.to_owned(),
-        parameters: parameters
-            .iter()
-            .map(|(name, value)| ((*name).to_owned(), ParamValue::Integer(*value)))
-            .collect(),
-        keyframes: BTreeMap::new(),
-    }
-}
-
-fn normalization_bus(
-    bus_id: AudioBusId,
-    first_effect_id: u64,
-    tracks: Vec<TrackId>,
-    gain_hundredths: i32,
-    measured_peak_hundredths: i32,
-    ceiling_hundredths: i32,
-) -> Result<AudioBus, String> {
-    if !(-6_000..=3_600).contains(&gain_hundredths) {
-        return Err(format!(
-            "required normalization gain {gain_hundredths} hundredths dB exceeds the supported -6000..=3600 range"
-        ));
-    }
-    let mut effects = Vec::new();
-    let mut next_effect_id = first_effect_id;
-    if gain_hundredths >= 0 {
-        let makeup_hundredths = gain_hundredths.min(2_400);
-        let post_gain_hundredths = gain_hundredths.saturating_sub(makeup_hundredths);
-        let compression_required =
-            measured_peak_hundredths.saturating_add(gain_hundredths) > ceiling_hundredths;
-        let (threshold_tenth_db, ratio_hundredths) = if compression_required {
-            let numerator = i64::from(ceiling_hundredths)
-                .saturating_sub(i64::from(gain_hundredths))
-                .saturating_sub(i64::from(measured_peak_hundredths).div_euclid(4));
-            let threshold_hundredths = numerator.saturating_mul(4).div_euclid(3).clamp(-6_000, 0);
-            (threshold_hundredths.div_euclid(10), 400)
-        } else {
-            (0, 100)
-        };
-        effects.push(static_audio_effect(
-            EffectId(next_effect_id),
-            "audio_compressor",
-            &[
-                ("threshold_tenth_db", threshold_tenth_db),
-                ("ratio_hundredths", ratio_hundredths),
-                ("attack_milliseconds", 5),
-                ("release_milliseconds", 200),
-                (
-                    "makeup_gain_tenth_db",
-                    round_hundredths_to_tenths(makeup_hundredths),
-                ),
-            ],
-        ));
-        next_effect_id = next_effect_id.saturating_add(1);
-        if post_gain_hundredths > 0 {
-            effects.push(static_audio_effect(
-                EffectId(next_effect_id),
-                "audio_gain",
-                &[(
-                    "gain_tenth_db",
-                    round_hundredths_to_tenths(post_gain_hundredths),
-                )],
-            ));
-            next_effect_id = next_effect_id.saturating_add(1);
-        }
-    } else {
-        effects.push(static_audio_effect(
-            EffectId(next_effect_id),
-            "audio_gain",
-            &[("gain_tenth_db", round_hundredths_to_tenths(gain_hundredths))],
-        ));
-        next_effect_id = next_effect_id.saturating_add(1);
-    }
-    effects.push(static_audio_effect(
-        EffectId(next_effect_id),
-        "audio_limiter",
-        &[(
-            "ceiling_tenth_db",
-            i64::from(ceiling_hundredths).div_euclid(10),
-        )],
-    ));
-    Ok(AudioBus {
-        id: bus_id,
-        name: "Delivery normalization".to_owned(),
-        tracks,
-        effects,
-        ducking_sidechain_tracks: Vec::new(),
-    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
